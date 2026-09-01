@@ -92,7 +92,7 @@ jobs:
           du -sh site
         working-directory: OOPS/orbistoun
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: OOPS/orbistoun/site
 
