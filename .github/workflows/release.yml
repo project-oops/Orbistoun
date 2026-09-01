@@ -105,6 +105,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # `rustup target add`, run inside the checkout so rustup resolves the pinned toolchain.
+      #
+      # `dtolnay/rust-toolchain@stable` installs the target against *stable*, and
+      # rust-toolchain.toml pins 1.97.1 - which that file itself points out, "rustup honours this
+      # file over any default toolchain a CI action installs". So cargo ran under 1.97.1 with no
+      # std for the target and failed with E0463, can't find crate for `core`. Linux and Windows
+      # never showed it because there the matrix target is the host triple and already present.
+      - name: The pinned toolchain needs this target
+        run: rustup target add ${{ matrix.target }}
+        working-directory: OOPS/orbistoun
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: OOPS/orbistoun
