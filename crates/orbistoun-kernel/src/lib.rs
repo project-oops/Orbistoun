@@ -1030,7 +1030,7 @@ fn mappings() -> &'static Mutex<orbistoun_mem::AddressSpace> {
 
 /// Regions the guest can read that this crate did not map itself - the loaded image, the guest
 /// stack, the main-thread TLS block. They live in address spaces the loader and worker own, so
-/// [`mappings`] never sees them; [`virtual_query`] consults this alongside it, because a guest
+/// [`mappings`] never sees them; `virtual_query` consults this alongside it, because a guest
 /// asking about its own code or stack expects a mapping, not "nothing here" (D446).
 fn noted_regions() -> &'static Mutex<Vec<(u64, u64)>> {
     static NOTED: OnceLock<Mutex<Vec<(u64, u64)>>> = OnceLock::new();
@@ -1038,7 +1038,7 @@ fn noted_regions() -> &'static Mutex<Vec<(u64, u64)>> {
 }
 
 /// Records a `[base, base + len)` region the guest can read but this crate did not map, so
-/// [`virtual_query`] answers for it. Stored as `(start, end)`; a region already noted is not
+/// `virtual_query` answers for it. Stored as `(start, end)`; a region already noted is not
 /// duplicated, so the worker may call this on every run without the list growing without bound.
 pub fn note_region(base: u64, len: u64) {
     if len == 0 {

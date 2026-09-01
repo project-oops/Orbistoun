@@ -51,7 +51,7 @@ pub const DIRECT_MEMORY_SIZE: u64 = 0x1_4000_0000;
 /// (`reports/hardware/console-klog.01092026.txt`). Both are the **system default**: every resident title
 /// carries an empty `PT_SCE_PROCPARAM` mem-param, the same one obSCEne carries, so none overrides the
 /// budget and obSCEne measured it under exactly the condition every title launches under (D442). So both
-/// transfer, system-wide like [`DIRECT_MEMORY_SIZE`] and [`RESERVED_LOW`].
+/// transfer, system-wide like [`DIRECT_MEMORY_SIZE`] and `RESERVED_LOW`.
 ///
 /// Flexible memory is a **separate space** from the direct pool - obSCEne maps it clear of the pool - so
 /// it is tracked here as its own budget rather than read off the direct map as it was before (D273): the
@@ -478,7 +478,7 @@ pub struct Settings {
     /// (one free region from zero) for as long as nothing had measured otherwise - the deliberately
     /// conservative default D218 argued for. obSCEne's `020-memory/allocate` then answered `0x10000`
     /// from a clean state, which is exactly the "the map does not start at zero" that `ReservedLow`
-    /// models, so that is now the default and [`RESERVED_LOW`] is the measured floor. The other
+    /// models, so that is now the default and `RESERVED_LOW` is the measured floor. The other
     /// shapes remain for sweeping the questions the walk still leaves open (the `end`-vs-`size` field
     /// meaning; the multi-region case).
     pub map_shape: MapShape,
