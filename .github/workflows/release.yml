@@ -67,14 +67,15 @@ jobs:
             bin: orbistoun-cli
             archive: tar.gz
             friendly: linux
-          # Analysis only. Guest code is x86-64 and runs natively, so this artifact can
-          # parse containers, name imports and read traces, and can never run a title -
-          # `run` refuses and says so rather than panicking. Built anyway because those
-          # commands are most of the tool; labelled on the site so nobody downloads it
-          # expecting an emulator (D208).
+          # x86_64, not aarch64. Guest code is x86-64 and runs natively, and the thunk layer
+          # declares `extern "sysv64"` at 28 sites with no architecture gate - so an Apple
+          # Silicon target does not fail at runtime, it fails to compile with E0570. Building
+          # the Intel target keeps the macOS artifact and keeps it an emulator; on Apple
+          # Silicon it is what Rosetta runs. Gating the ABI so an aarch64 host could carry the
+          # analysis-only subset is the other answer, and it is 28 sites of real work (D208).
           - name: macOS
             os: macos-latest
-            target: aarch64-apple-darwin
+            target: x86_64-apple-darwin
             bin: orbistoun-cli
             archive: tar.gz
             friendly: macos
