@@ -212,7 +212,10 @@ tempfile = "3"
 # Platform reservation APIs, used only by orbistoun-mem. Kept inline rather than as
 # [workspace.dependencies.rustix] sub-tables: a sub-table header would capture
 # every key declared after it, silently moving the internal crates below into it.
-rustix = { version = "1", features = ["mm", "thread"] }
+# `param` is not optional here despite the name: `allocation_granularity` calls
+# `rustix::param::page_size()`, and without the feature that module does not exist. It builds on
+# Windows either way, so the gap only appeared the first time a Linux job ran.
+rustix = { version = "1", features = ["mm", "thread", "param"] }
 windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",
