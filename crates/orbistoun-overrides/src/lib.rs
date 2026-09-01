@@ -116,8 +116,8 @@ pub enum Reach {
     /// **The last rung, deliberately.** Surviving to the time limit looks like it deserves
     /// one of its own, and it does not: a guest spinning on four unimplemented functions
     /// survives, and one reaching forty-seven imports before faulting does not. Ranked as a
-    /// higher rung, the least informative run in the corpus sorted to the top of the table
-    /// - which is how this was found (D182).
+    /// higher rung, the least informative run in the corpus sorted to the top of the table -
+    /// which is how this was found (D182).
     ///
     /// Not dying is an *outcome*, not a distance. It is recorded in [`Status::outcome`],
     /// and distance within this rung is measured by imports and then calls.

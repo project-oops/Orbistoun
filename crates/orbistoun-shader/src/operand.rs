@@ -206,8 +206,8 @@ impl OperandTable {
     /// Parses a table from TOML.
     ///
     /// Refuses overlapping ranges. Two ranges claiming one code means whichever is
-    /// checked first wins, which makes the file's order load-bearing without saying so
-    /// - and the wrong winner produces a register where a constant belongs.
+    /// checked first wins, which makes the file's order load-bearing without saying so -
+    /// and the wrong winner produces a register where a constant belongs.
     pub fn load(toml_text: &str) -> Result<Self, ShaderError> {
         let file: TableFile =
             toml::from_str(toml_text).map_err(|e| ShaderError::Table(e.to_string()))?;

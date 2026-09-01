@@ -300,8 +300,8 @@ fn socket(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// **Remembered rather than performed.** The host makes a listening socket by binding and
 /// listening in one call, so this records the address and `listen` uses it. A guest sees the
-/// sequence it wrote either way, and the alternative - binding here and rebuilding at listen
-/// - would hold the port twice.
+/// sequence it wrote either way, and the alternative - binding here and rebuilding at listen -
+/// would hold the port twice.
 ///
 /// Reference: POSIX.1-2008 `bind(2)`.
 fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {

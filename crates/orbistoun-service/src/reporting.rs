@@ -29,8 +29,8 @@ pub struct RunOutput {
 /// Content hash identifying a title.
 ///
 /// Hashes the **executable**, never the directory: a title directory can be tens of
-/// gigabytes, and the executable is both small enough and the semantically right thing
-/// - it is what changes when a title is patched (D048).
+/// gigabytes, and the executable is both small enough and the semantically right thing -
+/// it is what changes when a title is patched (D048).
 pub fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha1::new();
     h.update(bytes);

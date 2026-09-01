@@ -387,8 +387,8 @@ impl Translated {
 /// # Why this is not the silent substitution D098 forbids
 ///
 /// Because the caller asked for [`Fidelity::Auto`], which is a request to be told what
-/// the shader needs. Asking for the lane model explicitly and getting it is not affected
-/// - that shader is refused, loudly, by the model that cannot represent it.
+/// the shader needs. Asking for the lane model explicitly and getting it is not affected -
+/// that shader is refused, loudly, by the model that cannot represent it.
 fn resolve(requested: Fidelity, decode: &Decode, encodings: &EncodingTable) -> Fidelity {
     match requested {
         Fidelity::Auto => {

@@ -90,8 +90,8 @@ pub struct User {
     ///
     /// **Ours to choose, and one-based**, for the reason `orbistoun-core::Handle` is: a guest
     /// that zero-initialises an identifier field and then tests it must not find a valid user
-    /// there. Stable across restarts because it is stored, which matters more than it sounds
-    /// - a title keys save data on this, so a number that moved would lose somebody's saves.
+    /// there. Stable across restarts because it is stored, which matters more than it sounds -
+    /// a title keys save data on this, so a number that moved would lose somebody's saves.
     pub id: u32,
     /// What to call them.
     pub name: String,

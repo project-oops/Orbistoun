@@ -1749,8 +1749,8 @@ fn getpid_anchor_bytes() -> Option<Vec<u8>> {
 /// # What was measured, and what this can and cannot reproduce
 ///
 /// obSCEne read the whole `payload_args` off a jailbroken console (D408). Word zero was getpid;
-/// words one, two and five were userland pointers; words three and four were **kernel** pointers
-/// - one a kernel-heap address, one the kernel base itself; six onward were null.
+/// words one, two and five were userland pointers; words three and four were **kernel** pointers -
+/// one a kernel-heap address, one the kernel base itself; six onward were null.
 ///
 /// This project cannot hand over the real values. The kernel ones are canonical high-half
 /// addresses (`0xffff...`), which a user process cannot map, so a deref of the real number would

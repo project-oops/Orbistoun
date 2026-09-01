@@ -64,6 +64,9 @@ jobs:
           workspaces: OOPS/orbistoun
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
 
       # The project's own verbs, run from the project. Routing through the front door is
       # what stops these and `./bin/orbistoun check` drifting apart.
@@ -96,6 +99,9 @@ jobs:
           path: OOPS/orbistoun
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
 
       - name: No firmware, keys, dumps, or guest binaries
         # Calls the same verb ./bin/orbistoun check runs, so the two cannot drift - the
@@ -140,6 +146,9 @@ jobs:
           workspaces: OOPS/orbistoun
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
       - name: Every recorded behaviour accounts for itself
         run: ./bin/orbistoun knowledge-audit
         working-directory: OOPS/orbistoun
@@ -166,6 +175,9 @@ jobs:
           workspaces: OOPS/orbistoun
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
       - name: Every committed name re-derives from this repository
         # `--ceiling` rather than a hard failure: 202 vendor names are confirmed correct
         # by hash collision but cannot be respelled by the current grammar, and failing
@@ -192,6 +204,9 @@ jobs:
           tool: cargo-audit,cargo-deny,cargo-machete
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
       - name: Audit + deny + machete
         run: ./bin/orbistoun security
         working-directory: OOPS/orbistoun
@@ -229,6 +244,9 @@ jobs:
           tool: cargo-nextest
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
       # A shared verb, so it goes through the collection entry point: `oops test orbistoun`
       # relays to `./bin/orbistoun test`, which runs nextest and then the doctests nextest
       # skips - the same pair `./bin/orbistoun check` runs.
@@ -254,5 +272,8 @@ jobs:
           workspaces: OOPS/orbistoun
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
       - name: cargo doc
         run: OOPS/bin/oops doc orbistoun

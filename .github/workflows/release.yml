@@ -111,6 +111,9 @@ jobs:
 
       - name: Siblings this build needs
         run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          # Empty unless the org secret exists, and empty is the old behaviour.
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
 
       - name: Resolve tag
         id: meta
