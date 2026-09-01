@@ -153,7 +153,7 @@ jobs:
         working-directory: OOPS/orbistoun/dist
         run: tar -czf "orbistoun-${{ matrix.friendly }}.tar.gz" "${{ steps.meta.outputs.staged }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: orbistoun-${{ matrix.friendly }}
           path: OOPS/orbistoun/dist/orbistoun-${{ matrix.friendly }}.${{ matrix.archive }}
