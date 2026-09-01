@@ -4,8 +4,8 @@
 //! to walk kernel structures (`allproc` -> `struct proc` -> `dynlib_obj`) and resolve library
 //! symbols like `sceKernelDlsym`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static KERNEL_READ_ADDR: AtomicU64 = AtomicU64::new(0);
 
@@ -325,4 +325,3 @@ mod tests {
         assert_eq!(handle, 0x2001);
     }
 }
-

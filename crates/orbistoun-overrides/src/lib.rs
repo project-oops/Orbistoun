@@ -874,7 +874,10 @@ reason = "..."
             md.find("far").unwrap() < md.find("near").unwrap(),
             "further title must come first"
         );
-        assert!(md.contains("far 📷"), "the guest with a screenshot is marked");
+        assert!(
+            md.contains("far 📷"),
+            "the guest with a screenshot is marked"
+        );
         assert!(md.contains("experiment"), "the experiment slot is labelled");
         assert!(
             md.contains("![far](screenshots/far.png)"),

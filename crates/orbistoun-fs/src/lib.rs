@@ -172,7 +172,8 @@ fn kernel_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // error code where the byte-count calls hand back a negative count. This was `-1` while the errno
     // was "a question for the probe on hardware"; the probe answered (D252, D439). A failed open here
     // is a path that was not found, which is what `ENOENT` names.
-    opened.unwrap_or_else(|| u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw()))
+    opened
+        .unwrap_or_else(|| u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw()))
 }
 
 /// What a byte-count or offset call (`read`, `write`, `lseek`) answers on a bad descriptor.
@@ -382,10 +383,16 @@ mod tests {
 
         let made = kernel_mkdir(&args_with_path(guest_cstr("/data/obscene")));
         assert_eq!(made, 0, "a mkdir under /data succeeds");
-        assert!(root.join("obscene").is_dir(), "and the host directory exists");
+        assert!(
+            root.join("obscene").is_dir(),
+            "and the host directory exists"
+        );
 
         let refused = kernel_mkdir(&args_with_path(guest_cstr("/app0/nope")));
-        assert_ne!(refused, 0, "a mkdir outside the writable sandbox is refused");
+        assert_ne!(
+            refused, 0,
+            "a mkdir outside the writable sandbox is refused"
+        );
         assert_eq!(
             refused & 0xffff_0000,
             0x8002_0000,

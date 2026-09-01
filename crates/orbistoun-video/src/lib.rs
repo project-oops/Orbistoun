@@ -111,7 +111,10 @@ mod port {
     /// exactly as it would on hardware.
     pub(super) fn open(bus: u64, index: u64) -> Result<u64, OpenFailure> {
         let mut table = table().lock().map_err(|_| OpenFailure::Unavailable)?;
-        if table.iter().any(|p| p.open && p.bus == bus && p.index == index) {
+        if table
+            .iter()
+            .any(|p| p.open && p.bus == bus && p.index == index)
+        {
             return Err(OpenFailure::AlreadyOpen);
         }
         table.push(Port {
@@ -347,7 +350,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceVideoOutSubmitFlip", video_out_submit_flip),
         ("sceVideoOutSetFlipRate", video_out_set_flip_rate),
         ("sceVideoOutGetFlipStatus", video_out_get_flip_status),
-        ("sceVideoOutGetResolutionStatus", video_out_get_resolution_status),
+        (
+            "sceVideoOutGetResolutionStatus",
+            video_out_get_resolution_status,
+        ),
     ]
 }
 
@@ -392,12 +398,20 @@ mod tests {
         );
         let before = status[0];
 
-        assert_eq!(video_out_submit_flip(&args([handle, 0, 1, 0])), 0, "flip accepted");
+        assert_eq!(
+            video_out_submit_flip(&args([handle, 0, 1, 0])),
+            0,
+            "flip accepted"
+        );
         assert_eq!(
             video_out_get_flip_status(&args([handle, status_ptr, 0, 0])),
             0
         );
-        assert_eq!(status[0], before + 1, "the completed-flip count advanced by one");
+        assert_eq!(
+            status[0],
+            before + 1,
+            "the completed-flip count advanced by one"
+        );
     }
 
     /// **Every flip call refuses a handle that was never opened with the video-out code**, not a

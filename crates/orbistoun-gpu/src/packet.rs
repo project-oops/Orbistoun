@@ -227,7 +227,10 @@ pub mod build {
     /// caller passing zero gets a debug-time panic rather than a header that walks back wrong.
     #[must_use]
     pub const fn command_header(opcode: u8, body_dwords: u32) -> u32 {
-        debug_assert!(body_dwords >= 1, "a type-3 packet has at least one body dword");
+        debug_assert!(
+            body_dwords >= 1,
+            "a type-3 packet has at least one body dword"
+        );
         (3 << field::TYPE_SHIFT)
             | ((body_dwords - 1) << field::COUNT_SHIFT)
             | ((opcode as u32) << field::OPCODE_SHIFT)

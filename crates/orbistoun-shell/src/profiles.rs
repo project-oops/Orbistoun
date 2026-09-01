@@ -61,7 +61,10 @@ mod tests {
             .software_version
             .as_ref()
             .expect("the reference profile states a software version");
-        assert_eq!(sw.display, "13.090.001", "what sceKernelGetSystemSwVersion reports");
+        assert_eq!(
+            sw.display, "13.090.001",
+            "what sceKernelGetSystemSwVersion reports"
+        );
         assert_eq!(sw.packed, 0x1309_0001, "and its packed integer");
         assert_ne!(
             u32::from(m.firmware) << 16,

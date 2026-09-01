@@ -218,12 +218,12 @@ impl Source {
 
             let bytes = match kind.as_str() {
                 KIND_GITHUB_RELEASE => {
-                    let repo = repo.as_deref().with_context(|| {
-                        format!("source {name:?} is {kind} but has no repo")
-                    })?;
-                    let tag = tag.as_deref().with_context(|| {
-                        format!("source {name:?} is {kind} but has no tag")
-                    })?;
+                    let repo = repo
+                        .as_deref()
+                        .with_context(|| format!("source {name:?} is {kind} but has no repo"))?;
+                    let tag = tag
+                        .as_deref()
+                        .with_context(|| format!("source {name:?} is {kind} but has no tag"))?;
                     let url = format!(
                         "https://github.com/{repo}/releases/download/{tag}/{}",
                         asset.file

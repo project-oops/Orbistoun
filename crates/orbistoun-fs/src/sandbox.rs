@@ -59,7 +59,8 @@ mod tests {
 
     /// A scratch root unique to this test, cleaned at both ends.
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("orbistoun-sandbox-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("orbistoun-sandbox-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -89,8 +90,16 @@ mod tests {
         establish(&base, &overlay, &title.join("eboot.bin"), Retention::Retain);
         assert!(left.exists(), "retain keeps a previous run's file");
 
-        establish(&base, &overlay, &title.join("eboot.bin"), Retention::Ephemeral);
-        assert!(!left.exists(), "ephemeral empties the overlay before the run");
+        establish(
+            &base,
+            &overlay,
+            &title.join("eboot.bin"),
+            Retention::Ephemeral,
+        );
+        assert!(
+            !left.exists(),
+            "ephemeral empties the overlay before the run"
+        );
 
         crate::mount::clear();
         let _ = std::fs::remove_dir_all(&root);

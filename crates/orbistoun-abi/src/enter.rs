@@ -1169,9 +1169,7 @@ mod tests {
     /// arguments in, their total out.
     #[test]
     fn three_arguments_reach_the_guest_and_their_result_returns() {
-        let code = [
-            0x48, 0x89, 0xF8, 0x48, 0x01, 0xF0, 0x48, 0x01, 0xD0, 0xC3,
-        ];
+        let code = [0x48, 0x89, 0xF8, 0x48, 0x01, 0xF0, 0x48, 0x01, 0xD0, 0xC3];
         let buffer = ExecutableBuffer::new(&code).expect("map executable memory");
         let stack =
             GuestStack::reserve(TEST_STACK_BASE + 0x400_0000, 64 * 1024).expect("reserve a stack");
