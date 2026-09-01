@@ -1,0 +1,25 @@
+# A responder never guesses. Four refusals, each for a different reason.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|0a1b2c3d|call,read,report
+OBS|part|0a1b2c3d|target|deck
+OBS|part|0a1b2c3d|gpu|AMD Custom GPU 0405 (gfx1033)
+OBS|part|0a1b2c3d|probe|dev
+OBS|done|1|ok||
+# Not in the grammar at all.
+CMD|2|disassemble|0x1000|0x40
+OBS|ack|2|disassemble
+OBS|refused|2|unknown-verb
+# In the grammar, and not announced by this target. A stand-in part has no system
+# libraries, so it cannot answer a question about one - and says so rather than guessing.
+CMD|3|resolve|libkernel|sceKernelWrite
+OBS|ack|3|resolve
+OBS|refused|3|not-negotiated
+# Announced, but this build has writes disabled.
+CMD|4|write|0x8100000|deadbeef
+OBS|ack|4|write
+OBS|refused|4|unsupported
+# Malformed: a length that is not a number.
+CMD|5|read|0x8100000|lots
+OBS|ack|5|read
+OBS|refused|5|bad-argument

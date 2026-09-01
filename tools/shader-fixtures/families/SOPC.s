@@ -1,0 +1,12 @@
+s_cmp_eq_i32 s0, s1
+s_cmp_eq_i32 s40, s50
+s_cmp_eq_i32 s9, s90
+s_cmp_lg_i32 s2, s3
+s_cmp_lg_i32 s60, s70
+s_cmp_lg_i32 s1, s80
+s_cmp_gt_i32 s4, s5
+s_cmp_gt_i32 s30, s31
+s_cmp_gt_i32 s7, s77
+s_cmp_le_i32 s10, s11
+s_cmp_le_i32 s20, s21
+s_cmp_le_i32 s3, s88

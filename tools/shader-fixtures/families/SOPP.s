@@ -1,0 +1,12 @@
+s_nop 0
+s_nop 3
+s_nop 7
+s_waitcnt 0
+s_waitcnt 100
+s_waitcnt 4095
+s_sleep 0
+s_sleep 2
+s_sleep 5
+s_setprio 0
+s_setprio 1
+s_setprio 3

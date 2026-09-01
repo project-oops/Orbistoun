@@ -1,0 +1,321 @@
+[workspace]
+resolver = "2"
+
+# Grouped in dependency order rather than alphabetically. Cargo does not care, but this
+# list is the first description of the workspace anybody reads, and an arbitrary order
+# says the workspace has no shape - which is the opposite of what principle 6 claims.
+members = [
+    # The dependency spine (CLAUDE.md principle 6). Each is required by everything
+    # after it, which is also the order they build in.
+    "crates/orbistoun-core",
+    "crates/orbistoun-env",
+    "crates/orbistoun-elf",
+    "crates/orbistoun-nid",
+    "crates/orbistoun-mem",
+    "crates/orbistoun-hle",
+    "crates/orbistoun-loader",
+
+    # Execution, and the guest operating system above it.
+    "crates/orbistoun-abi",
+    "crates/orbistoun-thunk",
+    "crates/orbistoun-kernel",
+    "crates/orbistoun-firmware",
+    "crates/orbistoun-libc",
+    "crates/orbistoun-posix",
+    "crates/orbistoun-fs",
+    "crates/orbistoun-shell",
+    "crates/orbistoun-systemservice",
+    "crates/orbistoun-video",
+    "crates/orbistoun-audio",
+    "crates/orbistoun-input",
+
+    # Graphics. `orbistoun-gpu` has no path to a host graphics API and must not gain
+    # one - `cargo` enforces that boundary, not review (principle 12).
+    "crates/orbistoun-gpu",
+    "crates/orbistoun-gpu-vulkan",
+    "crates/orbistoun-shader",
+    "crates/orbistoun-translate",
+    "crates/orbistoun-spirv",
+
+    # Knowledge and tooling.
+    "crates/orbistoun-names",
+    "crates/orbistoun-report",
+    "crates/orbistoun-probe",
+    "crates/orbistoun-overrides",
+
+    # What a machine has to contribute, gathered. No path to the emulator, the loader or a
+    # model runtime - a bundle carries claims and cannot smuggle behaviour (principle 12).
+    "crates/orbistoun-submit",
+
+    # The test-corpus fetcher (D042/D411): a manifest of sources, pinned release assets
+    # downloaded into gitignored `titles/`, then run and recorded to `compat/`. Holds the
+    # download and pinning logic so the CLI stays a shim (D034).
+    "crates/orbistoun-corpus",
+    "crates/orbistoun-paths",
+    "crates/orbistoun-proto",
+    "crates/orbistoun-service",
+
+    # `orbistoun-llm` depends on nothing in the workspace, deliberately - see its
+    # README. `orbistoun-propose` is what joins it to the rest: it holds the callers
+    # that turn a run's findings into something a machine can try, each paired with the
+    # oracle that checks it.
+    "crates/orbistoun-llm",
+    "crates/orbistoun-propose",
+
+    # The dispatcher, split out so a shim can run a turn without a model runtime linked
+    # into it. `cargo tree -p orbistoun-turn` shows no path to `orbistoun-llm`, which is
+    # the boundary doing the work rather than a feature flag nobody re-checks (D293).
+    "crates/orbistoun-turn",
+
+    # Offline generators. Not part of the emulator and never on its build path - see
+    # crates/orbistoun-gen/README.md.
+    "crates/orbistoun-gen",
+
+    # Shims. None is privileged and none holds behaviour the others lack
+    # (principle 13).
+    "crates/orbistoun-worker",
+    "crates/orbistoun-cli",
+    "crates/orbistoun-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+# Edition 2024 (needs 1.85+). Chosen deliberately over 2021: it makes
+# `unsafe_op_in_unsafe_fn` warn by default and requires `unsafe extern` blocks,
+# both of which match this project's unsafe policy (CLAUDE.md principle 3).
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["legboots"]
+repository = "https://github.com/project-oops/Orbistoun"
+
+[workspace.dependencies]
+
+# The tool's own icon, on Windows only, and a build dependency rather than a real one.
+#
+# An executable's icon is not this project's subject matter. It is here because the alternative is
+# worse: a `.rc` file compiled by hand in a build script has to find `rc.exe` or `llvm-rc` and get
+# it right across the MSVC and GNU toolchains, to embed one small resource. This does that and
+# nothing else, and it disappears entirely on the two platforms where an executable cannot carry
+# an icon at all.
+winresource = "0.1"
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# Observability. `tracing` is the facade for developer logging. Guest calls do not go
+# through it - text logging does not survive ninety-nine million calls in twenty seconds,
+# so they are recorded by `orbistoun-thunk`'s atomic ring instead (principle 9).
+# `attributes` off: that is `#[instrument]`, unused here, and it costs a proc-macro chain and
+# a second copy of `syn` for a feature nobody called. Turn it on in the crate that wants it.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+# Kept for the crates that build their own subscriber. `oops-log` is the one that should be
+# installing it - see below - and this stays only until nothing else does.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Shared with the rest of the collection, rather than a fifth copy here. `oops-build` replaces
+# what `orbistoun-env::build` used to do itself; `oops-log` replaces the subscriber that was
+# hand-built in `orbistoun-cli` and absent from the other two binaries. `oops-paths` resolves
+# the data root that `orbistoun-paths` layers its own directories on top of.
+oops-build = { path = "../oops-libs/crates/oops-build" }
+oops-log = { path = "../oops-libs/crates/oops-log" }
+# The in-app documentation reader. Only the window takes it - it is the one crate in the
+# library that pulls egui, which is why it is a crate rather than a module of a shared one.
+oops-docs = { path = "../oops-libs/crates/oops-docs" }
+oops-paths = { path = "../oops-libs/crates/oops-paths" }
+
+# Serde + config (symbol databases, stub policy files)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# GUI. Immediate-mode, which suits dense diagnostic panels - a call tail and a
+# register dump are tables that change every frame, not a form. `eframe` carries
+# egui plus its windowing and rendering; the default backend is wgpu, which is
+# the same surface phase 6 will need for presenting a guest frame (D161).
+eframe = { version = "0.29", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+] }
+egui = "0.29"
+
+# Decoding title icons. PNG only and no default features: the one job is turning
+# `sce_sys/icon0.png` into pixels, and the rest of the format zoo is weight for
+# nothing.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Byte-level parsing. `zerocopy` gives checked, safe reinterpretation of byte
+# slices as POD structs - deliberately preferred over hand-rolled pointer casts
+# so ELF parsing needs no `unsafe` at all.
+zerocopy = { version = "0.8", features = ["derive"] }
+
+# NID computation: first 8 bytes of SHA-1 over the symbol name plus a fixed
+# suffix, then a custom base64 alphabet. See crates/orbistoun-nid.
+sha1 = "0.10"
+# Release-asset pinning for the test corpus (D042: pin by hash, never a branch).
+sha2 = "0.10"
+# Used only by `orbistoun-gen`, to parse reference-assembler output: ten small patterns,
+# none needing anything the crate lacks. Hand-rolling them would be more code in more places
+# for a job a dependency does exactly.
+regex = "1"
+
+
+# Vulkan. Thin, complete, tracks the spec closely.
+# `loaded`, not `linked`. Linking makes the build depend on a Vulkan SDK being
+# installed; loading defers it to runtime, so a machine without Vulkan still
+# compiles and reports the absence clearly instead of failing to link.
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
+
+# HTTP, for `orbistoun-llm` only: hosted endpoints and model downloads. Blocking
+# because this workspace has no async runtime and importing one to await two things in
+# sequence would be the largest dependency in the tree paying no rent. `rustls` rather
+# than native TLS so a build needs no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+
+# In-process inference, for `orbistoun-llm` only. 0.11 or later is required rather than
+# incidental - it is the first release carrying a `quantized_qwen3` loader, and reading
+# a Qwen3 model through the Qwen2 loader does not fail, it produces fluent output that
+# is wrong.
+#
+# The inference itself is pure Rust - no C++ toolchain, unlike a llama.cpp binding.
+# That is not the same as no native code: `candle-core` depends on `tokenizers` with
+# default features, which pulls `onig_sys` and builds a C regex library. Stated because
+# the version is pinned to match rather than to differ - declaring a different one here
+# would produce two copies of `tokenizers` in the tree and build the C library anyway.
+candle-core = "0.11"
+candle-transformers = "0.11"
+tokenizers = "0.22"
+
+# Unpacking the prebuilt inference runtime, for `orbistoun-llm` only. Already in the
+# tree via `tokenizers`, so this pins the same major rather than adding a second copy.
+# No default features: the archive is stored/deflate and the compression zoo is weight
+# for nothing.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+# Test-only: temp directories for the portable containment test.
+tempfile = "3"
+
+# Platform reservation APIs, used only by orbistoun-mem. Kept inline rather than as
+# [workspace.dependencies.rustix] sub-tables: a sub-table header would capture
+# every key declared after it, silently moving the internal crates below into it.
+rustix = { version = "1", features = ["mm", "thread"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }
+
+# Internal crates
+orbistoun-abi = { path = "crates/orbistoun-abi" }
+orbistoun-core = { path = "crates/orbistoun-core" }
+orbistoun-env = { path = "crates/orbistoun-env" }
+orbistoun-names = { path = "crates/orbistoun-names" }
+orbistoun-thunk = { path = "crates/orbistoun-thunk" }
+orbistoun-turn = { path = "crates/orbistoun-turn" }
+orbistoun-elf = { path = "crates/orbistoun-elf" }
+orbistoun-nid = { path = "crates/orbistoun-nid" }
+orbistoun-mem = { path = "crates/orbistoun-mem" }
+orbistoun-paths = { path = "crates/orbistoun-paths" }
+orbistoun-overrides = { path = "crates/orbistoun-overrides" }
+orbistoun-submit = { path = "crates/orbistoun-submit" }
+orbistoun-corpus = { path = "crates/orbistoun-corpus" }
+orbistoun-probe = { path = "crates/orbistoun-probe" }
+orbistoun-proto = { path = "crates/orbistoun-proto" }
+orbistoun-report = { path = "crates/orbistoun-report" }
+orbistoun-service = { path = "crates/orbistoun-service" }
+orbistoun-worker = { path = "crates/orbistoun-worker" }
+orbistoun-gui = { path = "crates/orbistoun-gui" }
+orbistoun-shell = { path = "crates/orbistoun-shell" }
+orbistoun-systemservice = { path = "crates/orbistoun-systemservice" }
+orbistoun-hle = { path = "crates/orbistoun-hle" }
+orbistoun-libc = { path = "crates/orbistoun-libc" }
+orbistoun-posix = { path = "crates/orbistoun-posix" }
+orbistoun-loader = { path = "crates/orbistoun-loader" }
+orbistoun-kernel = { path = "crates/orbistoun-kernel" }
+orbistoun-firmware = { path = "crates/orbistoun-firmware" }
+orbistoun-gen = { path = "crates/orbistoun-gen" }
+orbistoun-spirv = { path = "crates/orbistoun-spirv" }
+orbistoun-shader = { path = "crates/orbistoun-shader" }
+orbistoun-translate = { path = "crates/orbistoun-translate" }
+orbistoun-gpu = { path = "crates/orbistoun-gpu" }
+orbistoun-gpu-vulkan = { path = "crates/orbistoun-gpu-vulkan" }
+orbistoun-audio = { path = "crates/orbistoun-audio" }
+orbistoun-video = { path = "crates/orbistoun-video" }
+orbistoun-input = { path = "crates/orbistoun-input" }
+orbistoun-fs = { path = "crates/orbistoun-fs" }
+orbistoun-llm = { path = "crates/orbistoun-llm" }
+orbistoun-propose = { path = "crates/orbistoun-propose" }
+
+# --- Lints -------------------------------------------------------------------
+# Declared as a workspace table (not only CI flags) so rust-analyzer applies the
+# same strictness while you type. Every crate opts in with `lints.workspace = true`.
+# CI additionally runs with `-D warnings`, so anything below at `warn` is a hard
+# failure there - keep the allow-list honest rather than fighting it.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# The unsafe-discipline lints. These are the reason this table exists: this
+# codebase runs guest code in its own address space, so `unsafe` is unavoidable.
+# Undocumented `unsafe` is not.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+
+# Sharpen the pointer/integer work that FFI and guest-memory code is made of.
+ptr_as_ptr = "warn"
+cast_ptr_alignment = "warn"
+as_underscore = "warn"
+
+# `pedantic` opt-outs. Each fires constantly on correct FFI code and would only
+# train us to ignore warnings. Removing an entry here should be a deliberate
+# cleanup, not an accident.
+#   cast_* - guest values are fixed-width by ABI; the truncation IS the contract.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+#   Crate names already carry the subsystem (orbistoun_gpu::GpuError reads fine).
+module_name_repetitions = "allow"
+#   Error/panic docs: enforced by review on public APIs, too noisy as a lint.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+#   Every getter in a hardware-shaped API is a must_use candidate; the lint adds
+#   attribute noise without catching real bugs here.
+must_use_candidate = "allow"
+#   The domain vocabulary (ABI library names, SPIR-V, NID) trips the
+#   identifier heuristic on nearly every doc comment we write.
+doc_markdown = "allow"
+
+# Release profile. Deliberately NOT size-optimised (unlike a container
+# build): this is a hot-path emulator, so speed wins. `debug = 1` keeps line
+# tables in release builds - guest crashes are unreadable without them, and the
+# size cost is paid once on disk, not per frame.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+strip = "none"
+
+# Optimise dependencies even in debug builds. An unoptimised Vulkan/decode path
+# is too slow to boot anything, and these crates are not what you are debugging.
+[profile.dev.package."*"]
+opt-level = 2

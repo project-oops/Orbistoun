@@ -1,0 +1,207 @@
+# What we know about libScePad functions.
+#
+# Accumulated, never regenerated. Every edge case below cost an experiment against a real
+# guest, and losing this file means repeating them.
+#
+# NIDs are deliberately absent: they are derived from the name, so a file cannot hold a
+# pair that disagrees with itself (docs/SYMBOLS.md).
+#
+# **Both spellings are real.** This library exports an older and a newer form of several
+# calls - `scePadOpen` beside `scePadOpenExt`, `scePadReadState` beside `scePadReadStateExt`
+# - and a module in the library here imports ninety-seven of these functions, including both
+# halves of every such pair. So both are declared and one implementation serves each pair.
+#
+# The names below are confirmed the strongest way available: read out of a real module's
+# own import table, rather than derived and hoped to match (D340).
+
+library = "libScePad"
+
+[[function]]
+name = "scePadOpenExt"
+returns = "handle"
+arity = 4
+purpose = """
+Opens a pad and answers a handle. Implemented 2026-08-27 - not to deliver input, which
+needs a structure nobody has measured, but so a title that opens a pad at startup is not
+stopped by the first call it makes.
+"""
+arguments = [
+  { name = "unknown", kind = "u64", note = "not read - no lawful source describes the parameters" },
+  { name = "unknown", kind = "u64", note = "not read" },
+  { name = "unknown", kind = "u64", note = "not read" },
+  { name = "unknown", kind = "u64", note = "not read" },
+]
+edge_cases = [
+  "The handle is a small positive integer, one-based, so zero stays invalid for guests that zero-initialise a handle field and then test it (the reasoning `orbistoun-core::Handle` is built on).",
+  "**Handles are never recycled.** Reuse turns a stale-handle bug into a valid access to the wrong pad, which is far harder to diagnose than running out of numbers.",
+  "Exhaustion answers a placeholder rather than wrapping. Nothing here knows what the real function answers when it runs out.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+  "That the handle is returned rather than written through an out-pointer. The same assumption sceUserServiceGetInitialUser makes about its identifier (D274); if it is wrong, a guest sees a small positive value where it expected a status, which fails visibly.",
+  "The arity of four is provisional. A wrong arity degrades a call trace and does not break the call.",
+  "Nothing has been observed calling this. It is implemented ahead of demand because the name is confirmed and the behaviour needs no unmeasured structure.",
+]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadIsValidHandle"
+returns = "count"
+arity = 1
+purpose = """
+Whether a handle is one this shim issued - answered as one or zero rather than a status,
+which is why it is recorded as a count. Answers the real question rather than always
+agreeing.
+"""
+arguments = [
+  { name = "handle", kind = "u32", note = "checked against the handles issued so far" },
+]
+edge_cases = [
+  "**A stub that always said yes would be worse than none.** It would let a guest carry a handle nothing here issued to the call that uses it, and the failure would surface somewhere unconnected to the mistake.",
+  "Zero is never valid, matching the handle type's own rule.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+  "That the answer is a boolean in the low bit rather than a status code. Unmeasured.",
+]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadDisconnectDevice"
+returns = "status"
+arity = 1
+purpose = "Closes a pad. Validates the handle and does nothing else."
+arguments = [
+  { name = "handle", kind = "u32", note = "refused if this shim did not issue it" },
+]
+edge_cases = [
+  "The number is not returned to the allocator - see the reuse note on scePadOpenExt.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+  "That this is the close counterpart to scePadOpenExt. The library also confirms scePadDisconnectPort, and which of the two a title pairs with an open is unobserved.",
+]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadSetVibrationForce"
+returns = "status"
+arity = 2
+purpose = """
+Accepted and discarded. There are no motors, and a call that succeeds while nothing rumbles
+is exactly what a pad without them does.
+"""
+arguments = [
+  { name = "handle", kind = "u32", note = "refused if this shim did not issue it" },
+  { name = "param", kind = "ptr", note = "not read - its layout is not known from any lawful source" },
+]
+edge_cases = [
+  "**Discarding rather than refusing.** A refusal would stop titles that set vibration as part of opening a pad, which is a common shape and nothing to do with whether anything vibrates.",
+  "Haptics and adaptive triggers are out of scope until something asks for them - they have no general analogue on this host.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Arity provisional."]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadSetLightBar"
+returns = "status"
+arity = 2
+purpose = "Accepted and discarded. There is no light to set."
+arguments = [
+  { name = "handle", kind = "u32", note = "refused if this shim did not issue it" },
+  { name = "param", kind = "ptr", note = "not read" },
+]
+edge_cases = [
+  "Same reasoning as vibration: refusing would stop titles that set it while opening a pad.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Arity provisional."]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadInit"
+returns = "status"
+arity = 0
+purpose = """
+Starts the pad service. Accepts and succeeds - nothing here needs starting, and refusing
+would stop a title at the first pad call it makes, which is the one call certain to be
+reached.
+"""
+arguments = []
+edge_cases = [
+  "**Succeeding at nothing is the right answer here and not in general.** There is no state to create, so there is nothing to be wrong about; the functions that would have to invent state or bytes are left unimplemented instead.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["That it takes no arguments. Arity provisional."]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadOpen"
+returns = "handle"
+arity = 4
+purpose = "Opens a pad and answers a handle. Served by the same implementation as scePadOpenExt."
+arguments = [
+  { name = "unknown", kind = "u64", note = "not read" },
+  { name = "unknown", kind = "u64", note = "not read" },
+  { name = "unknown", kind = "u64", note = "not read" },
+  { name = "unknown", kind = "u64", note = "not read" },
+]
+edge_cases = [
+  "The older spelling of the pair. Both are imported by the module here, so both are served rather than one being guessed at.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+  "That it answers the handle rather than a status. See scePadOpenExt.",
+  "That it and scePadOpenExt differ in parameters rather than in what they hand back. Unobserved.",
+]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadClose"
+returns = "status"
+arity = 1
+purpose = "Closes a pad. Served by the same implementation as scePadDisconnectDevice."
+arguments = [
+  { name = "handle", kind = "u32", note = "refused if this shim did not issue it" },
+]
+edge_cases = [
+  "The number is not returned to the allocator - see the reuse note on scePadOpenExt.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Whether this and scePadDisconnectDevice differ in effect is unobserved."]
+found_in = ["obscene"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "scePadSetVibration"
+returns = "status"
+arity = 2
+purpose = "Accepted and discarded, as scePadSetVibrationForce is."
+arguments = [
+  { name = "handle", kind = "u32", note = "refused if this shim did not issue it" },
+  { name = "param", kind = "ptr", note = "not read" },
+]
+edge_cases = [
+  "The older spelling of the pair, and imported alongside the newer one.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Arity provisional."]
+found_in = ["obscene"]
+found_on = "2026-08-27"

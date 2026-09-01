@@ -1,0 +1,27 @@
+# Decision numbers that appear more than once.
+#
+# Not an allowance - a *ceiling*. `./orbistoun.sh check` fails if a number duplicates
+# that is not listed here, and fails again if a number listed here has stopped
+# duplicating, so the list can only shrink and cannot quietly become permanent.
+#
+# They exist for a structural reason: more than one session appends to the decision
+# log, each reading the last number and adding one, neither seeing the other's
+# unlanded writes. The guard is what stops that recurring; this file is what is left
+# over from before it existed.
+#
+# Every one of these is cited from source by number, so clearing one means renumbering
+# an entry *and* its citations - which is why they are not being fixed in a batch by
+# whoever noticed. Take one when you are already in that area.
+D054
+D055
+D056
+D084
+D085
+D122
+D124
+D125
+D126
+D127
+D128
+D129
+D130

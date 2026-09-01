@@ -1,0 +1,26 @@
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 178
+calls = 87658
+standing = 100
+default_return = "unimplemented"
+limit_seconds = 20
+build = "0.1.0"
+measured_on = "2026-08-30"
+
+[experiment]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 193
+calls = 356952
+standing = 100
+default_return = "unimplemented"
+overrides = 1
+limit_seconds = 30
+build = "0.1.0"
+measured_on = "2026-09-01"

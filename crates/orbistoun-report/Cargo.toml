@@ -1,0 +1,27 @@
+[package]
+publish = false
+name = "orbistoun-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Run reports - the machine-readable contract an agent reads, plus retention."
+
+[lints]
+workspace = true
+
+[dependencies]
+# For the marker decoders. `orbistoun-abi` is where the markers are made, so it is where
+# they are read back: two copies of the arithmetic is how a decoder comes to disagree
+# with the thing it decodes (D369).
+orbistoun-abi = { workspace = true }
+orbistoun-firmware = { workspace = true }
+orbistoun-overrides = { workspace = true }
+orbistoun-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "orbistoun-paths"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Portable-first path resolution - every writable location, confined beneath one resolved root."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-env = { workspace = true }
+# The resolution rules and the collection's root, shared. No `platform-dirs`: every project
+# here now resolves the same way, because they share a directory and cannot disagree about
+# where it is.
+oops-paths = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

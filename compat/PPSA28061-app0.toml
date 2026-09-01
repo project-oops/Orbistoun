@@ -1,0 +1,26 @@
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "image+0x43c4"
+imports = 47
+calls = 933
+standing = 94
+default_return = "unimplemented"
+limit_seconds = 12
+build = "0.1.0"
+measured_on = "2026-08-23"
+
+[experiment]
+reach = "entered"
+outcome = "the guest called abort"
+imports = 60
+calls = 961
+standing = 95
+default_return = "unimplemented"
+overrides = 1
+limit_seconds = 8
+build = "0.1.0"
+measured_on = "2026-09-01"

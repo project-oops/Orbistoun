@@ -1,0 +1,26 @@
+[package]
+publish = false
+name = "orbistoun-libc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The C library as the guest calls it - the one layer with a published specification."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-env = { workspace = true }
+orbistoun-core = { workspace = true }
+orbistoun-fs = { workspace = true }
+orbistoun-hle = { workspace = true }
+# For the storage a guest global lives in: `getopt` reports through the guest's own
+# `optarg` and `optind`, which this layer reserves. No cycle - `orbistoun-thunk` takes
+# only core and mem (D344).
+orbistoun-thunk = { workspace = true }
+# For the harvested ABI constants, which are read from their data file rather than
+# retyped - a value a person typed is one nobody can trace back to a header (D351).
+toml = { workspace = true }

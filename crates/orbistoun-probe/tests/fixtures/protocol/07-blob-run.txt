@@ -1,0 +1,26 @@
+# The escape hatch. Two primitives answer most questions; the rest need code.
+#
+# This exists so the vocabulary can stay small. A command per question would grow the
+# grammar without limit and couple it to whoever asked for each one.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|c3d4e5f6|call,read,blob,reset,report,gpu
+OBS|part|c3d4e5f6|target|deck
+OBS|part|c3d4e5f6|gpu|AMD Custom GPU 0405 (gfx1033)
+OBS|part|c3d4e5f6|driver|radv 25.1.0
+OBS|part|c3d4e5f6|probe|dev
+OBS|done|1|ok||
+# Position-independent machine code, uploaded in bounded chunks so no line exceeds the
+# length limit. Identified, so several can be resident at once.
+CMD|2|blob|probe1|0x0|554889e5488b45f0
+OBS|ack|2|blob
+OBS|done|2|returned|0x8|
+CMD|3|blob|probe1|0x8|4883c0015dc3
+OBS|ack|3|blob
+OBS|done|3|returned|0x6|
+CMD|4|run|probe1|0x29
+OBS|ack|4|run
+OBS|done|4|returned|0x2a|
+CMD|5|bye
+OBS|ack|5|bye
+OBS|done|5|ok||

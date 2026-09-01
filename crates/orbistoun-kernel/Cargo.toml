@@ -1,0 +1,30 @@
+[package]
+publish = false
+name = "orbistoun-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Guest kernel HLE - threads, synchronisation primitives, and the memory syscalls."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-abi = { workspace = true }
+orbistoun-mem = { workspace = true }
+# For the stub table a run-time name lookup answers out of. No cycle: the thunk crate
+# depends only on `orbistoun-core` and `orbistoun-mem` (D366).
+orbistoun-thunk = { workspace = true }
+# Diagnostics are declared in one registry so `orbistoun-cli doctor` can list every one
+# and say which crate reads it. `orbistoun-env` takes no orbistoun dependency, so this
+# cannot become a cycle (D325).
+orbistoun-env = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

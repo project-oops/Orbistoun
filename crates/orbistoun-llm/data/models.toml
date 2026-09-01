@@ -1,0 +1,149 @@
+# The model catalogue.
+#
+# Data, not code (CLAUDE.md principle 5): adding a model, retiring one, or changing
+# which one a machine gets is an edit to this file. The test that principle states is
+# "if answering the question requires a rebuild, it is in the wrong place", and
+# "which model should this machine run" is exactly that kind of question.
+#
+# `arch` is the one field that is not free-form. It names a loader that has to exist
+# in `embedded.rs`, and an unknown value is refused by name rather than guessed at -
+# the same split as `encodings.toml` and `table::classify`, where the data says what
+# and the code says how.
+#
+# Sizing fields are what `select.rs` reads:
+#
+#   min_vram_mb  what the weights plus working set need on an accelerator
+#   min_ram_mb   the same on CPU, where there is no separate pool and the working
+#                set competes with the emulator itself
+#   auto         may the selector pick this unprompted. `false` means hand-pick only
+#   default      the one entry chosen when the host cannot be measured at all.
+#                Exactly one entry should set it
+#
+# A machine that reports nothing gets the `default` entry rather than the largest, and
+# that asymmetry is deliberate: an over-sized pick fails at load time, minutes into a
+# multi-gigabyte download, which is the worst place to find out.
+
+# --- offline: downloaded once, then run in this process --------------------------
+#
+# Qwen3 throughout. `arch = "qwen3"` needs candle-transformers 0.11 or later, which is
+# where `quantized_qwen3` landed; earlier versions have to read a Qwen3 GGUF through
+# the Qwen2 loader, which is not the same thing and is why a sibling project pinned to
+# 0.8 records its Qwen3 coordinates as unverified.
+#
+# **Every `file` and `download_mb` below was read from the publisher's own file listing,
+# not assumed.** The first draft of this table carried plausible names copied from that
+# sibling project - `...-Q4_K_M.gguf` for all four - and two of the four do not exist:
+# the 0.6B and 1.7B repositories publish **Q8_0 only**, which is also close to twice the
+# size a Q4_K_M would have been, so the memory figures were wrong in the same stroke.
+# Nothing caught it until a download 404ed, because a filename is not checkable by any
+# amount of reading. Re-read the listing before changing one:
+#
+#   curl -s 'https://huggingface.co/api/models/<repo>?blobs=true'
+
+[[offline]]
+id = "qwen3-0.6b"
+label = "Qwen3 0.6B"
+note = "fastest, lightest; the model any machine can run"
+arch = "qwen3"
+repo = "Qwen/Qwen3-0.6B-GGUF"
+file = "Qwen3-0.6B-Q8_0.gguf"
+tokenizer_repo = "Qwen/Qwen3-0.6B"
+download_mb = 610
+min_ram_mb = 2200
+min_vram_mb = 1200
+auto = true
+default = false
+
+[[offline]]
+id = "qwen3-1.7b"
+label = "Qwen3 1.7B"
+note = "balanced; the pick when the host cannot be measured"
+arch = "qwen3"
+repo = "Qwen/Qwen3-1.7B-GGUF"
+file = "Qwen3-1.7B-Q8_0.gguf"
+tokenizer_repo = "Qwen/Qwen3-1.7B"
+download_mb = 1749
+min_ram_mb = 5000
+min_vram_mb = 2600
+auto = true
+default = true
+
+[[offline]]
+id = "qwen3-4b"
+label = "Qwen3 4B"
+note = "roughly 7B-class quality; wants a discrete GPU or a lot of cores"
+arch = "qwen3"
+repo = "Qwen/Qwen3-4B-GGUF"
+file = "Qwen3-4B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3-4B"
+download_mb = 2382
+min_ram_mb = 8000
+min_vram_mb = 3400
+auto = true
+default = false
+
+[[offline]]
+id = "qwen3-8b"
+label = "Qwen3 8B"
+note = "highest quality here, and slow enough to notice; hand-pick only"
+arch = "qwen3"
+repo = "Qwen/Qwen3-8B-GGUF"
+file = "Qwen3-8B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3-8B"
+download_mb = 4795
+min_ram_mb = 16000
+min_vram_mb = 6500
+auto = false
+default = false
+
+# --- online: an endpoint somebody else runs --------------------------------------
+#
+# `wire` is the protocol, not the vendor. Three of the four below speak the same
+# OpenAI-shaped request; the fourth does not, and treating it as though it did is a
+# mistake worth naming because two sibling projects both made it - they list
+# `api.anthropic.com/v1/chat/completions`, which is not an endpoint that exists.
+#
+# `key_env` is where a key is read from when the config file does not carry one, so a
+# key never has to be written to disk. An entry with a `key_env` and no key is
+# *unconfigured* rather than broken: it stays in the ladder, greyed out, and starts
+# working the moment the variable is set.
+
+[[online]]
+id = "ollama"
+label = "Local Ollama"
+wire = "openai"
+endpoint = "http://localhost:11434/v1/chat/completions"
+default_model = "qwen3:1.7b"
+key_env = ""
+key_url = ""
+note = "a model server on this machine; nothing leaves the box and no key is needed"
+
+[[online]]
+id = "anthropic"
+label = "Claude (Anthropic)"
+wire = "anthropic"
+endpoint = "https://api.anthropic.com/v1/messages"
+default_model = "claude-opus-5"
+key_env = "ANTHROPIC_API_KEY"
+key_url = "https://console.anthropic.com/settings/keys"
+note = "the Messages API, which is not OpenAI-shaped - see `wire`"
+
+[[online]]
+id = "openai"
+label = "ChatGPT (OpenAI)"
+wire = "openai"
+endpoint = "https://api.openai.com/v1/chat/completions"
+default_model = "gpt-4o-mini"
+key_env = "OPENAI_API_KEY"
+key_url = "https://platform.openai.com/api-keys"
+note = ""
+
+[[online]]
+id = "gemini"
+label = "Gemini (Google)"
+wire = "openai"
+endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+default_model = "gemini-1.5-flash"
+key_env = "GEMINI_API_KEY"
+key_url = "https://aistudio.google.com/apikey"
+note = "reached through the vendor's own OpenAI-compatible surface"

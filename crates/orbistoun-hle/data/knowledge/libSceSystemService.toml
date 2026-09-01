@@ -1,0 +1,106 @@
+# What we know about libSceSystemService functions.
+#
+# Accumulated, never regenerated. Every edge case below cost an experiment against a real
+# guest, and losing this file means repeating them.
+
+library = "libSceSystemService"
+
+[[function]]
+name = "sceSystemServiceParamGetInt"
+returns = "status"
+arity = 2
+purpose = """
+Answers a console setting - language, button assignment, and the like - through an
+out-pointer.
+
+Implemented 2026-08-21, not because the values are known but because **an out-pointer that
+is never written is worse than a wrong return value** (D171).
+"""
+arguments = [
+  { name = "param", kind = "u32", note = "which setting; no lawful source describes the identifiers" },
+  { name = "out", kind = "ptr", note = "destination for the value, four bytes" },
+]
+edge_cases = [
+  "**Unimplemented, this wrote nothing and the guest read whatever its stack held.** Every other unimplemented call here answers wrongly but *consistently*; this one answered differently every run, and had no signature to recognise in a trace because nothing was written to recognise.",
+  "Zero is a stated placeholder, not a value. It is the answer least likely to send a guest somewhere surprising: read as an index it lands on the first entry, as a flag it reads as off, as a count it reads as none - all ordinary states a title must already handle. A non-zero guess would be picking a behaviour out of the air and calling it a default.",
+  "Answers success rather than an error deliberately. A guest that checks the return skips whatever the setting was for; one that does not check reads the value regardless - which is why it must be written either way.",
+  "Four bytes, not eight. The interface answers an int, and writing eight would corrupt whatever the guest put next to it, which on a stack is usually another local.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "No parameter identifier is understood. Every one answers the same placeholder, chosen to be least harmful rather than because it is right.",
+  "Whether the call reports failure for an unknown parameter, rather than succeeding with a default, is unverified - and a guest could branch on the difference.",
+]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-21"
+note = "Name confirmed by hash against a real import out of a targeted sweep (D167)."
+
+[[function]]
+name = "sceUserServiceGetInitialUser"
+arity = 1
+purpose = "The user a title should start as."
+returns = "status"
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "Nothing on the target has confirmed this; the service is presented as a single signed-in user.",
+    "The identifier is fixed at one. A real console numbers its users and a title keys save data by that number, so a title that stored something under a different one would not find it.",
+    "The out-parameter is a four-byte int (D210, D272).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceUserServiceInitialize"
+arity = 1
+purpose = "Starts the user service."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Nothing on the target has confirmed this; the service is presented as a single signed-in user.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceUserServiceTerminate"
+arity = 0
+purpose = "Stops the user service."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Nothing on the target has confirmed this; the service is presented as a single signed-in user.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceUserServiceGetUserName"
+returns = "status"
+arity = 3
+purpose = """
+Writes the name a person chose for a user into a caller buffer. Implemented 2026-08-27, and
+it is the one call in this crate that answers a console setting **unencoded** - everything
+else here hands back a number whose meaning is a measurement, while a name is a string the
+owner typed into the shell and the guest reads as-is.
+"""
+arguments = [
+  { name = "user", kind = "u32", note = "which user; refused if this machine has no such account" },
+  { name = "out", kind = "ptr", note = "buffer for a NUL-terminated name" },
+  { name = "size", kind = "u64", note = "its size in bytes - believed only up to 64, see below" },
+]
+edge_cases = [
+  "**The size is checked rather than trusted.** That it is the third argument is an assumption, and a wrong argument position writes past a caller's buffer - the failure sceUserServiceGetInitialUser already warns about (D210, D272). A claimed size below two or above sixty-four is treated as a value that is not a size, and the call is refused. A refusal is recoverable; a smashed stack is not.",
+  "Truncation happens on a character boundary, never a byte one. Cutting a multi-byte character in half hands a guest a string that is not text.",
+  "A user identifier this machine does not have is refused rather than answered with the signed-in user's name, which would be a different person.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+  "That the third argument is a byte count. Bounded above so that being wrong refuses rather than overwrites.",
+  "That the buffer wants a NUL-terminated byte string rather than a fixed-width or wide-character field. Unmeasured.",
+  "Arity of three is provisional.",
+  "The name itself is not assumed: the naming loop derived it and confirmed it by hash, which is why `found_by` is generated rather than static.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"

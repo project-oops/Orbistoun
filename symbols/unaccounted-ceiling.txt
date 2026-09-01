@@ -1,0 +1,41 @@
+# Names in symbols/*.json that this repository cannot re-derive, as a ceiling.
+#
+# `orbistoun-cli audit --ceiling <this file>` fails if a name is unaccounted and NOT
+# listed here, and fails again if a name listed here has since become accounted for. So
+# the list can only shrink, and it cannot quietly become permission - the same mechanism
+# the duplicate decision numbers and the line-continuation backlog use (D208).
+#
+# **It is currently empty, and what emptied it is worth knowing.**
+#
+# This file held 202 names for weeks, described as vendor symbols the grammar could not
+# spell - proved correct by hash collision, but not reproducible, so a slowly-shrinking
+# gap in the vocabulary. That description was wrong. The grammar could spell every one of
+# them. What had gone stale was the *record*: a generated derivation is a pattern plus an
+# index, an index is a position in an enumeration over the vocabularies, and every word
+# learned from a confirmed name (D195) renumbers the candidates built from it.
+#
+# So each successful search quietly pushed names onto a list whose whole rule is that it
+# may only shrink, and the reason written at the top of this file explained the symptom
+# rather than the cause. `audit --repair` re-derives them in one sweep; all 202 came back,
+# along with 20 more that a learning pass had knocked off the same way (D213).
+#
+# **Two names are deliberately absent and always will be**: the two libc functions that
+# are characterised but unnameable. They are not in any symbol database, because nothing
+# has proposed a name the hash agrees with. See docs/PROJECT_STATUS.md.
+#
+# **How an entry gets here now.** A name confirmed by hash that the current grammar
+# genuinely cannot produce, and that `--repair` therefore cannot re-derive. Add it with a
+# reason, and expect it to leave: reading a title's own strings widens the grammar
+# automatically (D195), and `./orbistoun.sh names` runs the repair afterwards.
+
+# These two were the entire measured yield of `prefix-module-learned-learned-verb`, and it
+# was disabled for costing the vocabulary 33x what it earned (D342). Both are prefix +
+# module + learned + learned + verb - `sce` + `Audio` + `Propagation` + `Portal`/`System` +
+# `Destroy` - and no shape the grammar still sweeps uses `learned` twice, so the generator
+# genuinely cannot reach them.
+#
+# **They come back the moment that shape does**, which is what makes them the honest price
+# of the trade rather than a loss: two names against a `learned` list that can hold 16,042
+# words instead of 483.
+sceAudioPropagationPortalDestroy
+sceAudioPropagationSystemDestroy

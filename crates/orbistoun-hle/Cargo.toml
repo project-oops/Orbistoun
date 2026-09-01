@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "orbistoun-hle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Module registry, the guest_module macro, and the per-NID stub-return policy."
+
+[lints]
+workspace = true
+
+[dependencies]
+toml = { workspace = true }
+orbistoun-core = { workspace = true }
+orbistoun-nid = { workspace = true }
+serde = { workspace = true }

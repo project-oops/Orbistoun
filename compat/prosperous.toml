@@ -1,0 +1,15 @@
+[compat]
+
+[settings]
+
+[experiment]
+reach = "entered"
+outcome = "0x1"
+imports = 0
+calls = 0
+standing = 100
+default_return = "unimplemented"
+overrides = 1
+limit_seconds = 20
+build = "0.1.0"
+measured_on = "2026-08-31"

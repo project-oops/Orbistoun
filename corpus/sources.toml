@@ -1,0 +1,119 @@
+[[source]]
+name = "ps5-payloads-mirror"
+kind = "github-release"
+repo = "itsPLK/ps5-payloads-mirror"
+tag = "payloads-mirror"
+licence = "per-project (this is a mirror); each payload keeps its upstream author's licence"
+cite = "https://github.com/itsPLK/ps5-payloads-mirror/releases/tag/payloads-mirror"
+
+[[source.asset]]
+file = "BackPork_0.1.elf"
+sha256 = "d74e4cd119b2bb1fd423f2f5b1c9a7f096b3e588c753af1ab48b983d56216a52"
+
+[[source.asset]]
+file = "BFpilot_v0.4.4.elf"
+sha256 = "5a8237630260026ad054d71fbbe661e433ac9ffa2cb4eea2785769c1eb7ee1c1"
+
+[[source.asset]]
+file = "CheatRunner_v0.17.elf"
+sha256 = "2f296d3f1e69b65439bb5dc362f0f6504f6dc9f245fa16a3683e9d7ec9533773"
+
+[[source.asset]]
+file = "Lapy-JB-Daemon_v1.2.elf"
+sha256 = "13559b858fc33cc7fa3dc89e10dccf139070d99ee5d378dd75c969293700799e"
+
+[[source.asset]]
+file = "ShadowMountPlus_1.6beta16.elf"
+sha256 = "a35246fb3bb6042b25653b51cdcbc33254b40339342bf1d2dd0d2eceee2ca526"
+
+[[source.asset]]
+file = "WebKit-Autoloader-Installer_v0.4.0.elf"
+sha256 = "179d5e52ec3e0f595900b40883c0e10cc1fba1efc275a547f47e828d45d05915"
+
+[[source.asset]]
+file = "elfldr_v0.26.elf"
+sha256 = "ed6d587a057c09d6a95b2176e336d9ffc605e547ac56462128b029e47b8ccea1"
+
+[[source.asset]]
+file = "etaHEN_2.5B.bin"
+sha256 = "4845cac45095361b8983b14d6690622183b0dcfbf6d7fda16e161aa91ff0531e"
+
+[[source.asset]]
+file = "ftpsrv-drakmor_1.15-ng-stable.elf"
+sha256 = "913a443af847b6861ec11748e2640f62d1fc1027076f576aa0ddccab8507311f"
+
+[[source.asset]]
+file = "ftpsrv_v0.21.1.elf"
+sha256 = "7d4b31c83eae4e056580482a3a074e1db25922efc74ac1e439473b45d71a5938"
+
+[[source.asset]]
+file = "garlic-savemgr_v1.13.elf"
+sha256 = "b6d366f4101fa2fcc14a353d083ef7e45e1cc86ef457bb20502bd8680dce4d73"
+
+[[source.asset]]
+file = "klogsrv_v0.9.elf"
+sha256 = "e828ec144231f81547cb58bc7d2c396fa984be0c2295f31364b58017816dcceb"
+
+[[source.asset]]
+file = "kstuff-lite_v1.10.elf"
+sha256 = "b1dfe57f367a35374f605127915eda38c76a6ed5d1c729e427955798bd78c66a"
+
+[[source.asset]]
+file = "kstuff-toggle_0.6.elf"
+sha256 = "a1e99f2758aea98e78a37d1a1c2f79b08187acb35c7410eec4c8f4763162768f"
+
+[[source.asset]]
+file = "kstuff_v1.6.7.elf"
+sha256 = "f1c1f4b2b6395644af04cbe9828aba58586acf7aacb9e01113cac92ce16e3569"
+
+[[source.asset]]
+file = "nanoDNS_0.4.elf"
+sha256 = "dcb845f3570771275b22b37534bf924a7f8ae219fb91ef00c6bccab85d1c2420"
+
+[[source.asset]]
+file = "pldmgr_v0.5.1.elf"
+sha256 = "05617c69ea145d1c11b8f7a6b7d3bd9e6df3831afd25d71a4ac85d63fb8e28aa"
+
+[[source.asset]]
+file = "ps5-app-dumper_v1.11.elf"
+sha256 = "42763a6230df8ef3bf82253e9a4290e39d7c1e4b61a0a9a4477368f1d6440e1d"
+
+[[source.asset]]
+file = "ps5-linux-loader_v2.4.elf"
+sha256 = "51382795b486f7c5a3681648d457d129088311fc3f9601aeaff78dc72fafcf1d"
+
+[[source.asset]]
+file = "ps5-web-file-manager_v1.7.elf"
+sha256 = "07c1f65d855fc4eb905b37ef990baf25a6a8b21da13590cd21b3e4b7d10ff4e1"
+
+[[source.asset]]
+file = "ps5debug-NG_1.3.0.elf"
+sha256 = "8f75fb90b45d7cc4d59147e3323577d7264cf572c78a27f76722202f492ad16a"
+
+[[source.asset]]
+file = "ps5upload_v5.14.0.elf"
+sha256 = "c07f250cce8a0c8762dde0b73725fc710e62f0a0b54495eeeda9d44fd62a4dd8"
+
+[[source.asset]]
+file = "shsrv_v0.20.elf"
+sha256 = "fa4ccb2587bb61be317df0d001f668b17ebf9b4aafad87acf691b1fb8da0bd2d"
+
+[[source.asset]]
+file = "websrv_v0.34.elf"
+sha256 = "54730c867c6e1148536fdcb370e63a7762d989ea87b62488ad4caff64d43f263"
+
+[[source.asset]]
+file = "zftpd_v1.5.0.elf"
+sha256 = "6cf6a738112fc339619ebe772690fa611f60ecdb20164a0e3f49e137277bc42b"
+
+[[source]]
+name = "obscene"
+kind = "local"
+path = "../obscene/build"
+licence = "same suite (D043); our own accuracy probe, not third-party"
+cite = "https://github.com/project-oops/obSCEne"
+todo = "sibling checkout for now - migrate to a github-release once obSCEne publishes one, matching D042's prefer-prebuilt-assets rule"
+
+[[source.asset]]
+file = "obscene.elf"
+sha256 = "2a433097e6b0b6b7490428b05539d575d8522e7fcbab53c4011de2600f052998"

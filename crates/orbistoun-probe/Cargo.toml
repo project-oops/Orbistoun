@@ -1,0 +1,16 @@
+[package]
+publish = false
+name = "orbistoun-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reading the records a hardware probe produces. Consumes; never drives."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-hle = { workspace = true }

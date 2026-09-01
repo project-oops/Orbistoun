@@ -1,0 +1,11 @@
+# cargo-audit configuration. Kept in sync with the `ignore` list in deny.toml.
+#
+# Empty to start - the dependency stack here (ash, zerocopy, tracing, clap,
+# serde) has no standing RustSec advisories.
+#
+# When a NEW advisory lands on a crate we actually use, prefer upgrading the
+# dependency. Only add an entry here - WITH a justification comment and a
+# revisit condition - when the advisory is a non-actionable transitive.
+
+[advisories]
+ignore = []

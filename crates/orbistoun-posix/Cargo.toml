@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "orbistoun-posix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The POSIX-named half of the platform, delegated to what already implements it."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-fs = { workspace = true }
+# The two POSIX time calls have no vendor-named twin: the implementation is a C library
+# one and lives there under its own name (D367).
+orbistoun-libc = { workspace = true }
+orbistoun-kernel = { workspace = true }

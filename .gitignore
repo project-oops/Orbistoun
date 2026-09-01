@@ -1,0 +1,70 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Guest material NEVER belongs in this repo. See CLAUDE.md principle 1 and the
+# `provenance` job in .github/workflows/ci.yml, which fails the build if any of
+# it is committed. These entries are a convenience, not the control.
+/dumps/
+/firmware/
+/games/
+*.pkg
+*.prx
+*.sprx
+*.self
+eboot.bin
+*.pup
+
+# Test corpus (D042). Downloaded homebrew and user-supplied material. Never tracked.
+# Named `titles/` rather than `games/` because the provenance guard bans that path.
+#
+# `/titles/*` rather than `/titles/`: a trailing slash makes git skip the directory
+# outright, so the README exception below would never be reachable.
+/titles/*
+!/titles/README.md
+
+# Local run state (portable-first: everything lands beside the binary)
+/.portable/
+/traces/
+
+# Pages bundle assembled by `./orbistoun.sh site` (pages.yml builds its own).
+/site/
+
+
+# Scratch. Ad-hoc debug scripts belong on somebody's disk, not in the history - and
+# `git add -A` on a repository with no commits stages everything, so the only thing
+# standing between a one-off diagnostic and the first commit is this list.
+#
+# The interpreter-file entries are not leftovers. This repository is Rust and shell; they
+# are here so a stray one-off script cannot arrive unnoticed.
+/.diag*
+/scratch/
+*.tmp
+# No `__pycache__/` or `*.pyc` rule, deliberately. There is no Python in this repository and
+# there is not meant to be - the checks and the build scripts are shell. An ignore rule for
+# bytecode is a quiet accommodation for a language that is not allowed here: it would hide the
+# first stray file rather than let `git status` show it.
+
+# Outgoing proposals. Generated from measurements and regenerated on demand, so tracking
+# them would commit a derived artefact - and a patch worth keeping is a commit, not a file.
+/patches/
+
+# The Windows build directory, for the icon-bearing executable.
+/target-win/
+
+# Claude Code's per-person overrides. `settings.json` beside it IS shared - SELFish uses it to
+# deny reads and edits of `escalation.*` - but the `.local` one is whoever is sitting here, and
+# tracking it means their overrides arrive in everybody else's clone. SELFish had it committed
+# as a byte-identical copy of the shared file, which is the shape this prevents.
+.claude/settings.local.json
+
+# Whatever the person editing this happens to run. None of it is anybody else's business,
+# and every one of these has been committed to some repository by accident at least once.
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

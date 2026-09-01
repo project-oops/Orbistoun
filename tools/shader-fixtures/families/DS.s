@@ -1,0 +1,12 @@
+ds_read_b32 v0, v1
+ds_read_b32 v100, v200
+ds_read_b32 v9, v255
+ds_write_b32 v2, v3
+ds_write_b32 v130, v140
+ds_write_b32 v5, v190
+ds_read_b64 v[4:5], v6
+ds_read_b64 v[100:101], v200
+ds_read_b64 v[10:11], v240
+ds_write_b64 v7, v[8:9]
+ds_write_b64 v150, v[160:161]
+ds_write_b64 v11, v[220:221]

@@ -1,0 +1,929 @@
+# What we know about libScePosix functions.
+#
+# Accumulated, never regenerated. Every edge case below cost an experiment against a real
+# guest, and losing this file means repeating them.
+#
+# **Every function here delegates.** Each is the POSIX spelling of a call this project
+# already implements under a vendor name, and both resolve to the same function pointer -
+# so nothing is duplicated and the two spellings cannot drift apart (D349).
+#
+# The shared caveat, which is why every entry below is `assumed`: POSIX answers zero or an
+# errno, and the vendor-named calls answer their own codes. The success paths coincide and
+# the failure paths do not. Nothing here invents an errno - a failure returns this project's
+# placeholder, which deliberately avoids the high bit so it can never be mistaken for an
+# established value. A guest testing `!= 0` behaves correctly; one switching on specific
+# errno values falls to its default branch rather than matching the wrong case.
+
+library = "libScePosix"
+
+[[function]]
+name = "close"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `sceKernelClose`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `sceKernelClose`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `sceKernelClose` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "open"
+returns = "handle"
+arity = 3
+purpose = "The POSIX spelling of `sceKernelOpen`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `sceKernelOpen`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `sceKernelOpen` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_attr_destroy"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadAttrDestroy`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadAttrDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadAttrDestroy` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_attr_getschedparam"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadAttrGetschedparam`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadAttrGetschedparam`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadAttrGetschedparam` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_attr_init"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadAttrInit`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadAttrInit`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadAttrInit` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_attr_setschedparam"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadAttrSetschedparam`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadAttrSetschedparam`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadAttrSetschedparam` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_attr_setstacksize"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadAttrSetstacksize`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadAttrSetstacksize`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadAttrSetstacksize` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_cond_broadcast"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadCondBroadcast`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadCondBroadcast`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadCondBroadcast` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_cond_destroy"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadCondDestroy`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadCondDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadCondDestroy` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_cond_init"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadCondInit`, one argument shorter. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "**Two arguments, not the three its vendor twin takes.** `scePthreadCondInit` ends in a name and the POSIX call has no argument for it, so delegating meant reading a register the caller never set - `zftpd` faulted on a stale `rdx` while initialising its client table (D385). It is written under its POSIX name in `orbistoun-kernel`, beside the vendor one it wraps with no name.",
+  "Wraps `scePthreadCondInit` with an empty name; every other argument is that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadCondInit` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_cond_signal"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadCondSignal`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadCondSignal`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadCondSignal` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_cond_wait"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadCondWait`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadCondWait`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadCondWait` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_create"
+returns = "status"
+arity = 4
+purpose = "The POSIX spelling of `scePthreadCreate`, one argument shorter. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "**Two arguments, not the three its vendor twin takes.** `scePthreadCreate` ends in a name and the POSIX call has no argument for it, so delegating meant reading a register the caller never set - `zftpd` faulted on a stale `rdx` while initialising its client table (D385). It is written under its POSIX name in `orbistoun-kernel`, beside the vendor one it wraps with no name.",
+  "Wraps `scePthreadCreate` with an empty name; every other argument is that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadCreate` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_join"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadJoin`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadJoin`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadJoin` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutex_destroy"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadMutexDestroy`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexDestroy` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutex_init"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadMutexInit`, one argument shorter. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "**Two arguments, not the three its vendor twin takes.** `scePthreadMutexInit` ends in a name and the POSIX call has no argument for it, so delegating meant reading a register the caller never set - `zftpd` faulted on a stale `rdx` while initialising its client table (D385). It is written under its POSIX name in `orbistoun-kernel`, beside the vendor one it wraps with no name.",
+  "Wraps `scePthreadMutexInit` with an empty name; every other argument is that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexInit` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutex_lock"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadMutexLock`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexLock`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexLock` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutex_unlock"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadMutexUnlock`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexUnlock`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexUnlock` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutexattr_destroy"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadMutexattrDestroy`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexattrDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexattrDestroy` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutexattr_init"
+returns = "status"
+arity = 1
+purpose = "The POSIX spelling of `scePthreadMutexattrInit`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexattrInit`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexattrInit` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutexattr_setprotocol"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadMutexattrSetprotocol`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexattrSetprotocol`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexattrSetprotocol` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_mutexattr_settype"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `scePthreadMutexattrSettype`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadMutexattrSettype`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadMutexattrSettype` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "pthread_self"
+returns = "status"
+arity = 0
+purpose = "The POSIX spelling of `scePthreadSelf`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `scePthreadSelf`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `scePthreadSelf` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "read"
+returns = "count"
+arity = 3
+purpose = "The POSIX spelling of `sceKernelRead`, and the same function pointer. Declared 2026-08-27."
+arguments = []
+edge_cases = [
+  "Delegates to `sceKernelRead`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `sceKernelRead` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+  "The failure return is this project's placeholder rather than an errno. See the file header.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "write"
+returns = "count"
+arity = 3
+purpose = "The POSIX spelling of `sceKernelWrite`, and the same function pointer. Declared 2026-08-29."
+edge_cases = [
+  "Delegates to `sceKernelWrite`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+  "Seventeen of the twenty-five open-toolchain payloads import it - the POSIX spelling only. A server writes its output through this, so without it a payload that has accepted a connection has nothing to say on it.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+  "That the POSIX name and `sceKernelWrite` are the same behaviour rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
+]
+found_in = ["klogsrv", "ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "clock_gettime"
+returns = "status"
+arity = 2
+purpose = "Answers a named clock to the nanosecond. Declared here because a title imports it here; implemented in orbistoun-libc, which is where the C library lives."
+edge_cases = [
+  "There is no vendor-named twin, so the delegation names the same function on both sides. The declaration and the implementation being in different crates is ordinary; two declarations of one symbol would not be.",
+  "The behaviour is described by the libc entry of the same name - which clocks are answered, and why the rest are refused rather than given the nearest thing.",
+]
+cites = "POSIX.1-2008 clock_gettime(3). Identifiers from sys/sys/_clock_id.h, harvested."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "gettimeofday"
+returns = "status"
+arity = 2
+purpose = "Answers the wall clock to the microsecond. Declared here because a title imports it here; implemented in orbistoun-libc."
+edge_cases = [
+  "As for `clock_gettime`: no vendor twin, so the delegation names the same function on both sides, and the libc entry of the same name is the one that describes the behaviour.",
+]
+cites = "POSIX.1-2008 gettimeofday(3). struct timeval from sys/sys/_timeval.h."
+known_by = "published"
+found_in = ["ftpsrv", "websrv", "ps5-app-dumper"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "socket"
+returns = "handle"
+arity = 3
+purpose = "Answers a descriptor for a new socket, with nothing behind it yet."
+edge_cases = [
+    "Only AF_INET streams are served. Anything else is refused rather than quietly given a TCP socket: a guest asking for a datagram socket and receiving a stream would work for exactly as long as it took to send something.",
+    "The descriptor comes from the same table files use, because a guest has one - close, read and write take either without being told which (D371).",
+    "A socket exists before it has anything to do. The host makes a listener by binding and listening in one step, so a descriptor starts pending, remembers what bind was told, and becomes a host object at listen or connect.",
+]
+cites = "POSIX.1-2008 socket(2). AF_INET and SOCK_STREAM from sys/sys/socket.h, harvested."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "bind"
+returns = "status"
+arity = 3
+purpose = "Records where a socket is to listen."
+edge_cases = [
+    "Remembered rather than performed: the host binds and listens in one call, so listen uses what this recorded. Binding here and rebuilding at listen would hold the port twice.",
+    "sin_family is at offset one, not zero. Offset zero is sin_len on this family, and a shim written from memory of another platform reads it as the family.",
+    "Binding something already listening or connected is an error in the interface and is refused.",
+]
+cites = "POSIX.1-2008 bind(2). struct sockaddr_in from sys/netinet/in.h."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "listen"
+returns = "status"
+arity = 2
+purpose = "Makes a bound socket accept connections - the call that makes a service visible."
+edge_cases = [
+    "This is the one an external checker observes. A service reads as up the moment a guest has a listening socket on its port, because the check is a connect and nothing more.",
+    "The backlog is not honoured: the host's listener chooses its own, and passing a guest's number through would be reporting a queue depth this cannot promise.",
+    "Listening on a socket nobody bound is refused rather than given a port.",
+    "Declared in this library by inference rather than measurement: eight of its siblings were measured being imported from here by a title, and this one was not. A title connects rather than listens, so nothing in the corpus asks for it.",
+]
+cites = "POSIX.1-2008 listen(2)."
+known_by = "published"
+assumptions = ["That this library is where the platform exports it. Its siblings were measured here; this one was not."]
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "accept"
+returns = "handle"
+arity = 3
+purpose = "Takes the next connection, answering a descriptor for it."
+edge_cases = [
+    "Blocks, as the interface does. A guest that calls this with nothing connecting waits, and the run's own time limit is what ends it.",
+    "A null address argument is accepted and nothing is written, which is what a caller wanting only the connection passes.",
+    "Declared in this library by inference rather than measurement: eight of its siblings were measured being imported from here by a title, and this one was not. A title connects rather than listens, so nothing in the corpus asks for it.",
+]
+cites = "POSIX.1-2008 accept(2)."
+known_by = "published"
+assumptions = ["That this library is where the platform exports it."]
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "connect"
+returns = "status"
+arity = 3
+purpose = "Connects a socket to an address."
+edge_cases = [
+    "Only a pending socket may be connected; one already listening or connected is refused.",
+]
+cites = "POSIX.1-2008 connect(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "setsockopt"
+returns = "status"
+arity = 5
+purpose = "Accepted, and recorded as not applied."
+edge_cases = [
+    "Accepting is the part that matters. A server's first act after socket is setsockopt(SO_REUSEADDR), and failing it stops the server: a correct program checks, reports and exits. Refusing outright would end every payload measured before it reached bind.",
+    "Nothing is applied. SO_REUSEADDR is what the host's listener does by default on the platforms this runs on, so honouring it would change nothing; the rest - timeouts, buffer sizes, keepalive - would need a per-option mapping nothing here can verify, and a wrong one is a socket behaving differently from what the guest asked for with nothing saying so.",
+]
+cites = "POSIX.1-2008 setsockopt(2). SOL_SOCKET and SO_REUSEADDR from sys/sys/socket.h, harvested."
+known_by = "published"
+assumptions = [
+    "That no payload measured depends on an option actually taking effect. They set SO_REUSEADDR and check the return value; none reads an option back.",
+]
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "getsockname"
+returns = "status"
+arity = 3
+purpose = "Answers where a socket actually ended up."
+edge_cases = [
+    "Worth having rather than stubbing: a server that binds to port zero asks the system which port it got, and prints it. Answering a made-up number would put a wrong port in front of whoever is trying to connect.",
+]
+cites = "POSIX.1-2008 getsockname(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "getpeername"
+returns = "status"
+arity = 3
+purpose = "Answers who is at the other end of a connected socket."
+edge_cases = ["Declared in this library by inference rather than measurement: eight of its siblings were measured being imported from here by a title, and this one was not. A title connects rather than listens, so nothing in the corpus asks for it."]
+cites = "POSIX.1-2008 getpeername(2)."
+known_by = "published"
+assumptions = ["That this library is where the platform exports it."]
+found_on = "2026-08-29"
+
+[[function]]
+name = "send"
+returns = "count"
+arity = 4
+purpose = "Writes to a connected socket."
+edge_cases = [
+    "The flags are ignored and that is stated: MSG_OOB and MSG_DONTROUTE are not things this can promise, and a guest relying on one would be misread. Every payload measured passes zero.",
+]
+cites = "POSIX.1-2008 send(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "recv"
+returns = "count"
+arity = 4
+purpose = "Reads from a connected socket."
+edge_cases = [
+    "The flags are ignored, as for send.",
+    "Reading a listening socket is a guest's mistake, reported rather than answered with an empty read that looks like a closed connection.",
+]
+cites = "POSIX.1-2008 recv(2)."
+known_by = "published"
+found_in = ["ftpsrv", "elfldr"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "shutdown"
+returns = "status"
+arity = 2
+purpose = "Stops one or both directions of a connected socket."
+edge_cases = [
+    "A direction nobody defines is refused rather than treated as both.",
+]
+cites = "POSIX.1-2008 shutdown(2). SHUT_RD, SHUT_WR and SHUT_RDWR are 0, 1 and 2, from sys/sys/socket.h."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "select"
+returns = "count"
+arity = 5
+purpose = "Waits until one of a set of descriptors is ready, or until a timeout."
+edge_cases = [
+    "A server's loop is wait, accept, serve, and this is the wait. Without it the loop never turns: the guest is told the call failed and takes its error path having served nothing.",
+    "Readiness is asked by polling, a millisecond apart, because the standard library has no readiness primitive. That costs latency a real select would not, and a guest measuring its own wakeup latency would see the difference.",
+    "Asking must not consume. The only way to learn whether a listener has a connection is to accept one, so the connection is kept on the listener and the guest's own accept takes it - otherwise a guest that selects then accepts loses every connection to the call that only asked (D373).",
+    "Write readiness is yes for anything connected: writes here go straight to the host and do not buffer, so a write will not block.",
+    "The exceptional set is always cleared. Nothing here generates out-of-band data, so reporting one would be inventing an event.",
+    "A null timeout means wait as long as it takes; a zeroed one means ask once and answer. A caller means quite different things by them and both are ordinary.",
+]
+cites = "POSIX.1-2008 select(2). fd_set from sys/sys/select.h: FD_SETSIZE is 1024 and __fd_mask is an unsigned long, so sixteen 64-bit words with descriptor n at bit n%64 of word n/64."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "inet_ntop"
+returns = "pointer"
+arity = 4
+purpose = "Renders an address as text."
+edge_cases = [
+    "Only AF_INET is served. A family this cannot render is refused rather than printed as something plausible, because the caller prints what it gets.",
+    "A destination too small is refused rather than truncated: half an address is a different address.",
+    "The payloads import the underscored spelling __inet_ntop, which is FreeBSD's own name for it. Both are served and they are one function.",
+]
+cites = "POSIX.1-2008 inet_ntop(3). INET_ADDRSTRLEN is 16, from sys/netinet/in.h."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "lseek"
+returns = "count"
+arity = 3
+purpose = "The POSIX spelling of `sceKernelLseek`, and the same function pointer. Declared 2026-08-29."
+edge_cases = [
+  "Delegates to `sceKernelLseek`; its knowledge entry is the one that describes the arguments.",
+  "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+]
+found_by = "published-standard"
+known_by = "assumed"
+assumptions = ["That the POSIX name and `sceKernelLseek` are the same behaviour rather than merely similar."]
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "munmap"
+returns = "status"
+arity = 2
+purpose = "The POSIX spelling of `sceKernelMunmap`, and the same function pointer. Declared 2026-08-29."
+edge_cases = [
+  "Delegates to `sceKernelMunmap`; its knowledge entry is the one that describes the arguments.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["That the POSIX name and `sceKernelMunmap` are the same behaviour rather than merely similar."]
+found_in = ["ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "mmap"
+returns = "pointer"
+arity = 6
+purpose = "Maps pages of memory into guest address space. Reference: POSIX.1-2008 mmap(2), FreeBSD SYS_mmap 477."
+edge_cases = [
+  "Returns MAP_FAILED (!0) on zero length or allocation failure.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2008 mmap(2), FreeBSD SYS_mmap 477."
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-31"
+
+[[function]]
+name = "_open"
+returns = "handle"
+arity = 3
+purpose = "The underscored spelling of `open`, and the same function pointer. Declared 2026-08-29."
+edge_cases = ["FreeBSD's own underscored spelling, which its C library uses internally so a program replacing the public name does not break the library's own calls. The payloads import both, and they are one function - so both reach one implementation and cannot answer differently."]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["That the underscored and public spellings are one function on this platform, as they are on FreeBSD."]
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "_close"
+returns = "status"
+arity = 1
+purpose = "The underscored spelling of `close`, and the same function pointer. Declared 2026-08-29."
+edge_cases = ["FreeBSD's own underscored spelling, which its C library uses internally so a program replacing the public name does not break the library's own calls. The payloads import both, and they are one function - so both reach one implementation and cannot answer differently."]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["As `_open`."]
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "_read"
+returns = "count"
+arity = 3
+purpose = "The underscored spelling of `read`, and the same function pointer. Declared 2026-08-29."
+edge_cases = ["FreeBSD's own underscored spelling, which its C library uses internally so a program replacing the public name does not break the library's own calls. The payloads import both, and they are one function - so both reach one implementation and cannot answer differently."]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["As `_open`."]
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "pthread_detach"
+returns = "status"
+arity = 1
+purpose = "Says nobody will join a thread. Recorded rather than acted on."
+edge_cases = [
+  "Detaching is a promise about who cleans up, and every guest thread here is a host thread the runtime already cleans up when its body returns - so the promise is kept by construction and there is nothing to do but agree.",
+  "A handle nobody issued is refused: an arbitrary guest value must never be treated as a thread.",
+]
+cites = "POSIX.1-2008 pthread_detach(3)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "pthread_exit"
+returns = "status"
+arity = 1
+purpose = "Ends the calling thread, and never comes back."
+edge_cases = [
+  "On the main thread it ends the program, reported as the guest exiting deliberately - a different outcome from a fault, and the distinction that matters most in a report (D177).",
+  "On any other thread it ends only that thread, and the thread is parked rather than returned from: nothing here can unwind guest frames, so it stops executing guest code, which is what pthread_exit promises, and its stack is not reclaimed, which is what this cannot do.",
+  "The two are told apart by the thread registry: the process's first thread runs guest code without ever having been created, so it is adopted rather than spawned.",
+]
+cites = "POSIX.1-2008 pthread_exit(3)."
+known_by = "published"
+assumptions = ["That a parked thread is close enough to an exited one for the payloads measured. None of them counts its own running threads."]
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "pthread_key_create"
+returns = "status"
+arity = 2
+purpose = "Allocates a thread-specific-data key. A guest's own runtime (Intel TBB in a Unity title) builds its per-thread storage on these."
+edge_cases = [
+  "Unimplemented it answered the placeholder, which TBB read as key allocation failing - it threw `TBB failed to initialize task scheduler TLS` and, with exceptions disabled, aborted (D453).",
+  "The destructor argument is recorded nowhere and never run: nothing tears a guest thread down through this layer yet, so there is no moment for it to fire.",
+]
+cites = "POSIX.1-2008 pthread_key_create(3). Key is a small integer from a monotonic counter; value storage is per host thread, which is per guest thread here (D014)."
+known_by = "published"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "pthread_setspecific"
+returns = "status"
+arity = 2
+purpose = "Binds a value to a key for the calling thread."
+cites = "POSIX.1-2008 pthread_setspecific(3)."
+known_by = "published"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "pthread_getspecific"
+returns = "pointer"
+arity = 1
+purpose = "The calling thread's value for a key, or null if it was never set - which is what a fresh per-thread map answers, exactly as POSIX requires."
+cites = "POSIX.1-2008 pthread_getspecific(3)."
+known_by = "published"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "pthread_key_delete"
+returns = "status"
+arity = 1
+purpose = "Retires a key. A retired id is not reused, so a stale use reads null rather than another key's value."
+cites = "POSIX.1-2008 pthread_key_delete(3)."
+known_by = "published"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "fstat"
+returns = "status"
+arity = 2
+purpose = "What a guest is told about an open descriptor."
+edge_cases = [
+  "The layout is a setting, not a constant. The FreeBSD checkout these are read from is a newer release than the target's user space, and this is one of the two structures that changed shape in between - so both layouts are taken from that one header and ORBISTOUN_STAT_LAYOUT chooses, defaulting to the older (D374).",
+  "A socket and a standard stream answer nothing: neither has a size or a modification time, and reporting one would be inventing both.",
+  "The behaviour is otherwise the libc entry for `stat`, which is where the fields are described.",
+]
+cites = "POSIX.1-2008 fstat(2); the structure from sys/sys/stat.h."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "sem_init"
+arity = 3
+purpose = "Initialises a POSIX unnamed semaphore in place. Creates a host semaphore with the given initial value and writes its handle into the sem_t, mirroring how pthread_cond_init stores a handle in the guest's object."
+edge_cases = [
+  "PPSA21564's engine builds a concurrency primitive on this; unimplemented it answered the placeholder, which the guest asserted was zero and then aborted (D455).",
+  "pshared is ignored - a guest thread is a host thread here, so process-shared versus process-private makes no difference to a single-process emulator.",
+]
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 sem_init(3); host primitive is orbistoun-kernel sync::create_semaphore, shared with sceKernelCreateSema."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "sem_wait"
+arity = 1
+purpose = "Takes one from a POSIX semaphore, waiting for it. Reads the handle sem_init stored in the sem_t."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 sem_wait(3)."
+found_on = "2026-09-01"
+
+[[function]]
+name = "sem_trywait"
+arity = 1
+purpose = "Takes one only if available; a would-block and a bad handle are both non-zero, distinguished by errno on the platform, which this project does not invent."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 sem_trywait(3)."
+found_on = "2026-09-01"
+
+[[function]]
+name = "sem_post"
+arity = 1
+purpose = "Gives one back to a POSIX semaphore."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 sem_post(3)."
+found_on = "2026-09-01"
+
+[[function]]
+name = "sem_destroy"
+arity = 1
+purpose = "Retires the host semaphore a sem_t names."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 sem_destroy(3)."
+found_on = "2026-09-01"

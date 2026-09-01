@@ -1,0 +1,26 @@
+[package]
+name = "orbistoun-gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Offline generators for the shader data tables. Not part of the emulator."
+publish = false
+
+[dependencies]
+oops-log = { workspace = true }
+orbistoun-env = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+regex = { workspace = true }
+# Keying a recording by what was asked. Deterministic across platforms and releases, which
+# `DefaultHasher` is not - a recording keyed by that replays only where it was taken.
+sha1 = { workspace = true }
+# Reading the committed encoding table, rather than hand-parsing a file that is
+# genuinely TOML into a second dialect for it to disagree with.
+toml = { workspace = true }
+
+[lints]
+workspace = true

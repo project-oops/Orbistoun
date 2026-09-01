@@ -1,0 +1,21 @@
+[package]
+publish = false
+name = "orbistoun-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Guest filesystem HLE - file IO and the async streaming layer."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+# Settings are declared in one registry so `orbistoun-cli doctor` can list every one
+# and say which crate reads it. `orbistoun-env` takes no orbistoun dependency (D325).
+orbistoun-env = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-nid = { workspace = true }

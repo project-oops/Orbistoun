@@ -1,0 +1,18 @@
+[package]
+publish = false
+name = "orbistoun-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "orbistoun domain types - guest error codes, handles, and ABI primitives shared by every layer. IO-free."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pure derive, no IO: these are domain types two layers that cannot see each
+# other both need to store and read (D394).
+serde = { workspace = true }

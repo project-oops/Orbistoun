@@ -1,0 +1,32 @@
+name: Dependabot auto-merge
+
+# Enables auto-merge on patch and minor Dependabot PRs, so they land once the
+# required CI checks pass. Major bumps are left for manual review - in this
+# codebase a major bump of ash or zerocopy is an API migration, not a version
+# number.
+#
+# Requires "Allow auto-merge" enabled on the repository.
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for patch and minor bumps
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"

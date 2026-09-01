@@ -1,0 +1,10 @@
+# Pinned toolchain for reproducible builds - host and CI compile with exactly
+# this version (rustup honours this file over any default toolchain a CI action
+# installs). Bump deliberately. This is the *build* toolchain; the MSRV floor is
+# the separate `rust-version` in Cargo.toml.
+#
+# `rust-src` is included because the conformance harness runs under Miri on the
+# host-side crates (see docs/TESTING.md), which needs a local std source.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy", "rust-src"]

@@ -1,0 +1,19 @@
+library = "libSceGnmDriver"
+
+[[function]]
+name = "sceGnmDispatchInitDefaultHardwareState"
+arity = 2
+purpose = "Writes the default hardware-state preamble into a compute command buffer."
+returns = "count"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "Answers how many dwords it wrote, so the guest advances its command pointer by that much."
+
+[[function]]
+name = "sceGnmDispatchDirect"
+arity = 6
+purpose = "Writes a direct compute dispatch (thread-group counts) into a command buffer as a PM4 type-3 packet."
+returns = "count"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "The DISPATCH_DIRECT opcode with the three group dimensions; answers the dword count written."

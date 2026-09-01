@@ -1,0 +1,59 @@
+# The console's filesystem, as far as this project can account for it.
+#
+# **A knowledge file, not a fixture.** Every path here is a claim about the platform, and
+# this project's rule is that a claim says how it is known. A committed tree of empty
+# directories could not say that - and git does not track empty directories anyway.
+#
+# `known_by` uses the same vocabulary as the function knowledge base:
+#
+#   guest-observed  something running here asked for it, and the run is recorded
+#   published       a citable public source describes it
+#   measured        established on the target by a probe
+#   assumed         believed, with nothing behind it yet - legitimate, and visible
+#
+# **Nothing is added because it sounds right.** A guest that resolves a path we invented
+# gets a fabricated platform fact back, which is worse than the failure it replaces: the
+# failure is information. The tree grows when something asks (D251).
+
+[[entry]]
+path = "/app0"
+purpose = "The running title's own content, read-only."
+writable = false
+known_by = "guest-observed"
+asked_by = [
+    "PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0",
+    "PPSA21564-app0", "PPSA25872-app0", "PPSA28061-app0",
+]
+note = "Ten textures load from it in PPSA28061, at the right sizes, which is what confirms the mount rather than the mount confirming itself."
+
+[[entry]]
+path = "/data"
+purpose = "Writable storage belonging to the running application."
+writable = true
+known_by = "guest-observed"
+asked_by = ["obscene-module"]
+note = "The conformance probe opens /data/obscene-report.txt within its first few calls, read-only, and hands the failure straight to read() as a descriptor. That is what established the path exists in the console's namespace and that nothing here provided it."
+
+[[entry]]
+path = "/mnt/usb0"
+purpose = "A USB volume, sandboxed writable storage a title reaches when one is attached."
+writable = true
+known_by = "guest-observed"
+asked_by = ["obscene-eboot"]
+note = "The conformance probe's report sink mkdirs /mnt/usb0/obscene and opens /mnt/usb0/obscene/report.txt as the first of its candidates. Unmounted, its sceKernelMkdir hit the placeholder stub and the sink read itself back into a fault - the console sandboxes the path and the write simply lands there (D250, D251)."
+
+[[entry]]
+path = "/mnt/usb1"
+purpose = "A second USB volume, the sink's next candidate after usb0."
+writable = true
+known_by = "guest-observed"
+asked_by = ["obscene-eboot"]
+note = "The same sink tries /mnt/usb1/obscene after usb0, so it is asked for on any run where the first is not the one that answers."
+
+[[entry]]
+path = "/download0"
+purpose = "Download and update staging storage, writable to the installation."
+writable = true
+known_by = "guest-observed"
+asked_by = ["obscene-eboot", "obscene-module"]
+note = "The module build's sink reports /download0/obscene-report.txt as the path it used on hardware (the report headers carry `OBS|sink|/download0/obscene-report.txt`), so it is where the console let the probe write when the USB candidates were absent."

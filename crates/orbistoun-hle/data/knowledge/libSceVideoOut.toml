@@ -1,0 +1,119 @@
+# What we know about libSceVideoOut functions.
+#
+# Accumulated, never regenerated. Every edge case below cost an experiment against a real
+# guest, and losing this file means repeating them.
+#
+# NIDs are deliberately absent: they are derived from the name, so a file cannot hold a
+# pair that disagrees with itself (docs/SYMBOLS.md).
+
+library = "libSceVideoOut"
+
+[[function]]
+name = "sceVideoOutOpen"
+returns = "handle"
+arity = 4
+purpose = """
+Opens a display port. Implemented 2026-08-21 - not to display anything, nothing here
+draws, but to stop the guest carrying an error code around as a display handle.
+"""
+arguments = [
+  { name = "user", kind = "u32", note = "user id; not acted on" },
+  { name = "bus", kind = "u32", note = "which output; recorded so two opens are distinguishable in a trace" },
+  { name = "index", kind = "u32", note = "not acted on" },
+  { name = "param", kind = "ptr", note = "not read - its layout is not known from any lawful source" },
+]
+edge_cases = [
+  "**Unimplemented, this answered `0x7FFF0001` and the guest passed that into `sceVideoOutRegisterBuffers2` as the port to register against.** Our own placeholder travelling through the guest as data and arriving somewhere unrelated to where it came from - D125 with a display attached.",
+  "The handle is a small positive integer and deliberately **not** an address. Thread, lock and file handles are addresses because the guest dereferences them (D151); this one is compared against zero and passed back, and nothing observed reads through it.",
+  "One-based, because callers test a video-out handle against zero and a handle of zero would read as 'not open' to code holding a perfectly good port.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceVideoOutClose"
+returns = "status"
+arity = 1
+purpose = "Closes a port."
+edge_cases = [
+  "The port is left in the table rather than removed: handles are indices, so removing one would either renumber the rest or leave a hole a later open would reuse - and a reused display handle is a bug nobody would think to look for.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceVideoOutRegisterBuffers"
+returns = "status"
+arity = 6
+purpose = "Gives a port a set of buffers to display from."
+edge_cases = [
+  "**The addresses are not read.** There is no output surface, so a buffer registered here is one nobody will ever present. The count is recorded because a guest can read it back; inventing anything else would be worse than recording nothing.",
+  "Answers success rather than refusing, deliberately and reversibly: a guest that cannot register buffers stops setting up its display, while one that believes it can proceeds to submit flips - which is where the GPU layer is eventually reached.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceVideoOutRegisterBuffers2"
+returns = "status"
+arity = 6
+purpose = "As sceVideoOutRegisterBuffers, and handled identically."
+edge_cases = [
+  "Name confirmed by hash against a real import out of 249,506 candidates (D167). It was observed being called with `0x7FFF0001` as its first argument, which is what identified `sceVideoOutOpen` as the thing to implement.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceVideoOutSubmitFlip"
+arity = 4
+purpose = "Queues a buffer to be presented at the next flip on an open output."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceVideoOutSetFlipRate"
+arity = 2
+purpose = "Sets how many vertical blanks pass between presented flips."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceVideoOutGetFlipStatus"
+arity = 2
+purpose = "Reports how many flips have been requested and completed on an output."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceVideoOutGetResolutionStatus"
+arity = 2
+purpose = "Reports the presented resolution of an open output (1920x1080)."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"

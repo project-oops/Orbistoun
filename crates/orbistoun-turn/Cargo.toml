@@ -1,0 +1,38 @@
+[package]
+publish = false
+name = "orbistoun-turn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Turning the loop without a person - the steps a finding calls for, the sweeps that answer them, and what a turn earned."
+
+[lints]
+workspace = true
+
+# **No model runtime, and that is the point of the crate existing.** Its four modules are
+# rules and boots; the naming loop that needs a model is `orbistoun-propose`. A feature flag
+# would have hidden the dependency, and a crate boundary makes it impossible - the same
+# argument `orbistoun-gpu` uses for having no path to `ash` (D293).
+[dependencies]
+# The taxonomy of walls, so the dispatcher reads the report's own vocabulary rather than
+# keeping a second copy of it that drifts.
+orbistoun-report = { workspace = true }
+# The conformance probe's records, so a change can be graded against a spec rather than
+# against whether the guest survived it - the oracle the fix loop was missing (D302).
+orbistoun-probe = { workspace = true }
+# The knowledge format, so a measured contract is recorded through the same merge rule a
+# person's `learn` uses rather than a second copy of it (D292).
+orbistoun-hle = { workspace = true }
+# Every diagnostic variable, named once, so a run cannot inherit one this did not set (D288).
+orbistoun-env = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# For proving a generated knowledge entry parses. A patch producing a file the tool cannot
+# read is worse than no patch, and only a real parser settles that.
+toml = { workspace = true }

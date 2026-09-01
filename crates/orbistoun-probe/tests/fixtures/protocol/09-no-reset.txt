@@ -1,0 +1,15 @@
+# A target that cannot reset says so. This is the important half of 08.
+#
+# A `reset` that answers `ok` and does nothing is worse than a refusal: every record after
+# it claims a clean state it does not have. Refusing is honest, and the ordering recorded
+# with each command is what keeps the results interpretable anyway.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|deadc0de|call,read,report
+OBS|part|deadc0de|target|console
+OBS|part|deadc0de|firmware|13.520.001
+OBS|part|deadc0de|probe|dev
+OBS|done|1|ok||
+CMD|2|reset
+OBS|ack|2|reset
+OBS|refused|2|not-negotiated

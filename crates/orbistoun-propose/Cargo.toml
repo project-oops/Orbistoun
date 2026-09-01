@@ -1,0 +1,29 @@
+[package]
+publish = false
+name = "orbistoun-propose"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Proposals paired with the oracle that checks them - the callers that let something other than a person turn the loop."
+
+[lints]
+workspace = true
+
+# `orbistoun-llm` supplies the proposals and `orbistoun-names` supplies the oracle.
+# Both directions matter: this crate is where the two meet, which is why neither of them
+# knows about the other.
+[dependencies]
+orbistoun-llm = { workspace = true }
+orbistoun-names = { workspace = true }
+orbistoun-nid = { workspace = true }
+# For where data belongs. Resolving it here instead put a downloaded model runtime inside
+# the repository, which is exactly the second definition these crates exist to prevent.
+orbistoun-paths = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+publish = false
+name = "orbistoun-spirv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Building SPIR-V modules. Knows nothing about the guest architecture."
+
+[lints]
+workspace = true
+
+[dependencies]

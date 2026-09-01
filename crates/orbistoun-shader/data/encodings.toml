@@ -1,0 +1,345 @@
+# GPU instruction encoding families.
+#
+# ## What this is
+#
+# Each entry says: if the high bits of an instruction word match `value` under `mask`,
+# the instruction belongs to this family, its opcode sits at `opcode`, and it occupies
+# `width_bytes` (plus four more if one of `literal_operands` reads 255).
+#
+# That is enough to walk a shader binary end to end and say which instructions it
+# contains, without knowing what any of them *do*. Semantics come later; the census
+# comes first, because you cannot prioritise what you cannot count.
+#
+# ## Where these values come from
+#
+# AMD publishes the instruction set architecture for these GPUs openly, as the "ISA
+# Reference Guide" series - one document per architecture generation. That is the
+# source, and it is the best documentation available anywhere in this project: a real
+# specification, from the hardware vendor, for the exact instruction set in question.
+#
+# It is also lawful, citable reference material in the sense CLAUDE.md principle 1
+# means - published hardware documentation, not vendor firmware. See ACKNOWLEDGEMENTS.
+#
+# ## Status: verified differentially against a reference disassembler
+#
+# Every row below is exercised by `crates/orbistoun-shader/tests/differential.rs`
+# against **126 instructions**, with LLVM's own disassembler saying where each
+# instruction begins. Our instruction boundaries match that reference exactly, which
+# is the assertion that matters: an offset is the sum of every length before it, so
+# agreement across a hundred instructions means the lengths are right.
+#
+# **All seventeen families are now covered.** Fourteen by compiled fixtures - shaders
+# LLVM produced from source in `tools/shader-fixtures/` - and three by hand-written
+# assembly in `unreached.s`: SOPK, MTBUF and VINTRP, which no compiled fixture produces
+# because they arise from specific constant patterns, typed buffer formats and fragment
+# interpolation respectively.
+#
+# Hand-written is the weaker of the two. The instruction is one somebody thought of
+# rather than one a compiler reached for, so those three rows are shown right about the
+# instructions written and not shown to cover everything the family can express. It is
+# still an enormous step up from transcribed-and-never-checked, and the first run proved
+# it: **VINTRP's encoding value was wrong.** It carried this family's value from the
+# first two generations of the architecture, while this table targets a later one, and
+# the decoder called `v_interp_p1_f32` unrecognised the moment a fixture reached it.
+# That row had been sitting next to a comment saying it was unverified, which turns out
+# to be a different thing from being verified as wrong.
+#
+# One residual gap, recorded rather than papered over: MTBUF's opcode field is three
+# bits here and the specification gives four. The family defines eight opcodes, so the
+# two readings cannot disagree about any instruction that exists, and no fixture can
+# separate them. Left as it is because widening it would be a change no evidence
+# supports; noted because a future generation adding a ninth opcode makes it wrong.
+#
+# The original caveat is worth keeping, because it still applies wherever coverage is
+# thin: a wrong entry does not fail to build. It silently mis-decodes, and the result
+# looks like a shader using instructions nobody understands rather than like a typo.
+# Two things guard against it - this is data, so a correction is an edit rather than a
+# release; and the decoder reports its own coverage, so a table with a mistake in it
+# produces obviously poor coverage or a decode that runs off the end.
+#
+# ## The console parts are customised
+#
+# The published tables cover the great majority of what appears in a shader and not
+# all of it. Anything this table does not describe is counted and reported as unknown,
+# never guessed at.
+#
+# Order in this file does not matter - the loader sorts by mask specificity, so
+# families are grouped here for readability against the reference instead.
+
+# ---- Scalar ALU ------------------------------------------------------------
+# The scalar unit handles values uniform across a wavefront: loop counters, branch
+# conditions, descriptor addresses. Control flow lives here, which makes these the
+# instructions that matter most for reconstructing structure.
+
+# ## The generation this describes
+#
+# Hand-written from the published instruction-set reference for this generation, and
+# declared here so the loader can refuse a table set where the generated files were
+# solved against a different one. This is the *intent*; the generated files record what
+# a tool actually ran against, and they must match.
+#
+# It was `gfx900` - the wrong generation entirely - for months, with nothing saying so,
+# because an opcode number for the wrong generation still lands on a real instruction.
+# See D139.
+
+target = "gfx1030"
+
+[[encoding]]
+name = "SOP1"
+mask = "0xFF800000"
+value = "0xBE800000"
+opcode = { shift = 8, width = 8 }
+width_bytes = 4
+literal_operands = [{ shift = 0, width = 8 }]
+operands = [
+  { name = "sdst", shift = 16, width = 7, kind = "source" },
+  { name = "ssrc0", shift = 0, width = 8, kind = "source" },
+]
+
+[[encoding]]
+name = "SOP2"
+mask = "0xC0000000"
+value = "0x80000000"
+opcode = { shift = 23, width = 7 }
+width_bytes = 4
+literal_operands = [{ shift = 0, width = 8 }, { shift = 8, width = 8 }]
+operands = [
+  { name = "sdst", shift = 16, width = 7, kind = "source" },
+  { name = "ssrc0", shift = 0, width = 8, kind = "source" },
+  { name = "ssrc1", shift = 8, width = 8, kind = "source" },
+]
+
+[[encoding]]
+name = "SOPC"
+mask = "0xFF800000"
+value = "0xBF000000"
+opcode = { shift = 16, width = 7 }
+width_bytes = 4
+literal_operands = [{ shift = 0, width = 8 }, { shift = 8, width = 8 }]
+operands = [
+  { name = "ssrc0", shift = 0, width = 8, kind = "source" },
+  { name = "ssrc1", shift = 8, width = 8, kind = "source" },
+]
+
+# Branches, waits and program end. `literal_operands` is empty: the low sixteen bits
+# are an immediate, not an operand selector, so 255 there means the value 255.
+
+[[encoding]]
+name = "SOPK"
+mask = "0xF0000000"
+value = "0xB0000000"
+opcode = { shift = 23, width = 5 }
+width_bytes = 4
+# No layout: an operand layout is solved per opcode from probes, and none of this
+# family's opcodes has been probed yet (D096, D097). The encoding itself is verified.
+
+[[encoding]]
+name = "SOPP"
+mask = "0xFF800000"
+value = "0xBF800000"
+opcode = { shift = 16, width = 7 }
+width_bytes = 4
+# Checked, and genuinely carries no register operand - the payload is a signed
+# immediate. An empty layout is a different claim from an absent one, and the decoder
+# reports the difference.
+operands = []
+
+# ---- Vector ALU ------------------------------------------------------------
+# The bulk of any shader by instruction count. Operates per-lane across the wavefront.
+
+[[encoding]]
+name = "VOP1"
+mask = "0xFE000000"
+value = "0x7E000000"
+opcode = { shift = 9, width = 8 }
+width_bytes = 4
+literal_operands = [{ shift = 0, width = 9 }]
+operands = [
+  { name = "vdst", shift = 17, width = 8, kind = "vgpr" },
+  { name = "src0", shift = 0, width = 9, kind = "source" },
+]
+
+[[encoding]]
+name = "VOP2"
+mask = "0x80000000"
+value = "0x00000000"
+opcode = { shift = 25, width = 6 }
+width_bytes = 4
+literal_operands = [{ shift = 0, width = 9 }]
+operands = [
+  { name = "vdst", shift = 17, width = 8, kind = "vgpr" },
+  { name = "src0", shift = 0, width = 9, kind = "source" },
+  { name = "vsrc1", shift = 9, width = 8, kind = "vgpr" },
+]
+
+[[encoding]]
+name = "VOPC"
+mask = "0xFE000000"
+value = "0x7C000000"
+opcode = { shift = 17, width = 8 }
+width_bytes = 4
+literal_operands = [{ shift = 0, width = 9 }]
+operands = [
+  { name = "src0", shift = 0, width = 9, kind = "source" },
+  { name = "vsrc1", shift = 9, width = 8, kind = "vgpr" },
+]
+
+# The three-operand form, and the widest opcode space in the architecture.
+
+[[encoding]]
+name = "VOP3"
+mask = "0xFC000000"
+value = "0xD4000000"
+opcode = { shift = 16, width = 10 }
+width_bytes = 8
+# All three sources live in the *second* word - SRC0 at [40:32], SRC1 at [49:41], SRC2
+# at [58:50] - so any of them reading 255 adds a trailing literal. The previous
+# generation's long form could not take a literal at all, which is why this row had no
+# entry and why every `v_div_scale_f32` with one decoded four bytes short.
+literal_operands = [
+  { shift = 0, width = 9, word = 1 },
+  { shift = 9, width = 9, word = 1 },
+  { shift = 18, width = 9, word = 1 },
+]
+# No layout: two sub-encodings, distinguished by opcode, use different
+# fields (D096).
+
+# ---- Memory and export -----------------------------------------------------
+
+# Scalar memory: constant buffers and descriptors.
+
+[[encoding]]
+name = "SMEM"
+mask = "0xFC000000"
+value = "0xF4000000"
+opcode = { shift = 18, width = 8 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Local data share.
+
+[[encoding]]
+# The reference's field table gives this opcode as [24:17]. **It is [25:18].**
+# Under [24:17] `ds_read_b32` decodes as 108 and `ds_write_b32` as 26; under [25:18]
+# they decode as 54 and 13, which is what the reference's *own* opcode table says they
+# are. Confirmed against assembler output, and found independently by
+# the encoding solver before the document was consulted at all. A published
+# specification is a strong reference and not an infallible one.
+name = "DS"
+mask = "0xFC000000"
+value = "0xD8000000"
+opcode = { shift = 18, width = 8 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Untyped buffer access.
+
+[[encoding]]
+name = "MUBUF"
+mask = "0xFC000000"
+value = "0xE0000000"
+opcode = { shift = 18, width = 8 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Typed buffer access, with a format conversion.
+
+[[encoding]]
+# The opcode is split across both words in the reference and only its contiguous part
+# is held here, so the low bit(s) of the opcode are not read. Nothing translates this
+# family; the row exists so the decoder gets the instruction *boundary* right, and the
+# boundary depends only on the family and its width.
+name = "MTBUF"
+# The opcode is **split**: bits 18:16 of the first word, and one more bit at 53 - which is
+# bit 21 of the *second* word. Both halves are read, via `opcode_extension`.
+#
+# What that costs is exact and measured, not hypothetical. The sixteen opcodes are eight
+# operations and their eight half-precision variants, and the variants differ from their
+# counterparts in the missing bit **and nothing else**: assembling
+# `tbuffer_load_format_x` and `tbuffer_load_format_d16_x` produces an identical first
+# word. The continuation below is what separates them.
+#
+# The half-precision names are still *unknown*, which is different from wrong: mnemonics
+# are generated from what a compiler emitted and a disassembler named, and no fixture has
+# carried a `d16` variant yet. So one decodes as this family with an unrecognised opcode
+# rather than as the operation it is a variant of.
+mask = "0xFC000000"
+value = "0xE8000000"
+opcode = { shift = 16, width = 3 }
+opcode_extension = { shift = 21, width = 1, word = 1 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Image and sampler operations.
+
+[[encoding]]
+# The opcode is split across both words in the reference and only its contiguous part
+# is held here, so the low bit(s) of the opcode are not read. Nothing translates this
+# family; the row exists so the decoder gets the instruction *boundary* right, and the
+# boundary depends only on the family and its width.
+name = "MIMG"
+mask = "0xFC000000"
+value = "0xF0000000"
+opcode = { shift = 18, width = 7 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Flat address-space access.
+
+[[encoding]]
+name = "FLAT"
+mask = "0xFC000000"
+value = "0xDC000000"
+opcode = { shift = 18, width = 7 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Interpolation of fragment inputs.
+#
+# The value was 0xC8000000 - top six bits 110010 - and that is this family's encoding on
+# the first two generations of the architecture. It moved to 110101 later, and this table
+# targets the later one: every other family in it was verified against a reference
+# assembling for that target. So the row was not merely unverified, it was wrong, and it
+# had been sitting next to a comment saying it was unverified.
+#
+# Found the moment a hand-written fixture reached the family at all: the decoder called
+# `v_interp_p1_f32` unrecognised. Corrected from the published instruction set
+# documentation for this generation, which gives the encoding as 110101 - the reference
+# detected the error, it did not supply the fix (D085).
+
+[[encoding]]
+name = "VINTRP"
+mask = "0xFC000000"
+value = "0xC8000000"
+opcode = { shift = 16, width = 2 }
+width_bytes = 4
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+# Export to a render target or to the next pipeline stage. Every pixel shader ends in
+# one of these, which makes it a useful landmark when checking a decode by eye.
+
+[[encoding]]
+name = "EXP"
+mask = "0xFC000000"
+value = "0xF8000000"
+opcode = { shift = 0, width = 0 }
+width_bytes = 8
+# No layout: which fields are live depends on the opcode, not just the family
+# (D096). A per-family list cannot express that, so none is claimed.
+
+[[encoding]]
+# Declared so the decoder does not read one of these as a long-form vector
+# instruction - the two are one bit apart. No operand layout is established, so
+# nothing here claims to know how to read its fields.
+name = "VOP3P"
+mask = "0xfc000000"
+value = "0xcc000000"
+opcode = { shift = 16, width = 7 }
+width_bytes = 8

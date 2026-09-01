@@ -1,0 +1,74 @@
+library = "libSceAgc"
+
+[[function]]
+name = "sceAgcAcbDispatchIndirect"
+purpose = "Records a compute dispatch whose parameters are read from memory rather than given directly."
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcCreateShader"
+arity = 4
+purpose = "Hands the driver a shader: a destination for the resulting object, a small header describing the payload, and the shader bytecode itself."
+edge_cases = [
+    "**Argument convention derived from dumps, not disassembly (D194).** arg0 is an out-parameter - thirty-two zero bytes at an image address, untouched before the call. arg1 is a header beginning with the four bytes 31 32 33 34 ('1234'), then 0x18, then a length that differs per call (0xd8 and 0x118 observed). arg2 points at the bytecode itself.",
+    "Called eleven times during startup by PPSA28061, which is the furthest-progressing title in the corpus. It is the point at which a guest hands over shader bytecode, so it is the natural capture site for real translation material.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry.",
+    "The 0x18 following the magic is assumed to be the header's own size, by analogy with the structure-size argument sceKernelDirectMemoryQuery passes (D083). Unverified - no guest has been observed reacting to it being wrong.",
+    "Whether arg3 is a length, a flags word or something else is unestablished; it was not a pointer into mapped memory, so no dump was taken of it.",
+]
+found_in = [
+    "PPSA04263-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbDrawIndex"
+purpose = "Records an indexed draw into a draw command buffer."
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbSetIndexBuffer"
+purpose = "Points a draw command buffer at index data."
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDriverSubmitAcb"
+purpose = "Submits an async compute command buffer. The compute counterpart to the draw path."
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDriverSubmitDcb"
+purpose = """
+Submits a draw command buffer to the graphics hardware.
+
+**The capture point for the GPU work.** Its argument is a command buffer; intercepting
+one call yields a real packet stream, the registers a guest actually sets, and the
+addresses its shaders live at - none of which can be obtained any other way.
+"""
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-08-19"
+note = "Nothing beyond the name is established. No guest has reached it."

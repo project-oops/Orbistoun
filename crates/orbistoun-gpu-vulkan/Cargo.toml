@@ -1,0 +1,24 @@
+[package]
+publish = false
+name = "orbistoun-gpu-vulkan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Vulkan implementation of the render backend. The only crate that names a graphics API."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-gpu = { workspace = true }
+ash = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+orbistoun-spirv = { workspace = true }
+# Only for the end-to-end test: a module that reached a device by way of a command
+# stream, rather than by being handed to the translator directly.
+orbistoun-translate = { workspace = true }

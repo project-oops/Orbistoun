@@ -1,0 +1,197 @@
+# The unified source-operand space.
+#
+# ## What this is
+#
+# A source operand field does not just name a register. One field selects, depending
+# on its value, a scalar register, a vector register, one of a handful of special
+# registers, a small inline integer, one of a fixed set of inline floats, or a signal
+# that a 32-bit literal follows the instruction.
+#
+# That one numbering scheme is shared by every encoding that has source operands, which
+# is why it lives here once rather than being repeated per family.
+#
+# ## Why it matters more than it looks
+#
+# Getting a range boundary wrong does not produce an error. It produces an operand that
+# is a plausible register instead of a constant, or the wrong register index - and a
+# translator built on it emits a shader that compiles, runs, and draws the wrong thing.
+# There is no crash to investigate.
+#
+# The inline constants are the sharpest case: code 128 is the integer zero, and reading
+# it as a register index gives scalar register 128, which exists. Nothing about the
+# result looks wrong.
+#
+# ## Status
+#
+# Transcribed from the published AMD instruction set documentation, then checked
+# differentially: `tests/differential.rs` compares every operand this table produces
+# against what LLVM's disassembler printed for the same instruction, across the whole
+# fixture corpus. A boundary error shows up there as a register where the reference
+# says a constant.
+#
+# Ranges may be listed in any order; they are checked for overlap at load.
+
+# ---- Scalar registers -------------------------------------------------------
+
+[[operand_code]]
+first = 0
+last = 101
+kind = "sgpr"
+
+# ---- Special registers ------------------------------------------------------
+#
+# Named rather than numbered because they are not interchangeable with anything: a
+# translator has to recognise the condition mask and the execution mask specifically,
+# and an index would make that a magic number at the point of use.
+
+[[operand_code]]
+first = 102
+last = 102
+kind = "named"
+name = "flat_scratch_lo"
+
+[[operand_code]]
+first = 103
+last = 103
+kind = "named"
+name = "flat_scratch_hi"
+
+[[operand_code]]
+first = 106
+last = 106
+kind = "named"
+name = "vcc_lo"
+
+[[operand_code]]
+first = 107
+last = 107
+kind = "named"
+name = "vcc_hi"
+
+[[operand_code]]
+first = 124
+last = 124
+kind = "named"
+name = "m0"
+
+# Code 125 was a hole on the previous generation and names a register on this one, which
+# is why it arrived as `<unmapped:125>` in a differential run rather than as anything
+# obviously wrong. Reads return zero and writes are discarded, so it is the register form
+# of "discard this result" - `v_div_scale_f32` uses it for a result it does not want.
+[[operand_code]]
+first = 125
+last = 125
+kind = "named"
+name = "null"
+
+[[operand_code]]
+first = 126
+last = 126
+kind = "named"
+name = "exec_lo"
+
+[[operand_code]]
+first = 127
+last = 127
+kind = "named"
+name = "exec_hi"
+
+# ---- Inline integers --------------------------------------------------------
+#
+# `origin` is the code that means zero; the value is the code minus the origin. This is
+# the range whose boundary being wrong is least visible, because a misread inline
+# constant becomes a register index that exists.
+
+[[operand_code]]
+first = 128
+last = 192
+kind = "integer"
+origin = 128
+
+[[operand_code]]
+first = 193
+last = 208
+kind = "negative_integer"
+origin = 192
+
+# ---- Inline floats ----------------------------------------------------------
+#
+# A fixed set, carried as names rather than as parsed values. A translator needs the
+# exact bit pattern and will map these itself; storing them as text here keeps this
+# table free of float formatting and keeps a report readable.
+
+[[operand_code]]
+first = 240
+last = 240
+kind = "named"
+name = "0.5"
+
+[[operand_code]]
+first = 241
+last = 241
+kind = "named"
+name = "-0.5"
+
+[[operand_code]]
+first = 242
+last = 242
+kind = "named"
+name = "1.0"
+
+[[operand_code]]
+first = 243
+last = 243
+kind = "named"
+name = "-1.0"
+
+[[operand_code]]
+first = 244
+last = 244
+kind = "named"
+name = "2.0"
+
+[[operand_code]]
+first = 245
+last = 245
+kind = "named"
+name = "-2.0"
+
+[[operand_code]]
+first = 246
+last = 246
+kind = "named"
+name = "4.0"
+
+[[operand_code]]
+first = 247
+last = 247
+kind = "named"
+name = "-4.0"
+
+[[operand_code]]
+first = 248
+last = 248
+kind = "named"
+name = "inv_2pi"
+
+# ---- Literal ----------------------------------------------------------------
+#
+# The instruction is four bytes longer and the value is the dword that follows. The
+# decoder substitutes the actual value, so a caller never has to know this code exists.
+
+[[operand_code]]
+first = 255
+last = 255
+kind = "literal"
+
+# ---- Vector registers -------------------------------------------------------
+#
+# Only reachable through a nine-bit field. An eight-bit source field cannot address a
+# vector register at all, which is why the scalar and vector halves of the architecture
+# are as separate as they are.
+
+[[operand_code]]
+first = 256
+last = 511
+kind = "vgpr"
+origin = 256

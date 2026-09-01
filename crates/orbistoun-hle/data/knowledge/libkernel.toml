@@ -1,0 +1,1434 @@
+library = "libkernel"
+
+[[function]]
+name = "posix_getpagesize"
+arity = 0
+purpose = "The guest's page size."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Behaviour follows the POSIX analogue; nothing on the target has confirmed it."]
+found_on = "2026-08-25"
+note = "Reads the platform constant rather than asking the host: a host with 16K pages still has to present 4K semantics."
+
+[[function]]
+name = "posix_pthread_rwlock_destroy"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_pthread_rwlock_init"
+arity = 2
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_pthread_rwlock_rdlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_pthread_rwlock_tryrdlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_pthread_rwlock_trywrlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_pthread_rwlock_unlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_pthread_rwlock_wrlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_sigaddset"
+arity = 2
+purpose = "Adds one signal to a set."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Same delivery caveat as posix_sigemptyset."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_sigdelset"
+arity = 2
+purpose = "Removes one signal from a set."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Same delivery caveat as posix_sigemptyset."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_sigemptyset"
+arity = 1
+purpose = "Empties a signal set."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Nothing here delivers signals, so a guest that builds a set and installs a handler will find the handler never runs."]
+found_on = "2026-08-25"
+note = "Clears four 32-bit words. Clearing one left three quarters of the set holding whatever the guest's stack did."
+
+[[function]]
+name = "posix_sigfillset"
+arity = 1
+purpose = "Puts every signal in a set."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Same delivery caveat as posix_sigemptyset."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "posix_sigismember"
+arity = 2
+purpose = "Whether a signal is in a set."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Same delivery caveat as posix_sigemptyset."]
+found_on = "2026-08-25"
+note = "Another boolean that had to exist before the rest could be believed: unimplemented it answered an error code, which reads as yes, so a set that had just been emptied reported every signal still in it (D271)."
+
+[[function]]
+name = "posix_usleep"
+arity = 1
+purpose = "Sleeps for a number of microseconds."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Behaviour follows the POSIX analogue; nothing on the target has confirmed it."]
+found_on = "2026-08-25"
+note = "Actually sleeps. Returning immediately would make a title's frame pacing run as fast as the host can loop, and a guest polling with a short sleep between attempts would spin."
+
+[[function]]
+name = "sceKernelAllocateDirectMemory"
+arity = 6
+purpose = "Reserves a span of physical memory. The guest maps it into its address space separately - this is closer to a physical allocator the application drives than to malloc."
+returns = "status"
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = ["Arity and return kind are inferred from the name and its neighbours in the same family. No guest has exercised this entry far enough to establish either."]
+found_on = "2026-08-19"
+note = "Arity was recorded as five by inference and is six: searchStart, searchEnd, len, alignment, memoryType, physicalOut. Implementing it that way made the conformance probe complete a reserve, map, use, unmap and release cycle - which is what established it, rather than another reading of the name (D273)."
+
+[[function]]
+name = "sceKernelAllocateMainDirectMemory"
+arity = 4
+purpose = """
+Reserves from the main memory pool, without the caller choosing a physical address, and
+writes the address it chose where the caller asked.
+
+Implemented 2026-08-20. Found by the ordered call tail, which put it two calls before a
+`memset` through a null pointer, twice: the guest asks for memory, is refused, prints
+something, and then clears a buffer it never got (D154).
+"""
+returns = "status"
+edge_cases = [
+    "**Physical offset zero is a real address here.** The pool starts at zero, so the first allocation legitimately lands there. A guest that tests the returned address against zero would read success as failure - not observed, but the first thing to suspect if one does.",
+    "A full pool answers out-of-memory rather than unimplemented. A guest that gets the first can shrink its request; one that gets the second cannot tell a full pool from a missing function.",
+    "The alignment is validated as the caller passed it, before being widened to the pool minimum. Widening first makes every nonsense value look like a power of two and the check unreachable - which it was, until a test said so.",
+    "Argument order is inferred from the first argument being a length in both observed calls, against the POSIX-shaped signature the name implies. The remaining three are the FreeBSD-analogous shape and are NOT independently confirmed.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = ["Argument layout established from guest usage only. Anything the guest does not exercise - error paths, alignment rules, flag combinations - is unverified."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "len"
+kind = "usize"
+note = "observed as 0x1fe0000 and 0x10000 - both plausible sizes and both aligned, which is what fixed the argument order"
+
+[[function.arguments]]
+name = "alignment"
+kind = "usize"
+note = "zero means no preference; honoured but never separately verified"
+
+[[function.arguments]]
+name = "memory_type"
+kind = "u32"
+note = "recorded on the region, not acted on - nothing establishes what the types mean"
+
+[[function.arguments]]
+name = "physical_out"
+kind = "ptr"
+note = "destination for the chosen physical address"
+
+[[function]]
+name = "sceKernelAvailableFlexibleMemorySize"
+arity = 1
+purpose = "How much memory may be mapped without reserving physical pages first."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics are inferred from the name and its neighbours in the same family; nothing on the target has confirmed them.",
+    "Answered from the same pool as direct memory rather than as a separate budget. A second figure that nothing subtracted from would drift away from the first.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelClearEventFlag"
+arity = 2
+purpose = "An event flag: a word of bits threads test and wait on."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelCreateEventFlag"
+arity = 5
+purpose = "An event flag: a word of bits threads test and wait on."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelCreateSema"
+purpose = "Creates a counting semaphore and writes its handle to a caller-supplied destination."
+edge_cases = [
+    "**The single import whose error return aborted two Unity titles during static initialisation.** Implemented, they go from 45 calls to 222 with 96% of calls on real implementations (D193).",
+    "Its name could not be generated - the vocabulary held 'Semaphore' and the vendor wrote 'Sema' - and was read as a literal string out of a completely different title's data, then confirmed by hash.",
+    "The out-parameter is an int, not a pointer-width word. A mutex handle is a void* and a semaphore handle is an int; writing a full word through it puts four bytes into whatever the guest keeps next door.",
+    "Argument 1 is a name string, not the initial count. Reading it as a count shifts every later argument by one position, which presents as counts that are wrong with nothing noticing.",
+]
+known_by = "published"
+cites = "obSCEne platform.h, marked OBS_FROM_SPEC - public interface documentation; obSCEne D154"
+assumptions = [
+    "Only the first argument is established: the guest passes a stack address it expects to be filled. The initial count, ceiling and option arguments are inferred from the shape of semaphore interfaces generally, and are clamped rather than trusted - if the order differs, the counts are wrong and nothing here would notice.",
+    "Whether the guest ever dereferences the handle, as it does for a mutex (D151), is unmeasured - no title has reached a wait or a signal.",
+]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-23"
+
+[[function]]
+name = "sceKernelDeleteEventFlag"
+arity = 1
+purpose = "An event flag: a word of bits threads test and wait on."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelDeleteSema"
+arity = 1
+purpose = "A counting semaphore."
+returns = "status"
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelDirectMemoryQuery"
+arity = 4
+purpose = """
+Answers what lies at a physical offset and what follows it. A guest enumerates the whole
+memory map by feeding back the end of each region it is shown.
+
+The most-called function in every commercial executable examined - 99.9% of all guest
+calls, one title reaching four hundred million in ten seconds. Nothing else a guest wants
+matters until it can find out what memory exists.
+"""
+returns = "status"
+edge_cases = [
+    "MEASURED: the guest walks the map by feeding back each region's END, established by running the title against a map with a gap in it and reading which side of the hole it queried next. A hole from 0x80000000 to 0x100000000 separated them. Answers the open question about the second field that D218 left, which no contiguous map could settle.",
+    "The guest ignores the return value entirely. Ten candidate end-of-list codes were swept - vendor-shaped and bare errno, both signs - and every one behaved identically.",
+    "The guest reads the *destination buffer*, so the terminal path must clear it. Returning an error without writing left the previous answer in place, and the guest advanced to the same address forever.",
+    "Clearing the buffer changed the call pattern from `0 END END END` to `0 END 0 END` - the walk terminating and restarting, which is how the buffer was established as the channel.",
+    "A single free 8 GiB region is rejected: the guest completes the walk, finds nothing it wants, and starts again. The map shape it expects is still unknown.",
+    "The reported memory size is read and acted on: changing it from 8 GiB to 6 GiB moved the guest's second query from 0x200000000 to 0x180000000, exactly tracking.",
+    "The map SHAPE is not what it is filtering on. Given four regions - taken [0,512M), free [512M,2.5G), taken [2.5G,3.5G), free [3.5G,8G) - the guest queried 0, 0x20000000, 0xA0000000, 0xE0000000, 0x200000000 and then restarted at 0: it walked every region correctly, in order, and rejected the result anyway. One region, two regions and four regions all end the same way, so the walk is not what is failing (D218).",
+    "A contiguous map cannot distinguish 'end' from 'start + size' in the second field, because each region begins where the last ended - so the guest feeding back the previous end produces identical offsets under either layout. That question is still open and needs a map with a gap in it, not a map with more regions.",
+    "Field 1 is the walk cursor and nothing else, confirmed by design rather than by accident: writing self-identifying values into the three fields (ORBISTOUN_MARK_QUERY) showed the guest feeding back 0xbbbb000200000000 - the dye for field 1 carrying the real end in its low bits - as its very next query offset (D219).",
+    "The guest does NOT validate what it reads. It accepted 0xbbbb000200000000 as a physical offset without complaint and queried it. So whatever makes it reject the map, it is not a sanity check on the values in this structure.",
+]
+answerable_by = [
+    "map-shape",
+    "reads-the-buffer",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "The second argument is 1 in every call observed and its meaning is unestablished.",
+    "The map shape the guest will accept is unknown: it completes the walk, finds nothing it wants, and starts again.",
+    "The terminal return code is unestablished - ten candidates behaved identically, because the guest ignores the return and reads the destination buffer.",
+    "Fields 0 and 2 are never fed back or otherwise surfaced, so marked values cannot see whether the guest reads them at all. That needs a read watchpoint on the destination buffer.",
+]
+found_in = [
+    "PPSA04263-app0",
+    "PPSA03416-app0",
+    "PPSA25872-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-08-19"
+note = "Structure size read from the guest itself: it passes 0x18 in rcx. Nothing was consulted."
+
+[[function.arguments]]
+name = "offset"
+kind = "u64"
+note = "physical offset to query from; the guest feeds back the previous region's end"
+
+[[function.arguments]]
+name = "flags"
+kind = "u32"
+note = "always 1 in every call observed; meaning unestablished"
+
+[[function.arguments]]
+name = "info"
+kind = "ptr"
+note = "destination struct, written by the callee"
+
+[[function.arguments]]
+name = "info_size"
+kind = "usize"
+note = "guest passes 0x18; a smaller value should be refused"
+
+[[function]]
+name = "sceKernelDlsym"
+purpose = "Answers the address of a function, by name, at run time - writing it through the third argument."
+edge_cases = [
+    "The signature was measured rather than assumed. A payload's runtime was handed a structure of markers and called field zero with (1, a pointer, a stack address); the pointer named the string sceKernelDlsym, read out of the payload's own read-only data (D365).",
+    "The answer is the same stub the linker resolves an import to, so a function reached by name and the same function reached by an import are one address with one counter and one trace entry. A resolver that built its own answers would have made a call behave differently depending on which route found it (D366).",
+    "A name nothing implements is a failure with no write. Answering an address for a name this cannot serve hands the guest something to call that is not what it asked for, and inventing success is what stops the caller checking.",
+    "The module handle is ignored. A name is library-independent here for the same reason a NID is - the hash is of the name alone - so a guest asking two modules for one name gets one answer.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "That the third argument is where the address goes and the return value is a status. Consistent with everything measured and with the shape of every dynamic-linking interface, and not established by a document.",
+    "That the first argument is a module handle. The guest passed 1; nothing says what 1 selects.",
+]
+found_in = [
+    "klogsrv",
+    "PPSA21564-app0",
+]
+found_on = "2026-08-29"
+
+[[function]]
+name = "sceKernelGetDirectMemorySize"
+arity = 0
+purpose = "How much physical memory exists. Answered from the same model the query walks, so the two cannot describe different machines."
+returns = "count"
+edge_cases = [
+    "MEASURED: a target console answered 0x140000000 - five gibibytes. This project had assumed eight, and the value is not a power of two, so it was never going to be reached by guessing.",
+    "A guest reads this before walking the map, and sizes the walk against it - so it must agree with what the query reports or the walk runs past the end.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceKernelGetModuleInfo"
+arity = 2
+purpose = "Describes one module by handle into a caller-supplied structure"
+returns = "status"
+edge_cases = [
+    "Refused rather than filled. SceKernelModuleInfo is a vendor structure and no lawful source here describes its field offsets; a guest reading a name out of the wrong offset gets whatever was beside it, printed as though the platform had said it.",
+    "Answers a negative status rather than this project's Unimplemented placeholder. The placeholder is deliberately positive so it can never be confused with a firmware value, which for a status makes it read as success with a small code - the conformance probe reported that number straight back (D395).",
+    "sceKernelGetModuleList already answers honestly, and the handle and name are already held; the only missing thing is the structure's shape, which is a measurement rather than a reasoning problem.",
+    "MEASURED: refuses handle 0x0 with EINVAL (0x80020016) regardless of declared size 256..1024 - so the earlier layout probe failed on the null handle, not the layout, which remains unmeasured",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "obSCEne hardware run, data/hardware/ps5-imports.txt, PS5 sw 12.400.009, 2026-08-30, section 110-modules"
+assumptions = [
+    "That a negative status is how this call reports failure. It is the convention the rest of this family follows and it is still an assumption - which specific code comes back is a question for a probe on hardware.",
+    "The structure layout is still unknown: the size ladder must be re-run against a describable handle (0x2 and up), which the probe now does",
+]
+found_in = ["obscene"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "sceKernelGetModuleList"
+arity = 3
+purpose = "Enumerates the handles of loaded modules into a caller-supplied array"
+returns = "status"
+edge_cases = [
+    "MEASURED: a 12.40 console returned 32 handles: 0x0, 0x2001, 0x2, 0x11, 0x13, 0x14, 0x15, 0x16, 0x25, 0x26, 0x27 and up - app modules get small integers, libkernel is 0x2001, and the list begins with 0x0",
+    "MEASURED: 0x2001 is a live module handle, confirming it as libkernel's - LoadStartModule(libkernel) also returns 0x2001. This is the value elfldr/pldmgr fall back to (D400)",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "obSCEne hardware run, data/hardware/ps5-imports.txt, PS5 sw 12.400.009, 2026-08-30, section 110-modules"
+assumptions = [
+    "Reports the one module the loader placed. Handles are written as four-byte ints, which is the element size of the array the guest passes.",
+    "A title that loaded a library at runtime would expect more, and orbistoun cannot load one - see sceKernelLoadStartModule.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelGetProcessTime"
+arity = 0
+purpose = "Microseconds elapsed since the process began."
+returns = "count"
+edge_cases = ["MEASURED: the unit is microseconds. A target console was asked to sleep 0x4e20 microseconds and this clock advanced 0x4fbb over the same interval - a match no other unit produces. It was previously inferred from the name's family, and the probe's own monotonic check would have passed just as happily on a wrong unit."]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
+assumptions = ["Measured from process start rather than from an epoch, which is what the name says and what keeps two runs of one title comparable. The hardware run read deltas across a sleep, which settles the unit and says nothing about the origin - one absolute reading early in a run would settle it."]
+found_on = "2026-08-25"
+note = "Turned 010-kernel from two passes and a partial into three passes."
+
+[[function]]
+name = "sceKernelGetProcessTimeCounter"
+arity = 0
+purpose = "Elapsed time since the process began, counted in the target's own ticks rather than microseconds"
+edge_cases = [
+    "Runs at the rate sceKernelGetProcessTimeCounterFrequency reports, which a target console gave as 0x5f259b8e",
+    "Measured from process start, so two runs of one title stay comparable",
+]
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30, section 120-measure"
+found_on = "2026-08-30"
+note = "A 20000us sleep advanced this by 0x1f12cd9 ticks while the microsecond clock advanced 0x4fbb, which is the ratio a guest converting between the pair depends on"
+
+[[function]]
+name = "sceKernelGetProcessTimeCounterFrequency"
+arity = 0
+purpose = "Ticks per second for the process time counter"
+edge_cases = ["A target console answered this and sceKernelGetTscFrequency with the same value, 0x5f259b8e, in one run"]
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30, section 120-measure"
+found_on = "2026-08-30"
+
+[[function]]
+name = "sceKernelGetTscFrequency"
+arity = 0
+purpose = "Ticks per second of the time stamp counter."
+returns = "status"
+edge_cases = ["MEASURED: a target console answered 0x5f259b8e. It gave the same value to sceKernelGetProcessTimeCounterFrequency in the same run, so the two counters share one rate rather than merely being modelled that way here."]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelIsCex"
+arity = 0
+purpose = "Whether this is a retail console."
+returns = "count"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["orbistoun presents a retail console, because that is what the corpus is built for. A title taking a devkit path would behave differently and nothing in a trace would say which it took."]
+found_on = "2026-08-25"
+note = "A boolean, and that is why it had to be answered: unimplemented, it reported the placeholder error code, which is non-zero, which reads as true - so the platform claimed to be a retail unit and a devkit at once (D271)."
+
+[[function]]
+name = "sceKernelIsDevelopmentMode"
+arity = 0
+purpose = "Whether the system is in development mode."
+returns = "count"
+edge_cases = ["Answered false, for the reason the rest of this family is."]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Answered false to match the retail presentation. Not observed being imported; declared because it is the third of a family whose other two were."]
+found_on = "2026-08-30"
+
+[[function]]
+name = "sceKernelIsDevkit"
+arity = 0
+purpose = "Whether this is a development kit."
+returns = "count"
+edge_cases = [
+    "The spelling is `Devkit`, with a lower-case k. D271 left this open - a mined list carried both spellings and only one can exist - and answered the upper-case one, so the answer was correct about a symbol nothing imports while the real import went on landing on a stub. A stub's placeholder is non-zero, and this is a boolean, so the platform reported being a retail unit and a devkit at once for as long as the fix had been in place (D393).",
+    "Answered false, to match the retail presentation.",
+]
+found_by = "static"
+known_by = "guest-observed"
+assumptions = ["orbistoun presents a retail console, which is what makes false the right answer rather than merely a safe one. A title taking a devkit path would behave differently and nothing in a trace would say which it took."]
+found_in = ["obscene"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "sceKernelIsNeoMode"
+arity = 0
+purpose = "Whether this is the more capable hardware revision."
+returns = "count"
+edge_cases = ["A boolean, and unimplemented it answered the placeholder - non-zero, therefore true, therefore a guest believing it is on hardware it is not. The same shape as the devkit family and found the same way (D393)."]
+found_by = "static"
+known_by = "guest-observed"
+assumptions = ["Answered false. orbistoun presents one machine and this is the half of it that says which; nothing here is measured against either revision."]
+found_in = ["obscene"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "sceKernelIsStack"
+arity = 1
+purpose = "Whether an address lies in the calling thread's stack."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Answered from the span the worker actually mapped, and false when nothing has told it. A wrong yes is worse than a refusal: a guest told a static is stack memory may free it."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelIsTestKit"
+arity = 0
+purpose = "Whether this is a test kit."
+returns = "count"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Answered false, to match the retail presentation.",
+    "The spelling is now the odd one out. Its sibling turned out to be `sceKernelIsDevkit` with a lower-case k, confirmed by a guest importing that hash - so `Testkit` is the better guess for this one and it is still a guess. Left as it is rather than changed on inference: the next guest to import it settles it the same way, and a declaration changed on a hunch is one nobody can tell from a measured one (D393).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelLoadStartModule"
+arity = 6
+purpose = "Loads a module and runs its entry point."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Refused, always. orbistoun places one executable at load and has no way to bring another in afterwards, so this fails even for a module that really exists - answering a handle would tell a guest a library it is about to call is present.",
+    "Negative on failure, because the success answer is a module handle and a small positive placeholder is exactly what a handle looks like.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelMapDirectMemory"
+arity = 6
+purpose = "Maps reserved physical memory into the guest's virtual address space."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Arity and return kind are inferred from the name and its neighbours in the same family. No guest has exercised this entry far enough to establish either."]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceKernelMapFlexibleMemory"
+arity = 4
+purpose = "Allocates from the pool and maps it in one step."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics are inferred from the name and its neighbours in the same family; nothing on the target has confirmed them."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelMapNamedDirectMemory"
+arity = 6
+purpose = """
+Gives the guest a virtual address for physical memory it has already reserved - the other
+half of sceKernelAllocateMainDirectMemory, which answers *which* physical memory rather
+than *where the guest can reach it*.
+
+Implemented and **on by default**. It was parked for one afternoon because enabling it took
+PPSA28061 from 38 imports to 15 and moved the fault into host code (D157) - which turned out
+not to be this function at all, but guest calls arriving on a misaligned stack. This was
+simply the first import doing enough work for the compiler to use an instruction that cares
+(D178, D159).
+"""
+returns = "status"
+edge_cases = [
+    "Named for the *seventh* argument, which this trampoline cannot reach: only six registers are spilled and the seventh is on the guest stack. That costs a label in a trace and nothing else.",
+    "Physical memory is not aliased. Two mappings of the same physical range get two separate pieces of host memory, so a guest writing through one and reading through the other sees stale data. Doing it properly needs a shared-memory object rather than a reservation.",
+    "Chosen addresses must satisfy the *host* reservation granularity, not the guest page size. Those coincide on Unix; Windows rounds a reservation base down to 64 KiB, so a guest-page-aligned base comes back at a different address and is correctly refused.",
+    "Every rounding here is checked rather than panicking. A panic on this frame unwinds across a sysv64 boundary, which is undefined behaviour and surfaces as an unattributable host fault (D156).",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = ["Argument layout established from guest usage only. Anything the guest does not exercise - error paths, alignment rules, flag combinations - is unverified."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+note = "Name proved by proposing candidates and letting the hash confirm - nothing consulted (D155). The first argument being a guest stack address agrees independently."
+
+[[function.arguments]]
+name = "addr"
+kind = "ptr"
+note = "destination for the virtual address; may also carry a requested address in, with zero meaning anywhere"
+
+[[function.arguments]]
+name = "len"
+kind = "usize"
+note = "bytes to map"
+
+[[function.arguments]]
+name = "prot"
+kind = "u32"
+note = "POSIX PROT_ bits - read 1, write 2, execute 4"
+
+[[function.arguments]]
+name = "flags"
+kind = "u32"
+note = "not interpreted; no lawful source describes the values"
+
+[[function.arguments]]
+name = "physical"
+kind = "u64"
+note = "physical offset from the allocation call"
+
+[[function.arguments]]
+name = "alignment"
+kind = "usize"
+note = "zero means no preference"
+
+[[function]]
+name = "sceKernelMprotect"
+arity = 3
+purpose = "Changes the protection of a mapped range. Declared, not implemented."
+returns = "status"
+edge_cases = ["Observed once, against an address inside the guest's own image (0x4000001b8000) - so a guest wanting to change protection on part of its loaded self, which the loader's address space owns rather than the runtime mapping space."]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = ["Argument layout established from guest usage only. Anything the guest does not exercise - error paths, alignment rules, flag combinations - is unverified."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "sceKernelMunmap"
+arity = 2
+purpose = "Unmaps a span from the guest address space."
+returns = "status"
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "Semantics are inferred from the name and its neighbours in the same family; nothing on the target has confirmed them.",
+    "The host reservation is not torn down. orbistoun maps the guest span once at load and hands out pieces of it, so releasing a piece back would put a hole in an address space the guest believes is contiguous. A guest that unmaps and remaps expecting the address to be reusable will find it still is - which is more permissive than the target, not less.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelMmap"
+arity = 6
+purpose = "Maps pages of memory into the guest address space."
+returns = "pointer"
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow POSIX mmap(2) and FreeBSD SYS_mmap 477. An allocation allocates from the guest address space pool.",
+]
+found_on = "2026-08-31"
+
+[[function]]
+name = "sceKernelPollEventFlag"
+arity = 5
+purpose = "An event flag: a word of bits threads test and wait on."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelPollSema"
+arity = 2
+purpose = "A counting semaphore."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelReadTsc"
+arity = 0
+purpose = "The time stamp counter."
+returns = "status"
+edge_cases = [
+    "MEASURED: the counter runs at 0x5f259b8e ticks a second, read back from a target console. The same run cross-checked it without meaning to - a 20000us sleep advanced the counter 0x1f12cd9 ticks while the microsecond clock advanced 0x4fbb, which is 1.5963 GHz by a second route. This retires the nominal billion the arithmetic used to be built on.",
+    "It must advance: a stub answering a constant makes every elapsed measurement zero, which reads as a sleep that returned instantly - which is exactly what the probe reported before this existed.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelReleaseDirectMemory"
+arity = 2
+purpose = "Gives back a span taken by the allocator."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Arity and return kind are inferred from the name and its neighbours in the same family. No guest has exercised this entry far enough to establish either."]
+found_on = "2026-08-19"
+
+[[function]]
+name = "sceKernelReleaseFlexibleMemory"
+arity = 2
+purpose = "Returns a flexible mapping."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics are inferred from the name and its neighbours in the same family; nothing on the target has confirmed them.",
+    "The physical span behind a flexible mapping is not recorded per mapping, so the pool is not told which piece to take back. A title that maps and releases in a loop would exhaust the pool and the trace would not say why.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelReserveVirtualRange"
+known_by = "guest-observed"
+assumptions = [
+    "0x200000 bytes is a guess: the sweep measured where the guest faulted, not how much it asked for",
+    "nothing measured says what the arguments other than arg0 select, so they are ignored",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-08-26"
+note = "Answers Ok and hands back 0x200000 bytes through argument 0. Measured by a sweep against PPSA02664-app0, on the evidence of a conformance check covering it."
+
+[[function]]
+name = "sceKernelSendNotificationRequest"
+purpose = "Accepts a request to show a notification, and reports that one was asked for."
+edge_cases = [
+    "The most imported vendor name in the payload library: twenty-one of the twenty-five ask for it, second only to vsnprintf. It is how they announce themselves, and several call it before doing anything else - so failing it sends a working payload down an error path over a cosmetic call.",
+    "The message is deliberately not decoded. The request structure is a vendor one and no header in the FreeBSD checkout describes it, so reading a message out of it would mean inventing a field offset and then printing whatever was there as though it were the guest's own words.",
+    "What is reported is what can be seen without a layout: that a notification was asked for, and how many bytes it was given. A run that wants the bytes can point the argument-dump machinery at this call.",
+]
+known_by = "assumed"
+assumptions = [
+    "That success is the right answer. Nothing measured says what the platform returns, and the choice is between a cosmetic call failing and a payload stopping.",
+    "That the arguments are a device, a request, its size and a blocking flag. That is the shape the call is made with; nothing published confirms it.",
+]
+found_in = [
+    "klogsrv",
+    "ftpsrv",
+    "shsrv",
+    "elfldr",
+    "pldmgr",
+]
+found_on = "2026-08-29"
+
+[[function]]
+name = "sceKernelSetEventFlag"
+arity = 2
+purpose = "An event flag: a word of bits threads test and wait on."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelSignalSema"
+arity = 2
+purpose = "A counting semaphore."
+returns = "status"
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelUsleep"
+arity = 1
+purpose = "Sleeps for a number of microseconds."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Behaviour follows the POSIX analogue; nothing on the target has confirmed it."]
+found_on = "2026-08-25"
+note = "The vendor spelling of the same call."
+
+[[function]]
+name = "sceKernelWaitSema"
+arity = 3
+purpose = "A counting semaphore."
+returns = "status"
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrDestroy"
+arity = 1
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+    "The block is leaked rather than freed, as every handle here is: a guest that destroys and then uses one gets a stale object rather than a fault into freed memory.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrGetdetachstate"
+arity = 2
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+    "The out-parameter is a four-byte int. Writing a whole word through it would take the caller's neighbouring variable with it (D272).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrGetschedparam"
+arity = 2
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+    "The out-parameter is a four-byte int. Writing a whole word through it would take the caller's neighbouring variable with it (D272).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrGetstacksize"
+arity = 2
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrInit"
+arity = 1
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrSetdetachstate"
+arity = 2
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrSetschedparam"
+arity = 2
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrSetstacksize"
+arity = 2
+purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadBarrierDestroy"
+arity = 1
+purpose = "A barrier that releases once the expected number of threads have arrived."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadBarrierInit"
+arity = 4
+purpose = "A barrier that releases once the expected number of threads have arrived."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadBarrierWait"
+arity = 1
+purpose = "A barrier that releases once the expected number of threads have arrived."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCondBroadcast"
+arity = 1
+purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCondDestroy"
+arity = 1
+purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCondInit"
+arity = 3
+purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCondSignal"
+arity = 1
+purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCondWait"
+arity = 2
+purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCreate"
+arity = 5
+purpose = """
+Starts a guest thread. The body is called as `void *start(void *arg)` with the argument
+the caller supplied, on a stack of its own.
+
+Always a real host thread (principle 6). Guest code reads thread-local storage through
+the segment base directly and blocks inside its own primitives, and a green-threaded or
+pooled implementation can present neither honestly - the failures would surface as data
+corruption rather than as a scheduling bug.
+"""
+returns = "status"
+edge_cases = [
+    "The attribute block is deliberately not parsed. Its layout is not known from any lawful source, so reading a stack size or a detach state out of it by guessing offsets would produce a value that looks deliberate and is not.",
+    "Because of that, a guest asking for a non-default stack size silently gets the default. If a title overruns, this is the first thing to suspect.",
+    "Each thread gets its own stack, spaced further apart than a stack is tall - packed adjacently, an overrun lands in a neighbour and reads as memory corruption rather than as a stack overflow.",
+    "A spawn failure is reported rather than swallowed. A guest told its thread started when it did not will wait forever on something that cannot happen, and the hang gets attributed to whatever it was waiting for.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
+]
+found_on = "2026-08-20"
+note = "Signature follows POSIX `pthread_create`, which is a lawful citable reference - the target kernel is FreeBSD-derived (principle 1). Nothing was read from a vendor binary."
+
+[[function.arguments]]
+name = "thread"
+kind = "ptr"
+note = "destination for the handle, written by the callee"
+
+[[function.arguments]]
+name = "attr"
+kind = "ptr"
+note = "attribute block; NOT parsed - see edge cases"
+
+[[function.arguments]]
+name = "entry"
+kind = "ptr"
+note = "guest address of the thread body"
+
+[[function.arguments]]
+name = "arg"
+kind = "ptr"
+note = "passed through unexamined into the first argument register"
+
+[[function.arguments]]
+name = "name"
+kind = "cstr"
+note = "thread name; cosmetic, read bounded to 64 bytes"
+
+[[function]]
+name = "scePthreadJoin"
+arity = 2
+purpose = "Waits for a guest thread to finish."
+returns = "status"
+edge_cases = [
+    "The exit value is written as zero rather than carried back. The thread's return value is in `rax` when its body returns and nothing currently keeps it, so zero is stated as the placeholder it is rather than leaving whatever the guest had in that location.",
+    "A second join on the same handle is refused rather than blocking. Blocking there is indistinguishable from a guest deadlock when seen from outside.",
+    "The handle is checked against the ones actually issued before it is used. Handles are addresses, so believing one the guest invented would turn a guest bug into a host memory access.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
+]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "thread"
+kind = "handle"
+note = "the handle the create call wrote"
+
+[[function.arguments]]
+name = "value"
+kind = "ptr"
+note = "destination for the thread's exit value; may be null"
+
+[[function]]
+name = "scePthreadMutexDestroy"
+arity = 1
+purpose = "Releases a mutex created by scePthreadMutexInit and clears the guest's handle."
+returns = "status"
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = ["That the handle location is cleared on success is this implementation's choice rather than an observed behaviour. It makes a double destroy report a dead handle instead of returning a freed one, so a use-after-destroy surfaces here rather than as corruption wherever the lock was protecting."]
+found_on = "2026-08-25"
+note = "The most-wanted missing entry in the probe's first full run - seventeen calls, because it builds and tears down a lock per check."
+
+[[function]]
+name = "scePthreadMutexInit"
+arity = 3
+purpose = "Creates a lock and writes its handle into the location the guest supplies."
+returns = "status"
+edge_cases = [
+    "The attribute block is not parsed, for the same reason as thread creation - so the recursion mode is always the default (non-recursive). A title that deadlocks on a lock it takes twice is the symptom, and this is the cause.",
+    "A host `Mutex` cannot be used directly: its guard's lifetime is the critical section, and the guest locks in one call and unlocks in another with arbitrary guest code in between. There is no host frame to hold a guard in.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
+]
+found_on = "2026-08-20"
+note = "Signature follows POSIX `pthread_mutex_init` - a lawful reference for a FreeBSD-derived kernel (principle 1)."
+
+[[function.arguments]]
+name = "mutex"
+kind = "ptr"
+note = "destination for the handle, written by the callee"
+
+[[function.arguments]]
+name = "attr"
+kind = "ptr"
+note = "attribute block; NOT parsed - see edge cases"
+
+[[function.arguments]]
+name = "name"
+kind = "cstr"
+note = "lock name; cosmetic, but traces of unnamed locks are near-useless"
+
+[[function]]
+name = "scePthreadMutexLock"
+arity = 1
+purpose = "Takes a lock, blocking until it is available."
+returns = "status"
+edge_cases = [
+    "A **statically initialised** lock is the case worth naming: the guest filled the location with a constant at compile time and never called init, so the value there names nothing this crate made. It is reported as an invalid handle, because a stub returning success would let every thread through the critical section at once and the corruption would be blamed on whatever the lock was protecting.",
+    "A non-recursive lock taken again by its owner is refused rather than waited on. Waiting would deadlock the thread against itself and look like a hang in the guest, with nothing naming the cause.",
+    "A refusal and a lookup miss get different codes deliberately - one is a guest bug, the other is a gap here, and a trace that cannot tell them apart is worth much less.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
+]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "mutex"
+kind = "ptr"
+note = "points at the handle the init call wrote"
+
+[[function]]
+name = "scePthreadMutexTrylock"
+arity = 1
+purpose = "Takes a mutex if it is free, and reports without waiting if it is not."
+returns = "status"
+edge_cases = [
+    "MEASURED: taking a lock the caller already holds returns 0x80020010 - the busy errno under the vendor encoding. This was a placeholder chosen only to differ from success.",
+    "MEASURED: the answer depends on the mutex type. A target console returned success for type 2, which re-acquires, the busy code for types 1 and 3, and the invalid-argument code for type 4. So a guest that sets a type and then re-locks is branching on something this project has to model, not a detail.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
+found_on = "2026-08-25"
+note = "Implemented after the conformance probe asked for it nine times in one run. Its sync layer already had try_lock; only the guest-facing entry was missing."
+
+[[function]]
+name = "scePthreadMutexUnlock"
+arity = 1
+purpose = "Releases a lock."
+returns = "status"
+edge_cases = [
+    "Releasing a lock the caller does not hold is refused rather than performed. Performing it would let two guest threads into the same critical section, and the corruption that followed would be attributed to whatever they were protecting rather than to here.",
+    "A recursive lock counts its acquisitions, so an unlock at depth two leaves it held. Releasing on the first unlock would let another thread in while the owner still believed it was inside.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
+    "CONFIRMED ON HARDWARE: unlocking a mutex nobody holds returns 0x80020001. This was previously a hypothesis resting on one value from an emulator that could itself have been inferring it; a target console has now returned the same code.",
+    "Vendor error codes appear to be 0x8002_0000 | errno. Same provenance as above, and the same caveat: it is a structure worth testing for, not an established encoding.",
+]
+found_on = "2026-08-20"
+note = "This is the finding that validates GuestError's placeholder rule: real vendor codes have the high bit set, and our placeholders deliberately avoid it, so the two can never be confused. See obSCEne D154 via the bridge."
+
+[[function.arguments]]
+name = "mutex"
+kind = "ptr"
+note = "points at the handle the init call wrote"
+
+[[function]]
+name = "scePthreadMutexattrDestroy"
+purpose = "Builds or tears down a mutex attribute object. Our mutexes are Condvar-backed and recursive-safe by construction, so nothing downstream reads the attribute."
+edge_cases = [
+    "Named by the guest itself: two titles print this name, with the source file and line, once printf exists to carry the message. The hash then confirms it independently (D187).",
+    "Returning the unimplemented placeholder made two titles abort during static initialisation. Accepting and reporting success is the whole of the work.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
+    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-22"
+
+[[function]]
+name = "scePthreadMutexattrGetprotocol"
+arity = 2
+purpose = "A mutex attribute object. The argument is a pointer to a pointer: the guest declares one as NULL and passes its address, so init allocates and hands back the address."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values.",
+    "The out-parameter is a four-byte int. Writing a whole word through it overwrote the caller's neighbouring variable - which was a loop counter, so the check ran until the call budget stopped it (D272).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadMutexattrGettype"
+arity = 2
+purpose = "A mutex attribute object. The argument is a pointer to a pointer: the guest declares one as NULL and passes its address, so init allocates and hands back the address."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values.",
+    "The out-parameter is a four-byte int. Writing a whole word through it overwrote the caller's neighbouring variable - which was a loop counter, so the check ran until the call budget stopped it (D272).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadMutexattrInit"
+purpose = "Builds or tears down a mutex attribute object. Our mutexes are Condvar-backed and recursive-safe by construction, so nothing downstream reads the attribute."
+edge_cases = [
+    "Named by the guest itself: two titles print this name, with the source file and line, once printf exists to carry the message. The hash then confirms it independently (D187).",
+    "Returning the unimplemented placeholder made two titles abort during static initialisation. Accepting and reporting success is the whole of the work.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
+    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-22"
+
+[[function]]
+name = "scePthreadMutexattrSetprotocol"
+purpose = "Builds or tears down a mutex attribute object. Our mutexes are Condvar-backed and recursive-safe by construction, so nothing downstream reads the attribute."
+edge_cases = [
+    "Named by the guest itself: two titles print this name, with the source file and line, once printf exists to carry the message. The hash then confirms it independently (D187).",
+    "Returning the unimplemented placeholder made two titles abort during static initialisation. Accepting and reporting success is the whole of the work.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
+    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-22"
+
+[[function]]
+name = "scePthreadMutexattrSettype"
+purpose = "Builds or tears down a mutex attribute object. Our mutexes are Condvar-backed and recursive-safe by construction, so nothing downstream reads the attribute."
+edge_cases = [
+    "Named by the guest itself: two titles print this name, with the source file and line, once printf exists to carry the message. The hash then confirms it independently (D187).",
+    "Returning the unimplemented placeholder made two titles abort during static initialisation. Accepting and reporting success is the whole of the work.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
+    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-22"
+
+[[function]]
+name = "scePthreadRwlockDestroy"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadRwlockInit"
+arity = 3
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadRwlockRdlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadRwlockTryrdlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadRwlockTrywrlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadRwlockUnlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values.",
+    "The unlock call is not told whether the lock was held for reading or writing, so a writer release is inferred from the writer flag. A guest that unlocks without holding it is reported rather than ignored.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadRwlockWrlock"
+arity = 1
+purpose = "A read/write lock: readers share, a writer excludes everybody."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadSelf"
+arity = 0
+purpose = """
+The calling thread's own handle.
+
+Implemented 2026-08-20. The calling thread is *adopted* if the guest never created it:
+the process's first thread runs guest code without ever having been created, and the
+guest still asks it this. Answering zero would make every unadopted thread compare equal
+to every other one.
+"""
+returns = "pointer"
+edge_cases = [
+    "**The call that proved D125, and then decided the handle representation.** It returns a handle the guest immediately reads a field from. Unimplemented, it answered the error code `0x7FFF0001` - and one title faulted with `read of 0x5`, which is that code being dereferenced at an offset.",
+    "That is why a handle is the address of a real zeroed block rather than a small integer: a handle of `1` reproduces exactly the same fault at a lower address (D151).",
+    "The block is never written, because the real structure's layout is not known from any lawful source. Every field the guest reads is zero - which for a pointer field means null, and a guest that checks for null takes its own error path instead of dereferencing garbage.",
+    "The blocks are never freed either, so a handle kept past its thread's life reads as zeroes rather than as a use-after-free.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
+]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "scePthreadGetthreadid"
+arity = 0
+purpose = """
+The calling thread's unique integer id (FreeBSD pthread_getthreadid_np).
+
+Answers the same registry handle scePthreadSelf does - a per-thread value unique and stable
+for the thread's life. Distinct in type from the ScePthread handle but serving the same
+identity question, and this HLE does not model a separate LWP-id namespace. The caller is
+adopted so the process's first thread, which runs guest code without ever being created, gets
+a real id rather than zero.
+"""
+returns = "count"
+edge_cases = [
+    "Called 22.5k times in one PPSA21564 boot. Unimplemented it answered the placeholder 0x7FFF0001, so every thread reported one shared id - which a guest keying anything on thread identity reads as a single thread.",
+    "Returns the same value as scePthreadSelf. That is deliberate (both uniquely identify the thread and the handle is a safe zeroed-block address if dereferenced, per D151); a guest expecting the two namespaces to differ is not modelled.",
+]
+known_by = "assumed"
+assumptions = [
+    "Modelled on FreeBSD pthread_getthreadid_np: no arguments, a per-thread integer id. The correspondence is inferred from the name; the exact id namespace and width are not verified against the target library.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "sysctlbyname"
+arity = 5
+purpose = "Reads a named kernel knob; answers a string or an integer of the platform's width, or refuses names it gatekeeps"
+edge_cases = [
+    "MEASURED: kern.osrelease is the string 0.0-prototype on a 12.40 console - a development tag, not a version, which is why a guest parsing it as a version reports detection failed",
+    "MEASURED: kern.ostype is FreeBSD; kern.version carries r226974/releases/12.40; hw.ncpu is 16; hw.pagesize is 0x4000; machdep.tsc_freq is 0x5f259b8e",
+    "MEASURED: hw.physmem is refused with a policy message (not approved), so some knobs are gatekept rather than absent",
+]
+known_by = "measured"
+cites = "obSCEne hardware run, data/hardware/ps5-imports.txt, PS5 sw 12.400.009 CFI-1116A, 2026-08-30, section 135-sysctl"
+found_on = "2026-08-30"
+
+[[function]]
+name = "vendor_system_version"
+arity = 3
+purpose = "System call 649: answers a pointer to a structure whose u16 at offset 0x16 is the firmware version, which a guest reads to choose a firmware-specific code path"
+edge_cases = [
+    "Called (2, 8, out); writes an 8-byte pointer through out; the guest reads version<<16 at offset 0x16 of the target and compares against firmware bands 7.00 through 13.60",
+    "Blocks every open-toolchain payload: without it they print 'Unable to initialize rtld' and exit",
+]
+known_by = "guest-observed"
+assumptions = [
+    "That the 0x16 field is a firmware version is inferred from the comparison constants being firmware numbers, not from any document",
+    "The structure's other fields are unmodelled; nothing has been seen reading them",
+]
+found_on = "2026-08-30"
+note = "Number and call shape read from four running payloads; see D403. Firmware value comes from the configurable Machine.firmware, zero refusing the call."
+
+[[function]]
+name = "sceKernelGetSystemSwVersion"
+arity = 1
+purpose = "The system software version, written into the caller's struct."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "Reads the presented machine's software_version; refuses with the no-entry errno when the machine states none rather than fabricating one."
+
+[[function]]
+name = "sceKernelVirtualQuery"
+arity = 4
+purpose = "Describes the mapping that holds an address - where it starts and ends - so a guest can place things around it."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "Finds the region containing the queried address in the same address space mmap and the reservation use, writing start and end (offsets 0 and 8). An address in no region gets the console's not-found code."

@@ -1,0 +1,108 @@
+name: Deploy landing + rustdoc to GitHub Pages
+
+# Publishes two things to Pages on every push to main:
+#   /       -> the landing page (frontend/web/index.html)
+#   /doc/   -> cargo doc for the whole workspace
+#
+# The rustdoc half is the point: for a project whose crates document a hardware
+# interface, the API reference IS the main documentation. It is nearly free to
+# publish alongside the landing page.
+#
+# It is also why this workflow takes the standard OOPS preamble rather than a flat
+# checkout. `cargo doc` has to resolve `../oops-libs`, so a flat checkout fails here as a
+# missing *directory* - which is what this file did, silently, from the moment orbistoun
+# grew that dependency until somebody looked.
+#
+# Pages must be set to "GitHub Actions" build mode once
+# (Settings -> Pages -> Build and deployment -> Source: GitHub Actions).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "CHANGELOG.md"
+      - "LICENSE-*"
+      - ".gitignore"
+      - ".gitattributes"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site bundle
+    # GitHub Pages does not serve a private repository on a free plan, and turning this
+    # repository private turned Pages off with it. Without this guard the workflow would fail on
+    # every push - a red mark that means nothing except that the site is deliberately not there.
+    # Gated rather than deleted: flip the repository back to public and the site returns.
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    steps:
+      # The standard OOPS preamble, the same three steps every workflow in the
+      # collection begins with: the collection, this repository *into* it, then the
+      # siblings this project needs. See docs/BUILDING.md.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+
+      - uses: actions/configure-pages@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+
+      - name: Build rustdoc
+        run: OOPS/bin/oops doc orbistoun
+
+      - name: Assemble bundle
+        # The landing page is static with no build step, so that half is a copy.
+        # `docs/` is rendered to HTML by the shared script in OOPS - the same one
+        # the other three call, so the four sets of docs look alike. And /doc/
+        # gets a redirect to the workspace root crate rather than the bare
+        # directory listing rustdoc leaves behind.
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          cp -r frontend/web/. site/
+          mkdir -p site/assets
+          cp assets/logo.png assets/logo.svg site/assets/
+          bash ../tools/build-docs.sh . site "#f0474b" "orbistoun"
+          cp -r target/doc site/doc
+          cat > site/doc/index.html <<'HTML'
+          <!DOCTYPE html>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=orbistoun_core/index.html">
+          <title>orbistoun API docs</title>
+          <a href="orbistoun_core/index.html">orbistoun API documentation</a>
+          HTML
+          du -sh site
+        working-directory: OOPS/orbistoun
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: OOPS/orbistoun/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

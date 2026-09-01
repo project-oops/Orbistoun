@@ -1,0 +1,39 @@
+# Files carrying a line-continued string literal, as a ceiling rather than an allowance.
+#
+# `\` at the end of a line inside a string literal is collapsed by `cargo fmt`, which bakes
+# the source indentation into the rendered text - so a message written to read as a sentence
+# arrives with runs of spaces through the middle of it. It has shipped garbled output three
+# times, always at format time rather than when the line was written (D184).
+#
+# The replacement is `concat!` of one-line literals. Note that `concat!` defeats implicit
+# `{name}` capture, so arguments go positional.
+#
+# `./orbistoun.sh prose` fails on any file here that is *not* listed, and fails again on any
+# entry listed that has stopped offending. So this list can only shrink, and it cannot
+# quietly become permanent by being ignored - the same mechanism the duplicate decision
+# numbers use (D201).
+#
+# **It went 8 -> 21 once, which is the one direction the paragraph above forbids.** The
+# guard was blind twice over: it searched the index rather than the working tree, and this
+# repository has no commits; and then the expression meant to normalise its output aborted,
+# emptying the offender list entirely. Both failures reported "none added". Twenty-one is
+# the first count taken with the guard able to see, and it is the ceiling from here (D199).
+#
+crates/orbistoun-gpu/src/pipeline.rs
+crates/orbistoun-gpu/tests/vocabulary.rs
+crates/orbistoun-gui/src/app.rs
+crates/orbistoun-gui/src/prefs.rs
+crates/orbistoun-overrides/tests/frontier.rs
+crates/orbistoun-report/src/diagnose.rs
+crates/orbistoun-shader/src/encoding.rs
+crates/orbistoun-shader/src/report.rs
+crates/orbistoun-shader/tests/differential.rs
+crates/orbistoun-shader/tests/hostile.rs
+crates/orbistoun-spirv/src/lib.rs
+crates/orbistoun-translate/src/blocks.rs
+crates/orbistoun-translate/src/lib.rs
+crates/orbistoun-translate/src/model.rs
+crates/orbistoun-translate/src/modifiers.rs
+crates/orbistoun-translate/src/predicated.rs
+crates/orbistoun-translate/tests/agreement.rs
+crates/orbistoun-translate/tests/execute.rs

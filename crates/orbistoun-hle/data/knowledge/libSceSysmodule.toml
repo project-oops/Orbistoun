@@ -1,0 +1,26 @@
+library = "libSceSysmodule"
+
+[[function]]
+name = "sceSysmoduleLoadModule"
+arity = 1
+purpose = "Loads a system module the guest names by id, so its exports resolve."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "The modules are already linked in this emulator, so this reports success rather than doing the load a real system would."
+
+[[function]]
+name = "sceSysmoduleUnloadModule"
+arity = 1
+purpose = "Unloads a system module the guest loaded by id."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceSysmoduleIsLoaded"
+arity = 1
+purpose = "Reports whether a system module is loaded."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"

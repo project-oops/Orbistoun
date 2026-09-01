@@ -1,0 +1,32 @@
+# System call numbers the target has that FreeBSD does not.
+#
+# **Hand-written, unlike `abi-constants.toml`, and that is the whole distinction.** That file
+# is generated from FreeBSD headers and says so; a value typed into it by a person is one
+# nobody can trace back to a source. These have no header to be traced to. They are numbers a
+# *guest asked for*, read out of a running program, and each entry records how it came to be
+# here so the two kinds of knowledge are never mixed in one table.
+#
+# Nothing may be added here because it seemed likely. The bar is that a guest was watched
+# asking for the number, and that what it does with the answer is described.
+
+[syscall]
+
+# A guest asks for this before it will bring up its own runtime linker, and gives up when it
+# gets nothing: `elfldr`, `pldmgr`, `klogsrv` and `shsrv` all stop here, print
+# `Unable to initialize rtld`, and exit. It is the single call blocking every open-toolchain
+# payload this project has tried.
+#
+# **Called as `(2, 8, out)`** - a kind, a length, and somewhere to put eight bytes. What comes
+# back is a *pointer*, and the guest reads one field of what it points at: a sixteen-bit value
+# at offset 0x16, which it shifts left sixteen and compares against 0x0700FFFF, 0x085FFFFF,
+# 0x093FFFFF and 0x103FFFFF before choosing a code path.
+#
+# Those are firmware versions - 7.00, 8.50, 9.30, 10.30 - so the field is the version of the
+# system the guest is running on, and the call is how it finds out. That reading is inferred
+# from what the guest does with the answer rather than from any documentation, and it is
+# checkable: a value in a different band sends the guest down a different branch, which a run
+# can watch it take.
+#
+# Provenance: guest-observed. The number was read from four running programs; the shape of the
+# answer was read from the instructions that consume it. See D403.
+SYS_vendor_system_version = 649

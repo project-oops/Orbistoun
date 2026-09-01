@@ -1,0 +1,33 @@
+# The case the record format exists for.
+#
+# `ack` is written and flushed BEFORE the command runs. So an `ack` with no `done` after
+# it, and a connection that then closes, means exactly one thing: that call did not return.
+#
+# It is not recorded as returning 0. It is not recorded as returning anything.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|3c5e7a91|call,resolve,read,report
+OBS|part|3c5e7a91|target|console
+OBS|part|3c5e7a91|firmware|13.520.001
+OBS|part|3c5e7a91|probe|dev
+OBS|done|1|ok||
+CMD|2|resolve|libkernel|sceKernelStat
+OBS|ack|2|resolve
+OBS|sym|libkernel|sceKernelStat|present|shared
+OBS|done|2|returned|0x80019c40|
+# A null path. On at least one implementation this dereferences without checking.
+CMD|3|call|0x80019c40|0x0|0x0
+OBS|ack|3|call
+# Nothing further arrived and the socket closed. The line below was written by the DRIVER,
+# not by the probe - the probe was gone. The corpus marks it observed-by=driver, so a
+# reader can tell a fact the system reported from one inferred from its silence.
+OBS|done|3|died||connection closed after ack with no result
+# The probe was restarted. A NEW session identifier is the signal: everything before this
+# belongs to a different process, and nothing is resumed.
+CMD|4|hello|1
+OBS|ack|4|hello
+OBS|hello|1|be22d047|call,resolve,read,report
+OBS|part|be22d047|target|console
+OBS|part|be22d047|firmware|13.520.001
+OBS|part|be22d047|probe|dev
+OBS|done|4|ok||

@@ -1,0 +1,63 @@
+[package]
+publish = false
+name = "orbistoun-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line entry point - dump a module import list, run a guest module, replay a trace."
+
+[lints]
+workspace = true
+
+[dependencies]
+oops-log = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-names = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+orbistoun-nid = { workspace = true }
+orbistoun-service = { workspace = true }
+orbistoun-env = { workspace = true }
+orbistoun-paths = { workspace = true }
+orbistoun-overrides = { workspace = true }
+orbistoun-submit = { workspace = true }
+orbistoun-corpus = { workspace = true }
+orbistoun-report = { workspace = true }
+# The dispatcher. Deliberately *not* `orbistoun-propose`, which carries a model runtime this
+# binary has no use for - the crate boundary is what keeps candle and reqwest out of the CLI,
+# rather than a feature flag nobody re-checks (D293).
+orbistoun-turn = { workspace = true }
+# A verifying turn runs in a directory of its own, so what it measures cannot be influenced by
+# what this machine has already learned (D298).
+tempfile = { workspace = true }
+orbistoun-worker = { workspace = true }
+orbistoun-firmware = { workspace = true }
+orbistoun-shell = { workspace = true }
+orbistoun-proto = { workspace = true }
+orbistoun-probe = { workspace = true }
+orbistoun-shader = { workspace = true }
+orbistoun-translate = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Temp directories for the provenance guard tests: each writes a throwaway module
+# and a throwaway ceiling, because a guard is only trustworthy once it has been
+# observed failing on material built to make it fail (D213).
+tempfile = { workspace = true }
+
+[[bin]]
+name = "orbistoun-cli"
+path = "src/main.rs"
+
+# Windows is the only one of the three that carries an icon inside the executable. A Linux ELF and
+# a macOS CLI binary have nowhere to put one - theirs live in packaging metadata, which a bare
+# command-line tool has none of. Target-gated rather than conditional inside `build.rs`, so on
+# Linux and macOS it is not fetched, not built, and not in the lockfile's way.
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true

@@ -1,0 +1,19 @@
+library = "libSceAudioOut"
+
+[[function]]
+name = "sceAudioOutInit"
+arity = 0
+purpose = "Initialises the audio-output subsystem before any port is opened."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceAudioOutClose"
+arity = 1
+purpose = "Closes an audio-output port; with no port ever opened, rejects every handle as the audio subsystem's NO_SUCH."
+returns = "status"
+known_by = "measured"
+found_on = "2026-09-01"
+cites = "obSCEne 090-audio/close-rejects-bad-handle, reports/hardware/console-report-klog.txt"
+note = "0x80260003 - the audio error base 0x8026_0000 with NO_SUCH, measured on hardware. Honest rejection rather than a faked close, since there is no audio backend to open a port."

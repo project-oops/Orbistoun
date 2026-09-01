@@ -1,0 +1,17 @@
+[package]
+publish = false
+name = "orbistoun-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Audio output HLE."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+orbistoun-hle = { workspace = true }

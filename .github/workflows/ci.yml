@@ -1,0 +1,258 @@
+name: CI
+
+# Every job in every OOPS repository begins the same three steps: check out the
+# collection, check this repository out *into* it, and ask `oops bootstrap` for the
+# siblings this project needs. See docs/BUILDING.md.
+#
+# That preamble is not ceremony. Orbistoun takes `oops-build`, `oops-log`, `oops-paths`
+# and `oops-docs` from `oops-libs` by relative path, so a flat checkout fails as a
+# missing *directory* rather than as a missing dependency - and this workflow was a flat
+# checkout until it was noticed, having never run.
+
+on:
+  push:
+    branches: [main]
+    # Docs-only pushes to main do not affect fmt/clippy/test - skip them. PRs are
+    # left unfiltered below so a required status check always reports on a PR.
+    paths-ignore:
+      - "CHANGELOG.md"
+      - "README.md"
+      - "docs/**"
+      - "LICENSE-*"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".github/**/*.md"
+  pull_request:
+
+# Cancel an in-progress run when a newer commit lands on the same ref. Stops
+# superseded runs - especially Dependabot rebases - burning Actions minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Which tree produced this. Read by a build script and stamped into the binary, so a
+  # report or a screenshot names a commit somebody else can check out (D222).
+  #
+  # The pull request's *head* rather than `github.sha`, which on a PR is the ephemeral
+  # merge commit - it exists only inside the run, so nobody could ever check it out.
+  #
+  # Passed whole. Actions expressions cannot slice a string, so shortening here would mean
+  # a shell step per workflow whose only job is to cut seven characters off; the build
+  # script does it once instead.
+  ORBISTOUN_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  check:
+    name: Check + fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+
+      # The project's own verbs, run from the project. Routing through the front door is
+      # what stops these and `./bin/orbistoun check` drifting apart.
+      - name: cargo fmt --check
+        run: ./bin/orbistoun fmt-check
+        working-directory: OOPS/orbistoun
+      - name: cargo clippy
+        run: ./bin/orbistoun lint
+        working-directory: OOPS/orbistoun
+      - name: cargo check
+        run: ./bin/orbistoun compile
+        working-directory: OOPS/orbistoun
+
+  provenance:
+    name: Provenance guard
+    runs-on: ubuntu-latest
+    # Fails the build if console-derived material has been committed. See
+    # CLAUDE.md principle 1 - this is the mechanism, .gitignore is only a
+    # convenience. Runs on every PR and push; it is fast and non-negotiable.
+    #
+    # Neither check compiles anything, but the preamble is the same as everywhere else:
+    # one shape, so that reading any workflow in the collection teaches you all of them.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+
+      - name: No firmware, keys, dumps, or guest binaries
+        # Calls the same verb ./bin/orbistoun check runs, so the two cannot drift - the
+        # rule the prose step below already follows. They *had* drifted: this job checked
+        # three things and the local guard checked one, so the gate least suited to
+        # surprises was the one where passing locally said least about passing here.
+        run: ./bin/orbistoun provenance
+        working-directory: OOPS/orbistoun
+
+      - name: No line-continued string literals
+        # `\` at the end of a line inside a literal is collapsed by `cargo fmt`, which bakes
+        # the source indentation into the rendered text. It has shipped garbled output three
+        # times, always at format time rather than when written, so it is checked rather
+        # than remembered (D184). The known offenders are a ceiling that can only shrink -
+        # see docs/prose-continuation-backlog.txt.
+        run: ./bin/orbistoun prose
+        working-directory: OOPS/orbistoun
+
+  knowledge-provenance:
+    name: Knowledge provenance audit
+    runs-on: ubuntu-latest
+    # Every recorded *behaviour* must say how it was established, and a claim of outside
+    # support must say where to check it. The companion to symbol-provenance: that one
+    # asks where a name came from, this one asks where a fact came from.
+    #
+    # It exists because facts now arrive by way of a model that has read the public
+    # internet, so "this is what the function does" can be recalled and then dressed as
+    # reasoning. The vocabulary has no value meaning "I already knew it", which turns
+    # laundering a recalled fact into recording a falsifiable claim about its source.
+    # See CLAUDE.md principle 1 and docs/PROVENANCE.md.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+      - name: Every recorded behaviour accounts for itself
+        run: ./bin/orbistoun knowledge-audit
+        working-directory: OOPS/orbistoun
+
+  symbol-provenance:
+    name: Symbol provenance audit
+    runs-on: ubuntu-latest
+    # Every committed symbol name must be re-derivable from this repository alone -
+    # from the published-standard word list or the candidate grammar, both of which
+    # are in the tree. A name the generator can produce is self-evidently ours; one it
+    # cannot is the one that would need explaining, and this is where that question
+    # gets asked. See docs/PROVENANCE.md.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+      - name: Every committed name re-derives from this repository
+        # `--ceiling` rather than a hard failure: 202 vendor names are confirmed correct
+        # by hash collision but cannot be respelled by the current grammar, and failing
+        # every run on a known, shrinking fact makes this job permanently red - at which
+        # point nobody reads it, and the case it exists for (a *new* name arriving with
+        # no explanation) goes past unnoticed. The ceiling can only shrink.
+        run: ./bin/orbistoun symbols-audit
+        working-directory: OOPS/orbistoun
+
+  lint:
+    name: Audit + deny + machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-machete
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+      - name: Audit + deny + machete
+        run: ./bin/orbistoun security
+        working-directory: OOPS/orbistoun
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # `bash` on every platform, not only the two where it is the default. The entry points
+    # are bash scripts and `OOPS/bin/oops` has no extension, so under the Windows runner's
+    # default PowerShell it is not an executable at all - it fails as an unrecognised
+    # command rather than as anything to do with this project. Git Bash is present on the
+    # Windows image, which is the same shell `bin/oops.cmd` finds for a person.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+          key: ${{ matrix.os }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+      # A shared verb, so it goes through the collection entry point: `oops test orbistoun`
+      # relays to `./bin/orbistoun test`, which runs nextest and then the doctests nextest
+      # skips - the same pair `./bin/orbistoun check` runs.
+      - name: test
+        run: OOPS/bin/oops test orbistoun
+
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    # The crates ARE the documentation of a hardware interface, so a broken
+    # intra-doc link is a real defect. pages.yml publishes what this validates.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+      - name: cargo doc
+        run: OOPS/bin/oops doc orbistoun

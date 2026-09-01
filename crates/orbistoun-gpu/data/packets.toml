@@ -1,0 +1,191 @@
+# Command-processor packet vocabulary.
+#
+# ## What this is for
+#
+# `packet::walk` needs none of this - it walks a submission using header structure
+# alone. This file is what turns numbers into meaning: which opcode is which, which
+# packets write hardware registers, and which registers hold the address of a shader.
+#
+# That last one is the link between the two halves of the GPU work. A submission does
+# not contain shaders; it contains *addresses* of shaders. Following them is what lets
+# a captured command stream feed the shader corpus.
+#
+# ## Status
+#
+# **Opcode names: transcribed, low risk.** A wrong name is cosmetic - it mislabels a
+# report and corrupts nothing, because nothing dispatches on the name.
+#
+# **Register-setting packets: transcribed, structural risk.** The base offsets decide
+# which register a write lands on. A wrong base shifts every register in that class,
+# so writes get attributed to the wrong register consistently.
+#
+# **Shader address registers: transcribed, and the least certain thing here.** Unlike
+# the shader encoding table there is no reference disassembler to check these against,
+# so they have no differential test and cannot get one cheaply. Treat any shader
+# address this file produces as a *candidate* rather than a fact - which is why
+# `registers.rs` reports them as candidates and why nothing follows one blindly.
+#
+# The honest position: the extraction mechanism below is structural and will be
+# correct regardless. The interpretation is a hypothesis, and it is stored as data
+# precisely so it can be corrected against a real submission without a rebuild.
+#
+# ## Reference
+#
+# The packet format and register layout are publicly documented by AMD, and parsed by
+# the open-source Linux driver and by Mesa. Hardware documentation from the chip
+# vendor, not console firmware. See ACKNOWLEDGEMENTS.
+
+# ---- Type-3 opcodes ---------------------------------------------------------
+#
+# Names only. Nothing dispatches on these; they exist so a histogram reads as
+# "DRAW_INDEX_AUTO x412" instead of "0x2d x412".
+
+[[opcode]]
+value = 0x10
+name = "NOP"
+
+[[opcode]]
+value = 0x15
+name = "DISPATCH_DIRECT"
+
+[[opcode]]
+value = 0x16
+name = "DISPATCH_INDIRECT"
+
+[[opcode]]
+value = 0x22
+name = "COND_EXEC"
+
+[[opcode]]
+value = 0x26
+name = "ATOMIC_MEM"
+
+[[opcode]]
+value = 0x27
+name = "DRAW_INDEX_2"
+
+[[opcode]]
+value = 0x28
+name = "CONTEXT_CONTROL"
+
+[[opcode]]
+value = 0x2A
+name = "INDEX_TYPE"
+
+[[opcode]]
+value = 0x2D
+name = "DRAW_INDEX_AUTO"
+
+[[opcode]]
+value = 0x2F
+name = "NUM_INSTANCES"
+
+[[opcode]]
+value = 0x36
+name = "WRITE_DATA"
+
+[[opcode]]
+value = 0x3F
+name = "INDIRECT_BUFFER"
+
+[[opcode]]
+value = 0x42
+name = "ACQUIRE_MEM"
+
+[[opcode]]
+value = 0x43
+name = "SURFACE_SYNC"
+
+[[opcode]]
+value = 0x46
+name = "EVENT_WRITE"
+
+[[opcode]]
+value = 0x47
+name = "EVENT_WRITE_EOP"
+
+[[opcode]]
+value = 0x49
+name = "RELEASE_MEM"
+
+[[opcode]]
+value = 0x68
+name = "SET_PREDICATION"
+
+[[opcode]]
+value = 0x69
+name = "SET_CONTEXT_REG"
+
+[[opcode]]
+value = 0x76
+name = "SET_SH_REG"
+
+[[opcode]]
+value = 0x79
+name = "SET_UCONFIG_REG"
+
+# ---- Packets that write registers -------------------------------------------
+#
+# Body word zero is an index relative to `base`; the words after it are values for
+# consecutive registers from there.
+#
+# The base is what makes this risky. Get it wrong and every register in the class is
+# misattributed by a constant offset - consistently, which is worse than randomly,
+# because the result looks orderly.
+
+[[register_write]]
+opcode = 0x69
+name = "SET_CONTEXT_REG"
+base = 0xA000
+
+[[register_write]]
+opcode = 0x76
+name = "SET_SH_REG"
+base = 0x2C00
+
+[[register_write]]
+opcode = 0x79
+name = "SET_UCONFIG_REG"
+base = 0xC000
+
+# ---- Registers holding shader addresses -------------------------------------
+#
+# A shader address is split across two registers: the low half and the high half. Both
+# must be seen before an address can be formed, which is itself a useful check - a lone
+# half means the stream was truncated or the mapping is wrong.
+#
+# `stage` is reported verbatim and nothing dispatches on it.
+#
+# This list is deliberately short. It covers the two stages that matter first - a
+# fragment shader and a compute shader are what a first frame and a first dispatch
+# need - and every entry is a hypothesis until checked against a real submission.
+
+[[shader_address]]
+register = 0x2C0C
+stage = "fragment"
+half = "low"
+
+[[shader_address]]
+register = 0x2C0D
+stage = "fragment"
+half = "high"
+
+[[shader_address]]
+register = 0x2C48
+stage = "vertex"
+half = "low"
+
+[[shader_address]]
+register = 0x2C49
+stage = "vertex"
+half = "high"
+
+[[shader_address]]
+register = 0x2E0C
+stage = "compute"
+half = "low"
+
+[[shader_address]]
+register = 0x2E0D
+stage = "compute"
+half = "high"

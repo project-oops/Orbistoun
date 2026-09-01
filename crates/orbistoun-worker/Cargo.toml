@@ -1,0 +1,44 @@
+[package]
+publish = false
+name = "orbistoun-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Worker mode - hosting the crates behind the protocol, and driving one from a shim."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-proto = { workspace = true }
+orbistoun-shell = { workspace = true }
+orbistoun-report = { workspace = true }
+orbistoun-env = { workspace = true }
+orbistoun-paths = { workspace = true }
+orbistoun-abi = { workspace = true }
+orbistoun-core = { workspace = true }
+orbistoun-firmware = { workspace = true }
+orbistoun-fs = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-input = { workspace = true }
+orbistoun-kernel = { workspace = true }
+orbistoun-libc = { workspace = true }
+orbistoun-loader = { workspace = true }
+# For the named globals a skipped runtime would have filled: they live in `.symtab`,
+# which is a section, and only this crate reads sections (D376).
+orbistoun-elf = { workspace = true }
+orbistoun-nid = { workspace = true }
+orbistoun-mem = { workspace = true }
+orbistoun-service = { workspace = true }
+orbistoun-systemservice = { workspace = true }
+orbistoun-thunk = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

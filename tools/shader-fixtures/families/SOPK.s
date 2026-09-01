@@ -1,0 +1,12 @@
+s_movk_i32 s0, 0x1234
+s_movk_i32 s40, 0x5678
+s_movk_i32 s9, 0x11
+s_cmpk_eq_i32 s1, 0x22
+s_cmpk_eq_i32 s50, 0x33
+s_cmpk_eq_i32 s7, 0x44
+s_addk_i32 s3, 0x55
+s_addk_i32 s60, 0x66
+s_addk_i32 s2, 0x77
+s_mulk_i32 s4, 0x88
+s_mulk_i32 s70, 0x99
+s_mulk_i32 s8, 0xaa

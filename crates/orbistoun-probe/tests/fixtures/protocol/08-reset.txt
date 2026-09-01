@@ -1,0 +1,21 @@
+# State leaks between commands, and that is a real problem rather than untidiness: an
+# allocation made by one command changes what the next one observes.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|1122aabb|call,resolve,read,reset,report
+OBS|part|1122aabb|target|console
+OBS|part|1122aabb|firmware|13.520.001
+OBS|part|1122aabb|probe|dev
+OBS|done|1|ok||
+CMD|2|resolve|libkernel|sceKernelAllocateDirectMemory
+OBS|ack|2|resolve
+OBS|sym|libkernel|sceKernelAllocateDirectMemory|present|shared
+OBS|done|2|returned|0x80011200|
+CMD|3|call|0x80011200|0x0|0x10000000|0x4000|0x4000|0x3|0x8100000
+OBS|ack|3|call
+OBS|done|3|returned|0x0|
+# The next observation is NOT of a fresh system. It is of a system with one allocation in
+# it, made by command 3 - and the corpus records the sequence, so that stays interpretable.
+CMD|4|reset
+OBS|ack|4|reset
+OBS|done|4|ok||freed 1 allocation, closed 0 descriptors

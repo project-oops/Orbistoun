@@ -1,0 +1,7 @@
+obscene                entered    178 imports      87658 calls  100% standing   ran to the time limit
+PPSA28061-app0         entered     47 imports        933 calls   94% standing   image+0x43c4
+PPSA02664-app0         entered     23 imports        222 calls   96% standing   image+0xafc959
+PPSA03416-app0         entered     23 imports        222 calls   96% standing   image+0xafc959
+PPSA25872-app0         entered     14 imports       1735 calls  100% standing   image+0x7b591e
+PPSA21564-app0         entered     13 imports        131 calls   97% standing   image+0x70a932c
+PPSA04263-app0         entered      4 imports   98957030 calls  100% standing   ran to the time limit

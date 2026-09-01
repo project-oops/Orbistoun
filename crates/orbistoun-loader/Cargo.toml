@@ -1,0 +1,28 @@
+[package]
+publish = false
+name = "orbistoun-loader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Links a guest module: parse, resolve NIDs, apply relocations, set up TLS, hand over the entry point."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+orbistoun-elf = { workspace = true }
+orbistoun-nid = { workspace = true }
+orbistoun-thunk = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-mem = { workspace = true }
+# For the `.bss` fill diagnostic. `orbistoun-env` takes no orbistoun dependency, so this
+# cannot become a cycle (D359).
+orbistoun-env = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

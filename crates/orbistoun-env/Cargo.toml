@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "orbistoun-env"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Every environment variable orbistoun reads, declared once."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Which build this is. The implementation is shared; this crate is where it is *expanded*, so
+# that every front end reads one version and one commit - see `build`.
+oops-build = { workspace = true }
+
+[build-dependencies]
+# The other half of the same crate: `emit` at build time, `stamp!` at run time.
+oops-build = { workspace = true }

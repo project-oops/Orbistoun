@@ -1,0 +1,84 @@
+# The NID hash suffix.
+#
+# ============================================================================
+# WHAT THIS IS
+# ============================================================================
+#
+# Guest modules do not import functions by name. They import by NID: a 64-bit
+# value derived from the name as
+#
+#     NID = first 8 bytes of SHA-1(name || suffix), read big-endian
+#
+# where `suffix` is the sixteen bytes below. That is the whole of it.
+#
+# ============================================================================
+# WHAT THIS IS NOT
+# ============================================================================
+#
+# It is **not a cryptographic key**. It decrypts nothing, signs nothing,
+# authenticates nothing, and protects nothing. It is a salt on a name-mangling
+# hash, and its only effect is to make the mapping from names to identifiers
+# non-obvious. Removing it would not weaken any protection, because it is not
+# protecting anything.
+#
+# It is not per-title, not per-firmware, and not per-console-generation. It is
+# one constant, and it has been the same throughout.
+#
+# ============================================================================
+# WHY IT IS HERE RATHER THAN ASKED FOR
+# ============================================================================
+#
+# Resolving imports is the central act of high-level emulation, so every
+# emulator of this target necessarily contains this value. It is publicly
+# documented and freely available, and requiring a user to supply it would add
+# a setup step that protects nothing and helps nobody.
+#
+# It lives in a data file rather than a Rust literal so that it is *labelled*.
+# An unexplained hex blob in source is the kind of artefact that makes
+# provenance questions awkward to answer; a documented constant with its
+# derivation written next to it is not (CLAUDE.md principle 1, D006, D071).
+#
+# The file is embedded at build time, so a portable single-binary build carries
+# it with no external file to lose.
+#
+# ============================================================================
+# WHERE IT CAME FROM - read this before citing the file
+# ============================================================================
+#
+# It was **not derived here, and it could not have been.** A sixteen-byte salt
+# cannot be brute-forced, and knowing a name and its hash does not let you
+# invert SHA-1 to recover it. Unlike every symbol name in symbols/, this
+# constant had to come from outside; nothing in this repository could produce
+# it.
+#
+# It was recalled by a language model from publicly published material, stated
+# with an explicit caveat that the recall might be wrong, and then **checked**
+# (below). No vendor binary was read and no database was consulted, but the
+# honest label for its origin is *supplied* - the same category docs/PROVENANCE.md
+# uses for anything that came from elsewhere, and which never counts as verified.
+#
+# That distinction matters and is easy to blur: this file being *checkable* is
+# not the same as it being *ours*. The names are ours. This is not.
+#
+# ============================================================================
+# HOW IT IS VERIFIED
+# ============================================================================
+#
+# It verifies itself, and orbistoun checks this rather than trusting it.
+#
+# The target C library is FreeBSD-derived, so it exports functions under the
+# names ISO C and POSIX publish. Hashing those published names with the value
+# below matches dozens of real imports in a real executable; hashing them with
+# a wrong value, or reading the digest in the wrong byte order, matches none.
+# The signal is unmistakable, not marginal.
+#
+# Measured against one commercial executable importing 70 functions from the
+# C library: 66 of 468 published names matched. Every other candidate byte order
+# and suffix placement matched zero, so the check is unambiguous rather than
+# marginal - which is what makes a recalled value safe to rely on.
+#
+# Override it with `--suffix-hex`, or by loading a symbol database that carries
+# its own, if this ever turns out to be wrong for some module.
+
+# Sixteen bytes, hex-encoded, appended to a symbol name before hashing.
+suffix_hex = "518D64A635DED8C1E6B039B1C3E55230"

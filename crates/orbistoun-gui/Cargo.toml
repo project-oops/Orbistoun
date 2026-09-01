@@ -1,0 +1,42 @@
+[package]
+publish = false
+name = "orbistoun-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Desktop window - library, per-title inspection, and the run diagnostics."
+
+[lints]
+workspace = true
+
+[dependencies]
+oops-log = { workspace = true }
+oops-docs = { workspace = true }
+orbistoun-service = { workspace = true }
+orbistoun-input = { workspace = true }
+orbistoun-shell = { workspace = true }
+orbistoun-probe = { workspace = true }
+orbistoun-report = { workspace = true }
+orbistoun-proto = { workspace = true }
+orbistoun-worker = { workspace = true }
+orbistoun-env = { workspace = true }
+orbistoun-nid = { workspace = true }
+orbistoun-paths = { workspace = true }
+orbistoun-loader = { workspace = true }
+orbistoun-kernel = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+# Temp directories for the capture tests, which write a real PNG and read it back.
+tempfile = { workspace = true }
+
+# The Windows executable carries the icon Explorer and the taskbar show.
+# Gated by target so it is not fetched or built on Linux or macOS, where an
+# executable has nowhere to put one. Same arrangement as the CLI crates.
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true

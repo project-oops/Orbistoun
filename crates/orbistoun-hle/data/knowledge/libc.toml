@@ -1,0 +1,2402 @@
+library = "libc"
+
+[[function]]
+name = "0x70031e6feb6b6b36"
+purpose = "Formatted output taking a destination and a format string - arg1 is a printf format, so arg0 is a stream or buffer."
+edge_cases = ['''Identified by argument dump: arg1 pointed at the literal format '%c 0x%016lx [0x%016lx] [%d]\n' (D194). It is not printf, which is separately named and implemented.''']
+known_by = "guest-observed"
+assumptions = ["The name is unknown and every source is exhausted: all 3018 harvested standard names were tried and missed, so it is not a name FreeBSD exports."]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-08-24"
+
+[[function]]
+name = "0x92f57c2dc704346f"
+purpose = "Handed the guest's entry point and called exactly once by every title in the corpus - the C runtime startup call."
+edge_cases = ["Identified by argument dump, not by name: arg3 points at image+0x70, which inspect reports as the entry point (D194)."]
+known_by = "guest-observed"
+assumptions = ["The name is unknown. Every source this project has is exhausted for it - the harvested standard list (3018 names) was tried and missed, the module's own strings do not contain it, and no grammar shape reaches it."]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-08-24"
+
+[[function]]
+name = "_Exit"
+arity = 1
+purpose = "Ends the program without running handlers. Handled as exit."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-21"
+
+[[function]]
+name = "_ZdaPv"
+arity = 1
+purpose = "C++ `operator delete[]`."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C++ [new.delete]; mangling per Itanium C++ ABI 5.1"
+found_on = "2026-08-20"
+
+[[function]]
+name = "_ZdaPvm"
+arity = 2
+purpose = "Sized `operator delete[]`. As _ZdlPvm."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C++ [new.delete]; mangling per Itanium C++ ABI 5.1"
+found_on = "2026-08-20"
+
+[[function]]
+name = "_ZdlPv"
+arity = 1
+purpose = "C++ `operator delete`. The heap's free under another spelling."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C++ [new.delete]; mangling per Itanium C++ ABI 5.1"
+found_on = "2026-08-20"
+
+[[function]]
+name = "_ZdlPvm"
+arity = 2
+purpose = "Sized `operator delete`."
+returns = "status"
+edge_cases = ["The size is ignored: the heap records each allocation's length in its own header, so the caller's figure is at best a duplicate and at worst a disagreement resolved in favour of the header anyway."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C++ [new.delete]; mangling per Itanium C++ ABI 5.1"
+found_on = "2026-08-20"
+
+[[function]]
+name = "_Znam"
+arity = 1
+purpose = "C++ `operator new[]`. The same heap, for the same reason as _Znwm."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C++ [new.delete]; mangling per Itanium C++ ABI 5.1"
+found_on = "2026-08-20"
+note = "Itanium C++ ABI, a published specification."
+
+[[function]]
+name = "_Znwm"
+arity = 1
+purpose = """
+C++ `operator new`. The same heap `malloc` uses, because that is what it is - a program
+mixing the two spellings must see one heap or it frees pointers the other never issued.
+"""
+returns = "pointer"
+edge_cases = [
+    "**A real `operator new` throws on failure; this answers null.** A stated gap: throwing needs the exception runtime, which does not exist here, and inventing an unwind would be worse than a caller checking a pointer it did not expect to check.",
+    "Found by hash. The fault was `write to 0x7fff0019` - our unimplemented code plus 0x18 - which named the shape: something returning a pointer the guest writes a field into at offset 24. Candidate names were proposed and the hash confirmed this one.",
+]
+found_by = "generated"
+known_by = "published"
+cites = "ISO C++ [new.delete]; mangling per Itanium C++ ABI 5.1"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "__cxa_atexit"
+arity = 3
+purpose = """
+Registers a destructor for a C++ object with static storage duration. A program registers
+one of these for every global object it constructs.
+
+**The most-called import in every title examined** - 1,218 calls in one, 53.5% of
+everything, more than all other imports combined. It was the wall for a long time only
+because it was unnamed: no C or POSIX word list produces a mangled C++ ABI symbol.
+"""
+returns = "status"
+edge_cases = [
+    "Must return zero. Non-zero means registration failed, and a C++ runtime told that aborts.",
+    "Accepted and never run - nothing tears a guest down yet, so there is no moment for it to fire.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "Itanium C++ ABI 3.3"
+found_in = [
+    "PPSA04263-app0",
+    "PPSA25872-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-20"
+note = "Itanium C++ ABI, which is published. Found by guessing that a libc function called more than everything else combined was allocation or static initialisation, and testing the mangled names."
+
+[[function.arguments]]
+name = "destructor"
+kind = "ptr"
+
+[[function.arguments]]
+name = "argument"
+kind = "ptr"
+note = "passed to the destructor"
+
+[[function.arguments]]
+name = "dso_handle"
+kind = "ptr"
+note = "which shared object owns it"
+
+[[function]]
+name = "__cxa_guard_abort"
+arity = 1
+purpose = "Initialisation threw. The flag stays clear, because a static whose constructor throws is not initialised and the next attempt must retry."
+returns = "status"
+found_by = "runtime"
+known_by = "published"
+cites = "Itanium C++ ABI 3.3"
+found_on = "2026-08-20"
+
+[[function]]
+name = "__cxa_guard_acquire"
+arity = 1
+purpose = "Asked before a function-local static is initialised. Non-zero means not yet initialised; zero means skip it."
+returns = "status"
+edge_cases = [
+    "**Worse unimplemented than absent.** An error return is non-zero, which reads as *go ahead and initialise* - and with release doing nothing the flag never sets, so every static in the program reconstructs on every visit, forever.",
+    "The completion flag is the first byte of the guard variable on this architecture, per the Itanium C++ ABI.",
+]
+found_by = "runtime"
+known_by = "published"
+cites = "Itanium C++ ABI 3.3"
+found_in = [
+    "PPSA04263-app0",
+    "PPSA25872-app0",
+]
+found_on = "2026-08-20"
+
+[[function]]
+name = "__cxa_guard_release"
+arity = 1
+purpose = "Records that a function-local static finished initialising, so its constructor never runs twice."
+returns = "status"
+found_by = "runtime"
+known_by = "published"
+cites = "Itanium C++ ABI 3.3"
+found_in = [
+    "PPSA04263-app0",
+    "PPSA25872-app0",
+]
+found_on = "2026-08-20"
+
+[[function]]
+name = "abort"
+arity = 0
+purpose = """
+Ends the program because the guest refuses to continue. **Never returns**, and that is the
+entire point of implementing it.
+"""
+returns = "status"
+edge_cases = [
+    "**Undeclared, it returned - and execution ran into the trap a compiler places after a `noreturn` call.** Two titles reported `illegal instruction` at an address with no meaning, while the guest was doing something perfectly clear: giving up (D177).",
+    "The call site is the fault address in that report, which is what identified it: `abort` called *from* the very instruction that then trapped.",
+    "The trace is persisted before the process ends, the same as the fault and time-limit paths - a guest that gave up has still said what it wanted, and that is the whole output of the run.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "atexit"
+arity = 1
+purpose = "Registers a handler to run at exit."
+returns = "status"
+edge_cases = ["Accepted and never run. Nothing tears a guest down yet, so a handler would have no moment to fire - but refusing the registration makes a guest believe its runtime failed to initialise, which is worse."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_in = [
+    "PPSA04263-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-08-20"
+
+[[function]]
+name = "calloc"
+arity = 2
+purpose = "Allocates and zeroes."
+returns = "pointer"
+edge_cases = ["Catching the count-times-size overflow is half the reason this exists separately from malloc."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "exit"
+arity = 1
+purpose = "Ends the program deliberately. Never returns, as abort does not."
+returns = "status"
+edge_cases = ["A guest ending on purpose is a different outcome from one that faulted, and reporting them the same way loses the distinction that matters most."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-21"
+
+[[function]]
+name = "fclose"
+arity = 1
+purpose = "Closes a stream. The control block behind the handle is deliberately not freed, so a stale handle reads as zeroes rather than as freed memory."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "feof"
+arity = 1
+purpose = "Whether a read has hit the end."
+returns = "status"
+edge_cases = [
+    "Asked *after* the short read that ended the file, so the answer is tracked rather than derived at the moment it is asked.",
+    "A handle naming nothing answers 'not at the end', because a caller looping until feof on a bad handle would otherwise never stop.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "ferror"
+arity = 1
+purpose = "Always zero. Reads either succeed or report short, and nothing here distinguishes a device error from the end of a file - stated rather than left looking implemented."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "fflush"
+arity = 1
+purpose = "Nothing to flush - everything opened here is read-only."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "fopen"
+arity = 2
+purpose = """
+Opens a file. Declared and not yet implemented, which is deliberate: the declaration is
+what makes the stub answer **null** instead of an error code.
+"""
+returns = "pointer"
+edge_cases = [
+    "**Undeclared, this returned `0x7FFF0001` and the guest used it as a `FILE*`** through fseek, ftell, fread and fclose, then sized a 2 GiB allocation from the nonsense ftell gave back and died dereferencing offset 4. A pointer-returning function must answer null when it has no answer (D125).",
+    "The paths it asks for exist on disk - /app0/game.bin and /app0/Textures/*.gnf are all present in the title directory. The files are there; the filesystem is not.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "path"
+kind = "cstr"
+note = "observed opening /app0/... paths, which map to the title's own directory"
+
+[[function.arguments]]
+name = "mode"
+kind = "cstr"
+note = "the usual fopen mode string"
+
+[[function]]
+name = "fread"
+arity = 4
+purpose = "Reads elements from a stream. Declared, not implemented - answers zero, which a caller reads as a short read."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "free"
+arity = 1
+purpose = "Releases an allocation."
+returns = "status"
+edge_cases = ["Freeing null is defined and does nothing."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "fseek"
+arity = 3
+purpose = "Moves the read position. `whence` takes the published POSIX values - set 0, current 1, end 2."
+returns = "status"
+edge_cases = ["Seeking clears the end-of-file marker, which is what makes read-to-end then rewind then read-again work."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "ftell"
+arity = 1
+purpose = "Where the stream is. Declared, not implemented."
+returns = "count"
+edge_cases = ["The guest sizes a buffer from this: a nonsense answer produced a 2 GiB allocation request. Zero is a poor answer too, but it is a *plausible* one and it does not ask the memory subsystem for the whole address space."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "malloc"
+arity = 1
+purpose = "Allocates. The guest's own heap sits on top of this, so nothing that allocates works until it does."
+returns = "pointer"
+edge_cases = [
+    "**Null on failure, never an error code.** Unimplemented it answered the placeholder `0x7fff0001`; a title took that as its buffer and passed it to memset, and the fault address was the placeholder itself (D128).",
+    "Returns memory aligned for any type - sixteen bytes on x86-64. Less faults the first time a caller stores a vector type, somewhere unrelated to the allocation.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-20"
+
+[[function]]
+name = "memalign"
+purpose = "Allocates memory whose address is a multiple of a requested alignment."
+edge_cases = [
+    "Two Unity titles print 'tlsf_create: Memory must be aligned to 8 bytes.' and fail to build their allocator when this is unimplemented - the placeholder error code is not eight-aligned, which is exactly what they complain about (D190).",
+    "Shares one allocation path with malloc: the alignment is recorded in the block header, because dealloc given a layout differing from the one alloc received is undefined behaviour.",
+]
+known_by = "published"
+cites = "POSIX.1-2001 memalign; the aligned-allocation contract is ISO C 7.22.3.1 (aligned_alloc)"
+assumptions = ["Whether the target returns null or sets errno for a non-power-of-two alignment is unverified; this refuses with null."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-08-22"
+
+[[function]]
+name = "memchr"
+arity = 3
+purpose = "Finds a byte within a bounded span."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "memcmp"
+arity = 3
+purpose = "Compares two spans. Only the sign of the result is specified."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "memcpy"
+arity = 3
+purpose = "Copies a span and returns its destination."
+returns = "pointer"
+edge_cases = ["Implemented as a moving copy. The standard permits assuming no overlap, but a guest that overlaps anyway gets silent corruption from the stricter version and permissiveness costs nothing."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "dest"
+kind = "ptr"
+
+[[function.arguments]]
+name = "src"
+kind = "ptr"
+
+[[function.arguments]]
+name = "count"
+kind = "usize"
+
+[[function]]
+name = "memmove"
+arity = 3
+purpose = "Copies a span that may overlap. Identical to our memcpy, which already moves."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "memset"
+arity = 3
+purpose = "Fills a span with a byte and returns its destination."
+returns = "pointer"
+edge_cases = [
+    "Returns its destination. Callers chain on the result, so returning anything else breaks them silently.",
+    "One title calls this 305 times during startup and then writes to a garbage pointer when it is unimplemented - it was reading memory it had asked to be cleared.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_in = [
+    "PPSA28061-app0",
+    "PPSA25872-app0",
+]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "dest"
+kind = "ptr"
+
+[[function.arguments]]
+name = "byte"
+kind = "u32"
+note = "only the low byte is used, per the standard"
+
+[[function.arguments]]
+name = "count"
+kind = "usize"
+
+[[function]]
+name = "printf"
+purpose = "Writes a formatted string to standard output. In this emulator it goes to the host's error stream, because a worker's stdout carries the JSON protocol its parent parses."
+edge_cases = [
+    "**The cheapest oracle in the project.** Two titles print their own diagnostics through this - naming four libkernel functions the name search could not reach, with source file and line, and quoting orbistoun's own 0x7fff0001 placeholder back at us (D186).",
+    "A third title prints its texture-loading progress through it, which is how the filesystem layer was confirmed working rather than inferred.",
+    "Shares its renderer with snprintf_s and refuses the same formats: a half-rendered diagnostic is worse than none, because it is the text somebody then reasons from.",
+]
+known_by = "published"
+cites = "ISO C 7.21.6.3"
+assumptions = ["A floating-point conversion cannot be honoured - the argument arrives in a vector register the trampoline does not capture. No guest has needed one yet."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-08-22"
+
+[[function]]
+name = "realloc"
+arity = 2
+purpose = "Resizes an allocation, preserving what fits."
+returns = "pointer"
+edge_cases = [
+    "`realloc(NULL, n)` is `malloc(n)`.",
+    "On failure the original must survive - freeing it there loses the caller's data on the one path where it still needs it.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "rewind"
+arity = 1
+purpose = "Seeks to the start."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "snprintf_s"
+arity = 6
+purpose = """
+Formats into a bounded buffer. The most-called unnamed import in a boot - seventy-six
+calls - sitting between sceKernelAllocateMainDirectMemory and sceKernelMapNamedDirectMemory
+with a stack address as its argument: it is building the *name* the map call takes.
+
+Declared, not implemented. The declaration is what makes it answer a count rather than the
+generic error code, which a caller would otherwise use as a length.
+"""
+returns = "count"
+edge_cases = [
+    "Found by hash after the obvious spellings - snprintf, sprintf, vsnprintf - all missed. It is the C11 Annex K bounds-checked variant, which is not a name anybody would reach for first.",
+    "Answering zero means the guest gets an empty string where it expected a formatted one. That is wrong, but it is *bounded* wrong - the buffer stays untouched rather than being filled with something invented.",
+    "Implemented as an integer-only renderer. All seventy-six calls in a boot were honoured, so this title's formats need no floating-point conversion and no more than three variadic arguments - which is the whole capacity of the trampoline.",
+    "A format it cannot honour completely empties the destination rather than rendering part of it. A half-rendered string is invented data shaped like a real answer: the guest opens the wrong file and the failure surfaces somewhere unrelated.",
+]
+found_by = "generated"
+known_by = "published"
+cites = "ISO C 7.21.6.5 (snprintf); the bounds-checked variant follows Annex K K.3.5.3.4"
+assumptions = [
+    "Annex K is optional and implementations differ. Whether the target library follows it at all, and what it returns on truncation, is unverified.",
+    "Whether it writes a terminator when the buffer is too small is unverified, and a guest that trusts termination would read past the end if it does not.",
+    "A floating-point conversion cannot be honoured at all - the argument arrives in a vector register the trampoline does not capture. No guest has needed one yet, so whether any does is unmeasured.",
+]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-21"
+
+[[function]]
+name = "strcat"
+arity = 2
+purpose = "Appends a string at the destination's terminator."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strchr"
+arity = 2
+purpose = "Finds the first occurrence of a byte in a string."
+returns = "pointer"
+edge_cases = ["The terminator is searchable: `strchr(s, 0)` returns the end of the string, not null. Callers use it to find where a string ends."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strcmp"
+arity = 2
+purpose = "Orders two strings. Only the sign is specified."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strcpy"
+arity = 2
+purpose = "Copies a string including its terminator."
+returns = "pointer"
+edge_cases = ["The terminator must be copied too, or the result is not a string and the next strlen walks into whatever was there."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strlen"
+arity = 1
+purpose = "Length of a NUL-terminated string, not counting the terminator."
+returns = "count"
+edge_cases = [
+    "**The most damaging stub in the project.** Returning an error code instead of a length tells a guest every string is fourteen bytes long, and the damage surfaces somewhere completely unrelated.",
+    "Walking is bounded at 64 MiB. An unterminated buffer would otherwise fault inside string handling rather than at whatever produced the buffer.",
+]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-08-20"
+
+[[function.arguments]]
+name = "s"
+kind = "ptr"
+
+[[function]]
+name = "strncmp"
+arity = 3
+purpose = "Orders two strings, comparing at most n bytes."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strncpy"
+arity = 3
+purpose = "Copies at most n bytes, padding the remainder with NUL."
+returns = "pointer"
+edge_cases = ["The padding is required by the standard and callers rely on it - a short copy left unpadded is an unterminated string."]
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strnlen"
+arity = 2
+purpose = "Length of a string, capped at a limit."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2008"
+found_on = "2026-08-20"
+
+[[function]]
+name = "strrchr"
+arity = 2
+purpose = "Finds the last occurrence of a byte in a string."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-20"
+
+[[function]]
+name = "sqrt"
+arity = 1
+purpose = "sqrt, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "fabs"
+arity = 1
+purpose = "fabs, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "floor"
+arity = 1
+purpose = "floor, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "ceil"
+arity = 1
+purpose = "ceil, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "trunc"
+arity = 1
+purpose = "trunc, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "round"
+arity = 1
+purpose = "round, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "fmod"
+arity = 2
+purpose = "fmod, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "sqrtf"
+arity = 1
+purpose = "sqrtf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "fabsf"
+arity = 1
+purpose = "fabsf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "floorf"
+arity = 1
+purpose = "floorf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "ceilf"
+arity = 1
+purpose = "ceilf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "truncf"
+arity = 1
+purpose = "truncf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "roundf"
+arity = 1
+purpose = "roundf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "fmodf"
+arity = 2
+purpose = "fmodf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+found_on = "2026-08-25"
+note = "Exactly rounded by IEEE 754, so there is one right answer and the host produces it."
+
+[[function]]
+name = "pow"
+arity = 2
+purpose = "pow, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sin"
+arity = 1
+purpose = "sin, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "cos"
+arity = 1
+purpose = "cos, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "tan"
+arity = 1
+purpose = "tan, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "exp"
+arity = 1
+purpose = "exp, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "log"
+arity = 1
+purpose = "log, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "log10"
+arity = 1
+purpose = "log10, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "log2"
+arity = 1
+purpose = "log2, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "asin"
+arity = 1
+purpose = "asin, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "acos"
+arity = 1
+purpose = "acos, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "atan"
+arity = 1
+purpose = "atan, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "atan2"
+arity = 2
+purpose = "atan2, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "powf"
+arity = 2
+purpose = "powf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "sinf"
+arity = 1
+purpose = "sinf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "cosf"
+arity = 1
+purpose = "cosf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "tanf"
+arity = 1
+purpose = "tanf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "expf"
+arity = 1
+purpose = "expf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "logf"
+arity = 1
+purpose = "logf, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.12 (math.h)"
+assumptions = [
+    "The transcendental functions are not correctly rounded by IEEE 754, so a conforming implementation may differ from the target's in the last bit. A title comparing a computed value against a stored constant could see that difference; a probe on real hardware is what would settle it.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isalpha"
+arity = 1
+purpose = "isalpha, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isdigit"
+arity = 1
+purpose = "isdigit, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isalnum"
+arity = 1
+purpose = "isalnum, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isspace"
+arity = 1
+purpose = "isspace, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isupper"
+arity = 1
+purpose = "isupper, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "islower"
+arity = 1
+purpose = "islower, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "ispunct"
+arity = 1
+purpose = "ispunct, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isxdigit"
+arity = 1
+purpose = "isxdigit, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "iscntrl"
+arity = 1
+purpose = "iscntrl, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isprint"
+arity = 1
+purpose = "isprint, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "isgraph"
+arity = 1
+purpose = "isgraph, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "toupper"
+arity = 1
+purpose = "toupper, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "tolower"
+arity = 1
+purpose = "tolower, over the C locale."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.4 (ctype.h)"
+assumptions = [
+    "Classification follows the C locale, which is defined only for ASCII. A byte above 127 is not a letter here; a target running under another locale would answer differently and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "strstr"
+arity = 2
+purpose = "strstr, as the C standard defines it."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strpbrk"
+arity = 2
+purpose = "strpbrk, as the C standard defines it."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strspn"
+arity = 2
+purpose = "strspn, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strcspn"
+arity = 2
+purpose = "strcspn, as the C standard defines it."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strncat"
+arity = 3
+purpose = "strncat, as the C standard defines it."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strcasecmp"
+arity = 2
+purpose = "strcasecmp, ignoring ASCII case."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2017 strings.h; not ISO C"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strncasecmp"
+arity = 3
+purpose = "strncasecmp, ignoring ASCII case."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2017 strings.h; not ISO C"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strdup"
+arity = 1
+purpose = "strdup - a copy in memory the caller frees."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2017 string.h; not ISO C"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strndup"
+arity = 2
+purpose = "strndup - a copy in memory the caller frees."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2017 string.h; not ISO C"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtok"
+arity = 2
+purpose = "strtok - the next token, terminated in the caller's own buffer."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.24 (string.h)"
+assumptions = [
+    "strtok keeps its place in a static, as the interface specifies. A second thread walking a different string gets the first one's position - which is what the target does too, and why strtok_r exists.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtok_r"
+arity = 3
+purpose = "strtok_r - the next token, terminated in the caller's own buffer."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "POSIX.1-2017 string.h"
+found_on = "2026-08-25"
+
+[[function]]
+name = "atoi"
+arity = 1
+purpose = "atoi - decimal text to integer, no error reporting."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "atol"
+arity = 1
+purpose = "atol - decimal text to integer, no error reporting."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "atoll"
+arity = 1
+purpose = "atoll - decimal text to integer, no error reporting."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtol"
+arity = 3
+purpose = "strtol - text to integer in a given base, reporting where it stopped."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtoll"
+arity = 3
+purpose = "strtoll - text to integer in a given base, reporting where it stopped."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtoul"
+arity = 3
+purpose = "strtoul - text to integer in a given base, reporting where it stopped."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtoull"
+arity = 3
+purpose = "strtoull - text to integer in a given base, reporting where it stopped."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtod"
+arity = 2
+purpose = "strtod - text to floating point, reporting where it stopped."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+assumptions = [
+    "The longest parsable prefix is taken, which is what the standard specifies. Rust's own parser is stricter, so the prefix is found by search rather than handed over whole.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "strtof"
+arity = 2
+purpose = "strtof - text to floating point, reporting where it stopped."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+assumptions = [
+    "The longest parsable prefix is taken, which is what the standard specifies. Rust's own parser is stricter, so the prefix is found by search rather than handed over whole.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "abs"
+arity = 1
+purpose = "abs - absolute value."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+assumptions = [
+    "The most negative value has no positive counterpart and the standard leaves it undefined. Wrapping is what the hardware does and what every real implementation returns.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "labs"
+arity = 1
+purpose = "labs - absolute value."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+assumptions = [
+    "The most negative value has no positive counterpart and the standard leaves it undefined. Wrapping is what the hardware does and what every real implementation returns.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "llabs"
+arity = 1
+purpose = "llabs - absolute value."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22 (stdlib.h)"
+assumptions = [
+    "The most negative value has no positive counterpart and the standard leaves it undefined. Wrapping is what the hardware does and what every real implementation returns.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "wcslen"
+arity = 1
+purpose = "wcslen - wide characters before the terminator."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.29 (wchar.h)"
+assumptions = [
+    "wchar_t is taken to be 32 bits, as it is on every FreeBSD-derived system. A 16-bit wchar_t would make this count double and nothing in a trace would say so.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "snprintf"
+arity = 3
+purpose = "snprintf - formatted output, bounded, reporting the length it would have written."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_on = "2026-08-25"
+
+[[function]]
+name = "sprintf"
+arity = 2
+purpose = "sprintf - formatted output with no bound at all."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+assumptions = [
+    "Nothing here can detect an overrun: the caller promised the buffer is large enough and there is no size to check against. That promise is the interface.",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "qsort"
+arity = 4
+purpose = "Sorts an array in place using a comparison function the caller supplies."
+returns = "status"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22.5.2 (stdlib.h)"
+assumptions = [
+    "The comparator is called with addresses in the guest's own array and the array is not moved while comparisons run, so a comparator reading its arguments twice sees the same bytes. The standard makes no such promise - this is stricter than required, not looser.",
+]
+found_on = "2026-08-25"
+note = "The first call this project makes *into* guest code from an HLE function rather than out of it. That is a capability rather than a function, which is why it and bsearch were the last two checks left in their section (D274)."
+
+[[function]]
+name = "bsearch"
+arity = 5
+purpose = "Finds an element of a sorted array using a comparison function the caller supplies."
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.22.5.1 (stdlib.h)"
+assumptions = [
+    "A miss answers null rather than an error code. A count-shaped placeholder would be a wild pointer the guest dereferences immediately, which is the shape this project keeps finding (D125, D273).",
+]
+found_on = "2026-08-25"
+
+[[function]]
+name = "signal"
+purpose = "Installs a handler for a signal number and answers the one it replaced."
+edge_cases = ["Records only - nothing here delivers a signal, so a handler is remembered and never invoked. Stated rather than hidden: a guest asking to be told about an event this emulator cannot generate should not be told it will be.", "Must not fail. A network server's first act is signal(SIGPIPE, SIG_IGN) so a write to a closed socket does not kill it, and SIG_ERR there sends a correct program down its error path before it has done anything. klogsrv makes exactly this call, with 0xd, as its first instruction after main (D343)."]
+cites = "FreeBSD signal(3); POSIX.1-2008 <signal.h>. SIGPIPE = 13 from sys/sys/signal.h, harvested (D352)."
+known_by = "published"
+assumptions = ["The return value is SIG_DFL (zero) until something installs a handler. That is what nothing-installed is spelled as, not a placeholder."]
+found_in = ["klogsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "getopt"
+purpose = "Parses command-line option letters, reporting position and argument through the caller's own optind and optarg."
+edge_cases = ["Answers -1 when there is nothing left, which is the whole contract for a program run with no arguments - and every payload measured is.", "Refuses a wild argument count rather than iterating one. Entered at main a guest may hold whatever the entry-argument setting supplied, and walking a pointer array sized by a stray value would fault inside this call and be reported as the guest's fault.", "An option that is actually present is not parsed yet, and answers -1 rather than a wrong letter."]
+cites = 'POSIX.1-2008 getopt(3), and its documented -1 for no-more-options.'
+known_by = "published"
+assumptions = ["Position is kept here and published to the guest's optind, which is storage this layer reserved (D323). A guest that does not import optarg gets no write rather than an invented one."]
+found_in = ["klogsrv", "ftpsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "__error"
+purpose = "Answers a pointer to this thread's errno."
+edge_cases = ["errno is a macro expanding to *__error(), so every use of errno in a guest arrives here and immediately dereferences the answer. A placeholder becomes a wild pointer the guest then reads and writes - which is what klogsrv did, faulting on a read of 0x7fff0001, orbistoun's own placeholder read as an address (D344)."]
+cites = "FreeBSD errno(2); POSIX.1-2008 <errno.h>. errno is the macro *__error() on this platform."
+known_by = "published"
+assumptions = ["Per host thread, and a guest thread is a host thread here, so thread-local storage gives the per-thread errno the standard requires."]
+found_in = ["klogsrv", "ftpsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "strerror"
+purpose = "Answers a pointer to a message describing an error number."
+edge_cases = ["The message says what it is rather than imitating a table nobody here has seen: nothing has measured what this platform answers for a given number, and the strings are not derivable from anything lawful in this repository.", "What matters is that it is a real readable pointer. The caller does not check it, it prints it - so a placeholder here faults inside printf rather than at the call."]
+known_by = "assumed"
+assumptions = ["The text is ours and deliberately not FreeBSD's. A guest comparing it against a known string would fail, which no caller measured does - they print it.", "A per-thread static buffer, which the standard permits and every real implementation uses."]
+found_in = ["klogsrv", "ftpsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "fprintf"
+purpose = "Formatted output to a stream - printf with a stream argument in front."
+edge_cases = ["The stream is read and ignored. A guest's stderr is a FILE * it imported as data and this layer gives it zeroed storage (D323), so there is nothing behind the handle to distinguish; everything goes to the host's error stream where printf already sends it.", "This means fprintf(stdout, ...) and fprintf(stderr, ...) are not currently told apart, and a guest relying on that distinction would be misread."]
+cites = "ISO C 7.21.6 (stdio.h)."
+known_by = "published"
+assumptions = ["Shares printf's renderer, so it refuses exactly the same conversions - a half-rendered diagnostic is the text somebody would then reason from."]
+found_in = ["klogsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "puts"
+purpose = "Writes a string followed by a newline."
+edge_cases = ["Deliberately not printf with the same argument: puts appends a newline and does not treat its argument as a format, so routing it through the renderer would make a guest's own text containing a percent sign either vanish or be reported as a bad conversion.", "klogsrv calls it eight times before anything else - it is a program printing its banner, and it was being ignored (D344)."]
+cites = "POSIX.1-2008 puts(3); ISO C 7.21.7.9 - appends a newline, and does not treat its argument as a format."
+known_by = "published"
+assumptions = ["Answers the byte count, which is a permitted non-negative success value and more informative than a bare zero."]
+found_in = ["klogsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "getpid"
+purpose = "Answers the process id the guest is running in."
+edge_cases = ["The host process id, which is true rather than invented: the guest runs inside this process, so it is its process id in every sense checkable from inside it. A made-up constant would be indistinguishable until something compared it against something else."]
+cites = "POSIX.1-2008 getpid(3)."
+known_by = "published"
+assumptions = ["That a guest's notion of its process id and the host's should be the same number. Nothing measured says the platform agrees, and a guest comparing this against something the platform told it separately would disagree."]
+found_in = ["klogsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "sysctl"
+purpose = "Queries a kernel variable by numeric name. Refuses every name, with the documented failure, and reports what was asked."
+edge_cases = ["Refusing is the implementation. FreeBSD sysctl(3) documents ENOENT as 'The name array specifies a value that is unknown', and a documented failure is a real answer - the caller branches on it and takes its own error path, which is what klogsrv does while naming its own file and line.", "Answering success would be worse. oldp is often null on the first of a pair of calls asking only how large the answer would be, and success without writing a length hands the caller an uninitialised size to allocate against.", "errno is deliberately not set. ENOENT's numeric value is not derivable from anything lawful in this repository - FreeBSD's errno.h is not in the local checkout - so it is left alone rather than guessed at.", "Every distinct MIB is reported once. klogsrv asks for [1, 14, 8, 0] with oldp null, from a function its symbol table names find_pid, so the guest has said both what it wants and what for (D350)."]
+cites = 'FreeBSD sysctl(3), lib/libc/gen/sysctl.3 - ENOENT is documented there as: The name array specifies a value that is unknown.'
+known_by = "published"
+assumptions = ["That refusing every name is better than answering any. True while nothing here knows what a MIB means; the moment one is established this stops being right for that one."]
+found_in = ["klogsrv"]
+found_on = "2026-08-27"
+
+[[function]]
+name = "vsnprintf"
+purpose = "Formats into a bounded buffer, taking its arguments from a va_list rather than from registers."
+edge_cases = [
+    "The most imported name nothing here implemented: twenty-two of the twenty-five open-toolchain payloads measured ask for it, more than any other. Every one of their logging helpers is built out of it, so a payload without it cannot say why it stopped (D364).",
+    "A size of zero is a real call. vsnprintf(NULL, 0, format, ap) is the standard way to ask how long the answer would be before allocating for it, so it writes nothing and answers the full length - which is why the return is the rendered length in every case rather than the copied one.",
+    "It can render formats the register-based forms have to refuse. A va_list is a cursor over the caller's spilled registers and the stack beyond them, so a format with more conversions than there are argument registers is answerable here and is not there.",
+    "The caller's list is not advanced. The standard makes ap indeterminate after the call, so a conforming caller may not read it again - which makes advancing it unobservable and makes not writing into guest memory the safer of two permitted behaviours.",
+]
+cites = "ISO C vsnprintf; POSIX.1-2008 vsnprintf(3). The va_list layout is the System V AMD64 psABI, section 3.5.7."
+known_by = "published"
+assumptions = [
+    "That the platform's va_list is the psABI's, which follows from the architecture rather than from anything measured about this target.",
+]
+found_in = ["klogsrv", "ftpsrv", "shsrv", "elfldr"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "vprintf"
+purpose = "Writes a formatted string, taking its arguments from a va_list."
+edge_cases = [
+    "Output goes to the host's error stream rather than its output stream, for the same reason every other write here does: a worker's standard output carries the protocol its parent is parsing.",
+]
+cites = "ISO C vprintf; POSIX.1-2008 vprintf(3)."
+known_by = "published"
+found_in = ["WebKit-Autoloader-Installer", "kstuff-lite"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "vfprintf"
+purpose = "vprintf with a stream in front."
+edge_cases = [
+    "The stream is not honoured, exactly as in fprintf and for the same stated reason: both of a guest's standard streams already land on the host's error stream, so stdout and stderr are not currently told apart. A guest relying on that distinction would be misread.",
+]
+cites = "ISO C vfprintf; POSIX.1-2008 vfprintf(3)."
+known_by = "published"
+found_in = ["websrv", "ps5-app-dumper", "pldmgr", "CheatRunner", "BFpilot"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "time"
+purpose = "Answers seconds since the epoch, and writes them through its argument when it is given one."
+edge_cases = [
+    "A null argument is not an error. The standard answers the value either way and callers rely on time(NULL).",
+    "The host's clock, which is true rather than invented: a guest asking what time it is gets what time it is, for the same reason getpid answers the host's process id.",
+]
+cites = "POSIX.1-2008 time(3)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "gettimeofday"
+purpose = "Answers the wall clock to the microsecond, through a two-field structure."
+edge_cases = [
+    "The timezone argument is ignored, as it must be: POSIX marks it obsolete and says the behaviour is unspecified if it is not null. Writing something plausible there would be inventing data.",
+    "A null destination answers success with nothing written, which is what a caller passing two nulls asked for.",
+]
+cites = "POSIX.1-2008 gettimeofday(3). struct timeval is sys/sys/_timeval.h in the FreeBSD checkout the ABI constants are harvested from."
+known_by = "published"
+assumptions = [
+    "That time_t and suseconds_t are both 64 bits, so the structure is two machine words. That follows from the data model rather than from anything measured about this target.",
+]
+found_in = ["ftpsrv", "websrv", "ps5-app-dumper"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "clock_gettime"
+purpose = "Answers a named clock to the nanosecond, through a two-field structure."
+edge_cases = [
+    "Two families are answered: the real-time clocks, which are the host's wall clock, and the monotonic ones, which count from when this process started. A monotonic clock's zero is unspecified - what is specified is that it never goes backwards.",
+    "Every other clock is refused rather than answered with the nearest thing. A guest measuring its own CPU time and receiving wall time gets a number that looks right and is not.",
+    "The identifiers come from the harvested table rather than from recall, because they differ between platforms and a wrong one is a guest silently reading the wrong clock.",
+]
+cites = "POSIX.1-2008 clock_gettime(3). Identifiers from sys/sys/_clock_id.h, harvested; struct timespec from sys/sys/timespec.h."
+known_by = "published"
+assumptions = [
+    "That time_t and long are both 64 bits, so the structure is two machine words.",
+]
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "sleep"
+purpose = "Waits the requested number of seconds and answers how many were left."
+edge_cases = [
+    "A real sleep, not an immediate return. A sleep that returns at once does not save the guest any time - it turns a paced loop into a spin, and the run then measures how fast this emulator can answer the same call a million times.",
+    "A guest asking to wait longer than the run has left reaches the run's own limit, which exists for exactly that and reports itself. Capping the wait here would be a lie the guest could measure with clock_gettime.",
+    "Always answers zero: the only documented reason to answer otherwise is an interruption, and nothing here delivers a signal.",
+]
+cites = "POSIX.1-2008 sleep(3)."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "usleep"
+purpose = "Waits the requested number of microseconds."
+edge_cases = [
+    "A real sleep, for the reason sleep(3) gives.",
+]
+cites = "POSIX.1-2001 usleep(3)."
+known_by = "published"
+found_in = ["websrv", "ps5debug-NG"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "nanosleep"
+purpose = "Waits an interval given as a structure, and reports what was left."
+edge_cases = [
+    "A nanosecond field outside its range is refused rather than normalised. A caller that built the structure wrongly should be told, not quietly corrected.",
+    "The remaining-time structure is written as zero when it is asked for, because a sleep here always completes - nothing delivers a signal, so nothing can cut one short. Leaving it untouched would hand back whatever the guest had there.",
+]
+cites = "POSIX.1-2008 nanosleep(3); struct timespec from sys/sys/timespec.h."
+known_by = "published"
+assumptions = [
+    "That time_t and long are both 64 bits, so the structure is two machine words.",
+]
+found_in = ["websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "mkdir"
+purpose = "Creates one directory."
+edge_cases = [
+    "Goes through the same two gates every write here goes through: a path under no mount, or one that climbs out of its mount, is refused; and so is anything outside the storage the installation owns. A guest cannot touch the user's own title directory (D250).",
+    "The mode is not applied, and that is stated rather than hidden: the host need not have POSIX permission bits at all, and writing a plausible permission somewhere would be a fact about nothing.",
+    "One directory, not a path of them. mkdir creates the last component and fails if a parent is missing; creating the parents silently would turn a guest's own mistake into a directory tree nobody asked for.",
+    "Imported by seventeen of the twenty-five open-toolchain payloads - more than any other file call.",
+]
+cites = "POSIX.1-2008 mkdir(2)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv", "ps5-web-file-manager"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "rmdir"
+purpose = "Removes one empty directory."
+edge_cases = [
+    "Goes through the same two gates every write here goes through: a path under no mount, or one that climbs out of its mount, is refused; and so is anything outside the storage the installation owns. A guest cannot touch the user's own title directory (D250).",
+    "Empty only, which is the interface: rmdir on a directory with anything in it fails, and removing the contents instead would destroy a guest's data on a call documented to refuse.",
+]
+cites = "POSIX.1-2008 rmdir(2)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "unlink"
+purpose = "Removes one file."
+edge_cases = [
+    "Goes through the same two gates every write here goes through: a path under no mount, or one that climbs out of its mount, is refused; and so is anything outside the storage the installation owns. A guest cannot touch the user's own title directory (D250).",
+    "Refuses a directory rather than removing it. unlink on a directory is an error in the interface, and the host call underneath would not agree about that on every platform - so it is checked here rather than left to differ by operating system.",
+]
+cites = "POSIX.1-2008 unlink(2)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "remove"
+purpose = "Removes a file or an empty directory."
+edge_cases = [
+    "Goes through the same two gates every write here goes through: a path under no mount, or one that climbs out of its mount, is refused; and so is anything outside the storage the installation owns. A guest cannot touch the user's own title directory (D250).",
+    "Not an alias for unlink. C's remove takes either, and binding it to unlink would make a guest tidying up a directory fail on a call documented to work.",
+]
+cites = "ISO C remove; POSIX.1-2008 remove(3)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "rename"
+purpose = "Moves a file within the guest's own storage."
+edge_cases = [
+    "Both ends are checked. A rename whose source is writable and whose destination is not would be a way to write outside the writable mount using a call that only looks like it reads.",
+    "A path that does not exist and a path the guest may not have both report failure, deliberately: that is what the interface a guest thinks it is calling would tell it, and distinguishing them would tell a guest about files outside its own storage.",
+]
+cites = "POSIX.1-2008 rename(2)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "access"
+purpose = "Answers whether a path is there, and whether it may be written."
+edge_cases = [
+    "The write bit is answered by the writable mount rather than by the host's permissions: that is the rule this emulator actually enforces, so it is the rule reported. A guest told it may write to the title directory and then refused would take its error path somewhere less useful.",
+    "The read and execute bits are answered by existence, because everything a guest can reach through a mount it can read.",
+]
+cites = "POSIX.1-2008 access(2). W_OK from sys/sys/unistd.h, harvested, and cross-checked against the table by a test (D370)."
+known_by = "published"
+found_in = ["websrv", "ps5-app-dumper"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "truncate"
+purpose = "Sets a file's size, by path."
+edge_cases = ["Goes through the same two gates every write here goes through: a path under no mount, or one that climbs out of its mount, is refused; and so is anything outside the storage the installation owns. A guest cannot touch the user's own title directory (D250)."]
+cites = "POSIX.1-2008 truncate(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "ftruncate"
+purpose = "Sets an open file's size, by descriptor."
+edge_cases = [
+    "A standard stream has no length, so it is refused rather than given one - and a descriptor nobody opened is refused for the same reason read and write refuse it.",
+]
+cites = "POSIX.1-2008 ftruncate(2)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "getifaddrs"
+purpose = "Builds the list of addresses a guest can be reached on."
+edge_cases = [
+    "A server calls this before it serves anything and prints what comes back: a log server nobody can find the address of is a log server nobody connects to.",
+    "A server filters on IFF_LOOPBACK - it walks the list for an address that is not the loopback - so the flags matter as much as the addresses, and they are harvested from sys/net/if.h rather than recalled.",
+    "The outward address is asked of the operating system, not guessed: a UDP socket pointed at a documentation address (RFC 5737 TEST-NET-1, routed nowhere) picks a route and a source address and sends nothing, and the source address is the answer.",
+    "One allocation holds every structure, name and address, and it is kept rather than leaked so freeifaddrs can give it back. A server that reports its address on a timer would otherwise leak a list per report.",
+]
+cites = "FreeBSD getifaddrs(3); struct ifaddrs from include/ifaddrs.h; IFF_UP, IFF_LOOPBACK and IFF_RUNNING from sys/net/if.h, harvested."
+known_by = "published"
+assumptions = [
+    "The name of the outward interface is ours. Nothing available to this process knows what the platform calls its interfaces, so it is net0. The loopback's lo0 is not invented - it is what every BSD calls it.",
+    "One netmask per interface, /24 for the outward one and /8 for the loopback. The host's real netmask is not reachable from here, and no payload measured reads it.",
+]
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "freeifaddrs"
+purpose = "Gives back a list getifaddrs handed out."
+edge_cases = [
+    "A list this did not hand out is ignored rather than freed, which is the only safe answer: the alternative is treating an arbitrary guest pointer as an allocation.",
+]
+cites = "FreeBSD getifaddrs(3)."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "__inet_ntop"
+purpose = "FreeBSD's own name for inet_ntop, and the spelling the payloads import."
+edge_cases = [
+    "One function with two names. The behaviour is described by the libScePosix entry for inet_ntop.",
+]
+cites = "POSIX.1-2008 inet_ntop(3)."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "kill"
+purpose = "Refuses to signal anything, and answers the one question that has a true answer here."
+edge_cases = [
+    "Signal zero sends nothing: it is the documented way to ask whether a process exists and may be signalled. The guest's own process is the only one it can name, so that is answered and every other process id reports failure.",
+    "Any real signal is refused. Nothing here delivers signals at all - signal records that a handler is remembered and never invoked - and reporting success would tell a guest it had terminated something that is still running. A payload that kills a previous instance of itself and then binds its port would be told the port was free and find it was not.",
+    "A real kill here would signal the emulator, since the guest runs inside this process. That is not what the guest meant, and it would end the run in a way that looked like the guest's own doing.",
+]
+cites = "POSIX.1-2008 kill(2); signal zero's meaning is that page's own."
+known_by = "published"
+found_in = ["klogsrv", "ftpsrv", "shsrv", "elfldr"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "getenv"
+purpose = "Answers a variable out of the environment this run gave the guest."
+edge_cases = [
+    "The environment is empty by default and deliberately: nothing here knows what the platform sets, and inventing plausible variables is how a guest ends up taking a path nobody chose for it. What a run does set is config.toml's entry.environment, so giving a guest a variable is a deliberate act with a diff.",
+    "Answers null for anything unset, which is what getenv answers and what every caller already handles.",
+    "The answer is cached per name, because a caller may keep the pointer: a fresh allocation per call would leak and a temporary would dangle the moment the caller looked at it.",
+]
+cites = "POSIX.1-2008 getenv(3)."
+known_by = "published"
+found_in = ["shsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "getcwd"
+purpose = "Answers the root, because there is no working directory here."
+edge_cases = [
+    "Nothing in this emulator tracks a working directory: paths resolve against the mount table, which is absolute, so a guest that changed directory would be changing something nothing reads.",
+    "The root is true in the only sense available - every path a guest can name is absolute - and answering a plausible-looking title directory would be inventing a fact.",
+    "A buffer too small is the documented failure rather than a truncation.",
+]
+cites = "POSIX.1-2008 getcwd(3)."
+known_by = "published"
+assumptions = ["That no payload measured depends on the working directory being anything in particular. They print it or prepend it to an absolute path."]
+found_in = ["shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "perror"
+purpose = "Writes the guest's own error message to the error stream."
+edge_cases = [
+    "Reads errno from the same storage __error() hands the guest, so what a guest set and what this reads cannot differ.",
+    "A null or empty prefix prints the message alone, which is what the standard says.",
+    "The message is ours rather than FreeBSD's, exactly as strerror's is, and for the same reason.",
+]
+cites = "POSIX.1-2008 perror(3)."
+known_by = "published"
+found_in = ["shsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "strerror_r"
+purpose = "strerror into a caller's own buffer."
+edge_cases = [
+    "The thread-safe spelling, and the one a server uses.",
+    "A buffer too small gets nothing rather than half a message, for the same reason every other bounded write here refuses.",
+]
+cites = "POSIX.1-2008 strerror_r(3)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "pread"
+purpose = "Reads at an offset without moving the descriptor's own position."
+edge_cases = [
+    "The position is the whole point: pread exists so two threads can read one file at once without agreeing about where the position is.",
+    "Windows' positioned read updates the file pointer, which is exactly what pread promises not to do - so on that host the position is put back afterwards, under the descriptor lock, which provides the atomicity the syscall does not (D373's shape, one layer down).",
+    "A standard stream has no positions and is refused rather than answered with zero, which would look like an end of file.",
+]
+cites = "POSIX.1-2008 pread(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "pwrite"
+purpose = "Writes at an offset without moving the descriptor's own position."
+edge_cases = ["As pread, including the host difference and how it is handled."]
+cites = "POSIX.1-2008 pwrite(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "dup2"
+purpose = "Makes one descriptor refer to what another refers to."
+edge_cases = [
+    "On the platform this imitates, two descriptors from dup2 share one file position: a read through either moves both. Here they do not - each holds its own handle. That is the one thing a program could notice, and it costs nothing until a program reads through both.",
+    "What dup2 is overwhelmingly used for - putting a file on descriptor 0, 1 or 2 before handing them to a child - does not depend on the shared position at all.",
+    "Duplicating onto a standard stream is refused. They are the host's here, and replacing one would send a guest's output somewhere this process still needs (D170).",
+    "Duplicating a descriptor onto itself succeeds and closes nothing, as the standard says.",
+]
+cites = "POSIX.1-2008 dup2(2)."
+known_by = "published"
+found_in = ["shsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "chmod"
+purpose = "Accepted, and applied to nothing - but the path is still checked."
+edge_cases = [
+    "A file server sets a mode on a file it has just created, and failing that stops the transfer. The mode itself cannot be honoured: the host need not have POSIX permission bits, and nothing a guest can check from inside this emulator depends on them.",
+    "The path goes through the same gates a write does, so a chmod on the user's own title is refused exactly as a write to it would be. That keeps the one guarantee that matters and drops the one that cannot be kept.",
+    "A path that is not there still fails, because chmod on a missing file fails.",
+]
+cites = "POSIX.1-2008 chmod(2)."
+known_by = "published"
+assumptions = ["That no payload measured reads a mode back. They set one and check the return value."]
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "fchmod"
+purpose = "chmod by descriptor, with the same caveat."
+edge_cases = ["As chmod: accepted, applied to nothing, and a descriptor nobody opened still fails."]
+cites = "POSIX.1-2008 fchmod(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "mlock"
+purpose = "Accepted, and pins nothing - because nothing here can be paged out."
+edge_cases = [
+    "A guest locks memory so it is not paged out. Guest memory here is host memory this process reserved and holds for the life of the run, so the guarantee the call asks for is one this already keeps by construction.",
+    "Refusing would stop a payload that locks a buffer before using it, over a call whose promise is already true.",
+]
+cites = "POSIX.1-2008 mlock(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "munlock"
+purpose = "The other half of mlock, unpinning nothing."
+edge_cases = ["As mlock."]
+cites = "POSIX.1-2008 munlock(2)."
+known_by = "published"
+found_on = "2026-08-29"
+
+[[function]]
+name = "stat"
+purpose = "What a guest is told about a path."
+edge_cases = [
+    "The layout is a setting, not a constant. The FreeBSD checkout these are read from is a newer release than the target's user space, and this is one of the two structures that changed shape in between - so both layouts are taken from that one header and ORBISTOUN_STAT_LAYOUT chooses, defaulting to the older (D374).",
+    "Size, type and the timestamps come from the host and are true. Ownership, device numbers, inode numbers and generation counts are zero. They describe a filesystem this is not, and a plausible number there is a fact about nothing that a guest might print or compare.",
+    "The mode's permission half is 0755 for a directory and 0644 for a file, which is what the mount model actually enforces at the only granularity it has: everything readable, and writable only under the storage the installation owns.",
+    "The block count is derived from the size rather than asked of the host: what a host really allocated is about its filesystem, and a guest multiplying this by the block size expects it to cover the file.",
+    "One link, because every path here names one file. Zero would say the file is unlinked and waiting to be reclaimed, which is a different thing.",
+]
+cites = "POSIX.1-2008 stat(2); struct stat and struct freebsd11_stat from sys/sys/stat.h; S_IFDIR and S_IFREG harvested from the same header."
+known_by = "published"
+assumptions = [
+    "That the target uses the pre-12 layout, which is why that is the default. Its user space predates the change - which is a reason rather than a measurement, and the setting exists so a run can test the other.",
+]
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "lstat"
+purpose = "stat, without following a symbolic link."
+edge_cases = [
+    "The same as stat here, and stated rather than hidden: nothing a guest can reach through a mount is a symbolic link this created, and following one out of a mount is already refused by path resolution - so the distinction the call exists to make has nothing to act on.",
+]
+cites = "POSIX.1-2008 lstat(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "opendir"
+purpose = "Answers a handle a guest walks a directory with."
+edge_cases = [
+    "A handle is an address, for the same reason fopen's is (D165): a guest dereferences what it gets, so an error code there is a wild pointer.",
+    "The listing is taken once, at open, which is what a directory stream is - a snapshot a program iterates.",
+    "`.` and `..` come first, because a real listing has them and a program counting or skipping entries expects to see them.",
+    "Handles come from the same source stream handles do, so two tables cannot issue one twice - at which point closing one would close the other.",
+]
+cites = "POSIX.1-2008 opendir(3)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "readdir"
+purpose = "The next entry in a directory, or null at the end."
+edge_cases = [
+    "The layout is a setting, not a constant. The FreeBSD checkout these are read from is a newer release than the target's user space, and this is one of the two structures that changed shape in between - so both layouts are taken from that one header and ORBISTOUN_STAT_LAYOUT chooses, defaulting to the older (D374).",
+    "One buffer per directory, reused. readdir answers a pointer the caller reads and does not free, valid until the next call on the same directory - so a fresh allocation per entry would leak one per file in the listing.",
+    "Null at the end, which is how the loop a guest wrote terminates. A directory nobody opened answers null too, rather than a wild pointer.",
+]
+cites = "POSIX.1-2008 readdir(3); struct dirent and struct freebsd11_dirent from sys/sys/dirent.h; DT_DIR and DT_REG harvested from the same header."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "closedir"
+purpose = "Gives a listing back."
+edge_cases = ["Closing a handle nobody opened is refused, and so is closing one twice."]
+cites = "POSIX.1-2008 closedir(3)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "fdopen"
+purpose = "A stream over a descriptor that is already open."
+edge_cases = [
+    "What a file server writes its replies through: it accepts a connection, wraps the descriptor, and uses fprintf from then on. A reply that went to the host's error stream instead would look like a working server nobody could talk to.",
+    "The stream owns nothing. Closing it forgets the wrapper and leaves the descriptor open, which is not what fclose does on the platform and is what this can promise - closing a descriptor the stream never owned would take it out from under a guest that still holds the number.",
+    "The mode is not honoured: the descriptor decides what it can do, and a stream claiming to be writable over a read-only file would fail at the first write instead of here.",
+    "A descriptor nobody opened answers null rather than an error code, because a caller reads this as a pointer (D125).",
+]
+cites = "POSIX.1-2008 fdopen(3)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "fileno"
+purpose = "The descriptor behind a stream, where the stream is one."
+edge_cases = [
+    "Answers a number only for a stream that is a descriptor. A stream from fopen owns a host file rather than a descriptor, so it has no number to give - and inventing one would hand a guest a descriptor that names something else entirely.",
+]
+cites = "POSIX.1-2008 fileno(3)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "sendfile"
+purpose = "Copies a file straight into a socket."
+edge_cases = [
+    "How a file server sends a file. Refusing it does not make a server fall back to read and write - it makes the transfer fail - and answering success without moving bytes is worse: the client gets an empty file and no error.",
+    "Copied in bounded chunks rather than one allocation the size of the file, because a guest may hand this a file larger than this process should hold at once.",
+    "The header and trailer are refused rather than half-performed. hdtr points at a structure of scatter-gather buffers whose layout is not derivable here, so a guest passing one is passing something this cannot read. Every payload measured passes null.",
+    "A short write is the socket refusing more, and reporting it is the interface: the caller reads how much went and sends the rest itself.",
+]
+cites = "FreeBSD sendfile(2)."
+known_by = "published"
+found_in = ["ftpsrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "sscanf"
+purpose = "Reads values out of a string, as printf writes them into one."
+edge_cases = [
+    "Four conversions can be assigned and a fifth cannot: arguments arrive in six registers and two are spent on the string and the format, so the fifth destination was passed on the stack the trampoline does not reach.",
+    "A format needing more is refused entirely rather than assigning the four it can. sscanf's contract is that the count says how many conversions succeeded, so a caller told four believes those four are good - and they might be, or the arguments might have been misaligned from the start.",
+    "A conversion it cannot read stops the scan rather than skipping it, because carrying on would assign the next argument from the wrong place.",
+    "Whitespace in the format matches any run of it; any other character must match itself; a numeric conversion skips leading whitespace of its own accord.",
+]
+cites = "ISO C sscanf; POSIX.1-2008 sscanf(3)."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "strftime"
+purpose = "Renders a broken-down time as text."
+edge_cases = [
+    "A conversion it cannot render stops the whole thing and answers zero: a half-rendered timestamp is a wrong date rather than a short one, and a caller printing it has no way to tell.",
+    "No timezone and no locale. %Z and %z would need the fields past the nine this reads and a zone this emulator has no notion of, so they are among the conversions that stop it. The names are the C locale's, which is what a file listing wants.",
+    "A tm_wday or tm_mon outside its table stops it too, rather than wrapping - a nine there is a guest with a broken structure and rendering a plausible day would hide that.",
+]
+cites = "ISO C strftime; POSIX.1-2008 strftime(3); struct tm from include/time.h - nine ints, then a long and a pointer this does not read."
+known_by = "published"
+found_in = ["ftpsrv", "websrv"]
+found_on = "2026-08-29"
+
+[[function]]
+name = "__inet_pton"
+purpose = "Text as an address, for the two internet families - the direction a server needs before it can bind."
+edge_cases = [
+    "Three answers, and a caller acts on the difference between all three: 1 parsed, 0 the text is not an address in this family, -1 the family is not one this serves.",
+    "AF_INET is dotted quad only. The classful short forms - a.b.c, a.b, a bare number - belong to inet_aton and are refused here, which is the difference between the two functions.",
+    "A leading zero in an octet is refused: it is octal to some readers and decimal to others, so the same text names two different addresses.",
+    "AF_INET6 is parsed by the standard library, which follows RFC 4291 and rejects a zone identifier - both of which inet_pton also does.",
+    "Only the underscored spelling is served, because only that spelling has been measured being imported.",
+]
+cites = "POSIX.1-2008 inet_pton(3); RFC 4291."
+known_by = "published"
+found_in = ["zftpd"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "kqueue"
+purpose = "A new event queue, as a descriptor from the same table files and sockets come from."
+edge_cases = [
+    "The descriptor is an ordinary one, so close on it works without the guest knowing what kind of thing it is.",
+    "Refused if this build cannot name the event filters, which it says once. A queue that exists but reports nothing is a loop that never turns.",
+]
+cites = "FreeBSD kqueue(2)."
+known_by = "published"
+found_in = ["zftpd", "shsrv", "elfldr"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "kevent"
+purpose = "Registers what a queue watches and reports what became ready."
+edge_cases = [
+    "EVFILT_READ and EVFILT_WRITE only. Every other filter - timers, signals, processes, vnodes - is refused with EINVAL rather than accepted silently: a filter this never fires is a wakeup a guest waits for that cannot come.",
+    "The changes are applied before the wait, and a bad one is reported as its own EV_ERROR event rather than stopping the ones after it.",
+    "A null timeout blocks; a zeroed one asks once and answers. They are a timespec here - seconds and nanoseconds - not the timeval select takes.",
+    "Readiness is asked by polling the descriptor table, so the latency is this emulator's rather than the platform's. Asking never consumes: a listener's connection is kept for the guest's own accept.",
+    "The data field of a read event is reported as zero. How much is waiting cannot be known without consuming it, and a caller reading zero as a byte count would be wrong.",
+    "struct kevent has two shapes - 32 bytes through FreeBSD 11 and 64 after it - decided by the same setting as stat and dirent, because all three moved at one ABI boundary.",
+]
+cites = "FreeBSD kevent(2); struct kevent and the filters from sys/sys/event.h."
+known_by = "published"
+found_in = ["zftpd", "shsrv", "elfldr"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "fcntl"
+purpose = "What a descriptor is set to: the flags a guest reads back and the ones it sets."
+edge_cases = [
+    "It is a pair, which is why an unimplemented answer is worse than most: a guest reads the flags, changes one bit and writes them back, so a placeholder does not stay where it was put. zftpd handed one straight back to F_SETFL and closed its web listener.",
+    "O_NONBLOCK is honoured - set on the underlying socket - because it is the one flag a server's event loop depends on.",
+    "FD_CLOEXEC is remembered and does nothing: nothing here ever execs, so there is no moment at which it could have an effect. It reads back as it was set.",
+    "F_DUPFD copies to the lowest free descriptor at or above the argument, and does not carry FD_CLOEXEC; F_DUPFD_CLOEXEC does.",
+    "Every other command is refused. A lock, an owner or a seal would need machinery nothing here has, and answering success would tell a guest it held a lock it does not.",
+    "What was set is forgotten when the descriptor closes, so a number that comes back around does not inherit the last one's flags.",
+]
+cites = "POSIX.1-2008 fcntl(2); the commands and O_NONBLOCK from sys/sys/fcntl.h."
+known_by = "published"
+found_in = ["zftpd"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "realpath"
+purpose = "The canonical spelling of a path, and whether it is really there - what a server calls before it will act on one."
+edge_cases = [
+    "The answer is a guest path, not the host path it maps to. Handing back a host path would be a true fact about this machine and a lie about the platform, and the guest would pass it straight to open.",
+    "Every component must exist, as POSIX requires: a path this cannot resolve answers null rather than the tidied-up text. A caller uses the difference to decide whether to serve the path at all.",
+    "The components are walked here rather than by the host: `.` is dropped, `..` pops the one before it, empty components collapse.",
+    "`..` above the root stays at the root, which is what every filesystem does and what stops a path leaving the mount table by spelling alone.",
+    "A relative path is taken from the root, because there is no working directory here - the same fact getcwd reports.",
+    "A null second argument allocates, from this library's own heap, so the guest's free gives it back.",
+    "A path longer than PATH_MAX is refused rather than truncated: half a path is a different path, and the caller sized its buffer by that number.",
+]
+cites = "POSIX.1-2008 realpath(3); PATH_MAX from sys/sys/syslimits.h."
+known_by = "published"
+found_in = ["zftpd"]
+found_on = "2026-08-30"
+
+[[function]]
+name = "sysctlbyname"
+purpose = "The same question sysctl answers, asked by name - which is how a guest asks what kernel it is running on."
+edge_cases = [
+    "A name this knows is answered; a name it does not is refused and reported once, so the list of names a guest wanted is the work list. The same shape as the numeric sysctl.",
+    "kern.osrelease comes from the machine's own configuration and is empty by default. Nothing here knows what a console's kernel calls itself - the FreeBSD checkout is not that kernel - so an unset value refuses rather than answering a plausible version.",
+    "A guest branches hard on the answer: zftpd reports `Firmware detection failed` and turns a feature off. Answering something plausible would send it down a path chosen by a number nobody measured, and the run would look like it worked (D397).",
+    "A null buffer with a length pointer is the size half of the pair: the length is written back and nothing else, which is how a caller sizes an allocation before asking again.",
+    "A buffer too small has the needed length written back and reports failure, rather than truncating - half a version string is a different version.",
+]
+cites = "FreeBSD sysctlbyname(3)."
+known_by = "published"
+found_in = ["zftpd"]
+assumptions = [
+    "What kern.osrelease should answer is unknown, and it is a value rather than a behaviour: nothing here can derive it, because the console's kernel is not the FreeBSD checkout. It is configurable and empty, so the question is refused rather than answered wrongly - and one string read off a real console settles it.",
+    "That the shape matters as well as the presence. zftpd parses what comes back and still reports detection failed when given a plausible-looking version, so the format is part of the answer.",
+    "Which other names a title asks for is unmeasured. Each refusal is reported once, so a run against a real title produces that list.",
+]
+found_on = "2026-08-30"
+
+[[function]]
+name = "rand"
+arity = 0
+purpose = "A pseudo-random integer in the C library's range."
+returns = "count"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "srand"
+arity = 1
+purpose = "Seeds the pseudo-random sequence rand draws from."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_ZSt13_Execute_onceRSt9once_flagPFiPvS1_PS1_ES1_"
+arity = 3
+purpose = "std::call_once's engine: runs a once-flag initialiser exactly once, through a reentrant guest call."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "Runs the guest callback on a fresh stack via the thread registry's reentrant call. The flag's first word is 0 before the initialiser and 1 after."
+
+[[function]]
+name = "_Mtx_init"
+arity = 2
+purpose = "Constructs a C-runtime mutex - the layer std::mutex lowers onto - storing a handle where the guest asked."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+assumptions = ["Every std mutex is created recursive until the runtime's type bits are measured; cross-thread exclusion is real regardless."]
+
+[[function]]
+name = "_Mtx_destroy"
+arity = 1
+purpose = "Releases a C-runtime mutex. A word never initialised names nothing to release."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Mtx_lock"
+arity = 1
+purpose = "Blocks until the C-runtime mutex is held by this thread."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Mtx_unlock"
+arity = 1
+purpose = "Releases a C-runtime mutex this thread holds."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Mtx_trylock"
+arity = 1
+purpose = "Takes a C-runtime mutex only if free, reporting busy when it is not."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Cnd_init"
+arity = 1
+purpose = "Constructs a C-runtime condition variable where the guest asked."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Cnd_destroy"
+arity = 1
+purpose = "Releases a C-runtime condition variable."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Cnd_wait"
+arity = 2
+purpose = "Waits on a condition variable, releasing the mutex around the wait and retaking it after."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Cnd_timedwait"
+arity = 3
+purpose = "Waits on a condition variable until signalled or the absolute xtime deadline passes."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Cnd_signal"
+arity = 1
+purpose = "Wakes one waiter on a condition variable."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Cnd_broadcast"
+arity = 1
+purpose = "Wakes every waiter on a condition variable."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Xtime_get_ticks"
+arity = 0
+purpose = "The current time in 100-nanosecond ticks since the epoch, the unit the runtime's xtime clock counts in."
+returns = "count"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_Thrd_sleep"
+arity = 2
+purpose = "Yields the thread for a requested span, clamped to one second while the runtime's convention is unpinned."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceLibcMspaceMalloc"
+arity = 2
+purpose = "Allocates from an mspace (Doug Lea mspace arena). Served from the shared host heap; the arena handle is not consulted. Answers a pointer, never the placeholder a guest would write through."
+returns = "pointer"
+edge_cases = ["PPSA21564 called sceLibcMspaceMalloc(0x0, 0x48) and, unimplemented, wrote through the returned placeholder: write to 0x7fff0001 (D451)."]
+known_by = "published"
+cites = "Doug Lea dlmalloc mspace interface (public domain): mspace_malloc(msp, bytes); leading-arg shape confirmed by argument dump."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceLibcMspaceCalloc"
+arity = 3
+purpose = "mspace calloc: zeroed allocation of count*size, served from the shared host heap."
+returns = "pointer"
+known_by = "published"
+cites = "Doug Lea dlmalloc mspace_calloc(msp, n_elements, elem_size)."
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceLibcMspaceRealloc"
+arity = 3
+purpose = "mspace realloc: resize a prior mspace allocation, served from the shared host heap."
+returns = "pointer"
+known_by = "published"
+cites = "Doug Lea dlmalloc mspace_realloc(msp, ptr, bytes)."
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceLibcMspaceFree"
+arity = 2
+purpose = "mspace free: returns an mspace allocation to the shared host heap; the block header carries the size, so the arena handle is not needed."
+returns = "status"
+known_by = "published"
+cites = "Doug Lea dlmalloc mspace_free(msp, ptr)."
+found_on = "2026-09-01"
+
+[[function]]
+name = "bcmp"
+arity = 3
+purpose = "Compares two byte strings for equality. Handled as memcmp: bcmp promises only equal (zero) vs not-equal (nonzero), which memcmp's result satisfies exactly."
+returns = "count"
+known_by = "published"
+cites = "POSIX/4.3BSD bcmp(3); equivalent to memcmp for the equal/not-equal contract."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"

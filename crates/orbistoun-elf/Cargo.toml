@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "orbistoun-elf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Vendor ELF and PRX container parsing, including the custom segment and dynamic-table types."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+orbistoun-nid = { workspace = true }
+zerocopy = { workspace = true }
+thiserror = { workspace = true }

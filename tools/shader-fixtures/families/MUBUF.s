@@ -1,0 +1,12 @@
+buffer_load_dword v0, v1, s[4:7], 0 offen
+buffer_load_dword v100, v200, s[8:11], 0 offen
+buffer_load_dword v9, v255, s[12:15], 0 offen
+buffer_store_dword v2, v3, s[8:11], 0 offen
+buffer_store_dword v130, v140, s[16:19], 0 offen
+buffer_store_dword v5, v190, s[20:23], 0 offen
+buffer_load_dwordx2 v[4:5], v6, s[12:15], 0 offen
+buffer_load_dwordx2 v[100:101], v150, s[24:27], 0 offen
+buffer_load_dwordx2 v[20:21], v240, s[28:31], 0 offen
+buffer_store_dwordx2 v[8:9], v10, s[16:19], 0 offen
+buffer_store_dwordx2 v[110:111], v160, s[32:35], 0 offen
+buffer_store_dwordx2 v[30:31], v250, s[36:39], 0 offen

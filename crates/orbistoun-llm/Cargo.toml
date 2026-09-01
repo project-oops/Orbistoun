@@ -1,0 +1,44 @@
+[package]
+publish = false
+name = "orbistoun-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Local-first language-model access as a generic question-and-answer service - host sizing, an ordered backend registry, and an in-process engine."
+
+[lints]
+workspace = true
+
+# **No `orbistoun-*` dependency, and that is the design.** This crate is written to be
+# useful to callers that do not exist yet, so it knows nothing about traces, findings,
+# imports or titles. The one thing it would otherwise want - `orbistoun-paths`, for
+# somewhere to put a multi-gigabyte download - is an argument instead, so the crate
+# that holds the containment guarantee is the crate that decides where bytes land.
+[dependencies]
+orbistoun-env = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Hosted endpoints and model downloads. Blocking on purpose: this workspace has no
+# async runtime, inference is CPU-bound work a runtime cannot speed up, and an HTTP
+# call here is one round trip rather than a fan-out. `rustls` rather than the platform
+# TLS stack so a build needs no system OpenSSL.
+reqwest = { workspace = true }
+
+# In-process inference. The inference is pure Rust - no C++ toolchain, unlike a
+# llama.cpp binding - which matters more here than raw speed, given how much of this
+# repository's tooling already needs a VM to get a toolchain. It is not free of native
+# code: see the workspace manifest for what `tokenizers` drags in.
+candle-core = { workspace = true }
+candle-transformers = { workspace = true }
+tokenizers = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

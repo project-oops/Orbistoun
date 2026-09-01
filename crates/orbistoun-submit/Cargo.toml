@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "orbistoun-submit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "What one machine has to contribute - gathered, checked by re-derivation, never trusted."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The measurement format. A submission is a file of these plus the titles they came from.
+orbistoun-hle = { workspace = true }
+# How far each title got, and under which policy - the half that is worth more from a
+# machine holding titles this project will never see.
+orbistoun-overrides = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }

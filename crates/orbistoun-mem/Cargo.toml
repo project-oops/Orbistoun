@@ -1,0 +1,26 @@
+[package]
+publish = false
+name = "orbistoun-mem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Guest address space - fixed-address reservation, direct and flexible memory."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+thiserror = { workspace = true }
+
+# Fixed-address reservation has no portable API. Both are thin, audited wrappers
+# over the OS calls; see the module docs for why VirtualAlloc2 and mmap
+# MAP_FIXED_NOREPLACE are the only two primitives we need.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

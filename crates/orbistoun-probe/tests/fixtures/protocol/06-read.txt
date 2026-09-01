@@ -1,0 +1,27 @@
+# Memory, as the same `bytes` records a report uses - so an existing parser reads them
+# without knowing this protocol exists.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|5e6f7a8b|call,resolve,read,report
+OBS|part|5e6f7a8b|target|console
+OBS|part|5e6f7a8b|firmware|13.520.001
+OBS|part|5e6f7a8b|probe|dev
+OBS|done|1|ok||
+# 0x20 bytes come back as two records of sixteen - the server caps a bytes record at 16
+# bytes, and the offset field says where each chunk sits. Each hex run is a whole number of
+# bytes (32 digits = 16 bytes); a run that is not is a defective record, and a consumer is
+# right to refuse it rather than drop or invent a nibble.
+CMD|2|read|0x8003f510|0x20
+OBS|ack|2|read
+OBS|bytes|read/0x8003f510|(memory)|contents|0|35000000610000000000000000000000
+OBS|bytes|read/0x8003f510|(memory)|contents|16|37000000610000000c23000000000000
+OBS|done|2|returned|0x20|
+# An address this platform can test before touching. It answers `unmapped` rather than
+# faulting - and that is a DIFFERENT fact from the death in 03-died.txt. "Not readable"
+# and "asking killed the process" are both legitimate behaviours and the record says which.
+CMD|3|read|0xdead0000|0x10
+OBS|ack|3|read
+OBS|refused|3|unmapped
+CMD|4|bye
+OBS|ack|4|bye
+OBS|done|4|ok||

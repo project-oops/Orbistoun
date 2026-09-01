@@ -1,0 +1,1156 @@
+#!/usr/bin/env bash
+# orbistoun - the one dev CLI for this project.
+#
+# The seven verbs every OOPS project carries, so `oops test orbistoun` and
+# `./bin/orbistoun test` are one command reached two ways:
+#
+#   ./bin/orbistoun build          # release binary
+#   ./bin/orbistoun test           # the test suite
+#   ./bin/orbistoun lint           # clippy at -D warnings
+#   ./bin/orbistoun fmt            # format in place
+#   ./bin/orbistoun check          # everything CI checks, in CI's order
+#   ./bin/orbistoun clean          # remove build output
+#   ./bin/orbistoun doc            # build the API docs, without opening a browser
+#
+# And this project's own, which are the emulator rather than its build:
+#
+#   ./bin/orbistoun doctor [--fix] # is this machine ready; --fix installs what is missing
+#   ./bin/orbistoun fix            # cargo fmt + clippy --fix. More than `fmt`, so it is
+#                                  # asked for by name rather than folded into it.
+#   ./bin/orbistoun run <title>    # boot one title: refresh names if stale, run, report
+#   ./bin/orbistoun cli <args...>  # the orbistoun binary, raw
+#   ./bin/orbistoun docs           # build the API docs AND open them in a browser
+#   ./bin/orbistoun site           # assemble the Pages bundle into ./site for preview
+#   ./bin/orbistoun sweep          # run every local guest and rank what to implement next
+#   ./bin/orbistoun names          # regenerate symbols/ from local guest modules
+#   ./bin/orbistoun suggest [n|benchmark] [id] # ask a model for words; benchmark ranks them
+#   ./bin/orbistoun fmt-check      # formatting, checked rather than applied. What CI runs,
+#                                  # where `fmt` rewrites in place
+#   ./bin/orbistoun provenance     # the guard CI runs: no console-derived material tracked
+#   ./bin/orbistoun knowledge-audit # every recorded behaviour accounts for itself
+#   ./bin/orbistoun symbols-audit  # every committed name re-derives, or is on the ceiling
+#   ./bin/orbistoun constants     # the harvested ABI constants still match their headers
+#   ./bin/orbistoun tables         # the shader tables still match what generates them
+#   ./bin/orbistoun decide "<title>" # reserve the next decision number, atomically
+#   ./bin/orbistoun hooks          # install the pre-push hook + the tools it needs
+#
+# Every verb here is a thin wrapper over the EXACT command
+# .github/workflows/ci.yml runs. That is the point: this script cannot drift from
+# CI, because it is CI's commands. If you change one, change both.
+#
+# Cross-platform bash (Linux, macOS, Git Bash on Windows).
+
+set -euo pipefail
+
+# This script lives in bin/, so the repository root is one level up.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Absolute, because usage() reads this file back and the cd below would strand a relative $0.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+cd "$HERE"
+
+# --- helpers ---------------------------------------------------------------
+
+step() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
+# Says a step failed **without ending the run**, for the steps `check` accumulates.
+#
+# `die` exits, which is right for a setup problem - an unknown verb, a missing binary - and
+# wrong for a gate step: `also` cannot catch an `exit`, so one failing guard took `fmt`,
+# `clippy` and the whole test suite with it and the run read as though the tree had been
+# examined (D280).
+bad() { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; return 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Runs an optional cargo subcommand, or explains how to install it. Mirrors the
+# pre-push hook so a half-installed dev env still gets through the checks it can.
+optional() {
+    local tool="$1"; shift
+    if have "$tool"; then
+        step "$tool $*"
+        # Warned about rather than propagated. These are advisory - the gate degrades to
+        # slower equivalents when they are absent - but under `set -e` a finding from one of
+        # them killed the run outright, before the summary of the *required* steps could
+        # print. An advisory tool must not be able to end the report (D192).
+        "$tool" "$@" || warn "$tool reported findings - advisory, not blocking"
+    else
+        warn "$tool not installed - skipping. Install: cargo install ${tool#cargo-}"
+    fi
+}
+
+# --- decision numbering ----------------------------------------------------
+# The decision log is this project's durable memory, and a decision is cited from source
+# by number. Two numbers the same makes every citation of that number ambiguous - a reader
+# following it lands on two different decisions and cannot tell which the code meant.
+#
+# It happens for a structural reason rather than through carelessness: more than one
+# session appends to this file, each of them reading the last number and adding one, and
+# neither sees the other's unlanded writes. Nothing about being careful prevents that,
+# which is why it is a check rather than a convention.
+# Reserves the next decision number and prints it.
+#
+# # Why a command rather than a convention
+#
+# The convention was "grep the highest number and add one", and it races. Two sessions
+# working in one tree both read 312, both spent a few minutes writing, and both appended
+# D313 - twice in one afternoon. The gate below catches it afterwards, which is the right
+# backstop and the wrong moment: by then two entries exist and the citations in code
+# comments already point at an ambiguous number.
+#
+# The window is what matters, so this closes it. The number is claimed the instant it is
+# chosen, under a lock, before a word of the body is written. `mkdir` is the lock because
+# it is atomic everywhere this runs, unlike a test-then-touch.
+#
+# A reservation nobody fills in is caught by the gate rather than left to rot (D316).
+decide() {
+    local title="$1"
+    [ -n "$title" ] || die "decide needs a title: ./bin/orbistoun decide \"What was decided\""
+
+    local lock=docs/.decision-number.lock
+    # Waits rather than fails. The whole point is that the other holder is about to finish,
+    # and telling a person to retry is asking them to be the lock.
+    local waited=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        waited=$((waited + 1))
+        [ "$waited" -lt 50 ] || die "$lock held for five seconds - remove it if no session is writing"
+        sleep 0.1
+    done
+    # Released however this exits, including a failure below. A lock that outlives its
+    # holder is worse than no lock: the next session is told to delete it and learns to.
+    trap 'rmdir "$lock" 2>/dev/null || true' RETURN
+
+    local next
+    next=$(grep -oE '^## D[0-9]+' docs/DECISIONS.md | sed 's/^## D//' | sort -n | tail -1)
+    next=$((next + 1))
+
+    {
+        printf '\n## D%s - %s\n\n' "$next" "$title"
+        printf '**RESERVED** - being written. An entry left in this state is a number claimed\n'
+        printf 'and never spent, and the gate refuses one.\n'
+    } >> docs/DECISIONS.md
+
+    printf 'D%s\n' "$next"
+}
+
+decisions() {
+    step "decision numbers are unique"
+    local duplicates known unlisted stale reserved
+    duplicates=$(grep -oE '^## D[0-9]+' docs/DECISIONS.md | sed 's/^## //' | sort | uniq -d || true)
+    known=$(grep -vE '^#|^$' docs/decision-number-backlog.txt | sort || true)
+
+    # A reservation is a number claimed and not spent. Cheap to leave behind - a session
+    # ends, a context is lost - and it reads in the log as though a decision were recorded.
+    reserved=$(grep -B 2 '^\*\*RESERVED\*\*' docs/DECISIONS.md | grep -oE '^## D[0-9]+.*' || true)
+    if [ -n "$reserved" ]; then
+        echo "$reserved"
+        bad "these numbers were reserved and never written - finish them or remove them"
+        return 1
+    fi
+
+    unlisted=$(comm -23 <(echo "$duplicates") <(echo "$known"))
+    if [ -n "$unlisted" ]; then
+        echo "$unlisted"
+        bad "these decision numbers are newly duplicated - a citation of them is ambiguous"
+        return 1
+    fi
+
+    # The backlog is a ceiling, not an allowance: an entry that has stopped duplicating
+    # has to leave, or the list slowly stops describing anything.
+    stale=$(comm -13 <(echo "$duplicates") <(echo "$known"))
+    if [ -n "$stale" ]; then
+        echo "$stale"
+        bad "these are listed in docs/decision-number-backlog.txt and no longer duplicate - remove them"
+        return 1
+    fi
+}
+
+# The documentation states its own numbers, and it says they are printed by the tool rather
+# than counted by hand. Both parts were true and the numbers drifted anyway: two files
+# disagreed with the tool and with each other, one of them by ten open questions.
+#
+# A number that no command produces will be wrong within a week - the status page says so
+# itself. This makes that a mechanical fact rather than an intention (D240).
+generated_numbers() {
+    step "the generated numbers blocks are current"
+    must cargo run --quiet -p orbistoun-cli -- status --check
+}
+
+# --- prose -------------------------------------------------------------------
+# A `\` at the end of a line inside a string literal is collapsed by `cargo fmt`, which
+# bakes the source indentation into the rendered text - so a message meant to read as a
+# sentence arrives with runs of spaces through the middle of it. This has shipped garbled
+# output three times, always after formatting rather than when the line was written, which
+# is why it is a mechanical check and not a habit (D184).
+#
+# `concat!` of one-line literals is the replacement. Note it defeats implicit `{name}`
+# capture, so arguments go positional.
+prose() {
+    step "no line-continued string literals"
+    local offenders known unlisted stale
+    # **The working tree, not the index.** This used `git grep`, which searches only
+    # tracked files - and with no commit yet in this repository most files are untracked, so
+    # the guard was checking a fraction of the source and reporting "none added" regardless.
+    # A check that cannot see what it is checking is worse than no check: it is reassuring
+    # (D198).
+    # The path separator is not normalised here: `grep -r crates/` echoes back the prefix
+    # it was given, so the output is already `/`-separated on every platform. The attempt to
+    # normalise it was a broken `sed` expression that aborted, emptied `offenders`, and left
+    # the guard unable to report a new offender while calling every listed one stale (D199).
+    offenders=$(grep -rlE '"[^"]*[\]$' --include='*.rs' crates/ | sort || true)
+    known=$(grep -vE '^#|^$' docs/prose-continuation-backlog.txt | sort || true)
+
+    unlisted=$(comm -23 <(echo "$offenders") <(echo "$known"))
+    if [ -n "$unlisted" ]; then
+        echo "$unlisted"
+        echo "  cargo fmt collapses these and bakes the source indentation into the"
+        echo "  rendered text. Use concat! of one-line literals instead."
+        bad "a line-continued string literal was added - its rendered text will not survive formatting"
+        return 1
+    fi
+
+    # A listed file that has stopped offending has to leave the list, or the ceiling stops
+    # being a ceiling and becomes permission.
+    stale=$(comm -13 <(echo "$offenders") <(echo "$known"))
+    if [ -n "$stale" ]; then
+        echo "$stale"
+        bad "these are listed in docs/prose-continuation-backlog.txt and no longer offend - remove them"
+        return 1
+    fi
+    echo "  none added; $(echo "$known" | grep -c .) file(s) on the known ceiling"
+}
+
+# --- generated tables ---------------------------------------------------------
+# The shader data tables are *solved* from bytes a reference assembler produced, not
+# transcribed (D085). Nothing checked that the committed tables still matched what the
+# generator produces, because regenerating needs `llvm-mc` with the AMDGPU target and no
+# machine here has one - so a hand-edited table would have survived indefinitely.
+#
+# `--transcript` replays a committed recording of that assembler, which needs nothing
+# installed. Regenerating from it and diffing is the check that was impossible before
+# (D209).
+tables() {
+    step "generated tables match their recordings"
+    local transcripts="crates/orbistoun-gen/tests/fixtures/transcripts"
+    if [ ! -d "$transcripts" ]; then
+        warn "no recordings at $transcripts - the tables are unverified this run"
+        return 0
+    fi
+    local failed=0
+    # generator : the file it writes
+    for pair in \
+        "buffer-formats:crates/orbistoun-shader/data/buffer-formats.toml" \
+        "operands:crates/orbistoun-shader/data/opcode-operands.toml"; do
+        local gen="${pair%%:*}" file="${pair#*:}"
+        if ! cargo run -q -p orbistoun-gen -- --transcript "$transcripts" "$gen" --dry-run \
+            2>/dev/null > "$file.regenerated"; then
+            rm -f "$file.regenerated"
+            warn "$gen could not replay - recordings may be stale"
+            failed=1
+            continue
+        fi
+        # The line naming the generator is the one difference a rename legitimately makes.
+        if diff -q <(grep -v "^# Generated by" "$file") \
+            <(grep -v "^# Generated by" "$file.regenerated") >/dev/null; then
+            printf '  ok       %s
+' "$file"
+        else
+            echo "  $file differs from what its recording produces:"
+            diff <(grep -v "^# Generated by" "$file") \
+                <(grep -v "^# Generated by" "$file.regenerated") | head -20
+            failed=1
+        fi
+        rm -f "$file.regenerated"
+    done
+    [ "$failed" -eq 0 ] || { bad "a generated table no longer matches its generator - it was edited by hand, or the generator changed"; return 1; }
+}
+
+# --- harvested constants -----------------------------------------------------
+# **Proof of sourcing, not a style check.** The ABI constants are the one table in this
+# repository that is neither derived by experiment nor written by a person: they are copied
+# out of somebody else's headers. That makes "where did this number come from" the only
+# question that matters about them, and a file nobody re-derives is a file that answers it
+# with "somebody said so" (D352, D353, D354).
+#
+# Two ways a wrong number gets in, and this catches both: a hand-edit, and a harvest run
+# against a different revision from the one the file claims. The header line carries the
+# revision, so regenerating with it and diffing proves the whole file against that revision.
+constants() {
+    step "harvested constants still match their headers"
+    # `orbistoun-hle`, not `orbistoun-libc`: the table moved down so the crate implementing
+    # sockets and files could read it rather than writing its numbers out by hand (D385).
+    local file="crates/orbistoun-hle/data/abi-constants.toml"
+    if [ ! -f "$file" ]; then
+        bad "$file is missing - the constants are unsourced"
+        return 1
+    fi
+
+    # Where the checkout is. Named by a variable rather than assumed, because it lives
+    # outside this repository and there is no reason every machine puts it in one place.
+    local source="${ORBISTOUN_FREEBSD_SRC:-../../freebsd-src}"
+    if [ ! -d "$source" ]; then
+        warn "no FreeBSD checkout at $source - the constants are unverified this run; set ORBISTOUN_FREEBSD_SRC"
+        return 0
+    fi
+
+    # **The revision is not read out of the file.** It was, and that made this gate unable
+    # to tell a true claim from a false one: regenerating with whatever the file said
+    # produced a file saying the same thing, so a header edited to name a different revision
+    # passed. The generator asks the checkout instead, so the header states what the harvest
+    # actually read and a hand-edited one differs from a regeneration (D354).
+    if ! cargo run -q -p orbistoun-gen -- constants "$source" --dry-run         2>/dev/null > "$file.regenerated"; then
+        rm -f "$file.regenerated"
+        warn "the harvest could not run - the checkout may be missing the headers it needs"
+        return 0
+    fi
+
+    if diff -q "$file" "$file.regenerated" >/dev/null; then
+        printf '  ok       %s re-derives from its own checkout
+' "$file"
+        rm -f "$file.regenerated"
+    else
+        echo "  $file is not what its own source produces:"
+        diff "$file" "$file.regenerated" | head -20
+        rm -f "$file.regenerated"
+        bad "a harvested constant no longer matches the header it came from - the file was edited by hand, or the checkout is at a different revision from the one it names"
+        return 1
+    fi
+}
+
+# --- provenance --------------------------------------------------------------
+# The one gate where a false negative is expensive, so it is the one most worth being
+# paranoid about the *inputs* to.
+#
+# **What "would be committed" means here.** `git ls-files` alone reads the index, and this
+# repository has no commits - so it saw whatever happened to have been staged and nothing
+# else. `--cached --others --exclude-standard` is tracked files plus untracked ones that
+# are not ignored: exactly the set `git add -A` would pick up, which is the set that
+# matters. Ignored paths (`titles/`, `target/`, `site/`) are correctly invisible - guest
+# material living there is the arrangement working, not a violation (D199).
+#
+# All three checks live here rather than in the CI workflow so the two cannot drift; CI
+# calls this verb. They had already drifted - CI checked three things and this checked one,
+# which meant passing locally and failing in CI, on the gate least suited to surprises.
+provenance() {
+    step "provenance guard"
+    local files banned large keys fail=0
+
+    files=$(git ls-files --cached --others --exclude-standard)
+
+    # 1. File types that can only be console-derived.
+    banned=$(printf '%s\n' "$files" \
+      | grep -iE '\.(prx|sprx|self|pkg|pup|elf|bin)$|(^|/)eboot\.bin$|(^|/)(firmware|dumps|games)/' \
+      | grep -vE '^tests/fixtures/synthetic/' || true)
+    if [ -n "$banned" ]; then
+        echo "  console-derived file types would be committed:"
+        printf '    %s\n' $banned
+        fail=1
+    fi
+
+    # 2. Large *binary* files outside assets/ - the shape a dump takes even when the
+    #    extension is disguised, which is the case an extension list cannot catch.
+    #
+    # Binary rather than merely large, because a dump is binary and `symbols/generated.json`
+    # is not: it is UTF-8 JSON, every entry a name beside the derivation record that answers
+    # the very question this guard protects. Size alone caught the audit trail by the same
+    # accident it catches a dump. What this gives up - a large *text* file that really is
+    # console-derived - is caught two steps later by `symbols_audit`, which re-derives every
+    # name from this repository's own inputs rather than guessing from a byte count (D279).
+    #
+    # The `if` is not stylistic: a trailing `[ ... ] && echo` leaves the loop returning 1
+    # when the last file is small, which under `set -e` ends the script *silently* - a
+    # guard that exits 1 having checked everything and found nothing wrong.
+    large_binary=""
+    large_text=""
+    for f in $(printf '%s\n' "$files"); do
+        case "$f" in assets/*) continue ;; esac
+        [ -f "$f" ] || continue
+        size=$(wc -c <"$f")
+        if [ "$size" -le 1048576 ]; then
+            continue
+        fi
+        # `grep -I` treats a binary file as non-matching, so this succeeds only for text.
+        if grep -qI . "$f" 2>/dev/null; then
+            large_text="$large_text
+    $f ($size bytes)"
+        else
+            large_binary="$large_binary
+    $f ($size bytes)"
+        fi
+    done
+    if [ -n "$large_binary" ]; then
+        echo "  binary files over 1MB outside assets/ - is one of these a dump?"
+        printf '%s\n' "$large_binary"
+        fail=1
+    fi
+    if [ -n "$large_text" ]; then
+        # Said every run rather than passed over. A threshold that stops printing is a
+        # threshold nobody remembers, and these are still worth a human glance.
+        echo "  note: text files over 1MB outside assets/ - not a dump, but worth knowing:"
+        printf '%s\n' "$large_text"
+    fi
+
+    # 2b. An executable of any size, by its first four bytes.
+    #
+    # Step 1 is extensions and step 2 is binaries over a megabyte, and something can be
+    # neither: obSCEne had a 16 KB x86-64 ELF tracked at `src/porthole/build/porthole_selftest`,
+    # with no extension and far under the threshold, and its own guard passed it for weeks.
+    # This one would have too.
+    #
+    # **One `grep` for the whole tree, then `od` on what it finds.** The first version ran
+    # `head` and `od` per file over 1,509 files and took ten minutes - a gate nobody will wait
+    # for is a gate somebody removes. `grep -I` treats a binary file as non-matching, so `-L`
+    # with a pattern that matches every line of text lists exactly the binary ones, and there
+    # are only a handful to classify.
+    executables=""
+    binaries=$(printf '%s\n' "$files" | grep -vE '\.(png|ico|svg|jpg|gif|woff2)$' \
+      | tr '\n' '\0' | xargs -0 -r grep -IL '' 2>/dev/null || true)
+    for f in $(printf '%s\n' "$binaries"); do
+        [ -f "$f" ] || continue
+        case "$(od -An -tx1 -N4 "$f" | tr -d ' ')" in
+            7f454c46*|4d5a*|cffaedfe*|cefaedfe*) executables="$executables
+    $f" ;;
+        esac
+    done
+    if [ -n "$executables" ]; then
+        echo "  executables would be committed, whatever they are named:"
+        printf '%s\n' "$executables"
+        fail=1
+    fi
+
+    # 3. Telltale key material in source. Deliberately narrow: it looks for the well-known
+    #    *names*, not for values, so it does not fire on ordinary hex constants.
+    keys=$(printf '%s\n' "$files" \
+      | grep -vE '\.md$|^\.github/workflows/ci\.yml$|^orbistoun\.sh$' \
+      | while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            grep -nIHE '(prod\.keys|title\.keys|fake\.rif|EAP_?HDD|erk_?key|SECURE_?BOOT_?KEY)' "$f" || true
+        done)
+    if [ -n "$keys" ]; then
+        echo "  key material referenced in source:"
+        echo "$keys" | sed 's/^/    /'
+        fail=1
+    fi
+
+    [ "$fail" -eq 0 ] || { bad "provenance guard failed - see CLAUDE.md principle 1"; return 1; }
+    echo "OK: nothing console-derived would be committed ($(printf '%s\n' "$files" | grep -c .) files checked)"
+}
+
+# --- verbs -----------------------------------------------------------------
+
+# Runs a step and remembers if it failed, without stopping the rest.
+#
+# `set -euo pipefail` is in force above, so `check` already stopped at the first failure and
+# exited non-zero. That is correct and it is not the most useful shape for this script: a
+# tree with six problems reports one, and the next run reports the next. Six runs to learn
+# what one could have said.
+#
+# So the required steps run inside a tested context - which `set -e` deliberately does not
+# fire on - and their failures accumulate. The exit status still reflects them; only the
+# stopping does not. Say everything, then fail (D192).
+FAILED_STEPS=""
+must() {
+    step "$*"
+    if ! "$@"; then
+        FAILED_STEPS="$FAILED_STEPS
+  $*"
+    fi
+}
+
+# Runs a bare step function, remembering failure instead of stopping.
+#
+# `must` does this for a command and prints the heading itself; these steps print their own,
+# so they need the accumulation without the heading. Called bare they ran under `set -e`, and
+# the first to fail ended the gate - so `fmt`, `clippy` and the whole test suite never ran,
+# after one line about one file, in a run that read as though the tree had been examined
+# (D192, D280).
+also() {
+    if ! "$@"; then
+        FAILED_STEPS="$FAILED_STEPS
+  $1"
+    fi
+}
+
+# Turns `--only "a b c"` into the `-p` flags cargo wants, or `--workspace`.
+#
+# **The scope exists because the workspace is not always one person's.** More than one
+# session works in this tree, and a crate half-written by another one does not compile - which
+# under a workspace-wide gate means nobody can check anything, including work that has nothing
+# to do with it. An hour of finished work went unverified that way.
+#
+# It is deliberately not a shortcut for "my change is small". The verdict below never says
+# `all checks passed` for a scoped run, because a subset that passed is not a tree that is
+# sound and the two must never print the same words (D319).
+scope_flags() {
+    if [ -z "${ONLY_CRATES:-}" ]; then
+        printf '%s' "--workspace"
+        return
+    fi
+    local crate out=""
+    for crate in $ONLY_CRATES; do
+        out="$out -p $crate"
+    done
+    printf '%s' "${out# }"
+}
+
+check() {
+    local scope
+    # Unquoted on purpose below: this is a list of flags, not one argument.
+    scope=$(scope_flags)
+
+    also provenance
+    also constants
+    also decisions
+    also prose
+    also generated_numbers
+    also symbols_audit
+    also tables
+    # Scoped like the rest, and the first draft was not. The reasoning for exempting it was
+    # that formatting needs no compilation, so another session's half-written crate cannot
+    # stop it - which is false, and the very first scoped run proved it by failing on exactly
+    # that. A step that cannot pass for reasons outside the scope makes the scope useless.
+    # shellcheck disable=SC2086
+    if [ -n "${ONLY_CRATES:-}" ]; then
+        must cargo fmt $scope -- --check
+    else
+        must cargo fmt --all -- --check
+    fi
+    # **`--no-deps` when scoped, because `-p` alone is not a scope.** clippy runs on every
+    # workspace crate it compiles from source, so scoping to `orbistoun-cli` - which depends
+    # on nearly everything - linted the whole tree and failed on a crate the scope excluded.
+    # A scope that does not scope is worse than none: it reports somebody else's finding as
+    # yours (D319).
+    # shellcheck disable=SC2086
+    if [ -n "${ONLY_CRATES:-}" ]; then
+        must cargo clippy $scope --all-targets --no-deps -- -D warnings
+    else
+        must cargo clippy $scope --all-targets -- -D warnings
+    fi
+    # shellcheck disable=SC2086
+    must cargo check $scope --all-targets
+
+    if have cargo-nextest; then
+        # shellcheck disable=SC2086
+        must cargo nextest run $scope
+    else
+        warn "cargo-nextest not installed - falling back to cargo test"
+        # shellcheck disable=SC2086
+        must cargo test $scope
+    fi
+    # shellcheck disable=SC2086
+    must cargo test --doc $scope
+
+    # The device-dependent tests skip when no Vulkan device exists, and a test harness
+    # captures the output of a *passing* test - so that skip is invisible in the run
+    # above. Re-run just those with output shown, and say plainly whether they did
+    # anything. A suite that reports green while its most important test never ran is
+    # the exact failure the tests themselves are written to avoid.
+    step "device-dependent tests"
+    device_skipped=
+    for suite in "orbistoun-gpu-vulkan --test dispatch" \
+                 "orbistoun-translate --test execute" \
+                 "orbistoun-translate --test agreement"; do
+        # shellcheck disable=SC2086
+        if cargo test -p $suite -- --nocapture 2>&1 | grep -q "SKIPPED"; then
+            device_skipped="$device_skipped $suite"
+        fi
+    done
+    if [ -n "$device_skipped" ]; then
+        warn "Vulkan tests were SKIPPED - no device. NOT executed:$device_skipped"
+    else
+        printf '  executed against a real device
+'
+    fi
+
+    # Same rule, different gap. The packet vocabulary is checked against captures of a
+    # real guest, and there are none yet - so that suite passes while verifying nothing.
+    # Reported here for the same reason the device skip is: a green run must not imply a
+    # check that did not happen.
+    step "packet vocabulary"
+    if cargo test -p orbistoun-gpu --test vocabulary -- --nocapture 2>&1 |
+       grep -q "NO CAPTURES"; then
+        warn "no command-stream captures - data/packets.toml is still unverified."
+    else
+        printf '  checked against captures
+'
+    fi
+
+    # shellcheck disable=SC2086
+    must env RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links" \
+      cargo doc $scope --no-deps
+
+    optional cargo-machete
+    optional cargo-audit audit
+    optional cargo-deny check
+
+    # Conditional, because the steps above no longer stop the run. Under the previous
+    # fail-fast shape this line was only reachable on success; it is not any more, and an
+    # unconditional "all checks passed" after accumulating failures would be a lie (D192).
+    if [ -n "$FAILED_STEPS" ]; then
+        printf '\n\033[1;31mFAILED\033[0m%s\n' "$FAILED_STEPS"
+        exit 1
+    fi
+    # **A subset that passed is not a tree that is sound**, and the two must never print the
+    # same words. Green is the thing a person scrolls to and reads as permission; a scoped run
+    # that borrowed it would be this log's recurring failure - reporting more than the
+    # measurement supports - built into the gate itself (D319).
+    if [ -n "${ONLY_CRATES:-}" ]; then
+        printf '\n\033[1;33mpassed for %s\033[0m\n' "$ONLY_CRATES"
+        printf 'The rest of the workspace was NOT compiled, linted or tested. This is not a\n'
+        printf 'green tree - run `./bin/orbistoun check` with no --only before calling it done.\n'
+        return 0
+    fi
+    printf '\n\033[1;32mall checks passed\033[0m\n'
+}
+
+fix() {
+    step "cargo fmt --all"
+    cargo fmt --all
+    step "cargo clippy --workspace --all-targets --fix --allow-dirty"
+    cargo clippy --workspace --all-targets --fix --allow-dirty
+}
+
+build() {
+    # Passes extra arguments through, so the release workflow's `--target <triple>` reaches the
+    # same verb a person runs rather than a second copy of the command.
+    step "cargo build --release -p orbistoun-cli $*"
+    cargo build --release -p orbistoun-cli "$@"
+}
+
+docs() {
+    step "cargo doc --workspace --no-deps --open"
+    cargo doc --workspace --no-deps --open
+}
+
+# --- the shared OOPS verbs -------------------------------------------------
+# The seven every project here carries. `check` above is still the gate and still runs all
+# of these and more; these exist so the pieces can be asked for one at a time, and so the
+# same word means the same thing in all four projects.
+
+test_() {
+    # nextest with a fall back to cargo test, then the doctests nextest does not run - the
+    # exact pair the CI `test` job runs and the `check` gate runs, so all three agree.
+    if have cargo-nextest; then
+        step "cargo nextest run --workspace"
+        cargo nextest run --workspace
+    else
+        warn "cargo-nextest not installed - falling back to cargo test"
+        step "cargo test --workspace"
+        cargo test --workspace
+    fi
+    step "cargo test --doc --workspace"
+    cargo test --doc --workspace
+}
+
+lint() {
+    step "cargo clippy --workspace --all-targets -- -D warnings"
+    cargo clippy --workspace --all-targets -- -D warnings
+}
+
+fmt() {
+    step "cargo fmt --all"
+    cargo fmt --all
+}
+
+clean() {
+    step "cargo clean"
+    cargo clean
+}
+
+# Without `--open`, unlike `docs`. A build step that launches a browser is a build step you
+# cannot put in a pipeline.
+doc() {
+    # The same RUSTDOCFLAGS the CI docs job and the `check` gate set, so a broken intra-doc
+    # link fails here exactly as it does there.
+    step "cargo doc --workspace --no-deps"
+    RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links" cargo doc --workspace --no-deps
+}
+
+# The static-analysis steps the CI `check` job runs, each its own verb so a job can call one.
+fmt_check() {
+    step "cargo fmt --all -- --check"
+    cargo fmt --all -- --check
+}
+
+compile() {
+    step "cargo check --workspace --all-targets"
+    cargo check --workspace --all-targets
+}
+
+# The dependency and licence gates the CI `lint` job runs. Named `security` because that is
+# what they are; the front door already spends `lint` on clippy.
+security() {
+    step "cargo audit"
+    cargo audit
+    step "cargo deny check"
+    cargo deny check
+    step "cargo machete"
+    cargo machete
+}
+
+# The knowledge-provenance audit the CI job of that name runs.
+knowledge_audit() {
+    step "every recorded behaviour accounts for itself"
+    cargo test -p orbistoun-hle --lib knowledge::tests -- --nocapture
+}
+
+# Reproduces what pages.yml assembles, so the site can be checked before pushing.
+site() {
+    # Stops here rather than recording and continuing: `check` wants every failure
+    # reported before it gives up, but a site assembled from a doc build that failed
+    # is a broken artifact, and publishing one is worse than not publishing.
+    step "cargo doc --workspace --no-deps"
+    RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links" \
+      cargo doc --workspace --no-deps || die "documentation did not build"
+    rm -rf site
+    mkdir -p site/assets site/docs
+    cp -r frontend/web/. site/
+    cp assets/logo.png site/assets/
+    cp -r docs/. site/docs/
+    cp -r target/doc site/doc
+    printf '<!DOCTYPE html>\n<meta charset="utf-8">\n<meta http-equiv="refresh" content="0; url=orbistoun_core/index.html">\n' \
+      > site/doc/index.html
+    # Opened directly rather than served. The page is static HTML and CSS whose only script
+    # is a `document.write` of the year - no fetch, no XHR - so `file://` renders it exactly
+    # as Pages does, and previewing it needs nothing installed.
+    echo "site assembled. Open it with:  site/index.html"
+}
+
+hooks() {
+    step "git config core.hooksPath .githooks"
+    git config core.hooksPath .githooks
+    step "installing dev tools"
+    cargo install cargo-audit cargo-machete cargo-deny cargo-nextest
+    echo "hooks enabled. The pre-push gate now mirrors CI."
+}
+
+# Refreshes the symbol database from every guest module available locally.
+#
+# The database is *generated*, never hand-edited. Editing it by hand would put a name
+# in the tree with no derivation behind it, which is precisely what the audit exists
+# to catch - so the only supported way to add one is to make the generator produce it,
+# by extending crates/orbistoun-names/data/vendor.toml (D074).
+#
+# Modules live under titles/, which is gitignored, so this cannot run in CI and is not
+# meant to. What CI checks is the *audit*: that every name already committed re-derives
+# from this repository alone, which needs no module at all.
+names() {
+    preflight
+    step "cargo build --release -p orbistoun-cli"
+    cargo build --release -p orbistoun-cli
+
+    mkdir -p symbols
+    if [ ! -d titles ]; then
+        warn "no titles/ directory - nothing to search against"
+        warn "the generator produces candidate names; confirming one needs a real"
+        warn "import table to collide with. See docs/PROVENANCE.md."
+        return 0
+    fi
+
+    # **One call, one search.** This was a loop over four hand-written globs, running the
+    # full 2.6-billion-candidate sweep once per module - forty-two times over the local
+    # corpus, for a search whose cost does not depend on how many hashes it is looking for.
+    # The globs also omitted `.sprx`, so eleven modules were never searched and nothing
+    # said so. The walk is in the tool now, where it is one rule and is tested (D213).
+    # `--from-trace` because the runtime harvester is part of the system and the traces
+    # are right there. It costs one small JSON read per module and says what it found,
+    # including when that is nothing - which is the state it is in today (D213).
+    step "names titles/"
+    ./target/release/orbistoun-cli names titles \
+        --out symbols/generated.json \
+        --wanted symbols/wanted.txt \
+        --from-trace
+
+    # `--repair` because the search that just ran learns words, and every learned word
+    # renumbers the candidates a generated record cites (D195/D213). `--verify-harvest`
+    # because the corpus is here, and a static record is only checkable where it is.
+    step "orbistoun audit symbols/generated.json"
+    ./target/release/orbistoun-cli audit symbols/generated.json \
+        --ceiling "$SYMBOLS_CEILING" --repair --verify-harvest
+}
+
+# The audit CI runs, without needing a guest module.
+#
+# Separate from `names` because `names` needs material under titles/ and this does not -
+# it only reads what is already committed. WORKFLOW.md claimed this was part of `check`
+# for some time before it was, which is the sort of claim a document should not be able
+# to make on its own (D208).
+symbols_audit() {
+    step "orbistoun audit symbols/*.json --ceiling"
+    local any=0
+    for db in symbols/*.json; do
+        [ -e "$db" ] || continue
+        any=1
+        # `cargo run` rather than the release binary: `check` has already built debug, and
+        # requiring a release build for a check that reads two files would make the gate
+        # slow enough that people start skipping it.
+        cargo run -q -p orbistoun-cli -- audit "$db" --ceiling "$SYMBOLS_CEILING" >/dev/null ||
+            { bad "symbol audit failed for $db - re-run it without >/dev/null to see which names"; return 1; }
+    done
+    if [ "$any" -eq 0 ]; then
+        warn "no symbol databases committed yet - nothing to audit"
+        return 0
+    fi
+    echo "  every committed name is accounted for, or on the ceiling"
+}
+
+# The requirements that actually stop work, checked once and named once.
+#
+# Shared by `doctor` and by the preflight every `run` does, so the two cannot come to
+# different conclusions about whether this machine is usable - which is the failure mode
+# a second copy of the list would eventually produce.
+missing_requirements() {
+    have cargo || printf 'cargo
+'
+}
+
+# Checked before anything that needs a working toolchain.
+#
+# Silent when it passes. A full report before every debug run is noise, and noise before
+# every run is noise people learn to scroll past - at which point the check may as well
+# not exist (D081).
+preflight() {
+    local missing
+    missing="$(missing_requirements)"
+    [ -z "$missing" ] && return 0
+    printf '[1;31m[fail][0m this machine is missing:
+' >&2
+    printf '  %s
+' $missing >&2
+    printf '
+Run [1m./bin/orbistoun doctor[0m for what to install.
+' >&2
+    exit 1
+}
+
+# Says whether this machine can do the work, and what to do next.
+#
+# A fresh clone on a fresh machine should need exactly one command to find out what it
+# is missing. Discovering it one failure at a time - a toolchain error, then a missing
+# tool, then an empty directory - is how a setup that takes two minutes takes an hour
+# (D080).
+doctor() {
+    local blocking=0
+    local fix=0
+    [ "${1:-}" = "--fix" ] && fix=1
+
+    step "toolchain"
+    if have cargo; then
+        printf '  ok       %s
+' "$(cargo --version)"
+        printf '  ok       %s
+' "$(rustc --version)"
+    else
+        printf '  MISSING  cargo - install a Rust toolchain from https://rustup.rs
+'
+        printf '           curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh
+'
+        blocking=1
+    fi
+
+    step "gate tools"
+    local absent=""
+    for tool in cargo-nextest cargo-deny cargo-audit cargo-machete; do
+        if have "$tool"; then
+            printf '  ok       %s
+' "$tool"
+        else
+            # Not blocking: the gate degrades to slower equivalents and says so.
+            printf '  absent   %s - the gate skips it
+' "$tool"
+            absent="$absent $tool"
+        fi
+    done
+    if [ -n "$absent" ]; then
+        if [ "$fix" -eq 1 ] && have cargo; then
+            # Only the optional tools, and only when asked. Installing a Rust toolchain
+            # is a machine-wide decision that belongs to the person, not to a script
+            # they ran to ask a question (D081).
+            step "installing$absent"
+            # shellcheck disable=SC2086
+            cargo install $absent
+        else
+            printf '
+  install with:
+    cargo install%s
+' "$absent"
+            printf '  or let this do it:
+    ./bin/orbistoun doctor --fix
+'
+        fi
+    fi
+
+    step "repository"
+    if [ -d .git ] && [ "$(git config core.hooksPath 2>/dev/null)" = ".githooks" ]; then
+        printf '  ok       pre-push gate enabled
+'
+    elif [ "$fix" -eq 1 ] && [ -d .git ]; then
+        git config core.hooksPath .githooks
+        printf '  fixed    pre-push gate enabled
+'
+    else
+        printf '  absent   pre-push gate - ./bin/orbistoun doctor --fix
+'
+    fi
+    if [ -f "$SYMBOLS_DB" ]; then
+        # Present, not counted. Counting entries by grepping JSON gets the derivations
+        # as well as the names and reports double - and a number that is quietly wrong
+        # is worse than no number. `orbistoun-cli audit` gives the real one.
+        printf '  ok       %s (orbistoun-cli audit counts it)
+' "$SYMBOLS_DB"
+    else
+        printf '  absent   %s - built on the first run that needs it
+' "$SYMBOLS_DB"
+    fi
+
+    step "guest modules"
+    local titles=0
+    for module in titles/*/eboot.bin; do
+        [ -e "$module" ] || continue
+        titles=$((titles + 1))
+        printf '  ok       %s
+' "$(basename "$(dirname "$module")")"
+    done
+    if [ "$titles" -eq 0 ]; then
+        printf '  none     nothing under titles/
+'
+        printf '           Not a fault. Everything except running a guest still works,
+'
+        printf '           and the name search needs a real import table to confirm
+'
+        printf '           candidates against. See docs/PROVENANCE.md.
+'
+    fi
+
+    step "what to do next"
+    if [ "$blocking" -ne 0 ]; then
+        printf '  install a Rust toolchain, then run this again
+'
+        exit 1
+    fi
+    printf '  ./bin/orbistoun check          confirm the tree is sound
+'
+    if [ "$titles" -gt 0 ]; then
+        printf '  ./bin/orbistoun run <title>    the debug loop - see docs/WORKFLOW.md
+'
+    else
+        printf '  put a title under titles/, then ./bin/orbistoun run <title>
+'
+    fi
+}
+
+# Where the symbol database lives, and what it is derived from. Named once so the
+# staleness check below and the commands that write it cannot disagree.
+SYMBOLS_DB="symbols/generated.json"
+SYMBOLS_WANTED="symbols/wanted.txt"
+SYMBOLS_CEILING="symbols/unaccounted-ceiling.txt"
+SYMBOLS_INPUTS="crates/orbistoun-names/data/vendor.toml crates/orbistoun-names/data/standard.txt"
+
+# Whether the symbol database needs rebuilding before a run.
+#
+# Checked rather than always rebuilt: searching 251 million candidates takes ten seconds
+# per module, and paying that on every debug run of an unchanged tree would make the
+# fast path slow enough that people would start skipping it - at which point they debug
+# against stale names, which is worse than either (D079).
+symbols_stale() {
+    local module="$1"
+    [ -f "$SYMBOLS_DB" ] || return 0
+    for input in $SYMBOLS_INPUTS; do
+        [ "$input" -nt "$SYMBOLS_DB" ] && return 0
+    done
+    # A module newer than the database has never been searched, so its imports are not
+    # in there however current the vocabulary is.
+    [ -n "$module" ] && [ "$module" -nt "$SYMBOLS_DB" ] && return 0
+}
+
+# Resolves a title id, directory name, or path to a guest module.
+#
+# Takes an id because that is what a person has: they know which title they are chasing,
+# not where its executable sits inside the layout.
+resolve_module() {
+    local wanted="$1"
+    if [ -f "$wanted" ]; then
+        printf '%s' "$wanted"
+        return 0
+    fi
+    for candidate in titles/"$wanted"/eboot.bin titles/"$wanted"*/eboot.bin; do
+        if [ -f "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+}
+
+# Lists what is available locally, for when a title cannot be resolved.
+list_titles() {
+    local found=0
+    for module in titles/*/eboot.bin; do
+        [ -e "$module" ] || continue
+        found=1
+        printf '  %s
+' "$(basename "$(dirname "$module")")"
+    done
+    [ "$found" -eq 0 ] && printf '  (none - put a title directory under titles/)
+'
+    return 0
+}
+
+# Boots one title, doing everything it needs first.
+#
+# The single command a person should need while developing: resolve the title, make sure
+# names are current, run it, and say what it asked for. Everything static that a run
+# depends on happens here rather than in a checklist somebody has to remember.
+run() {
+    # Everything below needs a toolchain, so the check comes before the argument
+    # handling rather than after a build has already failed confusingly.
+    preflight
+
+    local wanted="${1:-}"
+    if [ -z "$wanted" ]; then
+        printf 'usage: ./bin/orbistoun run <title-id> [-- <extra args>]
+
+available:
+'
+        list_titles
+        exit 1
+    fi
+    shift || true
+
+    local module
+    if ! module="$(resolve_module "$wanted")"; then
+        die "no guest module for '$wanted'. Available:
+$(list_titles)"
+    fi
+
+    step "cargo build --release -p orbistoun-cli"
+    cargo build --release -p orbistoun-cli
+
+    if symbols_stale "$module"; then
+        step "names are stale - searching (this is the slow part, and only when needed)"
+        mkdir -p symbols
+        # The whole corpus, not just this module. A sweep costs the same either way -
+        # every candidate is one hash-set lookup whatever the target set holds - and the
+        # corpus is the only form that finds one title's strings naming another's
+        # imports (D213).
+        # `--from-trace` for the same reason it is in the `names` verb: the runtime
+        # harvester is part of the system, and a refresh that skips a source is a
+        # different refresh depending on which command asked for it.
+        ./target/release/orbistoun-cli names titles \
+            --out "$SYMBOLS_DB" --wanted "$SYMBOLS_WANTED" --from-trace ||
+            warn "the name search failed"
+    else
+        step "names are current"
+    fi
+
+    step "running $module (limit ${ORBISTOUN_LIMIT:-20}s)"
+    # Failure is the expected outcome for a long time yet, and a guest that faults has
+    # still produced a trace - which is the point of the run.
+    ./target/release/orbistoun-cli --symbols-db "$SYMBOLS_DB" \
+        run "$module" --limit "${ORBISTOUN_LIMIT:-20}" || true
+
+    step "what this guest asked for"
+    ./target/release/orbistoun-cli worklist --top 15
+}
+
+# One turn of the development loop: sweep every guest and report what they wanted.
+#
+# Refresh names, run every module available, then say what to implement next. This is
+# the cycle the whole project is shaped around - execute it, read what it wanted,
+# implement the frequent ones, execute it again - and it is a verb rather than a
+# paragraph in a document because a documented sequence drifts and a script does not
+# (D077). See docs/WORKFLOW.md.
+#
+# Called `sweep` and not `crunch` because a crunch, around here, is a long unattended
+# development session. Reusing the word for a fifteen-minute measurement would make two
+# quite different things share a name (D078).
+sweep() {
+    names
+
+    step "running every module (limit ${ORBISTOUN_LIMIT:-20}s each)"
+    for module in titles/*/eboot.bin; do
+        [ -e "$module" ] || continue
+        printf '
+--- %s
+' "$module"
+        # Failure is the expected outcome for a long time yet: a guest that faults has
+        # still produced a trace, and that trace is the point of the run.
+        ./target/release/orbistoun-cli --symbols-db "$SYMBOLS_DB" \
+            run "$module" --limit "${ORBISTOUN_LIMIT:-20}" 2>&1 \
+            | grep -E "^reached|^outcome|^halted|^failed|^orbistoun:|recorded \[|could not record" || true
+    done
+
+    step "what to implement next"
+    ./target/release/orbistoun-cli worklist
+}
+
+# Ask a local model for candidate vocabulary. Opt-in, and never on the run path.
+#
+# Separate from `names` on purpose: `names` is deterministic and fast, this is neither. A
+# wrong suggestion is harmless - the NID hash checks every one - but it is slow enough that
+# nothing should ever wait on it, which is also why `orbistoun-cli` does not depend on it.
+#
+# Check `shapes` first. When the gap is shapes rather than words, more vocabulary buys
+# nothing.
+suggest() {
+    step "asking a model for candidate words"
+    cargo run -q --release -p orbistoun-propose --bin orbistoun-suggest -- "$@"
+}
+
+# `$SELF` rather than `${BASH_SOURCE[0]}`: this script cd's to the repository root on the way
+# in, which strands a relative path to itself. The end of the header is found rather than
+# hardcoded, so documenting a new verb cannot silently truncate the help.
+usage() {
+    local last
+    last=$(( $(grep -n '^set -euo' "$SELF" | head -1 | cut -d: -f1) - 2 ))
+    sed -n "2,${last}p" "$SELF" | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+# --- dispatch --------------------------------------------------------------
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift || true
+
+# `check --only "a b"` narrows the cargo steps to those crates. Parsed here rather than in
+# `check` so the verb stays a one-liner and the flag cannot be silently accepted by a verb
+# that ignores it - an ignored flag is a scoped run somebody believes happened (D319).
+ONLY_CRATES=""
+if [ "${1:-}" = "--only" ]; then
+    [ -n "${2:-}" ] || die "--only needs a crate list: --only \"orbistoun-submit orbistoun-cli\""
+    ONLY_CRATES="$2"
+    shift 2
+    [ "$cmd" = "check" ] || die "--only applies to check, not $cmd"
+fi
+
+case "$cmd" in
+    check)      check ;;
+    fix)        fix ;;
+    build)      build "$@" ;;
+    test)       test_ ;;
+    lint)       lint ;;
+    fmt)        fmt ;;
+    clean)      clean ;;
+    doc)        doc ;;
+    docs)       docs ;;
+    site)       site ;;
+    hooks)      hooks ;;
+    provenance) provenance ;;
+    symbols-audit) symbols_audit ;;
+    fmt-check)  fmt_check ;;
+    compile)    compile ;;
+    security)   security ;;
+    knowledge-audit) knowledge_audit ;;
+    tables)     tables ;;
+    constants) constants ;;
+    prose)      prose ;;
+    decide)     decide "$@" ;;
+    decisions)  decisions ;;
+    names)      names ;;
+    suggest)    suggest "$@" ;;
+    sweep)      sweep ;;
+    doctor)     doctor "$@" ;;
+    run)        run "$@" ;;
+    cli)        cargo run -q -p orbistoun-cli -- "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *)          die "unknown verb: $cmd (try --help)" ;;
+esac

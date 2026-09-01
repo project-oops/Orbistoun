@@ -1,0 +1,21 @@
+[package]
+publish = false
+name = "orbistoun-thunk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Per-import thunks - the machine code a guest lands on when it calls something orbistoun has not implemented."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-abi = { workspace = true }
+orbistoun-core = { workspace = true }
+orbistoun-mem = { workspace = true }
+
+[dev-dependencies]
+orbistoun-core = { workspace = true }

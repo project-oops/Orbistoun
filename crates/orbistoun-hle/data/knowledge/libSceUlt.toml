@@ -1,0 +1,92 @@
+library = "libSceUlt"
+
+[[function]]
+name = "_sceUltMutexCreate"
+arity = 3
+purpose = "Constructs a named user-level-thread mutex where the guest asked, storing a handle in its first word."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "An ordinary mutex on the shared sync primitives; the JSON initialiser creates one named \"ultmtx\" during static init (PPSA28061), and a stub answering the placeholder stranded it."
+
+[[function]]
+name = "_sceUltMutexLock"
+arity = 1
+purpose = "Blocks until the user-level-thread mutex is held by this thread."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltMutexUnlock"
+arity = 1
+purpose = "Releases a user-level-thread mutex this thread holds."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltMutexTryLock"
+arity = 1
+purpose = "Takes a user-level-thread mutex only if free, reporting busy when it is not."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltMutexDestroy"
+arity = 1
+purpose = "Releases a user-level-thread mutex and clears the guest's handle."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltConditionVariableCreate"
+arity = 4
+purpose = "Constructs a user-level-thread condition variable bound to a mutex, where the guest asked."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "The mutex is bound at creation; Wait takes only the variable. The JSON initialiser creates one named \"ultcv\" during static init (PPSA28061)."
+
+[[function]]
+name = "_sceUltConditionVariableSignal"
+arity = 1
+purpose = "Wakes one waiter on a user-level-thread condition variable."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltConditionVariableSignalAll"
+arity = 1
+purpose = "Wakes every waiter on a user-level-thread condition variable."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltConditionVariableWait"
+arity = 1
+purpose = "Waits on a condition variable, releasing its bound mutex around the wait and retaking it after."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltConditionVariableDestroy"
+arity = 1
+purpose = "Releases a user-level-thread condition variable and clears the guest's handle."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltUlthreadCreate"
+arity = 6
+purpose = "Creates a cooperative user-level thread with an entry function; created but not yet scheduled."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "Records the thread as created and returns success without running its entry - cooperative threads run only when yielded to, and no scheduler is built yet. A title that creates a worker and continues (the JSON initialiser) proceeds; one that yields expecting it to run reaches a named gap."

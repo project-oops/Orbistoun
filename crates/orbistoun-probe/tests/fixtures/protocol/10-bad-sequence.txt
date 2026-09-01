@@ -1,0 +1,25 @@
+# Sequence numbers must strictly increase, and a repeated one is refused WITHOUT an
+# acknowledgement - the single exception to acknowledge-first.
+#
+# An `ack` is keyed by sequence. Acknowledging a repeat would put two acknowledgements on
+# the wire bearing the same key, and a reply that cannot be matched to a request is worse
+# than a refusal.
+#
+# Captured from a real session against the host build, which is where the inconsistency
+# between the implementation and an earlier draft of the specification was found.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|c0x1|report
+OBS|part|c0x1|probe|dev
+OBS|part|c0x1|target|host
+OBS|part|c0x1|transport|posix
+OBS|done|1|ok||
+# A repeat of a sequence already used.
+CMD|1|hello|1
+OBS|refused|1|bad-argument
+# And one that is not a number at all.
+CMD|banana|report
+OBS|refused|0|bad-argument
+CMD|2|bye
+OBS|ack|2|bye
+OBS|done|2|ok||

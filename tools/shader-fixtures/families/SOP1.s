@@ -1,0 +1,12 @@
+s_mov_b32 s0, s1
+s_mov_b32 s50, s60
+s_mov_b32 s101, s7
+s_not_b32 s3, s4
+s_not_b32 s70, s80
+s_not_b32 s9, s99
+s_brev_b32 s7, s8
+s_brev_b32 s40, s41
+s_brev_b32 s2, s90
+s_bcnt0_i32_b32 s1, s2
+s_bcnt0_i32_b32 s33, s44
+s_bcnt0_i32_b32 s5, s66

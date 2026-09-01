@@ -1,0 +1,27 @@
+# Named console profiles - a Machine, measured, under a name you can pass with --profile.
+#
+# Each profile is exactly what a real console presented as, so a run reproduces that machine
+# without a person retyping firmware numbers and release strings every time. Every value here is
+# measured and cited; a profile is not a place to invent a plausible console.
+#
+# The keys match Machine's own kebab-case fields. A field left out takes Machine's default, which
+# for firmware and kernel-release means "unset, refuse the call" - so a profile that omits them is
+# honestly declining to present a firmware rather than guessing one.
+
+# The reference target: a retail PS5 on system software 12.40, measured by obSCEne on hardware.
+# firmware 0x1240 is the value call 649 answers (D403); kern.osrelease is what sysctl returned
+# (D405). generation/kind/revision are what the console is.
+#
+# software-version is a *separate* number: sceKernelGetSystemSwVersion answers 13.090.001 /
+# 0x13090001, not the 12.40 firmware, measured identically across three obSCEne module runs (D420).
+# Both representations are stated because the encoding relating them is not documented.
+["ps5-cex-12.40"]
+generation = "ps5"
+kind = "cex"
+revision = "base"
+firmware = 4672            # 0x1240 = 12.40
+kernel-release = "0.0-prototype"
+
+["ps5-cex-12.40".software-version]
+display = "13.090.001"
+packed = 319356929        # 0x13090001

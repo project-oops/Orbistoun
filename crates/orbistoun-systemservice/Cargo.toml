@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "orbistoun-systemservice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "System service HLE - the settings and status a title asks the system about."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+orbistoun-hle = { workspace = true }
+orbistoun-shell = { workspace = true }
+

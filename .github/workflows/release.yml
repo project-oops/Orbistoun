@@ -1,0 +1,224 @@
+name: Release
+
+# CLI archives per platform.
+#
+#   push to main      -> build, refresh the rolling `latest-main` release
+#   push to a v* tag  -> build, create a draft versioned release
+#   workflow_dispatch -> manual draft with the given tag
+#
+# Archives use stable, version-less filenames so the landing page can link one
+# URL release-to-release. (Learned the hard way elsewhere, with Tauri's
+# version-stamped bundle names.)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    # Docs-only pushes never change a binary - skip the whole build so a changelog
+    # tweak does not burn a release run, and with cancel-in-progress below does not
+    # cancel an in-flight one that is actually producing artifacts.
+    paths-ignore:
+      - "CHANGELOG.md"
+      - "README.md"
+      - "docs/**"
+      - "LICENSE-*"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".github/**/*.md"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Which tree produced this artifact, stamped into the binary by a build script (D222).
+  #
+  # This is the one that matters: the whole release model is that there are no tagged
+  # versions and **the short commit SHA is the version number** - and until now every
+  # binary this workflow published reported its commit as "unknown".
+  ORBISTOUN_COMMIT: ${{ github.sha }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # Cap it so a hung step fails fast and frees the release instead of pinning a
+    # runner for the six-hour default.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: orbistoun-cli.exe
+            archive: zip
+            friendly: windows
+          - name: Linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: orbistoun-cli
+            archive: tar.gz
+            friendly: linux
+          # Analysis only. Guest code is x86-64 and runs natively, so this artifact can
+          # parse containers, name imports and read traces, and can never run a title -
+          # `run` refuses and says so rather than panicking. Built anyway because those
+          # commands are most of the tool; labelled on the site so nobody downloads it
+          # expecting an emulator (D208).
+          - name: macOS
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bin: orbistoun-cli
+            archive: tar.gz
+            friendly: macos
+    # `bash` on every platform. The entry points are bash scripts and `OOPS/bin/oops`
+    # has no extension, so under the Windows runner's default PowerShell it is not an
+    # executable at all. Git Bash is on the Windows image, which is the same shell
+    # `bin/oops.cmd` finds for a person. The two `Pack` steps below override this.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The standard OOPS preamble, the same three steps every workflow in the
+      # collection begins with: the collection, this repository *into* it, then the
+      # siblings this project needs. See docs/BUILDING.md.
+      #
+      # This job was a flat checkout, which stopped working the moment orbistoun took
+      # `oops-libs` by relative path - and it is the job that produces the archives the
+      # landing page's download buttons link to, so the failure would have been a dead
+      # button rather than anything that looks like a build problem.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+          key: release-${{ matrix.friendly }}
+
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="main-$(echo "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "staged=orbistoun-${tag}-${{ matrix.friendly }}" >> "$GITHUB_OUTPUT"
+
+      # Straight to the project's own entry point rather than through `oops`, because
+      # this one takes an argument: `oops <verb> <project>...` reads everything after the
+      # verb as a project name, so `oops build orbistoun --target x` dies on "unknown
+      # project '--target'". `./bin/orbistoun build` passes extras through to cargo, which
+      # is exactly why the verb accepts them.
+      - name: Build
+        run: ./bin/orbistoun build --target ${{ matrix.target }}
+        working-directory: OOPS/orbistoun
+
+      - name: Stage archive
+        working-directory: OOPS/orbistoun
+        run: |
+          dir="dist/${{ steps.meta.outputs.staged }}"
+          mkdir -p "$dir"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$dir/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+
+      - name: Pack (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        working-directory: OOPS/orbistoun/dist
+        run: Compress-Archive -Path "${{ steps.meta.outputs.staged }}" -DestinationPath "orbistoun-${{ matrix.friendly }}.zip"
+
+      - name: Pack (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        working-directory: OOPS/orbistoun/dist
+        run: tar -czf "orbistoun-${{ matrix.friendly }}.tar.gz" "${{ steps.meta.outputs.staged }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbistoun-${{ matrix.friendly }}
+          path: OOPS/orbistoun/dist/orbistoun-${{ matrix.friendly }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release-tag:
+    name: Draft release (tag)
+    if: |
+      always() && needs.build.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: orbistoun ${{ steps.meta.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+          files: dist/*
+
+  release-rolling:
+    name: Refresh latest-main release
+    if: |
+      always() && needs.build.result == 'success' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Delete previous latest-main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete latest-main --yes --cleanup-tag --repo "${{ github.repository }}" || true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-main
+          name: "Latest main build"
+          prerelease: true
+          make_latest: "false"
+          draft: false
+          target_commitish: ${{ github.sha }}
+          body: |
+            Auto-built from `main` at `${{ github.sha }}`.
+
+            Pre-alpha research tool: it inspects containers and reports what a
+            title would need. It does not run games.
+          files: dist/*

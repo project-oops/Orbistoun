@@ -1,0 +1,26 @@
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "image+0x7b591e"
+imports = 14
+calls = 1735
+standing = 100
+default_return = "unimplemented"
+limit_seconds = 12
+build = "0.1.0"
+measured_on = "2026-08-23"
+
+[experiment]
+reach = "entered"
+outcome = "image+0x7b594e"
+imports = 55
+calls = 26850
+standing = 12
+default_return = "unimplemented"
+overrides = 1
+limit_seconds = 8
+build = "0.1.0"
+measured_on = "2026-09-01"

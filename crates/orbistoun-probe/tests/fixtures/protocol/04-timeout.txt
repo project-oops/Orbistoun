@@ -1,0 +1,23 @@
+# A timeout is NOT a death, and is deliberately not resolved into one.
+#
+# A blocked call and a dead process look identical from one end of a socket. The honest
+# record says which was observed - here the connection is still open, so the process is
+# alive and the call has not come back yet.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|77ab90ce|call,resolve,read,report
+OBS|part|77ab90ce|target|console
+OBS|part|77ab90ce|firmware|13.520.001
+OBS|part|77ab90ce|probe|dev
+OBS|done|1|ok||
+CMD|2|resolve|libScePosix|read
+OBS|ack|2|resolve
+OBS|sym|libScePosix|read|present|shared
+OBS|done|2|returned|0x8003ba10|
+# A blocking read on a descriptor with nothing to give.
+CMD|3|call|0x8003ba10|0x0|0x8100000|0x10
+OBS|ack|3|call
+# Written by the DRIVER after its budget elapsed. The socket is still open.
+OBS|done|3|timeout||no result after 30s; connection still open
+# The session is not usable while a command is outstanding - one command in flight at a
+# time - so the driver closes and reconnects rather than pretending it can carry on.

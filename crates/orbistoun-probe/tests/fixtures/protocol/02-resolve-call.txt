@@ -1,0 +1,23 @@
+# The ordinary path, on a target that has the platform's libraries.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|9d0e1f22|call,resolve,read,reset,report
+OBS|part|9d0e1f22|target|console
+OBS|part|9d0e1f22|firmware|13.520.001
+OBS|part|9d0e1f22|probe|dev
+OBS|done|1|ok||
+CMD|2|resolve|libkernel|sceKernelGetProcessTime
+OBS|ack|2|resolve
+OBS|sym|libkernel|sceKernelGetProcessTime|present|shared
+OBS|done|2|returned|0x800124a0|
+# Called twice, and both results are kept. A clock that returns the same value twice is a
+# different finding from one that advances, and neither is visible from a single call.
+CMD|3|call|0x800124a0
+OBS|ack|3|call
+OBS|done|3|returned|0x0000004a3f21c8e0|
+CMD|4|call|0x800124a0
+OBS|ack|4|call
+OBS|done|4|returned|0x0000004a3f2d1140|
+CMD|5|bye
+OBS|ack|5|bye
+OBS|done|5|ok||

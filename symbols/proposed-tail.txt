@@ -1,0 +1,10 @@
+# Words a model proposed that the NID hash then confirmed.
+#
+# Every entry here was part of a name that collided with an import a real module
+# declared. Words that were proposed and led nowhere are not kept - the hash is the
+# only thing that puts a word in this file.
+#
+# Generated. Sorted, one per line, so a diff shows what a run actually learned.
+# Promoting these into crates/orbistoun-names/data/vendor.toml is a separate and
+# deliberate act.
+Async

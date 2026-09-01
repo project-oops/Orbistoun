@@ -1,0 +1,62 @@
+# Line-ending and binary handling.
+#
+# **Order matters: the last matching line wins.** Generic rules come first, fixture
+# overrides last. Getting that backwards silently un-protects the fixtures, and the
+# symptom is bytes changing on somebody else's checkout rather than an error here - so
+# any edit to this file should be checked with `git check-attr text eol binary -- <path>`
+# against one fixture and one source file (D208).
+
+# --- source: LF everywhere, in the repository and in every working copy ----------
+#
+# Stated rather than left to whatever `core.autocrlf` a contributor happens to have.
+# `eol=lf` rather than plain `text`, which would check out CRLF on Windows: this tree is
+# LF on disk and half the tooling is a bash script run under Git Bash. A working copy that
+# differs by platform is a diff appearing out of nowhere on somebody else's machine.
+*.rs               text eol=lf diff=rust
+*.toml             text eol=lf
+*.lock             text eol=lf
+*.md               text eol=lf
+*.txt              text eol=lf
+*.json             text eol=lf
+*.yml              text eol=lf
+*.sh               text eol=lf
+*.html             text eol=lf
+*.css              text eol=lf
+# Extensionless and dotted files the patterns above cannot reach. `.githooks/*` in
+# particular: a hook checked out with CRLF fails on a `
+` in the shebang line.
+.gitattributes     text eol=lf
+.gitignore         text eol=lf
+.githooks/*        text eol=lf
+# The entry point has no extension, so none of the rules above reach it - it was the one
+# script in the collection with no eol rule at all, and a bash script checked out with CRLF
+# fails as `bad interpreter: /usr/bin/env bash^M`, which names the shell rather than the
+# line endings. Every other repository covers it with a blanket `* text=auto eol=lf`.
+bin/*              text eol=lf
+LICENSE-*          text eol=lf
+
+# --- binary, wherever it lives ---------------------------------------------------
+#
+# Never diffed, never translated. `.gcn` is guest shader bytecode and was the dangerous
+# omission: ten binary fixtures git would have treated as text on a Windows clone, turning
+# every 0x0A inside them into 0x0D 0x0A - corrupting the material the whole differential
+# suite is built on, in a way that looks like a decoder bug.
+*.gcn              binary
+*.bin              binary
+*.spv              binary
+*.png              binary
+
+# --- fixtures: git does not touch these bytes at all -----------------------------
+#
+# `-text` rather than `eol=lf`, which would still rewrite a fixture that legitimately
+# contains CRLF - and a *line protocol* transcript is exactly the thing that might. These
+# are compared byte-for-byte, so the correct instruction is "leave them alone", not
+# "normalise them the way we normalise source".
+#
+# Unanchored, because there is no `tests/` at the repository root and there never has
+# been: every fixture lives under `crates/<crate>/tests/`. This file used to say
+# `tests/fixtures/**`, which is anchored, and therefore matched nothing at all.
+**/tests/fixtures/**        -text
+**/tests/captures/**        -text
+**/tools/shader-fixtures/** -text
+tests/fixtures/**           -text

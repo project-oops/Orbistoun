@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "orbistoun-input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Controller HLE - pad state and haptics."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-core = { workspace = true }
+orbistoun-hle = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# Round-tripping a mapping, which is how it reaches the settings file.
+toml = { workspace = true }

@@ -1,0 +1,15 @@
+# Negotiation against a stand-in target with no system libraries.
+#
+# Note what is NOT announced: no `resolve`, because this part has none of the platform's
+# libraries to resolve against. A driver discovers that here rather than assuming it, and
+# a question about library behaviour is refused rather than answered wrongly.
+CMD|1|hello|1
+OBS|ack|1|hello
+OBS|hello|1|f1a2b3c4|call,read,blob,reset,report,gpu
+OBS|part|f1a2b3c4|target|deck
+OBS|part|f1a2b3c4|gpu|AMD Custom GPU 0405 (gfx1033)
+OBS|part|f1a2b3c4|driver|radv 25.1.0
+OBS|part|f1a2b3c4|mesa|25.1.0
+OBS|part|f1a2b3c4|os|SteamOS 3.6.20
+OBS|part|f1a2b3c4|probe|dev
+OBS|done|1|ok||

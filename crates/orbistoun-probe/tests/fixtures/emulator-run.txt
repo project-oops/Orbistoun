@@ -1,0 +1,110 @@
+OBS|meta|1|15|79
+OBS|build|dev|module
+OBS|section|000-boot|Boot and report stream|Establishes that the report itself can be trusted before anything is reported.
+OBS|try|000-boot/number-formatting|obscene|obs_format_u64
+OBS|res|000-boot/number-formatting|pass||
+OBS|try|000-boot/write-returns-count|libkernel|sceKernelWrite
+OBS|res|000-boot/write-returns-count|pass||
+OBS|try|000-boot/write-rejects-bad-fd|libkernel|sceKernelWrite
+OBS|res|000-boot/write-rejects-bad-fd|pass|0xffffffff80020009|
+OBS|sectiontally|000-boot|3|0|0|0
+OBS|section|005-generation|Console generation|Which console this is, inferred from which exclusive symbols resolve. Read this first: it decides whether an absence below is a gap or is expected.
+OBS|try|005-generation/detect|obscene|(symbol probe)
+OBS|res|005-generation/detect|partial||both generations resolve; absences cannot be attributed to a generation
+OBS|try|005-generation/neo-mode|libkernel|sceKernelIsNeoMode
+OBS|res|005-generation/neo-mode|pass|0x0|
+OBS|sectiontally|005-generation|1|1|0|0
+OBS|section|010-kernel|Kernel core|Process identity and the clocks everything else measures itself against.
+OBS|try|010-kernel/process-time|libkernel|sceKernelGetProcessTime
+OBS|res|010-kernel/process-time|pass|0x147|
+OBS|try|010-kernel/process-time-counter|libkernel|sceKernelGetProcessTimeCounter
+OBS|res|010-kernel/process-time-counter|pass|0x2d644de7a|
+OBS|try|010-kernel/tsc-frequency|libkernel|sceKernelGetTscFrequency
+OBS|res|010-kernel/tsc-frequency|pass|0xd693a400|
+OBS|sectiontally|010-kernel|3|0|0|0
+OBS|section|020-memory|Direct memory|A full reserve, map, use, unmap and release cycle, reported step by step.
+OBS|try|020-memory/direct-size|libkernel|sceKernelGetDirectMemorySize
+OBS|res|020-memory/direct-size|pass|0x120000000|
+OBS|try|020-memory/allocate|libkernel|sceKernelAllocateDirectMemory
+OBS|res|020-memory/allocate|pass|0x10000|
+OBS|try|020-memory/map|libkernel|sceKernelMapDirectMemory
+OBS|res|020-memory/map|pass|0x200000000|
+OBS|try|020-memory/read-write|obscene|mapped memory
+OBS|res|020-memory/read-write|pass||
+OBS|try|020-memory/unmap|libkernel|sceKernelMunmap
+OBS|res|020-memory/unmap|pass||
+OBS|try|020-memory/release|libkernel|sceKernelReleaseDirectMemory
+OBS|res|020-memory/release|pass||
+OBS|try|020-memory/unmap-rejects-null|libkernel|sceKernelMunmap
+OBS|res|020-memory/unmap-rejects-null|pass|0x80020016|
+OBS|sectiontally|020-memory|7|0|0|0
+OBS|section|030-thread|Threads|Creating a thread, proving its body actually ran, and joining it back.
+OBS|try|030-thread/self|libkernel|scePthreadSelf
+OBS|res|030-thread/self|pass|0x7ffffc000|
+OBS|try|030-thread/create|libkernel|scePthreadCreate
+OBS|res|030-thread/create|pass||
+OBS|try|030-thread/join|libkernel|scePthreadJoin
+OBS|res|030-thread/join|pass||
+OBS|sectiontally|030-thread|3|0|0|0
+OBS|section|035-libc|C runtime|The standard library a title leans on hardest, checked for behaviour rather than for mere presence.
+OBS|try|035-libc/strlen|libSceLibcInternal|strlen
+OBS|res|035-libc/strlen|pass||
+OBS|try|035-libc/strcmp|libSceLibcInternal|strcmp
+OBS|res|035-libc/strcmp|pass||
+OBS|try|035-libc/memcmp|libSceLibcInternal|memcmp
+OBS|res|035-libc/memcmp|pass||
+OBS|try|035-libc/strchr|libSceLibcInternal|strchr
+OBS|res|035-libc/strchr|pass||
+OBS|try|035-libc/snprintf|libSceLibcInternal|snprintf
+OBS|res|035-libc/snprintf|fail||a truncated write did not terminate the buffer
+OBS|try|035-libc/malloc-free|libSceLibcInternal|malloc
+OBS|res|035-libc/malloc-free|fail||a small allocation returned null
+OBS|res|035-libc/calloc-zeroes|skip||a prerequisite capability was not established
+OBS|res|035-libc/realloc-preserves|skip||a prerequisite capability was not established
+OBS|try|035-libc/qsort|libSceLibcInternal|qsort
+OBS|res|035-libc/qsort|fail|0x1|the array is not in order
+OBS|try|035-libc/bsearch|libSceLibcInternal|bsearch
+OBS|res|035-libc/bsearch|fail||a present value was not found at the right element
+OBS|try|035-libc/numeric|libSceLibcInternal|strtol
+OBS|res|035-libc/numeric|fail||absolute value is wrong
+OBS|try|035-libc/strtoul-bases|libSceLibcInternal|strtoul
+OBS|res|035-libc/strtoul-bases|fail||decimal conversion is wrong
+OBS|try|035-libc/strcpy-strcat|libSceLibcInternal|strcpy
+OBS|res|035-libc/strcpy-strcat|fail||strcpy did not return its destination
+OBS|try|035-libc/strncpy-padding|libSceLibcInternal|strncpy
+OBS|res|035-libc/strncpy-padding|pass||
+OBS|try|035-libc/strstr|libSceLibcInternal|strstr
+OBS|res|035-libc/strstr|fail||a present substring was not found at the right offset
+OBS|try|035-libc/memchr-strrchr|libSceLibcInternal|memchr
+OBS|res|035-libc/memchr-strrchr|fail||memchr found the wrong occurrence
+OBS|try|035-libc/strspn|libSceLibcInternal|strspn
+OBS|res|035-libc/strspn|fail||the leading accepted span is wrong
+OBS|try|035-libc/strtok|libSceLibcInternal|strtok
+OBS|res|035-libc/strtok|fail|0x0|tokenising stopped early
+OBS|try|035-libc/ctype|libSceLibcInternal|toupper
+OBS|res|035-libc/ctype|fail||case conversion is wrong
+OBS|try|035-libc/rand-seeded|libSceLibcInternal|rand
+OBS|res|035-libc/rand-seeded|partial|0x0|two consecutive draws were identical
+OBS|sectiontally|035-libc|5|1|12|2
+OBS|section|037-math|Floating-point maths|Exact-value checks on the maths library, where sign and rounding direction are what break.
+OBS|try|037-math/sqrt|libSceLibcInternal|sqrt
+OBS|res|037-math/sqrt|fail|0x3c205d65726f435b|sqrt(4) is wrong
+OBS|try|037-math/pow|libSceLibcInternal|pow
+OBS|res|037-math/pow|pass||
+OBS|try|037-math/fabs|libSceLibcInternal|fabs
+OBS|res|037-math/fabs|fail||absolute value is wrong
+OBS|try|037-math/floor-ceil|libSceLibcInternal|floor
+OBS|res|037-math/floor-ceil|fail||rounding a positive value is wrong
+OBS|try|037-math/fmod|libSceLibcInternal|fmod
+OBS|res|037-math/fmod|fail|0x3c205d65726f435b|fmod is wrong
+OBS|try|037-math/trigonometry|libSceLibcInternal|sin
+OBS|res|037-math/trigonometry|pass||
+OBS|try|037-math/single-precision|libSceLibcInternal|sqrtf
+OBS|res|037-math/single-precision|fail||single-precision square root is wrong
+OBS|sectiontally|037-math|2|0|5|0
+OBS|section|040-file|Filesystem|Descriptor handling, checked from the failure side where no layout is assumed.
+OBS|try|040-file/close-rejects-bad-fd|libkernel|sceKernelClose
+OBS|res|040-file/close-rejects-bad-fd|pass|0x80020009|
+OBS|try|040-file/open-rejects-missing|libkernel|sceKernelOpen
+OBS|res|040-file/open-rejects-missing|pass|0x80020002|
+OBS|try|040-file/open-rejects-null|libkernel|sceKernelOpen

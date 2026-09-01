@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# orbistoun pre-push hook.
+#
+# Fast static analysis before code leaves the machine - faster failure than
+# waiting for CI to flag the same issues. Mirrors CI's static gate, trimmed to
+# what is worth blocking a push on.
+#
+# Tools run:
+#   provenance grep                                (console-derived material)
+#   cargo fmt --all -- --check
+#   cargo clippy --workspace --all-targets -- -D warnings
+#   cargo machete                                  (unused deps)
+#   cargo audit                                    (RustSec advisory DB)
+#
+# Deliberately NOT run here:
+#   cargo deny check    - slower; covered by CI
+#   cargo nextest       - too slow for every push; CI's job
+#
+# One-time setup on a fresh clone:
+#   git config core.hooksPath .githooks
+#   cargo install cargo-audit cargo-machete cargo-deny cargo-nextest
+#
+# CI runs an equivalent gate regardless of whether this hook ran - the hook is a
+# fast-failure convenience, not a security boundary.
+
+set -e
+
+# The provenance check runs ALWAYS, even for a docs-only push. It is the one gate
+# where a false negative is expensive and the check costs milliseconds.
+#
+# Delegated rather than duplicated: `./orbistoun.sh provenance` is the same code CI runs,
+# and this hook used to carry its own weaker copy of one third of it.
+if ! ./orbistoun.sh provenance; then
+    echo "[pre-push] BLOCKED. See CLAUDE.md principle 1."
+    exit 1
+fi
+
+# Only run the heavy checks for pushes that include Rust or Cargo-config changes.
+# Doc-only pushes skip them.
+#
+# **`false` was the wrong default, and it took a greenfield repository to show it.** Both
+# `git diff` forms below fail when there is no upstream and no `HEAD~1` - which is exactly
+# the state of a repository about to receive its first push, i.e. the push carrying the
+# entire codebase. The hook skipped every check on the one push where it mattered most.
+# Unknown now means "run them", and only a *successful* diff showing no Rust may skip.
+#
+# The `if`s are not stylistic: under `set -e`, a bare `grep -q ... && VAR=true` ends the
+# script when grep finds nothing, so "no Rust changed" would abort the push instead of
+# skipping the build checks. Same trap as the file-size loop in `orbistoun.sh provenance`.
+RUST_CHANGED=unknown
+if diff_out=$(git diff --name-only @{push}..HEAD 2>/dev/null); then
+    RUST_CHANGED=false
+    if echo "$diff_out" | grep -qE '[.](rs|toml)$'; then RUST_CHANGED=true; fi
+elif diff_out=$(git diff --name-only HEAD~1..HEAD 2>/dev/null); then
+    RUST_CHANGED=false
+    if echo "$diff_out" | grep -qE '[.](rs|toml)$'; then RUST_CHANGED=true; fi
+fi
+
+if [ "$RUST_CHANGED" = false ]; then
+    echo "[pre-push] no Rust/TOML changes detected - skipping build checks"
+    exit 0
+fi
+if [ "$RUST_CHANGED" = unknown ]; then
+    echo "[pre-push] cannot tell what changed (no upstream yet) - running everything"
+fi
+
+run_if_available() {
+    local tool="$1"
+    shift
+    if command -v "$tool" >/dev/null 2>&1; then
+        echo "[pre-push] $tool $*"
+        if ! "$tool" "$@"; then
+            echo
+            echo "[pre-push] $tool failed. Fix the issues above and re-commit."
+            return 1
+        fi
+    else
+        echo "[pre-push] $tool not installed - skipping (install: cargo install ${tool})"
+    fi
+}
+
+# rustfmt + clippy ship with rustup so they are always present in a working
+# toolchain. No `command -v` guard.
+echo "[pre-push] cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+    echo
+    echo "[pre-push] fmt check failed. Run \`cargo fmt --all\` and re-commit."
+    exit 1
+fi
+
+echo "[pre-push] cargo clippy --workspace --all-targets -- -D warnings"
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo
+    echo "[pre-push] clippy found lints. Fix them, or add a targeted #[allow] with"
+    echo "[pre-push] a comment saying why - see CLAUDE.md principle 3."
+    exit 1
+fi
+
+# Optional tools - each guards itself so a half-installed dev env still pushes.
+run_if_available cargo-machete || exit 1
+run_if_available cargo-audit audit || exit 1
+
+echo "[pre-push] ok"

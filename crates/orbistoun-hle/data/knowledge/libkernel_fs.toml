@@ -1,0 +1,116 @@
+# What we know about the kernel's file interface.
+#
+# Accumulated, never regenerated. Every edge case below cost an experiment against a real
+# guest, and losing this file means repeating them.
+
+library = "libkernel_fs"
+
+[[function]]
+name = "sceKernelWrite"
+returns = "count"
+arity = 3
+purpose = """
+Writes bytes to a descriptor. **The call that decides whether a conformance probe can
+report at all.**
+
+A probe reports by writing to standard output. One loader examined implements this purely
+as a filesystem call - it requires a real opened descriptor and refuses descriptor 1 - and
+that single choice is why it cannot emit a report (D170).
+"""
+arguments = [
+  { name = "fd", kind = "u32", note = "1 and 2 are standard output and error; anything else must have been opened" },
+  { name = "buffer", kind = "ptr", note = "guest memory, read only" },
+  { name = "length", kind = "usize", note = "bytes to take" },
+]
+edge_cases = [
+  "**Descriptors 1 and 2 land on the host's *error* stream, never its output stream.** The worker's stdout carries its protocol as newline-delimited JSON, and guest bytes interleaved into that would break the reader permanently - the same reasoning the fault reporter already follows.",
+  "Flushed per write, because a probe's output is only useful if it survives the guest faulting immediately afterwards, which is the ordinary case here.",
+  "Writing to a file is refused: files are opened read-only, so it would be a write into the user's own title directory.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+  "Which errno values the target returns, and on which conditions, is unverified.",
+]
+found_on = "2026-08-21"
+note = "Prompted by findings from the obSCEne probe running under other loaders. Behavioural observation of what breaks a report, not anything read from another project's source."
+
+[[function]]
+name = "sceKernelOpen"
+returns = "handle"
+arity = 3
+purpose = "Opens a path, answering a descriptor."
+edge_cases = [
+  "**Read-only regardless of the flags asked for**, and the flags are not honoured. A write mode would be a write into the user's own title directory; refusing the open outright would stop a guest that only wanted to read.",
+  "A file never gets descriptor 0, 1 or 2 - handing it descriptor 1 would make its writes appear as program output.",
+  "Lowest free descriptor, which is what a caller expects and makes a leak visible as a number that climbs.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+  "Which errno values the target returns, and on which conditions, is unverified.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceKernelClose"
+returns = "status"
+arity = 1
+purpose = "Closes a descriptor."
+edge_cases = [
+  "Closing a standard stream succeeds and does nothing. A guest tidying up on exit should not be told it failed, and actually closing the host's error stream would take the fault reporter with it.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+  "Which errno values the target returns, and on which conditions, is unverified.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceKernelRead"
+returns = "count"
+arity = 3
+purpose = "Reads from a descriptor."
+edge_cases = [
+  "Reading a standard stream answers zero rather than blocking on the host's own input - a guest reading stdin would otherwise hang the worker on a terminal nobody is typing into, and a hang costs the whole trace.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+  "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+  "Which errno values the target returns, and on which conditions, is unverified.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceKernelLseek"
+returns = "count"
+arity = 3
+purpose = "Moves the read position. `whence` takes the published POSIX values - set 0, current 1, end 2."
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+  "Inferred from the name and the POSIX call it resembles. No guest has exercised it.",
+  "Whether the whence constants match the POSIX values is unverified.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceKernelMkdir"
+arity = 2
+purpose = "Creates a directory in the guest's sandboxed filesystem."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceKernelDebugOutText"
+arity = 2
+purpose = "Writes a guest debug string to the host's diagnostic stream."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"

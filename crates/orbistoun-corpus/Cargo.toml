@@ -1,0 +1,20 @@
+[package]
+publish = false
+name = "orbistoun-corpus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The test corpus: a manifest of sources, pinned release assets fetched into titles/, ready to run and record."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }

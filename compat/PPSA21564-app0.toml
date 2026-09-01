@@ -1,0 +1,26 @@
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "image+0x70a932c"
+imports = 13
+calls = 131
+standing = 97
+default_return = "unimplemented"
+limit_seconds = 12
+build = "0.1.0"
+measured_on = "2026-08-23"
+
+[experiment]
+reach = "entered"
+outcome = "image+0x11ccd"
+imports = 55
+calls = 500257
+standing = 100
+default_return = "unimplemented"
+overrides = 1
+limit_seconds = 12
+build = "0.1.0"
+measured_on = "2026-09-01"

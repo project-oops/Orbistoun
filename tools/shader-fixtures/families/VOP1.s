@@ -1,0 +1,12 @@
+v_mov_b32_e32 v0, v1
+v_mov_b32_e32 v100, v200
+v_mov_b32_e32 v9, v255
+v_not_b32_e32 v2, v3
+v_not_b32_e32 v70, v80
+v_not_b32_e32 v5, v190
+v_rcp_f32_e32 v4, v5
+v_rcp_f32_e32 v120, v130
+v_rcp_f32_e32 v7, v240
+v_floor_f32_e32 v8, v9
+v_floor_f32_e32 v33, v44
+v_floor_f32_e32 v1, v210
