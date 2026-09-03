@@ -9,6 +9,14 @@ New here? The [root README](../README.md) has the pitch and a one-command start,
 **[THE_LOOP.md](THE_LOOP.md) explains what the tool actually does**, start to finish,
 including which steps still need a person. This page is the index to everything deeper.
 
+
+## The words
+
+- [GLOSSARY.md](GLOSSARY.md) - HLE, thunks, stubs, workers, and the two words that mean
+  something else in obSCEne (`shape` here is an instruction's operand layout, not an artifact
+  form). Start here if the vocabulary is new; the collection's glossary covers standard ELF
+  and `DT_`/`PT_`.
+
 ## Repository layout
 
 **[CRATES.md](CRATES.md)** says what each crate is *for* - the dependency spine first, then
