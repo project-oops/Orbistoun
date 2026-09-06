@@ -226,6 +226,19 @@ pub struct ThreadRecord {
     pub effective_affinity: Affinity,
     /// The priority the guest asked for, recorded and not yet acted on.
     pub requested_priority: i32,
+    /// The scheduling policy the guest asked for, stored verbatim and **not interpreted**.
+    ///
+    /// PPSA02664 passes `0x4000`, which is no POSIX policy constant - those are small integers -
+    /// so this is a vendor value and nothing here knows what it selects. Storing it uninterpreted
+    /// is what lets `scePthreadGetschedparam` hand back what was set, which is the whole of what
+    /// the setter's contract promises (D561).
+    pub requested_policy: i32,
+    /// Whether the guest has asked for cancellation to be disabled on this thread.
+    ///
+    /// Stored so `pthread_setcancelstate` can hand back the previous value, which is the whole
+    /// of what that call promises. **Not acted on**: orbistoun cancels no threads, so there is
+    /// nothing for the state to gate (D561).
+    pub cancel_state: i32,
     /// Whether it has finished.
     pub finished: bool,
 }
@@ -299,6 +312,8 @@ pub fn register(
         requested_affinity,
         effective_affinity: effective,
         requested_priority,
+        requested_policy: 0,
+        cancel_state: 0,
         finished: false,
     };
     table().lock().ok()?.insert(handle, record);
@@ -308,6 +323,57 @@ pub fn register(
 /// What is known about a thread.
 pub fn record(handle: ThreadHandle) -> Option<ThreadRecord> {
     table().lock().ok()?.get(&handle).cloned()
+}
+
+/// Records the scheduling a guest asked for, answering whether the thread is known.
+///
+/// # Why this exists now and did not before
+///
+/// D523 accepted `scePthreadSetaffinity` and dropped it, saying so plainly: *"orbistoun keeps no
+/// per-thread scheduling record ... the moment something does, this needs the per-thread record
+/// rather than a wider `Ok`"*. Something does - PPSA02664 calls `scePthreadGetschedparam` **34
+/// times**, which is a read-back, and a setter that dropped what it was given would answer it
+/// with a value the guest never set (D561).
+///
+/// `policy` is [`None`] where the caller set only a priority, so `scePthreadSetprio` cannot
+/// silently reset a policy nobody mentioned.
+pub fn set_scheduling(handle: ThreadHandle, policy: Option<i32>, priority: i32) -> bool {
+    let Ok(mut table) = table().lock() else {
+        return false;
+    };
+    let Some(record) = table.get_mut(&handle) else {
+        return false;
+    };
+    if let Some(policy) = policy {
+        record.requested_policy = policy;
+    }
+    record.requested_priority = priority;
+    true
+}
+
+/// Sets the cancellation state, answering the one it replaced.
+///
+/// [`None`] where the thread is not one this crate issued, which the caller must tell apart from
+/// a real previous state of zero.
+pub fn swap_cancel_state(handle: ThreadHandle, state: i32) -> Option<i32> {
+    let mut table = table().lock().ok()?;
+    let record = table.get_mut(&handle)?;
+    Some(std::mem::replace(&mut record.cancel_state, state))
+}
+
+/// Renames a thread, answering whether it is one this crate issued.
+///
+/// **Worth more than it looks.** The name is what a trace shows instead of a handle, and a title
+/// that renames its threads is telling the reader what each one is for - PPSA02664 renames one.
+pub fn rename(handle: ThreadHandle, name: &str) -> bool {
+    let Ok(mut table) = table().lock() else {
+        return false;
+    };
+    let Some(record) = table.get_mut(&handle) else {
+        return false;
+    };
+    name.clone_into(&mut record.name);
+    true
 }
 
 /// Marks a thread as finished.
@@ -450,6 +516,18 @@ pub unsafe fn spawn(
         // And to this thread, so `sceKernelIsStack` can answer about it. Same fact, needed by
         // a second subsystem that had the same blind spot (D391).
         note_this_stack(stack.lowest_usable(), stack.len());
+        // Give this thread its own thread-local storage before it runs any guest code. A spawned
+        // thread got none, so its first `fs:`-relative access read a zero base and faulted (a new
+        // thread's `mov rax, fs:[0]`, worklog 286). Runs here, on the new thread, because the
+        // `fs` base it installs is per-thread. A no-op when nothing installed the hook.
+        if let Some(start) = ON_THREAD_START.get() {
+            start();
+        }
+        // The same float environment the process entry adopts. **Per thread**, because
+        // `MXCSR` is a per-thread register and a fresh host thread gets the host default -
+        // so without this a guest thread would do denormal arithmetic differently from the
+        // thread that spawned it, which is worse than every thread being wrong alike.
+        orbistoun_abi::enter::adopt_guest_float_environment();
         // The value the guest thread function returns in `rax`, kept so a join can hand it back.
         // SAFETY: the caller of `spawn` guarantees `entry` is mapped, executable and
         // relocated; `stack` is a freshly reserved, writable, aligned guest stack with a
@@ -570,6 +648,20 @@ pub fn current() -> ThreadHandle {
 /// Called once, at the top of a spawned thread, before any guest code runs on it.
 pub fn become_thread(handle: ThreadHandle) {
     current_handle().with(|c| c.set(handle));
+}
+
+/// A hook run at the top of every spawned guest thread, before it enters guest code.
+///
+/// The layer that builds the guest's thread-local storage installs this so a new thread can be
+/// given its own block: this crate *spawns* the thread but does not own the TLS template - the
+/// loader parses it and the worker holds it - so the setup is inverted down to here, exactly as
+/// the call budget is (D238 shape). Absent one - a run with no thread-locals, or a unit test -
+/// a spawned thread simply runs without it, which is the old behaviour and the right default.
+static ON_THREAD_START: OnceLock<fn()> = OnceLock::new();
+
+/// Installs the per-thread start hook. Called once, by the worker, before the guest is entered.
+pub fn install_thread_start(hook: fn()) {
+    let _ = ON_THREAD_START.set(hook);
 }
 
 /// Gives the calling host thread a handle if it does not already have one.

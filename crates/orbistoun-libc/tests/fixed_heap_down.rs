@@ -1,0 +1,104 @@
+//! The fixed heap handing blocks out downward.
+//!
+//! # Why this is a second binary rather than a second test
+//!
+//! The direction is read once per process, from the same variable as the base, so a run can
+//! only be one of the two. The ascending case is in `fixed_heap.rs` for the same reason.
+//!
+//! # Why it exists at all
+//!
+//! This direction is an **instrument, not a feature**. Fifty-one runs across thirteen bases
+//! showed that fixing the heap collapses D499's oscillation and that the address *value* is
+//! not what does it. Reversing the order blocks come out in - and changing nothing else -
+//! is what separates "the addresses are fixed" from "the addresses are ordered".
+//!
+//! A negative from an instrument is only worth what the instrument is worth, so this asserts
+//! the direction really reverses. Without it, a run that failed to descend and a run that
+//! descended and changed nothing are the same output (check 3).
+
+use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
+
+/// Where this test puts its region. A different base from the ascending test's, so neither
+/// can be reading the other's.
+const BASE: u64 = 0x0000_6E01_0000_0000;
+
+/// How far the region reaches, mirroring `arena::SPAN`.
+const SPAN: u64 = 64 * 1024 * 1024;
+
+fn implementation(name: &str) -> GuestFn {
+    orbistoun_libc::implementations()
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or_else(
+            || panic!("{name} is not implemented, so nothing can call it"),
+            |(_, f)| *f,
+        )
+}
+
+fn call(name: &str, args: &[u64]) -> u64 {
+    let mut regs = [0xDEAD_BEEF_DEAD_BEEF_u64; GUEST_ARG_REGISTERS];
+    for (slot, value) in regs.iter_mut().zip(args) {
+        *slot = *value;
+    }
+    implementation(name)(&regs)
+}
+
+/// Downward, every later block is at a lower address, and every block is still real memory.
+#[test]
+fn the_descending_region_really_descends() {
+    // SAFETY: set before any thread in this process reads the environment - this binary has
+    // exactly one test, and nothing runs before it.
+    unsafe { std::env::set_var("ORBISTOUN_HEAP_BASE", format!("{BASE:x}-down")) };
+
+    let mut previous = u64::MAX;
+    for step in 0..8_u64 {
+        let block = call("malloc", &[64]);
+        assert!(
+            (BASE..BASE + SPAN).contains(&block),
+            "block {step} left the region: {block:#x}"
+        );
+        assert!(
+            block < previous,
+            "block {step} at {block:#x} must be below the one before it at {previous:#x} - \
+             a region that did not reverse would pass every other assertion here"
+        );
+        assert_eq!(block % 16, 0, "still aligned like `malloc` must be");
+        // The whole block is writable, which a start rounded down past the region's floor
+        // would not be.
+        for offset in 0..64_u64 {
+            // SAFETY: inside the sixty-four bytes just returned.
+            unsafe {
+                std::ptr::write(
+                    std::ptr::with_exposed_provenance_mut::<u8>((block + offset) as usize),
+                    step as u8,
+                );
+            }
+        }
+        // SAFETY: the last byte of the same block.
+        let last = unsafe {
+            std::ptr::read(std::ptr::with_exposed_provenance::<u8>(
+                (block + 63) as usize,
+            ))
+        };
+        assert_eq!(last, step as u8, "the block must be writable memory");
+        previous = block;
+    }
+
+    // Blocks do not overlap, which downward arithmetic gets wrong more easily than upward:
+    // eight distinct 64-byte blocks need at least 8 * 64 bytes between the first and last.
+    let first = call("malloc", &[64]);
+    assert!(
+        first < previous,
+        "the ninth block continues downward: {first:#x} then {previous:#x}"
+    );
+
+    let summary = orbistoun_libc::heap_base_summary().expect("the variable is set");
+    assert!(
+        summary.contains(&format!("{BASE:#x}")),
+        "the report names the base it was given: {summary}"
+    );
+    assert!(
+        !summary.contains("did NOT hold every address fixed"),
+        "nothing here should have spilled: {summary}"
+    );
+}

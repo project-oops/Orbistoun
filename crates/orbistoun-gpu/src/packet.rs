@@ -24,10 +24,18 @@
 //! and Mesa parse these exact structures. Hardware documentation from the chip
 //! vendor, not console firmware.
 //!
-//! **The values below are transcribed and not yet verified line by line against the
-//! published document.** Same caveat as the shader encoding table, and the same
-//! mitigation: a walk over a real command buffer that desynchronises immediately is
-//! how a mistake here announces itself.
+//! The values below were **transcribed and unverified** for as long as there was nothing to
+//! check them against. As of D565 there is: obSCEne called four `libSceAgc` command builders on
+//! hardware and captured what each wrote, with an **independently measured length** for every
+//! one - bytes it saw change, owing nothing to any header field.
+//!
+//! `tests/measured_packets.rs` walks all four. The length rule consumes three of them **exactly**,
+//! including one that decomposes into three packets of 16, 28 and 12 bytes landing on a measured
+//! 56. Dropping the count adjustment, doubling it, or moving the opcode field all make it fail.
+//!
+//! So this is no longer transcribed-and-unchecked; it is transcribed **and agreed with hardware
+//! on four buffers**. That is not the same as verified line by line - a rule that erred on a
+//! packet none of the four contains would still pass - and the caveat narrows rather than lifts.
 
 /// Packet header field positions.
 ///

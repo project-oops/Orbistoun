@@ -34,13 +34,15 @@ pub struct DeclaredSymbol {
 /// hand-called `register` per crate - and adding `libc` to only one of them produced a
 /// function that `orbistoun-cli symbols` listed, that a trace named correctly, and that
 /// resolved to nothing. Every layer agreed except the one that mattered (D123).
-pub(crate) fn modules() -> [ModuleDesc; 12] {
+pub(crate) fn modules() -> [ModuleDesc; 41] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
         orbistoun_libc::MODULE,
         orbistoun_posix::MODULE,
         orbistoun_gpu::MODULE,
+        orbistoun_gpu::agc::MODULE,
+        orbistoun_gpu::agc_driver::MODULE,
         orbistoun_audio::MODULE,
         orbistoun_video::MODULE,
         orbistoun_input::MODULE,
@@ -48,6 +50,33 @@ pub(crate) fn modules() -> [ModuleDesc; 12] {
         orbistoun_systemservice::MODULE,
         orbistoun_systemservice::user::MODULE,
         orbistoun_systemservice::sysmodule::MODULE,
+        orbistoun_audio::ajm::MODULE,
+        orbistoun_audio::audio3d::MODULE,
+        orbistoun_audio::audio_in::MODULE,
+        orbistoun_audio::audio_out2::MODULE,
+        orbistoun_gpu::ampr::MODULE,
+        orbistoun_input::ime::MODULE,
+        orbistoun_input::ime_dialog::MODULE,
+        orbistoun_input::keyboard::MODULE,
+        orbistoun_input::mouse::MODULE,
+        orbistoun_net::http::MODULE,
+        orbistoun_net::http2::MODULE,
+        orbistoun_net::netctl::MODULE,
+        orbistoun_net::npmanager::MODULE,
+        orbistoun_net::npwebapi2::MODULE,
+        orbistoun_net::socket::MODULE,
+        orbistoun_net::ssl::MODULE,
+        orbistoun_systemservice::app_content::MODULE,
+        orbistoun_systemservice::common_dialog::MODULE,
+        orbistoun_systemservice::coredump::MODULE,
+        orbistoun_systemservice::error_dialog::MODULE,
+        orbistoun_systemservice::json2::MODULE,
+        orbistoun_systemservice::msg_dialog::MODULE,
+        orbistoun_systemservice::remoteplay::MODULE,
+        orbistoun_systemservice::save_data::MODULE,
+        orbistoun_systemservice::web_browser_dialog::MODULE,
+        orbistoun_video::av_player::MODULE,
+        orbistoun_video::recording::MODULE,
     ]
 }
 
@@ -56,6 +85,39 @@ pub(crate) fn modules() -> [ModuleDesc; 12] {
 /// The counterpart to [`modules`], and kept beside it for the same reason: a function
 /// declared in one place and implemented in another drifts apart silently, and the
 /// failure mode is code that looks written and never runs.
+/// The implementation a guest would reach by importing `name`.
+///
+/// **Exposed so something can call one without a guest.** Every other route into these
+/// functions goes through a loaded image, a thunk table and a relocation, which is a great
+/// deal of machinery to stand up in order to ask what one function answers. A harness
+/// checking orbistoun against a measured console value needs exactly this, and so does a
+/// differential run against another implementation of the same interface.
+///
+/// The arguments are plain words and guest memory is the host's under an identity mapping, so
+/// a caller passes the address of its own storage and the implementation writes through it -
+/// which is what a guest does.
+#[must_use]
+pub fn implementation_named(name: &str) -> Option<orbistoun_core::GuestFn> {
+    implementations()
+        .into_iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, f)| f)
+}
+
+/// The implementation of `name` that answers in a floating-point register.
+///
+/// **A separate door because they are a separate table.** A function answers in `rax` or in
+/// `xmm0` and never both (D268), so a harness looking one up by name has to know which it
+/// wants - and `strtod` reading an integer argument while answering a float is exactly the
+/// case that makes the distinction visible rather than academic.
+#[must_use]
+pub fn float_implementation_named(name: &str) -> Option<orbistoun_core::GuestFloatFn> {
+    float_implementations()
+        .into_iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, f)| f)
+}
+
 pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> {
     let mut all = orbistoun_kernel::implementations().to_vec();
     all.extend(orbistoun_libc::implementations());
@@ -389,7 +451,124 @@ mod knowledge_tests {
     // implemented nothing rather than fake sound, and still implements no *output*, but its init now
     // succeeds honestly (setting a subsystem up is not claiming a sound was made). A module that
     // genuinely serves nothing goes back here with its reason.
-    const SERVES_NOTHING: &[(&str, &str)] = &[];
+    const SERVES_NOTHING: &[(&str, &str)] = &[
+        (
+            "libSceAgc",
+            "declared as names only, and deliberately. Fifty-one of them are read out of a real              module's import table, so a guest reaching the current generation's graphics              interface is named and counted rather than vanishing into `unknown::` (D500) - but              the first frame is Phase 6, which has not begun, and principle 6 puts a subsystem              after the address space and threads. Implementing one of these to make this list              shorter would be writing the abstraction before its caller.",
+        ),
+        (
+            "libSceAgcDriver",
+            "as `libSceAgc`: the submission half of the same interface, names only.",
+        ),
+        (
+            "libSceAjm",
+            "declared as 14 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceAudio3d",
+            "declared as 7 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceAudioIn",
+            "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceAudioOut2",
+            "declared as 13 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceAmpr",
+            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceIme",
+            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceImeDialog",
+            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceKeyboard",
+            "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceMouse",
+            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceHttp",
+            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceHttp2",
+            "declared as 23 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceNetCtl",
+            "declared as 2 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceNpManager",
+            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceNpWebApi2",
+            "declared as 8 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceNet",
+            "declared as 20 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceSsl",
+            "declared as 10 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceAppContent",
+            "declared as 8 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceCommonDialog",
+            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceCoredump",
+            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceErrorDialog",
+            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceJson2",
+            "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceMsgDialog.native",
+            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceRemoteplay",
+            "declared as 2 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceSaveData_native",
+            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceWebBrowserDialog",
+            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceAvPlayer",
+            "declared as 22 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+        (
+            "libSceVideoRecording",
+            "declared as 10 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+        ),
+    ];
 
     /// **A declared library that serves nothing is either listed above or a bug.**
     ///

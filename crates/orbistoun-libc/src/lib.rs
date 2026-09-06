@@ -28,10 +28,16 @@
 //! faulted there, and the fault reporter names the address.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
+mod arena;
+mod atomic;
 mod clock;
 pub mod cstring;
+mod ctype;
+mod cxx;
+mod locks;
 pub mod math;
 mod scan;
+pub mod streams;
 mod varargs;
 
 use orbistoun_hle::guest_module;
@@ -61,6 +67,12 @@ guest_module! {
         "_Cnd_signal" => 1,
         "_Cnd_broadcast" => 1,
         "_Xtime_get_ticks" => 0,
+        // The character-classification tables. Each answers a *pointer* the caller indexes,
+        // so a placeholder is an address the guest reads through rather than a wrong answer
+        // (D459) - implemented in `ctype` from a measured capture (D468). No arguments.
+        "_Getpctype" => 0,
+        "_Getptolower" => 0,
+        "_Getptoupper" => 0,
         "_Thrd_sleep" => 2,
         // The maths library. Arity is the count of *floating-point* arguments here, which
         // is what these take - none of them touches an integer register. Declared beside
@@ -87,6 +99,7 @@ guest_module! {
         "acos" => 1,
         "atan" => 1,
         "atan2" => 2,
+        "atan2f" => 2,
         "floorf" => 1,
         "ceilf" => 1,
         "truncf" => 1,
@@ -100,6 +113,9 @@ guest_module! {
         "logf" => 1,
         "strtod" => 2,
         "strtof" => 2,
+        // One float argument and two `float *` out-parameters, so it is here rather than above:
+        // the pure-maths functions touch no integer register and this touches two.
+        "sincosf" => 3,
         // Character classes and case folding. One `int` in, one `int` out.
         "isalpha" => 1, "isdigit" => 1, "isalnum" => 1, "isspace" => 1,
         "isupper" => 1, "islower" => 1, "ispunct" => 1, "isxdigit" => 1,
@@ -114,10 +130,26 @@ guest_module! {
         "abs" => 1, "labs" => 1, "llabs" => 1,
         "rand" => 0, "srand" => 1,
         "wcslen" => 1,
+        // Single-precision and the remaining double entries, from ISO/IEC 9899 7.12.
+        // `ldexp`/`frexp`/`modf`/`sincos` count their integer arguments: an exponent or an
+        // out-parameter arrives in an integer register, not a floating-point one.
+        "acosf" => 1, "asinf" => 1, "atanf" => 1, "cbrtf" => 1,
+        "exp2" => 1, "exp2f" => 1, "log10f" => 1, "log2f" => 1, "tanhf" => 1,
+        "nearbyintf" => 1, "hypotf" => 2,
+        "frexp" => 2, "ldexp" => 2, "ldexpf" => 2, "modf" => 2, "modff" => 2,
+        "sincos" => 3,
+        // The bounded string functions: BSD's `strlcpy`/`strnstr`, and the C11 Annex K `_s`
+        // family whose extra argument is the destination's size - the whole point of them.
+        "strlcpy" => 3, "strnstr" => 3,
+        "wcscmp" => 2, "wcsncpy" => 3,
+        "memcpy_s" => 4, "memmove_s" => 4, "memset_s" => 4,
+        "strcat_s" => 3, "strncat_s" => 4, "strncpy_s" => 4, "wcsncpy_s" => 4,
+        "wcsrchr" => 2,
         "snprintf" => 3, "sprintf" => 2,
         // The `va_list` forms. Fixed parameters only - the variadic half arrives through
         // the list rather than in registers, which is the whole point of them (D364).
         "vsnprintf" => 4, "vprintf" => 2, "vfprintf" => 3,
+        "vsprintf_s" => 4,
         // Breaking a `time_t` down and rendering it. A Unity title formats a timestamp with
         // `asctime(localtime(&t))`; unimplemented, `localtime` answered a placeholder that
         // `asctime` then `printf`'d as a `%s`, faulting on our own error code (D454).
@@ -131,7 +163,7 @@ guest_module! {
         "kill" => 2,
         // The two calls between `ftpsrv` and a listening port (D382).
         "sscanf" => 6, "strftime" => 4,
-        "getenv" => 1, "getcwd" => 2, "perror" => 1, "strerror_r" => 3,
+        "getenv" => 1, "setenv" => 3, "unsetenv" => 1, "getcwd" => 2, "perror" => 1, "strerror_r" => 3,
         // The file calls that change a directory. Declared here, where FreeBSD puts them,
         // and implemented in `orbistoun-fs`, where the mount model that decides whether a
         // guest may touch a path lives (D367).
@@ -165,6 +197,9 @@ guest_module! {
         "strdup" => 1, "strndup" => 2, "strncat" => 3,
         "strtok" => 2, "strtok_r" => 3,
         "qsort" => 4, "bsearch" => 5,
+        // `setlocale` takes a category and a locale name; `clock` takes nothing; `setjmp`
+        // takes the buffer it would save into. PPSA02664 calls each once (D562).
+        "setlocale" => 2, "clock" => 0, "setjmp" => 1,
         "memset" => 3,
         "memcpy" => 3,
         "memmove" => 3,
@@ -181,6 +216,8 @@ guest_module! {
         "strncmp" => 3,
         "strcpy" => 2,
         "strncpy" => 3,
+        // `strcpy_s(dest, destsz, src)` - Annex K's bounds-checked copy, answering errno_t.
+        "strcpy_s" => 3,
         "strcat" => 2,
         "strchr" => 2,
         "strrchr" => 2,
@@ -202,6 +239,9 @@ guest_module! {
         "_ZdaPv" => 1,
         "_ZdlPvm" => 2,
         "_ZdaPvm" => 2,
+        // `std::_Random_device()` - the entropy primitive `std::random_device` reads through.
+        // No arguments (the `v` suffix); answers an `unsigned int`.
+        "_ZSt14_Random_devicev" => 0,
         // Stdio. Declared before any of it is implemented, because *declaring* is what
         // lets the knowledge file say `fopen` returns a pointer - and an undeclared
         // pointer-returning function falls to the default stub, which answers an error
@@ -233,6 +273,35 @@ guest_module! {
         // `noreturn` call - reported as `illegal instruction` at an address that meant
         // nothing, in two titles (D177).
         "abort" => 0,
+        // The runtime's own assertion handler, which a failed `assert` reaches instead of
+        // calling `abort` itself. One argument: the message.
+        "_Assert" => 1,
+        // The out-of-line C11 atomics the runtime ships for compilers without the intrinsics.
+        // The trailing memory-order argument is counted: it is passed, even though the
+        // strongest order is used regardless.
+        "_Atomic_load_4" => 2,
+        "_Atomic_fetch_add_4" => 3,
+        "_Atomic_fetch_sub_4" => 3,
+        "_Atomic_compare_exchange_weak_4" => 5,
+        // The runtime's own names for the conversions `strtoul`/`strtoull` wrap.
+        "_Stoul" => 3, "_Stoull" => 3,
+        "strtoumax" => 3, "strtoimax" => 3,
+        // The runtime's internal recursive locks: a stream's, and its numbered system ones.
+        // One argument each - the thing being locked.
+        "_Lockfilelock" => 1, "_Unlockfilelock" => 1,
+        "_Locksyslock" => 1, "_Unlocksyslock" => 1,
+        // The C++ runtime this layer can answer without an unwinder: allocation, and the
+        // family that never returns. Arities are the ABI's own - the `nothrow_t` and
+        // `align_val_t` arguments are passed even though one of them is an empty tag type.
+        "_ZnwmRKSt9nothrow_t" => 2, "_ZnwmSt11align_val_t" => 2,
+        "_ZdlPvSt11align_val_t" => 2,
+        "_ZSt15get_new_handlerv" => 0,
+        "_ZSt9terminatev" => 0, "__cxa_pure_virtual" => 0,
+        "_Unwind_Resume" => 1,
+        "_ZSt14_Xlength_errorPKc" => 1, "_ZSt14_Xout_of_rangePKc" => 1,
+        "_ZSt18_Xinvalid_argumentPKc" => 1,
+        "_ZSt11_Xbad_allocv" => 0, "_ZSt19_Xbad_function_callv" => 0,
+        "_ZSt14_Throw_C_errori" => 1, "_ZSt16_Throw_Cpp_errori" => 1,
         // Two arguments: the signal number and the handler. FreeBSD's `signal(3)`.
         "signal" => 2,
         // `getopt(argc, argv, optstring)`. POSIX.1-2008.
@@ -243,6 +312,8 @@ guest_module! {
         "strerror" => 1,
         // `puts(s)`, which appends a newline where `printf` does not.
         "puts" => 1,
+        // `putchar(c)`, one byte to the output stream.
+        "putchar" => 1,
         // `getpid()`.
         "getpid" => 0,
         // `sysctl(name, namelen, oldp, oldlenp, newp, newlen)`. FreeBSD `sysctl(3)`.
@@ -438,6 +509,49 @@ fn strncpy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         unsafe { std::ptr::write_bytes(ptr(dest + len as u64), 0, limit - len) };
     }
     dest
+}
+
+/// `strcpy_s(dest, destsz, src)` - the bounds-checked copy of Annex K.
+///
+/// **Its answer is a status, not the buffer**, and that is the whole point here. Unimplemented,
+/// it fell to the default stub and returned a placeholder a caller reads as *non-zero* -
+/// failure - so PPSA04263 copied none of its 102 build strings and then dereferenced the null it
+/// had left behind (`image+0x2ba47bc`). A function whose contract is `errno_t` must answer the
+/// `errno_t`.
+///
+/// Copies `src`, terminator included, into `dest` when it fits in `destsz`, and answers `0`. On
+/// any runtime-constraint violation - a null pointer, a zero or too-small `destsz` - it writes an
+/// empty string to a usable `dest` (as the standard requires) and answers a non-zero `errno_t`.
+///
+/// Reference: C11 Annex K, K.3.7.1.3 `strcpy_s`. The non-zero codes are the POSIX `EINVAL`/
+/// `ERANGE` a caller comparing against `<errno.h>` expects; a caller testing only against zero
+/// sees success or failure either way.
+fn strcpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// `errno_t` for a null pointer or a zero destination size.
+    const EINVAL: u64 = 22;
+    /// `errno_t` for a destination too small to hold the source and its terminator.
+    const ERANGE: u64 = 34;
+
+    let (dest, destsz, src) = (args[0], args[1], args[2]);
+    if dest == 0 || src == 0 || destsz == 0 {
+        if dest != 0 && destsz != 0 {
+            // SAFETY: `dest` is non-null and `destsz >= 1`, so its first byte is writable.
+            unsafe { ptr(dest).write(0) };
+        }
+        return EINVAL;
+    }
+    // SAFETY: a guest-supplied string under the identity mapping, bounded by its terminator.
+    let len = unsafe { c_len(src) };
+    // The terminator has to fit as well, so the source needs `len + 1` bytes of room.
+    if len + 1 > destsz as usize {
+        // SAFETY: `dest` is non-null and `destsz >= 1`.
+        unsafe { ptr(dest).write(0) };
+        return ERANGE;
+    }
+    // SAFETY: both are guest-supplied pointers, and the check above established that `len + 1`
+    // bytes - the string and its terminator - fit within `destsz` at `dest`.
+    unsafe { std::ptr::copy(ptr(src), ptr(dest), len + 1) };
+    0
 }
 
 fn strcat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -644,7 +758,7 @@ const MAX_ARGUMENTS: usize = 1024;
 /// Silently does nothing when the guest does not import that name, which is the honest
 /// answer: a program with no `optarg` has nowhere for one to go, and inventing somewhere
 /// would put a value where nothing will ever read it.
-fn write_guest_word(name: &str, value: u64) {
+pub(crate) fn write_guest_word(name: &str, value: u64) {
     let Some(at) = orbistoun_thunk::data_symbol(name) else {
         return;
     };
@@ -698,7 +812,7 @@ const WORD: usize = size_of::<usize>();
 /// at once: where the allocation starts, and what `dealloc` must be told. `dealloc` given a
 /// layout that differs from the one `alloc` received is undefined behaviour, which is why
 /// the alignment cannot simply be recomputed and hoped over.
-fn allocate(size: usize, align: usize) -> u64 {
+pub(crate) fn allocate(size: usize, align: usize) -> u64 {
     // **Conforming is not the same as compatible.** The standard permits `malloc(0)` to
     // answer null *or* a unique pointer, and this answered null because it is simpler and a
     // caller must not dereference either. That reasoning is about the standard; this
@@ -724,8 +838,14 @@ fn allocate(size: usize, align: usize) -> u64 {
     let Ok(layout) = std::alloc::Layout::from_size_align(total, align) else {
         return 0;
     };
-    // SAFETY: the layout has a non-zero size, which is `alloc`'s only requirement.
-    let base = unsafe { std::alloc::alloc(layout) };
+    // A fixed-base region when one was asked for, and the host heap otherwise. Both hand
+    // back `total` bytes aligned to `align`, so everything below this point - the header,
+    // `free`, `realloc` - is written once and does not know which answered (D513).
+    let base = match arena::take(total, align) {
+        Some(address) => std::ptr::with_exposed_provenance_mut::<u8>(address as usize),
+        // SAFETY: the layout has a non-zero size, which is `alloc`'s only requirement.
+        None => unsafe { std::alloc::alloc(layout) },
+    };
     if base.is_null() {
         // What a real allocator returns when it cannot allocate, and callers test for it.
         return 0;
@@ -760,6 +880,17 @@ fn allocate(size: usize, align: usize) -> u64 {
 static FILLED_ALLOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Bytes filled, alongside [`FILLED_ALLOCATIONS`].
 static FILLED_HEAP_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One line for a run report: what the fixed-base heap actually did.
+///
+/// [`None`] when none was asked for. A run that asked and served nothing, or that spilled
+/// past the region into the host heap, says so in those words - a partial fixing of the
+/// guest's addresses read as a whole one is the one conclusion this diagnostic must never
+/// support (D513).
+#[must_use]
+pub fn heap_base_summary() -> Option<String> {
+    arena::summary()
+}
 
 /// One line for a run report: what the heap fill actually did.
 ///
@@ -863,10 +994,17 @@ fn memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `free(pointer)`.
 ///
 /// Reads the size back out of the header `malloc` wrote.
-fn free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+pub(crate) fn free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let pointer = args[0];
     if pointer == 0 {
         // Freeing null is defined and does nothing.
+        return 0;
+    }
+    if arena::holds(pointer) {
+        // Asked before the header is read, not after: a block from the fixed region carries
+        // exactly the same header as one from the host heap, so the header cannot be what
+        // tells them apart - and `dealloc` against reserved memory is undefined behaviour.
+        // The region never reuses a block, which is stated in its own documentation.
         return 0;
     }
     let Some((total, offset)) = header_of(pointer) else {
@@ -1462,15 +1600,57 @@ fn render_with(format: &[u8], args: &mut impl Arguments) -> Result<Vec<u8>, Form
             other => return Err(FormatFault::Unsupported(char::from(other))),
         };
 
-        // Padding, applied after rendering so it is the same code for every conversion.
-        let pad = width.saturating_sub(rendered.len());
-        let fill = if zero && !left { b'0' } else { b' ' };
-        if left {
-            out.extend_from_slice(&rendered);
-            out.extend(std::iter::repeat_n(b' ', pad));
+        // **An integer conversion pads differently from a string, and both used to go
+        // through the same three lines.** The differential caught two conformance bugs in
+        // one run: `%05d` of -42 rendered `00-42` where the sign must come first, and
+        // `%.3d` of 42 rendered `42` because precision was applied to `%s` and nowhere else
+        // (D511).
+        //
+        // ISO C 7.21.6.1 for `d i o u x X`: precision is the **minimum number of digits**,
+        // default one, zero-filled on the left; a precision of zero with a value of zero
+        // renders nothing at all. **A specified precision makes the `0` flag ignored**, and
+        // `-` overrides it too. Width padding with `0` goes *after* the sign, which is the
+        // whole of the first bug.
+        let numeric = matches!(conversion, b'd' | b'i' | b'u' | b'x' | b'X' | b'o');
+        let (sign, digits): (&[u8], &[u8]) = if numeric && rendered.first() == Some(&b'-') {
+            rendered.split_at(1)
         } else {
-            out.extend(std::iter::repeat_n(fill, pad));
-            out.extend_from_slice(&rendered);
+            (&[], &rendered)
+        };
+        let mut body: Vec<u8> = Vec::with_capacity(rendered.len());
+        if numeric {
+            if let Some(least) = precision {
+                if least == 0 && digits == b"0" {
+                    // The one case where a conversion renders no characters at all.
+                } else {
+                    body.extend(std::iter::repeat_n(
+                        b'0',
+                        least.saturating_sub(digits.len()),
+                    ));
+                    body.extend_from_slice(digits);
+                }
+            } else {
+                body.extend_from_slice(digits);
+            }
+        } else {
+            body.extend_from_slice(&rendered);
+        }
+
+        let pad = width.saturating_sub(sign.len() + body.len());
+        let zero_fill = zero && !left && !(numeric && precision.is_some());
+        if left {
+            out.extend_from_slice(sign);
+            out.extend_from_slice(&body);
+            out.extend(std::iter::repeat_n(b' ', pad));
+        } else if zero_fill {
+            // The sign first, then the zeros: `-0042`, never `00-42`.
+            out.extend_from_slice(sign);
+            out.extend(std::iter::repeat_n(b'0', pad));
+            out.extend_from_slice(&body);
+        } else {
+            out.extend(std::iter::repeat_n(b' ', pad));
+            out.extend_from_slice(sign);
+            out.extend_from_slice(&body);
         }
     }
     Ok(out)
@@ -1500,13 +1680,21 @@ fn snprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (dest, size, format) = (args[0], args[1] as usize, args[2]);
     FORMAT_CALLS.fetch_add(1, Relaxed);
 
-    if dest == 0 || size == 0 {
+    // **A size of zero is a question, not a refusal.** ISO C 7.21.6.5: with `n` zero nothing
+    // is written, `s` may even be null, and the return is still the length the output *would*
+    // have needed - which is the entire reason a caller passes zero, to size a buffer before
+    // allocating it. Returning zero told that caller it needed no space at all. Found by
+    // diffing against a reference library, which answered 2 where this answered 0 (D479).
+    if dest == 0 && size != 0 {
         return 0;
     }
     if format == 0 {
         note_fault(FormatFault::Unsupported('\0'));
-        // SAFETY: `dest` is non-null with at least one byte, per the size the guest passed.
-        unsafe { std::ptr::write(ptr(dest), 0) };
+        if size != 0 {
+            // SAFETY: `dest` is non-null with at least one byte, per the size the guest
+            // passed - the null-destination case returned above.
+            unsafe { std::ptr::write(ptr(dest), 0) };
+        }
         return 0;
     }
 
@@ -1519,11 +1707,19 @@ fn snprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         Ok(text) => text,
         Err(fault) => {
             note_fault(fault);
-            // SAFETY: `dest` is non-null with at least one byte.
-            unsafe { std::ptr::write(ptr(dest), 0) };
+            if size != 0 {
+                // SAFETY: `dest` is non-null with at least one byte.
+                unsafe { std::ptr::write(ptr(dest), 0) };
+            }
             return 0;
         }
     };
+
+    // Nothing to write into, so nothing is written - and the length is still reported.
+    if size == 0 {
+        FORMAT_TRUNCATED.fetch_add(1, Relaxed);
+        return rendered.len() as u64;
+    }
 
     // One byte reserved for the terminator, which is what makes this the bounded variant.
     let room = size - 1;
@@ -1801,6 +1997,70 @@ fn qsort(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// `setlocale(category, locale)` - the locale in force, as a string.
+///
+/// # Answers a pointer, which is why it was worth implementing at one call
+///
+/// Unimplemented, this handed back the placeholder `0x7fff_0001`, and the guest reads that as a
+/// `char *`. It is a **wild pointer it dereferences immediately** - the D125 shape this project
+/// keeps finding, and the reason the tail was worked in order of what a placeholder does rather
+/// than how often it is called (D562).
+///
+/// Always `"C"`. A program that has not successfully set a locale is in the C locale, so that is
+/// the true answer here rather than a convenient one - orbistoun implements no other, and
+/// answering the name of a locale it does not have would be worse than answering the one it does.
+///
+/// The string is leaked once and never freed: a guest may hold the pointer for its whole life,
+/// and the C standard says a later `setlocale` may invalidate it but nothing says when.
+fn setlocale(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::sync::OnceLock;
+    static C_LOCALE: OnceLock<u64> = OnceLock::new();
+    *C_LOCALE.get_or_init(|| {
+        let leaked: &'static mut [u8; 2] = Box::leak(Box::new(*b"C "));
+        std::ptr::from_mut(leaked) as usize as u64
+    })
+}
+
+/// `clock()` - processor time used, in `CLOCKS_PER_SEC` units.
+///
+/// Elapsed since the process started, the same span `sceKernelGetProcessTime` reports and for
+/// the same reason (D256): an epoch-based value would make two runs of one title incomparable,
+/// and this is *process* time.
+///
+/// # The unit is the assumption, and it is a large one
+///
+/// **Microseconds, on POSIX's rule that `CLOCKS_PER_SEC` is 1,000,000.** FreeBSD's own headers
+/// have historically defined it as **128**, and the target kernel is FreeBSD-derived - so a guest
+/// compiled against those would read a time roughly 7,800 times too large. Nothing here settles
+/// which the vendor's SDK uses, and this is the first thing to change if a title's timing is
+/// wildly wrong (D562).
+fn clock(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// `setjmp(env)` - zero, because this is the direct return.
+///
+/// # It saves nothing, and that is stated rather than hidden
+///
+/// A real `setjmp` stores the callee-saved registers, the stack pointer and the return address
+/// so a later `longjmp` can resume here. **This stores none of them**, so a `longjmp` into this
+/// buffer would jump through uninitialised memory and take the process with it.
+///
+/// It is still strictly better than the placeholder it replaces, which is the whole argument for
+/// implementing it: `0x7fff_0001` is **non-zero**, and a non-zero return from `setjmp` tells the
+/// guest *"you arrived here via longjmp"* - sending it down an error-recovery path it was never
+/// on. Answering zero at least tells it the truth about which return this is.
+///
+/// **No title in the corpus imports `longjmp`**, which is what makes this safe today and is
+/// exactly the condition to check before it stops being. Implementing `longjmp` without first
+/// implementing the save here would be the dangerous change, not this one (D562).
+fn setjmp(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `bsearch(key, base, count, size, compare)` - the matching element, or null.
 ///
 /// **Answers a pointer, so a miss is null and never an error code.** A count-shaped
@@ -2023,6 +2283,18 @@ fn render_va(format: u64, ap: u64) -> Option<Vec<u8>> {
 /// rather than the copied one in every case.
 ///
 /// Reference: ISO C `vsnprintf`; POSIX.1-2008 `vsnprintf(3)`.
+/// `vsprintf_s(buffer, count, format, argptr)` - the bounds-checked `vsprintf` of Annex K.
+///
+/// The same shape and observable effect as [`vsnprintf`] - render the format against the argument
+/// list into `buffer`, bounded by `count` and always terminated, answering the length - so it is
+/// delegated to it. The `_s` variant's only additional contract is its runtime-constraint handlers,
+/// which a caller that passes a valid buffer and format never invokes, and which is the case here.
+///
+/// Reference: C11 Annex K `vsprintf_s`; the buffer form of the rendering `vsnprintf` already does.
+fn vsprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    vsnprintf(args)
+}
+
 fn vsnprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -2081,13 +2353,21 @@ fn vprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `vfprintf(stream, format, ap)` - [`vprintf`] with a stream in front.
 ///
-/// **The stream is not honoured**, exactly as in [`fprintf`] and for the same stated
-/// reason: both of a guest's standard streams already land on the host's error stream, so
-/// `stdout` and `stderr` are not currently told apart here. A guest relying on that
-/// distinction would be misread.
+/// **The stream is honoured the same way [`fprintf`] honours it**: a stream that stands for a
+/// descriptor is written to that descriptor, and anything else falls through to the host's
+/// error stream. The two used to differ - `fprintf` routed and this did not - which was
+/// invisible until the standard streams became real descriptors and a guest's `stdout` and
+/// `stderr` could finally be told apart. One of the pair honouring a distinction the other
+/// ignores is worse than neither doing it, because the output looks right until it does not.
 ///
 /// Reference: ISO C `vfprintf`; POSIX.1-2008 `vfprintf(3)`.
 fn vfprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Some(fd) = orbistoun_fs::open::wrapped_descriptor(args[0]) {
+        let Some(rendered) = render_va(args[1], args[2]) else {
+            return 0;
+        };
+        return orbistoun_fs::descriptor::write(fd, &rendered).map_or(0, |written| written as u64);
+    }
     let mut shifted = [0_u64; GUEST_ARG_REGISTERS];
     shifted[..GUEST_ARG_REGISTERS - 1].copy_from_slice(&args[1..]);
     vprintf(&shifted)
@@ -2122,6 +2402,60 @@ fn puts(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let _ = err.write_all(b"\n");
     let _ = err.flush();
     len as u64 + 1
+}
+
+/// `putchar(c)` - writes one byte to the output stream and returns it.
+///
+/// Routed to the host's error stream, exactly as [`puts`] and [`printf`] are and for the same
+/// reason (D344): a worker's standard output carries the JSON protocol, so a guest's own
+/// output goes to stderr where it cannot corrupt it.
+///
+/// Reference: ISO C `putchar`; POSIX.1-2008 `putchar(3)`. Answers the byte written as an
+/// `unsigned char` widened to `int`; the `EOF` error return is not producible here, since the
+/// write cannot be refused.
+fn putchar(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::io::Write as _;
+
+    let byte = args[0] as u8;
+    let mut err = std::io::stderr();
+    let _ = err.write_all(&[byte]);
+    let _ = err.flush();
+    u64::from(byte)
+}
+
+/// `std::_Random_device()` - the entropy source `std::random_device` reads from.
+///
+/// # Deterministic on purpose
+///
+/// A real `random_device` is non-deterministic, which is exactly what this emulator must not
+/// be: every measurement it makes - `FURTHER`/`same`/`BACK`, a fault address, a call budget -
+/// depends on two runs of one build behaving identically (D181, D238). A guest reads this to
+/// *seed* its own generator, so what it needs is a well-distributed 32-bit value rather than a
+/// physically random one, and a fixed-seed sequence gives it that while keeping the run
+/// reproducible. It is also a strict improvement on the placeholder it replaces, which a guest
+/// would have seeded a generator with and then behaved oddly around.
+///
+/// The generator is `splitmix64` (Sebastiano Vigna, public domain), advanced once per call
+/// from a fixed seed; the low 32 bits are returned, because `std::random_device::result_type`
+/// is `unsigned int`. Varied across calls, so a guest reading several does not see one value
+/// repeated.
+///
+/// Reference: C++ `std::random_device` (`[rand.device]`); the generator is `splitmix64`.
+fn random_device(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The `splitmix64` increment, also the seed - any odd constant serves, and this is the
+    /// one the reference uses.
+    const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    static STATE: AtomicU64 = AtomicU64::new(GAMMA);
+    let mut z = STATE
+        .fetch_add(GAMMA, Ordering::Relaxed)
+        .wrapping_add(GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    u64::from((z & 0xFFFF_FFFF) as u32)
 }
 
 /// `getpid()` - the process the guest is running in.
@@ -2200,19 +2534,22 @@ fn getenv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     environment_value(wanted).map_or(0, |value| value as usize as u64)
 }
 
+/// The guest's environment as this library answers it: what it was handed, plus anything it
+/// has set since.
+///
+/// **One table for both**, so a variable the guest writes with `setenv` is one `getenv` reads
+/// back. Two tables would let them disagree, which is the bug rather than the feature.
+static ENVIRONMENT: std::sync::Mutex<Option<std::collections::BTreeMap<String, &'static [u8]>>> =
+    std::sync::Mutex::new(None);
+
 /// The value of a variable in the guest's environment, as a stable address.
 ///
 /// Cached per name, because `getenv` answers a pointer the caller may keep: handing out a
 /// fresh allocation per call would be a leak, and a temporary would be a dangling pointer
 /// the moment the caller looked at it.
 fn environment_value(name: &str) -> Option<*const u8> {
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
-
-    static ANSWERED: Mutex<Option<BTreeMap<String, &'static [u8]>>> = Mutex::new(None);
-
-    let mut guard = ANSWERED.lock().ok()?;
-    let answered = guard.get_or_insert_with(BTreeMap::new);
+    let mut guard = ENVIRONMENT.lock().ok()?;
+    let answered = guard.get_or_insert_with(std::collections::BTreeMap::new);
     if let Some(found) = answered.get(name) {
         return Some(found.as_ptr());
     }
@@ -2223,6 +2560,96 @@ fn environment_value(name: &str) -> Option<*const u8> {
     let stored: &'static [u8] = Box::leak(format!("{value}\0").into_bytes().into_boxed_slice());
     answered.insert(name.to_owned(), stored);
     Some(stored.as_ptr())
+}
+
+/// `setenv(name, value, overwrite)` - POSIX.1-2008 `setenv(3)`.
+///
+/// Written into the same table [`environment_value`] answers from, so a variable the guest sets
+/// is one it can read back - two tables would let `getenv` and `setenv` disagree, which is the
+/// bug rather than the feature. The storage is leaked deliberately, for the reason that
+/// function leaks: `getenv` answers a pointer the caller may keep, so a temporary would dangle
+/// the moment it was looked at.
+///
+/// **`overwrite` of zero leaves an existing variable alone and still reports success**, which
+/// is what the standard says and is the half that is easy to get backwards. An empty name, or
+/// one containing `=`, is the documented `EINVAL` rather than a variable nothing could read.
+fn setenv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (name, value, overwrite) = (args[0], args[1], args[2]);
+    let invalid = || {
+        set_errno(i64::from(orbistoun_core::errno::INVALID));
+        FAILED
+    };
+    if name == 0 || value == 0 {
+        return invalid();
+    }
+    // SAFETY: a guest-supplied string under the identity mapping (D014), bounded.
+    let name_len = unsafe { c_len(name) };
+    // SAFETY: the other one, same contract.
+    let value_len = unsafe { c_len(value) };
+    // SAFETY: `c_len` established `name_len` readable bytes at `name`.
+    let name_bytes = unsafe { std::slice::from_raw_parts(ptr(name).cast_const(), name_len) };
+    // SAFETY: and `value_len` readable bytes at `value`.
+    let value_bytes = unsafe { std::slice::from_raw_parts(ptr(value).cast_const(), value_len) };
+    let (Ok(name), Ok(value)) = (
+        std::str::from_utf8(name_bytes),
+        std::str::from_utf8(value_bytes),
+    ) else {
+        return invalid();
+    };
+    if name.is_empty() || name.contains('=') {
+        return invalid();
+    }
+    let Ok(mut guard) = ENVIRONMENT.lock() else {
+        return invalid();
+    };
+    let answered = guard.get_or_insert_with(std::collections::BTreeMap::new);
+    if overwrite == 0 {
+        // Already set by an earlier call, or present in what the guest was handed - both
+        // count as existing, and the standard says to leave it and report success.
+        let prefix = format!("{name}=");
+        if answered.contains_key(name)
+            || orbistoun_thunk::guest_environment()
+                .iter()
+                .any(|entry| entry.starts_with(&prefix))
+        {
+            return OK;
+        }
+    }
+    let stored: &'static [u8] = Box::leak(format!("{value}\0").into_bytes().into_boxed_slice());
+    answered.insert(name.to_owned(), stored);
+    OK
+}
+
+/// `unsetenv(name)` - POSIX.1-2008 `unsetenv(3)`.
+///
+/// Removes only what this layer is holding. A variable the guest was *handed* cannot be taken
+/// out of the process image it was built from, so one that came from there is reported as
+/// removed and will still be found by `getenv` - stated here because the alternative is to
+/// pretend, and a caller that checks would be told a lie either way round.
+fn unsetenv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let name = args[0];
+    if name == 0 {
+        set_errno(i64::from(orbistoun_core::errno::INVALID));
+        return FAILED;
+    }
+    // SAFETY: a guest-supplied string under the identity mapping (D014), bounded.
+    let len = unsafe { c_len(name) };
+    // SAFETY: `c_len` established `len` readable bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr(name).cast_const(), len) };
+    let Ok(name) = std::str::from_utf8(bytes) else {
+        set_errno(i64::from(orbistoun_core::errno::INVALID));
+        return FAILED;
+    };
+    if name.is_empty() || name.contains('=') {
+        set_errno(i64::from(orbistoun_core::errno::INVALID));
+        return FAILED;
+    }
+    if let Ok(mut guard) = ENVIRONMENT.lock()
+        && let Some(answered) = guard.as_mut()
+    {
+        answered.remove(name);
+    }
+    OK
 }
 
 /// `getcwd(buffer, size)` - where the guest thinks it is.
@@ -2599,26 +3026,38 @@ fn no_processes(length_at: u64) -> u64 {
 /// `sysctl`: what is known is answered, what is not is refused and *reported once*, so the
 /// list of names a guest wanted is the work list.
 ///
-/// # What is answered, and what is deliberately not invented
+/// # This is the merge of two implementations (D477)
 ///
-/// `kern.osrelease` comes from the machine's own configuration and is **empty by default**.
-/// Nothing in this repository knows what a console's kernel calls itself - the FreeBSD
-/// checkout is not that kernel - so an unset value refuses rather than answering a plausible
-/// version, which would send a guest down a path chosen by a number nobody measured (D397).
+/// A second `sysctlbyname` was written in `orbistoun-kernel` a day after this one, by
+/// somebody who did not know this existed. A NID hashes the name alone, so both claimed one
+/// identifier and the stub table carried a slot for each - the same name reaching different
+/// code depending on how a guest asked for it. This is the survivor, and it carries what the
+/// other one decided:
+///
+/// - **an unset `kern.osrelease` answers an empty NUL-terminated string** rather than
+///   refusing. D397 refused it here; D447 answered it there and the conformance check
+///   `135-sysctl/osrelease` passed. Answering is also the more defensible of the two on the
+///   merits: the knob *exists* on the console, so reporting "no such name" is false, where
+///   reporting an existing knob with no value is exactly true.
+/// - **failures answer vendor codes**, not this crate's generic `FAILED`. The distinctions
+///   are ones a caller acts on - a name that does not exist is a different thing from a
+///   buffer too small for one that does, and only the second is worth retrying with the
+///   length this writes back.
 ///
 /// Reference: FreeBSD `sysctlbyname(3)`. A caller passing a null buffer is asking for the
 /// size, which is the ordinary first half of the pair and gets the same answer.
 fn sysctl_by_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (name, out, out_len) = (args[0], args[1], args[2]);
     if name == 0 {
-        return FAILED;
+        return sysctl_failed(orbistoun_core::errno::FAULT);
     }
     // SAFETY: a guest-supplied string under the identity mapping (D014), bounded.
     let len = unsafe { c_len(name) };
     // SAFETY: `c_len` established `len` readable bytes from `name`.
     let bytes = unsafe { std::slice::from_raw_parts(ptr(name).cast_const(), len) };
     let Ok(asked) = std::str::from_utf8(bytes) else {
-        return FAILED;
+        // A MIB name is ASCII; bytes that are not are not a name this can look up.
+        return sysctl_failed(orbistoun_core::errno::INVALID);
     };
 
     // An integer knob is answered as raw bytes of the width the platform uses, because a
@@ -2630,7 +3069,7 @@ fn sysctl_by_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(text) = answer_for(asked) else {
         // Reported once, so the names a guest wanted are the work list rather than a silence.
         note_unknown_sysctl(asked);
-        return FAILED;
+        return sysctl_failed(orbistoun_core::errno::NO_ENTRY);
     };
     answer_string(&text, out, out_len)
 }
@@ -2684,7 +3123,7 @@ fn answer_bytes(value: &[u8], out: u64, out_len: u64) -> u64 {
             );
         }
         if out != 0 && room < needed as u64 {
-            return FAILED;
+            return sysctl_failed(orbistoun_core::errno::NO_MEMORY);
         }
     }
     if out == 0 {
@@ -2705,6 +3144,16 @@ fn answer_bytes(value: &[u8], out: u64, out_len: u64) -> u64 {
     OK
 }
 
+/// The code a `sysctl` failure answers, from the errno underneath it.
+///
+/// **Vendor codes rather than [`FAILED`]**, which the rest of this crate uses for a generic
+/// refusal. Carried over in the D477 merge: the encoding is the measured `0x8002_0000 |
+/// errno` pattern, and the three values used here - a name that does not exist, a buffer too
+/// small, a pointer that cannot be used - are distinctions a caller branches on.
+fn sysctl_failed(errno: u32) -> u64 {
+    u64::from(orbistoun_core::GuestError::vendor(errno).as_raw())
+}
+
 /// What this machine says about one named MIB, or nothing.
 ///
 /// Deliberately a short list. Every entry is a claim about the platform, and a name answered
@@ -2712,16 +3161,27 @@ fn answer_bytes(value: &[u8], out: u64, out_len: u64) -> u64 {
 /// them is visible in the report.
 fn answer_for(name: &str) -> Option<String> {
     match name {
-        "kern.osrelease" => {
-            let release = &orbistoun_core::machine::presented().kernel_release;
-            (!release.is_empty()).then(|| release.clone())
-        }
+        // **Answered even when empty**, which is the half D397 got wrong and D447 corrected:
+        // the knob exists on the console, so refusing it says "no such name" - false - where
+        // an empty NUL-terminated string says "exists, no value", which is exactly true.
+        // A console measured `0.0-prototype` here; a machine profile may carry it, and the
+        // default still does not invent one.
+        "kern.osrelease" => Some(orbistoun_core::machine::presented().kernel_release.clone()),
         // **Measured, and firmware-independent.** A conformance run read `FreeBSD` off a target
         // console, and unlike the release it is not a per-machine string - the target kernel is
         // FreeBSD-derived, which the whole project already relies on for the C library's
         // analogues, and this is that fact stated by the platform itself rather than assumed
         // (D405). Cited to the same run in the knowledge base.
         "kern.ostype" => Some("FreeBSD".to_owned()),
+        // **Empty, by exactly D447's argument.** The console answered one byte for this
+        // knob - a NUL and nothing before it - so the name exists and has no value. Refusing
+        // it would say "no such name", which is false; answering an empty string says
+        // "exists, no value", which is what was measured.
+        //
+        // A hostname is a per-machine setting, so the *content* is not claimed and could not
+        // be: what is claimed is the width, and orbistoun has no hostname to report, which is
+        // the same state the measured console was in.
+        "kern.hostname" => Some(String::new()),
         _ => None,
     }
 }
@@ -2734,7 +3194,7 @@ fn answer_string(text: &str, out: u64, out_len: u64) -> u64 {
     let needed = text.len() + 1;
     if out_len != 0 {
         let Ok(at) = usize::try_from(out_len) else {
-            return FAILED;
+            return sysctl_failed(orbistoun_core::errno::FAULT);
         };
         // SAFETY: a guest-supplied `size_t *` under the identity mapping (D014), which the
         // guest passed expecting to be written through.
@@ -2750,7 +3210,7 @@ fn answer_string(text: &str, out: u64, out_len: u64) -> u64 {
         if out != 0 && room < needed as u64 {
             // Too small, and the length is already written back so the caller can retry -
             // which is what the interface documents rather than a truncation.
-            return FAILED;
+            return sysctl_failed(orbistoun_core::errno::NO_MEMORY);
         }
     }
     if out == 0 {
@@ -2758,7 +3218,7 @@ fn answer_string(text: &str, out: u64, out_len: u64) -> u64 {
         return OK;
     }
     let Ok(at) = usize::try_from(out) else {
-        return FAILED;
+        return sysctl_failed(orbistoun_core::errno::FAULT);
     };
     let mut bytes = text.as_bytes().to_vec();
     bytes.push(0);
@@ -2812,6 +3272,28 @@ fn note_unknown_sysctl(mib: &str) {
 /// doing something perfectly clear: giving up (D177).
 fn abort(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     orbistoun_core::stop(orbistoun_core::StopReason::Aborted, args[0])
+}
+
+/// `_Assert(message)` - the runtime's assertion handler.
+///
+/// The Dinkumware runtime routes a failed `assert` here rather than to `abort` directly, so
+/// this is where a guest says which assertion it lost. Reference: the C standard requires a
+/// failed `assert` to write information about the call to the standard error stream and then
+/// call `abort` (ISO/IEC 9899 7.2.1.1), which is what this does - the message first, because
+/// stopping without it would throw away the only part a reader needs.
+fn assert_failed(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let message = if args[0] == 0 {
+        "(no message)".to_owned()
+    } else {
+        // SAFETY: a guest-supplied string under the identity mapping (D014), bounded.
+        let len = unsafe { c_len(args[0]) };
+        // SAFETY: `c_len` established `len` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr(args[0]).cast_const(), len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    eprintln!("orbistoun: the guest failed an assertion: {message}");
+    orbistoun_core::klog::note(&format!("assertion failed: {message}"));
+    orbistoun_core::stop(orbistoun_core::StopReason::Aborted, 0)
 }
 
 /// `exit(status)`, and `_Exit(status)`.
@@ -3067,6 +3549,10 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
     let mut all = core_implementations().to_vec();
     all.extend_from_slice(cstring::implementations());
     all.extend_from_slice(clock::implementations());
+    all.extend_from_slice(ctype::implementations());
+    all.extend_from_slice(atomic::implementations());
+    all.extend_from_slice(locks::implementations());
+    all.extend_from_slice(cxx::implementations());
     all.extend_from_slice(scan::implementations());
     // Implemented next to the mount model rather than here, and declared here because this
     // is the library that exports them (D367).
@@ -3096,6 +3582,7 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
 fn core_implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("abort", abort),
+        ("_Assert", assert_failed),
         ("exit", exit),
         ("_Exit", exit),
         ("_Znwm", operator_new),
@@ -3104,6 +3591,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("_ZdaPv", operator_delete),
         ("_ZdlPvm", operator_delete),
         ("_ZdaPvm", operator_delete),
+        ("_ZSt14_Random_devicev", random_device),
         ("fopen", fopen),
         ("fclose", fclose),
         ("fread", fread),
@@ -3124,6 +3612,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("memalign", memalign),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
+        ("vsprintf_s", vsprintf_s),
         ("vprintf", vprintf),
         ("vfprintf", vfprintf),
         ("snprintf_s", snprintf_s),
@@ -3134,6 +3623,9 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("strncat", strncat),
         ("qsort", qsort),
         ("bsearch", bsearch),
+        ("setlocale", setlocale),
+        ("clock", clock),
+        ("setjmp", setjmp),
         ("rand", rand),
         ("srand", srand),
         ("strtok", strtok),
@@ -3144,6 +3636,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("strncmp", strncmp),
         ("strcpy", strcpy),
         ("strncpy", strncpy),
+        ("strcpy_s", strcpy_s),
         ("strcat", strcat),
         ("strchr", strchr),
         ("strrchr", strrchr),
@@ -3153,10 +3646,13 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("__error", error_location),
         ("strerror", strerror),
         ("puts", puts),
+        ("putchar", putchar),
         ("getpid", getpid),
         ("sysctl", sysctl),
         ("kill", kill),
         ("getenv", getenv),
+        ("setenv", setenv),
+        ("unsetenv", unsetenv),
         ("getcwd", getcwd),
         ("sysctlbyname", sysctl_by_name),
         ("realpath", realpath),
@@ -3588,7 +4084,28 @@ mod tests {
         /// `libScePosix` - so that is where they are declared, and `orbistoun-posix`
         /// delegates to the code here. A list rather than a blanket exemption, because the
         /// guard is only worth having if a new one has to be argued for.
-        const DECLARED_ELSEWHERE: &[&str] = &["gettimeofday", "clock_gettime"];
+        const DECLARED_ELSEWHERE: &[&str] = &[
+            "gettimeofday",
+            "clock_gettime",
+            // The descriptor and mapping calls added in bulk (worklog 308). Same argument as
+            // the two above: POSIX names with no vendor-named twin, declared in `libScePosix`
+            // because that is the library a guest imports them from, and implemented in the
+            // filesystem layer beside the file calls they belong with.
+            "creat",
+            "readv",
+            "writev",
+            "preadv",
+            "pwritev",
+            "fsync",
+            "fdatasync",
+            "getpagesize",
+            "madvise",
+            // Byte order, for the same reason, beside the sockets that use it.
+            "htonl",
+            "htons",
+            "ntohl",
+            "ntohs",
+        ];
 
         // An implementation nobody declared can never be reached: resolution goes
         // through the declared symbol list.
@@ -3845,9 +4362,17 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_sized_destination_is_left_alone() {
-        // There is no room even for a terminator, so writing one would corrupt whatever
-        // the guest put next to it.
+    fn a_zero_sized_destination_is_left_alone_and_the_length_is_still_reported() {
+        // Two halves, and this test used to have the second one wrong.
+        //
+        // The destination is untouched: there is no room even for a terminator, so
+        // writing one would corrupt whatever the guest put next to it. That half was
+        // always right.
+        //
+        // **The return is the length the output would have needed**, not zero. ISO C
+        // 7.21.6.5, and the reason a caller passes a size of zero at all - it is asking
+        // how much to allocate, and zero told it to allocate nothing. Caught by diffing
+        // against a reference library (D479); the test had pinned the bug.
         let format = b"x\0";
         let mut dest = [0xAA_u8; 4];
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
@@ -3855,8 +4380,12 @@ mod tests {
         args[1] = 0;
         args[2] = format.as_ptr() as usize as u64;
 
-        assert_eq!(snprintf_s(&args), 0);
-        assert_eq!(dest, [0xAA; 4]);
+        assert_eq!(
+            snprintf_s(&args),
+            1,
+            "one character would have been written"
+        );
+        assert_eq!(dest, [0xAA; 4], "and none of it was");
     }
     #[test]
     fn memalign_returns_what_it_was_asked_for() {
@@ -4091,6 +4620,58 @@ mod tests {
         assert_eq!(super::answer_for("kern.ostype"), Some("FreeBSD".to_owned()));
     }
 
+    /// **`kern.osrelease` is answered whatever its value**, including when it has none.
+    ///
+    /// Carried from the implementation this merged with (D477), and the reason it wins over
+    /// the refusal that used to be here: the knob *exists* on the console, so answering "no
+    /// such name" is false where answering an existing knob with no value is exactly true.
+    /// A guest branches on this - it is what turns firmware detection off - so the
+    /// difference between the two is a path taken or not taken.
+    ///
+    /// Asserted as "answers at all" rather than against a string, because the value comes
+    /// from the machine profile and a test that pinned one would only be pinning the default.
+    #[test]
+    fn the_release_knob_answers_even_when_it_has_no_value() {
+        assert!(
+            super::answer_for("kern.osrelease").is_some(),
+            "an unset release is an empty knob, not a missing one"
+        );
+    }
+
+    /// Names orbistoun cannot source honestly are refused rather than answered plausibly.
+    ///
+    /// `kern.version` is a build banner and `hw.machine` a model string; neither is carried
+    /// here, and a guess at either is a path chosen by a number nobody measured (principle 3).
+    /// **`hw.ncpu` is deliberately not in this list** - it is refused by `answer_for` and
+    /// answered by `answer_integer`, because it is an `int` rather than text, and a test
+    /// asserting the string table refuses it would read as though the call did.
+    #[test]
+    fn unsourceable_knobs_are_refused_rather_than_invented() {
+        assert_eq!(super::answer_for("kern.version"), None);
+        assert_eq!(super::answer_for("hw.machine"), None);
+        assert_eq!(super::answer_for("kern.nonesuch"), None);
+    }
+
+    /// A knob that does not exist is told apart from a buffer too small for one that does.
+    ///
+    /// The two failures the D477 merge kept distinct, because a caller acts on them
+    /// differently: the second is worth retrying with the length written back, and the first
+    /// never is. A single generic refusal for both would send a caller round a loop that
+    /// cannot succeed.
+    #[test]
+    fn a_missing_knob_and_a_short_buffer_answer_differently() {
+        use orbistoun_core::errno;
+
+        let missing = super::sysctl_failed(errno::NO_ENTRY);
+        let short = super::sysctl_failed(errno::NO_MEMORY);
+        assert_ne!(missing, short);
+
+        // Both carry the measured vendor encoding rather than this crate's generic refusal.
+        assert_ne!(missing, super::FAILED);
+        assert_eq!(missing, 0x8002_0002, "the errno pattern, name not found");
+        assert_eq!(short, 0x8002_000c, "and the one a retry can fix");
+    }
+
     /// An integer knob writes its width and no more, and reports that width through the pair.
     ///
     /// The case that matters: a caller reading four bytes of a value must be handed exactly
@@ -4112,5 +4693,94 @@ mod tests {
             &[0xEE; 4],
             "and nothing past the width is touched"
         );
+    }
+}
+
+#[cfg(test)]
+mod environment {
+    use super::{GUEST_ARG_REGISTERS, environment_value, setenv, unsetenv};
+
+    /// A NUL-terminated guest string this test owns.
+    fn text(s: &str) -> Box<[u8]> {
+        format!("{s}\0").into_bytes().into_boxed_slice()
+    }
+
+    fn call(f: fn(&[u64; GUEST_ARG_REGISTERS]) -> u64, args: [u64; 3]) -> u64 {
+        let mut regs = [0_u64; GUEST_ARG_REGISTERS];
+        regs[..3].copy_from_slice(&args);
+        f(&regs)
+    }
+
+    fn value_of(name: &str) -> Option<String> {
+        let at = environment_value(name)?;
+        // SAFETY: `environment_value` answers a NUL-terminated leaked buffer this library
+        // owns, so reading up to its terminator stays inside it.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(at.cast()) };
+        Some(bytes.to_string_lossy().into_owned())
+    }
+
+    /// What is set can be read back - the property that makes one table rather than two the
+    /// right shape.
+    #[test]
+    fn what_setenv_writes_getenv_reads() {
+        let (name, value) = (text("ORBISTOUN_TEST_A"), text("first"));
+        assert_eq!(
+            call(setenv, [name.as_ptr() as u64, value.as_ptr() as u64, 1]),
+            0
+        );
+        assert_eq!(value_of("ORBISTOUN_TEST_A").as_deref(), Some("first"));
+    }
+
+    /// **The half that is easy to get backwards.** `overwrite` of zero must leave an existing
+    /// variable alone *and still report success*; refusing, or overwriting anyway, are both
+    /// wrong and both look plausible.
+    #[test]
+    fn overwrite_zero_keeps_the_existing_value_and_still_succeeds() {
+        let (name, first, second) = (text("ORBISTOUN_TEST_B"), text("kept"), text("ignored"));
+        assert_eq!(
+            call(setenv, [name.as_ptr() as u64, first.as_ptr() as u64, 1]),
+            0
+        );
+        assert_eq!(
+            call(setenv, [name.as_ptr() as u64, second.as_ptr() as u64, 0]),
+            0,
+            "not overwriting is success, not failure"
+        );
+        assert_eq!(value_of("ORBISTOUN_TEST_B").as_deref(), Some("kept"));
+        assert_eq!(
+            call(setenv, [name.as_ptr() as u64, second.as_ptr() as u64, 1]),
+            0
+        );
+        assert_eq!(
+            value_of("ORBISTOUN_TEST_B").as_deref(),
+            Some("ignored"),
+            "and overwrite of one does replace it"
+        );
+    }
+
+    /// **The guard made to fail**: a name containing `=` or an empty one is the documented
+    /// `EINVAL`, not a variable stored under a key nothing could ever ask for.
+    #[test]
+    fn a_name_with_an_equals_sign_is_refused() {
+        let (bad, empty, value) = (text("HAS=EQUALS"), text(""), text("x"));
+        assert_ne!(
+            call(setenv, [bad.as_ptr() as u64, value.as_ptr() as u64, 1]),
+            0
+        );
+        assert_ne!(
+            call(setenv, [empty.as_ptr() as u64, value.as_ptr() as u64, 1]),
+            0
+        );
+        assert_ne!(call(setenv, [0, value.as_ptr() as u64, 1]), 0, "and null");
+    }
+
+    /// `unsetenv` removes what this layer holds.
+    #[test]
+    fn unsetenv_removes_what_setenv_added() {
+        let (name, value) = (text("ORBISTOUN_TEST_C"), text("gone"));
+        call(setenv, [name.as_ptr() as u64, value.as_ptr() as u64, 1]);
+        assert!(value_of("ORBISTOUN_TEST_C").is_some());
+        assert_eq!(call(unsetenv, [name.as_ptr() as u64, 0, 0]), 0);
+        assert_eq!(value_of("ORBISTOUN_TEST_C"), None);
     }
 }

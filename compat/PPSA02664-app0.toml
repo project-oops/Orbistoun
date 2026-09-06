@@ -3,24 +3,28 @@
 [settings]
 
 [status]
-reach = "entered"
-outcome = "image+0xafc959"
-imports = 23
-calls = 222
-standing = 96
+reach = "flipped"
+outcome = "image+0xf56e09"
+imports = 197
+calls = 418278
+standing = 100
 default_return = "unimplemented"
-limit_seconds = 12
+frames = 1
+unanswered = 20
+limit_seconds = 25
 build = "0.1.0"
-measured_on = "2026-08-23"
+measured_on = "2026-09-04"
 
 [experiment]
-reach = "entered"
-outcome = "image+0xafcc08"
-imports = 49
-calls = 2664
-standing = 92
+reach = "flipped"
+outcome = "image+0x42c76"
+imports = 215
+calls = 420776
+standing = 100
 default_return = "unimplemented"
-overrides = 1
-limit_seconds = 20
+overrides = 2
+propping = 2
+frames = 1
+limit_seconds = 25
 build = "0.1.0"
-measured_on = "2026-09-01"
+measured_on = "2026-09-04"

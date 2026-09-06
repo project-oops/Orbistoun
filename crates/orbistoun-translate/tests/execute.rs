@@ -2916,29 +2916,31 @@ fn mtbuf(
 const FMT_32_FLOAT: u32 = 22;
 /// `BUF_FMT_32_32_32_32_FLOAT`.
 const FMT_32X4_FLOAT: u32 = 77;
-/// `BUF_FMT_8_UNORM`: one component, eight bits, and a conversion nothing here performs.
-const FMT_8_UNORM: u32 = 1;
+/// `BUF_FMT_16_16_16_16_UNORM`: four components across two words, a width the packed path does
+/// not yet convert. (The single-word `UNORM` it now does; this stays refused until multi-word
+/// widths land, so it keeps guarding the refusal after the narrow kinds are implemented.)
+const FMT_16X4_UNORM: u32 = 65;
 
 #[test]
 fn a_typed_buffer_format_needing_conversion_is_refused_by_name() {
     // The gate that matters more than the feature.
     //
-    // A narrow component has to be extracted from within a word and converted - an
-    // eight-bit normalised value becomes a float by dividing by 255. None of that is
-    // written. Translating it as though the word were the value produces a shader that
-    // compiles, runs, draws, and is wrong only in the pixels, which is the one failure
-    // this project has no cheap way to notice.
+    // A component that must be extracted and converted, and here also one that spans more than a
+    // single word - four sixteen-bit normalised channels - which the packed path does not yet
+    // handle. Translating it as though the words were the values produces a shader that compiles,
+    // runs, draws, and is wrong only in the pixels, which is the one failure this project has no
+    // cheap way to notice.
     //
     // So it is refused, and this holds that refusal. It needs no device: the refusal
     // happens during translation, before anything is submitted.
     let mut program = describe_buffer(4, 256);
     program.extend(mtbuf(
-        "tbuffer_load_format_x",
+        "tbuffer_load_format_xyzw",
         2,
         0,
         4,
         INLINE_0,
-        FMT_8_UNORM,
+        FMT_16X4_UNORM,
         OFFEN,
     ));
     program.push(s_endpgm());
@@ -3043,6 +3045,216 @@ fn a_four_channel_typed_access_moves_four_consecutive_words() {
             vector(&registers, 4 + channel),
             *word,
             "channel {channel} should read back the word it was stored to"
+        );
+    }
+}
+
+#[test]
+fn a_packed_uint_load_extracts_each_component_from_one_word() {
+    // The first narrow-component format translated: BUF_FMT_8_8_8_8_UINT, four eight-bit
+    // unsigned components packed into a single word. It needs no conversion - each component
+    // is an exact bit field - so a shift and a mask per component is the whole of it, and
+    // this checks each byte comes out in its own register, the first component in the low
+    // byte. A raw word is stored untyped (that path already works), then read back typed.
+    /// Distinct bytes so a wrong shift or mask cannot pass: `x=1, y=2, z=3, w=4`.
+    const PACKED: u32 = 0x0403_0201;
+    /// `BUF_FMT_8_8_8_8_UINT`, measured (code 60).
+    const FMT_8X4_UINT: u32 = 60;
+
+    if !device_or_skip("a_packed_uint_load_extracts_each_component_from_one_word") {
+        return;
+    }
+
+    let mut program = describe_buffer(4, 256);
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(1, PACKED));
+    program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    program.extend(mtbuf(
+        "tbuffer_load_format_xyzw",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_8X4_UINT,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+
+    let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
+    for (component, expected) in [1u32, 2, 3, 4].into_iter().enumerate() {
+        assert_eq!(
+            vector(&registers, 2 + component),
+            expected,
+            "component {component} should be byte {component} of {PACKED:#010x}, low byte first"
+        );
+    }
+}
+
+#[test]
+fn a_packed_sint_load_sign_extends_each_component() {
+    // SINT adds sign extension to the packed integer load: a component whose high bit is set
+    // is negative and must fill the register's high bits with ones, not zeroes. The bytes
+    // 0x80, 0x01, 0x7f, 0x81 are -128, 1, 127, -127; each must read back as its full
+    // sign-extended word. A logical shift (the UINT path) would give 0x80/0x81 unchanged and
+    // fail.
+    /// Distinct signed bytes, mixing both signs: `x=-128, y=1, z=127, w=-127`.
+    const PACKED: u32 = 0x817F_0180;
+    /// `BUF_FMT_8_8_8_8_SINT`, measured (code 61).
+    const FMT_8X4_SINT: u32 = 61;
+
+    if !device_or_skip("a_packed_sint_load_sign_extends_each_component") {
+        return;
+    }
+
+    let mut program = describe_buffer(4, 256);
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(1, PACKED));
+    program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    program.extend(mtbuf(
+        "tbuffer_load_format_xyzw",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_8X4_SINT,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+
+    let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
+    let expected = [(-128i32) as u32, 1, 127, (-127i32) as u32];
+    for (component, want) in expected.into_iter().enumerate() {
+        assert_eq!(
+            vector(&registers, 2 + component),
+            want,
+            "component {component} should be its byte sign-extended to a full word"
+        );
+    }
+}
+
+#[test]
+fn a_packed_unorm_load_normalises_each_component() {
+    // UNORM is the first converting kind: each unsigned byte becomes its value divided by 255,
+    // the byte's maximum, landing in 0.0..=1.0. Only 0 and 255 are exactly representable results
+    // for an 8-bit field (255 is odd, so k/255 is dyadic only at the ends), so the bytes are
+    // 0x00, 0xff, 0xff, 0x00 -> 0.0, 1.0, 1.0, 0.0, asserted against the float bits with no
+    // epsilon. This still exercises the whole mechanism: a bitcast in place of the integer->float
+    // convert, or a missing divide, would land nowhere near 1.0.
+    /// Bytes `x=0, y=255, z=255, w=0`, low byte first.
+    const PACKED: u32 = 0x00FF_FF00;
+    /// `BUF_FMT_8_8_8_8_UNORM`, measured (code 56).
+    const FMT_8X4_UNORM: u32 = 56;
+
+    if !device_or_skip("a_packed_unorm_load_normalises_each_component") {
+        return;
+    }
+
+    let mut program = describe_buffer(4, 256);
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(1, PACKED));
+    program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    program.extend(mtbuf(
+        "tbuffer_load_format_xyzw",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_8X4_UNORM,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+
+    let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
+    let expected = [0.0f32, 1.0, 1.0, 0.0];
+    for (component, want) in expected.into_iter().enumerate() {
+        assert_eq!(
+            vector(&registers, 2 + component),
+            want.to_bits(),
+            "component {component} should be byte/255 as float bits ({want})"
+        );
+    }
+}
+
+#[test]
+fn a_packed_snorm_load_normalises_each_component() {
+    // SNORM is UNORM's signed twin, and the first kind that clamps: each signed byte becomes its
+    // value over 127 (the signed maximum, 2^7 - 1), spanning -1.0..=1.0. The most-negative byte
+    // -128 gives -128/127 = -1.0079, a hair past -1.0, which the reference pins at -1.0 - so it
+    // is clamped. The bytes 127, 0, -128, -127 give exactly 1.0, 0.0, -1.0 (by the clamp), -1.0
+    // (already, since -127/127 is exactly -1.0), asserted against the float bits with no epsilon.
+    // A missing clamp reads -128 as -1.0079 and fails on the third component.
+    const PACKED: u32 = 0x8180_007F;
+    /// `BUF_FMT_8_8_8_8_SNORM`, measured (code 57).
+    const FMT_8X4_SNORM: u32 = 57;
+
+    if !device_or_skip("a_packed_snorm_load_normalises_each_component") {
+        return;
+    }
+
+    let mut program = describe_buffer(4, 256);
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(1, PACKED));
+    program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    program.extend(mtbuf(
+        "tbuffer_load_format_xyzw",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_8X4_SNORM,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+
+    let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
+    let expected = [1.0f32, 0.0, -1.0, -1.0];
+    for (component, want) in expected.into_iter().enumerate() {
+        assert_eq!(
+            vector(&registers, 2 + component),
+            want.to_bits(),
+            "component {component} should be byte/127 clamped to >= -1.0 as float bits ({want})"
+        );
+    }
+}
+
+#[test]
+fn a_packed_float16_load_widens_each_half() {
+    // FLOAT16 is the first kind that is a float in the buffer, not an integer normalised into
+    // one: each 16-bit half is widened to a single-precision float. Two halves share one word -
+    // 0x3C00 is 1.0 and 0xC000 is -2.0, both exact in both widths - packed low half first, so the
+    // word is 0xC0003C00 and the two registers must read back the float bits of 1.0 and -2.0. The
+    // widening is the driver's own (UConvert to u16, bitcast to half, FConvert to float), so this
+    // is a check that the plumbing carries an exact value through, no epsilon.
+    const PACKED: u32 = 0xC000_3C00;
+    /// `BUF_FMT_16_16_FLOAT`, measured (code 29).
+    const FMT_16X2_FLOAT: u32 = 29;
+
+    if !device_or_skip("a_packed_float16_load_widens_each_half") {
+        return;
+    }
+
+    let mut program = describe_buffer(4, 256);
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(1, PACKED));
+    program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    program.extend(mtbuf(
+        "tbuffer_load_format_xy",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_16X2_FLOAT,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+
+    let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
+    let expected = [1.0f32, -2.0];
+    for (component, want) in expected.into_iter().enumerate() {
+        assert_eq!(
+            vector(&registers, 2 + component),
+            want.to_bits(),
+            "component {component} should be its half widened to a float ({want})"
         );
     }
 }

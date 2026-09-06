@@ -265,6 +265,26 @@ pub const HEAP_FILL: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Serve every allocation from a region at a fixed address, instead of from the host heap.
+pub const HEAP_BASE: Var = Var {
+    name: "ORBISTOUN_HEAP_BASE",
+    kind: Kind::Diagnostic,
+    summary: "serve the heap from a region reserved at a fixed address - `default`, or a hexadecimal address - does the run depend on where the host put the heap?",
+    example: "default",
+    read_by: "orbistoun-libc",
+    effect: Effect::Intervenes,
+};
+
+/// Run every placed module's initialisers before the guest starts, not only the ones it loads.
+pub const START_MODULES: Var = Var {
+    name: "ORBISTOUN_START_MODULES",
+    kind: Kind::Diagnostic,
+    summary: "run every placed module's DT_INIT_ARRAY before entry - does the guest depend on a module being initialised that it never asks to load?",
+    example: "all",
+    read_by: "orbistoun-worker",
+    effect: Effect::Intervenes,
+};
+
 /// Fill the guest's `.bss` before it starts, instead of zeroing it.
 pub const BSS_FILL: Var = Var {
     name: "ORBISTOUN_BSS_FILL",
@@ -283,6 +303,16 @@ pub const RUNTIME_GLOBALS: Var = Var {
     example: "ptr_syscall",
     read_by: "orbistoun-worker",
     effect: Effect::Intervenes,
+};
+
+/// How many ranked findings a run prints before summarising the rest.
+pub const FINDINGS: Var = Var {
+    name: "ORBISTOUN_FINDINGS",
+    kind: Kind::Setting,
+    summary: "how many ranked findings to print - the default six summarises the rest as a count, which hides the arguments of every finding past it",
+    example: "40",
+    read_by: "orbistoun-cli",
+    effect: Effect::Observes,
 };
 
 /// Which generation of the platform's file structures a guest is given.
@@ -424,6 +454,33 @@ pub const MAP_SHAPE: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Give every unimplemented function its own placeholder, so one found as data names its source.
+///
+/// # What it buys
+///
+/// Every stub answers `0x7fff_0001`, so a placeholder turning up in a guest's argument says
+/// *some* unimplemented function produced it and never which. `error_used_as_pointer`'s own
+/// action is a person's search - *"find what answered with that code just before"* - and D299
+/// says a finding that sends a reader looking must carry what they are to look at.
+///
+/// Under this, a stub answers `0x7fff_0000 | index`, so the value **is** the attribution. It cost
+/// four gigabytes to not have: a work-area sizer answered the placeholder and PPSA28061 handed it
+/// to `malloc` twice, and the report could only list the three calls before it (D564, D567).
+///
+/// # Why it intervenes rather than observes
+///
+/// It changes what the guest is told. A guest that branches on the exact value takes a different
+/// branch, so a verdict under it measures a settings change - which is what [`Effect::Intervenes`]
+/// exists to say.
+pub const TAG_PLACEHOLDERS: Var = Var {
+    name: "ORBISTOUN_TAG_PLACEHOLDERS",
+    kind: Kind::Diagnostic,
+    summary: "give each unimplemented function its own placeholder, so one found as data names it",
+    example: "1",
+    read_by: "orbistoun-service",
+    effect: Effect::Intervenes,
+};
+
 /// Write a value at a guest address before the guest runs.
 pub const POKE: Var = Var {
     name: "ORBISTOUN_POKE",
@@ -494,9 +551,13 @@ pub const REGISTRY: &[Var] = &[
     STAT_LAYOUT,
     RUNTIME_GLOBALS,
     HEAP_FILL,
+    HEAP_BASE,
+    START_MODULES,
+    FINDINGS,
     WATCH,
     WATCHPOINT,
     POKE,
+    TAG_PLACEHOLDERS,
     MAP,
     MAP_SHAPE,
     WRITE,
@@ -562,8 +623,12 @@ mod tests {
         super::STAT_LAYOUT,
         super::RUNTIME_GLOBALS,
         super::HEAP_FILL,
+        super::HEAP_BASE,
+        super::START_MODULES,
+        super::FINDINGS,
         super::WATCH,
         super::POKE,
+        super::TAG_PLACEHOLDERS,
         super::MAP,
         super::MAP_SHAPE,
         super::WRITE,

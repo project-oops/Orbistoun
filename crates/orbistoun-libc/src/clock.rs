@@ -47,31 +47,6 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// Microseconds in a second.
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
-/// When this process started, for the monotonic clocks.
-///
-/// **A baseline rather than the host's own uptime.** A monotonic clock's zero is
-/// unspecified; what is specified is that it never goes backwards. So process start is a
-/// legitimate origin, and it is the one thing here that is certainly stable for the life of
-/// the guest.
-fn started() -> std::time::Instant {
-    use std::sync::OnceLock;
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    *START.get_or_init(std::time::Instant::now)
-}
-
-/// Seconds and nanoseconds since the epoch, as the host knows them.
-fn wall_clock() -> (u64, u64) {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or((0, 0), |d| (d.as_secs(), u64::from(d.subsec_nanos())))
-}
-
-/// Seconds and nanoseconds since this process started.
-fn since_start() -> (u64, u64) {
-    let elapsed = started().elapsed();
-    (elapsed.as_secs(), u64::from(elapsed.subsec_nanos()))
-}
-
 /// Writes two machine words where a guest expects a two-field time structure.
 ///
 /// Answers whether it could. A null destination is refused rather than written to, which is
@@ -101,7 +76,7 @@ fn write_pair(address: u64, first: u64, second: u64) -> bool {
 /// Reference: POSIX.1-2008 `time(3)`. A null `tloc` is not an error: the standard says the
 /// value is answered either way, and callers rely on `time(NULL)`.
 fn time(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (seconds, _) = wall_clock();
+    let (seconds, _) = orbistoun_hle::clocks::wall_clock();
     if let Ok(at) = usize::try_from(args[0])
         .map(|_| args[0])
         .and_then(usize::try_from)
@@ -124,7 +99,7 @@ fn time(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `gettimeofday(3)`; `struct timeval` from `sys/sys/_timeval.h`.
 fn gettimeofday(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (seconds, nanos) = wall_clock();
+    let (seconds, nanos) = orbistoun_hle::clocks::wall_clock();
     // A null destination is success with nothing written: the call is then a no-op, which
     // is what a caller passing two nulls asked for.
     if args[0] == 0 {
@@ -157,32 +132,14 @@ fn gettimeofday(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `clock_gettime(3)`; identifiers from `sys/sys/_clock_id.h`.
 fn clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (asked, destination) = (args[0] as i64, args[1]);
-    let matches = |name: &str| orbistoun_hle::constants::abi_constant("clock", name) == Some(asked);
-
-    let (seconds, nanos) = if [
-        "CLOCK_REALTIME",
-        "CLOCK_REALTIME_PRECISE",
-        "CLOCK_REALTIME_FAST",
-    ]
-    .iter()
-    .any(|n| matches(n))
-    {
-        wall_clock()
-    } else if [
-        "CLOCK_MONOTONIC",
-        "CLOCK_MONOTONIC_PRECISE",
-        "CLOCK_MONOTONIC_FAST",
-    ]
-    .iter()
-    .any(|n| matches(n))
-    {
-        since_start()
-    } else {
+    // **The families, the identifiers and the monotonic origin live one crate down**, because
+    // `sceKernelClockGettime` is the same call under the platform's own name and belongs to a
+    // library this crate does not own. Copying them would have worked and would have drifted
+    // (D536).
+    let Some((seconds, nanos)) = orbistoun_hle::clocks::reading(args[0] as i64) else {
         return FAILED;
     };
-
-    if write_pair(destination, seconds, nanos) {
+    if write_pair(args[1], seconds, nanos) {
         OK
     } else {
         FAILED

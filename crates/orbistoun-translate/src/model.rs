@@ -47,6 +47,9 @@ use crate::modifiers::Modifiers;
 /// alongside each opcode's operand layout. Both come from the same observation, so they
 /// cannot disagree about what an opcode is called.
 pub const SUPPORTED: &[&str] = &[
+    "exp",
+    "v_interp_p1_f32_e32",
+    "v_interp_p2_f32_e32",
     "buffer_load_dword",
     "buffer_store_dword",
     "tbuffer_load_format_x",
@@ -372,24 +375,14 @@ pub fn supports(mnemonic: &str) -> bool {
 
 /// Instructions understood well enough to say what they are waiting on.
 ///
-/// # Why this is not just the absence of an entry in [`SUPPORTED`]
-///
-/// "No translation for this instruction" is true of everything unimplemented, and it
-/// makes the worklist say the same thing about an instruction nobody has looked at and
-/// one that is blocked on a whole subsystem. Those rank differently: the first is an
-/// afternoon and the second is not, and a list that cannot tell them apart sends effort
-/// at whichever is most frequent rather than whichever is next.
-///
-/// An entry here is a claim that the semantics are understood and the dependency named.
-/// It is not a to-do list - anything that could simply be written should be written.
+/// Empty since D553, when the export - its only entry - became translatable at the
+/// fragment stage. Kept rather than deleted: the distinction it draws, between "nobody
+/// has looked at this" and "this is waiting on a subsystem", is what stops a worklist
+/// sending effort at whichever refusal is most frequent, and the next instruction that
+/// needs it will need it for the same reason.
 pub const BLOCKED: &[(&str, &str)] = &[(
-    "exp",
-    "exporting needs a render target to export to, and there is no concept of one \
-         yet - every translated module today is a compute dispatch writing to a storage \
-         buffer. Mapping an export onto that buffer would let fragment shaders \
-         translate, but the mapping would be invented here rather than derived from \
-         anything, and a shader that appears to work while writing its colour somewhere \
-         arbitrary is worse than one that refuses",
+    "v_interp_mov_f32_e32",
+    "its second operand selects between P0, P10 and P20 - a constant term and two deltas - and this repository has no citable encoding for which value names which. Translating it as the attribute's value would be right for the constant and silently wrong for the deltas, which is the shape of error a shader carries into a frame rather than into an exception. Its pair `v_interp_p1_f32` and `v_interp_p2_f32` do translate (D555); this one waits for a source for that field",
 )];
 
 /// Why an instruction is blocked, if it is one this translator recognises.
@@ -419,6 +412,24 @@ pub trait Model {
 
     /// A constant of the given value, declared once however often it is used.
     fn constant(&mut self, value: u32) -> Id;
+
+    /// The colour output this module exports to, and its vector type, if it has one.
+    ///
+    /// [`None`] for every module that is not a fragment shader, which is the default and was
+    /// every module until D553. An export into a compute dispatch has nowhere to go, and
+    /// answering `None` is what makes that a refusal rather than a store somewhere arbitrary.
+    fn colour_output(&self) -> Option<(Id, Id)> {
+        None
+    }
+
+    /// The fragment input carrying an attribute, and its vector type, if this module has one.
+    ///
+    /// [`None`] for a compute module, and for a fragment module that was built without being
+    /// told the shader interpolates that attribute - the inputs are declared in the header, so
+    /// which ones exist is decided before any instruction is seen (D555).
+    fn attribute_input(&self, _attribute: u32) -> Option<(Id, Id)> {
+        None
+    }
 
     /// The value of a source operand, for one lane.
     fn read_source(
@@ -452,6 +463,14 @@ pub trait Model {
 
     /// The 32-bit float type, for arithmetic.
     fn f32_type(&self) -> Id;
+
+    /// The 16-bit float type, the intermediate a packed half is read as before it is widened
+    /// to a [`f32_type`](Self::f32_type) by the driver's own conversion.
+    fn f16_type(&self) -> Id;
+
+    /// The 16-bit unsigned type, which a packed half's field is narrowed to before it is read
+    /// as a half - a bitcast needs the two sides the same width.
+    fn u16_type(&self) -> Id;
 
     /// Reads one word of the local data share.
     ///
@@ -802,6 +821,66 @@ pub trait Model {
         b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
         result
     }
+
+    /// Converts a register's value, read as an unsigned integer, to the equal float, and returns
+    /// that float's bits.
+    ///
+    /// The exact counterpart to [`f32_binary`](Self::f32_binary)'s bitcast, and the reason that
+    /// one's doc warns against confusing the two: there the register already holds a float's bits;
+    /// here it holds an integer whose *value* becomes the float - 255 becomes 255.0, not the
+    /// float whose bits happen to be 255. Used to lift a packed normalised component and its range
+    /// into the float domain before the division that normalises it.
+    fn unsigned_to_float_bits(&mut self, value: Id) -> Id {
+        let (u32_type, f32_type) = (self.u32_type(), self.f32_type());
+        let b = self.builder();
+        let as_float = b.id();
+        b.function(op::CONVERT_U_TO_F, &[f32_type.0, as_float.0, value.0]);
+        let bits = b.id();
+        b.function(op::BITCAST, &[u32_type.0, bits.0, as_float.0]);
+        bits
+    }
+
+    /// As [`unsigned_to_float_bits`](Self::unsigned_to_float_bits), but reading the register's
+    /// value as a signed integer: `-128` becomes `-128.0`, so a sign-extended packed field
+    /// carries its sign into the float. The pair exists because the two conversions differ in
+    /// exactly the opcode and nothing else, and choosing the wrong one is silent.
+    fn signed_to_float_bits(&mut self, value: Id) -> Id {
+        let (u32_type, f32_type) = (self.u32_type(), self.f32_type());
+        let b = self.builder();
+        let as_float = b.id();
+        b.function(op::CONVERT_S_TO_F, &[f32_type.0, as_float.0, value.0]);
+        let bits = b.id();
+        b.function(op::BITCAST, &[u32_type.0, bits.0, as_float.0]);
+        bits
+    }
+
+    /// Widens a packed half - a sixteen-bit IEEE float in the low bits of the register - to a
+    /// single-precision float, and returns that float's bits.
+    ///
+    /// The conversion is the driver's own, not a hand-rolled one: the field is narrowed to
+    /// sixteen bits (`UConvert`), read as a half (`Bitcast` - which needs the two sides the
+    /// same width, hence the narrow first), and widened by `FConvert`. So subnormals,
+    /// infinities and NaNs go through the hardware's IEEE path rather than a bit-twiddle whose
+    /// edge cases would be wrong silently - the one failure this project has no cheap way to
+    /// catch. The caller must have masked the field to its sixteen bits already.
+    fn half_to_float_bits(&mut self, field: Id) -> Id {
+        let (u32_type, f32_type, f16_type, u16_type) = (
+            self.u32_type(),
+            self.f32_type(),
+            self.f16_type(),
+            self.u16_type(),
+        );
+        let b = self.builder();
+        let narrowed = b.id();
+        b.function(op::UCONVERT, &[u16_type.0, narrowed.0, field.0]);
+        let half = b.id();
+        b.function(op::BITCAST, &[f16_type.0, half.0, narrowed.0]);
+        let widened = b.id();
+        b.function(op::FCONVERT, &[f32_type.0, widened.0, half.0]);
+        let bits = b.id();
+        b.function(op::BITCAST, &[u32_type.0, bits.0, widened.0]);
+        bits
+    }
 }
 
 /// A destination and two sources, in the order the specification prints them.
@@ -865,6 +944,158 @@ fn resolve<M: Model + ?Sized>(
                      nothing to translate it as",
         })
 }
+/// `v_interp_p1_f32` / `v_interp_p2_f32` - an interpolated fragment attribute.
+///
+/// # Two instructions, one host operation
+///
+/// On the guest these are a pair: `p1` computes `P10 * I + P0` and `p2` adds `P20 * J` to it,
+/// with the parameters coming from a cache the hardware fills before the shader runs. SPIR-V has
+/// no such pair. A fragment `Input` variable **is** the interpolated attribute - the hardware
+/// does the weighting - so the two-step computation collapses into one read.
+///
+/// **Both halves therefore yield the whole value.** The alternative, treating `p2` as a no-op on
+/// the grounds that its destination already holds `p1`'s result, is wrong the moment the two do
+/// not share a destination - which `unreached.s` does on purpose, and which the guest permits
+/// because `p2` reads its destination as an accumulator. Answering the same value from either
+/// half depends on no register history at all (D555).
+///
+/// # What this assumes, and what would break it
+///
+/// **`assumed`, not measured.** A shader that used `p1`'s intermediate for anything other than
+/// feeding `p2` would get a different number here - the intermediate is a partial sum on the
+/// guest and the finished value here. The only documented use is the pair.
+///
+/// It also ignores both `vsrc` operands, which carry the barycentric I and J. The host
+/// interpolates with its own, and a shader that computed its own barycentrics and expected them
+/// honoured would be silently wrong rather than refused. That is the sharpest edge of this
+/// translation and it is why it is recorded rather than asserted.
+fn interpolate<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [
+        Operand::Vector(destination),
+        _source,
+        Operand::Immediate(attribute),
+        Operand::Immediate(channel),
+    ] = instruction.operands.as_slice()
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an interpolation decodes to a destination, a source, an attribute and a \
+                     channel; this one did not",
+        });
+    };
+    let attribute = u32::try_from(*attribute).unwrap_or(u32::MAX);
+    let Some((vec4, input)) = model.attribute_input(attribute) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an interpolation needs a fragment input to read, and this module has none \
+                     for that attribute - translate at the fragment stage",
+        });
+    };
+    let Ok(channel) = u32::try_from(*channel) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "the channel is not a component index",
+        });
+    };
+
+    let f32_type = model.f32_type();
+    let u32_type = model.u32_type();
+    let b = model.builder();
+    let whole = b.id();
+    b.function(op::LOAD, &[vec4.0, whole.0, input.0]);
+    let component = b.id();
+    b.function(
+        op::COMPOSITE_EXTRACT,
+        &[f32_type.0, component.0, whole.0, channel],
+    );
+    // Registers hold bits, not floats: the same convention the export reads them back under.
+    let bits = b.id();
+    b.function(op::BITCAST, &[u32_type.0, bits.0, component.0]);
+
+    // **Lane zero only.** At the fragment stage one invocation is one pixel, not a wavefront -
+    // the host rasteriser decides coverage - so the other lanes of this model are not meaningful
+    // here, and the export reads lane zero for the same reason.
+    model.write_vector_lane(u32::from(*destination), 0, bits);
+    Ok(())
+}
+
+/// The only export target this translates, and what it is.
+///
+/// `mrt0` - colour attachment zero. Which attachment any *other* target index selects is
+/// register state a guest writes, and D104 refuses to invent it; a capture would settle it. So
+/// one target is translated and the rest are refused by name, rather than all of them being
+/// translated onto the same attachment and appearing to work (D553).
+const MRT0: i64 = 0;
+
+/// `exp` - hands four registers to a render target.
+///
+/// # What is translated
+///
+/// The four sources are read for lane zero, reinterpreted as floats, assembled into a `vec4`
+/// and stored to the module's colour output. **The bits are not converted**: a vector register
+/// holds the colour's bit pattern already, so this is a bitcast rather than an arithmetic
+/// conversion, and treating it as one would scale every channel.
+///
+/// # What is refused, and why each refusal is separate
+///
+/// - **A module with no colour output.** A compute dispatch has nowhere to export to. That is
+///   the whole reason [`Model::colour_output`] exists and defaults to `None`.
+/// - **Any target but `mrt0`.** See [`MRT0`].
+/// - **The compressed and done bits, and the write mask**, which live in the instruction's
+///   first word and are not among the operands the decoder solved. Nothing here reads them, so
+///   nothing here may claim to honour them - a shader exporting two half-packed channels would
+///   otherwise be translated as though it exported four whole ones.
+fn export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let Some((vec4, colour)) = model.colour_output() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an export needs a colour attachment to export to, and this module is a \
+                     compute dispatch - translate at the fragment stage for one that has one",
+        });
+    };
+    let [target, sources @ ..] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an export decodes to a target and four sources; this one did not",
+        });
+    };
+    if *target != Operand::Immediate(MRT0) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "only mrt0 is translated - which attachment another target selects is \
+                     register state a guest writes, and inventing it would render a frame that \
+                     looks right and is not (D104)",
+        });
+    }
+    let [a, b, c, d] = sources else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an export takes four sources, and this one decoded a different number",
+        });
+    };
+
+    let mut components = Vec::with_capacity(4);
+    for source in [a, b, c, d] {
+        // Lane zero: one fragment is one pixel, and the wavefront model's lanes are pixels a
+        // rasteriser assigns rather than anything this translation chooses.
+        let bits = model.read_source(instruction, source, 0)?;
+        components.push(model.as_float(bits).0);
+    }
+
+    let builder = model.builder();
+    let value = builder.id();
+    let mut construct = vec![vec4.0, value.0];
+    construct.extend(components);
+    builder.function(op::COMPOSITE_CONSTRUCT, &construct);
+    builder.function(op::STORE, &[colour.0, value.0]);
+    Ok(())
+}
 
 /// which is far harder to find than a translator that stops and names what it hit.
 pub fn instruction<M: Model + ?Sized>(
@@ -904,6 +1135,12 @@ pub fn instruction<M: Model + ?Sized>(
         // Matched explicitly rather than falling through, because "emits nothing" and
         // "nobody handled it" must never look the same.
         "s_endpgm" | "s_waitcnt" | "s_clause" => Ok(()),
+
+        // The export, which is why a fragment stage exists at all (D553).
+        "exp" => export(model, instruction),
+
+        // Both halves of the interpolation pair answer the whole value (D555).
+        "v_interp_p1_f32_e32" | "v_interp_p2_f32_e32" => interpolate(model, instruction),
 
         // s_mov_b32: once for the whole wavefront, since scalar registers are uniform.
         // The scalar moves. Split out for the same reason the memory instructions
@@ -2814,12 +3051,6 @@ fn typed_buffer_memory<M: Model + ?Sized>(
             detail: "a typed buffer access names a format code with no meaning",
         });
     };
-    if !format.is_plain_words() {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a typed buffer format needing component conversion",
-        });
-    }
     if format.components() != channels as usize {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -2827,7 +3058,242 @@ fn typed_buffer_memory<M: Model + ?Sized>(
         });
     }
 
-    buffer_access(model, instruction, loading, channels)
+    // A plain-word format moves whole dwords and goes straight through the untyped path. A
+    // narrow format packs its components inside words and has to unpack them, which is a
+    // different shape of access - `packed_buffer_memory` handles the ones it can so far.
+    if format.is_plain_words() {
+        buffer_access(model, instruction, loading, channels)
+    } else {
+        packed_buffer_memory(model, instruction, format, loading)
+    }
+}
+
+/// One narrow integer component pulled out of a packed word, sign-extended when `signed`.
+///
+/// The component occupies bits `bit..bit + width` of `packed`, with `width < 32`. Unsigned:
+/// shift it down and mask to its width. Signed: shift its high bit up to bit 31, then an
+/// arithmetic shift right brings it to the low `width` bits with the sign copied into the rest -
+/// two shifts, no mask. Both are exact, which is what keeps the integer kinds free of the rounding
+/// a real conversion has.
+fn packed_integer_component<M: Model + ?Sized>(
+    model: &mut M,
+    packed: Id,
+    bit: u32,
+    width: u32,
+    signed: bool,
+) -> Id {
+    if signed {
+        let left = 32 - bit - width;
+        let up = if left == 0 {
+            packed
+        } else {
+            let amount = model.constant(left);
+            model.binary(op::SHIFT_LEFT_LOGICAL, packed, amount)
+        };
+        let right = model.constant(32 - width);
+        model.binary(op::SHIFT_RIGHT_ARITHMETIC, up, right)
+    } else {
+        let shifted = if bit == 0 {
+            packed
+        } else {
+            let amount = model.constant(bit);
+            model.binary(op::SHIFT_RIGHT_LOGICAL, packed, amount)
+        };
+        let mask = model.constant((1u32 << width) - 1);
+        model.binary(op::BITWISE_AND, shifted, mask)
+    }
+}
+
+/// Extracts one component from the packed word and produces the value the register is to hold:
+/// the integer itself for the integer kinds, or the bits of a normalised float for `UNORM`.
+///
+/// The kinds it understands are exactly the ones [`packed_buffer_memory`] admits before a lane is
+/// emitted, so the `unreachable!` guards a case that cannot arise rather than one left to chance.
+fn packed_component<M: Model + ?Sized>(
+    model: &mut M,
+    packed: Id,
+    bit: u32,
+    width: u32,
+    kind: orbistoun_shader::ComponentKind,
+) -> Id {
+    use orbistoun_shader::ComponentKind;
+    match kind {
+        ComponentKind::Uint => packed_integer_component(model, packed, bit, width, false),
+        ComponentKind::Sint => packed_integer_component(model, packed, bit, width, true),
+        // A UNORM component is its unsigned field over the field's maximum, landing in 0.0..=1.0.
+        // The maximum is converted from the integer domain the same way the field is, rather than
+        // written as a float constant, so both reach the division having travelled the same path.
+        ComponentKind::Unorm => {
+            let field = packed_integer_component(model, packed, bit, width, false);
+            let field_f = model.unsigned_to_float_bits(field);
+            let maximum = model.constant((1u32 << width) - 1);
+            let maximum_f = model.unsigned_to_float_bits(maximum);
+            model.f32_binary(op::FDIV, field_f, maximum_f)
+        }
+        // A SNORM component is its signed field over the signed maximum 2^(width-1) - 1, so it
+        // spans -1.0..=1.0. The most-negative code (-2^(width-1)) over that maximum lands a hair
+        // past -1.0 - -128/127 for a byte - and the reference pins it at -1.0, so the low end is
+        // clamped. Selecting between -1.0's bits and the value's bits is bit-identical to
+        // selecting between the two floats, so the clamp needs no float-typed select.
+        ComponentKind::Snorm => {
+            let field = packed_integer_component(model, packed, bit, width, true);
+            let field_f = model.signed_to_float_bits(field);
+            let maximum = model.constant((1u32 << (width - 1)) - 1);
+            let maximum_f = model.unsigned_to_float_bits(maximum);
+            let normalized = model.f32_binary(op::FDIV, field_f, maximum_f);
+            let minus_one = model.constant((-1.0f32).to_bits());
+            let value_f = model.as_float(normalized);
+            let low_f = model.as_float(minus_one);
+            let below = model.compare(op::FORD_LESS_THAN, value_f, low_f);
+            pick(model, below, minus_one, normalized)
+        }
+        // A 16-bit half, widened to a float by the driver's own conversion. Admitted only at
+        // width 16 (the refusal checks it), because the narrower packed floats - the 11- and
+        // 10-bit channels of a format like R11G11B10 - are not IEEE halves and decode differently.
+        ComponentKind::Float => {
+            let field = packed_integer_component(model, packed, bit, width, false);
+            model.half_to_float_bits(field)
+        }
+        _ => {
+            unreachable!(
+                "packed_buffer_memory admits only the integer, normalised and half kinds so far"
+            )
+        }
+    }
+}
+
+/// Translates a typed buffer access whose components are packed within words, so they must be
+/// unpacked and converted rather than moved whole as [`buffer_access`] moves them.
+///
+/// # Built up by kind, lowest risk first
+///
+/// A wrong conversion here does not fail - it renders the wrong thing, silently - so this grows
+/// one component kind at a time, each checked on a real device before the next. What is
+/// translated so far, all single-word: **`UINT`/`SINT`**, exact bit fields that shift and mask
+/// (and sign-extend) without rounding; **`UNORM`**/**`SNORM`**, the field over its range into
+/// 0.0..=1.0 or -1.0..=1.0 (the low end clamped); and **`FLOAT`** at width 16, a half widened by
+/// the driver's own conversion. Narrower packed floats, formats wider than one word, and stores
+/// are still refused - each with a detail that names which, so a shader that needs one is a loud
+/// gap rather than a quiet wrong render.
+fn packed_buffer_memory<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    format: &orbistoun_shader::BufferFormat,
+    loading: bool,
+) -> Result<(), TranslateError> {
+    use orbistoun_shader::ComponentKind;
+
+    let total_bits: u32 = format.widths.iter().sum();
+    // Half floats are admitted only at their true width; the narrower packed floats (11- and
+    // 10-bit channels) are not IEEE halves and are left refused.
+    let all_halves =
+        format.kind == ComponentKind::Float && format.widths.iter().all(|&width| width == 16);
+    let convertible = matches!(
+        format.kind,
+        ComponentKind::Uint | ComponentKind::Sint | ComponentKind::Unorm | ComponentKind::Snorm
+    ) || all_halves;
+    if !loading || total_bits > 32 || !convertible {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a packed typed buffer format needing component conversion \
+                     (single-word integer, normalised and half-float loads are translated so far)",
+        });
+    }
+
+    // The operands and addressing modifiers are read exactly as the untyped path reads them:
+    // only the per-component work below differs.
+    let [data, vaddr, resource_operand, soffset] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a buffer access does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = data else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a buffer access names something other than a vector register for its data",
+        });
+    };
+    let register = u32::from(*register);
+    let Operand::Scalar(resource_base) = resource_operand else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a buffer resource constant is not in scalar registers",
+        });
+    };
+    let resource_base = u32::from(*resource_base);
+    if resource_base + 4 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a buffer resource constant runs past the end of the register file",
+        });
+    }
+
+    let word = instruction.word;
+    let literal_offset = word & 0xFFF;
+    let offen = word & (1 << 12) != 0;
+    let idxen = word & (1 << 13) != 0;
+
+    let resource = read_buffer_resource(model, resource_base);
+    let flags = model.read_scalar(resource_base + 3);
+    let instruction_offset = model.constant(literal_offset);
+
+    // The element is one word here (`total_bits <= 32`), so the whole thing is bounds-checked
+    // once and read once, then the components come out of the bits.
+    let element_bytes = total_bits.div_ceil(8);
+
+    for lane in 0..model.lanes() {
+        let scalar_offset = model.read_source(instruction, soffset, lane)?;
+        let (vindex, voffset) = match (idxen, offen) {
+            (false, false) => (None, None),
+            (true, false) => (Some(model.read_source(instruction, vaddr, lane)?), None),
+            (false, true) => (None, Some(model.read_source(instruction, vaddr, lane)?)),
+            (true, true) => {
+                let Operand::Vector(first) = vaddr else {
+                    return Err(TranslateError::Unsupported {
+                        offset: instruction.offset,
+                        detail: "a buffer access with both address modifiers does not \
+                                 name a vector register pair",
+                    });
+                };
+                let base = *first;
+                let index = model.read_source(instruction, &Operand::Vector(base), lane)?;
+                let offset = model.read_source(instruction, &Operand::Vector(base + 1), lane)?;
+                (Some(index), Some(offset))
+            }
+        };
+
+        let zero = model.constant(0);
+        let offset_term = voffset.unwrap_or(zero);
+        let offset = model.add(instruction_offset, offset_term);
+        let index = vindex.unwrap_or(zero);
+
+        let base = buffer_address(
+            model,
+            &resource,
+            scalar_offset,
+            instruction_offset,
+            voffset,
+            vindex,
+        );
+
+        let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, element_bytes);
+        let packed = read_guarded(model, base);
+
+        let mut bit = 0u32;
+        for component in 0..format.widths.len() {
+            let width = format.widths[component];
+            let register_component =
+                register + u32::try_from(component).expect("a format has at most four components");
+            let value = packed_component(model, packed, bit, width, format.kind);
+            // Out of range reads zero, exactly as the untyped path answers it.
+            let kept = pick(model, outside, zero, value);
+            model.write_vector_lane(register_component, lane, kept);
+            bit += width;
+        }
+    }
+    model.count();
+    Ok(())
 }
 
 /// Translates the untyped buffer accesses.

@@ -72,7 +72,7 @@ a *different* title's import, which is where a large share of them are (D213).
 Candidates come from four places, and only one is guesswork:
 
 - **Published standard-library names.** The target C library is FreeBSD-derived, so much
-  of it is ISO C and POSIX under the names those standards publish. 3,018 ship in
+  of it is ISO C and POSIX under the names those standards publish, and they ship in
   `crates/orbistoun-names/data/standard.txt`. These are not guesses.
 - **A module's own bytes.** Diagnostic and assertion text leaves real function names in a
   binary. Not a guess about the vendor's naming - it is the vendor's naming (D193).

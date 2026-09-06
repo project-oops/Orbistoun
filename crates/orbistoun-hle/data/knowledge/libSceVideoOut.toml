@@ -1,113 +1,67 @@
-# What we know about libSceVideoOut functions.
-#
-# Accumulated, never regenerated. Every edge case below cost an experiment against a real
-# guest, and losing this file means repeating them.
-#
-# NIDs are deliberately absent: they are derived from the name, so a file cannot hold a
-# pair that disagrees with itself (docs/SYMBOLS.md).
-
 library = "libSceVideoOut"
 
 [[function]]
-name = "sceVideoOutOpen"
-returns = "handle"
-arity = 4
-purpose = """
-Opens a display port. Implemented 2026-08-21 - not to display anything, nothing here
-draws, but to stop the guest carrying an error code around as a display handle.
-"""
-arguments = [
-  { name = "user", kind = "u32", note = "user id; not acted on" },
-  { name = "bus", kind = "u32", note = "which output; recorded so two opens are distinguishable in a trace" },
-  { name = "index", kind = "u32", note = "not acted on" },
-  { name = "param", kind = "ptr", note = "not read - its layout is not known from any lawful source" },
-]
+name = "sceVideoOutAddFlipEvent"
+arity = 3
+purpose = "Registers a flip completion against an event queue, so a submitted flip has somewhere to report."
 edge_cases = [
-  "**Unimplemented, this answered `0x7FFF0001` and the guest passed that into `sceVideoOutRegisterBuffers2` as the port to register against.** Our own placeholder travelling through the guest as data and arriving somewhere unrelated to where it came from - D125 with a display attached.",
-  "The handle is a small positive integer and deliberately **not** an address. Thread, lock and file handles are addresses because the guest dereferences them (D151); this one is compared against zero and passed back, and nothing observed reads through it.",
-  "One-based, because callers test a video-out handle against zero and a handle of zero would read as 'not open' to code holding a perfectly good port.",
+    "Arity three, corroborated at both ends: arg0 is an event-queue handle orbistoun issued, arg1 is 0x1 - the port handle its own sceVideoOutOpen answered - and arg2 the caller's opaque word, 0x0 here (D560).",
+    "This was the missing half of the flip loop. sceVideoOutSubmitFlip completed a flip and told nobody, so PPSA02664 waited on a completion orbistoun had already performed - 839 calls to sceKernelWaitEqueue against a queue nothing delivered to.",
 ]
-found_by = "generated"
 known_by = "guest-observed"
 assumptions = [
-  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
-  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+    "What identifier a flip event carries, and what a waiter reads back out of it, is not established. Without it a flip that completes on submit (D516) cannot be reported to a queue, which is why PPSA02664 waits 1,177 times for one.",
+    "Registration is keyed by the port handle, because that is what the guest passes and what a flip knows about itself. Nothing measured says the console keys it the same way.",
 ]
-found_in = ["PPSA28061-app0"]
-found_on = "2026-08-21"
+found_in = [
+    "PPSA02664",
+    "PPSA02664-app0",
+]
+found_on = "2026-09-03"
 
 [[function]]
 name = "sceVideoOutClose"
-returns = "status"
 arity = 1
 purpose = "Closes a port."
+returns = "status"
 edge_cases = [
-  "The port is left in the table rather than removed: handles are indices, so removing one would either renumber the rest or leave a hole a later open would reuse - and a reused display handle is a bug nobody would think to look for.",
+    "The port is left in the table rather than removed: handles are indices, so removing one would either renumber the rest or leave a hole a later open would reuse - and a reused display handle is a bug nobody would think to look for.",
+    "Measured on hardware: obSCEne `080-video/close-rejects-bad-handle` reported pass, value 0x8029000b. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
 assumptions = [
-  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
-  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+    "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+    "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
 ]
 found_on = "2026-08-21"
 
 [[function]]
-name = "sceVideoOutRegisterBuffers"
-returns = "status"
-arity = 6
-purpose = "Gives a port a set of buffers to display from."
+name = "sceVideoOutConfigureOutput"
+purpose = "Configures an output port's mode."
 edge_cases = [
-  "**The addresses are not read.** There is no output surface, so a buffer registered here is one nobody will ever present. The count is recorded because a guest can read it back; inventing anything else would be worse than recording nothing.",
-  "Answers success rather than refusing, deliberately and reversibly: a guest that cannot register buffers stops setting up its display, while one that believes it can proceeds to submit flips - which is where the GPU layer is eventually reached.",
+    "The guest passes the port handle 0x1 - the one this crate's own sceVideoOutOpen answered - then registers buffers and submits a flip (D562).",
+    "A setter, not a filler, which is why it is implemented where sceVideoOutSetBufferAttribute2 beside it is not: nothing here promises to write into the caller's memory, so reporting success promises nothing it does not do.",
 ]
-found_by = "generated"
 known_by = "guest-observed"
 assumptions = [
-  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
-  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+    "Accepted against a real port and not modelled. What an output is configured to is a property of a scanout that does not exist here - the same bargain sceVideoOutSetFlipRate already records.",
+    "The arity is not claimed. The guest passes a handle and three small values and nothing establishes how many the call reads.",
 ]
-found_on = "2026-08-21"
-
-[[function]]
-name = "sceVideoOutRegisterBuffers2"
-returns = "status"
-arity = 6
-purpose = "As sceVideoOutRegisterBuffers, and handled identically."
-edge_cases = [
-  "Name confirmed by hash against a real import out of 249,506 candidates (D167). It was observed being called with `0x7FFF0001` as its first argument, which is what identified `sceVideoOutOpen` as the thing to implement.",
-]
-found_by = "generated"
-known_by = "guest-observed"
-assumptions = [
-  "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
-  "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
-]
-found_in = ["PPSA28061-app0"]
-found_on = "2026-08-21"
-
-[[function]]
-name = "sceVideoOutSubmitFlip"
-arity = 4
-purpose = "Queues a buffer to be presented at the next flip on an open output."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-
-[[function]]
-name = "sceVideoOutSetFlipRate"
-arity = 2
-purpose = "Sets how many vertical blanks pass between presented flips."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
 
 [[function]]
 name = "sceVideoOutGetFlipStatus"
 arity = 2
-purpose = "Reports how many flips have been requested and completed on an output."
+purpose = "Reports how many submitted flips a port has completed."
 returns = "status"
+edge_cases = [
+    "Writes the completed-flip count at offset 0, which is the field a guest polls to learn a submitted flip was picked up. With a flip completing on submit (D516) the count a caller reads back is the number it has submitted.",
+    "ONLY the count is written. The structure has more fields on hardware - a timestamp, the current buffer - and no citable source here gives their offsets, so a caller reading one gets whatever it left there.",
+]
 known_by = "assumed"
+assumptions = ["That the completed count is the head of SceVideoOutFlipStatus at offset 0. It is the one field with a citable position - obSCEne assembles a uint64 from status[0..8] - and the rest of the layout is unestablished."]
 found_on = "2026-09-01"
 
 [[function]]
@@ -115,5 +69,136 @@ name = "sceVideoOutGetResolutionStatus"
 arity = 2
 purpose = "Reports the presented resolution of an open output (1920x1080)."
 returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `130-layout/resolution-status` reported skip - no video output to query. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Only `width` and `height` are written - the documented leading two `uint32`s - and the rest of the structure is left as the caller prepared it, exactly as `sceVideoOutGetFlipStatus` writes only the count.",
+]
 known_by = "assumed"
+assumptions = ["The field offsets come from open homebrew SDKs, not from a dump. obSCEne's `130-layout/resolution-status` skips on every run on record - not for want of a display, but because obSCEne's own display path already holds the main output, so the test's second `sceVideoOutOpen` is refused and it never reaches this call. A run that does not already hold the output could dump the real structure."]
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceVideoOutIsFlipPending"
+arity = 1
+purpose = "Answers how many flips a port has queued and not yet presented."
+edge_cases = [
+    "A guest drains it before submitting: PPSA02664 loops on it and sceKernelWaitEqueue until it reads zero, 1.29M iterations in one run, and never calls sceVideoOutSubmitFlip - so a non-zero answer with nothing submitted hangs the title at its first frame.",
+    "Orbistoun has no scanout and completes a flip on submit, so the pending count it can honestly answer is always zero - the same model sceVideoOutSubmitFlip and sceVideoOutGetFlipStatus already document.",
+    "The count is what a guest tests, so a placeholder error code reads as a large positive number of pending flips rather than as a failure (D125).",
+]
+known_by = "guest-observed"
+found_in = ["PPSA02664"]
+found_on = "2026-09-03"
+
+[[function]]
+name = "sceVideoOutOpen"
+arity = 4
+purpose = """
+Opens a display port. Implemented 2026-08-21 - not to display anything, nothing here
+draws, but to stop the guest carrying an error code around as a display handle.
+"""
+returns = "handle"
+edge_cases = [
+    "**Unimplemented, this answered `0x7FFF0001` and the guest passed that into `sceVideoOutRegisterBuffers2` as the port to register against.** Our own placeholder travelling through the guest as data and arriving somewhere unrelated to where it came from - D125 with a display attached.",
+    "The handle is a small positive integer and deliberately **not** an address. Thread, lock and file handles are addresses because the guest dereferences them (D151); this one is compared against zero and passed back, and nothing observed reads through it.",
+    "One-based, because callers test a video-out handle against zero and a handle of zero would read as 'not open' to code holding a perfectly good port.",
+    "Measured on hardware: obSCEne `080-video/open` reported fail, value 0x80290009 - the main video output would not open. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+    "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-21"
+
+[[function.arguments]]
+name = "user"
+kind = "u32"
+note = "user id; not acted on"
+
+[[function.arguments]]
+name = "bus"
+kind = "u32"
+note = "which output; recorded so two opens are distinguishable in a trace"
+
+[[function.arguments]]
+name = "index"
+kind = "u32"
+note = "not acted on"
+
+[[function.arguments]]
+name = "param"
+kind = "ptr"
+note = "not read - its layout is not known from any lawful source"
+
+[[function]]
+name = "sceVideoOutRegisterBuffers"
+arity = 6
+purpose = "Gives a port a set of buffers to display from."
+returns = "status"
+edge_cases = [
+    "**The addresses are not read.** There is no output surface, so a buffer registered here is one nobody will ever present. The count is recorded because a guest can read it back; inventing anything else would be worse than recording nothing.",
+    "Answers success rather than refusing, deliberately and reversibly: a guest that cannot register buffers stops setting up its display, while one that believes it can proceeds to submit flips - which is where the GPU layer is eventually reached.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+    "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceVideoOutRegisterBuffers2"
+arity = 6
+purpose = "As sceVideoOutRegisterBuffers, and handled identically."
+returns = "status"
+edge_cases = ["Name confirmed by hash against a real import out of 249,506 candidates (D167). It was observed being called with `0x7FFF0001` as its first argument, which is what identified `sceVideoOutOpen` as the thing to implement."]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Argument layout established from guest usage. What the call does to a display - format negotiation, buffer lifetime, flip semantics - is entirely unestablished.",
+    "Whether the two RegisterBuffers entries differ in more than arity is unknown.",
+]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-08-21"
+
+[[function]]
+name = "sceVideoOutSetBufferAttribute"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 2 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceVideoOutSetBufferAttribute2"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 5 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceVideoOutSetFlipRate"
+arity = 2
+purpose = "Sets how many vertical blanks pass between presented flips."
+returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `080-video/flip-rate-rejects-bad-handle` reported pass, value 0x8029000b. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "The rate argument is not modelled: the handle is validated and the value discarded, so a guest asking for one flip every second blank presents exactly as one asking for every blank.",
+]
+known_by = "assumed"
+assumptions = ["What rate values the target accepts, what it answers for one it does not, and when a new rate takes effect, is unestablished - only the bad-handle code has been measured."]
+found_on = "2026-09-01"
+
+[[function]]
+name = "sceVideoOutSubmitFlip"
+arity = 4
+purpose = "Queues a buffer to be presented at the next flip on an open output."
+returns = "status"
+edge_cases = [
+    "A flip completes the instant it is submitted. On hardware it is queued and its completion count moves when a presenter picks it up at the next vertical blank; there is no presenter and no vblank here, so the honest model for a headless run is that the count advances now - and a guest polling sceVideoOutGetFlipStatus sees it move and proceeds rather than spinning on a frame a real display would have shown.",
+    "buffer_index, flip_mode and flip_arg are accepted and not modelled: which buffer is shown and when are properties of a scanout that does not exist, and echoing a flip_arg nothing reads would be state carried for no reader.",
+]
+known_by = "assumed"
+assumptions = ["That a guest cannot tell a flip that completed on submit from one that completed at a vblank. Nothing observed distinguishes them - but a title that times frames against the flip count, or waits on a flip event expecting a delay, would."]
 found_on = "2026-09-01"

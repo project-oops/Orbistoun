@@ -297,3 +297,141 @@ context cannot re-derive.
 | 2026-09-01 | [(/loop) The call trace records what each call answered](worklog/280-trace-records-return-values.md) |
 | 2026-09-01 | [(/loop) Map direct memory into an existing reservation; crack image+0xafcc08](worklog/281-map-commits-into-a-reserved-range.md) |
 | 2026-09-01 | [(/loop) The reserve-then-map fix advanced three titles, not one](worklog/282-map-fix-blast-radius.md) |
+| 2026-09-01 | [(/loop) Overnight crunch: putchar and std::random_device](worklog/283-standard-libc-functions-putchar-random-device.md) |
+| 2026-09-01 | [(/loop) PPSA04263's map wall: a rigorous narrowing, not yet a fix](worklog/284-ppsa04263-map-failure-investigation.md) |
+| 2026-09-01 | [(/loop) Made reservation failures legible, then cracked the collision they hid](worklog/285-mapping-arena-collision-fixed.md) |
+| 2026-09-02 | [(/loop) strcpy_s implemented; new-thread TLS gap diagnosed (the real wall)](worklog/286-strcpy-s-and-new-thread-tls-diagnosis.md) |
+| 2026-09-02 | [(/loop) Per-thread TLS for spawned guest threads: PPSA04263 10k -> 333k calls](worklog/287-per-thread-tls-implemented.md) |
+| 2026-09-02 | [(/loop) Blocking WaitEventFlag (kills a 304k spin) + atan2f/sincosf](worklog/288-wait-event-flag-and-math.md) |
+| 2026-09-02 | [(/loop) PPSA25872's unnamed spin (naming-gated) + pthread attr setters](worklog/289-ppsa25872-spin-and-attr-setters.md) |
+| 2026-09-02 | [(/loop) The last clearly-standard stubs: vsprintf_s, SetVirtualRangeName](worklog/290-last-standard-stubs.md) |
+| 2026-09-02 | [(/loop) The last clean functions; the oracle-free crunch is complete](worklog/291-last-clean-functions-and-crunch-summary.md) |
+| 2026-09-02 | [(/loop) Packed typed-buffer formats begin: UINT single-word load, GPU-verified](worklog/292-packed-uint-buffer-load.md) |
+| 2026-09-02 | [(/loop) Packed typed-buffer SINT load: sign extension, GPU-verified](worklog/293-packed-sint-buffer-load.md) |
+| 2026-09-02 | [(/loop) Packed typed-buffer UNORM load: the first converting kind, GPU-verified](worklog/294-packed-unorm-buffer-load.md) |
+| 2026-09-02 | [(/loop) Packed typed-buffer SNORM load: the clamp, GPU-verified](worklog/295-packed-snorm-buffer-load.md) |
+| 2026-09-02 | [(/loop) Packed typed-buffer FLOAT16 load: driver-widened halves, GPU-verified](worklog/296-packed-float16-buffer-load.md) |
+| 2026-09-02 | [(/loop) The ctype tables, measured off hardware: table right, wall unchanged](worklog/297-ctype-tables-from-hardware.md) |
+| 2026-09-02 | [(/loop) The `_Getpctype` wall is a mislabel: measured, and it reframes four decisions](worklog/298-the-wall-is-not-getpctype.md) |
+| 2026-09-02 | [(/loop) Every report today was a file from 01:50; the ctype work had moved the wall](worklog/299-a-stale-trace-was-being-reported-as-this-run.md) |
+| 2026-09-02 | [(/loop) The reporter could not survive an execute fault; fixed, and the ctype work turns out to be a 7x advance](worklog/300-the-ctype-work-was-a-7x-advance.md) |
+| 2026-09-02 | [(/loop) 452 documented functions were knowable all along; the work list is now inventory-driven](worklog/301-the-work-list-is-now-inventory-driven.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 1: the bounded string and memory functions](worklog/302-batch-1-bounded-string-and-memory.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 2: the runtime's out-of-line atomics, conversions and assert](worklog/303-batch-2-runtime-internals.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 3: the standard streams, real recursive locks, and the C++ runtime](worklog/304-batch-3-streams-locks-and-the-cxx-runtime.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 4: 20 POSIX delegations, and the arity check that refused two](worklog/305-batch-4-posix-delegation-and-the-environment.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 5: the single-precision math family and byte order](worklog/306-batch-5-math-and-byte-order.md) |
+| 2026-09-02 | [(/loop) A partial marker, and the inconsistency the audit found](worklog/307-the-partial-marker.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 7: scatter/gather, sync, and the ones refused instead](worklog/308-batch-7-descriptor-and-mapping-calls.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 8: the `posix_`-prefixed family, 69 in one go](worklog/309-batch-8-the-posix-prefixed-family.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 9: the attribute accessors, and three guards that fired](worklog/310-batch-9-the-attribute-accessors.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 10: `getsockopt`, and what "missing" actually means](worklog/311-batch-10-getsockopt-and-a-near-duplication.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 11: two inits resolved, and the cheap wins are exhausted](worklog/312-batch-11-the-cheap-wins-are-exhausted.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 12: the lock-attribute families - and my stop recommendation was wrong](worklog/313-batch-12-and-a-recommendation-that-was-wrong.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 13: the timed condition wait and `pthread_once`](worklog/314-batch-13-timed-wait-and-once.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 14: the timed acquisitions, and a guard that checked the wrong table](worklog/315-batch-14-deadlines-and-a-guard-on-the-wrong-table.md) |
+| 2026-09-02 | [(/loop) R0: the red gates cleared, and the knowledge file catches up](worklog/316-r0-the-red-gates-cleared.md) |
+| 2026-09-02 | [(/loop) R1: the measure count is not a bug, and the name oracle already answered](worklog/317-r1-the-measure-count-is-not-a-bug.md) |
+| 2026-09-02 | [(/loop) R5: the hardware records finally get read, and the two runs disagree](worklog/318-r5-the-hardware-records-finally-get-read.md) |
+| 2026-09-02 | [(/loop) R6: measurements become a work queue with a completion condition](worklog/319-r6-measurements-become-a-work-queue.md) |
+| 2026-09-02 | [(/loop) R7: a live oracle at last, and it found four bugs in twenty-four cases](worklog/320-r7-the-differential-finds-four-bugs-on-day-one.md) |
+| 2026-09-02 | [(/loop) More differential cases, and the parallel run finds a real concurrency bug](worklog/321-more-differential-cases-and-a-spurious-wakeup.md) |
+| 2026-09-02 | [(/loop) The differential calls back into guest code, and `qsort` agrees](worklog/322-qsort-and-bsearch-call-back-into-guest-code.md) |
+| 2026-09-02 | [(/loop) The sign-extension divergence was mine, not the console's](worklog/323-a-claim-i-made-was-wrong-and-is-withdrawn.md) |
+| 2026-09-02 | [(/loop) `strtok` needs a sequence, and the mutex type mapping becomes a test](worklog/324-strtok-sequences-and-the-mutex-types-pinned.md) |
+| 2026-09-02 | [(/loop) Four outstanding items that were never hard, and the overlapping moves](worklog/325-the-memory-query-flags-and-the-overlap-cases.md) |
+| 2026-09-02 | [(/loop) The loader's answers were already right; the real gap is exports](worklog/326-the-loader-answers-were-already-right-and-the-real-gap-is-exports.md) |
+| 2026-09-02 | [(/loop) Exports exist now, and the title's own module answers the wall](worklog/327-exports-exist-now-and-the-title-module-answers-the-wall.md) |
+| 2026-09-02 | [(/loop) Three firmware directories, and a test that cannot tell them apart](worklog/328-three-firmware-directories-and-a-test-that-cannot-see-them.md) |
+| 2026-09-03 | [(/loop) A title's module is found by name, and `fakelib/` proved the rule right](worklog/329-a-title-module-is-found-by-name-and-fakelib-proves-it.md) |
+| 2026-09-03 | [(/loop) The wall resolves to a real address, and `libc` turns out to be the title's](worklog/330-the-wall-resolves-and-libc-turns-out-to-be-the-titles.md) |
+| 2026-09-03 | [(/loop) The stub tables are global, so there is one of them (D484)](worklog/331-the-stub-tables-are-global-so-there-is-one-of-them.md) |
+| 2026-09-03 | [(/loop) R9 was already closed, and twenty-one new differential cases](worklog/332-r9-was-already-closed-and-twenty-one-new-differential-cases.md) |
+| 2026-09-03 | [(/loop) A third capture added 186 measurements and took two claims away](worklog/333-a-third-capture-took-two-claims-away.md) |
+| 2026-09-03 | [(/loop) One stub table with a range per module](worklog/334-one-stub-table-with-a-range-per-module.md) |
+| 2026-09-03 | [(/loop) The float environment, and the bit that is not configuration](worklog/335-the-float-environment-and-the-bit-that-is-not-configuration.md) |
+| 2026-09-03 | [(/loop) The title's own modules relocate](worklog/336-the-titles-own-modules-relocate.md) |
+| 2026-09-03 | [(/loop) The worker links the title, and the verdict turns out to be noisy](worklog/337-the-worker-links-the-title-and-the-verdict-is-noisy.md) |
+| 2026-09-03 | [(/loop) The decision log had the answer](worklog/338-the-decision-log-had-the-answer.md) |
+| 2026-09-03 | [(/loop) The guest runs its own code](worklog/339-the-guest-runs-its-own-code.md) |
+| 2026-09-03 | [(/loop) The trace was naming the wrong functions](worklog/340-the-trace-was-naming-the-wrong-functions.md) |
+| 2026-09-03 | [(/loop) The instruction bytes answered it, and the tags refused the answer](worklog/341-the-instruction-bytes-answered-it-and-the-tags-refused-the-answer.md) |
+| 2026-09-03 | [(/loop) A `nid` verb, and a hypothesis that did not survive it](worklog/342-a-nid-verb-and-a-hypothesis-that-did-not-survive-it.md) |
+| 2026-09-03 | [(/loop) `.bss`, and a blind spot of our own making](worklog/343-bss-and-a-blind-spot-of-our-own-making.md) |
+| 2026-09-03 | [(/loop) The instrument existed, and I mis-grepped it](worklog/344-the-instrument-existed-and-i-mis-grepped-it.md) |
+| 2026-09-03 | [(/loop) The guest says which modules to start, and we do not start them](worklog/345-the-guest-says-which-modules-to-start.md) |
+| 2026-09-03 | [(/loop) Six absences, and the tag that made them mean something](worklog/346-six-absences-and-the-tag-that-made-them-mean-something.md) |
+| 2026-09-03 | [(/loop) 24 claims, 24 non-claims, and a restore that broke a mutex](worklog/347-24-claims-24-non-claims-and-a-restore-that-broke-a-mutex.md) |
+| 2026-09-03 | [(/loop) A conformance bug, a stale work item, and a lying instrument](worklog/348-a-conformance-bug-a-stale-work-item-and-a-lying-instrument.md) |
+| 2026-09-03 | [(/loop) The oscillation is one allocation round, and the backlog is now the whole list](worklog/349-the-oscillation-is-one-allocation-round.md) |
+| 2026-09-03 | [(/loop) What the 96% does not say, a stale red phase, and three more libc functions](worklog/350-what-the-96-percent-does-not-say.md) |
+| 2026-09-03 | [(/loop) The citations were already here, and R9 was already closed](worklog/351-the-citations-were-already-here.md) |
+| 2026-09-03 | [(/loop) The queue had permanent residents, and two asks were about the run](worklog/352-the-queue-had-permanent-residents.md) |
+| 2026-09-03 | [(/loop) Skeletons for the gaps: 61 graphics names and 49 recorded imports](worklog/353-skeletons-for-the-gaps.md) |
+| 2026-09-03 | [(/loop) Twenty-eight libraries, and a coverage figure that got worse on purpose](worklog/354-twenty-eight-libraries-and-an-honest-denominator.md) |
+| 2026-09-03 | [(/loop) The encoder measurements say the opposite, and thirty names go back](worklog/355-the-encoder-measurements-say-the-opposite.md) |
+| 2026-09-03 | [(/loop) A second capture settles the third query field](worklog/356-a-second-capture-settles-a-field.md) |
+| 2026-09-03 | [(/loop) A masked register, and the width where a shim shows itself](worklog/357-a-masked-register-and-single-precision.md) |
+| 2026-09-03 | [(/loop) Eight bytes where documentation said four](worklog/358-eight-bytes-and-a-round-trip.md) |
+| 2026-09-03 | [(/loop) A closed gap that both surfaces still called open](worklog/359-a-closed-gap-that-both-surfaces-called-open.md) |
+| 2026-09-03 | [(/loop) Two formatter bugs, in the padding nobody had tested](worklog/360-two-formatter-bugs.md) |
+| 2026-09-03 | [(/loop) vsnprintf closes the list, and the break names the cases carrying it](worklog/361-vsnprintf-closes-the-list.md) |
+| 2026-09-03 | [(/loop) The oscillation is settled: it was the guest's own allocator](worklog/362-the-oscillation-is-settled.md) |
+| 2026-09-03 | [(/loop) The wall named: a module that was loaded, placed, and never started](worklog/363-the-wall-is-a-module-never-started.md) |
+| 2026-09-03 | [(/loop) The wall is down: the guest reached its frame loop](worklog/364-the-wall-is-down.md) |
+| 2026-09-03 | [(/loop) Nothing is ever pending: the guest left its frame loop](worklog/365-nothing-is-ever-pending.md) |
+| 2026-09-03 | [(/loop) dlsym never knew the guest's own exports; the wall did not move](worklog/366-dlsym-and-a-wall-that-did-not-move.md) |
+| 2026-09-03 | [(/loop) One writer, thirty-seven readers, and a guard that never passes](worklog/367-one-writer-thirty-seven-readers.md) |
+| 2026-09-03 | [(/loop) I blamed a guard that never ran](worklog/368-i-blamed-a-guard-that-never-ran.md) |
+| 2026-09-03 | [(/loop) Starting every module early is not the missing ordering](worklog/369-starting-everything-early-is-not-it.md) |
+| 2026-09-03 | [(/loop) No branch avoids the read: half the open question is closed](worklog/370-no-branch-avoids-the-read.md) |
+| 2026-09-03 | [(/loop) A fault now says what its registers point at, and the label is "None"](worklog/371-a-fault-says-what-it-points-at.md) |
+| 2026-09-03 | [(/loop) One thread call implemented, one deliberately not](worklog/372-one-implemented-one-deliberately-not.md) |
+| 2026-09-03 | [(/loop) The event queue exists so a handle means something](worklog/373-the-event-queue.md) |
+| 2026-09-03 | [(/loop) The vendor stat is not the POSIX one under another name](worklog/374-the-vendor-stat.md) |
+| 2026-09-03 | [(/loop) A positioned read took the guest into the GPU](worklog/375-a-positioned-read-into-the-gpu.md) |
+| 2026-09-03 | [(/loop) The wall is sceAgcCreateShader, and a cap was hiding it](worklog/376-the-wall-is-a-shader.md) |
+| 2026-09-03 | [(/loop) Two walls that need a measurement, routed to the mechanism that asks](worklog/377-routing-two-walls-to-the-console.md) |
+| 2026-09-04 | [(/loop) The record format already carried what it was said to lack](worklog/378-the-format-already-carried-it.md) |
+| 2026-09-04 | [(/loop) The wide family verified, and the case that bites](worklog/379-the-wide-family-verified.md) |
+| 2026-09-04 | [(/loop) The interleaved sequence, and the sixteen cases that were blind](worklog/380-the-interleaved-sequence.md) |
+| 2026-09-04 | [(/loop) strftime, and the question that found it](worklog/381-strftime-and-the-question.md) |
+| 2026-09-04 | [(/loop) libm splits in two, and only half belongs here](worklog/382-libm-splits-in-two.md) |
+| 2026-09-04 | [(/loop) Two rounding rules that pin each other](worklog/383-two-rounding-rules.md) |
+| 2026-09-04 | [(/loop) strdup covered, and a missing terminator is only caught by luck](worklog/384-caught-by-luck.md) |
+| 2026-09-04 | [(/loop) One clock, two names, and one origin](worklog/385-one-clock-two-names.md) |
+| 2026-09-04 | [(/loop) The reasoning was in the code, and the record said nothing](worklog/386-the-record-said-nothing.md) |
+| 2026-09-04 | [(/loop) Two thirds of the ask list is forty sentences](worklog/387-two-thirds-of-the-ask-list.md) |
+| 2026-09-04 | [(/loop) One question, written a hundred and forty-nine ways](worklog/388-one-question-written-149-ways.md) |
+| 2026-09-04 | [(/loop) The ask list was asking for a function that does not exist](worklog/389-asking-for-a-function-that-does-not-exist.md) |
+| 2026-09-04 | [(/loop) A measurement was sitting in the list of things nobody knows](worklog/390-a-measurement-in-the-list-of-unknowns.md) |
+| 2026-09-04 | [(/loop) Six records said nothing was known while holding a measurement](worklog/391-six-records-and-the-axis-closes.md) |
+| 2026-09-04 | [(/loop) `dlsym` succeeds where the console refuses](worklog/392-dlsym-succeeds-where-the-console-refuses.md) |
+| 2026-09-04 | [(/loop) Forty-seven measured values that no test looked at](worklog/393-measured-values-nothing-looked-at.md) |
+| 2026-09-04 | [(/loop) The relations are testable where the numbers are not](worklog/394-relations-testable-where-numbers-are-not.md) |
+| 2026-09-04 | [(/loop) A permanent resident of the work queue](worklog/395-a-permanent-resident-of-the-queue.md) |
+| 2026-09-04 | [(/loop) The relation needed a mount, not a guest](worklog/396-the-relation-needed-a-mount.md) |
+| 2026-09-04 | [(/loop) The wall is an experiment, and there is no guest to run](worklog/397-the-wall-is-an-experiment.md) |
+| 2026-09-04 | [(/loop) The oracle the roadmap said did not exist](worklog/398-the-oracle-the-roadmap-said-did-not-exist.md) |
+| 2026-09-04 | [(/loop) The oracle draws](worklog/399-the-oracle-draws.md) |
+| 2026-09-04 | [(/loop) The export was already decoded, and its blocker had half expired](worklog/400-the-export-was-already-decoded.md) |
+| 2026-09-04 | [(/loop) The fragment path does not need the feature](worklog/401-the-fragment-path-does-not-need-the-feature.md) |
+| 2026-09-04 | [(/loop) The translator draws](worklog/402-the-translator-draws.md) |
+| 2026-09-04 | [(/loop) The oracle carries a varying](worklog/403-the-oracle-carries-a-varying.md) |
+| 2026-09-04 | [(/loop) The wall was real, the record was twelve days stale, VINTRP translates](worklog/404-the-wall-was-real.md) |
+| 2026-09-04 | [(/loop) The out-parameter is the whole of the wall](worklog/405-the-out-parameter-is-the-whole-wall.md) |
+| 2026-09-04 | [(/loop) A rung for the first frame, and a prop that was never counted](worklog/406-a-rung-for-the-first-frame.md) |
+| 2026-09-04 | [The Agc probe set, aimed from the guest's own arguments](worklog/407-the-agc-probe-set.md) |
+| 2026-09-04 | [The flip completion had no reader](worklog/408-the-flip-completion-had-no-reader.md) |
+| 2026-09-04 | [The pthread family, and a prediction kept](worklog/409-the-pthread-family-and-a-prediction-kept.md) |
+| 2026-09-04 | [The tail, and what was decided not to do](worklog/410-the-tail-and-what-was-decided-not-to-do.md) |
+| 2026-09-04 | [The record could not see the work](worklog/411-the-record-could-not-see-the-work.md) |
+| 2026-09-04 | [The whole corpus was twelve days stale](worklog/412-the-whole-corpus-was-twelve-days-stale.md) |
+| 2026-09-04 | [libSceUlt, and the quiet four gigabytes](worklog/413-libsceult-and-the-quiet-four-gigabytes.md) |
+| 2026-09-04 | [The first command packets came back](worklog/414-the-first-command-packets-came-back.md) |
+| 2026-09-04 | [The constructor was the wrong question](worklog/415-the-constructor-was-the-wrong-question.md) |
+| 2026-09-04 | [Seventy-eight percent of every call](worklog/416-seventy-eight-percent-of-every-call.md) |
+| 2026-09-04 | [A placeholder that says who](worklog/417-a-placeholder-that-says-who.md) |
+| 2026-09-04 | [The classification failed, and found two bugs on the way](worklog/418-the-classification-failed-and-found-two-bugs.md) |
+| 2026-09-04 | [Six arguments, and a hypothesis that was wrong](worklog/419-six-arguments-and-a-refuted-hypothesis.md) |
+| 2026-09-04 | [The ring is circular, and the trade was false](worklog/420-the-ring-is-circular.md) |

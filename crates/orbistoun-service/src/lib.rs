@@ -19,6 +19,8 @@
 //! argument parsing, or transports.
 
 pub mod respond;
+pub mod titlemodules;
+pub mod titleplacement;
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +30,7 @@ use orbistoun_proto::{ImportRecord, SegmentPlacement};
 
 mod reporting;
 mod symbols;
+pub use symbols::{float_implementation_named, implementation_named};
 
 // Re-exported so a shim depends only on the service, never on the protocol crate.
 // Re-exported so a shim depends only on the service.
@@ -209,6 +212,27 @@ pub fn read_title_metadata(title_dir: &Path) -> Option<TitleMetadata> {
         built_with: value.get("sdkVersion").and_then(decode_system_version),
         icon: icon.is_file().then_some(icon),
     })
+}
+
+/// The high half every placeholder carries, so one is recognisable as ours wherever it turns up.
+///
+/// **Not named `_BASE`, deliberately.** That suffix means an *address* base in this tree, and
+/// `docs/ADDRESS_MAP.md` is gated against every one of them (D513). Calling this a base made the
+/// gate demand it be documented as somewhere memory is mapped, which it is not - it is an
+/// error-code prefix. The gate was right and the name was wrong (D567).
+const PLACEHOLDER_PREFIX: u64 = 0x7fff_0000;
+
+/// Where tagged placeholders start, clear of the fixed `GuestError` codes that occupy
+/// `0x7fff_0000..0x7fff_0010` - a tag must never be mistaken for one of those (D567).
+const PLACEHOLDER_TAG_FLOOR: u64 = 0x10;
+
+/// Whether the placeholder-tagging diagnostic is on for this process.
+///
+/// Read once. A setting consulted at two sites is a setting that can disagree with itself,
+/// which is the D220 failure this project has already had three times.
+fn tag_placeholders() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| orbistoun_env::TAG_PLACEHOLDERS.is_set())
 }
 
 /// The file a title is entered through.
@@ -451,6 +475,11 @@ pub struct Service {
 /// next allocation returned null. Moved into orbistoun's own high cluster, between the TLS block and
 /// the mapping arena, where nothing the guest chooses lands and the few small policy regions cannot
 /// climb into the arena above (D443).
+/// **The thirteen failed reservations at this address are the guest reserving inside the region
+/// it was handed, and are expected.** A policy region plants its base into a guest argument, the
+/// guest's allocator then reserves ranges *at* that base, and orbistoun already holds it - so the
+/// hint fails and the fallback in `sceKernelReserveVirtualRange` supplies an address. Confirmed by
+/// moving this constant twice and watching every failure follow it (D488).
 const POLICY_REGION_BASE: u64 = 0x0000_6B00_0000_0000;
 
 /// Reserves `len` bytes somewhere, bumping past anything already taken.
@@ -625,6 +654,162 @@ fn reserve_somewhere(next: &mut u64, len: u64) -> Option<u64> {
     None
 }
 
+/// The vendor library table and module table, each keyed by the id an import carries.
+type ModuleTables = (
+    std::collections::BTreeMap<u16, String>,
+    std::collections::BTreeMap<u16, String>,
+);
+
+/// Where one module's dynamic symbols sit in the shared stub table.
+///
+/// # Why there is one table and not one per module
+///
+/// Every table behind a stub - handlers, stub returns, forced returns, call counts, the
+/// readable and writable ranges - is a process-global `OnceLock` indexed by a dynamic symbol
+/// index, and a second install is **ignored**. So a table per module would be built and
+/// silently dropped, and every count taken afterwards would be indexed against the wrong
+/// module (D484).
+///
+/// One table with a range per module keeps all of that working unchanged: module *M*'s symbol
+/// *i* is slot `offset + i`, one index still names one symbol of one module, and
+/// `implemented_count` stays a single number over the run.
+///
+/// **The main executable is module 0 at offset 0**, so every recorded call index and every
+/// measurement taken before this existed still means what it meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleSlots {
+    /// What the module is called, for a diagnostic that has to name one.
+    pub label: String,
+    /// The slot its symbol zero occupies.
+    pub offset: usize,
+    /// How many dynamic symbols it has.
+    pub count: usize,
+}
+
+/// Lays out the shared stub table: which slots each module owns.
+///
+/// **Pure, and separated from the parsing for exactly the reason principle 8 gives.** The
+/// arithmetic here is the whole of what makes one table serve several modules, and it is
+/// testable without an ELF, without the host address space, and without touching the
+/// process-global tables that [`Service::build_thunks_for`] can only fill once (D484).
+///
+/// The first module gets offset zero. That is not an accident of iteration order: the main
+/// executable is module 0, so every call index in every trace and every measurement taken
+/// before this existed still names the same symbol.
+fn slot_ranges(modules: &[(&str, usize)]) -> Vec<ModuleSlots> {
+    let mut out = Vec::with_capacity(modules.len());
+    let mut at = 0_usize;
+    for (label, count) in modules {
+        out.push(ModuleSlots {
+            label: (*label).to_owned(),
+            offset: at,
+            count: *count,
+        });
+        at = at.saturating_add(*count);
+    }
+    out
+}
+
+/// Policy-driven writes and returns, accumulated across every module before being installed.
+///
+/// # Why this is a value rather than a function that installs
+///
+/// `install_policy_writes` and `install_policy_returns` are process-global `OnceLock`s, so
+/// calling them once per module keeps the first module's plants and **silently discards every
+/// other module's** (D484).
+///
+/// That is exactly the shape of D187 - a setting consulted nowhere, in the branch nobody
+/// re-read - so the collection is separated from the install and the install happens once,
+/// where it can be seen to happen once.
+///
+/// The reservation cursor lives here too, for the same reason: two modules asking for regions
+/// from independent cursors would be handed the same addresses.
+#[derive(Debug)]
+struct PolicyPlants {
+    writes: Vec<Box<[orbistoun_thunk::Plant]>>,
+    returns: Vec<(usize, u64)>,
+    next: u64,
+}
+
+impl PolicyPlants {
+    /// An empty set, one slot per symbol across every module.
+    fn sized(slots: usize) -> Self {
+        Self {
+            writes: (0..slots).map(|_| Box::default()).collect(),
+            returns: Vec::new(),
+            next: POLICY_REGION_BASE,
+        }
+    }
+
+    /// Publishes what every module asked for.
+    ///
+    /// The returns table is installed only when something wants it, because it is the same
+    /// table a policy *answer* uses and an empty install would claim the slot for nothing.
+    fn install(self) {
+        orbistoun_thunk::install_policy_writes(self.writes);
+        // Installed through the same table a policy answer uses, because that is what this is:
+        // a value the function answers with. Only where it comes from differs.
+        if !self.returns.is_empty() {
+            orbistoun_thunk::install_policy_returns(self.returns);
+        }
+    }
+}
+
+/// Where a run puts the title's own modules and the tables that serve them.
+///
+/// Carried as one value because the three are a **layout**, and a caller passing three bare
+/// addresses can transpose two of them into a collision that looks like a corrupt image.
+#[derive(Debug, Clone, Copy)]
+pub struct TitleBases {
+    /// Where the title's own module images go.
+    pub modules: u64,
+    /// Where the shared stub table goes.
+    pub thunks: u64,
+    /// Where storage for data imports goes.
+    pub data: u64,
+}
+
+/// The title's own modules, placed and relocated against one shared stub table.
+#[derive(Debug)]
+pub struct LinkedTitle {
+    /// The placed images and everything they export.
+    pub placed: titleplacement::PlacedTitleModules,
+    /// Which slots of the shared table each module owns - the executable first.
+    pub slots: Vec<ModuleSlots>,
+    /// What relocating each module came to, by library name.
+    pub tallies: Vec<(String, orbistoun_elf::reloc::RelocationTally)>,
+    /// Names more than one module imports as data, which a lookup by name cannot separate.
+    pub shared_data: Vec<String>,
+    /// The one stub table serving every module, the executable included.
+    ///
+    /// **Returned rather than kept private, because the caller has to relocate the executable
+    /// against it.** Building a second table for the executable would put its imports in a
+    /// different index space from the modules that answer them, and the process-global
+    /// dispatch tables would hold whichever was installed first (D484).
+    pub thunks: orbistoun_thunk::ThunkTable,
+    /// Storage for every data import across every module, in one reservation.
+    pub data: orbistoun_thunk::DataBlocks,
+    /// The executable's imports that a module the title ships answers, by symbol index.
+    ///
+    /// **Only the ones orbistoun does not implement itself** (D483): where this project has
+    /// written the function, its implementation is what every measurement was taken against
+    /// and it keeps the slot. Where it has not, a stub would say "nothing implements this"
+    /// about code sitting in the title's own data, so the module wins.
+    pub bound: std::collections::BTreeMap<u32, u64>,
+    /// One label per slot of the shared stub table, across every module.
+    ///
+    /// **Built here because this is where the module bytes are.** A label vector sized to the
+    /// executable alone names a title module's calls with whatever by-name stub sits at the
+    /// same index, which is how a call returning a heap pointer came to read as `libc::usleep`
+    /// (D490).
+    pub labels: Vec<String>,
+    /// Imports a module answers that orbistoun implements, so the implementation kept the slot.
+    ///
+    /// Reported rather than silently dropped: it is the list a reader needs to judge whether
+    /// D483's default is still the right one for a given title.
+    pub kept_by_orbistoun: Vec<String>,
+}
+
 impl Service {
     /// Builds a service with every subsystem registered.
     ///
@@ -684,19 +869,26 @@ impl Service {
         reporting::emit(self, path, &bytes, survey, now_unix_ms)
     }
 
-    /// What unimplemented functions answer, and how many were given a specific answer.
+    /// What unimplemented functions answer, how many were given a specific answer, and how
+    /// many of those rest on nothing measured.
     ///
     /// Exposed so a run can *record* what it was subject to. Loosening the default is the
     /// single change that improves every number in a report while implementing nothing, so
     /// a trace that cannot say which policy produced it cannot be compared with one that
     /// can (D181).
-    pub fn policy_summary(&self) -> (String, usize) {
+    ///
+    /// **The count is of symbols, not of answers, and the third number is new.** It used to be
+    /// `overrides.len()`, which missed regions entirely - a policy that wrote a base into guest
+    /// memory and answered nothing reported zero and read as an honest run. And it counted a
+    /// hardware measurement and a guess alike, so a record could not tell the emulator being
+    /// right from the emulator being helped (D557).
+    pub fn policy_summary(&self) -> (String, usize, usize) {
         let default = match self.policy.default_return {
             orbistoun_hle::StubReturn::Ok => "ok".to_owned(),
             orbistoun_hle::StubReturn::Unimplemented => "unimplemented".to_owned(),
             orbistoun_hle::StubReturn::Raw(v) => format!("{v:#x}"),
         };
-        (default, self.policy.overrides.len())
+        (default, self.policy.specific(), self.policy.propping())
     }
 
     /// How many names the loaded symbol database knows, if there is one.
@@ -947,20 +1139,16 @@ impl Service {
     /// said out loud** rather than failing the run: the rest of the guest is still worth
     /// having, and a policy entry that silently did nothing is the failure this whole family
     /// of mechanisms exists to avoid.
-    fn install_policy_writes(
+    fn collect_policy_writes(
         &self,
         container: &orbistoun_elf::Container<'_>,
         bytes: &[u8],
+        offset: usize,
+        plants: &mut PolicyPlants,
     ) -> Result<(), ServiceError> {
         if self.policy.regions.is_empty() {
             return Ok(());
         }
-        let count = usize::try_from(container.symbol_count(bytes)?).unwrap_or(0);
-        let mut writes: Vec<Box<[orbistoun_thunk::Plant]>> =
-            (0..count).map(|_| Box::default()).collect();
-        let mut next = POLICY_REGION_BASE;
-        let mut returns: Vec<(usize, u64)> = Vec::new();
-
         for import in container.raw_imports(bytes, &self.hasher)? {
             let Some(resolved) = self.registry.resolve(Nid::from_raw(import.nid)) else {
                 continue;
@@ -968,36 +1156,31 @@ impl Service {
             let Some(plan) = self.policy.regions.get(resolved.name) else {
                 continue;
             };
-            let Some(base) = reserve_somewhere(&mut next, plan.bytes) else {
+            let Some(base) = reserve_somewhere(&mut plants.next, plan.bytes) else {
                 eprintln!(
                     "orbistoun: {} asks for {:#x} bytes and none were free - it will answer without one",
                     resolved.name, plan.bytes
                 );
                 continue;
             };
+            let slot = offset.saturating_add(import.symbol_index as usize);
             // **Delivery is a decision about how, not about what.** The region is the same
             // either way; all that differs is whether the guest reads the base out of an
             // argument it passed or out of the register it gets an answer in (D300).
             match plan.via {
-                orbistoun_hle::Delivery::Argument(slot) => {
-                    if let Some(entry) = writes.get_mut(import.symbol_index as usize) {
+                orbistoun_hle::Delivery::Argument(position) => {
+                    if let Some(entry) = plants.writes.get_mut(slot) {
                         *entry = Box::new([orbistoun_thunk::Plant {
-                            position: slot,
+                            position,
                             offset: 0,
                             value: base,
                         }]);
                     }
                 }
                 orbistoun_hle::Delivery::Return => {
-                    returns.push((import.symbol_index as usize, base));
+                    plants.returns.push((slot, base));
                 }
             }
-        }
-        orbistoun_thunk::install_policy_writes(writes);
-        // Installed through the same table a policy answer uses, because that is what this is:
-        // a value the function answers with. Only where it comes from differs.
-        if !returns.is_empty() {
-            orbistoun_thunk::install_policy_returns(returns);
         }
         Ok(())
     }
@@ -1032,6 +1215,58 @@ impl Service {
         )?)
     }
 
+    /// Storage for every data import across several modules, in one reservation.
+    ///
+    /// **One block, indexed the way the shared stub table is** (D484): module *M*'s symbol *i*
+    /// occupies index `offset(M) + i`, so a resolver consulting the two needs one index space
+    /// rather than a lookup that first works out which module a slot belongs to.
+    ///
+    /// The named map merges as a consequence, which is what `install_data_symbols` needs -
+    /// it is a `OnceLock`, so building one block per module would publish the first module's
+    /// globals and silently drop the rest.
+    ///
+    /// A name two modules both import as data is **reported**: they get separate storage, as
+    /// they must, but an implementation reaching for the name by string can only be handed
+    /// one of them, and which one is not something this layer can decide.
+    ///
+    /// # Errors
+    ///
+    /// When a container cannot be parsed or the host refuses the reservation.
+    pub fn build_data_blocks_for(
+        &self,
+        modules: &[(&str, &[u8])],
+        slots: &[ModuleSlots],
+        base: u64,
+    ) -> Result<(orbistoun_thunk::DataBlocks, Vec<String>), ServiceError> {
+        let mut imports: Vec<(usize, String)> = Vec::new();
+        let mut seen: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut shared: Vec<String> = Vec::new();
+        for ((label, bytes), slot) in modules.iter().zip(slots) {
+            let container = orbistoun_elf::Container::parse(bytes)?;
+            for import in container.raw_imports(bytes, &self.hasher)? {
+                if import.kind != orbistoun_elf::dynamic::Kind::Object {
+                    continue;
+                }
+                if let Some(first) = seen.get(&import.name) {
+                    shared.push(format!(
+                        "{}: imported as data by {first} and by {label} - both have storage, but a lookup by name answers one of them",
+                        import.name
+                    ));
+                } else {
+                    seen.insert(import.name.clone(), (*label).to_owned());
+                }
+                imports.push((
+                    slot.offset.saturating_add(import.symbol_index as usize),
+                    import.name,
+                ));
+            }
+        }
+        let blocks =
+            orbistoun_thunk::DataBlocks::build(base, &imports, orbistoun_core::GUEST_PAGE_SIZE)?;
+        Ok((blocks, shared))
+    }
+
     /// Builds one stub per dynamic symbol, sized from the container itself.
     ///
     /// Sized from the symbol table rather than the import list because relocations
@@ -1046,10 +1281,38 @@ impl Service {
         bytes: &[u8],
         base: u64,
     ) -> Result<orbistoun_thunk::ThunkTable, ServiceError> {
-        let container = orbistoun_elf::Container::parse(bytes)?;
-        let count = usize::try_from(container.symbol_count(bytes)?).unwrap_or(0);
-        let available = symbols::implementations();
-        let float_available = symbols::float_implementations();
+        let (table, _) = self.build_thunks_for(&[("", bytes)], base)?;
+        Ok(table)
+    }
+
+    /// Builds one shared stub table across several modules, and says where each one sits.
+    ///
+    /// `modules[0]` is the main executable and takes offset zero, so a single-module call is
+    /// bit-identical to what [`Self::build_thunks`] always did.
+    ///
+    /// **Every process-global table is installed once, after every module has contributed.**
+    /// That is not tidiness: `install_handlers`, `install_stub_returns` and
+    /// `install_policy_writes` are `OnceLock`s, so installing per module would keep the first
+    /// module's answers and silently discard the rest (D484).
+    ///
+    /// # Errors
+    ///
+    /// When a container cannot be parsed or the table cannot be built.
+    pub fn build_thunks_for(
+        &self,
+        modules: &[(&str, &[u8])],
+        base: u64,
+    ) -> Result<(orbistoun_thunk::ThunkTable, Vec<ModuleSlots>), ServiceError> {
+        let mut counts = Vec::with_capacity(modules.len());
+        for (label, bytes) in modules {
+            let container = orbistoun_elf::Container::parse(bytes)?;
+            counts.push((
+                *label,
+                usize::try_from(container.symbol_count(bytes)?).unwrap_or(0),
+            ));
+        }
+        let slots = slot_ranges(&counts);
+        let imports = slots.last().map_or(0, |s| s.offset.saturating_add(s.count));
         // Stubs past the guest's own symbols, one per implemented name.
         //
         // **For the names a guest never imports.** The open-toolchain payloads resolve
@@ -1057,10 +1320,10 @@ impl Service {
         // name at a time - so those names appear in no import table and no relocation, and
         // a resolver has nothing to hand back unless a stub exists for them (D365).
         let resolvable = symbols::resolvable();
-        let total = count + resolvable.len();
+        let total = imports + resolvable.len();
         let table = orbistoun_thunk::ThunkTable::build_with_named(
             base,
-            count,
+            imports,
             resolvable.len(),
             orbistoun_core::GUEST_PAGE_SIZE,
         )?;
@@ -1074,12 +1337,82 @@ impl Service {
         let mut float_handlers: Vec<Option<orbistoun_core::GuestFloatFn>> = vec![None; total];
         // Functions that resolved and had nowhere to go. Reported, never silent.
         let mut unplaced: Vec<String> = Vec::new();
+        for ((_, bytes), slot) in modules.iter().zip(&slots) {
+            let container = orbistoun_elf::Container::parse(bytes)?;
+            self.bind_handlers(
+                &container,
+                bytes,
+                slot.offset,
+                (&mut handlers, &mut float_handlers),
+                &mut unplaced,
+            )?;
+        }
+        if !unplaced.is_empty() {
+            // Not fatal: the rest of the run is still worth having, and a report that names
+            // the functions is worth more than a refusal that names none of them.
+            eprintln!(
+                "orbistoun: {} implemented functions could not be bound to a stub slot and will answer a placeholder: {}",
+                unplaced.len(),
+                unplaced.join(", ")
+            );
+        }
+        Self::bind_by_name(
+            &resolvable,
+            imports,
+            &table,
+            &mut handlers,
+            &mut float_handlers,
+        );
+        orbistoun_thunk::install_float_handlers(float_handlers);
+
+        let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
+        let mut stub_returns: Vec<Option<u64>> = vec![None; imports];
+        let mut plants = PolicyPlants::sized(imports);
+        for ((_, bytes), slot) in modules.iter().zip(&slots) {
+            let container = orbistoun_elf::Container::parse(bytes)?;
+            self.fill_stub_returns(
+                &container,
+                bytes,
+                slot.offset,
+                &knowledge,
+                &mut stub_returns,
+            )?;
+            self.collect_policy_writes(&container, bytes, slot.offset, &mut plants)?;
+        }
+        orbistoun_thunk::install_stub_returns(stub_returns);
+        plants.install();
+        orbistoun_thunk::install_handlers(handlers);
+        Ok((table, slots))
+    }
+
+    /// Binds this module's implemented imports into the shared handler tables.
+    ///
+    /// `offset` is where the module's symbol zero sits, so `symbol_index` is a slot only after
+    /// it is added - the one arithmetic that makes a shared table work.
+    ///
+    /// The two tables travel as a pair because a binding goes into exactly one of them and the
+    /// choice is made here; splitting them into two arguments invited passing one function's
+    /// table with another's.
+    fn bind_handlers(
+        &self,
+        container: &orbistoun_elf::Container<'_>,
+        bytes: &[u8],
+        offset: usize,
+        tables: (
+            &mut [Option<orbistoun_core::GuestFn>],
+            &mut [Option<orbistoun_core::GuestFloatFn>],
+        ),
+        unplaced: &mut Vec<String>,
+    ) -> Result<(), ServiceError> {
+        let (handlers, float_handlers) = tables;
+        let available = symbols::implementations();
+        let float_available = symbols::float_implementations();
         for import in container.raw_imports(bytes, &self.hasher)? {
             let nid = Nid::from_raw(import.nid);
             let Some(resolved) = self.registry.resolve(nid) else {
                 continue;
             };
-            let slot = import.symbol_index as usize;
+            let slot = offset.saturating_add(import.symbol_index as usize);
             // **A binding that does not fit is said out loud.** Both tables are sized from
             // the dynamic symbol count and `symbol_index` indexes that same table, so a slot
             // out of range means the two disagree - and the consequence is an implemented
@@ -1103,43 +1436,32 @@ impl Service {
                 }
             }
         }
-        if !unplaced.is_empty() {
-            // Not fatal: the rest of the run is still worth having, and a report that names
-            // the functions is worth more than a refusal that names none of them.
-            eprintln!(
-                "orbistoun: {} implemented functions could not be bound to a stub slot and will answer a placeholder: {}",
-                unplaced.len(),
-                unplaced.join(", ")
-            );
-        }
-        Self::bind_by_name(
-            &resolvable,
-            count,
-            &table,
-            &mut handlers,
-            &mut float_handlers,
-        );
-        orbistoun_thunk::install_float_handlers(float_handlers);
-        // What each *unimplemented* stub should answer.
-        //
-        // **Three sources, in this order, and the order is the whole point** (D166):
-        //
-        // 1. An explicit per-symbol override from the policy file. Somebody has typed a
-        //    deliberate experiment - "answer ok for this one and see if the guest
-        //    proceeds" - and that must win over everything, because it is the question
-        //    being asked.
-        // 2. The knowledge file's declared return kind. A pointer-, handle- or
-        //    count-returning function answers zero, because an error code in a pointer
-        //    register is a wild pointer the guest dereferences immediately (D125). This
-        //    beats the policy *default* deliberately: a blanket "answer ok" must not
-        //    quietly reintroduce that.
-        // 3. The policy default, for everything else.
-        //
-        // Until this existed the policy was consulted nowhere on the call path, so every
-        // override anybody wrote was silently ignored - the same failure as D082, one
-        // layer over.
-        let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
-        let mut stub_returns: Vec<Option<u64>> = vec![None; count];
+        Ok(())
+    }
+
+    /// What each of this module's *unimplemented* stubs should answer.
+    ///
+    /// **Three sources, in this order, and the order is the whole point** (D166):
+    ///
+    /// 1. An explicit per-symbol override from the policy file. Somebody has typed a
+    ///    deliberate experiment - "answer ok for this one and see if the guest proceeds" -
+    ///    and that must win over everything, because it is the question being asked.
+    /// 2. The knowledge file's declared return kind. A pointer-, handle- or count-returning
+    ///    function answers zero, because an error code in a pointer register is a wild
+    ///    pointer the guest dereferences immediately (D125). This beats the policy *default*
+    ///    deliberately: a blanket "answer ok" must not quietly reintroduce that.
+    /// 3. The policy default, for everything else.
+    ///
+    /// Until this existed the policy was consulted nowhere on the call path, so every
+    /// override anybody wrote was silently ignored - the same failure as D082, one layer over.
+    fn fill_stub_returns(
+        &self,
+        container: &orbistoun_elf::Container<'_>,
+        bytes: &[u8],
+        offset: usize,
+        knowledge: &orbistoun_hle::knowledge::Knowledge,
+        stub_returns: &mut [Option<u64>],
+    ) -> Result<(), ServiceError> {
         for import in container.raw_imports(bytes, &self.hasher)? {
             // **An undeclared import still gets the policy.** It used to be skipped here,
             // which quietly exempted the majority of what a guest calls from the one knob
@@ -1170,8 +1492,25 @@ impl Service {
                 .get(&format!("{:#018x}", import.nid))
                 .or_else(|| self.policy.overrides.get(&format!("{:016x}", import.nid)));
             let overridden = by_name.or(by_nid).map(|r| u64::from(r.as_raw()));
+            // **A tagged placeholder names its own source.** Every stub answers the same
+            // `0x7fff_0001`, so one found in a guest's argument says *some* unimplemented
+            // function produced it and never which - `error_used_as_pointer` can only tell a
+            // reader to go looking, which D299 says a finding must not do. Under
+            // `ORBISTOUN_TAG_PLACEHOLDERS` each stub answers `0x7fff_0000 | (0x10 + its slot)`,
+            // so the value **is** the attribution.
+            //
+            // Above `0x10` because `0x7fff_0000..0x7fff_0010` is the fixed placeholder range the
+            // `GuestError` codes occupy - a tag must not be mistaken for one of those (D567).
+            let slot_index = offset.saturating_add(import.symbol_index as usize);
+            let tagged = tag_placeholders()
+                .then(|| u64::try_from(slot_index).ok())
+                .flatten()
+                .map(|index| index + PLACEHOLDER_TAG_FLOOR)
+                .filter(|tag| *tag <= 0xffff)
+                .map(|tag| PLACEHOLDER_PREFIX | tag);
             let Some(value) =
                 overridden
+                    .or(tagged)
                     .or(declared)
                     .or_else(|| match self.policy.default_return {
                         // The ordinary error code is what the dispatcher already falls back
@@ -1182,14 +1521,13 @@ impl Service {
             else {
                 continue;
             };
-            if let Some(slot) = stub_returns.get_mut(import.symbol_index as usize) {
+            if let Some(slot) =
+                stub_returns.get_mut(offset.saturating_add(import.symbol_index as usize))
+            {
                 *slot = Some(value);
             }
         }
-        orbistoun_thunk::install_stub_returns(stub_returns);
-        self.install_policy_writes(&container, bytes)?;
-        orbistoun_thunk::install_handlers(handlers);
-        Ok(table)
+        Ok(())
     }
 
     /// Where run artifacts are written, if reporting is enabled at all.
@@ -1313,9 +1651,46 @@ impl Service {
     fn labels(&self, bytes: &[u8], db: Option<&SymbolDb>) -> Result<Vec<String>, ServiceError> {
         let container = orbistoun_elf::Container::parse(bytes)?;
         let count = usize::try_from(container.symbol_count(bytes)?).unwrap_or(0);
-        // The table the ids actually index, not `DT_NEEDED` (D117).
-        let libraries = container.import_libraries(bytes)?;
-        let mut labels = vec![String::new(); count];
+        let mut labels = Self::resolvable_labels(count);
+        self.fill_labels(&container, bytes, 0, db, &mut labels)?;
+        Ok(labels)
+    }
+
+    /// Labels for every module sharing one stub table, in that table's own index space.
+    ///
+    /// # Why the single-module form is not enough
+    ///
+    /// `labels` sizes the vector to the executable's symbol count and appends the by-name
+    /// stubs after it. With one table across several modules (D484), **that is exactly where
+    /// the second module's slots begin** - so every call from a title module was labelled with
+    /// a by-name stub's name, and the trace read `libc::usleep` for a call that returned a heap
+    /// pointer. A report naming the wrong function is worse than one naming none (D490).
+    ///
+    /// # Errors
+    ///
+    /// When a container cannot be parsed.
+    pub fn import_labels_for(
+        &self,
+        modules: &[(&str, &[u8])],
+        slots: &[ModuleSlots],
+        file: &SymbolDbFile,
+    ) -> Result<Vec<String>, ServiceError> {
+        let db = SymbolDb::from_file(file).map(|(db, _)| db);
+        let imports: usize = slots.iter().map(|s| s.count).sum();
+        let mut labels = Self::resolvable_labels(imports);
+        for ((_, bytes), slot) in modules.iter().zip(slots) {
+            let container = orbistoun_elf::Container::parse(bytes)?;
+            self.fill_labels(&container, bytes, slot.offset, db.as_ref(), &mut labels)?;
+        }
+        Ok(labels)
+    }
+
+    /// An empty label per import slot, then one per by-name stub.
+    ///
+    /// The by-name block sits **after every module's imports**, which is the whole of what the
+    /// single-module version got wrong once there was more than one module.
+    fn resolvable_labels(imports: usize) -> Vec<String> {
+        let mut labels = vec![String::new(); imports];
         // The by-name stubs, labelled from the same list that binds them, so a call
         // resolved at run time reads as itself in a trace rather than as `unknown` (D366).
         //
@@ -1326,9 +1701,22 @@ impl Service {
             let library = knowledge.library_of(name).unwrap_or("resolved");
             labels.push(format!("{library}::{name}"));
         }
+        labels
+    }
 
+    /// Writes one module's import names into the shared label vector at its own offset.
+    fn fill_labels(
+        &self,
+        container: &orbistoun_elf::Container<'_>,
+        bytes: &[u8],
+        offset: usize,
+        db: Option<&SymbolDb>,
+        labels: &mut [String],
+    ) -> Result<(), ServiceError> {
+        let libraries = container.import_libraries(bytes)?;
         for import in container.raw_imports(bytes, &self.hasher)? {
-            let Some(slot) = labels.get_mut(import.symbol_index as usize) else {
+            let Some(slot) = labels.get_mut(offset.saturating_add(import.symbol_index as usize))
+            else {
                 continue;
             };
             let nid = Nid::from_raw(import.nid);
@@ -1349,7 +1737,7 @@ impl Service {
                 },
             };
         }
-        Ok(labels)
+        Ok(())
     }
 
     /// Applies relocations to a placed image.
@@ -1425,6 +1813,362 @@ impl Service {
         })
     }
 
+    /// The modules a title ships that answer the libraries its executable imports from.
+    ///
+    /// Joins the two halves: the executable names libraries and says nothing about where they
+    /// live (D482), so the names are taken from its vendor tables and looked for in the
+    /// title's own tree. What comes back is the subset that exists - a platform library is
+    /// supposed to be absent from a title's data.
+    ///
+    /// # Errors
+    ///
+    /// When the executable cannot be read or parsed.
+    pub fn title_modules_for(
+        &self,
+        executable: &Path,
+    ) -> Result<Vec<titlemodules::TitleModule>, ServiceError> {
+        let bytes = std::fs::read(executable).map_err(|source| ServiceError::Io {
+            path: executable.display().to_string(),
+            source,
+        })?;
+        let (libraries, _modules) = self.module_tables(&bytes)?;
+        let root = executable.parent().unwrap_or(Path::new("."));
+        let wanted: Vec<String> = libraries.into_values().collect();
+        Ok(titlemodules::find(root, &wanted))
+    }
+
+    /// Places the title's own modules and reports what they export.
+    ///
+    /// Two passes, not one per module (D482): every module is placed before any export is
+    /// indexed, so a module that exports a name another of the title's own imports does not
+    /// depend on which the filesystem offered first.
+    ///
+    /// **The result is placed, not relocated**, and must not be bound into a running guest -
+    /// see [`titleplacement`] for why an address into unrelocated code is worse than a stub.
+    ///
+    /// # Errors
+    ///
+    /// When the executable or one of its modules cannot be read, parsed, or placed.
+    pub fn place_title_modules(
+        &self,
+        modules: &[titlemodules::TitleModule],
+        base: u64,
+    ) -> Result<titleplacement::PlacedTitleModules, ServiceError> {
+        titleplacement::place_all(
+            modules,
+            base,
+            orbistoun_mem::allocation_granularity(),
+            |bytes, at| self.place_image(bytes, at),
+            |bytes| {
+                let container = orbistoun_elf::Container::parse(bytes)?;
+                Ok(container.raw_exports(bytes, &self.hasher)?)
+            },
+        )
+    }
+
+    /// What a guest module imports, as the loader reads it.
+    ///
+    /// Exposed because resolving an import against a placed module is a match on the
+    /// **hash and the kind** of each side, and both live here rather than in a name.
+    ///
+    /// # Errors
+    ///
+    /// When the container cannot be parsed or carries no usable dynamic table.
+    pub fn raw_imports_of(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Vec<orbistoun_elf::dynamic::RawImport>, ServiceError> {
+        let container = orbistoun_elf::Container::parse(bytes)?;
+        Ok(container.raw_imports(bytes, &self.hasher)?)
+    }
+
+    /// Places the title's own modules and relocates them against one shared stub table.
+    ///
+    /// D482's order, and the order is the decision: **place every module, collect every
+    /// export, then relocate** - because a title module may import from another of the
+    /// title's own, and relocating each as it is placed would make the answer depend on which
+    /// the filesystem offered first.
+    ///
+    /// The executable is module 0 and takes slot zero, so everything already measured keeps
+    /// its meaning (D484). It is **not** relocated here: this links the modules that answer
+    /// its imports, and entering the guest is the worker's sequence rather than this one's.
+    ///
+    /// # Errors
+    ///
+    /// When a container cannot be read, parsed, placed or relocated.
+    pub fn link_title_modules(
+        &self,
+        executable: &Path,
+        bases: TitleBases,
+        symbols: &SymbolDbFile,
+    ) -> Result<LinkedTitle, ServiceError> {
+        let read = |path: &Path| -> Result<Vec<u8>, ServiceError> {
+            std::fs::read(path).map_err(|source| ServiceError::Io {
+                path: path.display().to_string(),
+                source,
+            })
+        };
+        let executable_bytes = read(executable)?;
+        let found = self.title_modules_for(executable)?;
+        let mut placed = self.place_title_modules(&found, bases.modules)?;
+
+        // The executable first, so it is module 0 at offset 0.
+        let mut owned: Vec<(String, Vec<u8>)> = vec![(String::new(), executable_bytes)];
+        for module in &found {
+            owned.push((module.library.clone(), read(&module.path)?));
+        }
+        let modules: Vec<(&str, &[u8])> = owned
+            .iter()
+            .map(|(label, bytes)| (label.as_str(), bytes.as_slice()))
+            .collect();
+
+        let (thunks, slots) = self.build_thunks_for(&modules, bases.thunks)?;
+        let (data, shared_data) = self.build_data_blocks_for(&modules, &slots, bases.data)?;
+        // Published once, across every module - the table is a `OnceLock` and a second install
+        // is ignored, so per-module publishing would keep the executable's globals and drop
+        // every module's (D484).
+        orbistoun_thunk::install_data_symbols(data.named());
+
+        let mut tallies = Vec::new();
+        // `slots[0]` is the executable, which the worker relocates as part of entering it.
+        for ((library, image), slot) in placed.images().iter().zip(slots.iter().skip(1)) {
+            let bytes = owned
+                .iter()
+                .find(|(label, _)| label == library)
+                .map(|(_, bytes)| bytes.as_slice())
+                .unwrap_or_default();
+            // Built per module rather than once outside the loop: the borrow it takes has
+            // to end before the tables move into the returned value.
+            let shared = orbistoun_loader::relocate::ImportResolver {
+                thunks: &thunks,
+                data: &data,
+                refuse: None,
+            };
+            let resolver = orbistoun_loader::relocate::OffsetResolver {
+                offset: slot.offset,
+                inner: &shared,
+            };
+            let tally = self.relocate_image(image, bytes, &resolver)?;
+            tallies.push((library.clone(), tally));
+        }
+        // **Only now**, and this is the same ordering the executable already has: placement
+        // leaves every page writable and none executable because relocation writes into text,
+        // so protecting any earlier would make those writes fault. A module left unprotected is
+        // not a module the guest can call - it faults on the instruction fetch (D489).
+        for (_, image) in placed.images_mut() {
+            self.protect_image(image)?;
+        }
+        // **And tell the kernel where they are.** A module's pages live in this loader's own
+        // address space, which the kernel's runtime map never sees - the executable's image is
+        // noted for exactly that reason (D446). Without the same for modules, a fault inside one
+        // reads as *outside every placed region*, which is the test for "orbistoun's own code
+        // faulted", and `sceKernelVirtualQuery` refuses an address the guest is running from.
+        for (_, image) in placed.images() {
+            let (base, len) = image.span();
+            orbistoun_kernel::note_region(base, len);
+        }
+        // **And where each one's initialisers are**, so a later `sceKernelLoadStartModule`
+        // can run them. Recorded here because this is the only place holding both halves: the
+        // module's bytes, which carry `DT_INIT_ARRAY` as a link-relative address, and the
+        // image, which knows where it was placed.
+        //
+        // The array's *contents* are deliberately not read here - they are function pointers
+        // relocation writes, and the loop above has only just written them. The address is
+        // recorded; the pointers are read at start time, which is after linking (D515).
+        for (library, image) in placed.images() {
+            let Some(bytes) = owned
+                .iter()
+                .find(|(label, _)| label == library)
+                .map(|(_, bytes)| bytes.as_slice())
+            else {
+                continue;
+            };
+            if let Some(initialisers) = initialisers_of(bytes, image.base()) {
+                orbistoun_kernel::note_module_initialisers(library, initialisers);
+            }
+        }
+        // **And what they export**, so `sceKernelDlsym` can answer for a symbol the guest's own
+        // binaries provide. The addresses here already carry the module base; the NIDs are the
+        // hashes an importer would name them by, which is also what a `dlsym` name hashes to
+        // (D517).
+        let exports: Vec<(u64, u64)> = placed
+            .exports()
+            .values()
+            .flat_map(|by_hash| by_hash.values())
+            .map(|export| (export.nid, export.address))
+            .collect();
+        orbistoun_kernel::note_guest_exports(self.hasher.suffix_bytes(), &exports);
+        let labels = self.import_labels_for(&modules, &slots, symbols)?;
+        let (bound, kept_by_orbistoun) = self.bind_to_title_modules(&placed, &owned)?;
+        Ok(LinkedTitle {
+            placed,
+            slots,
+            tallies,
+            shared_data,
+            thunks,
+            data,
+            bound,
+            labels,
+            kept_by_orbistoun,
+        })
+    }
+
+    /// Which of the executable's imports a module the title ships should answer.
+    ///
+    /// **D483's rule, and the place it is actually applied.** An import binds into the module
+    /// its `library_id` names, and only where orbistoun has no implementation of its own: the
+    /// emulator's `libc` is what every differential case and every hardware claim was measured
+    /// against, so it keeps the slot. A name nothing here implements is the opposite - a stub
+    /// there answers a placeholder for code that is present and relocated, and the guest then
+    /// uses the placeholder as an address (D489).
+    ///
+    /// `owned[0]` is the executable, which is module 0 at offset 0 - so its symbol index is its
+    /// slot, and the map needs no shifting.
+    fn bind_to_title_modules(
+        &self,
+        placed: &titleplacement::PlacedTitleModules,
+        owned: &[(String, Vec<u8>)],
+    ) -> Result<(std::collections::BTreeMap<u32, u64>, Vec<String>), ServiceError> {
+        let Some((_, bytes)) = owned.first() else {
+            return Ok((std::collections::BTreeMap::new(), Vec::new()));
+        };
+        let container = orbistoun_elf::Container::parse(bytes)?;
+        let imports = container.raw_imports(bytes, &self.hasher)?;
+        let libraries = container.import_libraries(bytes)?;
+        let resolution = placed.resolve(&imports, &libraries);
+        let mut bound = std::collections::BTreeMap::new();
+        let mut kept = Vec::new();
+        for import in &imports {
+            let Some(address) = resolution.addresses.get(&import.symbol_index) else {
+                continue;
+            };
+            // Asked of the dispatch tables rather than of a name list, because that is what
+            // actually answers the call - a name this project knows but has not bound is not
+            // implemented, whatever a registry says.
+            if orbistoun_thunk::is_implemented(import.symbol_index as usize) {
+                kept.push(import.name.clone());
+            } else {
+                bound.insert(import.symbol_index, *address);
+            }
+        }
+        Ok((bound, kept))
+    }
+
+    /// The hash a guest would import this name by.
+    ///
+    /// **The service's own hasher, not a fresh one.** The suffix is a run input (principle 5),
+    /// so a hash computed with a default would answer a different question from the one every
+    /// other lookup in this process asks.
+    #[must_use]
+    pub fn hash_name(&self, name: &str) -> Nid {
+        self.hasher.hash(name)
+    }
+
+    /// The vendor tables an encoded import name indexes: libraries, then modules.
+    ///
+    /// **The two are different lists and neither is `DT_NEEDED`** (D117). Exposed because the
+    /// question "where does the loader find a module the executable imports from" is answered
+    /// by what these strings actually contain - a bare name or a path - and that is read, not
+    /// assumed.
+    ///
+    /// # Errors
+    ///
+    /// When the container cannot be parsed or carries no usable dynamic table.
+    pub fn module_tables(&self, bytes: &[u8]) -> Result<ModuleTables, ServiceError> {
+        let container = orbistoun_elf::Container::parse(bytes)?;
+        Ok((
+            container.import_libraries(bytes)?,
+            container.import_modules(bytes)?,
+        ))
+    }
+
+    /// What a module **provides**, read without executing it.
+    ///
+    /// The other half of [`Self::survey_bytes`]. A survey answers "what does this need"; this
+    /// answers "what can it answer for somebody else", which is the question that decides
+    /// What a binary exports, as `(nid, runtime address)` once placed at `base`.
+    ///
+    /// For `sceKernelDlsym`: the kernel is handed a name and every export table is keyed by a
+    /// hash of one, so it hashes at the call and looks up here. Separate from
+    /// [`Self::exports_bytes`], which names symbols for a human reading a survey - this one is
+    /// for a lookup, so it carries no names at all (D517).
+    ///
+    /// # Errors
+    ///
+    /// When the container cannot be parsed, or carries no usable dynamic symbol table.
+    pub fn export_addresses(
+        &self,
+        bytes: &[u8],
+        base: u64,
+    ) -> Result<Vec<(u64, u64)>, ServiceError> {
+        let container = orbistoun_elf::Container::parse(bytes)?;
+        Ok(container
+            .raw_exports(bytes, &self.hasher)?
+            .into_iter()
+            .map(|e| (e.nid, base.saturating_add(e.offset)))
+            .collect())
+    }
+
+    /// The hash suffix this service is configured with.
+    ///
+    /// Handed to the kernel alongside the exports, because the hashing has to happen where the
+    /// name arrives and this hasher does not reach there.
+    #[must_use]
+    pub fn nid_suffix(&self) -> &[u8] {
+        self.hasher.suffix_bytes()
+    }
+
+    /// whether loading a second module is worth anything.
+    ///
+    /// # Errors
+    ///
+    /// When the container cannot be parsed, or carries no usable dynamic symbol table.
+    pub fn exports_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Vec<orbistoun_proto::ExportRecord>, ServiceError> {
+        let container = orbistoun_elf::Container::parse(bytes)?;
+        let found = container.raw_exports(bytes, &self.hasher)?;
+        Ok(found
+            .into_iter()
+            .map(|e| orbistoun_proto::ExportRecord {
+                // Named from the database where the module spelled it as a bare NID, exactly
+                // as a survey names an import - the same symbol, asked about from the other
+                // side.
+                symbol: Some(e.name).filter(|n| !n.is_empty()).or_else(|| {
+                    self.symbols
+                        .as_ref()
+                        .and_then(|db| db.name(Nid::from_raw(e.nid)).map(str::to_owned))
+                }),
+                nid: e.nid,
+                offset: e.offset,
+                kind: match e.kind {
+                    orbistoun_elf::dynamic::Kind::Function => orbistoun_proto::ImportKind::Function,
+                    orbistoun_elf::dynamic::Kind::Object => orbistoun_proto::ImportKind::Object,
+                    orbistoun_elf::dynamic::Kind::Unspecified => {
+                        orbistoun_proto::ImportKind::Unspecified
+                    }
+                },
+            })
+            .collect())
+    }
+
+    /// Reads a container from disk and reports what it provides.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::exports_bytes`], plus the file not being readable.
+    pub fn exports_path(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<orbistoun_proto::ExportRecord>, ServiceError> {
+        let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        self.exports_bytes(&bytes)
+    }
+
     /// Surveys a container on disk.
     pub fn survey_path(&self, path: &Path) -> Result<SurveySummary, ServiceError> {
         let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
@@ -1440,9 +2184,96 @@ impl Service {
     }
 }
 
+/// Where a placed module's initialisers live, as runtime addresses.
+///
+/// [`None`] when the module carries no dynamic table, or carries one with no `DT_INIT` and an
+/// empty `DT_INIT_ARRAY` - a module with nothing to run is not a module that failed to be
+/// read, and recording it would make the run report claim a start that did nothing.
+///
+/// # The link-relative to runtime step, stated because it is the easy thing to get wrong
+///
+/// `DT_INIT_ARRAY` is a virtual address in the module's own link view, and a title's module
+/// links at zero - which is why its entry point reads as `0x0` and why its exports report as
+/// bare offsets. So the runtime address is `base + vaddr`, and a module that did *not* link
+/// at zero would need its load bias instead. Nothing in the corpus does; if one ever does,
+/// this is where it will be wrong, which is why it is written down rather than inlined.
+fn initialisers_of(bytes: &[u8], base: u64) -> Option<orbistoun_kernel::ModuleInitialisers> {
+    let container = orbistoun_elf::Container::parse(bytes).ok()?;
+    let dynamic = container.dynamic_bytes(bytes).ok()??;
+    let info = orbistoun_elf::dynamic::DynamicInfo::parse(dynamic);
+    let count = info.init_arraysz / 8;
+    if info.init == 0 && (info.init_array == 0 || count == 0) {
+        return None;
+    }
+    Some(orbistoun_kernel::ModuleInitialisers {
+        init: if info.init == 0 {
+            0
+        } else {
+            base.saturating_add(info.init)
+        },
+        array: if info.init_array == 0 {
+            0
+        } else {
+            base.saturating_add(info.init_array)
+        },
+        count: if info.init_array == 0 { 0 } else { count },
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LibrarySettings, Path, Service, ServiceConfig};
+    use super::{LibrarySettings, Path, Service, ServiceConfig, slot_ranges};
+
+    /// **The main executable owns slot zero**, whatever else is loaded beside it.
+    ///
+    /// Every recorded call index and every measurement taken before the table was shared
+    /// names a slot in the executable's range. Giving module 0 any other offset would
+    /// renumber all of them silently.
+    #[test]
+    fn the_main_executable_owns_slot_zero() {
+        let ranges = slot_ranges(&[("eboot", 583), ("Il2CppUserAssemblies", 247)]);
+        assert_eq!(ranges[0].offset, 0);
+        assert_eq!(ranges[0].count, 583);
+    }
+
+    /// A second module starts exactly where the first ended - no gap, no overlap.
+    ///
+    /// A gap wastes slots harmlessly; an **overlap** binds two modules' symbols to one stub,
+    /// so a call trace names the wrong function and an implementation answers for a symbol it
+    /// was never written for. The assertion is on the exact boundary for that reason.
+    #[test]
+    fn each_module_begins_where_the_last_one_ended() {
+        let ranges = slot_ranges(&[("a", 4), ("b", 3), ("c", 5)]);
+        let offsets: Vec<usize> = ranges.iter().map(|r| r.offset).collect();
+        assert_eq!(offsets, [0, 4, 7]);
+        for pair in ranges.windows(2) {
+            assert_eq!(
+                pair[0].offset + pair[0].count,
+                pair[1].offset,
+                "a gap or an overlap between {} and {}",
+                pair[0].label,
+                pair[1].label
+            );
+        }
+    }
+
+    /// A module with no dynamic symbols takes no slots and shifts nothing.
+    ///
+    /// It can happen - a module whose table this build could not read answers zero - and the
+    /// wrong handling is to give it a slot anyway, which shifts every module after it by one
+    /// and silently misbinds all of them.
+    #[test]
+    fn a_module_with_no_symbols_shifts_nothing() {
+        let ranges = slot_ranges(&[("a", 4), ("empty", 0), ("c", 5)]);
+        assert_eq!(ranges[1].offset, 4);
+        assert_eq!(ranges[2].offset, 4, "the empty module consumed no slots");
+    }
+
+    /// No modules is an empty layout rather than a panic.
+    #[test]
+    fn no_modules_lays_out_nothing() {
+        assert!(slot_ranges(&[]).is_empty());
+    }
 
     fn service() -> Service {
         Service::new(ServiceConfig {

@@ -10,12 +10,46 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
 [[function]]
+name = "sceAgcCbNop"
+purpose = "Writes a no-operation packet into a command buffer."
+edge_cases = [
+    "MEASURED on hardware: writes exactly 4 bytes, 00 10 ff ff - one dword, 0xffff1000 little-endian (D565).",
+    "**No arity is claimed.** obSCEne called it with a command-buffer writer in the first argument and the rest zeroed, which establishes that the first argument is that writer and nothing about how many arguments the function takes. The declaration's 6 is the trampoline's full capture, not a claim (D504, D565).",
+    "Read as a packet header (type in bits 30-31, opcode in bits 8-15) that is type 3, opcode 0x10. The count field reads 0x3fff, which does NOT describe a 4-byte packet - the one of the four measured builders whose length arithmetic does not close, and consistent with a no-op used as filler where the count is not a body length.",
+    "The field split used to read it is **derived, not cited**: it is the only reading under which the measured lengths of the other three builders close exactly, which is evidence and is not a document. No further hardware run settles it - it is a question about how these bytes are read, not about what the console did (D565).",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/cb-nop, firmware 12.40, native title, generation 5 (agc)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
+
+[[function]]
+name = "sceAgcCbReleaseMem"
+purpose = "Writes a release-memory packet into a command buffer."
+edge_cases = [
+    "MEASURED: 32 bytes. First dword 0xc0064900 - type 3, opcode 0x49, count 6; (count + 2) dwords is exactly 32 bytes, so the length arithmetic closes (D565).",
+    "Body as captured with zeroed arguments: 00 05 00 00 | 00 00 00 45 | 00 00 00 00 | 00 00 00 00 | b0 bb ff ee | 07 00 00 00 | 80 44 74 00. The bytes b0 bb ff ee appear in three of the four builders and are not from any argument this probe supplied.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/cb-release-mem."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
+
+[[function]]
 name = "sceAgcCreateShader"
 arity = 4
 purpose = "Hands the driver a shader: a destination for the resulting object, a small header describing the payload, and the shader bytecode itself."
 edge_cases = [
     "**Argument convention derived from dumps, not disassembly (D194).** arg0 is an out-parameter - thirty-two zero bytes at an image address, untouched before the call. arg1 is a header beginning with the four bytes 31 32 33 34 ('1234'), then 0x18, then a length that differs per call (0xd8 and 0x118 observed). arg2 points at the bytecode itself.",
     "Called eleven times during startup by PPSA28061, which is the furthest-progressing title in the corpus. It is the point at which a guest hands over shader bytecode, so it is the natural capture site for real translation material.",
+    "The guest reaches it through a validating wrapper that null-checks rdi, rsi and rdx and answers 0x8a6c000a for any of them, then **tail-jumps** to the import. That bounds what the wrapper checks, NOT the callee's arity - a tail-jump preserves every register, so a fourth argument passes through unexamined. Read as evidence for arity 3 once, against the arity 4 the dumps had already established (D527).",
+    "In PPSA02664 arg0 is an out-parameter **on the stack** rather than at an image address. Unimplemented, it is never written, so the caller reads null out of it and faults at read of 0x50 immediately afterwards.",
+    "The caller tests the answer against 0x8a6c003d specifically, and orbistoun's 0x7fff0001 placeholder is not it - so the guest takes the success path with an unwritten out-parameter. 0x8a6c is libSceAgc's error family, established from the guest's own wrapper returning 0x8a6c000a and 0x8a6c0002.",
+    "NOT implemented: what a shader object is has no model here, and inventing one would put a fabricated pointer where a guest will dereference it.",
+    "**arg0 is a pointer-to-pointer, derived from the guest's own stack.** At the fault, `rsp` is `0x6000007fc4e0` and the faulting `rsi` was loaded by `mov rsi,[rsp+0x38]` - which is `0x6000007fc518`, exactly the arg0 the call was given. So the call is expected to write a pointer *into* arg0, and the guest then dereferences that pointer (D556).",
+    "**Two fields of the shader object are observed, by reading the guest's code at the fault**: `8b 46 50` reads a dword at +0x50 and `0f b6 d0` keeps only its low byte, which `88 54 24 58` stores as a byte - so +0x50 is read as a dword and used as one byte. The next instruction, `48 8b 46 30`, reads a quadword at +0x30. Nothing here says what either means (D556).",
+    "**Extent measured, not inferred.** Planting any readable pointer at `*arg0` - `ORBISTOUN_WRITE=sceAgcCreateShader:0+0:<addr>` - carries the guest past `image+0xf56e09` entirely, to a different fault elsewhere. So the unwritten out-parameter is the whole of what stands at that site, and nothing else about the call is blocking there. The run afterwards is a guest operating on a structure that is not one, so where it then stops says nothing (D227, D556).",
+    "**Called on hardware, and it refused.** obSCEne's `166-agc/create-shader` invoked it on firmware 12.40 in a native title with the header shape this project had established - magic `31 32 33 34`, then `0x18`, then a length - at both observed lengths, `0xd8` and `0x118`. It answered **`0x8a6c002f`** and **wrote nothing**: both out-slots came back sixteen zero bytes. So the header shape as recorded here is not sufficient, and `0x8a6c002f` is a fifth measured member of the `0x8a6c` family alongside `0x8a6c000a`, `0x8a6c0002` and the `0x8a6c003d` the guest tests for (D565).",
 ]
 found_by = "generated"
 known_by = "guest-observed"
@@ -23,12 +57,26 @@ assumptions = [
     "The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry.",
     "The 0x18 following the magic is assumed to be the header's own size, by analogy with the structure-size argument sceKernelDirectMemoryQuery passes (D083). Unverified - no guest has been observed reacting to it being wrong.",
     "Whether arg3 is a length, a flags word or something else is unestablished; it was not a pointer into mapped memory, so no dump was taken of it.",
+    "**What the object arg0 receives a pointer to contains.** Two of its fields are observed from the guest reading them - a dword at +0x50 whose low byte is used, and a quadword at +0x30 - and nothing says what either holds, nor how large the object is. obSCEne cannot answer it as it runs today: 472 libSceAgc symbols are recorded **absent** across four captures, and its own sysinfo says no GPU library is mapped in that process. The ask is therefore not for another capture of the same kind but for one taken where libSceAgc is loaded (D556).",
 ]
 found_in = [
     "PPSA04263-app0",
     "PPSA28061-app0",
+    "PPSA02664",
 ]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbDmaData"
+purpose = "Writes a DMA-data packet into a command buffer."
+edge_cases = [
+    "MEASURED: 28 bytes. First dword 0xc0055000 - type 3, opcode 0x50, count 5; (count + 2) dwords is exactly 28 bytes (D565).",
+    "Body with zeroed arguments: 00 40 00 00 | b0 bb ff ee | 07 00 00 00 | 00 00 00 00 | 00 00 00 00 | b0 bb ff 82.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/dcb-dma-data."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
 
 [[function]]
 name = "sceAgcDcbDrawIndex"
@@ -47,6 +95,18 @@ known_by = "assumed"
 assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbWaitRegMem"
+purpose = "Writes a wait-on-register-or-memory sequence into a command buffer."
+edge_cases = [
+    "MEASURED: 56 bytes, and it is THREE packets rather than one - 0xc0027904 (opcode 0x79, 16 bytes), then 0xc0053c00 (opcode 0x3c, 28 bytes), then 0xc0017904 (opcode 0x79, 12 bytes). They sum to exactly 56 (D565).",
+    "That a single builder emits a multi-packet sequence is the finding: a command-stream parser cannot assume one call is one packet.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/dcb-wait-reg-mem."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
 
 [[function]]
 name = "sceAgcDriverSubmitAcb"

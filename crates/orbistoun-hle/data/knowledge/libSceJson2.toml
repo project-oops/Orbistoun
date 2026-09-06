@@ -1,0 +1,19 @@
+library = "libSceJson2"
+
+[[function]]
+name = "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "_ZN3sce4Json11InitializerC1Ev"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "_ZN3sce4Json12MemAllocatorC2Ev"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."

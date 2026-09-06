@@ -57,7 +57,7 @@ fn thunks_execute_record_their_own_index_and_answer_the_guest() {
         "each stub must report its own index, including index zero"
     );
     assert_eq!(
-        calls.iter().map(|c| c.arg0).collect::<Vec<_>>(),
+        calls.iter().map(|c| c.args[0]).collect::<Vec<_>>(),
         vec![0xAAAA, 0xBBBB, 0xCCCC],
         "the first argument must survive the trip through the trampoline"
     );

@@ -16,14 +16,26 @@
 
 use orbistoun_hle::guest_module;
 
+pub mod av_player;
+pub mod recording;
+
 guest_module! {
     "libSceVideoOut" {
         "sceVideoOutOpen" => 4,
         "sceVideoOutClose" => 1,
         "sceVideoOutRegisterBuffers" => 6,
         "sceVideoOutSubmitFlip" => 4,
+        // Arity 3, read off the guest's own call: `arg0` is an event-queue handle orbistoun
+        // issued, `arg1` is `0x1` - the port handle its own `sceVideoOutOpen` answered - and
+        // `arg2` is the caller's opaque word, `0x0` here (D560).
+        "sceVideoOutAddFlipEvent" => 3,
         "sceVideoOutSetFlipRate" => 2,
+        "sceVideoOutConfigureOutput" => 4,
         "sceVideoOutGetFlipStatus" => 2,
+        // Arity 1: the handle and nothing else, the same shape as `sceVideoOutClose`. The
+        // guest passes it `0x1` - the port `sceVideoOutOpen` answered - and the registers
+        // after it carry leftovers, two of them identical (D516).
+        "sceVideoOutIsFlipPending" => 1,
         "sceVideoOutGetResolutionStatus" => 2,
         // Confirmed by hash against a real import (D167): the guest was calling this with
         // our unimplemented code as the port to register against.
@@ -87,6 +99,16 @@ mod port {
     fn table() -> &'static Mutex<Vec<Port>> {
         static TABLE: OnceLock<Mutex<Vec<Port>>> = OnceLock::new();
         TABLE.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    /// Every flip this process has completed, across every port ever opened.
+    ///
+    /// Closed ports are included deliberately: a guest that opened an output, presented, and
+    /// closed it did present, and a total that forgot would say it had not.
+    pub(super) fn flips() -> u64 {
+        table()
+            .lock()
+            .map_or(0, |t| t.iter().map(|p| p.flips).sum())
     }
 
     /// The first handle handed out.
@@ -216,7 +238,105 @@ fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// reads would be state carried for no reader. What advancing the count buys - the guest getting
 /// past its present loop - is the whole point (as with buffer registration above).
 fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match port::with(args[0], |p| p.flips += 1) {
+    let (handle, flip_arg) = (args[0], args[3]);
+    if port::with(handle, |p| p.flips += 1).is_none() {
+        return video_error::INVALID_HANDLE;
+    }
+    // **And the completion is posted**, which is the half that was missing. A flip completing
+    // with nobody told is how PPSA02664 came to call `sceKernelWaitEqueue` 839 times against a
+    // queue nothing ever delivered to: it registered a flip event, submitted, and waited on a
+    // completion this crate had already performed and never announced (D560).
+    //
+    // Routed by the port handle, because that is what `sceVideoOutAddFlipEvent` registered.
+    // Nothing here knows which queue asked - that is the registration's business.
+    orbistoun_kernel::sync::post_event(
+        handle,
+        orbistoun_kernel::sync::PendingEvent {
+            ident: handle,
+            // **Unestablished, and left at zero rather than invented.** A real flip event
+            // carries a filter identifying it as a video-out completion, and no lawful source
+            // here gives that value. A guest that branches on it will take the wrong branch and
+            // say so by where it stops, which is a better outcome than a fabricated constant
+            // that looks right (principle 3).
+            filter: 0,
+            flags: 0,
+            fflags: 0,
+            // The flip argument the caller supplied. It is the only per-flip value the guest
+            // provided and `data` is the only field shaped to carry it - an assumption, not a
+            // reading, and the first thing to change if the guest disagrees.
+            data: i64::from_ne_bytes(flip_arg.to_ne_bytes()),
+            // Replaced by the registration's own word on delivery.
+            udata: 0,
+        },
+    );
+    OK
+}
+
+/// `sceVideoOutAddFlipEvent(equeue, handle, udata)`.
+///
+/// Registers a flip completion against an event queue, so [`video_out_submit_flip`] has somewhere
+/// to post. Identified by the **port handle**, which is what the guest passes and what the flip
+/// knows about itself.
+///
+/// **Both handles are checked.** A registration naming a port this crate never opened, or a queue
+/// the kernel never created, is a guest holding a handle orbistoun never issued - and answering
+/// success would promise a delivery that cannot happen.
+fn video_out_add_flip_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (equeue, handle, udata) = (args[0], args[1], args[2]);
+    if port::with(handle, |_| ()).is_none() {
+        return video_error::INVALID_HANDLE;
+    }
+    if orbistoun_kernel::sync::register_event_with_udata(equeue, handle, udata) {
+        OK
+    } else {
+        video_error::INVALID_HANDLE
+    }
+}
+
+/// `sceVideoOutIsFlipPending(handle)`.
+///
+/// # Always zero, and that is this crate's own model rather than a convenient answer
+///
+/// [`video_out_submit_flip`] completes a flip the instant it is accepted, because there is no
+/// presenter and no vertical blank here - nothing scans a buffer out. A queue that empties on
+/// submit is a queue with nothing in it, so the count of flips queued and not yet presented is
+/// zero at every moment a guest can observe it. This is the same sentence as the one already
+/// written above `video_out_submit_flip`, read from the other end.
+///
+/// **It is a count, not a verdict, which is why the stub was fatal.** Unimplemented, this
+/// answered the placeholder `0x7fff_0001` - and a guest testing "are any flips pending?" reads
+/// that as a hundred and thirty-four million of them. PPSA02664 loops on this and
+/// `sceKernelWaitEqueue` until it reads zero: **1,294,359 iterations in one run**, and it never
+/// calls `sceVideoOutSubmitFlip`, so there was never anything pending to drain (D125, D516).
+///
+/// A bad handle answers the port error rather than zero. Zero is a real count and would tell a
+/// guest that a port it does not have is idle.
+fn video_out_is_flip_pending(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match port::with(args[0], |_| ()) {
+        // Nothing is ever queued, so nothing is ever pending.
+        Some(()) => 0,
+        None => video_error::INVALID_HANDLE,
+    }
+}
+
+/// `sceVideoOutConfigureOutput(handle, ...)`.
+///
+/// # Accepted against a real port, and not modelled
+///
+/// Exactly [`video_out_set_flip_rate`]'s bargain, one line below: what an output is configured
+/// *to* is a property of a scanout that does not exist here, so there is nothing to model and
+/// nothing to read back. The handle is still checked, because a guest configuring a port
+/// orbistoun never opened is holding a handle it was never given.
+///
+/// PPSA02664 passes the port handle `0x1`, the one this crate's own `sceVideoOutOpen`
+/// answered, then registers buffers and submits a flip - which is where getting further
+/// leads (D562).
+///
+/// **This is a setter, not a filler**, and that is why it is implemented where
+/// `sceVideoOutSetBufferAttribute2` beside it is not: nothing here promises to write into the
+/// caller's memory, so reporting success promises nothing it does not do.
+fn video_out_configure_output(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match port::with(args[0], |_| ()) {
         Some(()) => OK,
         None => video_error::INVALID_HANDLE,
     }
@@ -337,6 +457,24 @@ fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// How many frames the guest has handed to the output layer.
+///
+/// # What this number is, and what it is not
+///
+/// It is the count of flips **accepted against a real port** - a submission with a handle this
+/// crate never issued is refused and never reaches it. That is what makes it worth ranking on
+/// where a call count is not: a guest reaches its first flip only by opening an output, setting
+/// its attributes, registering buffers and configuring it, and none of that can be spun.
+///
+/// **It is not a count of frames displayed.** Nothing scans a buffer out here, and a flip
+/// completes the instant it is accepted because there is no vertical blank to wait for - the
+/// model [`video_out_submit_flip`] already documents. A guest that reaches this has got a frame
+/// to the layer that would present it, which is a distance, not a picture.
+#[must_use]
+pub fn frames_presented() -> u64 {
+    port::flips()
+}
+
 /// Implementations this crate provides, by symbol name.
 ///
 /// Names rather than hashes: the hash is derived from the name, so a table written in
@@ -348,6 +486,9 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),
         ("sceVideoOutRegisterBuffers2", video_out_register_buffers),
         ("sceVideoOutSubmitFlip", video_out_submit_flip),
+        ("sceVideoOutAddFlipEvent", video_out_add_flip_event),
+        ("sceVideoOutConfigureOutput", video_out_configure_output),
+        ("sceVideoOutIsFlipPending", video_out_is_flip_pending),
         ("sceVideoOutSetFlipRate", video_out_set_flip_rate),
         ("sceVideoOutGetFlipStatus", video_out_get_flip_status),
         (
@@ -361,8 +502,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 mod tests {
     use super::{
         GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
-        video_out_get_flip_status, video_out_get_resolution_status, video_out_open,
-        video_out_set_flip_rate, video_out_submit_flip,
+        video_out_get_flip_status, video_out_get_resolution_status, video_out_is_flip_pending,
+        video_out_open, video_out_set_flip_rate, video_out_submit_flip,
     };
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
@@ -375,6 +516,48 @@ mod tests {
     /// collide on ownership. `[user, bus, index, param]`; each test picks its own bus.
     fn open_on(bus: u64) -> u64 {
         video_out_open(&args([0, bus, 0, 0]))
+    }
+
+    /// **Nothing is ever pending, including straight after a submit.**
+    ///
+    /// The other end of the same sentence as [`super::video_out_submit_flip`]: a flip completes
+    /// the instant it is accepted, so a queue of flips-not-yet-presented is a queue that is
+    /// always empty. Asserted *after* a submit as well as before, because "zero because nothing
+    /// was submitted" and "zero because the model completes on submit" are different claims and
+    /// only the second one is this crate's.
+    ///
+    /// **What this cannot prove:** that hardware answers zero here. It does not - a real port
+    /// has a scanout and a flip really is pending until the next vertical blank. This asserts
+    /// the model orbistoun can honestly implement with no scanout at all, which is the same
+    /// model the flip count already uses.
+    #[test]
+    fn nothing_is_ever_pending_because_a_flip_completes_on_submit() {
+        let handle = open_on(4);
+        assert!(handle >= port::FIRST, "a port opened");
+
+        assert_eq!(
+            video_out_is_flip_pending(&args([handle, 0, 0, 0])),
+            0,
+            "an idle port has nothing pending"
+        );
+        assert_eq!(video_out_submit_flip(&args([handle, 0, 1, 0])), 0);
+        assert_eq!(
+            video_out_is_flip_pending(&args([handle, 0, 0, 0])),
+            0,
+            "and still nothing after a submit, because the submit completed it"
+        );
+    }
+
+    /// A handle no port answers is refused, not told it is idle.
+    ///
+    /// Zero is a **count**, so answering it for a bad handle tells a guest that a port it does
+    /// not have has nothing pending - which is the failure D125 is about, one value along.
+    #[test]
+    fn a_bad_handle_is_refused_rather_than_reported_idle() {
+        assert_eq!(
+            video_out_is_flip_pending(&args([0xDEAD_BEEF, 0, 0, 0])),
+            video_error::INVALID_HANDLE
+        );
     }
 
     /// **A submitted flip completes now, and the status reports the count a guest polls.**

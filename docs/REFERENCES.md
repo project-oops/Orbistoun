@@ -402,6 +402,46 @@ no code. The file records what a machine answered, and what is written down here
 answered, in this project's own words and shapes.
 
 
+## The platform's own library directories
+
+**What it is.** `docs/PLATFORM_LIBRARIES.md` and `data/hardware/ps5-sprx-manifest.tsv` in the
+sibling conformance-probe repository: 537 modules across three directories, with the privilege
+tier each belongs to.
+
+| directory | modules | tier |
+|---|---|---|
+| `/system/common/lib/` | 274 | mapped into every game sandbox |
+| `/system_ex/common_ex/lib/` | 234 | system applications - shell, browser, media |
+| `/system/priv/lib/` | 29 | privileged services |
+
+**What was taken from it.** The three directory paths, and nothing else. They are now a table
+in `sceKernelLoadStartModule` rather than the single `/system/` prefix that was there, which
+covered 274 modules and silently missed 234 - **`/system_ex` is not under `/system`**. The
+privilege tiers and credential values were read and deliberately not taken: orbistoun does not
+sandbox, so a tier is a fact about the platform that nothing here would act on.
+
+**How strong the claim is, stated precisely.** Weaker than the conformance run above, and the
+difference matters. That run's header names the artefact and the console state; this manifest's
+header says "measured on hardware via obSCEne probe & live filesystem survey", and **no such
+survey appears in the captures this project has read** - the 2026-08-30 runs contain no
+directory listing. So the two `/system` refusals orbistoun answers are measured
+(`110-modules/load` asked for both); the extension to `/system_ex` rests on this document
+alone.
+
+Recorded that way rather than folded in, because a directory list that turned out to be
+inferred would otherwise be indistinguishable from one a machine printed. One probe asking for
+a `/system_ex` path settles it.
+
+**What it cannot be checked by today.** Nothing observable: the console answers `0x8002_0002`
+for a firmware module and for a path that does not exist at all
+(`060-module/load-rejects-missing`), so a wrong directory list produces a right answer by the
+other route. The table earns its place when the loader starts loading - `/app0` will load and a
+firmware path must not, and at that point the two stop agreeing.
+
+**What was deliberately not taken.** No code, no structure, no credential value. Paths and
+counts only.
+
+
 ## The process-parameter block layout
 
 **What it is.** The `PT_SCE_PROCPARAM` segment's structure - a size, a `"ORBI"` magic, an entry

@@ -53,6 +53,7 @@ impl Reservation {
 #[cfg(windows)]
 mod imp {
     use super::{MemError, Protection, Reservation};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_ADDRESS, GetLastError};
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
         PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualProtect,
@@ -101,7 +102,21 @@ mod imp {
         };
 
         if got.is_null() {
-            return Err(MemError::Conflict { base, len });
+            // SAFETY: reads this thread's last-error code, set by the `VirtualAlloc` that
+            // just failed; it takes no arguments and cannot fault.
+            let code = unsafe { GetLastError() };
+            // `ERROR_INVALID_ADDRESS` is what `VirtualAlloc` reports when the base is already
+            // reserved - a genuine conflict. Anything else (a commitment limit, not-enough-
+            // memory) is the host refusing, and reporting that as "range taken" sends a reader
+            // hunting a phantom occupant instead of at the real cause - the same D010 rule the
+            // Unix path already follows, unmet here until now.
+            return Err(if code == ERROR_INVALID_ADDRESS {
+                MemError::Conflict { base, len }
+            } else {
+                MemError::HostRefused(format!(
+                    "VirtualAlloc({base:#x}, {len:#x}) refused: error {code}"
+                ))
+            });
         }
         if got as usize != addr {
             // Documented not to happen when a base is given, but assert it rather than

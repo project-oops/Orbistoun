@@ -10,6 +10,7 @@ calls = 0
 standing = 100
 default_return = "unimplemented"
 overrides = 1
+propping = 1
 limit_seconds = 3
 build = "0.1.0"
 measured_on = "2026-08-31"

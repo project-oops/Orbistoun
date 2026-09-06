@@ -45,7 +45,7 @@ That relays to this repository's own entry point rather than reimplementing anyt
 two cannot disagree - and it is what CI runs, for the same reason.
 [docs/BUILDING.md](https://github.com/project-oops/OOPS/blob/main/docs/BUILDING.md) has every verb.
 
-**From inside this repository the entry point is `bin/orbistoun`**, carrying the seven verbs
+**From inside this repository the entry point is `bin/orbistoun`**, carrying the shared verbs
 every OOPS project has - `build`, `test`, `lint`, `fmt`, `check`, `clean`, `doc` - and far
 more besides, because the emulator's own loop lives in it:
 
@@ -62,7 +62,7 @@ That last command is the project. It resolves a title, refreshes symbol names if
 are stale, runs the guest under a time limit, and reports what it asked for, how far it
 got, and **whether that is further than last time**.
 
-**A clone of only this repository is not enough.** Orbistoun takes four crates from
+**A clone of only this repository is not enough.** Orbistoun takes crates from
 `oops-libs` by relative path, as a sibling, so the collection layout is a build requirement.
 `oops bootstrap orbistoun` fetches it.
 
@@ -88,7 +88,7 @@ true.
 
 ## Where it actually is
 
-All six executables in the local corpus run guest code. That one is measured from a run,
+Every executable in the local corpus runs guest code. That one is measured from a run,
 on material this repository does not ship, so it is not in the generated table below - which
 holds only what the tool can recompute anywhere.
 

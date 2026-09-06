@@ -50,10 +50,16 @@ fn a_created_mutex_has_a_handle_and_remembers_its_name() {
 #[test]
 fn a_mutex_is_taken_and_released_by_its_owner() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
-    assert_eq!(sync::lock(m, ALICE), Some(true));
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
     assert_eq!(sync::unlock(m, ALICE), Some(true));
     // And is free again afterwards, which is the half a leak would pass without.
-    assert_eq!(sync::try_lock(m, BOB), Some(sync::TryLock::Locked));
+    assert_eq!(
+        sync::acquire(m, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked)
+    );
     assert_eq!(sync::unlock(m, BOB), Some(true));
     sync::destroy(m);
 }
@@ -67,15 +73,18 @@ fn a_mutex_is_taken_and_released_by_its_owner() {
 #[test]
 fn re_locking_a_non_recursive_mutex_is_refused_rather_than_deadlocked() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
-    assert_eq!(sync::lock(m, ALICE), Some(true));
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(sync::lock(m, ALICE));
+        let _ = tx.send(sync::acquire(m, ALICE, sync::Blocking::Forever));
     });
     assert_eq!(
         rx.recv_timeout(PATIENCE),
-        Ok(Some(false)),
+        Ok(Some(sync::Acquisition::Busy)),
         "the owner asking again must be told no, not made to wait"
     );
 
@@ -91,11 +100,17 @@ fn re_locking_a_non_recursive_mutex_is_refused_rather_than_deadlocked() {
 #[test]
 fn a_recursive_mutex_must_be_released_as_many_times_as_it_was_taken() {
     let m = sync::create(sync::Recursion::Allowed, "m");
-    assert_eq!(sync::lock(m, ALICE), Some(true));
-    assert_eq!(sync::lock(m, ALICE), Some(true));
     assert_eq!(
-        sync::try_lock(m, ALICE),
-        Some(sync::TryLock::Locked),
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked),
         "three deep"
     );
 
@@ -103,15 +118,15 @@ fn a_recursive_mutex_must_be_released_as_many_times_as_it_was_taken() {
     assert_eq!(sync::unlock(m, ALICE), Some(true));
     assert_eq!(sync::unlock(m, ALICE), Some(true));
     assert_eq!(
-        sync::try_lock(m, BOB),
-        Some(sync::TryLock::Busy),
+        sync::acquire(m, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Busy),
         "one acquisition is still outstanding"
     );
 
     assert_eq!(sync::unlock(m, ALICE), Some(true));
     assert_eq!(
-        sync::try_lock(m, BOB),
-        Some(sync::TryLock::Locked),
+        sync::acquire(m, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked),
         "and now it is free"
     );
     sync::unlock(m, BOB);
@@ -133,38 +148,53 @@ fn unlocking_a_mutex_you_do_not_hold_is_refused() {
         "nobody holds it at all"
     );
 
-    assert_eq!(sync::lock(m, ALICE), Some(true));
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
     assert_eq!(sync::unlock(m, BOB), Some(false), "somebody else holds it");
     // And the real owner still does, which a wrongly-permissive unlock would have broken.
-    assert_eq!(sync::try_lock(m, BOB), Some(sync::TryLock::Busy));
+    assert_eq!(
+        sync::acquire(m, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Busy)
+    );
 
     assert_eq!(sync::unlock(m, ALICE), Some(true));
     sync::destroy(m);
 }
 
-/// `try_lock` never blocks, and tells the two kinds apart for the owner.
+/// An impatient acquisition never blocks, and tells the two kinds apart for the owner.
 #[test]
-fn try_lock_answers_immediately_and_respects_recursion() {
+fn an_impatient_take_answers_immediately_and_respects_recursion() {
     let strict = sync::create(sync::Recursion::Forbidden, "strict");
     let loose = sync::create(sync::Recursion::Allowed, "loose");
 
-    assert_eq!(sync::try_lock(strict, ALICE), Some(sync::TryLock::Locked));
     assert_eq!(
-        sync::try_lock(strict, ALICE),
-        Some(sync::TryLock::Busy),
+        sync::acquire(strict, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked)
+    );
+    assert_eq!(
+        sync::acquire(strict, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Busy),
         "the owner may not take a non-recursive lock twice"
     );
-    assert_eq!(sync::try_lock(strict, BOB), Some(sync::TryLock::Busy));
-
-    assert_eq!(sync::try_lock(loose, ALICE), Some(sync::TryLock::Locked));
     assert_eq!(
-        sync::try_lock(loose, ALICE),
-        Some(sync::TryLock::Locked),
+        sync::acquire(strict, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Busy)
+    );
+
+    assert_eq!(
+        sync::acquire(loose, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked)
+    );
+    assert_eq!(
+        sync::acquire(loose, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked),
         "but may here"
     );
     assert_eq!(
-        sync::try_lock(loose, BOB),
-        Some(sync::TryLock::Busy),
+        sync::acquire(loose, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Busy),
         "and BOB may not"
     );
 
@@ -177,21 +207,24 @@ fn try_lock_answers_immediately_and_respects_recursion() {
 
 /// An error-checking mutex tells its owner a self-relock is a deadlock, distinct from busy.
 ///
-/// The whole reason `try_lock` reports three states rather than two: a normal lock the owner
+/// The whole reason an acquisition reports three states rather than two: a normal lock the owner
 /// re-takes is *busy*, an error-checking one is a *deadlock*, and the platform gives those two
 /// different codes (015-sync/mutex-recursion, D416). To another thread it is still just busy.
 #[test]
 fn an_errorcheck_mutex_reports_a_self_relock_as_a_deadlock() {
     let m = sync::create(sync::Recursion::Errorcheck, "errorcheck");
-    assert_eq!(sync::try_lock(m, ALICE), Some(sync::TryLock::Locked));
     assert_eq!(
-        sync::try_lock(m, ALICE),
-        Some(sync::TryLock::Deadlock),
+        sync::acquire(m, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Locked)
+    );
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Never),
+        Some(sync::Acquisition::Deadlock),
         "the owner re-taking it is a deadlock, not a nest and not a plain busy"
     );
     assert_eq!(
-        sync::try_lock(m, BOB),
-        Some(sync::TryLock::Busy),
+        sync::acquire(m, BOB, sync::Blocking::Never),
+        Some(sync::Acquisition::Busy),
         "to another thread it is simply held"
     );
     sync::unlock(m, ALICE);
@@ -205,11 +238,14 @@ fn an_errorcheck_mutex_reports_a_self_relock_as_a_deadlock() {
 #[test]
 fn a_waiting_thread_is_woken_when_the_mutex_is_released() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
-    assert_eq!(sync::lock(m, ALICE), Some(true));
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
 
     let (tx, rx) = std::sync::mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let taken = sync::lock(m, BOB);
+        let taken = sync::acquire(m, BOB, sync::Blocking::Forever);
         let _ = tx.send(taken);
     });
 
@@ -220,7 +256,11 @@ fn a_waiting_thread_is_woken_when_the_mutex_is_released() {
     );
 
     assert_eq!(sync::unlock(m, ALICE), Some(true));
-    assert_eq!(rx.recv_timeout(PATIENCE), Ok(Some(true)), "and now it may");
+    assert_eq!(
+        rx.recv_timeout(PATIENCE),
+        Ok(Some(sync::Acquisition::Locked)),
+        "and now it may"
+    );
     waiter.join().expect("the waiter finishes");
 
     sync::unlock(m, BOB);
@@ -238,11 +278,14 @@ fn a_mutex_handle_naming_nothing_is_not_the_same_as_a_refusal() {
     assert!(sync::destroy(m), "destroying it once works");
     assert!(!sync::destroy(m), "and only once");
 
-    assert_eq!(sync::lock(m, ALICE), None);
-    assert_eq!(sync::try_lock(m, ALICE), None);
+    assert_eq!(sync::acquire(m, ALICE, sync::Blocking::Forever), None);
+    assert_eq!(sync::acquire(m, ALICE, sync::Blocking::Never), None);
     assert_eq!(sync::unlock(m, ALICE), None);
     assert_eq!(sync::name_of(m), None);
-    assert_eq!(sync::lock(sync::NO_MUTEX, ALICE), None);
+    assert_eq!(
+        sync::acquire(sync::NO_MUTEX, ALICE, sync::Blocking::Forever),
+        None
+    );
 }
 
 // --- semaphores ---------------------------------------------------------------------------
@@ -254,16 +297,20 @@ fn a_semaphore_hands_out_its_count_and_then_refuses() {
     assert_ne!(s, sync::NO_SEMAPHORE);
     assert_eq!(sync::semaphore_name_of(s).as_deref(), Some("slots"));
 
-    assert_eq!(sync::semaphore_try_wait(s), Some(true));
-    assert_eq!(sync::semaphore_try_wait(s), Some(true));
+    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
+    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
     assert_eq!(
-        sync::semaphore_try_wait(s),
+        sync::semaphore_wait(s, sync::Blocking::Never),
         Some(false),
         "the count is spent"
     );
 
     assert_eq!(sync::semaphore_signal(s, 1), Some(true));
-    assert_eq!(sync::semaphore_try_wait(s), Some(true), "and returned");
+    assert_eq!(
+        sync::semaphore_wait(s, sync::Blocking::Never),
+        Some(true),
+        "and returned"
+    );
     assert!(sync::semaphore_destroy(s));
 }
 
@@ -299,15 +346,15 @@ fn a_signal_past_the_ceiling_is_refused_rather_than_clamped() {
 
     // Refused means unchanged: the three still there are all takeable, and no more.
     for _ in 0..3 {
-        assert_eq!(sync::semaphore_try_wait(s), Some(true));
+        assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
     }
-    assert_eq!(sync::semaphore_try_wait(s), Some(false));
+    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(false));
 
     // An addition that would not even fit in the counter is refused before the ceiling
     // comparison, rather than wrapping to a small number that passes it.
     assert_eq!(sync::semaphore_signal(s, u32::MAX), Some(false));
     assert_eq!(
-        sync::semaphore_try_wait(s),
+        sync::semaphore_wait(s, sync::Blocking::Never),
         Some(false),
         "and nothing appeared"
     );
@@ -322,7 +369,7 @@ fn a_semaphore_waiter_blocks_until_it_is_signalled() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let _ = tx.send(sync::semaphore_wait(s));
+        let _ = tx.send(sync::semaphore_wait(s, sync::Blocking::Forever));
     });
 
     assert!(
@@ -343,10 +390,13 @@ fn a_semaphore_handle_naming_nothing_answers_nothing() {
     assert!(sync::semaphore_destroy(s));
     assert!(!sync::semaphore_destroy(s));
 
-    assert_eq!(sync::semaphore_try_wait(s), None);
+    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), None);
     assert_eq!(sync::semaphore_signal(s, 1), None);
     assert_eq!(sync::semaphore_name_of(s), None);
-    assert_eq!(sync::semaphore_try_wait(sync::NO_SEMAPHORE), None);
+    assert_eq!(
+        sync::semaphore_wait(sync::NO_SEMAPHORE, sync::Blocking::Never),
+        None
+    );
 }
 
 // --- condition variables ----------------------------------------------------------------------
@@ -375,6 +425,45 @@ fn a_signal_before_anybody_waits_is_not_lost() {
     );
 
     assert!(sync::cond_destroy(c));
+}
+
+/// **One signal wakes one waiter, however many the notify reaches.**
+///
+/// The deterministic form of the bug a loaded test run found by accident. `cond_broadcast`
+/// owes one wake and calls the host's `notify_all`, so both waiters are woken; the count is
+/// what says only one of them was signalled. A wait that returned "signalled" for any wake -
+/// which is what this did - let both through, and a guest would have two threads leaving a
+/// condition only one of them was told about.
+///
+/// Nothing here forces a *spurious* wake, which cannot be provoked on demand. It provokes the
+/// same thing by the route that can be: a real wake with nothing behind it.
+#[test]
+fn one_signal_releases_one_waiter_even_though_the_notify_reaches_both() {
+    let c = sync::create_cond("one-of-two");
+    let (tx, rx) = std::sync::mpsc::channel();
+    for _ in 0..2 {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(sync::cond_wait(c, Some(Duration::from_millis(400))));
+        });
+    }
+    drop(tx);
+
+    // Long enough for both to be inside the wait before anything is owed.
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(sync::cond_broadcast(c), Some(true));
+
+    let first = rx.recv_timeout(PATIENCE).expect("one waiter returns");
+    let second = rx.recv_timeout(PATIENCE).expect("and so does the other");
+    let mut both = [first, second];
+    both.sort_by_key(|a| *a == Some(true));
+    assert_eq!(
+        both,
+        [Some(false), Some(true)],
+        "exactly one was signalled; the other waited out its deadline"
+    );
+
+    sync::cond_destroy(c);
 }
 
 /// A wait with nothing to wake it reports the timeout rather than hanging.
@@ -438,23 +527,27 @@ fn readers_do_not_wait_for_each_other() {
     let l = sync::create_rwlock("shared");
     assert_eq!(sync::rwlock_name_of(l).as_deref(), Some("shared"));
 
-    assert_eq!(sync::rwlock_read(l, true), Some(true));
-    assert_eq!(sync::rwlock_read(l, true), Some(true));
-    assert_eq!(sync::rwlock_read(l, false), Some(true), "three at once");
+    assert_eq!(sync::rwlock_read(l, sync::Blocking::Forever), Some(true));
+    assert_eq!(sync::rwlock_read(l, sync::Blocking::Forever), Some(true));
+    assert_eq!(
+        sync::rwlock_read(l, sync::Blocking::Never),
+        Some(true),
+        "three at once"
+    );
 
     // A writer may not join them.
-    assert_eq!(sync::rwlock_write(l, false), Some(false));
+    assert_eq!(sync::rwlock_write(l, sync::Blocking::Never), Some(false));
 
     // Each reader has to leave before the writer may enter.
     assert_eq!(sync::rwlock_unlock(l), Some(true));
     assert_eq!(sync::rwlock_unlock(l), Some(true));
     assert_eq!(
-        sync::rwlock_write(l, false),
+        sync::rwlock_write(l, sync::Blocking::Never),
         Some(false),
         "one reader still holds it"
     );
     assert_eq!(sync::rwlock_unlock(l), Some(true));
-    assert_eq!(sync::rwlock_write(l, false), Some(true));
+    assert_eq!(sync::rwlock_write(l, sync::Blocking::Never), Some(true));
 
     assert_eq!(sync::rwlock_unlock(l), Some(true));
     assert!(sync::rwlock_destroy(l));
@@ -464,14 +557,14 @@ fn readers_do_not_wait_for_each_other() {
 #[test]
 fn a_writer_excludes_readers_as_well_as_other_writers() {
     let l = sync::create_rwlock("exclusive");
-    assert_eq!(sync::rwlock_write(l, true), Some(true));
+    assert_eq!(sync::rwlock_write(l, sync::Blocking::Forever), Some(true));
 
-    assert_eq!(sync::rwlock_read(l, false), Some(false));
-    assert_eq!(sync::rwlock_write(l, false), Some(false));
+    assert_eq!(sync::rwlock_read(l, sync::Blocking::Never), Some(false));
+    assert_eq!(sync::rwlock_write(l, sync::Blocking::Never), Some(false));
 
     assert_eq!(sync::rwlock_unlock(l), Some(true));
     assert_eq!(
-        sync::rwlock_read(l, false),
+        sync::rwlock_read(l, sync::Blocking::Never),
         Some(true),
         "and now readers may"
     );
@@ -490,7 +583,7 @@ fn releasing_an_rwlock_nobody_holds_is_reported() {
     let l = sync::create_rwlock("l");
     assert_eq!(sync::rwlock_unlock(l), Some(false));
 
-    assert_eq!(sync::rwlock_read(l, true), Some(true));
+    assert_eq!(sync::rwlock_read(l, sync::Blocking::Forever), Some(true));
     assert_eq!(sync::rwlock_unlock(l), Some(true));
     assert_eq!(
         sync::rwlock_unlock(l),
@@ -505,11 +598,11 @@ fn releasing_an_rwlock_nobody_holds_is_reported() {
 #[test]
 fn a_blocked_writer_is_woken_when_the_readers_leave() {
     let l = sync::create_rwlock("l");
-    assert_eq!(sync::rwlock_read(l, true), Some(true));
+    assert_eq!(sync::rwlock_read(l, sync::Blocking::Forever), Some(true));
 
     let (tx, rx) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
-        let _ = tx.send(sync::rwlock_write(l, true));
+        let _ = tx.send(sync::rwlock_write(l, sync::Blocking::Forever));
     });
 
     assert!(
@@ -531,8 +624,8 @@ fn an_rwlock_handle_naming_nothing_answers_nothing() {
     assert!(sync::rwlock_destroy(l));
     assert!(!sync::rwlock_destroy(l));
 
-    assert_eq!(sync::rwlock_read(l, false), None);
-    assert_eq!(sync::rwlock_write(l, false), None);
+    assert_eq!(sync::rwlock_read(l, sync::Blocking::Never), None);
+    assert_eq!(sync::rwlock_write(l, sync::Blocking::Never), None);
     assert_eq!(sync::rwlock_unlock(l), None);
     assert_eq!(sync::rwlock_name_of(l), None);
 }
@@ -744,4 +837,225 @@ fn a_handle_from_one_kind_of_object_means_nothing_to_another() {
     sync::rwlock_destroy(rwlock);
     sync::barrier_destroy(barrier);
     sync::event_flag_destroy(flag);
+}
+
+// --- deadlines ---------------------------------------------------------------------------------
+//
+// The three primitives that gained a deadline this batch, tested for the property the
+// deadline exists to give: a bounded total wait. Every one of these would pass against an
+// implementation that waited forever, if it only asserted the return value - so each one
+// measures the elapsed time as well.
+
+/// A span short enough that a test waiting it out is not slow, long enough that the wait is
+/// real rather than a scheduling accident.
+const BRIEF: Duration = Duration::from_millis(80);
+
+/// A deadline that has already passed is a wait of no time, **not a refusal**.
+///
+/// POSIX says the timeout of a `pthread_mutex_timedlock` is not consulted when the mutex can
+/// be locked at once, so a caller that arrives late at a free lock still gets it. An
+/// implementation that checked the clock first would fail this and would look correct
+/// everywhere else.
+#[test]
+fn a_deadline_already_past_still_takes_something_that_is_free() {
+    let m = sync::create(sync::Recursion::Forbidden, "late");
+    let a_second_ago = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("the host clock has been up longer than a second");
+    let past = sync::Blocking::Until(a_second_ago);
+    assert_eq!(
+        sync::acquire(m, ALICE, past),
+        Some(sync::Acquisition::Locked),
+        "free is free, however late the caller is"
+    );
+    sync::unlock(m, ALICE);
+    sync::destroy(m);
+}
+
+/// A timed acquisition of a held lock gives up, and gives up **when it said it would**.
+#[test]
+fn a_timed_acquisition_gives_up_at_its_deadline() {
+    let m = sync::create(sync::Recursion::Forbidden, "held");
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
+
+    let started = std::time::Instant::now();
+    let outcome = sync::acquire(m, BOB, sync::Blocking::Until(started + BRIEF));
+    let waited = started.elapsed();
+
+    assert_eq!(outcome, Some(sync::Acquisition::Busy), "it never came free");
+    assert!(waited >= BRIEF, "and it did not give up early: {waited:?}");
+    assert!(waited < PATIENCE, "nor wait past its deadline: {waited:?}");
+
+    sync::unlock(m, ALICE);
+    sync::destroy(m);
+}
+
+/// A lock released before the deadline is taken, not waited out.
+#[test]
+fn a_timed_acquisition_takes_a_lock_that_comes_free_in_time() {
+    let m = sync::create(sync::Recursion::Forbidden, "soon");
+    assert_eq!(
+        sync::acquire(m, ALICE, sync::Blocking::Forever),
+        Some(sync::Acquisition::Locked)
+    );
+    std::thread::spawn(move || {
+        std::thread::sleep(BRIEF / 4);
+        sync::unlock(m, ALICE);
+    });
+
+    assert_eq!(
+        sync::acquire(
+            m,
+            BOB,
+            sync::Blocking::Until(std::time::Instant::now() + PATIENCE)
+        ),
+        Some(sync::Acquisition::Locked),
+        "released well inside the deadline"
+    );
+    sync::unlock(m, BOB);
+    sync::destroy(m);
+}
+
+/// **Repeated wakes must not extend the wait**, which is the bug the deadline arithmetic
+/// exists to prevent.
+///
+/// Handing the whole remaining span to each `wait_timeout` restarts the clock every time the
+/// condition variable wakes a waiter, and this module's release notifies *all* of them - so
+/// a writer waiting behind readers that keep arriving and leaving would be woken, find the
+/// lock still taken, and start its timeout again from the top. It would never return.
+///
+/// The churn is deliberate: readers enter and leave continuously for longer than the
+/// writer's deadline, so every one of those releases wakes the writer with nothing for it.
+///
+/// # Why the wait happens on its own thread
+///
+/// **The regression this guards against is an infinite wait**, so a test that simply called
+/// `rwlock_write` and asserted afterwards would hang rather than fail - and a hanging test
+/// takes the whole suite with it, reporting nothing about what broke. This was confirmed
+/// the hard way: the arithmetic was reverted deliberately and the first version of this test
+/// stopped responding instead of failing. So the wait runs on a thread with a channel, and
+/// the deadline that matters is the one on the `recv`.
+#[test]
+fn wakes_that_bring_nothing_do_not_extend_a_deadline() {
+    let l = sync::create_rwlock("churn");
+    assert_eq!(
+        sync::rwlock_read(l, sync::Blocking::Forever),
+        Some(true),
+        "one reader holds it throughout, so the writer can never proceed"
+    );
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churning = {
+        let stop = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                // Each release notifies every waiter, so each turn is one pointless wake
+                // for the writer below.
+                sync::rwlock_read(l, sync::Blocking::Forever);
+                sync::rwlock_unlock(l);
+                std::thread::yield_now();
+            }
+        })
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let outcome = sync::rwlock_write(l, sync::Blocking::Until(started + BRIEF));
+        let _ = tx.send((outcome, started.elapsed()));
+    });
+    let answered = rx.recv_timeout(PATIENCE);
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    churning.join().expect("the churn thread should finish");
+    sync::rwlock_unlock(l);
+
+    let (outcome, waited) =
+        answered.expect("the deadline must bound the total wait, not each turn of it - this hung");
+    assert_eq!(outcome, Some(false), "a reader held it the whole time");
+    assert!(waited >= BRIEF, "and it did not give up early: {waited:?}");
+
+    sync::rwlock_destroy(l);
+}
+
+/// A timed semaphore take gives up, and one signalled in time does not.
+/// **A timed wait must not report a timeout before its deadline.**
+///
+/// The invariant `a_timed_semaphore_take_gives_up_and_can_be_rescued` asserts once, and it
+/// failed once - under the load of a whole-workspace run, never on its own. Once is a
+/// coincidence to that test and a property to this one: fifty short waits, each of which must
+/// have lasted at least as long as it was told to.
+///
+/// **The cause is not established.** The leading guess was rounding - `Condvar::wait_timeout`
+/// is handed the span remaining until a fixed instant, and a host that rounds it *down* to its
+/// timer granularity would report `timed_out` a fraction early. Fifty-eight attempts across
+/// 5ms and 80ms deadlines did not reproduce it, so that guess is unsupported and this test is
+/// an instrument rather than a regression test: it exercises the property fifty times a run
+/// instead of once, so the next occurrence lands here with a turn number attached.
+#[test]
+fn a_timed_wait_never_gives_up_before_its_deadline() {
+    const SHORT: Duration = Duration::from_millis(5);
+    let s = sync::create_semaphore(0, 4, "never-signalled");
+    for turn in 0..50 {
+        let started = std::time::Instant::now();
+        let outcome = sync::semaphore_wait(s, sync::Blocking::Until(started + SHORT));
+        let waited = started.elapsed();
+        assert_eq!(outcome, Some(false), "turn {turn}: nothing to take");
+        assert!(
+            waited >= SHORT,
+            "turn {turn}: gave up after {waited:?}, which is short of the {SHORT:?} deadline"
+        );
+    }
+}
+
+#[test]
+fn a_timed_semaphore_take_gives_up_and_can_be_rescued() {
+    let s = sync::create_semaphore(0, 4, "empty");
+
+    let started = std::time::Instant::now();
+    assert_eq!(
+        sync::semaphore_wait(s, sync::Blocking::Until(started + BRIEF)),
+        Some(false),
+        "nothing to take"
+    );
+    assert!(started.elapsed() >= BRIEF, "and it waited for it");
+
+    std::thread::spawn(move || {
+        std::thread::sleep(BRIEF / 4);
+        sync::semaphore_signal(s, 1);
+    });
+    assert_eq!(
+        sync::semaphore_wait(
+            s,
+            sync::Blocking::Until(std::time::Instant::now() + PATIENCE)
+        ),
+        Some(true),
+        "signalled inside the deadline"
+    );
+    assert!(sync::semaphore_destroy(s));
+}
+
+/// The count a semaphore reports is the one it hands out.
+#[test]
+fn a_semaphore_reports_the_count_it_will_hand_out() {
+    let s = sync::create_semaphore(3, 4, "counted");
+    assert_eq!(sync::semaphore_value(s), Some(3));
+    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
+    assert_eq!(sync::semaphore_value(s), Some(2), "one fewer after a take");
+    assert_eq!(sync::semaphore_signal(s, 1), Some(true));
+    assert_eq!(
+        sync::semaphore_value(s),
+        Some(3),
+        "and one more after a give"
+    );
+
+    assert!(sync::semaphore_destroy(s));
+    assert_eq!(
+        sync::semaphore_value(s),
+        None,
+        "a handle naming nothing has no count, which is not a count of zero"
+    );
 }

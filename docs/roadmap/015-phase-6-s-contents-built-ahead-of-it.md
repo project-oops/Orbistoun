@@ -23,12 +23,12 @@ project will ever have.
 | **G4** | Translation: registers, guest memory, execution mask, comparisons, per-lane divergence | **done** |
 | **G5** | Control flow, as a dispatch loop rather than reconstructed structure | **done** |
 | **G6** | Execution on a real device, as the test oracle | **done** - 225 tests on the shader side, a large fraction executing |
-| **G7** | Instruction breadth | **87%** - 110/127, 6/10 fixtures complete; **unblocked work now genuinely exhausted** |
+| **G7** | Instruction breadth | **94%** - 120/127, **8/10** fixtures complete (D554, re-derived from `orbistoun-cli shaders`; this row said 110/127 and 6/10, which was stale before `exp` was translated and staler after). **Four instructions remain, in two families**: VINTRP's three, which need no capture, and MIMG's `image_sample`, which needs the resource model |
 | **G8** | Submission pipeline: packets to register writes to a shader to a running module | **structure done**, synthetic input only; survives arbitrary and truncated streams |
 | **G9** | Packet vocabulary verified against something external | **harness done**, corpus empty - needs a capture |
-| **G10** | Resource model: descriptors, buffers, images, render targets | **not started**; its *guest side* is documented and no longer needs a capture - see below |
-| **G11** | Graphics pipelines in the Vulkan backend; today it dispatches compute only | **not started** - needs G10 |
-| **G12** | Framebuffer diffing | **not started** - needs G11 and a guest that draws |
+| **G10** | Resource model: descriptors, buffers, images, render targets | **guest side done** - the V# buffer-descriptor decoder (D204) and MUBUF/MTBUF-plain translation landed (worklogs 097, 101; D203/D205). The one capture-free remainder is **narrow-component format conversion** in MTBUF (packed UNORM/SNORM/float/etc., which `typed_buffer_memory` still refuses) - not yet done. The *host* side (descriptor base -> host memory) and images/render targets still need G11 or a capture. |
+| **G11** | Graphics pipelines in the Vulkan backend; today it dispatches compute only | **begun** - the backend builds one, and a translated fragment export reaches an attachment through it (D550, D553). Steps (a), (b) and (c) are done; step (d) - which registers configure colour buffer zero - needs a capture |
+| **G12** | Framebuffer diffing | **the harness is built** - it draws a hand-written fragment shader's colour into an attachment over a differing clear, carries a varying through interpolation, and reads every pixel back (D549, D550, D554). A **translated** module has been through it (D553) |
 | **G13** | Subgroup fidelity, the level that would actually be used at speed | **done** (D146) - one invocation per lane, mask by ballot; reports the subgroup width it needs |
 | **G14** | Performance: collapse the single-block dispatch loop, persist the shader cache | **deferred** until there is something to measure |
 
@@ -40,8 +40,15 @@ project will ever have.
 families and turned out to specify all three. The last instruction that needed nothing
 structural, `v_fmac_f32`, is done too.
 
-Everything still refused needs the resource model or the graphics pipeline: `exp`, the
-typed buffer accesses (MTBUF), parameter interpolation (VINTRP) and image sampling (MIMG).
+**That is no longer true of all of them.** `exp` translates at the fragment stage for `mrt0`
+(D553), and **VINTRP needs no capture either**: its operands are solved, and the attribute and
+channel it names are in the instruction rather than in guest register state (D554). What still
+needs the resource model is the typed buffer accesses (MTBUF) and image sampling (MIMG).
+
+The oracle can now check an interpolation when one is translated: its vertex shader carries a
+`Location 0` varying and its fragment shader reads it, so a value the three corners agree about
+arrives unchanged at every pixel and one they disagree about does not (D554). That had to come
+first, for the reason this whole section opens with.
 
 **Down to ten worklist entries and three fixtures**, from thirteen and four. The untyped
 accesses (MUBUF) are translated, and the typed ones are decoded - operands solved for all
@@ -71,6 +78,12 @@ without real data. `exp` and VINTRP need render targets and fragment inputs, whi
 **G11 - the graphics pipeline**, and with it `exp`, which blocks more shaders than
 anything else on the worklist and is the reason no fragment shader translates.
 
+**Two of its three obstacles are now gone**, and this section said otherwise until D551 checked.
+The backend *does* build a graphics pipeline, and a fragment shader's `Location 0` output *does*
+reach colour attachment zero - `orbistoun-gpu-vulkan/tests/draw.rs` proves it on a device. What
+is left of the export is (1) emitting a `Fragment` module rather than a compute one, and (3) the
+attachment configuration a capture would settle.
+
 An export is not a memory write. `exp mrt0 v0,v1,v2,v3` means *this is colour zero*, and
 the destination is a **render target** - a thing that exists only inside a graphics
 pipeline. Three things stand between here and there:
@@ -87,15 +100,28 @@ Only the third needs a capture. In the order worth doing them:
 
 | | Step | Needs a capture | What it buys |
 |---|---|---|---|
-| **b** | Render pass, a draw with a hand-written fragment shader, and read the attachment back | no | **the oracle**, and it does not exist yet |
-| **a** | Solve the export's operand layout by probe | no | decoding which targets a corpus exports to |
-| **c** | Emit `Fragment` modules with output variables | no | somewhere for a translated export to go |
+| **b** | Render pass, a draw with a hand-written fragment shader, and read the attachment back | no | **done** (D549, D550). `orbistoun_gpu_vulkan::framebuffer::draw_with` clears to red, draws a hand-written fullscreen triangle whose fragment shader writes blue, and every pixel comes back blue. The two colours differ on purpose: the clear is what failure looks like |
+| **a** | Solve the export's operand layout by probe | no | **already done, and this table did not say so.** `opcode-operands.toml` carries the EXP entry solved from ten samples, and decoding `0xF8000000 | target << 4` answers `Immediate(target)` plus four vector registers for every target tried (D551). The remaining export work is translation, not decoding |
+| **c** | Emit `Fragment` modules with output variables | no | **done** (D553). `orbistoun_translate::wavefront::Stage::Fragment` emits the execution model, `OriginUpperLeft` and a `Location 0` output in the entry point's interface, and skips the observation epilogue - which is what keeps a fragment module inside a device that requests no features. `exp mrt0` translates into a store to it, and `orbistoun-gpu-vulkan/tests/translated_export.rs` draws the translated module and the hand-written one over the same clear and compares every pixel |
 | **d** | Which registers configure colour buffer zero | **yes** | the mapping D104 refuses to invent |
 
-**Do (b) first**, before anything it is meant to check. Framebuffer diffing is described
-above as the only cheap mechanical oracle this project will ever have, and it is currently
-the one part of that sentence that is not built. It is also the only step whose value does
-not depend on any of the others, and every later step is verified by it.
+**(b) is done.** Framebuffer diffing was described above as the only cheap mechanical oracle
+this project will ever have, and it was the one part of that sentence that was not built. It is
+now: `orbistoun_gpu_vulkan::framebuffer` clears an attachment, builds a graphics pipeline, draws
+three vertices through hand-written shaders, and reads every pixel back (D549, D550).
+
+**The shaders are hand-written on purpose** - `orbistoun_spirv::fullscreen_triangle_vertex_module`
+and `constant_colour_fragment_module`, assembled instruction by instruction. The oracle exists to
+check the translator, so a shader the translator produced could not check it.
+
+Four breaks were tried across the two steps and each landed somewhere different: dropping the
+clear fails the first pixel, a copy region one row short fails the *last* row, a draw of zero
+vertices leaves the clear's red everywhere, and a triangle that no longer covers the viewport
+fails at pixel (3, 0) while the origin still passes. A test sampling one corner would have missed
+two of the four.
+
+**The remaining steps (a), (c) and (d) are now all verified by it**, which is what doing (b)
+first was for.
 
 It is more building ahead of the spine, with the cost this section opens by stating. The
 difference is that a framebuffer harness is checked against **itself** - draw a known

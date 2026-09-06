@@ -196,36 +196,24 @@ impl Experiments {
 
     /// Whether any diagnostic in force **changes the program** rather than only observing.
     ///
-    /// Derived from the registry rather than listed again here, so a diagnostic added with
-    /// the wrong effect is wrong in one place instead of two (D227).
+    /// # Asked of the registry, not of a list kept beside it
+    ///
+    /// This used to enumerate every field of this struct against its variable's effect, with a
+    /// note saying the *effect* was derived so it could not be wrong in two places. The effects
+    /// were - the **presence** list was not, and it was hand-maintained. A diagnostic added
+    /// without an entry here was silently non-intervening.
+    ///
+    /// That is what happened to `ORBISTOUN_TAG_PLACEHOLDERS` within an hour of it existing: three
+    /// titles' honest compatibility records were overwritten by tagged runs, because the guard
+    /// that refuses to record an intervened run (D227, D355) never saw the intervention. The same
+    /// D220 shape as every other setting this project has consulted nowhere.
+    ///
+    /// Asking [`orbistoun_env::active`] closes the class rather than the instance: every variable
+    /// that is set is checked against the effect the registry records for it, so a new diagnostic
+    /// is covered by existing. It also errs the safe way - a variable set but unparseable still
+    /// counts as intervening, so the run is refused rather than filed (D569).
     pub fn intervenes(&self) -> bool {
-        [
-            (!self.dump.is_empty(), orbistoun_env::DUMP.effect),
-            (self.resolve.is_some(), orbistoun_env::RESOLVE.effect),
-            (
-                self.handoff_poison.is_some(),
-                orbistoun_env::HANDOFF_POISON.effect,
-            ),
-            (
-                self.entry_argument.is_some(),
-                orbistoun_env::ENTRY_ARGUMENT.effect,
-            ),
-            (self.stack_fill.is_some(), orbistoun_env::STACK_FILL.effect),
-            (self.heap_fill.is_some(), orbistoun_env::HEAP_FILL.effect),
-            (self.bss_fill.is_some(), orbistoun_env::BSS_FILL.effect),
-            (self.map.is_some(), orbistoun_env::MAP.effect),
-            (self.poke.is_some(), orbistoun_env::POKE.effect),
-            (!self.write.is_empty(), orbistoun_env::WRITE.effect),
-            (!self.returns.is_empty(), orbistoun_env::RETURN.effect),
-            (self.watch.is_some(), orbistoun_env::WATCH.effect),
-            (
-                !self.watchpoint.is_empty(),
-                orbistoun_env::WATCHPOINT.effect,
-            ),
-            (self.mark_query, orbistoun_env::MARK_QUERY.effect),
-        ]
-        .iter()
-        .any(|(active, effect)| *active && effect.needs_caveat())
+        any_intervenes(&orbistoun_env::active())
     }
 
     /// Every active diagnostic, in one line, for the run conditions.
@@ -446,6 +434,16 @@ fn parse_returns(raw: &str) -> Vec<(Target, u64)> {
     forced
 }
 
+/// Whether any of these active variables changes the program.
+///
+/// **The decision, with the environment left outside it.** [`Experiments::intervenes`] is the thin
+/// wrapper that reads; this is the part worth testing, and testing it needs no process-global
+/// mutation - which in a parallel suite is flaky by construction and is what principle 8's "a pure
+/// decision function plus a thin effectful wrapper" exists to avoid (D569).
+fn any_intervenes(active: &[(&'static orbistoun_env::Var, String)]) -> bool {
+    active.iter().any(|(var, _)| var.effect.needs_caveat())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Experiments, Target, byte, parse_returns, parse_write, targets, truthy};
@@ -651,6 +649,79 @@ mod tests {
         );
         for bad in ["f", "f:", ":0x1", "f:0x1:0x2", "f:zz", "f:0x1,g"] {
             assert!(parse_returns(bad).is_empty(), "{bad:?} should be refused");
+        }
+    }
+
+    /// **Every diagnostic the registry marks as changing the program makes a run intervened.**
+    ///
+    /// The list this replaced was hand-maintained, so a diagnostic added without an entry was
+    /// silently non-intervening - and one was not remembered, which let tagged runs overwrite
+    /// three titles' honest compatibility records (D569).
+    ///
+    /// Driven from the **registry**, so a diagnostic declared tomorrow is covered the day it is
+    /// declared. No environment is touched: each variable is offered to the decision directly.
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the effect recorded for a variable is the right one. A diagnostic declared `Observes`
+    /// that in fact changes the program is invisible here and everywhere else - the registry is
+    /// the single source, so a wrong entry is wrong once and completely.
+    ///
+    /// **Nor anything about the wrapper.** Replacing `orbistoun_env::active()` with an empty slice
+    /// inside [`Experiments::intervenes`] does **not** fail this - a break that was tried, and did
+    /// not fire. Covering it means controlling process-global environment from a test, which in a
+    /// parallel suite is flaky by construction; the line is drawn where this project draws it
+    /// elsewhere, at a one-line effectful wrapper left deliberately untested. What that leaves
+    /// uncovered is exactly one call, and it is named here so it is a choice rather than an
+    /// oversight (D569).
+    #[test]
+    fn every_intervening_diagnostic_in_the_registry_makes_a_run_intervened() {
+        let intervening: Vec<&orbistoun_env::Var> = orbistoun_env::REGISTRY
+            .iter()
+            .filter(|v| v.effect.needs_caveat())
+            .collect();
+        assert!(
+            !intervening.is_empty(),
+            "the registry lists no intervening diagnostics, so this test proves nothing"
+        );
+
+        for var in intervening {
+            assert!(
+                super::any_intervenes(&[(var, "1".to_owned())]),
+                "{} is declared as changing the program, and a run under it would still be                  recorded as an honest measurement",
+                var.name
+            );
+        }
+    }
+
+    /// **A run under nothing is not an intervened run.**
+    ///
+    /// The direction that decides whether anything is ever recorded: were this true
+    /// unconditionally, the guard would refuse every ordinary run and the compatibility record
+    /// would silently stop moving.
+    #[test]
+    fn a_run_under_no_diagnostic_is_not_intervened() {
+        assert!(!super::any_intervenes(&[]));
+    }
+
+    /// **An observing diagnostic does not make a run intervened.**
+    ///
+    /// The other half of the registry's distinction. `Observes` exists so a run can be watched
+    /// without being disqualified; treating every set variable as an intervention would make the
+    /// observing tier pointless and quietly stop the record moving.
+    #[test]
+    fn an_observing_diagnostic_leaves_a_run_recordable() {
+        let observing: Vec<&orbistoun_env::Var> = orbistoun_env::REGISTRY
+            .iter()
+            .filter(|v| !v.effect.needs_caveat())
+            .collect();
+        assert!(!observing.is_empty(), "no observing variables to check");
+        for var in observing {
+            assert!(
+                !super::any_intervenes(&[(var, "1".to_owned())]),
+                "{} only observes, and a run under it was disqualified anyway",
+                var.name
+            );
         }
     }
 }

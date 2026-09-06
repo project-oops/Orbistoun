@@ -375,6 +375,26 @@ pub struct ImportRecord {
     pub kind: ImportKind,
 }
 
+/// One symbol a module **provides**.
+///
+/// Here beside [`ImportRecord`] and for the same reason: it is wire data. An import is a NID
+/// somebody needs; an export is that NID plus where in the module it lives, which is the field
+/// that makes loading a second module worth anything.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ExportRecord {
+    /// The hash an importer asks for it by.
+    pub nid: u64,
+    /// The name, where the module spelled one or a symbol database knows it.
+    pub symbol: Option<String>,
+    /// Where it lives, **as an offset from the module's own base** - not an address. Nothing
+    /// has been placed when this is read.
+    pub offset: u64,
+    /// Code or data. Binding data as though it were a function hands the guest a thunk where
+    /// it expects a value (D125).
+    #[serde(default)]
+    pub kind: ImportKind,
+}
+
 /// What a module needs, determined without executing it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurveySummary {

@@ -296,8 +296,8 @@ name?*
 ## Why the search itself is defensible
 
 **Published standards are not guesses.** The target C library is FreeBSD-derived, so a
-large part of it is ISO C and POSIX under the names those standards publish. **3,018**
-of them ship in `crates/orbistoun-names/data/standard.txt`. Nothing was read out of a
+large part of it is ISO C and POSIX under the names those standards publish, and they
+ship in `crates/orbistoun-names/data/standard.txt`. Nothing was read out of a
 vendor binary to write that list; the standards are the source, and they are public.
 
 That list used to be hand-curated, **which was the weakest link in this whole document**.

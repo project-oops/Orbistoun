@@ -4,23 +4,25 @@
 
 [status]
 reach = "entered"
-outcome = "image+0x7b591e"
-imports = 14
-calls = 1735
-standing = 100
+outcome = "the title's own modules+0xba940"
+imports = 129
+calls = 7004897
+standing = 5
 default_return = "unimplemented"
+unanswered = 11
 limit_seconds = 12
 build = "0.1.0"
-measured_on = "2026-08-23"
+measured_on = "2026-09-04"
 
 [experiment]
 reach = "entered"
 outcome = "image+0x7b594e"
-imports = 55
-calls = 26850
-standing = 12
+imports = 56
+calls = 39929
+standing = 8
 default_return = "unimplemented"
 overrides = 1
+propping = 1
 limit_seconds = 8
 build = "0.1.0"
 measured_on = "2026-09-01"

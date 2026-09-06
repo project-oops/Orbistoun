@@ -98,6 +98,70 @@ impl SymbolResolver for ImportResolver<'_> {
     }
 }
 
+/// Binds an import to a real address inside a module the title ships, before any stub.
+///
+/// # Why a stub is the wrong answer here
+///
+/// Every import gets a stub so that a call to something unimplemented is *reported* rather
+/// than jumping into a zeroed slot, and for a platform library that is the honest answer -
+/// orbistoun either implements the function or says it does not.
+///
+/// **A module the title ships is not that case.** The code is in the title's own data, placed
+/// and relocated; answering with a stub says "nothing implements this" about a function that
+/// is right there. PPSA02664 imports `0x6f8b9da539afc9af` from `Il2CppUserAssemblies` and calls
+/// it 222 times with strings like `il2cpp_init`; on a stub it answers a placeholder, and the
+/// guest uses the placeholder as an address (D483, D489).
+///
+/// `bound` holds only the imports that should take this path - the caller decides, because
+/// whether the emulator's own implementation wins is a policy question and not one a resolver
+/// can see (D483).
+#[derive(Debug, Clone, Copy)]
+pub struct TitleResolver<'a, R> {
+    /// Dynamic symbol index to an address inside a placed, relocated module.
+    pub bound: &'a std::collections::BTreeMap<u32, u64>,
+    /// What answers everything else.
+    pub inner: &'a R,
+}
+
+impl<R: SymbolResolver> SymbolResolver for TitleResolver<'_, R> {
+    fn resolve(&self, symbol_index: u32) -> Option<u64> {
+        self.bound
+            .get(&symbol_index)
+            .copied()
+            .or_else(|| self.inner.resolve(symbol_index))
+    }
+}
+
+/// Shifts a module's symbol indices into the shared table's index space.
+///
+/// # Why this exists
+///
+/// One stub table serves every module, and module *M*'s symbol *i* lives at slot
+/// `offset(M) + i` (D484). A relocation inside *M* names *i*, because that is what *M*'s own
+/// dynamic symbol table is indexed by - so something has to add the offset, and doing it here
+/// means the resolvers underneath stay unaware there is more than one module.
+///
+/// The main executable is module 0 with offset 0, so wrapping it is a no-op rather than a
+/// special case anybody has to remember not to apply.
+#[derive(Debug, Clone, Copy)]
+pub struct OffsetResolver<'a, R> {
+    /// Where this module's symbol zero sits in the shared table.
+    pub offset: usize,
+    /// The resolver holding the shared table.
+    pub inner: &'a R,
+}
+
+impl<R: SymbolResolver> SymbolResolver for OffsetResolver<'_, R> {
+    fn resolve(&self, symbol_index: u32) -> Option<u64> {
+        // **Refuses rather than wraps.** A shifted index that does not fit is a table and a
+        // module disagreeing about how many symbols exist, and answering a wrapped slot would
+        // bind the relocation to whatever else happened to be there - an implementation
+        // answering for a symbol nobody wrote it for, silently, for the whole run.
+        let shifted = u32::try_from(self.offset).ok()?.checked_add(symbol_index)?;
+        self.inner.resolve(shifted)
+    }
+}
+
 /// A resolver that answers every symbol with one address.
 ///
 /// Used before per-import thunks exist: every import points at a single host function
@@ -274,6 +338,100 @@ fn apply_table(
 
 #[cfg(test)]
 mod tests {
+    use super::OffsetResolver;
+
+    /// A resolver that answers the slot it was asked for, so a shift is visible as a value.
+    struct Echo;
+    impl SymbolResolver for Echo {
+        fn resolve(&self, symbol_index: u32) -> Option<u64> {
+            Some(u64::from(symbol_index))
+        }
+    }
+
+    /// A bound import answers the module's address, not the stub underneath.
+    #[test]
+    fn a_bound_import_beats_the_stub() {
+        let bound = std::collections::BTreeMap::from([(7_u32, 0x5000_1234_u64)]);
+        let resolver = super::TitleResolver {
+            bound: &bound,
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(7), Some(0x5000_1234));
+    }
+
+    /// **Everything not bound still falls through**, which is what keeps the stub table the
+    /// answer for the platform's own libraries.
+    #[test]
+    fn an_unbound_import_falls_through() {
+        let bound = std::collections::BTreeMap::from([(7_u32, 0x5000_1234_u64)]);
+        let resolver = super::TitleResolver {
+            bound: &bound,
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(8), Some(8), "the stub table still answers");
+    }
+
+    /// An empty binding changes nothing at all - the shape a title with no own modules takes.
+    #[test]
+    fn binding_nothing_is_the_identity() {
+        let bound = std::collections::BTreeMap::new();
+        let resolver = super::TitleResolver {
+            bound: &bound,
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(3), Some(3));
+    }
+
+    /// **The main executable is module 0, and wrapping it changes nothing.**
+    ///
+    /// Every call index and every measurement taken before the table was shared names a slot
+    /// in the executable's range, so an offset of zero has to be exactly the identity - not
+    /// approximately, and not a case anybody has to remember to skip.
+    #[test]
+    fn module_zero_is_unshifted() {
+        let resolver = OffsetResolver {
+            offset: 0,
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(0), Some(0));
+        assert_eq!(resolver.resolve(583), Some(583));
+    }
+
+    /// A later module's symbol lands in that module's own range.
+    #[test]
+    fn a_later_module_is_shifted_by_its_offset() {
+        let resolver = OffsetResolver {
+            offset: 583,
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(0), Some(583));
+        assert_eq!(resolver.resolve(4), Some(587));
+    }
+
+    /// **A shift that does not fit refuses rather than wraps.**
+    ///
+    /// A wrapped index answers some other module's slot, which binds the relocation to an
+    /// implementation written for a different symbol - silently, and for the whole run. An
+    /// unresolved relocation is counted and reported; a wrong one is not.
+    #[test]
+    fn a_shift_that_overflows_answers_nothing() {
+        let resolver = OffsetResolver {
+            offset: usize::try_from(u32::MAX).expect("fits on a 64-bit host"),
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(1), None, "an overflow was wrapped");
+    }
+
+    /// An offset too large to be a slot index at all is refused, not truncated.
+    #[test]
+    fn an_offset_beyond_the_index_space_answers_nothing() {
+        let resolver = OffsetResolver {
+            offset: usize::MAX,
+            inner: &Echo,
+        };
+        assert_eq!(resolver.resolve(0), None);
+    }
+
     /// Addresses these tests reserve, taken rather than chosen.
     ///
     /// # Why this is one static for the module and not one per test

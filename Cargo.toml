@@ -27,6 +27,7 @@ members = [
     "crates/orbistoun-systemservice",
     "crates/orbistoun-video",
     "crates/orbistoun-audio",
+    "crates/orbistoun-net",
     "crates/orbistoun-input",
 
     # Graphics. `orbistoun-gpu` has no path to a host graphics API and must not gain
@@ -260,6 +261,7 @@ orbistoun-translate = { path = "crates/orbistoun-translate" }
 orbistoun-gpu = { path = "crates/orbistoun-gpu" }
 orbistoun-gpu-vulkan = { path = "crates/orbistoun-gpu-vulkan" }
 orbistoun-audio = { path = "crates/orbistoun-audio" }
+orbistoun-net = { path = "crates/orbistoun-net" }
 orbistoun-video = { path = "crates/orbistoun-video" }
 orbistoun-input = { path = "crates/orbistoun-input" }
 orbistoun-fs = { path = "crates/orbistoun-fs" }

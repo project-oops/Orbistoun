@@ -425,6 +425,137 @@ pub fn read_cstr(table: &[u8], offset: usize) -> Option<&str> {
     std::str::from_utf8(&rest[..end]).ok()
 }
 
+/// One export, as read out of the symbol table.
+///
+/// # Why this is a separate type from [`RawImport`]
+///
+/// They carry different things, and the difference is the whole point of reading exports at
+/// all. An import is a *question* - a NID this module needs somebody to answer. An export is
+/// an **answer**: the same NID, plus where in this module the thing actually lives. That
+/// address is the field an import has no room for and the only reason a second module is
+/// worth loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawExport {
+    /// Index into the dynamic symbol table, so a diagnostic can name the row.
+    pub symbol_index: u32,
+    /// The hash a caller imports it by.
+    pub nid: u64,
+    /// How the name was spelled, and what it carried.
+    pub form: NameForm,
+    /// Whether this is code or data.
+    ///
+    /// **Load-bearing, exactly as it is for an import.** Binding a data export as though it
+    /// were a function hands the guest a thunk where it expects a value (D125).
+    pub kind: Kind,
+    /// The symbol name exactly as it appears, encoding included where there is one.
+    pub name: String,
+    /// Where it lives, **as an offset from the module's own base**.
+    ///
+    /// Not an address: nothing has been placed yet when this is read, and a module is placed
+    /// wherever there is room. The loader adds its base.
+    pub offset: u64,
+}
+
+impl RawExport {
+    /// Builds one from a vendor-encoded name.
+    fn encoded(
+        symbol_index: u32,
+        name: String,
+        decoded: EncodedImport,
+        kind: Kind,
+        offset: u64,
+    ) -> Self {
+        Self {
+            symbol_index,
+            nid: decoded.nid.as_raw(),
+            form: NameForm::Encoded {
+                library_id: decoded.library_id,
+                module_id: decoded.module_id,
+            },
+            kind,
+            name,
+            offset,
+        }
+    }
+
+    /// Builds one from a plain name, hashing it to the NID an importer asks for.
+    fn plain(symbol_index: u32, name: String, hasher: &NidHasher, kind: Kind, offset: u64) -> Self {
+        Self {
+            nid: hasher.hash(&name).as_raw(),
+            symbol_index,
+            form: NameForm::Plain,
+            kind,
+            name,
+            offset,
+        }
+    }
+}
+
+/// Extracts exports from the symbol table.
+///
+/// The mirror of [`imports_from_symbols`]: same table, same walk, and the **opposite** test
+/// on `st_shndx`. A symbol bound to a section is one this module provides; one bound to
+/// `SHN_UNDEF` is one it needs.
+///
+/// # What is deliberately not filtered here
+///
+/// Binding and visibility are not consulted. A local or hidden symbol is not reachable by
+/// another module in a real linker, and filtering on that would be the right thing for a
+/// general ELF reader - but this format is not being read generally. The guest's own imports
+/// name NIDs, and the only question that matters is whether this module answers one. A symbol
+/// that no importer asks for costs a row in a table nobody reads; a symbol wrongly filtered
+/// out is an import that never binds and a guest that stops. Of the two, the second is the
+/// one that cannot be diagnosed from the outside, so this errs the other way and says so.
+///
+/// # Errors
+///
+/// [`ElfError::AbsurdSymbolCount`] when the table claims more symbols than could be real,
+/// which is the same bound the import walk applies and for the same reason.
+pub fn exports_from_symbols(
+    symbols: &[u8],
+    strings: &[u8],
+    count: u64,
+    syment: usize,
+    hasher: &NidHasher,
+) -> Result<Vec<RawExport>, ElfError> {
+    if count > MAX_SYMBOLS {
+        return Err(ElfError::AbsurdSymbolCount {
+            count,
+            max: MAX_SYMBOLS,
+        });
+    }
+    let stride = if syment == 0 { SYMBOL_SIZE } else { syment };
+    let mut out = Vec::new();
+
+    for index in 0..count as usize {
+        let at = index.saturating_mul(stride);
+        let Some(entry) = symbols.get(at..at + SYMBOL_SIZE) else {
+            break;
+        };
+        let name_off = u32::from_le_bytes(entry[..4].try_into().unwrap_or_default()) as usize;
+        let kind = Kind::from_info(entry[4]);
+        let shndx = u16::from_le_bytes(entry[6..8].try_into().unwrap_or_default());
+        // Defined, and named. `shndx == 0` is SHN_UNDEF - that is the import case.
+        if shndx == 0 || name_off == 0 {
+            continue;
+        }
+        let offset = u64::from_le_bytes(entry[8..16].try_into().unwrap_or_default());
+        let Some(name) = read_cstr(strings, name_off) else {
+            continue;
+        };
+        let at_index = u32::try_from(index).unwrap_or(u32::MAX);
+        // **Both spellings, exactly as the import walk keeps both.** A module publishing
+        // vendor-encoded names and one publishing plain names are answering the same
+        // questions, and dropping either would make a module that exports eighty things
+        // report exporting none - which reads as "provides nothing" (D305).
+        out.push(match decode_symbol_name(name) {
+            Some(decoded) => RawExport::encoded(at_index, name.to_owned(), decoded, kind, offset),
+            None => RawExport::plain(at_index, name.to_owned(), hasher, kind, offset),
+        });
+    }
+    Ok(out)
+}
+
 /// Extracts imports from the symbol table.
 ///
 /// `symbols` and `strings` are the raw tables; `count` comes from `DT_HASH`. Only
@@ -548,8 +679,8 @@ pub fn symbol_count_from_gnu_hash(table: &[u8]) -> Result<u64, ElfError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DYNAMIC_ENTRY_SIZE, DynamicInfo, MAX_SYMBOLS, SYMBOL_SIZE, imports_from_symbols, read_cstr,
-        tag,
+        DYNAMIC_ENTRY_SIZE, DynamicInfo, MAX_SYMBOLS, NameForm, SYMBOL_SIZE, exports_from_symbols,
+        imports_from_symbols, read_cstr, tag,
     };
     use crate::ElfError;
 
@@ -565,13 +696,19 @@ mod tests {
 
     /// Builds a symbol table. `defined` marks a symbol as provided rather than needed.
     fn symbols(entries: &[(u32, bool)]) -> Vec<u8> {
+        let placed: Vec<(u32, bool, u64)> = entries.iter().map(|(n, d)| (*n, *d, 0)).collect();
+        symbols_at(&placed)
+    }
+
+    /// The same, with each symbol's value - which is where an export lives.
+    fn symbols_at(entries: &[(u32, bool, u64)]) -> Vec<u8> {
         let mut v = Vec::new();
-        for (name_off, defined) in entries {
+        for (name_off, defined, value) in entries {
             v.extend_from_slice(&name_off.to_le_bytes());
             v.push(0); // info
             v.push(0); // other
             v.extend_from_slice(&u16::from(*defined).to_le_bytes());
-            v.extend_from_slice(&0_u64.to_le_bytes()); // value
+            v.extend_from_slice(&value.to_le_bytes());
             v.extend_from_slice(&0_u64.to_le_bytes()); // size
         }
         v
@@ -586,6 +723,70 @@ mod tests {
             table.push(0);
         }
         (table, offsets)
+    }
+
+    /// **Imports and exports are the two sides of one table**, split on `SHN_UNDEF`.
+    ///
+    /// The property that matters is that they are complementary: every named symbol lands in
+    /// exactly one of the two lists. A walk that got the test backwards would return a
+    /// plausible-looking list of the wrong half, and nothing downstream could tell.
+    #[test]
+    fn every_named_symbol_is_an_import_or_an_export_and_never_both() {
+        let (strings, at) = strings(&["needed_one", "provided_one", "needed_two"]);
+        let table = symbols_at(&[(at[0], false, 0), (at[1], true, 0x1234), (at[2], false, 0)]);
+        let hasher = hasher();
+
+        let imports = imports_from_symbols(&table, &strings, 3, SYMBOL_SIZE, &hasher)
+            .expect("the table is small and well formed");
+        let exports = exports_from_symbols(&table, &strings, 3, SYMBOL_SIZE, &hasher)
+            .expect("the same table read the other way");
+
+        let imported: Vec<&str> = imports.iter().map(|i| i.name.as_str()).collect();
+        let exported: Vec<&str> = exports.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(imported, ["needed_one", "needed_two"]);
+        assert_eq!(exported, ["provided_one"]);
+    }
+
+    /// An export carries **where it lives**, which is the field an import has no room for.
+    #[test]
+    fn an_export_carries_its_offset_within_the_module() {
+        let (strings, at) = strings(&["provided"]);
+        let table = symbols_at(&[(at[0], true, 0x4142_4344)]);
+        let hasher = hasher();
+
+        let exports = exports_from_symbols(&table, &strings, 1, SYMBOL_SIZE, &hasher)
+            .expect("one well-formed symbol");
+        assert_eq!(exports.len(), 1);
+        assert_eq!(
+            exports[0].offset, 0x4142_4344,
+            "the value is an offset from the module base, not an address"
+        );
+        assert_eq!(
+            exports[0].nid,
+            hasher.hash("provided").as_raw(),
+            "a plain name is the NID an importer will ask for, hashed"
+        );
+    }
+
+    /// A vendor-encoded export decodes to the NID it publishes, not to a hash of the encoding.
+    ///
+    /// The case the title's own modules are entirely made of: 247 of 247 exports in
+    /// `Il2CppUserAssemblies.prx` are spelled this way, so hashing the string instead would
+    /// produce 247 NIDs no importer asks for.
+    #[test]
+    fn an_encoded_export_publishes_the_nid_in_its_name() {
+        let (strings, at) = strings(&["CRJcH8CnPSI#I#A"]);
+        let table = symbols_at(&[(at[0], true, 0x10)]);
+        let hasher = hasher();
+
+        let exports = exports_from_symbols(&table, &strings, 1, SYMBOL_SIZE, &hasher)
+            .expect("one well-formed symbol");
+        assert_ne!(
+            exports[0].nid,
+            hasher.hash("CRJcH8CnPSI#I#A").as_raw(),
+            "the encoding carries the NID; hashing the spelling answers a different one"
+        );
+        assert!(matches!(exports[0].form, NameForm::Encoded { .. }));
     }
 
     #[test]

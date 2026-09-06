@@ -124,9 +124,45 @@ pub struct Finding {
 ///
 /// Deliberately in a range no real firmware value occupies (principle 3), which is exactly
 /// what makes them findable in a guest's arguments afterwards.
+/// What each integer argument arrives in, so a finding can say **which** one carried the value.
+///
+/// Saying "its first argument" when the value was in `rdx` sends a reader to the wrong place, and
+/// a finding that misdirects is worse than one that says less (D570).
+const ARGUMENT_REGISTERS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+
 const PLACEHOLDER_LOW: u64 = 0x7FFF_0000;
 /// One past the placeholder range.
 const PLACEHOLDER_HIGH: u64 = 0x7FFF_0010;
+
+/// One past every placeholder, tagged ones included.
+///
+/// `ORBISTOUN_TAG_PLACEHOLDERS` gives each stub `0x7fff_0000 | (0x10 + its slot)`, so a tagged
+/// value sits above [`PLACEHOLDER_HIGH`] and still inside the half-word this project reserves.
+const PLACEHOLDER_TAGGED_HIGH: u64 = 0x8000_0000;
+
+/// Which stub produced a tagged placeholder, if this value is one.
+///
+/// [`None`] for an untagged placeholder - the ordinary `0x7fff_0001` says only that *some*
+/// unimplemented function answered, which is the whole reason tagging exists (D567).
+fn tagged_stub(value: u64) -> Option<usize> {
+    if !(PLACEHOLDER_HIGH..PLACEHOLDER_TAGGED_HIGH).contains(&value) {
+        return None;
+    }
+    usize::try_from(value - PLACEHOLDER_HIGH).ok()
+}
+
+/// The import a tagged placeholder came from, named from the run's own call list.
+///
+/// The trace indexes every call by the stub it landed on, which is the same numbering the tag
+/// carries - so no new plumbing is needed to turn a value back into a name.
+fn source_of(trace: &CallTrace, value: u64) -> Option<&str> {
+    let slot = tagged_stub(value)?;
+    trace
+        .calls
+        .iter()
+        .find(|c| c.index == slot)
+        .map(|c| c.label.as_str())
+}
 
 /// Whether a value looks like one of our placeholders, at any small offset.
 ///
@@ -135,7 +171,11 @@ const PLACEHOLDER_HIGH: u64 = 0x7FFF_0010;
 /// bare value alone would miss every case where the guest did anything with it (D125).
 fn looks_like_placeholder(value: u64) -> bool {
     const NEAR: u64 = 0x1000;
-    value >= PLACEHOLDER_LOW.saturating_sub(NEAR) && value < PLACEHOLDER_HIGH.saturating_add(NEAR)
+    // The upper bound is the tagged range's, not the fixed one's: under
+    // `ORBISTOUN_TAG_PLACEHOLDERS` a placeholder can be any `0x7fff_xxxx`, and a detector that
+    // only knew the first sixteen would go blind exactly when asked to say more (D567).
+    value >= PLACEHOLDER_LOW.saturating_sub(NEAR)
+        && value < PLACEHOLDER_TAGGED_HIGH.saturating_add(NEAR)
 }
 
 /// A share of total calls, as a percentage, guarding against an empty run.
@@ -207,6 +247,9 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         evidence.extend(null_base_registers(f.address, r));
         evidence.extend(r.lines());
     }
+    // After the raw dump, because it is longer and a reader wants the values first. Empty
+    // unless something the guest held pointed at memory this run had mapped (D522).
+    evidence.extend(f.pointees.iter().cloned());
     evidence.extend(last.into_iter().map(|c| format!("{PRECEDED_BY}{c}")));
 
     Some(Finding {
@@ -375,8 +418,11 @@ fn gave_up(trace: &CallTrace) -> Option<Finding> {
 /// where saying nothing is the honest thing (D459).
 fn traced_line(c: &TracedCall) -> String {
     match c.returned {
-        Some(ret) => format!("{}({:#x}) -> {ret:#x} from {:#x}", c.label, c.arg0, c.from),
-        None => format!("{}({:#x}) from {:#x}", c.label, c.arg0, c.from),
+        Some(ret) => format!(
+            "{}({:#x}) -> {ret:#x} from {:#x}",
+            c.label, c.args[0], c.from
+        ),
+        None => format!("{}({:#x}) from {:#x}", c.label, c.args[0], c.from),
     }
 }
 
@@ -400,18 +446,34 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
 
     // The guest passing one of our codes *into* a later call. Whatever answered it is the
     // function to fix, and the call that received it names the moment.
-    for call in &trace.tail {
-        if !looks_like_placeholder(call.arg0) {
+    // **Every argument, not only the first.** A placeholder handed on as a *size* is visible only
+    // if the size happens to be argument zero - `malloc`'s is, which is the sole reason D564's four
+    // gigabytes were ever seen. The same value in `rdx` left no trace at all until now (D570).
+    for (call, register) in trace
+        .tail
+        .iter()
+        .flat_map(|c| (0..c.args.len()).map(move |r| (c, r)))
+    {
+        let value = call.args[register];
+        if !looks_like_placeholder(value) {
             continue;
         }
+        let which = ARGUMENT_REGISTERS.get(register).copied().unwrap_or("?");
         out.push(Finding {
             gap: Gap::ErrorUsedAsPointer,
             confidence: Confidence::Certain,
             subject: Some(call.label.clone()),
-            what: format!(
-                "{} was passed {:#x} as its first argument - one of our own placeholder codes",
-                call.label, call.arg0
-            ),
+            what: match source_of(trace, value) {
+                // Tagged: the value names its own source, so the finding says it outright.
+                Some(source) => format!(
+                    "{} was passed {value:#x} in {which} - the placeholder {source} answered",
+                    call.label
+                ),
+                None => format!(
+                    "{} was passed {value:#x} in {which} - one of our own placeholder codes",
+                    call.label
+                ),
+            },
             evidence: {
                 // **The calls this finding's own action points at.** It says "find what
                 // answered with that code just before", and a finding whose action sends a
@@ -424,11 +486,19 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
                 e.extend(preceding(trace));
                 e
             },
-            action: Some(
-                "find what answered with that code just before, and give it a real return \
-                 - a pointer-returning function must never answer an error code (D125)"
+            action: Some(match source_of(trace, value) {
+                // D299: a finding that sends a reader looking must carry what they are to
+                // look at. With a tag there is nothing to look for - the value is the answer.
+                Some(source) => format!(
+                    "give {source} a real return - a function whose answer is read as data \
+                     must never answer an error code (D125)"
+                ),
+                None => "find what answered with that code just before, and give it a real \
+                         return - a pointer-returning function must never answer an error \
+                         code (D125). Re-run under ORBISTOUN_TAG_PLACEHOLDERS to be told \
+                         which (D567)"
                     .to_owned(),
-            ),
+            }),
             weight: 1,
         });
     }
@@ -624,7 +694,10 @@ fn unnamed(trace: &CallTrace) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Confidence, Gap, findings, looks_like_placeholder, marker, null_base_registers};
+    use super::{
+        Confidence, Gap, findings, looks_like_placeholder, marker, null_base_registers, source_of,
+        tagged_stub,
+    };
     use crate::trace::{
         AbiReport, CallTrace, CalledImport, Conditions, FaultSite, FormatReport, ReadReport,
         Registers, TracedCall,
@@ -735,6 +808,7 @@ mod tests {
             reached: "Entered".to_owned(),
             total_calls: 0,
             distinct: 0,
+            frames: 0,
             calls: Vec::new(),
             syscalls: Vec::new(),
             tail: Vec::new(),
@@ -752,7 +826,7 @@ mod tests {
         TracedCall {
             sequence: 1,
             label: label.to_owned(),
-            arg0,
+            args: [arg0, 0, 0, 0, 0, 0],
             from: 0x1000,
             returned: None,
         }
@@ -904,6 +978,7 @@ mod tests {
         // the prose.
         let mut trace = empty();
         trace.fault = Some(FaultSite {
+            pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0x7FFF_0001,
             instruction_pointer: 0x1234,
@@ -917,5 +992,118 @@ mod tests {
             assert!(!finding.gap.where_to_look().is_empty());
             assert!(!finding.evidence.is_empty(), "a claim needs its evidence");
         }
+    }
+
+    /// A trace whose call list places two imports at known stub slots.
+    fn trace_with_slots() -> CallTrace {
+        CallTrace {
+            module: "m".to_owned(),
+            reached: "Entered".to_owned(),
+            total_calls: 2,
+            distinct: 2,
+            frames: 0,
+            calls: vec![
+                CalledImport {
+                    index: 0x81,
+                    label: "libSceUlt::sceUltUlthreadRuntimeGetWorkAreaSize".to_owned(),
+                    calls: 1,
+                    implemented: false,
+                },
+                CalledImport {
+                    index: 0x215,
+                    label: "libSceAgc::sceAgcCreateShader".to_owned(),
+                    calls: 1,
+                    implemented: false,
+                },
+            ],
+            syscalls: Vec::new(),
+            tail: Vec::new(),
+            abi: AbiReport::default(),
+            reads: ReadReport::default(),
+            dumps: Vec::new(),
+            conditions: Conditions::default(),
+            formats: FormatReport::default(),
+            fault: None,
+            stopped: None,
+        }
+    }
+
+    /// **A tagged placeholder names the function that answered it.**
+    ///
+    /// The whole point of D567. Untagged, every stub answers `0x7fff_0001`, so a placeholder in a
+    /// guest's argument says *some* unimplemented function produced it - and the finding could
+    /// only tell a reader to go looking, which D299 says a finding must not do.
+    ///
+    /// The tag is `0x7fff_0000 | (0x10 + slot)`, and the trace indexes calls by the same slot, so
+    /// the value resolves to a name with no new plumbing.
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the slot numbering the service tags with is the one the trace records. They are the
+    /// same global stub index today; nothing here would notice if one of them started counting
+    /// differently, and the symptom would be a confident finding naming the wrong function.
+    #[test]
+    fn a_tagged_placeholder_names_its_source() {
+        let trace = trace_with_slots();
+        assert_eq!(
+            source_of(&trace, 0x7fff_0091),
+            Some("libSceUlt::sceUltUlthreadRuntimeGetWorkAreaSize"),
+            "0x91 is slot 0x81 plus the 0x10 floor"
+        );
+        assert_eq!(
+            source_of(&trace, 0x7fff_0225),
+            Some("libSceAgc::sceAgcCreateShader")
+        );
+        // **A tag for a slot this run never called resolves to nothing**, and this is the
+        // load-bearing half rather than hygiene. Guest registers routinely hold stale values
+        // that fall inside the tag range: PPSA28061's tail carries `0x7fff0201` and
+        // `0x7fffbe01` in argument slots, which decode to stubs 497 and 48,625 - neither of
+        // which that run ever called. Without this check both would have been reported as
+        // confident attributions built from garbage, which is worse than the vague finding
+        // tagging replaced (D570).
+        assert_eq!(source_of(&trace, 0x7fff_0999), None);
+        assert_eq!(
+            source_of(&trace, 0x7fff_0201),
+            None,
+            "PPSA28061's real stale register"
+        );
+        assert_eq!(source_of(&trace, 0x7fff_be01), None, "and the other one");
+    }
+
+    /// **An untagged placeholder names nothing, and must not pretend to.**
+    ///
+    /// `0x7fff_0001` is what every stub answers when tagging is off, and the fixed `GuestError`
+    /// codes live below `0x7fff_0010`. Reading one of those as a slot would attribute a finding to
+    /// whichever import happened to be at index 0 - a confident, wrong answer, which is worse than
+    /// the vague one it replaced.
+    #[test]
+    fn an_untagged_placeholder_attributes_nothing() {
+        let trace = trace_with_slots();
+        for fixed in [0x7fff_0000_u64, 0x7fff_0001, 0x7fff_000f] {
+            assert_eq!(
+                tagged_stub(fixed),
+                None,
+                "{fixed:#x} is a fixed placeholder code, not a tag"
+            );
+            assert_eq!(source_of(&trace, fixed), None);
+        }
+    }
+
+    /// **The detector still recognises a tagged placeholder as one of ours.**
+    ///
+    /// `looks_like_placeholder` bounded itself at `0x7fff_0010` - the fixed codes. A tagged run
+    /// answers far above that, so the detector would have gone blind **exactly when it was asked
+    /// to say more**, and the diagnostic would have silently reported nothing.
+    #[test]
+    fn the_detector_sees_tagged_placeholders_too() {
+        for tagged in [0x7fff_0010_u64, 0x7fff_0091, 0x7fff_0225, 0x7fff_beac] {
+            assert!(
+                looks_like_placeholder(tagged),
+                "{tagged:#x} is one of ours and the detector missed it"
+            );
+        }
+        // And still recognises the untagged one, and still rejects an ordinary address.
+        assert!(looks_like_placeholder(0x7fff_0001));
+        assert!(!looks_like_placeholder(0x4000_0000_0000));
     }
 }

@@ -283,6 +283,25 @@ pub fn seek(fd: u64, from: crate::open::From, offset: i64) -> Option<u64> {
     Some(file.seek(to).unwrap_or(0))
 }
 
+/// Flushes an open file's contents to the storage behind it. Answers whether it could.
+///
+/// **A real flush, not a reported one.** `fsync` exists so a caller can know its bytes have
+/// landed, and a version answering success without asking the operating system gives exactly
+/// the assurance the caller wanted and none of the substance. A standard stream has nothing to
+/// flush and is answered as success, since its bytes have already left this process.
+pub fn sync(fd: u64) -> bool {
+    if is_standard(fd) {
+        return true;
+    }
+    let Ok(table) = table().lock() else {
+        return false;
+    };
+    let Some(Target::File(file)) = table.get(&fd) else {
+        return false;
+    };
+    file.sync_all().is_ok()
+}
+
 /// Sets an open file's length. Answers whether it could.
 ///
 /// A standard stream has no length, so it is refused rather than being given one - and a

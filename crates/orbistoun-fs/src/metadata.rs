@@ -238,6 +238,45 @@ fn stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceKernelStat(path, buffer)` - the vendor-named form of [`stat`].
+///
+/// # Why this is not just [`stat`] registered under a second name
+///
+/// **The two disagree about failure, and only about failure.** POSIX `stat` answers `-1`; a
+/// `sceKernel*` call answers a vendor code in the `0x8002_00xx` family, which is what
+/// `sceKernelMkdir` beside it already does. Registering the POSIX function under the vendor
+/// name would hand a caller `-1` - `0xffff_ffff_ffff_ffff` - where it tests for a negative
+/// 32-bit vendor error, and the two are not the same number (D125, D525).
+///
+/// The success path and the structure it writes are shared, so which generation of
+/// `struct stat` a guest is given stays one decision (D374) rather than two that can drift.
+///
+/// `ENOENT` for a path nothing answers, which is what the failure is: `facts_of` returns
+/// nothing only when neither a host file nor a mount point is behind the name.
+///
+/// **Written here and registered in `lib.rs`.** The machinery it shares with [`stat`] lives in
+/// this module; the *name* belongs to `libkernel_fs`, which is where it is declared. Putting the
+/// registration beside the POSIX ones offered it under the wrong library, and the crate's own
+/// `every_implementation_is_also_declared_here_or_says_why_not` refused it (D525).
+pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(guest) = crate::read_guest_path(args[0]) else {
+        return u64::from(
+            orbistoun_core::GuestError::vendor(orbistoun_core::errno::INVALID).as_raw(),
+        );
+    };
+    let Some(facts) = facts_of(&guest) else {
+        return u64::from(
+            orbistoun_core::GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw(),
+        );
+    };
+    if write_stat(args[1], facts) {
+        OK
+    } else {
+        // The path resolved and the destination did not, so this is the caller's buffer.
+        u64::from(orbistoun_core::GuestError::vendor(orbistoun_core::errno::INVALID).as_raw())
+    }
+}
+
 /// What a guest is told about a path, host directory or mount point.
 ///
 /// **A mount point is a directory with no host behind it.** `/` is the case that matters: it
@@ -501,6 +540,54 @@ mod tests {
 
     fn path(text: &str) -> std::ffi::CString {
         std::ffi::CString::new(text).expect("a path")
+    }
+
+    /// **The vendor form succeeds like the POSIX one and fails differently**, which is the
+    /// only reason it is separate code.
+    ///
+    /// # What this asserts
+    ///
+    /// That a missing path answers a `0x8002_00xx` vendor code and **not** `-1`. Registering
+    /// the POSIX function under the vendor name would have handed a caller
+    /// `0xffff_ffff_ffff_ffff` where it tests a negative 32-bit vendor error, and those are not
+    /// the same number (D125, D525).
+    ///
+    /// # What it cannot assert
+    ///
+    /// Which errno the console answers for a missing path. Nothing has measured it. `ENOENT` is
+    /// what the failure *is* here - neither a host file nor a mount point is behind the name -
+    /// and the test pins the family and the sign, which is what a caller branches on, rather
+    /// than a specific code no run has established.
+    #[test]
+    fn the_vendor_stat_refuses_with_a_vendor_code_and_never_minus_one() {
+        let _guard = exclusively();
+        an_installation("kernel-stat");
+        let mut buffer = [0_u8; 256];
+        let at = buffer.as_mut_ptr() as usize as u64;
+
+        // Called directly rather than through this module's table: the body lives here and the
+        // name is offered by `libkernel_fs`, which is the split the crate's own declaration
+        // guard insisted on (D525).
+        let good = path("/data/save.bin");
+        assert_eq!(
+            super::kernel_stat(&[good.as_ptr() as usize as u64, at, 0, 0, 0, 0]),
+            0,
+            "a path that exists is answered like the POSIX form"
+        );
+
+        let missing = path("/data/nothing-here.bin");
+        let refused = super::kernel_stat(&[missing.as_ptr() as usize as u64, at, 0, 0, 0, 0]);
+        assert_ne!(refused, 0, "a missing path is a failure");
+        assert_ne!(
+            refused,
+            u64::MAX,
+            "and NOT the POSIX -1 - that is the whole reason this is not the POSIX function              under a second name"
+        );
+        assert_eq!(
+            refused & 0xffff_0000,
+            0x8002_0000,
+            "it is in the vendor family a caller tests against: {refused:#x}"
+        );
     }
 
     /// **The size is at the offset the chosen layout says**, which is the whole risk here.

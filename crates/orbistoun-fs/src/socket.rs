@@ -590,15 +590,158 @@ fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     })
 }
 
+/// `htonl(value)` - host byte order to network byte order, 32 bits.
+///
+/// Reference: POSIX.1-2008 `htonl(3)`. Network order is big-endian by definition and both the
+/// guest and this host are x86-64, so the conversion is a byte swap - stated rather than
+/// written as a no-op, because a no-op is what it would be on a big-endian host and is exactly
+/// the assumption that would be wrong there.
+///
+/// **Only the low thirty-two bits are meaningful.** The argument arrives in a 64-bit register
+/// and the high half is whatever the caller last had there.
+fn htonl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    u64::from((args[0] as u32).swap_bytes())
+}
+
+/// `htons(value)` - host to network, 16 bits. POSIX.1-2008 `htons(3)`.
+fn htons(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    u64::from((args[0] as u16).swap_bytes())
+}
+
+/// `ntohl(value)` - network to host, 32 bits. POSIX.1-2008 `ntohl(3)`.
+///
+/// The same swap as [`htonl`]: the conversion is its own inverse, which is why the two are
+/// separate names for one operation rather than a pair.
+fn ntohl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    u64::from((args[0] as u32).swap_bytes())
+}
+
+/// `ntohs(value)` - network to host, 16 bits. POSIX.1-2008 `ntohs(3)`.
+fn ntohs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    u64::from((args[0] as u16).swap_bytes())
+}
+
+/// The socket options `getsockopt` can answer, by the section and name they are harvested under.
+///
+/// # Why a table rather than a blanket answer
+///
+/// An option this layer cannot read has no value to hand back, and inventing one is worse than
+/// failing: a caller reads what it is given and acts on it. So each option is either answered
+/// from the host socket or **refused by name**, and the refusal says which option was wanted so
+/// a trace names the next piece of work rather than two integers.
+///
+/// The values come from the harvested table rather than being written here (D350/D351), which
+/// also bounds what can be recognised at all: `TCP_NODELAY` lives in `netinet/tcp.h`, outside
+/// what the harvest reads, so it is refused as unknown rather than guessed at.
+const READABLE_OPTIONS: &[(&str, &str)] = &[("socket", "SO_ERROR"), ("in", "IP_TTL")];
+
+/// The name of an option, for a report that would otherwise print a number.
+fn option_name(option: u64) -> Option<&'static str> {
+    let wanted = i64::try_from(option).ok()?;
+    READABLE_OPTIONS.iter().find_map(|(section, name)| {
+        (orbistoun_hle::constants::abi_constant(section, name)? == wanted).then_some(*name)
+    })
+}
+
+/// Says which option a guest wanted and could not have, once per distinct option.
+///
+/// Once, because options are typically set in a loop and the same refusal repeated forty times
+/// buries the rest of the report.
+fn refuse_option(level: u64, option: u64) -> u64 {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    static SAID: Mutex<Option<BTreeSet<(u64, u64)>>> = Mutex::new(None);
+
+    if let Ok(mut guard) = SAID.lock()
+        && guard
+            .get_or_insert_with(BTreeSet::new)
+            .insert((level, option))
+    {
+        let named = option_name(option).map_or_else(
+            || format!("option {option:#x} at level {level:#x}"),
+            |name| format!("{name} (level {level:#x})"),
+        );
+        let line = format!("orbistoun: getsockopt asked for {named}, which is not answered here");
+        eprintln!("{line}");
+        orbistoun_core::klog::note(&line);
+    }
+    FAILED
+}
+
+/// `getsockopt(fd, level, option, value, length)` - POSIX.1-2008 `getsockopt(2)`.
+///
+/// Answers the options the host socket can report and refuses the rest by name. See
+/// [`READABLE_OPTIONS`]; the counterpart `setsockopt` takes the opposite tack for a reason
+/// stated there - a server exits if setting an option fails, whereas a server *reading* one
+/// gets a value it will act on, so a wrong answer is worse than a refusal.
+fn getsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (fd, level, option, value, length) = (args[0], args[1], args[2], args[3], args[4]);
+    let Some(name) = option_name(option) else {
+        return refuse_option(level, option);
+    };
+    let answer = crate::descriptor::with_socket(fd, |socket| {
+        let Socket::Stream(stream) = socket else {
+            return None;
+        };
+        match name {
+            // **Reading `SO_ERROR` clears it**, which is the half a naive version drops: a
+            // caller polls it precisely to consume the pending error, and one that keeps
+            // answering the same error sees a socket that never recovers.
+            "SO_ERROR" => Some(
+                stream
+                    .take_error()
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.raw_os_error())
+                    .unwrap_or(0),
+            ),
+            "IP_TTL" => stream.ttl().ok().and_then(|ttl| i32::try_from(ttl).ok()),
+            _ => None,
+        }
+    });
+    let Some(Some(answered)) = answer else {
+        return refuse_option(level, option);
+    };
+    if !write_option(value, length, answered) {
+        return FAILED;
+    }
+    OK
+}
+
+/// Writes an `int` option value back to the guest, and the length beside it.
+fn write_option(value_at: u64, length_at: u64, value: i32) -> bool {
+    let Ok(base) = usize::try_from(value_at) else {
+        return false;
+    };
+    if value_at == 0 {
+        return false;
+    }
+    // SAFETY: a guest-supplied out-parameter under the identity mapping (D014). Four bytes,
+    // which is what an `int` option is - eight would take the caller's next variable (D272).
+    unsafe { std::ptr::write_unaligned(base as *mut i32, value) };
+    if length_at != 0
+        && let Ok(at) = usize::try_from(length_at)
+    {
+        // SAFETY: the caller's `socklen_t`, four bytes, under the same contract.
+        unsafe { std::ptr::write_unaligned(at as *mut u32, 4) };
+    }
+    true
+}
+
 /// Implementations this module provides, by symbol name.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("htonl", htonl),
+        ("htons", htons),
+        ("ntohl", ntohl),
+        ("ntohs", ntohs),
         ("socket", socket),
         ("bind", bind),
         ("listen", listen),
         ("accept", accept),
         ("connect", connect),
         ("setsockopt", setsockopt),
+        ("getsockopt", getsockopt),
         ("getsockname", getsockname),
         ("getpeername", getpeername),
         ("send", send),
@@ -823,5 +966,43 @@ mod tests {
         let fd = call("socket", [af_inet(), super::sock_stream(), 0, 0, 0, 0]);
         assert_eq!(call("listen", [fd, 8, 0, 0, 0, 0]), super::FAILED);
         assert!(crate::descriptor::close(fd));
+    }
+}
+
+#[cfg(test)]
+mod byte_order {
+    use super::{GUEST_ARG_REGISTERS, htonl, htons, ntohl, ntohs};
+
+    fn call(f: fn(&[u64; GUEST_ARG_REGISTERS]) -> u64, value: u64) -> u64 {
+        let mut regs = [0xDEAD_BEEF_DEAD_BEEF_u64; GUEST_ARG_REGISTERS];
+        regs[0] = value;
+        f(&regs)
+    }
+
+    /// The swap is the whole function, and the answer is known exactly.
+    #[test]
+    fn the_conversions_swap_bytes() {
+        assert_eq!(call(htonl, 0x1234_5678), 0x7856_3412);
+        assert_eq!(call(htons, 0x1234), 0x3412);
+        assert_eq!(call(ntohl, 0x7856_3412), 0x1234_5678);
+        assert_eq!(call(ntohs, 0x3412), 0x1234);
+    }
+
+    /// **Only the low half is meaningful.** The argument arrives in a 64-bit register whose
+    /// upper bits are the caller's leftovers; reading them would answer a different number
+    /// every call for the same input.
+    #[test]
+    fn the_high_half_of_the_register_is_ignored() {
+        assert_eq!(call(htonl, 0xFFFF_FFFF_1234_5678), 0x7856_3412);
+        assert_eq!(call(htons, 0xFFFF_FFFF_FFFF_1234), 0x3412);
+    }
+
+    /// Each conversion is its own inverse, which is why network order needs one operation
+    /// and not two.
+    #[test]
+    fn each_conversion_is_its_own_inverse() {
+        for value in [0_u64, 1, 0x0000_00FF, 0x1234_5678, 0xFFFF_FFFF] {
+            assert_eq!(call(ntohl, call(htonl, value)), value & 0xFFFF_FFFF);
+        }
     }
 }

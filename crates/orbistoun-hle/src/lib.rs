@@ -36,12 +36,17 @@
 //! assert_eq!(MODULE.imports[1].arity, 4);
 //! ```
 
+pub mod clocks;
 pub mod constants;
+pub mod differential;
+pub mod hardware;
 pub mod knowledge;
 pub mod learned;
+pub mod origin;
 
 use std::collections::HashMap;
 
+use crate::knowledge::Oracle;
 use orbistoun_core::GuestError;
 use orbistoun_nid::{Nid, NidHasher};
 use serde::{Deserialize, Serialize};
@@ -140,6 +145,20 @@ pub struct StubPolicy {
     /// it may do; writing code is not (D295).
     #[serde(default)]
     pub regions: HashMap<String, StubRegion>,
+    /// How each entry above was established, by symbol name.
+    ///
+    /// # Why beside the answers rather than inside them
+    ///
+    /// The answer is what the **guest** observes; this is what a **report** observes, and they
+    /// arrive separately - an answer comes from a policy file, a provenance comes from the
+    /// measurement that produced it. Folding them into one map would put a field in the
+    /// guest's path that nothing in the guest's path reads.
+    ///
+    /// **A name missing from here reads as [`Oracle::Assumed`]**, which is the safe direction:
+    /// an unlabelled answer somebody typed into a file is a guess, and treating it as one can
+    /// only ever call a run *less* honest than it was (D557).
+    #[serde(default)]
+    pub known: HashMap<String, Oracle>,
 }
 
 /// How a region reaches the guest.
@@ -184,6 +203,7 @@ impl Default for StubPolicy {
             default_return: StubReturn::Unimplemented,
             overrides: HashMap::new(),
             regions: HashMap::new(),
+            known: HashMap::new(),
         }
     }
 }
@@ -205,6 +225,57 @@ impl StubPolicy {
         for (name, region) in learned.regions {
             self.regions.entry(name).or_insert(region);
         }
+        // Provenance follows the same rule as the answer it describes, and for the same
+        // reason: a person's entry wins, and a person's entry that said nothing about where it
+        // came from is a guess. `or_insert` leaves such a name absent, which reads as
+        // `Assumed` - so absorbing a measured fact can never relabel a hand-written answer as
+        // evidence (D557).
+        for (name, known) in learned.known {
+            self.known.entry(name).or_insert(known);
+        }
+    }
+
+    /// How `name`'s answer was established.
+    ///
+    /// [`Oracle::Assumed`] when nothing says - see [`StubPolicy::known`] for why that is the
+    /// safe default rather than a gap.
+    #[must_use]
+    pub fn provenance(&self, name: &str) -> Oracle {
+        self.known.get(name).copied().unwrap_or(Oracle::Assumed)
+    }
+
+    /// Every symbol this policy says anything specific about, once each.
+    ///
+    /// Answers and regions together: both are this machine deciding what a function does, and
+    /// counting only the first is how a policy that wrote guest memory and answered nothing
+    /// read as an honest run (D557).
+    pub fn named(&self) -> impl Iterator<Item = &str> {
+        let mut names: Vec<&str> = self
+            .overrides
+            .keys()
+            .chain(self.regions.keys())
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names.into_iter()
+    }
+
+    /// How many symbols this policy answers or writes for, once each.
+    #[must_use]
+    pub fn specific(&self) -> usize {
+        self.named().count()
+    }
+
+    /// Of those, how many hold the run up rather than describing it.
+    ///
+    /// An entry whose provenance [`Oracle::is_evidence`] is the emulator being right; the rest
+    /// are props, and a run resting on one is an experiment rather than a measurement.
+    #[must_use]
+    pub fn propping(&self) -> usize {
+        self.named()
+            .filter(|n| !self.provenance(n).is_evidence())
+            .count()
     }
 
     /// The behaviour configured for `name`.
@@ -301,7 +372,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use super::{Delivery, Registry, StubPolicy, StubRegion, StubReturn};
+    use super::{Delivery, Oracle, Registry, StubPolicy, StubRegion, StubReturn};
     use orbistoun_nid::NidHasher;
     use std::collections::HashMap;
 
@@ -318,6 +389,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             regions: HashMap::new(),
+            known: HashMap::new(),
         };
         let learned = StubPolicy {
             // Never taken: it applies to every function the loop did *not* measure, which is
@@ -336,6 +408,14 @@ mod tests {
                     bytes: 0x1000,
                 },
             )]
+            .into_iter()
+            .collect(),
+            // The loop's own entries say where they came from: a sweep watches the guest
+            // proceed, which is `GuestObserved` and never stronger.
+            known: [
+                ("sceFoo".to_owned(), Oracle::GuestObserved),
+                ("sceBar".to_owned(), Oracle::GuestObserved),
+            ]
             .into_iter()
             .collect(),
         };

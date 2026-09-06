@@ -1,7 +1,7 @@
-obscene                entered    178 imports      87658 calls  100% standing   ran to the time limit
-PPSA28061-app0         entered     47 imports        933 calls   94% standing   image+0x43c4
-PPSA02664-app0         entered     23 imports        222 calls   96% standing   image+0xafc959
-PPSA03416-app0         entered     23 imports        222 calls   96% standing   image+0xafc959
-PPSA25872-app0         entered     14 imports       1735 calls  100% standing   image+0x7b591e
-PPSA21564-app0         entered     13 imports        131 calls   97% standing   image+0x70a932c
-PPSA04263-app0         entered      4 imports   98957030 calls  100% standing   ran to the time limit
+PPSA02664-app0         flipped    197 imports (177 answered)     418278 calls  100% standing   image+0xf56e09
+obscene                flipped    193 imports (180 answered)     278722 calls  100% standing   ran to the time limit
+PPSA03416-app0         flipped    187 imports (173 answered)     467537 calls  100% standing   image+0x1389269
+PPSA25872-app0         entered    129 imports (118 answered)    7004897 calls    5% standing   the title's own modules+0xba940
+PPSA04263-app0         entered     70 imports (63 answered)      28341 calls  100% standing   image+0x196b91a
+PPSA21564-app0         entered     57 imports (56 answered)     500260 calls  100% standing   the title's own modules+0x7af792
+PPSA28061-app0         entered     47 imports (- answered)        933 calls   94% standing   image+0x43c4

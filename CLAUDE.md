@@ -330,4 +330,7 @@ rediscovering it by making the same mistake.
 - [docs/BACKLOG.md](docs/BACKLOG.md) - everything considered, loosely ranked.
 - [docs/SCOPE.md](docs/SCOPE.md) - what orbistoun deliberately is not.
 - [docs/SYMBOLS.md](docs/SYMBOLS.md) - symbol database format and the hash suffix.
+- [docs/ADDRESS_MAP.md](docs/ADDRESS_MAP.md) - every fixed base, its owner, and the
+  conventions for taking a new one. **Check it before choosing an address** - it is gated
+  against the source, so it cannot go stale (D513).
 - [docs/TESTING.md](docs/TESTING.md) - the test strategy and the oracle problem.

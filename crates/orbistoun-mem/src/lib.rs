@@ -33,7 +33,106 @@ pub mod test_bases;
 
 pub use platform::{Reservation, allocation_granularity};
 
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
 use orbistoun_core::{DIRECT_MEMORY_ALIGN, GUEST_PAGE_SIZE};
+
+/// The base of the last reservation this process failed to make, with [`FAIL_KIND`] the
+/// reason and [`FAIL_LEN`] the size.
+///
+/// # Why a run needs this
+///
+/// A reservation failure is otherwise invisible. `map_named_direct_memory` collapses every
+/// [`MemError`] into `NoMemory`, the guest reads that as out-of-memory and faults through the
+/// null it kept - far from the reservation, with the base and the reason both unrecoverable
+/// (worklog 284). Recorded allocation-free, because `reserve` runs on the guest's own stack
+/// when a guest maps memory, and a lock or an allocation there is the D381 fault.
+static FAIL_BASE: AtomicU64 = AtomicU64::new(0);
+/// The size of the last failed reservation; see [`FAIL_BASE`].
+static FAIL_LEN: AtomicU64 = AtomicU64::new(0);
+/// Why the last reservation failed: `0` none yet, `1` conflict, `2` misaligned, `3` host
+/// refused. Written last, with `Release`, so a reader that sees it also sees the base and len.
+static FAIL_KIND: AtomicU8 = AtomicU8::new(0);
+
+/// How many reservations have failed, not just the last one.
+///
+/// # Why a count and not only the last failure
+///
+/// The last failure alone cannot answer "did this run fail more reservations than that one",
+/// which is exactly the question when two runs of the same binary take different paths. Two
+/// runs reporting the identical last failure looked like agreement and were not compared on
+/// anything else (D487).
+static FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// The base of the *first* failure, which the last one cannot stand in for.
+///
+/// Thirteen failures all at one address is a caller retrying; thirteen at different addresses
+/// is a walk running out of room. The two want different fixes and the last failure alone
+/// cannot tell them apart.
+static FIRST_FAIL_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// The last reservation this process could not make, for the run report to surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReserveFailure {
+    /// The base address the reservation was attempted at - the value the empty-arena
+    /// reasoning could not otherwise confirm.
+    pub base: u64,
+    /// The length in bytes.
+    pub len: u64,
+    /// Why it failed, in words a report can print.
+    pub reason: &'static str,
+}
+
+/// Records a reservation failure for the run report. Allocation-free and lock-free (D381).
+fn note_reserve_failure(base: u64, len: u64, error: &MemError) {
+    FAIL_BASE.store(base, Ordering::Relaxed);
+    FAIL_LEN.store(len, Ordering::Relaxed);
+    let kind = match error {
+        MemError::Conflict { .. } => 1,
+        MemError::Misaligned { .. } => 2,
+        MemError::HostRefused(_) => 3,
+    };
+    if FAIL_COUNT.fetch_add(1, Ordering::Relaxed) == 0 {
+        FIRST_FAIL_BASE.store(base, Ordering::Relaxed);
+    }
+    // Last, so a reader never sees the reason set against a stale base or len.
+    FAIL_KIND.store(kind, Ordering::Release);
+}
+
+/// How many reservations this process failed to make.
+///
+/// **Zero is a real answer** and differs from "no failure recorded": a run that reserved
+/// everything it asked for reports zero here and [`None`] from [`last_reserve_failure`], and
+/// the two agree. A run that failed several reports the count here and only the newest there.
+#[must_use]
+pub fn reserve_failures() -> u64 {
+    FAIL_COUNT.load(Ordering::Relaxed)
+}
+
+/// The base of the first reservation that failed, or [`None`] if none has.
+#[must_use]
+pub fn first_reserve_failure_base() -> Option<u64> {
+    (FAIL_COUNT.load(Ordering::Relaxed) > 0).then(|| FIRST_FAIL_BASE.load(Ordering::Relaxed))
+}
+
+/// The last reservation this process failed to make, or [`None`] if every one has succeeded.
+///
+/// Read at the end of a run, from the host side, so it may allocate - unlike the recording
+/// side, which is on the guest's stack.
+#[must_use]
+pub fn last_reserve_failure() -> Option<ReserveFailure> {
+    let reason = match FAIL_KIND.load(Ordering::Acquire) {
+        1 => "conflict - the address was already reserved (something else holds it)",
+        2 => "misaligned - the base or length broke an ABI alignment rule",
+        3 => "host refused - out of memory, or an address the host would not give",
+        _ => return None,
+    };
+    Some(ReserveFailure {
+        base: FAIL_BASE.load(Ordering::Relaxed),
+        len: FAIL_LEN.load(Ordering::Relaxed),
+        reason,
+    })
+}
 
 /// Why an address-space operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -212,8 +311,20 @@ impl AddressSpace {
         len: u64,
         protection: Protection,
     ) -> Result<Region, MemError> {
-        self.validate(base, len, false)?;
-        let held = platform::reserve(base, len, protection)?;
+        // The failure is captured here, at the one place both the validate conflict and the
+        // host refusal pass through, so the report can name the base and the reason a caller
+        // that only sees `NoMemory` cannot (worklog 284).
+        if let Err(e) = self.validate(base, len, false) {
+            note_reserve_failure(base, len, &e);
+            return Err(e);
+        }
+        let held = match platform::reserve(base, len, protection) {
+            Ok(held) => held,
+            Err(e) => {
+                note_reserve_failure(base, len, &e);
+                return Err(e);
+            }
+        };
         let region = Region {
             base,
             len,
@@ -248,11 +359,20 @@ impl AddressSpace {
     pub fn protect(&mut self, base: u64, len: u64, protection: Protection) -> Result<(), MemError> {
         if !self.owns(base, len) {
             let end = base.saturating_add(len);
-            return Err(MemError::HostRefused(format!(
+            let error = MemError::HostRefused(format!(
                 "{base:#x}..{end:#x} is not inside any region this address space owns"
-            )));
+            ));
+            note_reserve_failure(base, len, &error);
+            return Err(error);
         }
-        platform::protect(base, len, protection)
+        // Recorded on failure for the same reason `reserve` is: a guest that maps into a
+        // pre-reserved range and is refused faults far from here, and the report otherwise
+        // sees only `NoMemory` (worklog 284).
+        if let Err(e) = platform::protect(base, len, protection) {
+            note_reserve_failure(base, len, &e);
+            return Err(e);
+        }
+        Ok(())
     }
 }
 

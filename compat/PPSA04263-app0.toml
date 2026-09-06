@@ -4,23 +4,25 @@
 
 [status]
 reach = "entered"
-outcome = "ran to the time limit"
-imports = 4
-calls = 98957030
+outcome = "image+0x196b91a"
+imports = 70
+calls = 28341
 standing = 100
 default_return = "unimplemented"
+unanswered = 7
 limit_seconds = 12
 build = "0.1.0"
-measured_on = "2026-08-23"
+measured_on = "2026-09-04"
 
 [experiment]
 reach = "entered"
-outcome = "image+0x2ba64c1"
-imports = 12
-calls = 32
-standing = 97
+outcome = "image+0x196b91a"
+imports = 72
+calls = 28343
+standing = 100
 default_return = "unimplemented"
 overrides = 1
+propping = 1
 limit_seconds = 8
 build = "0.1.0"
-measured_on = "2026-09-01"
+measured_on = "2026-09-02"

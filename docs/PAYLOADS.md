@@ -45,7 +45,7 @@ until you notice the guest brings its own protocol.
 
 | stage | state |
 |---|---|
-| parse the container | works, all 23 payloads |
+| parse the container | works, all 25 payloads |
 | read the import list | works, exact, `readelf` agrees on all five |
 | name the imports | 24/24, 33/34, 39/41, 84/85, 159/160 |
 | map and relocate | complete, zero unresolved slots |

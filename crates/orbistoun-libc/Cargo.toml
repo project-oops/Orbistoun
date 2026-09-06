@@ -21,6 +21,9 @@ orbistoun-hle = { workspace = true }
 # `optarg` and `optind`, which this layer reserves. No cycle - `orbistoun-thunk` takes
 # only core and mem (D344).
 orbistoun-thunk = { workspace = true }
+# For the fixed-base heap region, reserved through the one crate allowed to touch the host
+# address space - principle 4. A subsystem taking `mem` is the spine's own order (D513).
+orbistoun-mem = { workspace = true }
 # For the harvested ABI constants, which are read from their data file rather than
 # retyped - a value a person typed is one nobody can trace back to a header (D351).
 toml = { workspace = true }

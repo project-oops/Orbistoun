@@ -232,3 +232,192 @@ kernel base), a second `136-kernel` check can *use* the raw read to walk kernel 
 That is the measurement orbistoun needs to model or no-op the escape and let a payload reach
 `main`. It reads kernel memory, so it must guard every access and stay behind the recon check's
 "a kernel context is present" pass.
+
+---
+
+## Update 2026-09-04: ps5_mode is cracked and Agc is reachable - the probe set
+
+The operator reports access to libSceAgc. This is the ask, aimed and prioritised from
+**measurement rather than guesswork**: every function below is one PPSA02664 actually calls, the
+counts are its counts, and the argument classes were read off the guest's own calls in a run made
+for this purpose (D559).
+
+### First, the safety gate - because D008 blocks the obvious plan
+
+D008 forbids calling a function whose arity is uncertain, and obSCEne's standing for Gnm is D107:
+two independent open reimplementations agreeing. **That standard cannot be met for Agc.** shadPS4
+and GPCS4 are PS4/Gnm projects; there is no mature open Agc reimplementation to agree with
+anything. Taken literally the gate blocks the entire ask.
+
+It can be met a different way. **In System V AMD64 the first six integer arguments are in
+registers, and a callee simply ignores register arguments it does not take.** A call that sets all
+six to individually safe values is therefore safe for *any* arity up to six, whatever it turns out
+to be - the stack is never involved, which is the thing D008 is protecting. What remains is not
+arity risk but **value** risk: a pointer parameter handed a non-pointer, or a size parameter
+handed a huge number.
+
+That is what the argument census below is for, and it is why this ask leads with which functions
+are safe rather than with which are interesting.
+
+### The four classes, read off the guest
+
+Every Agc function PPSA02664 calls, grouped by what it passes in `arg0`. The three distinct
+pointer values are the finding: functions sharing one are taking the same object.
+
+**Class B - a caller-owned writer struct on the stack. Start here.**
+
+`arg0 = 0x6000007fbe38`, and the guest's stack there holds
+`{begin = 0x6000007fbe70, end = 0x6000007fc270, begin, end}` - a **0x400-byte command buffer with
+a begin/end pair in front of it**, the struct sitting 0x38 below the buffer it describes.
+
+| calls | function |
+|--:|---|
+| 2 | `sceAgcCbNop` |
+| 2 | `sceAgcCbReleaseMem` |
+| 2 | `sceAgcDcbDmaData` |
+| 2 | `sceAgcDcbWaitRegMem` |
+| 2 | `0x7d86501b8094ef57` (unnamed; takes `arg0 - 8`, where a count `0x1fa` sits) |
+
+**These five are constructible from nothing** - a probe allocates a buffer, writes a begin/end
+pair in front of it, and calls. This is exactly `gnm.c`'s technique and the same safety class.
+
+**Begin with `sceAgcCbNop`.** A no-op's packet is the simplest encoding that exists, so if nothing
+appears in the buffer the instrument is wrong rather than the platform - the same role `pipeline`
+plays in the GPU section.
+
+**Class A - a library-owned Dcb handle.** `arg0 = 0x740002447868`, one heap object shared by nine
+functions:
+
+| calls | function |
+|--:|---|
+| 5 | `sceAgcDcbEventWrite` |
+| 4 | `sceAgcDcbPushMarker` |
+| 3 | `sceAgcDcbPopMarker` |
+| 2 | `sceAgcDcbAcquireMem` |
+| 2 | `sceAgcDcbResetQueue` |
+| 1 | `sceAgcDcbSetCxRegistersIndirect` |
+| 1 | `sceAgcDcbSetUcRegistersIndirect` |
+| 1 | `sceAgcDcbSetIndexSize` |
+| 1 | `sceAgcDcbWaitUntilSafeForRendering` |
+
+**The open question that unlocks all nine: what creates that object?** Nothing orbistoun has
+observed constructs it - the guest already holds it by the first call. If the census (below) names
+a constructor, that one call opens nine.
+
+**Class C - a handle returned by an earlier call. Not standalone-probeable, and this is why it
+matters.** Four of these receive `0x7fff0001` in `arg0` - which is **orbistoun's own placeholder**,
+meaning the guest fed them the return value of a call nothing implements:
+
+`sceAgcSetCxRegIndirectPatchAddRegisters` (23 calls), `sceAgcSetUcRegIndirectPatchAddRegisters`,
+`sceAgcSetCxRegIndirectPatchSetAddress`, `sceAgcSetUcRegIndirectPatchSetAddress`.
+
+Three more take `0x140081c3bf21` - unaligned, in a region unlike any host pointer, so a packed or
+tagged handle rather than an address: `sceAgcQueueEndOfPipeActionPatchAddress`,
+`sceAgcWaitRegMemPatchAddress`, `sceAgcDmaDataPatchSetDstAddressOrOffset`.
+
+**Do not call these blind.** Their first argument is a handle whose producer is unidentified, and
+a fabricated one is exactly the value risk the safety argument above does not cover. They come
+free once Class A and B are answered.
+
+**Class D** - `0x53bbd82b51d172db` (1 call) takes a pointer to a static descriptor in the guest's
+own image, `00 00 00 00 01 00 00 00` then zeroes. A probe can pass a similar zeroed block.
+
+### What to record for each call
+
+The `gnm.c` shape, unchanged: poison the buffer, call, dump the delta and the return value. The
+bytes it wrote **are** the finding - that encoding is what orbistoun's command processor must
+parse, and there is no other way here to learn it. A guard band behind the buffer catches a write
+that runs long, which is the one fault this could cause and not otherwise notice.
+
+Two passes are worth it where a builder writes nothing for zero: `arg1..arg5 = 0` first, then
+small plausible values (1, 2, 4), one register at a time.
+
+### The shader object - the actual wall
+
+`sceAgcCreateShader(out, header, bytecode, arg3)`, arity 4 from dumps (D194).
+
+**Record:** the 32 bytes at `out`; then, if `*out` is a mapped pointer, **0x200 bytes from it**.
+Twice, with two different payload lengths, so fields that vary separate from fields that do not.
+
+Orbistoun supplies the header shape, already established from the guest: it begins `31 32 33 34`
+(`'1234'`), then `0x18`, then a length - `0xd8` and `0x118` both observed.
+
+**What it unblocks:** the guest reads a dword at **+0x50** and keeps only its low byte, then a
+quadword at **+0x30**. Those two offsets are the wall, and a run with a 4KB region planted there
+takes PPSA02664 from 197 imports to 215 and from 1 shader created to 33 (D559). Measured
+provenance also means orbistoun records it as an **honest** run rather than an experiment (D557),
+which a guessed layout never can.
+
+### The surface census, worth simply re-running
+
+472 libSceAgc symbols are recorded `absent` across the existing captures, and the reason is in the
+record: *"excluded at build time: known to end the process on this platform"*. If the library now
+maps, **re-running the existing census converts all 472 into a real surface** with no new code.
+
+Two NIDs the guest calls are named by nothing on either side - `0x53bbd82b51d172db` and
+`0x7d86501b8094ef57`. Neither matches any of the 111 Agc names obSCEne knows; orbistoun swept all
+111 against both hashes and got no hit. Any new name the census reports, orbistoun can hash and
+place.
+
+### Free while the console is up
+
+Orbistoun's ask list is **744 open questions across 502 functions**, but only **143 distinct
+premises**, and 28 of those carry 629 of the total. `orbistoun-cli questions --premises` ranks them
+by how much a single answer retires - which is the right order to spend a hardware day in.
+
+---
+
+## Update 2026-09-04, second: the Dcb "constructor" is the wrong question
+
+`run-native-title.txt` came back and Class B worked - four builders called, four encodings
+captured, and orbistoun's packet walker consumes three of them exactly (D565). Thank you. Two
+things follow, one a correction to the ask itself.
+
+### The correction: those nine functions are Class B, not Class A
+
+The first handover asked you to **find what constructs the Dcb object** those nine functions take,
+calling it "a library-owned handle". **That was wrong, and it was orbistoun's mistake to make.**
+
+`0x740002447868` is not a handle libSceAgc issued. `0x7400_0000_0000` is orbistoun's own fixed-base
+heap - it is in `docs/ADDRESS_MAP.md`, which is gated against the source so it cannot go stale, and
+was not consulted. The address is **memory the guest allocated itself**.
+
+So there is probably no allocating constructor to find. There is an **initialiser taking a
+caller-allocated block**, which is the Class B shape you have already proved four times.
+
+### The one call worth making
+
+**`sceAgcDcbResetQueue`.**
+
+PPSA02664 calls it on **that exact pointer**, twice, before every other use of the object. "Reset
+queue" on a freshly allocated block is what an initialiser looks like, and it is the only observed
+call that could be one.
+
+The recipe is the one that already worked - no new technique:
+
+- allocate a block, poison it, pass it as `arg0`
+- `arg1..arg5 = 0` first, then a second pass with a plausible size in `arg1` (the guest's buffer
+  work elsewhere is 0x400-sized, so `0x400` is a reasonable second value)
+- **dump the delta and the return value**
+
+**What it answers:** if it writes a structure, that structure is the Dcb, and nine functions open
+at once - `EventWrite`, `PushMarker`, `PopMarker`, `AcquireMem`, `SetCxRegistersIndirect`,
+`SetUcRegistersIndirect`, `SetIndexSize`, `WaitUntilSafeForRendering` and `ResetQueue` itself. If
+it writes nothing and returns an error, that is equally useful: it says the object is built
+somewhere orbistoun has not seen, and the search moves elsewhere.
+
+### And a bug worth more than the ask
+
+**The report contradicts itself.** It records `sceAgcCbNop` as `absent`, along with 121 other
+libSceAgc symbols - while section `166-agc` **called that symbol and captured four bytes of its
+output**. All five symbols the Agc section exercised are recorded absent.
+
+The cause looks like `900-surface/agc`, which **skipped** with *"belongs to the other console
+generation, so absence is expected rather than a gap"* - on hardware `005-generation` had just
+identified as generation 5 with `gpu = agc`. The gate appears inverted for this library.
+
+**This matters to orbistoun specifically**: the first handover was built on *"472 libSceAgc symbols
+recorded absent"* and treated that as the blocker on the whole Agc axis. It was not measuring what
+it appeared to. Fixing it is probably also the cheapest way to answer the constructor question
+properly - a working census of libSceAgc's exports would show whether any constructor-shaped name
+exists at all, which no amount of calling can.

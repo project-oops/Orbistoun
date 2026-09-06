@@ -216,6 +216,14 @@ impl NidHasher {
     pub fn suffix_len(&self) -> usize {
         self.suffix.len()
     }
+
+    /// The suffix itself, for a consumer that has to hash somewhere this hasher cannot reach.
+    ///
+    /// The kernel resolves a `sceKernelDlsym` name against guest export tables and so must
+    /// hash at the call, where a `NidHasher` built from configuration does not reach (D517).
+    pub fn suffix_bytes(&self) -> &[u8] {
+        &self.suffix
+    }
 }
 
 impl Default for NidHasher {

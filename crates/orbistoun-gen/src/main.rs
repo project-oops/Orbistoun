@@ -29,8 +29,11 @@
 mod assembler;
 mod buffer_formats;
 mod constants;
+mod ctype;
 mod encodings;
 mod fixtures;
+mod hardware;
+mod knowledge;
 mod operands;
 mod patterns;
 mod solve;
@@ -138,6 +141,60 @@ enum Command {
     ///     cd freebsd-src
     ///     git sparse-checkout set lib/libc lib/libsys lib/libthr lib/libutil lib/msun
     ///     git sparse-checkout add sys/sys sys/netinet include
+    /// Write the committed table of what a conformance run measured.
+    ///
+    /// The `measure` records carry subject, condition, observation and kind, which is enough
+    /// for an assertion to name one and be checked against it. A measurement every run agreed
+    /// on is marked constant; one they disagreed on is kept and marked not.
+    Measurements {
+        /// The directory of capture files, in the sibling conformance-probe repository.
+        #[arg(long, default_value = "../obscene/data/hardware")]
+        records: PathBuf,
+        /// Where the generated table goes.
+        #[arg(long, default_value = "crates/orbistoun-hle/data/hardware.toml")]
+        out: PathBuf,
+    },
+    /// Attach conformance-run observations to the functions they exercised.
+    ///
+    /// Joins `try` and `res` on their check id and records each outcome as an edge case on
+    /// the function it names - **quoted, not interpreted**. The value's meaning lives in the
+    /// check rather than the record, so reading every one as a return value would write
+    /// timestamps and loop counters into the knowledge base as behaviour.
+    Hardware {
+        /// The directory of capture files, in the sibling conformance-probe repository.
+        #[arg(long, default_value = "../obscene/data/hardware")]
+        records: PathBuf,
+        /// Where the per-library knowledge files live.
+        #[arg(long, default_value = "crates/orbistoun-hle/data/knowledge")]
+        out: PathBuf,
+    },
+    /// Derive knowledge entries from the implementations' own documentation.
+    ///
+    /// For every implemented symbol with no entry, reads the doc comment on the function
+    /// that implements it and records what it says - purpose, the specification it cites,
+    /// and the caveats it emphasised. **Nothing is invented**: documentation citing no
+    /// standard lands as `assumed`, and every entry goes through the format's own
+    /// provenance rules, which stop the write rather than warning (D180).
+    Knowledge {
+        /// The crate sources to read implementations and declarations from.
+        #[arg(long, default_value = "crates")]
+        crates: PathBuf,
+        /// Where the per-library knowledge files live.
+        #[arg(long, default_value = "crates/orbistoun-hle/data/knowledge")]
+        out: PathBuf,
+    },
+    /// Read the character-classification tables from an obSCEne hardware capture.
+    ///
+    /// The values are the platform C library's own, so nothing lawful states them and the
+    /// capture is the oracle. It carries its own spot-checks, and the generator refuses a
+    /// table that disagrees with them.
+    Ctype {
+        /// Path to an obSCEne capture holding the `035-libc/getpctype` probe.
+        source: PathBuf,
+        /// Where to write the table.
+        #[arg(long, default_value = "crates/orbistoun-libc/data/ctype.toml")]
+        out: PathBuf,
+    },
     Constants {
         /// Path to a FreeBSD source checkout.
         source: PathBuf,
@@ -180,6 +237,13 @@ fn main() -> Result<()> {
             })?;
             println!("{value}");
             Ok(())
+        }
+        Command::Knowledge { crates, out } => run_knowledge(crates, out, cli.dry_run),
+        Command::Hardware { records, out } => run_hardware(records, out, cli.dry_run),
+        Command::Measurements { records, out } => run_measurements(records, out, cli.dry_run),
+        Command::Ctype { source, out } => {
+            let rendered = ctype::run(source)?;
+            emit(&rendered, out, cli.dry_run)
         }
         Command::Constants { source, out } => {
             let rendered = constants::run(source)?;
@@ -247,6 +311,199 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Derives the missing knowledge entries and writes them, or shows what it would write.
+///
+/// **Refuses on a provenance fault rather than warning.** The format's rules are the reason
+/// this is safe to run unattended: an entry claiming an outside source without citing one is
+/// rejected by [`orbistoun_hle::knowledge::KnowledgeFile::merge`], and one rejected entry
+/// stops the whole write. Reporting and carrying on would leave the file in a state nobody
+/// chose (D180).
+fn run_knowledge(crates: &std::path::Path, out: &std::path::Path, dry_run: bool) -> Result<()> {
+    let sources = rust_sources(crates)?;
+    anyhow::ensure!(!sources.is_empty(), "no sources under {}", crates.display());
+
+    let existing = load_knowledge(out)?;
+    let derived = knowledge::derive(&sources, &existing, &orbistoun_nid::today());
+
+    for symbol in &derived.undeclared {
+        eprintln!("  {symbol}: implemented but declared by no module, so nothing reaches it");
+    }
+    for symbol in &derived.undocumented {
+        eprintln!("  {symbol}: implemented with no doc comment, so there is nothing to derive");
+    }
+    anyhow::ensure!(
+        derived.faults.is_empty(),
+        "{} entr(ies) would not be admissible, so nothing was written:\n  {}",
+        derived.faults.len(),
+        derived.faults.join("\n  ")
+    );
+
+    eprintln!("derived {} entr(ies)", derived.added);
+    write_knowledge(&derived.files, out, dry_run)
+}
+
+/// Attaches conformance-run observations to the entries for the functions they exercised.
+///
+/// **Refuses on a provenance fault**, exactly as the derivation does: the knowledge format's
+/// own rules decide admissibility, and one rejected entry stops the write rather than leaving
+/// the files in a state nobody chose (D180).
+fn run_hardware(records: &std::path::Path, out: &std::path::Path, dry_run: bool) -> Result<()> {
+    let mut observations = Vec::new();
+    let mut seen = 0_usize;
+    for (name, text) in captures(records)? {
+        let found = hardware::observations_in(&text, &name);
+        if found.is_empty() {
+            continue;
+        }
+        seen += 1;
+        eprintln!("  {name}: {} observation(s)", found.len());
+        observations.extend(found);
+    }
+    anyhow::ensure!(
+        seen > 0,
+        "no capture in {} carried a joinable record",
+        records.display()
+    );
+
+    let observations = hardware::fold(observations);
+    let existing = load_knowledge(out)?;
+    let ingested = hardware::ingest(&observations, &existing, &orbistoun_nid::today());
+    for symbol in &ingested.unknown {
+        eprintln!("  {symbol}: observed on hardware, but nothing here records it");
+    }
+    anyhow::ensure!(
+        ingested.faults.is_empty(),
+        "{} entr(ies) would not be admissible, so nothing was written:\n  {}",
+        ingested.faults.len(),
+        ingested.faults.join("\n  ")
+    );
+    eprintln!(
+        "attached {} observation(s), {} of which the two runs disagreed on",
+        ingested.attached, ingested.varying
+    );
+    write_knowledge(&ingested.files, out, dry_run)
+}
+
+/// Writes the measurement table, or shows it.
+fn run_measurements(records: &std::path::Path, out: &std::path::Path, dry_run: bool) -> Result<()> {
+    let mut found = Vec::new();
+    for (name, text) in captures(records)? {
+        let rows = hardware::measurements_in(&text, &name);
+        if rows.is_empty() {
+            continue;
+        }
+        eprintln!("  {name}: {} measurement(s)", rows.len());
+        found.extend(rows);
+    }
+    anyhow::ensure!(
+        !found.is_empty(),
+        "no capture in {} carried a measure record",
+        records.display()
+    );
+    let table = hardware::table(&hardware::fold(found));
+    let constant = table.constants().count();
+    eprintln!(
+        "{} distinct measurement(s), {constant} constant across every run that took them",
+        table.measurements.len()
+    );
+    let rendered = table.render().context("rendering the measurement table")?;
+    emit(&rendered, &out.to_path_buf(), dry_run)
+}
+
+/// Every capture file under a directory, as (name, contents).
+fn captures(records: &std::path::Path) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for entry in
+        std::fs::read_dir(records).with_context(|| format!("reading {}", records.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "txt") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        out.push((name, text));
+    }
+    Ok(out)
+}
+
+/// Reads every per-library knowledge file, keyed by the library it declares.
+fn load_knowledge(
+    out: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, orbistoun_hle::knowledge::KnowledgeFile>> {
+    let mut existing = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(out).with_context(|| format!("reading {}", out.display()))? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let file = orbistoun_hle::knowledge::KnowledgeFile::parse(&text)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        existing.insert(file.library.clone(), file);
+    }
+    Ok(existing)
+}
+
+/// Writes the knowledge files back, or shows what would be written.
+fn write_knowledge(
+    files: &std::collections::BTreeMap<String, orbistoun_hle::knowledge::KnowledgeFile>,
+    out: &std::path::Path,
+    dry_run: bool,
+) -> Result<()> {
+    for (library, file) in files {
+        let rendered = file
+            .render()
+            .with_context(|| format!("rendering {library}"))?;
+        let path = out.join(format!("{library}.toml"));
+        if dry_run {
+            println!("--- {}", path.display());
+            print!("{rendered}");
+            continue;
+        }
+        std::fs::write(&path, rendered).with_context(|| format!("writing {}", path.display()))?;
+    }
+    if !dry_run {
+        eprintln!("wrote {}", out.display());
+    }
+    Ok(())
+}
+
+/// Every `.rs` file under a directory, read into memory.
+///
+/// Generated sources are skipped: a table emitted by another generator carries no
+/// documentation worth deriving from, and reading it back would record a machine's output as
+/// though somebody had established it.
+fn rust_sources(root: &std::path::Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs") {
+                out.push(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading {}", path.display()))?,
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Writes a generated table, or shows it.

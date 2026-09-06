@@ -61,15 +61,15 @@ pub(crate) fn exclusively() -> std::sync::MutexGuard<'static, ()> {
     // `sendfile` that passed alone failed in the suite. Reset them under the lock this returns, so
     // every test that holds the guard starts from empty (D241 was the serialising half; this is the
     // resetting half it turned out also to need).
-    crate::descriptor::clear();
-    crate::fcntl::clear();
-    crate::metadata::clear();
-    crate::mount::clear();
+    descriptor::clear();
+    fcntl::clear();
+    metadata::clear();
+    mount::clear();
     // The escape pipe's address is a static an escape test sets and never cleared. Left set, it turns
     // `write` on descriptor 4 into a no-op (the kernel R/W escape write end), so a later test whose
     // ordinary file descriptor happens to be 4 has its writes silently swallowed - which is exactly
     // what stranded the `sendfile` test in the suite, `moved` = 5 but the file empty. Cleared here.
-    crate::escape::set_kernel_read_address(0);
+    escape::set_kernel_read_address(0);
     guard
 }
 
@@ -80,6 +80,10 @@ guest_module! {
         "sceKernelOpen" => 3,
         "sceKernelClose" => 1,
         "sceKernelRead" => 3,
+        // Arity 4, the same shape as POSIX `pread`, which this crate implements and
+        // `orbistoun-libc` declares at four - a descriptor, a destination and its length, and
+        // the offset to read from (D526).
+        "sceKernelPread" => 4,
         "sceKernelWrite" => 3,
         "sceKernelLseek" => 3,
         "sceKernelStat" => 2,
@@ -212,6 +216,31 @@ fn kernel_read(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     descriptor::read(args[0], into).map_or_else(|| FAILED_DESCRIPTOR, |n| n as u64)
 }
 
+/// `sceKernelPread(fd, buffer, length, offset)` - the vendor-named positioned read.
+///
+/// # What is shared and what is not
+///
+/// The positioned read itself is `descriptor::read_at`, which POSIX `pread` already uses - it
+/// reads at an offset **without moving the descriptor's position**, which is the whole point of
+/// the call and is why it is not a seek, a read and a seek back (that is a race with extra
+/// steps). Sharing it keeps one implementation of the thing that is hard.
+///
+/// What differs is failure, exactly as it does for `stat` (D525): POSIX answers `-1`, and a
+/// `sceKernel*` file call answers [`FAILED_DESCRIPTOR`] - the vendor `EBADF` sign-extended,
+/// which obSCEne measured on hardware for `read`, `lseek` and `write` against a bad descriptor
+/// (D439). A caller testing for that number would not recognise `-1`.
+///
+/// The guest reached this by opening its first asset file: `sceKernelStat` answering (D525) let
+/// it get as far as `sceKernelOpen`, and this is the next call it makes.
+fn kernel_pread(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: as `kernel_read` - a guest-supplied destination and its declared length, which
+    // is the contract the real call has.
+    let Some(into) = (unsafe { guest_slice(args[1], args[2]) }) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    descriptor::read_at(args[0], into, args[3]).map_or_else(|| FAILED_DESCRIPTOR, |n| n as u64)
+}
+
 /// `sceKernelWrite(fd, buffer, length)`.
 ///
 /// # The call that decides whether a probe can talk to us
@@ -341,16 +370,23 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceKernelOpen", kernel_open),
         ("sceKernelClose", kernel_close),
         ("sceKernelRead", kernel_read),
+        ("sceKernelPread", kernel_pread),
         ("sceKernelWrite", kernel_write),
         ("sceKernelLseek", kernel_lseek),
         ("sceKernelMkdir", kernel_mkdir),
+        // The body is in `metadata`, beside the POSIX form it shares its success path with;
+        // the name is declared here, so this is where it is offered (D525).
+        ("sceKernelStat", metadata::kernel_stat),
         ("sceKernelDebugOutText", kernel_debug_out_text),
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GUEST_ARG_REGISTERS, kernel_debug_out_text, kernel_mkdir};
+    use super::{
+        FAILED_DESCRIPTOR, GUEST_ARG_REGISTERS, kernel_debug_out_text, kernel_mkdir, kernel_open,
+        kernel_pread, kernel_read, mount,
+    };
 
     /// A NUL-terminated guest string, from a leaked host buffer under the identity mapping.
     fn guest_cstr(text: &str) -> u64 {
@@ -365,6 +401,74 @@ mod tests {
         args
     }
 
+    /// **A positioned read reads at the offset and leaves the position alone**, and a bad
+    /// descriptor answers the vendor code rather than the POSIX one.
+    ///
+    /// # What this asserts
+    ///
+    /// The position is the point. A `pread` that seeks, reads and seeks back would pass a test
+    /// that only checked the bytes - so this reads at an offset and then reads *sequentially*,
+    /// which only lands where it does if the descriptor never moved.
+    ///
+    /// And it pins the failure at the vendor `EBADF` sign-extended, never `-1`. Registering the
+    /// POSIX form under the vendor name is the mistake this shape invites, and it is the one the
+    /// `stat` pair already made once (D525, D526).
+    ///
+    /// # What it cannot assert
+    ///
+    /// That the console reads short at the end of a file the same way. That is the host's
+    /// `read_at`, unchanged from the POSIX form this shares it with, and no run has measured the
+    /// console's behaviour there.
+    #[test]
+    fn a_positioned_read_does_not_move_the_descriptor() {
+        let _guard = super::exclusively();
+        let root = std::env::temp_dir().join("orbistoun-pread-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a root");
+        std::fs::write(root.join("bytes.bin"), b"0123456789").expect("a file");
+        mount::clear();
+        mount::mount_data(root.clone());
+
+        let path = guest_cstr("/data/bytes.bin");
+        let mut open_args = [0_u64; GUEST_ARG_REGISTERS];
+        open_args[0] = path;
+        let fd = kernel_open(&open_args);
+        assert!((fd as i64) >= 0, "the file opened: {fd:#x}");
+
+        let mut buffer = [0_u8; 4];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = fd;
+        args[1] = buffer.as_mut_ptr() as usize as u64;
+        args[2] = 4;
+        args[3] = 6;
+        assert_eq!(kernel_pread(&args), 4, "four bytes read from offset six");
+        assert_eq!(&buffer, b"6789", "and they are the bytes at that offset");
+
+        // The position must still be zero, so an ordinary read starts at the beginning.
+        let mut after = [0_u8; 4];
+        let mut read_args = [0_u64; GUEST_ARG_REGISTERS];
+        read_args[0] = fd;
+        read_args[1] = after.as_mut_ptr() as usize as u64;
+        read_args[2] = 4;
+        assert_eq!(kernel_read(&read_args), 4);
+        assert_eq!(
+            &after, b"0123",
+            "the positioned read left the descriptor where it was - a seek/read/seek-back              would pass the assertion above and fail this one"
+        );
+
+        let mut bad = [0_u64; GUEST_ARG_REGISTERS];
+        bad[0] = 0xDEAD_BEEF;
+        bad[1] = buffer.as_mut_ptr() as usize as u64;
+        bad[2] = 4;
+        let refused = kernel_pread(&bad);
+        assert_eq!(
+            refused, FAILED_DESCRIPTOR,
+            "a bad descriptor answers the vendor EBADF obSCEne measured, not the POSIX -1"
+        );
+        assert_ne!(refused, u64::MAX, "and specifically not -1");
+        mount::clear();
+    }
+
     /// **A directory under a writable mount is created; one outside it is refused with the
     /// console's error code, never a placeholder a caller reads as success.**
     ///
@@ -374,12 +478,12 @@ mod tests {
     #[test]
     fn mkdir_creates_under_a_writable_mount_and_refuses_elsewhere_without_a_placeholder() {
         let _guard = super::exclusively();
-        super::mount::clear();
+        mount::clear();
 
         let root = std::env::temp_dir().join(format!("orbistoun-mkdir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        super::mount::mount_data(root.clone());
-        super::mount::allow_writes(super::mount::DATA_MOUNT);
+        mount::mount_data(root.clone());
+        mount::allow_writes(mount::DATA_MOUNT);
 
         let made = kernel_mkdir(&args_with_path(guest_cstr("/data/obscene")));
         assert_eq!(made, 0, "a mkdir under /data succeeds");
@@ -399,7 +503,7 @@ mod tests {
             "refused with the console's 0x8002_00xx, not a 0x7fff placeholder a caller misreads"
         );
 
-        super::mount::clear();
+        mount::clear();
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -40,7 +40,7 @@ console?**
 
 | | |
 |---|---|
-| `%APPDATA%\OOPS\` | `titles/`, `saves/`, `overrides/`, `reports/`, `screenshots/`, `orbistoun.toml`, `learned.toml` |
+| `%APPDATA%\OOPS\` | `titles/`, `saves/`, `overrides/`, `reports/`, `screenshots/`, `config.toml`, `learned.toml` |
 | `%LOCALAPPDATA%\OOPS\` | `models/`, `runtime/`, `shaders/`, `filesystem/`, `traces/`, `logs/` |
 
 Models and runtimes download again, shaders compile again, the base filesystem is materialised

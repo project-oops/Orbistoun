@@ -26,6 +26,15 @@ pub struct CallTrace {
     pub total_calls: u64,
     /// Distinct imports called.
     pub distinct: usize,
+    /// Frames the guest handed to the output layer, counted by the port that accepted them.
+    ///
+    /// **Not derived from this list.** A call to the submit function that a port refused - a
+    /// handle this process never issued - is still a call to something implemented, so counting
+    /// labels here would report frames a guest never got. The number comes from the video
+    /// crate's own table, which is the only place that knows which submissions were taken
+    /// (D558).
+    #[serde(default)]
+    pub frames: u64,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
     /// Every system call the guest asked the kernel for **directly**, not through a stub.
@@ -131,11 +140,18 @@ pub struct TracedCall {
     pub sequence: u64,
     /// Library and name, or library and hash when no name is known yet.
     pub label: String,
-    /// The first integer argument, as it arrived.
+    /// The integer arguments, in register order - `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`.
     ///
-    /// Kept because at a wall it is often the whole answer: a guest passing an address it
-    /// was handed a moment earlier makes the chain visible without any other tooling.
-    pub arg0: u64,
+    /// Kept because at a wall they are often the whole answer: a guest passing an address it was
+    /// handed a moment earlier makes the chain visible without any other tooling.
+    ///
+    /// **All six, and it used to be only the first.** A value handed on as a *size* is visible
+    /// only if the size happens to be the first argument - the four gigabytes of D564 were, and
+    /// the same value passed as `arg2` would have left no trace. An attempt to classify
+    /// unimplemented functions by what the guest did with their answers found one usable
+    /// observation in four runs, entirely because of this (D570).
+    #[serde(default)]
+    pub args: [u64; 6],
     /// The guest address this call returns to - one instruction past the call site.
     ///
     /// **The same address space a fault's frame walk reports**, which is the point: a
@@ -178,6 +194,20 @@ pub struct FaultSite {
     /// Offset into that region.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
+    /// What each register that holds a readable address is pointing at.
+    ///
+    /// # Why the registers alone are not enough
+    ///
+    /// A fault dump names sixteen values and says nothing about any of them. At this title's
+    /// wall the argument that mattered was a short text label in `r12`, and reading it meant
+    /// arming a watchpoint on a stack address that orbistoun's own shims churn - which filled
+    /// the recorder with host sites and never showed the guest's own access (D522).
+    ///
+    /// The argument dumper has named and dumped pointers since D198; a fault had no equivalent.
+    /// Filled by the worker, because deciding whether an address is readable and naming its
+    /// region both need the running process, and this crate has neither.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pointees: Vec<String>,
     /// The import the guest was inside when it faulted, if it was inside one.
     ///
     /// **The question a fault in host code cannot otherwise answer.** An instruction
@@ -352,9 +382,19 @@ pub struct Conditions {
     /// and the value is for a person and a diff to read, not to act on.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_return: String,
-    /// How many functions were given an explicit answer instead of the default.
+    /// How many symbols the policy said something specific about - an answer, a region, or
+    /// both, counted once each.
     #[serde(default)]
     pub overrides: usize,
+    /// How many of those rest on nothing measured, and are therefore holding the run up.
+    ///
+    /// **The distinction the record could not draw.** An answer taken from the target is the
+    /// emulator being *right*, and a run using it measures the emulator as it stands; an answer
+    /// somebody guessed until the guest moved is a prop. Counting both as "an override exists"
+    /// made an honest compatibility entry unreachable for any title with a learned fact loaded
+    /// (D555, D557).
+    #[serde(default)]
+    pub propping: usize,
     /// Every diagnostic the run was put under, or empty for an ordinary run.
     ///
     /// **A run under a diagnostic is answering a different question** - "does this depend on
@@ -508,19 +548,12 @@ pub struct Registers {
 }
 
 impl Registers {
-    /// Every register, as lines to print under a fault.
+    /// Every register, in dump order, with its name.
     ///
-    /// **All sixteen, not the four that usually matter.** The short form named `rax`,
-    /// `rcx`, `rdx` and `rdi` because those carry an address or a size in most faults - and
-    /// at the `image+0xafc959` wall the question was *which register held the base that
-    /// should not have been zero*, which the four cannot answer. The values were captured
-    /// and recorded all along; only the last step threw them away, so a run had to be
-    /// repeated to learn something already sitting in its own trace (D230).
-    ///
-    /// Grouped four to a line because sixteen on one line wraps in a terminal, and a
-    /// wrapped register dump is read wrongly.
-    pub fn lines(&self) -> Vec<String> {
-        let all = [
+    /// One list, used by both the printed lines and the pointee description, so a register
+    /// cannot appear in one and be missing from the other (D522).
+    pub fn named(&self) -> [(&'static str, u64); 16] {
+        [
             ("rax", self.rax),
             ("rbx", self.rbx),
             ("rcx", self.rcx),
@@ -537,7 +570,22 @@ impl Registers {
             ("r13", self.r13),
             ("r14", self.r14),
             ("r15", self.r15),
-        ];
+        ]
+    }
+
+    /// Every register, as lines to print under a fault.
+    ///
+    /// **All sixteen, not the four that usually matter.** The short form named `rax`,
+    /// `rcx`, `rdx` and `rdi` because those carry an address or a size in most faults - and
+    /// at the `image+0xafc959` wall the question was *which register held the base that
+    /// should not have been zero*, which the four cannot answer. The values were captured
+    /// and recorded all along; only the last step threw them away, so a run had to be
+    /// repeated to learn something already sitting in its own trace (D230).
+    ///
+    /// Grouped four to a line because sixteen on one line wraps in a terminal, and a
+    /// wrapped register dump is read wrongly.
+    pub fn lines(&self) -> Vec<String> {
+        let all = self.named();
         all.chunks(4)
             .map(|row| {
                 row.iter()
@@ -596,6 +644,22 @@ impl CallTrace {
             .sum()
     }
 
+    /// Distinct imports the guest called that had nothing behind them.
+    ///
+    /// # Why this and not the call share
+    ///
+    /// `stubbed_share` is a percentage of **calls**, and calls are dominated by whatever the
+    /// guest happens to loop on: PPSA02664 spent 12,924 of them in one wait. So a day that took
+    /// the unimplemented functions it called from 35 to 20 moved that percentage from 0.22% to
+    /// 0.008% - both of which round to a `standing` of 100, and the record could not see any of
+    /// it (D563).
+    ///
+    /// This counts **functions**, which is stable against a hot loop and is also the work list:
+    /// it is exactly the number of things the guest asked for and did not get.
+    pub fn unanswered_imports(&self) -> usize {
+        self.calls.iter().filter(|c| !c.implemented).count()
+    }
+
     /// What share of the run rested on stubs, as a percentage.
     ///
     /// Zero when nothing was called, rather than a division by zero - a run that made no
@@ -625,6 +689,11 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
     // guest that faulted still *entered*; that it then died - or survived to the limit -
     // is the outcome, not the distance, and `outcome` carries it.
     let reach = match trace.reached.as_str() {
+        // **Promoted by a measurement, not by a claim.** The worker reports how far it got in
+        // words; the frame count comes from the video crate's own port table, so a title
+        // reaches this rung by a flip a real port accepted rather than by a call it made
+        // (D558).
+        "Entered" if trace.frames > 0 => Reach::Flipped,
         "Entered" => Reach::Entered,
         "Linked" => Reach::Linked,
         "ImportsResolved" | "ContainerParsed" => Reach::Parsed,
@@ -639,6 +708,9 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
         standing: 100_u32.saturating_sub(trace.stubbed_share()),
         default_return: trace.conditions.default_return.clone(),
         overrides: trace.conditions.overrides,
+        propping: trace.conditions.propping,
+        frames: trace.frames,
+        unanswered: Some(trace.unanswered_imports()),
         limit_seconds: trace.conditions.limit_seconds,
         build: trace.conditions.build.clone(),
         measured_on,
@@ -678,6 +750,58 @@ pub fn load_previous(traces_dir: &std::path::Path, module: &std::path::Path) -> 
     let name = trace_file_name(&module.to_string_lossy());
     let text = std::fs::read_to_string(traces_dir.join(name)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Identity of a trace file on disk, for telling one run's trace from an older one.
+///
+/// Modification time *and* length, because either alone can repeat: two runs of the same
+/// guest produce traces of very similar size, and a filesystem's timestamp can be coarse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    /// When the file was last written.
+    pub modified: std::time::SystemTime,
+    /// How long it is, in bytes.
+    pub len: u64,
+}
+
+/// The identity of `module`'s trace file, or `None` if there is not one.
+pub fn stamp_of(traces_dir: &std::path::Path, module: &std::path::Path) -> Option<Stamp> {
+    let name = trace_file_name(&module.to_string_lossy());
+    let data = std::fs::metadata(traces_dir.join(name)).ok()?;
+    Some(Stamp {
+        modified: data.modified().ok()?,
+        len: data.len(),
+    })
+}
+
+/// Whether the run that just finished actually wrote a trace.
+///
+/// # Why this is asked at all
+///
+/// A run reads the stored trace *after* the guest stops, on the reasoning that the worker
+/// has just written it. When the worker dies without writing one - a fault it cannot report,
+/// or a crash inside orbistoun itself - the file that is read is the **previous** run's, and
+/// every line drawn from it is presented as though it were this run's. It compares equal to
+/// itself, so the verdict reads `same - nothing moved`, which is the most convincing possible
+/// way to say nothing happened.
+///
+/// That cost a session: an implementation that worked was reported as unimplemented, six runs
+/// running, because all six reports were one file from hours earlier (D470). A stale
+/// measurement presented as a current one is exactly what principle 3 forbids, so the answer
+/// is to notice rather than to guess.
+///
+/// A pure decision so it can be tested without a filesystem, in the shape `orbistoun-mem`
+/// established: the effectful half is [`stamp_of`].
+#[must_use]
+pub fn wrote_a_trace(before: Option<Stamp>, after: Option<Stamp>) -> bool {
+    match (before, after) {
+        // Nothing there afterwards means nothing was written, whatever was there before.
+        (_, None) => false,
+        // The first trace this module has ever had.
+        (None, Some(_)) => true,
+        // Rewritten only if it is a different file than the one read before the run.
+        (Some(was), Some(now)) => was != now,
+    }
 }
 
 /// How this run compares with the last one of the same module.
@@ -935,7 +1059,7 @@ mod tail_return_tests {
         trace.tail = vec![TracedCall {
             sequence: 3,
             label: "libkernel::sceKernelMapDirectMemory".to_owned(),
-            arg0: 0x6000_0080_0d28,
+            args: [0x6000_0080_0d28, 0, 0, 0, 0, 0],
             from: 0x4000_0159_6189,
             returned: Some(0),
         }];
@@ -952,7 +1076,7 @@ mod tail_return_tests {
         trace.tail = vec![TracedCall {
             sequence: 1,
             label: "libc::strlen".to_owned(),
-            arg0: 0x10,
+            args: [0x10, 0, 0, 0, 0, 0],
             from: 0x20,
             returned: None,
         }];
@@ -982,12 +1106,108 @@ mod tail_return_tests {
 mod tests {
     use super::{CallTrace, CalledImport, Conditions, FaultSite, Verdict, compare};
 
+    /// **The unanswered count is of functions, not of calls.**
+    ///
+    /// The whole reason D563 added it. A percentage of calls belongs to whatever the guest loops
+    /// on - PPSA02664 spent 12,924 of them in one wait - so it swings wildly while the thing a
+    /// person acts on, the list of functions with nothing behind them, barely moves. Counting
+    /// calls here would rebuild the metric this replaces.
+    #[test]
+    fn the_record_counts_functions_not_calls() {
+        let mut t = trace(3, 10_000, None, None);
+        t.calls = vec![
+            CalledImport {
+                index: 0,
+                label: "libc::memcpy".to_owned(),
+                calls: 9_000,
+                implemented: true,
+            },
+            // One function, thousands of calls: a hot loop on something unimplemented.
+            CalledImport {
+                index: 1,
+                label: "libkernel::sceKernelWaitEqueue".to_owned(),
+                calls: 990,
+                implemented: false,
+            },
+            CalledImport {
+                index: 2,
+                label: "libc::setlocale".to_owned(),
+                calls: 1,
+                implemented: false,
+            },
+        ];
+
+        assert_eq!(
+            t.unanswered_imports(),
+            2,
+            "two functions are unanswered - the 990 calls are one of them, not 990 of them"
+        );
+        assert_eq!(
+            t.stubbed_calls(),
+            991,
+            "and the call count still says what it says"
+        );
+        let status = super::status_of(&t, "2026-09-04".to_owned());
+        assert_eq!(status.unanswered, Some(2), "and it reaches the record");
+        assert_eq!(status.answered(), 1, "of three imports, one was answered");
+    }
+
+    /// **A run is promoted to the presenting rung by a frame, not by a word.**
+    ///
+    /// The worker reports how far it got in prose; the frame count comes from the video crate's
+    /// port table. Deriving the rung from the count is what makes it a measurement - a title
+    /// cannot reach it by calling the submit function, only by having a port accept one (D558).
+    ///
+    /// # What this cannot assert
+    ///
+    /// **That the count itself is honest**, which is the port table's property and is tested
+    /// where the table lives. If `frames_presented` ever counted refused submissions, this would
+    /// pass and the rung would be wrong - which is exactly why the count is read from the port
+    /// rather than from the call list this report already has.
+    #[test]
+    fn the_presenting_rung_comes_from_the_frame_count() {
+        use orbistoun_overrides::Reach;
+
+        let mut entered = trace(47, 933, None, None);
+        entered.frames = 0;
+        assert_eq!(
+            super::status_of(&entered, "2026-09-04".to_owned()).reach,
+            Reach::Entered,
+            "a guest that presented nothing is not at the presenting rung"
+        );
+
+        let mut presented = trace(47, 933, None, None);
+        presented.frames = 1;
+        let status = super::status_of(&presented, "2026-09-04".to_owned());
+        assert_eq!(status.reach, Reach::Flipped);
+        assert_eq!(status.frames, 1, "and the count travels with the rung");
+    }
+
+    /// **A run that never entered is not promoted by a frame count.**
+    ///
+    /// The negative half. `reached` still decides the floor: a guest whose imports never
+    /// resolved cannot present, and a stray count must not lift it past the rungs it skipped.
+    #[test]
+    fn a_frame_count_cannot_lift_a_run_that_never_entered() {
+        use orbistoun_overrides::Reach;
+
+        let mut never_ran = trace(0, 0, None, None);
+        never_ran.reached = "Linked".to_owned();
+        never_ran.frames = 5;
+        assert_eq!(
+            super::status_of(&never_ran, "2026-09-04".to_owned()).reach,
+            Reach::Linked,
+            "five frames from a guest that never entered is a bug in the count, not a rung"
+        );
+    }
+
     fn trace(distinct: usize, calls: u64, region: Option<&str>, offset: Option<u64>) -> CallTrace {
         CallTrace {
             module: "m".to_owned(),
             reached: "Entered".to_owned(),
             total_calls: calls,
             distinct,
+            frames: 0,
             calls: Vec::new(),
             syscalls: Vec::new(),
             tail: Vec::new(),
@@ -998,6 +1218,7 @@ mod tests {
             formats: super::FormatReport::default(),
             stopped: None,
             fault: region.map(|region| FaultSite {
+                pointees: Vec::new(),
                 kind: "read of".to_owned(),
                 address: 0,
                 instruction_pointer: offset.unwrap_or(0),
@@ -1197,6 +1418,7 @@ mod tests {
             did_nothing: Vec::new(),
             default_return: "unimplemented".to_owned(),
             overrides: 3,
+            propping: 3,
             build: "0.1.0".to_owned(),
         };
         let before = under(conditions.clone());
@@ -1212,6 +1434,60 @@ mod tests {
                 .conditions_changed
                 .is_empty()
         );
+    }
+
+    /// **The guard, made to fail.** A worker that dies without writing leaves the previous
+    /// run's file in place; reading it back and reporting it is how six identical reports
+    /// came out of six runs of changed code (D470). Unchanged identity must read as "no
+    /// trace from this run", never as a measurement.
+    #[test]
+    fn a_trace_that_was_not_rewritten_is_not_this_run_s() {
+        let stamp = super::Stamp {
+            modified: std::time::UNIX_EPOCH,
+            len: 16_164,
+        };
+        assert!(
+            !super::wrote_a_trace(Some(stamp), Some(stamp)),
+            "an untouched file is the previous run's, and reporting it as this run's is the              failure this exists to stop"
+        );
+    }
+
+    /// The same length at a different time, and the same time at a different length, are both
+    /// rewrites - which is why the stamp carries two fields rather than one.
+    #[test]
+    fn either_half_of_the_stamp_changing_is_a_rewrite() {
+        let was = super::Stamp {
+            modified: std::time::UNIX_EPOCH,
+            len: 16_164,
+        };
+        let later = super::Stamp {
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ..was
+        };
+        let longer = super::Stamp { len: 17_000, ..was };
+        assert!(super::wrote_a_trace(Some(was), Some(later)));
+        assert!(super::wrote_a_trace(Some(was), Some(longer)));
+    }
+
+    /// A first run has nothing before it and is still a real measurement.
+    #[test]
+    fn the_first_trace_a_module_ever_writes_counts() {
+        let now = super::Stamp {
+            modified: std::time::UNIX_EPOCH,
+            len: 1,
+        };
+        assert!(super::wrote_a_trace(None, Some(now)));
+    }
+
+    /// No file afterwards is no measurement, whatever came before.
+    #[test]
+    fn no_trace_afterwards_is_never_a_measurement() {
+        let was = super::Stamp {
+            modified: std::time::UNIX_EPOCH,
+            len: 1,
+        };
+        assert!(!super::wrote_a_trace(None, None));
+        assert!(!super::wrote_a_trace(Some(was), None));
     }
 
     #[test]

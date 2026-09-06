@@ -6,7 +6,7 @@ The words orbistoun uses for its own machinery. For the vocabulary the whole col
 For the file formats, see [SELFish's](https://github.com/project-oops/SELFish/blob/main/docs/GLOSSARY.md).
 
 **guest**, **host**, **loader**, **target** and **implementation** are defined once for all
-five repositories in
+six repositories in
 [CONVENTIONS.md §2](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md#the-words-for-our-own-layers)
 and are not repeated here. The one to watch: orbistoun calls its own ELF-reading component
 "the loader" as well, so where both senses are live, write **the ELF loader** for the

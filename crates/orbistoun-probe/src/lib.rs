@@ -2005,7 +2005,12 @@ impl Transcript {
                 };
                 match provenance.oracle(origin) {
                     Oracle::Measured => summary.measured += 1,
-                    Oracle::Published => summary.published += 1,
+                    // `Differential` cannot come out of `Provenance::oracle` - the probe's
+                    // grades are hardware, spec, documented, derived and assumed, and none
+                    // maps to it. The arm exists because the enum is exhaustive, and it
+                    // counts as published rather than assumed because that is what a
+                    // differential result is: a published claim somebody verified (D478).
+                    Oracle::Published | Oracle::Differential => summary.published += 1,
                     Oracle::GuestObserved | Oracle::Assumed => summary.assumed += 1,
                 }
             }

@@ -126,6 +126,19 @@ pub enum Oracle {
     /// A published standard or published source: ISO C, POSIX, or the FreeBSD tree the
     /// target C library derives from. The strongest reference available, and citable.
     Published,
+    /// Run against a published implementation of the same interface, and they agreed.
+    ///
+    /// **Not a measurement of the target, and the distinction is load-bearing.** A FreeBSD
+    /// box answering what orbistoun answers establishes that orbistoun implements the
+    /// analogue correctly; it establishes nothing about whether the console implements the
+    /// analogue. D468 is this project watching that gap open: the ctype tables were written
+    /// from FreeBSD's documented layout, hardware was measured, and the layout was different.
+    ///
+    /// Stronger than [`Self::Published`], which is a reading of the same source rather than a
+    /// verification of it, and weaker than [`Self::Measured`], which is the target itself. It
+    /// stays [`Self::is_probeable`] for exactly that reason - hardware can still contradict
+    /// it (D478).
+    Differential,
     /// Measured on real hardware by a conformance probe.
     ///
     /// The cleanest provenance in the list. Observing what a box you own does with an
@@ -151,6 +164,7 @@ impl Oracle {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Published => "published",
+            Self::Differential => "differential",
             Self::Measured => "measured",
             Self::GuestObserved => "guest-observed",
             Self::Assumed => "assumed",
@@ -163,7 +177,7 @@ impl Oracle {
     /// the claim, and an uncheckable claim of external support is worth strictly less than
     /// an honest [`Oracle::Assumed`] - it looks like evidence and is not.
     pub const fn needs_citation(self) -> bool {
-        matches!(self, Self::Published | Self::Measured)
+        matches!(self, Self::Published | Self::Differential | Self::Measured)
     }
 
     /// Whether the claim rests on nothing yet.
@@ -171,11 +185,46 @@ impl Oracle {
         matches!(self, Self::Assumed)
     }
 
+    /// Whether an answer with this provenance is **knowledge**, or a prop holding a run up.
+    ///
+    /// # The line, and why it falls where it does
+    ///
+    /// A compatibility record distinguishes a run that measures the emulator as it stands from
+    /// one that was helped along, and until now it drew that line at *whether a function was
+    /// answered by name at all* - which counts a hardware measurement and a wild guess as the
+    /// same act. They are not: an answer taken from the target is the emulator being **right**,
+    /// and a run that used it is honest.
+    ///
+    /// [`Self::GuestObserved`] is on the prop side, and that is the decision worth arguing
+    /// with. The guest proceeding is one bit of *consistency*, not correctness - somebody tried
+    /// answers until the guest moved, which is the definition of being helped along. A run
+    /// resting on one is an experiment.
+    ///
+    /// [`Self::Differential`] is on the evidence side even though it stays
+    /// [`Self::is_probeable`]: agreeing with a published implementation is not the last word,
+    /// but nobody tuned it to move a guest.
+    ///
+    /// **This is not [`Self::needs_citation`], which today covers the same three.** That asks
+    /// whether a claim owes a reader a source; this asks whether a run leaned on something.
+    /// They coincide by accident of extension and answer different questions - reusing one for
+    /// the other is the "gate checked a different field from the one it claimed" failure that
+    /// principle 3 names (D557).
+    pub const fn is_evidence(self) -> bool {
+        matches!(self, Self::Published | Self::Differential | Self::Measured)
+    }
+
     /// Whether a conformance probe on real hardware could settle it.
     ///
     /// What makes the assumption count a worklist rather than an apology.
     pub const fn is_probeable(self) -> bool {
-        matches!(self, Self::Assumed | Self::GuestObserved)
+        // `Differential` is here on purpose: agreeing with FreeBSD is not the end of the
+        // line, because the console is free to disagree with FreeBSD and has done (D468,
+        // D478). A tier that counted it as finished would retire the very questions worth
+        // asking on hardware.
+        matches!(
+            self,
+            Self::Assumed | Self::GuestObserved | Self::Differential
+        )
     }
 }
 
@@ -204,6 +253,24 @@ pub struct FunctionKnowledge {
     /// The arguments, in register order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<Argument>,
+    /// What this function does **not** do, when it is implemented but not completely.
+    ///
+    /// # Why a field rather than a comment
+    ///
+    /// The gap report counts whether a symbol resolves to code. It cannot tell a finished
+    /// function from one that answers the easy case and gives up: `getopt` handles a process
+    /// with no arguments and nothing else, and said so only in prose, so it counted as done.
+    /// A caveat a person has to read is a caveat a report cannot subtract.
+    ///
+    /// So this is the same claim in a form the tooling can count, and the count is the point:
+    /// "implemented" and "implemented, with these edges missing" are different states of a
+    /// project and the difference should be visible without reading the source.
+    ///
+    /// Empty means no incompleteness has been **declared** - which is not the same as
+    /// complete, and the report says so rather than claiming otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub partial: String,
+
     /// Behaviour a reimplementation would otherwise get wrong.
     ///
     /// The expensive knowledge. Each entry here cost an experiment.
@@ -339,12 +406,7 @@ impl FunctionKnowledge {
         // travels. What is refused is a path, absolute or relative, that has to exist
         // somewhere for the claim to be checkable.
         for fragment in self.cites.split_whitespace() {
-            let looks_like_a_path = fragment.contains(":\\")
-                || fragment.contains(":/")
-                || fragment.starts_with('/')
-                || fragment.starts_with("./")
-                || fragment.starts_with("..");
-            if looks_like_a_path {
+            if fragment_is_a_path(fragment) {
                 faults.push(format!(
                     "{}: cites a filesystem path ({fragment}) - a citation must name a document, not a location on one machine",
                     self.name
@@ -403,6 +465,122 @@ impl FunctionKnowledge {
 /// question rather than a way of printing one - and the two counters disagreed precisely
 /// because half the definition lived in the shim (D239).
 pub const NOTHING_ESTABLISHED: &str = "Nothing about this entry has been established.";
+
+/// What a POSIX-named delegation admits, in the one wording all of them use.
+///
+/// # Why the target is not named in it
+///
+/// This library's names resolve to the vendor-named function beside them, and every entry
+/// used to ask whether the two behave alike **with the target's name inside the question**.
+/// One premise, written a hundred and forty-nine ways: [`shared_premises`] groups by
+/// word-for-word identity and cannot see that a sentence differing only in a symbol is the
+/// same sentence, so a fifth of the ask list read as a hundred and forty-nine separate
+/// things to establish (D539).
+///
+/// The name is not lost - it is an `edge_cases` line, which is where a fact about what this
+/// project does belongs. The question is what a console is being asked, and it is one
+/// question.
+///
+/// Shared with `orbistoun-gen`, which writes these entries, so the generator and the data
+/// cannot drift into two wordings again.
+pub const DELEGATION_ASSUMPTION: &str = "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.";
+
+/// A question several entries ask in the same words, and every entry that rests on it.
+///
+/// **A premise, not a category.** The grouping below is word-for-word identity, so nothing
+/// here is a judgement about what two questions have in common - see [`shared_premises`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedPremise {
+    /// The question, in the wording most of its entries use.
+    pub question: String,
+    /// The entries asking it, in the order they were supplied.
+    pub functions: Vec<String>,
+    /// How many distinct **wordings** were collapsed into this one.
+    ///
+    /// Above one means several entries mean the same sentence and punctuate it differently,
+    /// which is a defect in the knowledge base rather than a fact about the platform - it
+    /// makes one premise read as two. Gated by a test over the shipped data (D538).
+    pub wordings: usize,
+}
+
+/// The words of a question, lowercased, with everything else dropped.
+///
+/// The grouping key. Two questions share it exactly when they are the same sequence of
+/// words - `shape. The` and `shape; the` agree, and any difference of a single word does
+/// not.
+fn words_of(question: &str) -> String {
+    let mut key = String::with_capacity(question.len());
+    let mut between = false;
+    for character in question.chars() {
+        if character.is_alphanumeric() {
+            if between && !key.is_empty() {
+                key.push(' ');
+            }
+            between = false;
+            key.extend(character.to_lowercase());
+        } else {
+            between = true;
+        }
+    }
+    key
+}
+
+/// The entries asking one premise, and each wording of it with how many entries used it.
+type PremiseGroup = (Vec<String>, Vec<(String, usize)>);
+/// Group `asked` - pairs of function name and question - by the premise they share.
+///
+/// # Why this is deduplication and not classification
+///
+/// `orbistoun-turn` refuses to decide *what a question means* from its prose, because a
+/// rule over words fails silently and reads exactly like a question nobody can act on
+/// (D356). That still holds and this does not weaken it: nothing here asks what a question
+/// is about. Two questions group only when they are **the same sequence of words**, which
+/// is not an interpretation of either.
+///
+/// So the merging is deliberately unable to do the useful-looking thing. Two entries asking
+/// closely related questions in different words stay separate, because the differing word
+/// may be where the difference is. Only punctuation, case and spacing are forgiven.
+///
+/// # What the caller gets
+///
+/// Groups in first-seen order, so the output is stable and a diff means something. Ranking
+/// is the caller's - it is the one that knows how often a guest called each function.
+#[must_use]
+pub fn shared_premises(asked: &[(String, String)]) -> Vec<SharedPremise> {
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut groups: Vec<PremiseGroup> = Vec::new();
+
+    for (function, question) in asked {
+        let at = *index.entry(words_of(question)).or_insert_with(|| {
+            groups.push((Vec::new(), Vec::new()));
+            groups.len() - 1
+        });
+        let (functions, wordings) = &mut groups[at];
+        functions.push(function.clone());
+        if let Some(seen) = wordings.iter_mut().find(|(text, _)| text == question) {
+            seen.1 += 1;
+        } else {
+            wordings.push((question.clone(), 1));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(functions, mut wordings)| {
+            // Commonest wording, then alphabetical - a total order, so two runs over the
+            // same data print the same sentence.
+            wordings.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            SharedPremise {
+                question: wordings
+                    .first()
+                    .map(|(text, _)| text.clone())
+                    .unwrap_or_default(),
+                functions,
+                wordings: wordings.len(),
+            }
+        })
+        .collect()
+}
 
 /// Every label [`FunctionKnowledge::found_by`] may carry.
 ///
@@ -463,6 +641,28 @@ impl FunctionKnowledge {
         }
         faults
     }
+}
+
+/// Whether one whitespace-delimited piece of a citation is a filesystem path.
+///
+/// **Exposed so a generator applies the same rule rather than a second copy of it.** A
+/// derivation that guessed at this rule got it wrong in the safe direction and threw away a
+/// perfectly good citation: it refused anything containing a slash, which rejects
+/// `ISO/IEC 9899` - the C standard's own name. The rule is per-fragment, so a slash inside a
+/// word is ordinary and a fragment that *begins* one is a path.
+#[must_use]
+pub fn fragment_is_a_path(fragment: &str) -> bool {
+    fragment.contains(":\\")
+        || fragment.contains(":/")
+        || fragment.starts_with('/')
+        || fragment.starts_with("./")
+        || fragment.starts_with("..")
+}
+
+/// Whether a whole citation names a location on one machine rather than a document.
+#[must_use]
+pub fn citation_is_a_path(cites: &str) -> bool {
+    cites.split_whitespace().any(fragment_is_a_path)
 }
 
 /// What the audited symbol database says produced a name, if it says anything.
@@ -758,7 +958,7 @@ impl Knowledge {
 
 #[cfg(test)]
 mod tests {
-    use super::{Knowledge, KnowledgeFile, Oracle, Record};
+    use super::{DELEGATION_ASSUMPTION, Knowledge, KnowledgeFile, Oracle, Record};
 
     /// Recording one thing does not erase what was recorded before it.
     ///
@@ -908,6 +1108,7 @@ mod tests {
         // is no such value and why this test would fail if somebody added one.
         for oracle in [
             Oracle::Published,
+            Oracle::Differential,
             Oracle::Measured,
             Oracle::GuestObserved,
             Oracle::Assumed,
@@ -1318,5 +1519,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Punctuation is forgiven and a word is not.**
+    ///
+    /// # What this asserts
+    ///
+    /// Both halves of the rule, because only having both makes it a rule. Two entries that
+    /// punctuate one sentence differently are one premise; two that differ by a single word
+    /// are two, however alike they read.
+    ///
+    /// The first pair is the real one out of `libkernel.toml` - ten entries ended the first
+    /// clause with a full stop and four with a semicolon - so this test would have gone red
+    /// on the data that prompted it (D538).
+    ///
+    /// # What it cannot assert
+    ///
+    /// That two questions grouped together *mean* the same thing. Nothing here reads a
+    /// question; identical words are taken as one premise because they are the same
+    /// sentence, and that is the whole claim. Two entries asking the same thing in
+    /// different words stay separate and this test is content with that - deciding they
+    /// agree would be classifying prose, which `orbistoun-turn` refuses for good reason
+    /// (D356).
+    #[test]
+    fn one_sentence_punctuated_two_ways_is_one_premise_and_one_word_apart_is_two() {
+        let full_stop = "Modelled on the POSIX call of the same shape. The correspondence is \
+                         inferred from the name.";
+        let semicolon = "Modelled on the POSIX call of the same shape; the correspondence is \
+                         inferred from the name.";
+        let one_word_off = "Modelled on the POSIX call of the same name. The correspondence is \
+                            inferred from the name.";
+
+        let asked = vec![
+            ("sceKernelWrite".to_owned(), full_stop.to_owned()),
+            ("sceKernelOpen".to_owned(), semicolon.to_owned()),
+            ("sceKernelRead".to_owned(), full_stop.to_owned()),
+            ("scePthreadJoin".to_owned(), one_word_off.to_owned()),
+        ];
+        let premises = super::shared_premises(&asked);
+
+        assert_eq!(
+            premises.len(),
+            2,
+            "a full stop and a semicolon do not make two premises, and one different word \
+             does: {premises:#?}"
+        );
+        assert_eq!(premises[0].functions.len(), 3);
+        assert_eq!(
+            premises[0].wordings, 2,
+            "the two punctuations must be reported, not hidden - that count is what says the \
+             data needs tidying"
+        );
+        assert_eq!(
+            premises[0].question, full_stop,
+            "the commonest wording is the one printed"
+        );
+        assert_eq!(premises[1].functions, vec!["scePthreadJoin".to_owned()]);
+
+        // Nothing is lost or duplicated on the way through.
+        let regrouped: usize = premises.iter().map(|p| p.functions.len()).sum();
+        assert_eq!(regrouped, asked.len());
+    }
+
+    /// **One premise is written one way in the shipped knowledge base.**
+    ///
+    /// # What this asserts, and why it is worth a test
+    ///
+    /// That no premise carries more than one wording. When it does, one thing this project
+    /// does not know reads as two, and a probe planning to answer it sees two entries to
+    /// sample instead of one. It is not a claim about the platform - it is a claim about
+    /// the ask list being countable, and the ask list is what obSCEne's backlog is
+    /// generated from.
+    ///
+    /// It went red on the data that prompted it: fourteen entries meant one sentence and
+    /// four of them used a semicolon (D538).
+    ///
+    /// # What it cannot assert
+    ///
+    /// That two *differently worded* questions are not secretly the same premise. This sees
+    /// only exact repetition, so the count it protects is a floor - the real number of
+    /// distinct things unknown here is no larger, and may be smaller.
+    #[test]
+    fn no_premise_in_the_knowledge_base_is_written_two_ways() {
+        let k = Knowledge::builtin();
+        let asked: Vec<(String, String)> = k
+            .functions()
+            .flat_map(|f| {
+                f.open_questions_asked()
+                    .into_iter()
+                    .map(move |q| (f.name.clone(), q))
+            })
+            .collect();
+
+        for premise in super::shared_premises(&asked) {
+            assert_eq!(
+                premise.wordings,
+                1,
+                "{} entries share this premise and write it {} different ways, so it is \
+                 counted as {} open questions rather than one: {:?}",
+                premise.functions.len(),
+                premise.wordings,
+                premise.wordings,
+                premise.question
+            );
+        }
+    }
+
+    /// **Every delegation asks the one question, in the one wording.**
+    ///
+    /// # What this asserts
+    ///
+    /// That no entry asks whether a POSIX spelling and its vendor twin behave alike in words
+    /// of its own. The wording used to carry the target's name, so a hundred and forty-nine
+    /// entries resting on one premise were a hundred and forty-nine premises - a fifth of the
+    /// ask list, and no way to see from the list that one measurement speaks to all of it
+    /// (D539).
+    ///
+    /// The check is deliberately blunt: any *other* sentence in the knowledge base about two
+    /// spellings behaving alike is a fault, whoever wrote it. `orbistoun-gen` emits
+    /// [`DELEGATION_ASSUMPTION`] rather than a string of its own, so a generated entry cannot
+    /// reintroduce one; a hand-written entry can, and this is what stops it.
+    ///
+    /// # What it cannot assert
+    ///
+    /// That the premise is *true*, or that grouping these 149 is right. It is one question
+    /// only because they are one situation - a name resolving to the function beside it - and
+    /// a console answering it for one entry answers it for that entry. What it does for the
+    /// other 148 is make the shared claim more or less credible, which is what the sentence
+    /// says it rests on.
+    #[test]
+    fn the_delegation_question_is_asked_in_one_wording() {
+        let mut strays = Vec::new();
+        let mut asking = 0usize;
+        for f in Knowledge::builtin().functions() {
+            for question in f.open_questions_asked() {
+                if question == DELEGATION_ASSUMPTION {
+                    asking += 1;
+                } else if question.contains("behave alike")
+                    || question.contains("same behaviour")
+                    || question.contains("two spellings")
+                {
+                    strays.push(format!("{}: {question}", f.name));
+                }
+            }
+        }
+        assert!(
+            strays.is_empty(),
+            "these ask the delegation question in words of their own, so each becomes a \
+             premise of its own: {strays:#?}"
+        );
+        assert!(
+            asking > 1,
+            "the shared wording is what makes this one premise - finding it on {asking} \
+             entries means it stopped being shared rather than that the entries were fixed"
+        );
     }
 }

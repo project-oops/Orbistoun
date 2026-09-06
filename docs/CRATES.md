@@ -6,9 +6,6 @@ which is the part a reader needs and the part that does not go stale.
 This was the README's "Workspace layout" section. It is reference for somebody already working
 in the tree rather than something a person arriving needs before anything else.
 
-A Cargo workspace. `Cargo.toml` is the authoritative list; the table below says what each
-crate is *for*, which is the part a reader needs and the part that does not go stale.
-
 The crates at the head of it are a **dependency spine** - each is required by everything
 after it, which is also the order they get built in.
 
@@ -29,11 +26,15 @@ after it, which is also the order they get built in.
 | [orbistoun-abi](../crates/orbistoun-abi/) | The guest-to-host call boundary, proved end to end. |
 | [orbistoun-thunk](../crates/orbistoun-thunk/) | Per-import thunks: the machine code a guest lands on, and the dispatch behind it. |
 | [orbistoun-kernel](../crates/orbistoun-kernel/) | Guest kernel - memory syscalls, threads, synchronisation. |
+| [orbistoun-firmware](../crates/orbistoun-firmware/) | A skeleton of the console's firmware address space, for guests that reach past the named interface into raw memory. |
 | [orbistoun-libc](../crates/orbistoun-libc/) | The C library as the guest calls it. The largest implemented surface. |
+| [orbistoun-posix](../crates/orbistoun-posix/) | The POSIX-named half of the platform, delegated to what already implements it. |
 | [orbistoun-fs](../crates/orbistoun-fs/) | Guest filesystem - file IO and async streaming. |
+| [orbistoun-shell](../crates/orbistoun-shell/) | The system software: session lifecycle, guest-visible events, and console settings. |
 | [orbistoun-systemservice](../crates/orbistoun-systemservice/) | The settings and status a title asks the system about. |
 | [orbistoun-video](../crates/orbistoun-video/) | Video output - swapchain and flips. |
 | [orbistoun-audio](../crates/orbistoun-audio/) | Audio output. |
+| [orbistoun-net](../crates/orbistoun-net/) | Networking HLE: declarations for the libraries a title imports. |
 | [orbistoun-input](../crates/orbistoun-input/) | Controller input. |
 
 **Graphics**
@@ -53,12 +54,16 @@ after it, which is also the order they get built in.
 | [orbistoun-llm](../crates/orbistoun-llm/) | Local-first language-model access, as a generic question in and an answer out. Depends on nothing else here, on purpose. |
 | [orbistoun-names](../crates/orbistoun-names/) | Generating and confirming candidate symbol names. |
 | [orbistoun-propose](../crates/orbistoun-propose/) | Proposals paired with the oracle that checks them - where a model meets the hash. |
+| [orbistoun-turn](../crates/orbistoun-turn/) | Turning the loop without a person - the steps a finding calls for, the sweeps that answer them, and what a turn earned. |
 | [orbistoun-report](../crates/orbistoun-report/) | Run reports, traces, the progress verdict, and the ranked findings. |
 | [orbistoun-probe](../crates/orbistoun-probe/) | Reading the records a hardware conformance probe produces. |
 | [orbistoun-overrides](../crates/orbistoun-overrides/) | Per-title settings and compatibility entries, layered and merged. |
+| [orbistoun-submit](../crates/orbistoun-submit/) | What one machine has to contribute - gathered, checked by re-derivation, never trusted. |
+| [orbistoun-corpus](../crates/orbistoun-corpus/) | The test corpus: a manifest of sources, pinned release assets fetched into titles/, ready to run and record. |
 | [orbistoun-paths](../crates/orbistoun-paths/) | Portable-first path resolution. Never writes outside its own root. |
 | [orbistoun-proto](../crates/orbistoun-proto/) | The shim-to-worker protocol: messages as data. |
 | [orbistoun-service](../crates/orbistoun-service/) | The shared logic layer every shim calls. |
+| [orbistoun-gen](../crates/orbistoun-gen/) | Offline generators for the shader data tables. Not part of the emulator. |
 | [orbistoun-worker](../crates/orbistoun-worker/) | The isolated process a guest actually runs in. |
 | [orbistoun-cli](../crates/orbistoun-cli/) | The `orbistoun` binary. |
 | [orbistoun-gui](../crates/orbistoun-gui/) | The desktop shell. |

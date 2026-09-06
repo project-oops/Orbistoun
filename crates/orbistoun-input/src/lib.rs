@@ -35,6 +35,11 @@
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn, Handle, HandleAllocator};
 use orbistoun_hle::guest_module;
 
+pub mod ime;
+pub mod ime_dialog;
+pub mod keyboard;
+pub mod mouse;
+
 pub mod latest;
 pub mod mapping;
 pub mod pad;

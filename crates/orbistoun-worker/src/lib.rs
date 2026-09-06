@@ -205,6 +205,22 @@ fn shell_action(action: orbistoun_shell::Request) {
 /// be clear of anything the host maps, and granularity-aligned.
 pub const DEFAULT_MODULE_BASE: u64 = 0x0000_4000_0000_0000;
 
+/// Where the modules a title ships with itself are placed.
+///
+/// Between the main executable and the guest stack, and clear of both: the title's own
+/// modules are placed *before* the executable (D482), so they need somewhere that cannot
+/// collide with the base it will take. Each module then gets its own slot within this
+/// region with a granule of unmapped guard between them.
+///
+/// **Not `0x5000_0000_0000`, which is a guest's.** D443 records that PPSA02664's C++ allocator
+/// reserves its heap arena at exactly that address, and that a policy region placed there once
+/// already cost a null-pointer fault: the guest's reservation fell back, its arena-relative size
+/// arithmetic underflowed, and `tlsf_add_pool` rejected the pool.
+///
+/// This constant was put on that same address when the modules were first placed - the decision
+/// log had the answer and was not read. Moved off it (D488).
+pub const TITLE_MODULE_BASE: u64 = 0x0000_4800_0000_0000;
+
 /// Where the per-import stub table is placed.
 ///
 /// Far from [`DEFAULT_MODULE_BASE`] on purpose: a stray offset from either then lands
@@ -296,15 +312,7 @@ fn run_guest<W: Write>(
         write_message(output, &Event::Reached { phase: reached })?;
     }
 
-    place_and_relocate(
-        output,
-        service,
-        &bytes,
-        reached,
-        limits,
-        &path.display().to_string(),
-        symbols_db,
-    )
+    place_and_relocate(output, service, &bytes, reached, limits, symbols_db, path)
 }
 
 /// Reports that a run stopped, with the reason and the furthest phase reached.
@@ -397,25 +405,107 @@ fn install_limits(limits: Limits, module: &str) {
 
 /// Everything an import can resolve to: a stub for code, storage for data.
 ///
-/// Built together because they are one decision - *what does the guest get in this slot* -
-/// and split out of `place_and_relocate` only because that function has a line limit and
-/// this is the part of it that is about imports rather than about placement.
+/// What the guest gets in each import slot, and the title's own modules linked behind them.
 ///
-/// **Both before relocation**, because relocation is where the wrong answer would
-/// otherwise be written into the slot (D307, D323).
-fn what_imports_resolve_to(
+/// **One stub table across the executable and every module the title ships** (D484). The
+/// executable is module 0 at offset 0, so its imports keep the slot numbers every trace and
+/// every measurement already refer to, and a module answering one of them is a real address
+/// in relocated code rather than a stub.
+///
+/// **Before relocation**, because relocation is where the wrong answer would otherwise be
+/// written into the slot (D307, D323).
+///
+/// The returned value owns the module images, so it has to outlive the run - dropping it
+/// unmaps code the executable now has pointers into.
+fn link_the_title(
     service: &Service,
+    path: &Path,
+    symbols: &orbistoun_nid::SymbolDbFile,
+) -> Result<orbistoun_service::LinkedTitle, String> {
+    service
+        .link_title_modules(
+            path,
+            orbistoun_service::TitleBases {
+                modules: TITLE_MODULE_BASE,
+                thunks: THUNK_TABLE_BASE,
+                data: DATA_BLOCK_BASE,
+            },
+            symbols,
+        )
+        .map_err(|e| format!("could not link the title: {e}"))
+}
+
+/// The symbol database this run names imports with.
+///
+/// A supplied path still wins, because a database under construction has to be testable
+/// before it is committed.
+fn symbol_database(symbols_db: Option<&Path>) -> orbistoun_nid::SymbolDbFile {
+    symbols_db
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| orbistoun_nid::SymbolDbFile::from_json(&text).ok())
+        .unwrap_or_else(orbistoun_nid::SymbolDbFile::builtin)
+}
+
+/// Applies the executable's relocations against the title's code, then the stubs.
+///
+/// # The order is the whole of it
+///
+/// A stub is the honest answer for a platform library orbistoun has not written. It is the
+/// **wrong** answer for a function sitting relocated in the title's own data: the stub returns
+/// a placeholder, the guest uses it as an address, and the fault that follows names neither
+/// (D483, D489). So the title's own modules answer first, for the imports the caller decided
+/// they should - and everything else falls through to the stub table exactly as before.
+///
+/// The resolvers are built here rather than by the caller because they borrow the tables, and
+/// the borrow has to end before the run report starts moving things about.
+fn relocate_the_executable(
+    service: &Service,
+    image: &Image,
     bytes: &[u8],
-) -> Result<(orbistoun_thunk::ThunkTable, orbistoun_thunk::DataBlocks), String> {
-    // One stub per dynamic symbol, so a call trace says *which* import the guest wanted
-    // rather than merely that it wanted something unimplemented.
-    let thunks = service
-        .build_thunks(bytes, THUNK_TABLE_BASE)
-        .map_err(|e| format!("could not build the thunk table: {e}"))?;
-    let data = service
-        .build_data_blocks(bytes, DATA_BLOCK_BASE)
-        .map_err(|e| format!("could not reserve storage for data imports: {e}"))?;
-    Ok((thunks, data))
+    title: &orbistoun_service::LinkedTitle,
+    refuse: Option<&std::collections::BTreeSet<usize>>,
+) -> Result<orbistoun_elf::reloc::RelocationTally, orbistoun_service::ServiceError> {
+    // No offset: the executable is module 0, so its symbol index *is* its slot (D484).
+    let stubs = orbistoun_loader::relocate::ImportResolver {
+        thunks: &title.thunks,
+        data: &title.data,
+        refuse,
+    };
+    let resolver = orbistoun_loader::relocate::TitleResolver {
+        bound: &title.bound,
+        inner: &stubs,
+    };
+    service.relocate_image(image, bytes, &resolver)
+}
+
+/// Fills the globals a guest reads without ever calling anything that could fill them.
+///
+/// Both must happen **before** the guest runs. `_Stdout` and `_Stderr` are *data*, so nothing
+/// the guest calls would populate them on demand (D307, D323), and `getenv` has to answer from
+/// the same strings the process image was built from rather than from a second copy.
+fn publish_what_the_guest_reads(service: &Service) {
+    orbistoun_thunk::install_environment(service.entry_settings().environment.clone());
+    orbistoun_libc::streams::install();
+}
+
+/// Tells the fault reporter where the title's own code is.
+///
+/// **One span covering every module.** Without it the instruction pointer of a fault inside a
+/// module is outside every region the reporter knows, which is its exact test for "orbistoun's
+/// own code faulted" - so the guest's own crash was reported as an emulator bug. Once an import
+/// binds into a module, that is where the guest spends its time (D489).
+fn describe_title_modules(title: &orbistoun_service::LinkedTitle) {
+    let images = title.placed.images();
+    let (Some((_, first)), Some((_, last))) = (images.first(), images.last()) else {
+        return;
+    };
+    let base = first.span().0;
+    let (end_base, end_len) = last.span();
+    report::describe_region(
+        report::Region::TitleModules,
+        base,
+        end_base.saturating_add(end_len).saturating_sub(base),
+    );
 }
 
 fn place_and_relocate<W: Write>(
@@ -424,9 +514,12 @@ fn place_and_relocate<W: Write>(
     bytes: &[u8],
     reached: Phase,
     limits: Limits,
-    module: &str,
     symbols_db: Option<&Path>,
+    path: &Path,
 ) -> io::Result<()> {
+    // The name a report calls this run, derived here rather than passed alongside the path it
+    // is derived from - two parameters that must agree is one more thing that can disagree.
+    let module = &path.display().to_string();
     // Everything observed so far links at or near zero - modules by construction, and
     // the executable too - so a placement base is always needed. Honouring a zero base
     // literally would fail, since the null page is never mappable.
@@ -449,24 +542,20 @@ fn place_and_relocate<W: Write>(
         image.base()
     );
 
-    let (thunks, data) = match what_imports_resolve_to(service, bytes) {
-        Ok(pair) => pair,
+    let database = symbol_database(symbols_db);
+    let title = match link_the_title(service, path, &database) {
+        Ok(linked) => linked,
         Err(e) => return halt(output, Phase::Mapped, format!("{placed}; {e}")),
     };
-    // Published before anything can call an implementation that writes one (D344).
-    orbistoun_thunk::install_data_symbols(data.named());
-    // Published alongside them, and before the guest runs, so `getenv` answers from the same
-    // strings the process image was built from rather than from a second copy.
-    orbistoun_thunk::install_environment(service.entry_settings().environment.clone());
+    let (thunks, data) = (&title.thunks, &title.data);
+    describe_title_modules(&title);
+    // The data symbols are published inside the link, across every module at once - a second
+    // install here would be ignored, and writing one would read as though it were doing
+    // something (D344, D484).
+    publish_what_the_guest_reads(service);
     // Which imports this run will refuse, if it was asked to refuse any (D392).
     let unnameable = unnameable_imports(service, bytes, symbols_db);
-    let resolver = orbistoun_loader::relocate::ImportResolver {
-        thunks: &thunks,
-        data: &data,
-        refuse: unnameable.as_ref(),
-    };
-
-    let tally = match service.relocate_image(&image, bytes, &resolver) {
+    let tally = match relocate_the_executable(service, &image, bytes, &title, unnameable.as_ref()) {
         Ok(t) => t,
         Err(e) => {
             return halt(
@@ -476,7 +565,7 @@ fn place_and_relocate<W: Write>(
             );
         }
     };
-    let relocations = describe_relocations(&tally, &data);
+    let relocations = describe_relocations(&tally, data);
 
     // **A refusal is not a failure to link.** Under `ORBISTOUN_RESOLVE=named` this run
     // deliberately left some imports unresolved, so the image is exactly as linked as it was
@@ -499,6 +588,17 @@ fn place_and_relocate<W: Write>(
 
     // Only now: the image was populated read-write, and relocation wrote into text.
     // Protecting any earlier would make those writes fault.
+    // **What the executable itself exports**, so `sceKernelDlsym` can answer for it. The
+    // title's own modules are registered by the loader; nothing registers this one - and for
+    // PPSA02664 it is the one that matters. Its export table has exactly one entry,
+    // `scriptingGetMem`, and the guest asks for it by name through `dlsym` (D517).
+    //
+    // Here because this is where the service, the bytes and the placed image are all in scope
+    // at once. A failure costs `dlsym` an answer rather than the run: a binary with no export
+    // table is ordinary, and the report already names what went unanswered.
+    if let Ok(exports) = service.export_addresses(bytes, image.base()) {
+        orbistoun_kernel::note_guest_exports(service.nid_suffix(), &exports);
+    }
     let protection = match service.protect_image(&mut image) {
         Ok(p) => p,
         Err(e) => {
@@ -523,7 +623,7 @@ fn place_and_relocate<W: Write>(
         orbistoun_thunk::implemented_count_within(thunks.len())
     );
 
-    prepare_diagnostics(service, bytes, module, symbols_db, &image, &thunks, limits);
+    prepare_diagnostics(service, module, &image, thunks, limits, &title.labels);
 
     // Only a fully linked image is safe to enter. An unapplied relocation leaves a
     // pointer that looks valid and is not, so entering would produce a fault with no
@@ -576,17 +676,16 @@ fn place_and_relocate<W: Write>(
 /// previous times a setting was consulted nowhere (D379).
 fn prepare_diagnostics(
     service: &Service,
-    bytes: &[u8],
     module: &str,
-    symbols_db: Option<&Path>,
     image: &Image,
     thunks: &orbistoun_thunk::ThunkTable,
     limits: Limits,
+    labels: &[String],
 ) {
     // What this run is subject to, recorded before anything can fault. A verdict comparing
     // two runs is only evidence when these match, and neither the wall-clock limit nor the
     // stub policy is visible in any number the run reports (D181).
-    let (default_return, overrides) = service.policy_summary();
+    let (default_return, overrides, propping) = service.policy_summary();
     // Read once and used three times below - to record what the run is under, to install
     // each diagnostic, and to warn about a variable that is nearly one. Reading the
     // environment separately at each site is how the three of these came to disagree about
@@ -605,6 +704,7 @@ fn prepare_diagnostics(
         did_nothing: Vec::new(),
         default_return,
         overrides,
+        propping,
         experiments: experiments.describe(),
         intervened: experiments.intervenes(),
         // Read from the map that was actually built, not from the setting that asked for it -
@@ -645,13 +745,12 @@ fn prepare_diagnostics(
     //
     // A supplied path still wins, because a database under construction has to be
     // testable before it is committed.
-    let supplied = symbols_db
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| orbistoun_nid::SymbolDbFile::from_json(&text).ok());
-    let file = supplied.unwrap_or_else(orbistoun_nid::SymbolDbFile::builtin);
-    let named = service.import_labels_with(bytes, &file);
-    if let Ok(labels) = named {
-        report::name_imports(labels);
+    // **Every slot of the shared table, not the executable's alone.** Sized to the executable,
+    // the vector ends exactly where the second module's slots begin, so a title module's call
+    // was named after whichever by-name stub shared its index - which is how a call answering a
+    // heap pointer read as `libc::usleep` (D490).
+    if !labels.is_empty() {
+        report::name_imports(labels.to_vec());
         // Where each implementation starts, so a fault in orbistoun's own code can name the
         // function it landed in rather than an address nothing can look up (D380).
         report::name_implementations(service.implementation_addresses());
@@ -929,7 +1028,6 @@ pub fn serve_as_worker_process() -> Result<(), String> {
         .map_err(|e| format!("worker loop: {e}"))
 }
 
-/// What relocation did, for the run summary.
 /// What relocation did, for the run summary.
 ///
 /// Its own function because `place_and_relocate` grew past the line ceiling, and a format
@@ -2009,6 +2107,24 @@ fn starting_address(image: &Image, settings: &process::EntrySettings) -> u64 {
 /// thread pointer is recognisable by its address alone - the same reasoning the other bases carry.
 const MAIN_TLS_BASE: u64 = 0x0000_6900_0000_0000;
 
+/// Where **spawned** threads' thread-local blocks are reserved, one after another.
+///
+/// Its own arena, clear of the main block (`0x6900…`), the thread stacks (`0x6100…`), the reentrant
+/// stacks (`0x6800…`) and the mapping arena (`0x7400…`), so a stray thread pointer still names its
+/// kind by its address (worklog 286).
+const THREAD_TLS_BASE: u64 = 0x0000_6A00_0000_0000;
+
+/// The next spawned-thread block base, bump-allocated and never reused.
+static NEXT_THREAD_TLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(THREAD_TLS_BASE);
+
+/// The thread-local template - layout and initialised `.tdata` - captured when the main thread's
+/// block is built, so a spawned thread can build its own from it without re-parsing the image (the
+/// kernel that spawns it cannot reach the loader anyway). `Some(None)` once a run with no
+/// thread-locals has set up: nothing to build, and the hook stays a cheap no-op.
+static TLS_TEMPLATE: std::sync::OnceLock<Option<(orbistoun_loader::tls::TlsLayout, Vec<u8>)>> =
+    std::sync::OnceLock::new();
+
 /// Installs the guest thread pointer for the thread about to enter, when the image declares
 /// thread-local storage.
 ///
@@ -2029,18 +2145,53 @@ const MAIN_TLS_BASE: u64 = 0x0000_6900_0000_0000;
 /// sleep). So on Windows this block, layout and priming write are the correct foundation but do not by
 /// themselves keep guest thread-locals alive - that needs re-installing the base after each context
 /// switch, which install-once cannot see (recorded as the next step, not pretended here).
+/// Builds a thread-local block for the **calling** thread at `base_arena`, installs its `fs` base,
+/// and remembers it for the backstop - the effectful half both the main thread and every spawned
+/// one need. The template (`layout`, `tdata`) is the same for every thread of a run; only the arena
+/// differs.
+fn build_tls_block(
+    base_arena: u64,
+    layout: &orbistoun_loader::tls::TlsLayout,
+    tdata: &[u8],
+) -> Result<u64, String> {
+    let alloc = layout.allocation_size();
+    let alloc_len = usize::try_from(alloc)
+        .map_err(|_| "thread-local block does not fit a pointer".to_owned())?;
+    let region = GuestStack::reserve(base_arena, alloc)
+        .map_err(|e| format!("could not reserve a thread-local block: {e}"))?;
+    let base = region.lowest_usable();
+
+    // SAFETY: `region` is freshly reserved and committed read-write at `base` for `alloc_len` bytes,
+    // and it is leaked below, so the block outlives every read the guest makes through it.
+    let dest = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, alloc_len) };
+    let tp = layout.render_block(base, dest, tdata);
+    std::mem::forget(region);
+
+    // SAFETY: sets the calling thread's `fs` base to the block just built, which is what that
+    // thread reads its thread-locals through.
+    unsafe { orbistoun_abi::thread_pointer::install(tp) }
+        .map_err(|e| format!("could not install the thread pointer: {e}"))?;
+    match orbistoun_abi::thread_pointer::current() {
+        Some(v) if v == tp => {
+            // Remembered so the fault handler can restore it after a host context switch drops it
+            // (D433). On Linux, where the base survives, this is recorded and never needed.
+            tls_backstop::remember(tp);
+            Ok(tp)
+        }
+        other => Err(format!(
+            "the thread pointer read back as {other:x?}, not the {tp:#x} that was written"
+        )),
+    }
+}
+
 fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, String> {
     let Some((layout, _index, vaddr)) = orbistoun_loader::tls::layout_of(bytes)
         .map_err(|e| format!("could not read the thread-local layout: {e}"))?
     else {
+        // Remembered as "no thread-locals" so a spawned thread's hook has a definite answer.
+        let _ = TLS_TEMPLATE.set(None);
         return Ok(None);
     };
-    let alloc = layout.allocation_size();
-    let alloc_len = usize::try_from(alloc)
-        .map_err(|_| "thread-local block does not fit a pointer".to_owned())?;
-    let region = GuestStack::reserve(MAIN_TLS_BASE, alloc)
-        .map_err(|e| format!("could not reserve a thread-local block: {e}"))?;
-    let base = region.lowest_usable();
 
     // The init image, copied out of the placed image. Only `init_size` bytes are the `.tdata`; the
     // rest of the block is `.tbss`, which `render_block` zeroes.
@@ -2054,27 +2205,138 @@ fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, S
         tdata.copy_from_slice(placed);
     }
 
-    // SAFETY: `region` is freshly reserved and committed read-write at `base` for `alloc_len` bytes,
-    // and it is leaked below, so the block outlives every read the guest makes through it.
-    let dest = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, alloc_len) };
-    let tp = layout.render_block(base, dest, &tdata);
-    std::mem::forget(region);
+    // Kept so a spawned thread can build its own block from it (worklog 286).
+    let _ = TLS_TEMPLATE.set(Some((layout, tdata.clone())));
+    // And register the hook the kernel calls at the top of every new guest thread, now that there
+    // is a template for it to read - only a title with thread-locals needs one built per thread.
+    orbistoun_kernel::thread::install_thread_start(set_up_this_threads_tls);
+    build_tls_block(MAIN_TLS_BASE, &layout, &tdata).map(Some)
+}
 
-    // SAFETY: sets this thread's `fs` base to the block just built; this thread is the one about to
-    // enter the guest, which is what reads through it.
-    unsafe { orbistoun_abi::thread_pointer::install(tp) }
-        .map_err(|e| format!("could not install the thread pointer: {e}"))?;
-    match orbistoun_abi::thread_pointer::current() {
-        Some(v) if v == tp => {
-            // Remembered so the fault handler can restore it after a host context switch drops it
-            // (D433). On Linux, where the base survives, this is recorded and never needed.
-            tls_backstop::remember(tp);
-            Ok(Some(tp))
-        }
-        other => Err(format!(
-            "the thread pointer read back as {other:x?}, not the {tp:#x} that was written"
-        )),
+/// Builds a thread-local block for the calling **spawned** guest thread - the per-thread half of
+/// what [`install_main_thread_tls`] does for the main one. Installed as the kernel's thread-start
+/// hook, so it runs at the top of every new guest thread, before any guest code (worklog 286).
+///
+/// A plain `fn` with no captures, so it is a `fn()` the kernel can call; it reads the template the
+/// main-thread setup stored. Silent when the image declared no thread-locals - the hook is
+/// registered unconditionally and most threads then have nothing to build. A failure leaves a
+/// thread that will fault on its first `fs:`-relative access, so it is said out loud, not swallowed.
+fn set_up_this_threads_tls() {
+    let Some(Some((layout, tdata))) = TLS_TEMPLATE.get() else {
+        return;
+    };
+    let alloc = layout.allocation_size();
+    // Spaced by the block's own size and a gap, so two threads' blocks never overlap; bump-
+    // allocated and never reused, and a run makes far too few threads to exhaust the arena.
+    let unit = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
+    let step = alloc
+        .checked_next_multiple_of(unit)
+        .unwrap_or(alloc)
+        .saturating_add(unit);
+    let base = NEXT_THREAD_TLS.fetch_add(step, std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = build_tls_block(base, layout, tdata) {
+        eprintln!(
+            "orbistoun: could not set up thread-local storage for a spawned guest thread: {e}"
+        );
     }
+}
+/// Everything the run is put under, planted before the guest starts, and the spans it may touch.
+///
+/// # Why this is one unit
+///
+/// The order inside it is load-bearing and the mistakes are invisible: a stack fill run after a
+/// poke silently erases it, and the run then reports an ordinary result under a diagnostic that did
+/// nothing (D229, D185). Keeping the sequence in one named place says that it *is* a sequence,
+/// rather than leaving it as a stretch of `enter` that reads like setup.
+///
+/// The reason for a refusal is returned rather than written, so the halt stays in `enter` with
+/// every other way entry can be declined and there is one place that decides what a refusal looks
+/// like.
+fn arm_diagnostics(
+    stack: &mut GuestStack,
+    image: &Image,
+    module: &str,
+) -> Result<experiment::Experiments, String> {
+    // Every diagnostic this run is under. Read here rather than passed in: `enter` is
+    // reached long after `prepare_diagnostics`, and threading one struct through four
+    // signatures to avoid a second read of the environment would be the worse trade.
+    let experiments = experiment::Experiments::from_env();
+
+    // Filled before anything is written onto it, so the only zeros the guest sees are ones
+    // something deliberately wrote. Refused rather than skipped on failure: a diagnostic
+    // that silently did not run answers the question wrongly and confidently (D185).
+    if let Some(byte) = experiments.stack_fill {
+        if let Err(e) = stack.fill(byte) {
+            return Err(format!(
+                "could not fill the guest stack with {byte:#04x}: {e}"
+            ));
+        }
+    }
+
+    // **After the stack fill, not before.** A poke plants a value at one address and a fill
+    // writes the whole stack; run the other way round the fill silently erases the poke, and
+    // the run reports an ordinary result under a diagnostic that did nothing. The same
+    // ordering makes the watch snapshot the state the guest actually starts from (D229).
+    apply_memory_diagnostics(image, stack, &experiments);
+
+    // Where an argument may safely be dereferenced for a dump. The same spans the fault
+    // reporter names, reused: an address inside one of them is mapped by this process, so
+    // reading it cannot fault - and an argument outside them is a length or a flag rather
+    // than a pointer, which is the other half of what this filters (D194).
+    //
+    // **Asked of the stack rather than re-derived from the constants it was built with.**
+    // This lived in `prepare_diagnostics`, which runs before the stack exists, so it
+    // declared `(GUEST_STACK_BASE, DEFAULT_STACK_SIZE)` - and `reserve` puts a guard page
+    // at the base with usable memory starting one page *above* it. The window was therefore
+    // shifted down by a page: it offered the one page mapped specifically to fault, and
+    // refused the top page of real stack.
+    //
+    // Not a rounding error. `libkernel::0x6abac2f3dc6f8cee` - the lead on the
+    // `image+0xafc959` wall - is called with `0x600000800d38`, which lands in exactly the
+    // page that was excluded, so every attempt to dump it came back as a bare scalar and
+    // the argument looked like a count. Two copies of one span, and the copy that was wrong
+    // was the one the diagnostic used (D217).
+    orbistoun_thunk::install_readable_ranges(vec![
+        image.span(),
+        (stack.lowest_usable(), stack.len()),
+    ]);
+    // **The stack only, and deliberately not the image.** A forced write is the one thing
+    // here that modifies guest memory, and the image's runs are protected after relocation
+    // - so planting a value in a read-only one would fault inside the emulator and produce
+    // a crash with no relation to the guest. An out-parameter lives on the stack anyway,
+    // which is what this exists to test (D218).
+    orbistoun_thunk::install_writable_ranges(vec![(stack.lowest_usable(), stack.len())]);
+    // Told where the stack is, so `sceKernelIsStack` answers from the span this process
+    // actually mapped rather than from the constants it was built with (D275).
+    describe_environment(stack, module);
+    // And where the image is: it lives in the loader's address space, which the kernel's runtime
+    // map never sees, so without this `sceKernelVirtualQuery` refuses the guest's own code (D446).
+    let (image_span_base, image_span_len) = image.span();
+    orbistoun_kernel::note_region(image_span_base, image_span_len);
+    Ok(experiments)
+}
+
+/// Runs every placed module's initialisers, when `ORBISTOUN_START_MODULES` asks for it.
+///
+/// # Why it says what it is about to do
+///
+/// A constructor is guest code and can fault. The first version of this reported afterwards,
+/// and the first run faulted inside the third module - so the loop never returned, the line
+/// never printed, and the intervention read as though it had not run. That is the ambiguity
+/// D325 exists to remove, reproduced in a new diagnostic on its first use (D520).
+///
+/// What each module actually did is recorded as it goes and reported from `persist`, which
+/// every ending reaches - so the per-module evidence survives a fault even though the total
+/// below does not.
+fn start_placed_modules_if_asked() {
+    if orbistoun_env::START_MODULES.get().is_none() {
+        return;
+    }
+    eprintln!("orbistoun: starting every placed module before entry");
+    let (modules, initialisers) = orbistoun_kernel::start_every_placed_module();
+    eprintln!(
+        "orbistoun: started {modules} placed module(s) before entry, {initialisers} initialiser(s) ran"
+    );
 }
 
 fn enter<W: Write>(
@@ -2119,64 +2381,12 @@ fn enter<W: Write>(
         }
     };
 
-    // Every diagnostic this run is under. Read here rather than passed in: `enter` is
-    // reached long after `prepare_diagnostics`, and threading one struct through four
-    // signatures to avoid a second read of the environment would be the worse trade.
-    let experiments = experiment::Experiments::from_env();
-
-    // Filled before anything is written onto it, so the only zeros the guest sees are ones
-    // something deliberately wrote. Refused rather than skipped on failure: a diagnostic
-    // that silently did not run answers the question wrongly and confidently (D185).
-    if let Some(byte) = experiments.stack_fill {
-        if let Err(e) = stack.fill(byte) {
-            return halt(
-                output,
-                Phase::Linked,
-                format!("{summary}; could not fill the guest stack with {byte:#04x}: {e}"),
-            );
-        }
-    }
-
-    // **After the stack fill, not before.** A poke plants a value at one address and a fill
-    // writes the whole stack; run the other way round the fill silently erases the poke, and
-    // the run reports an ordinary result under a diagnostic that did nothing. The same
-    // ordering makes the watch snapshot the state the guest actually starts from (D229).
-    apply_memory_diagnostics(image, &stack, &experiments);
-
-    // Where an argument may safely be dereferenced for a dump. The same spans the fault
-    // reporter names, reused: an address inside one of them is mapped by this process, so
-    // reading it cannot fault - and an argument outside them is a length or a flag rather
-    // than a pointer, which is the other half of what this filters (D194).
-    //
-    // **Asked of the stack rather than re-derived from the constants it was built with.**
-    // This lived in `prepare_diagnostics`, which runs before the stack exists, so it
-    // declared `(GUEST_STACK_BASE, DEFAULT_STACK_SIZE)` - and `reserve` puts a guard page
-    // at the base with usable memory starting one page *above* it. The window was therefore
-    // shifted down by a page: it offered the one page mapped specifically to fault, and
-    // refused the top page of real stack.
-    //
-    // Not a rounding error. `libkernel::0x6abac2f3dc6f8cee` - the lead on the
-    // `image+0xafc959` wall - is called with `0x600000800d38`, which lands in exactly the
-    // page that was excluded, so every attempt to dump it came back as a bare scalar and
-    // the argument looked like a count. Two copies of one span, and the copy that was wrong
-    // was the one the diagnostic used (D217).
-    orbistoun_thunk::install_readable_ranges(vec![
-        image.span(),
-        (stack.lowest_usable(), stack.len()),
-    ]);
-    // **The stack only, and deliberately not the image.** A forced write is the one thing
-    // here that modifies guest memory, and the image's runs are protected after relocation
-    // - so planting a value in a read-only one would fault inside the emulator and produce
-    // a crash with no relation to the guest. An out-parameter lives on the stack anyway,
-    // which is what this exists to test (D218).
-    orbistoun_thunk::install_writable_ranges(vec![(stack.lowest_usable(), stack.len())]);
-    // Told where the stack is, so `sceKernelIsStack` answers from the span this process
-    // actually mapped rather than from the constants it was built with (D275).
-    describe_environment(&stack, module);
-    // And where the image is: it lives in the loader's address space, which the kernel's runtime
-    // map never sees, so without this `sceKernelVirtualQuery` refuses the guest's own code (D446).
-    let (image_span_base, image_span_len) = image.span();
-    orbistoun_kernel::note_region(image_span_base, image_span_len);
+    // Every diagnostic this run is under, and the spans they may touch, in the order that order
+    // matters in - see `arm_diagnostics`.
+    let experiments = match arm_diagnostics(&mut stack, image, module) {
+        Ok(experiments) => experiments,
+        Err(why) => return halt(output, Phase::Linked, format!("{summary}; {why}")),
+    };
 
     let reporting = match install_reporting(&stack, &experiments) {
         Ok(active) => active,
@@ -2241,6 +2451,19 @@ fn enter<W: Write>(
         }
     }
 
+    // The float environment the console starts a title in: denormals-are-zero,
+    // flush-to-zero, every exception masked. Guest code runs natively, so without this it
+    // inherits the host thread's - which has DAZ and FTZ clear, and quietly computes
+    // different answers for denormal inputs rather than failing anywhere visible.
+    orbistoun_abi::enter::adopt_guest_float_environment();
+
+    // **Ask whether an import-bound module needed initialising before the guest started.**
+    // Off unless asked for. D515 starts a module when the guest loads it by name; a module
+    // the loader placed and resolved imports against is never loaded by name and so never
+    // started. Here, after protection and after the float environment, because a constructor
+    // is guest code and this is the last point before the guest's own entry (D520).
+    start_placed_modules_if_asked();
+
     if entry_settings.convention == process::Convention::Process {
         // SAFETY: the image is fully relocated - checked above - and its text was made
         // executable by the protection pass. `entry_stack` is the sixteen-byte-aligned
@@ -2269,10 +2492,13 @@ fn enter<W: Write>(
     } else {
         "fault reporting is unavailable on this host"
     };
-    let first: Vec<String> = orbistoun_thunk::recorded_calls()
+    // **The opening, from the record kept for it** - not the head of the ring. The ring is
+    // circular now, so its first entry is whatever the guest called eight thousand calls ago
+    // rather than what it started with (D571).
+    let first: Vec<String> = orbistoun_thunk::opening_calls()
         .iter()
         .take(SUMMARISED_CALLS)
-        .map(|c| format!("#{}", c.index))
+        .map(|index| format!("#{index}"))
         .collect();
     let trace = if first.is_empty() {
         "no imports were called".to_owned()

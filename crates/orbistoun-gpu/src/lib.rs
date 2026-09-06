@@ -65,6 +65,10 @@ pub use registers::{
 
 use orbistoun_hle::guest_module;
 
+pub mod agc;
+pub mod agc_driver;
+pub mod ampr;
+
 guest_module! {
     "libSceGnmDriver" {
         "sceGnmSubmitCommandBuffers" => 5,

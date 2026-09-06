@@ -1,0 +1,16 @@
+[package]
+publish = false
+name = "orbistoun-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Networking HLE: declarations for the libraries a title imports."
+
+[lints]
+workspace = true
+
+[dependencies]
+orbistoun-hle = { workspace = true }

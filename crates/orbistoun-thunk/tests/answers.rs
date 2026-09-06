@@ -421,6 +421,31 @@ fn what_answers_a_call_and_in_what_order() {
     );
     assert_eq!(orbistoun_thunk::total_calls(), 8);
 
+    // --- and a second install is ignored, which is why there is one table (D484) ------
+
+    // `BARE` is deliberately unimplemented above, and every call to it was recorded as
+    // called-and-not-implemented. Installing a handler for it *now* must change nothing:
+    // the tables are `OnceLock`s, so the first install is the live one for the process.
+    //
+    // **This is the claim a second module's stub table would rest on**, and it is false: a
+    // per-module table would be built, dropped in silence, and every count taken afterwards
+    // would be indexed against the wrong module. Asserted here rather than reasoned about,
+    // because a guard nobody has watched fail is a guard nobody knows anything about.
+    assert!(
+        !dispatch::is_implemented(BARE),
+        "the first install left this slot empty, which is what makes the check below mean something"
+    );
+    let mut second: Vec<Option<GuestFn>> = vec![None; IMPORTS];
+    second[BARE] = Some(handler);
+    dispatch::install_handlers(second);
+    assert!(
+        !dispatch::is_implemented(BARE),
+        concat!(
+            "a second install took effect, so a per-module stub table would work and D484 is ",
+            "wrong - re-read it before building on either answer"
+        )
+    );
+
     // The buffers have to outlive every call that was handed their addresses.
     drop(readable);
     drop(writable);

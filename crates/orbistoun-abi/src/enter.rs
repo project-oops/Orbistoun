@@ -57,6 +57,91 @@ pub unsafe fn enter_guest(entry: u64, stack_pointer: u64) -> u64 {
     unsafe { enter_guest_with_argument(entry, stack_pointer, process_argument_block()) }
 }
 
+/// The float environment a title runs under on the console, as configuration bits.
+///
+/// # What was measured, and why this is not that number
+///
+/// A conformance run read `MXCSR` as **`0x9fe0`** on entry to a native title. Decomposed:
+///
+/// | bits | meaning | value |
+/// |---|---|---|
+/// | 15 | flush-to-zero | set |
+/// | 13-14 | rounding mode | to nearest |
+/// | 7-12 | exception masks | all six masked |
+/// | 6 | denormals-are-zero | set |
+/// | 0-5 | **status flags** | `0x20` - the precision flag |
+///
+/// The first four are configuration. **The last is not**: bits 0-5 are sticky *status*, set by
+/// float work that has already happened, and the console had done some before the title got
+/// control. Writing `0x9fe0` would tell the guest an inexact result had occurred before it
+/// executed a single instruction - a fact about the console's startup reported as a fact about
+/// the guest's own arithmetic.
+///
+/// So this is `0x9fc0`: the same configuration, with the status flags clear.
+///
+/// # Why it has to be set at all
+///
+/// Guest code runs natively, so it uses whatever `MXCSR` the host thread carries - which has
+/// DAZ and FTZ **clear**, because that is the ordinary host default. A denormal argument reads
+/// as itself here and as zero on the console, and a denormal result is kept here and flushed
+/// there. Nothing about that shows up as a failed call; it shows up as arithmetic that is
+/// quietly different, which is the hardest kind of divergence to find later.
+pub const GUEST_MXCSR: u32 = 0x9fc0;
+
+/// Puts this thread into the float environment a title runs under.
+///
+/// **Per thread, so every path that enters guest code has to call it** - the process entry and
+/// each guest thread alike. A thread that skipped it would do the same arithmetic differently
+/// from its siblings, which is worse than all of them being wrong the same way.
+///
+/// Also applies to orbistoun's own implementations answering on that thread, and that is
+/// correct rather than a side effect: they stand in for the console's C library, which runs
+/// under exactly this environment.
+#[cfg(target_arch = "x86_64")]
+pub fn adopt_guest_float_environment() {
+    let value = GUEST_MXCSR;
+    // SAFETY: `ldmxcsr` reads four bytes from the operand, and `value` is a live `u32` on this
+    // frame. It writes no memory and touches no register the compiler is tracking.
+    unsafe {
+        core::arch::asm!(
+            "ldmxcsr [{control}]",
+            control = in(reg) &raw const value,
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+}
+
+/// Puts this thread into the float environment a title runs under.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn adopt_guest_float_environment() {}
+
+/// This thread's current `MXCSR`.
+///
+/// Exists so the setting above can be checked rather than assumed - a write nobody reads back
+/// is a write nobody knows happened.
+#[cfg(target_arch = "x86_64")]
+#[must_use]
+pub fn float_environment() -> u32 {
+    let mut value = 0_u32;
+    // SAFETY: `stmxcsr` writes four bytes to the operand, and `value` is a live `u32` on this
+    // frame with nothing else aliasing it.
+    unsafe {
+        core::arch::asm!(
+            "stmxcsr [{control}]",
+            control = in(reg) &raw mut value,
+            options(nostack, preserves_flags),
+        );
+    }
+    value
+}
+
+/// This thread's current `MXCSR`, where there is one.
+#[cfg(not(target_arch = "x86_64"))]
+#[must_use]
+pub fn float_environment() -> u32 {
+    0
+}
+
 /// Transfers control to a **process** entry point, and never comes back.
 ///
 /// # Why this cannot be a call

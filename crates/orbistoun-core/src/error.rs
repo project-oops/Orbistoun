@@ -36,13 +36,29 @@ pub enum GuestError {
 /// See [`GuestError::vendor`] for how this is known.
 pub const VENDOR_ERROR_BASE: u32 = 0x8002_0000;
 
-/// The POSIX `errno` values the target has been watched to return.
+/// The POSIX `errno` values this project answers with, in two tiers by how each is known.
 ///
 /// Named rather than spelled at each call site: `0x8002_0010` says nothing about what
-/// happened, and `GuestError::vendor(errno::BUSY)` says what was provoked. Only values
-/// somebody has actually observed coming back are listed - this is a record of
-/// measurements, not a copy of `errno.h`, and a name here is a claim that the target
-/// produced it.
+/// happened, and `GuestError::vendor(errno::BUSY)` says what was provoked.
+///
+/// # The two tiers, and why there are two
+///
+/// **Measured** is the first group below, and its claim is the strong one: somebody watched
+/// the target hand that value back. This module held nothing else until a call arrived that
+/// had to report a condition nobody had provoked on hardware yet - a wait that ran out of
+/// time - and the three ways to answer it were all worse than admitting the difference
+/// (D476). So the second group is **published**: the value comes from the documented
+/// numbering of the platform's ancestor rather than from a console, and each entry says so
+/// and cites it.
+///
+/// What is *not* uncertain about a published entry is the encoding around it: the
+/// `0x8002_0000` half was measured across seven values from five unrelated call families,
+/// so the only unverified part is the small number underneath. That is a narrow gap and a
+/// nameable one, which is what makes it worth carrying openly rather than hiding by
+/// answering a measured-but-wrong code instead.
+///
+/// **A published entry is promoted, not kept.** Each names the probe that would settle it,
+/// and moving it up is a one-line change once somebody runs that probe.
 pub mod errno {
     /// The caller does not hold what it is operating on. Observed from unlocking a mutex
     /// nobody holds.
@@ -69,6 +85,27 @@ pub mod errno {
     /// The argument is outside what the call accepts. Observed from querying memory with an
     /// undefined flag, and from asking for a module description the wrong way.
     pub const INVALID: u32 = 22;
+
+    // --- published, not measured ------------------------------------------------------
+    //
+    // Everything below this line comes from a document rather than from a console. See the
+    // module note for why they are here at all, and what promotes one.
+
+    /// A wait gave up before it got what it was waiting for.
+    ///
+    /// **Published, not measured.** `ETIMEDOUT` is 60 in the documented `errno` numbering of
+    /// the platform's FreeBSD ancestor, which is a citable source and not a console.
+    ///
+    /// Every timed call needs it and no other value will do: POSIX has
+    /// `pthread_mutex_timedlock` answer `ETIMEDOUT` and never `EBUSY`, and a guest that
+    /// retries on busy and gives up on timed-out would spin forever on the wrong one. That
+    /// is the trade this entry exists to avoid - an unverified value is a smaller lie than a
+    /// verified value that means something else.
+    ///
+    /// **Promoted by**: taking a lock, calling `pthread_mutex_timedlock` on it with a
+    /// deadline a millisecond out, and recording what comes back. One conformance check
+    /// settles it.
+    pub const TIMED_OUT: u32 = 60;
 }
 
 impl GuestError {
@@ -136,6 +173,55 @@ impl GuestError {
     }
 }
 
+/// The lowest placeholder value, and the base of the block they occupy.
+///
+/// Public because a *reader* of a fault needs it as much as a writer of a stub: an address
+/// in this block is not memory, it is one of these codes being used as a pointer.
+pub const PLACEHOLDER_BASE: u32 = 0x7FFF_0000;
+
+/// Names the placeholder an address is, when it is one of orbistoun's own.
+///
+/// # Why a fault reporter needs this
+///
+/// A stub answers `0x7FFF_0001` for a function nobody has written. A guest that reads it as a
+/// pointer and jumps through it faults **at that value** - and to anything checking "is this
+/// address inside a region orbistoun placed", the answer is no, so the fault reads as
+/// *orbistoun's own code crashing*. It is the opposite: the emulator behaved exactly as
+/// designed, and the guest used a refusal as an address (D128, D154, D186, D299).
+///
+/// The two diagnoses send a reader to opposite places - one to debug this codebase, the other
+/// to implement the function the guest asked for - so telling them apart is worth a lookup.
+///
+/// `Exact` where the value is a placeholder itself; `Offset` where it is inside the same block,
+/// which is a guest that took one and added to it before dereferencing. The second is a weaker
+/// claim and is labelled as one.
+#[must_use]
+pub const fn placeholder_named(address: u64) -> Option<(&'static str, bool)> {
+    // Above 32 bits it cannot be one of these: they are `u32` codes, and a guest that
+    // sign-extended one would land somewhere else entirely.
+    if address > u32::MAX as u64 {
+        return None;
+    }
+    let value = address as u32;
+    let exact = match value {
+        0x7FFF_0001 => Some("unimplemented"),
+        0x7FFF_0002 => Some("invalid argument"),
+        0x7FFF_0003 => Some("invalid handle"),
+        0x7FFF_0004 => Some("out of memory"),
+        _ => None,
+    };
+    if let Some(name) = exact {
+        return Some((name, true));
+    }
+    // **Bounded above as well as below.** `>= PLACEHOLDER_BASE` alone claims every vendor
+    // code too - `0x8002_0016` is a value a console answered, and naming it as orbistoun's own
+    // would report a measurement as an invention. The negative test caught exactly that.
+    if value >= PLACEHOLDER_BASE && value <= PLACEHOLDER_BASE | 0xFFFF {
+        return Some(("a placeholder answer", false));
+    }
+    None
+}
+
 impl fmt::Display for GuestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -156,6 +242,57 @@ pub type GuestResult<T> = Result<T, GuestError>;
 #[cfg(test)]
 mod tests {
     use super::GuestError;
+
+    /// **The value a stub answers is recognised as one**, so a fault at it is not read as a
+    /// crash in orbistoun's own code.
+    #[test]
+    fn each_placeholder_is_named_exactly() {
+        for (error, name) in [
+            (GuestError::Unimplemented, "unimplemented"),
+            (GuestError::InvalidArgument, "invalid argument"),
+            (GuestError::InvalidHandle, "invalid handle"),
+            (GuestError::NoMemory, "out of memory"),
+        ] {
+            assert_eq!(
+                super::placeholder_named(u64::from(error.as_raw())),
+                Some((name, true)),
+                "{error} is one of ours and must be recognised"
+            );
+        }
+    }
+
+    /// A value inside the block but not one of the four is reported as a weaker claim.
+    ///
+    /// A guest that takes a placeholder and offsets into it before dereferencing lands here,
+    /// and "close to one of ours" is still far more useful than "somewhere in the emulator".
+    #[test]
+    fn an_offset_from_a_placeholder_is_reported_as_the_weaker_claim() {
+        assert_eq!(
+            super::placeholder_named(0x7FFF_0001 + 0x18),
+            Some(("a placeholder answer", false))
+        );
+    }
+
+    /// **An ordinary address is not one of ours**, which is the half that must not fire.
+    ///
+    /// A guest image sits at `0x40…` and the stack at `0x60…`; reporting either as a
+    /// placeholder would replace one wrong diagnosis with another.
+    #[test]
+    fn an_ordinary_address_is_not_a_placeholder() {
+        assert_eq!(super::placeholder_named(0x4000_0000_0000), None);
+        assert_eq!(super::placeholder_named(0x6000_007f_ca68), None);
+        assert_eq!(super::placeholder_named(0), None);
+        assert_eq!(super::placeholder_named(0x7FFE_FFFF), None);
+    }
+
+    /// A vendor error is not a placeholder, however much it looks like a code.
+    ///
+    /// `0x8002_0016` is a real value a console answered; naming it as orbistoun's own would
+    /// claim a measurement was an invention.
+    #[test]
+    fn a_vendor_code_is_not_one_of_ours() {
+        assert_eq!(super::placeholder_named(0x8002_0016), None);
+    }
 
     #[test]
     fn raw_round_trips_exactly() {

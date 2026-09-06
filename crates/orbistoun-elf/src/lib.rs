@@ -191,6 +191,12 @@ pub struct Container<'a> {
     wrapper: Option<Wrapper>,
 }
 
+/// The dynamic symbol table, its strings, how many symbols there are, and the entry stride.
+///
+/// Named because the tuple is four wide and two callers unpack it: a reader meeting
+/// `(&[u8], &[u8], u64, usize)` has to work out which slice is which from the call site.
+type SymbolTables<'bytes> = (&'bytes [u8], &'bytes [u8], u64, usize);
+
 impl<'a> Container<'a> {
     /// Parses a container, unwrapping it first if it is wrapped.
     ///
@@ -564,12 +570,18 @@ impl<'a> Container<'a> {
         Ok(None)
     }
 
-    /// Every import this module needs, read from the dynamic symbol table.
-    pub fn raw_imports(
-        &self,
-        whole: &[u8],
-        hasher: &orbistoun_nid::NidHasher,
-    ) -> Result<Vec<dynamic::RawImport>, ElfError> {
+    /// The dynamic symbol table and its strings, located and bounded.
+    ///
+    /// Shared by [`Self::raw_imports`] and [`Self::raw_exports`], which read the **same
+    /// table** and differ only in which side of `SHN_UNDEF` they keep. Locating it twice
+    /// would be thirty lines that have to stay identical, and the day they stopped being
+    /// identical one of the two would read a table the other did not.
+    ///
+    /// # Errors
+    ///
+    /// [`ElfError::NoDynamicTable`] when there is no dynamic segment, when it lacks the
+    /// string, symbol or hash table, or when any of those addresses is unmapped.
+    fn symbol_tables<'bytes>(&self, whole: &'bytes [u8]) -> Result<SymbolTables<'bytes>, ElfError> {
         let Some(dyn_bytes) = self.dynamic_bytes(whole)? else {
             return Err(ElfError::NoDynamicTable {
                 reason: "no PT_DYNAMIC segment, or its address could not be located",
@@ -602,8 +614,39 @@ impl<'a> Container<'a> {
         let strings = whole.get(strtab_at..strtab_at + strsz).unwrap_or(&[]);
         let symbols = whole.get(symtab_at..).unwrap_or(&[]);
         let syment = usize::try_from(info.syment).unwrap_or(dynamic::SYMBOL_SIZE);
+        Ok((symbols, strings, nchain, syment))
+    }
 
+    /// Every import this module needs, read from the dynamic symbol table.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::symbol_tables`], plus a symbol count too large to be real.
+    pub fn raw_imports(
+        &self,
+        whole: &[u8],
+        hasher: &orbistoun_nid::NidHasher,
+    ) -> Result<Vec<dynamic::RawImport>, ElfError> {
+        let (symbols, strings, nchain, syment) = self.symbol_tables(whole)?;
         dynamic::imports_from_symbols(symbols, strings, nchain, syment, hasher)
+    }
+
+    /// Every symbol this module **provides**, read from the same table.
+    ///
+    /// The other half of [`Self::raw_imports`], and the half that makes a second module worth
+    /// loading: an import is a NID somebody needs, an export is that NID plus where in this
+    /// module it lives.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::symbol_tables`], plus a symbol count too large to be real.
+    pub fn raw_exports(
+        &self,
+        whole: &[u8],
+        hasher: &orbistoun_nid::NidHasher,
+    ) -> Result<Vec<dynamic::RawExport>, ElfError> {
+        let (symbols, strings, nchain, syment) = self.symbol_tables(whole)?;
+        dynamic::exports_from_symbols(symbols, strings, nchain, syment, hasher)
     }
 
     /// The symbol count, from whichever hash table the module carries.

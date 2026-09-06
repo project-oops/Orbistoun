@@ -32,6 +32,7 @@ orbistoun-libc = { workspace = true }
 orbistoun-posix = { workspace = true }
 orbistoun-gpu = { workspace = true }
 orbistoun-audio = { workspace = true }
+orbistoun-net = { workspace = true }
 orbistoun-video = { workspace = true }
 orbistoun-input = { workspace = true }
 orbistoun-fs = { workspace = true }
@@ -43,3 +44,11 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The hardware measurement table and the guest calling convention, for the claims in
+# `tests/hardware.rs`. Both are already dependencies of the library; an integration test
+# sees only the crate and its dev-dependencies, so they are named again here.
+orbistoun-hle = { workspace = true }
+orbistoun-core = { workspace = true }
+# The float environment a guest is entered under, so the measured `MXCSR` can be asserted
+# against what orbistoun actually installs rather than against a constant copied twice.
+orbistoun-abi = { workspace = true }

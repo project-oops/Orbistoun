@@ -31,7 +31,7 @@ use orbistoun_report::trace::{
 };
 
 /// How many regions can be named in a fault report.
-const MAX_REGIONS: usize = 4;
+const MAX_REGIONS: usize = 5;
 
 /// Bases of the named regions, or zero for an unused slot.
 static REGION_BASE: [AtomicU64; MAX_REGIONS] = [const { AtomicU64::new(0) }; MAX_REGIONS];
@@ -40,7 +40,13 @@ static REGION_LEN: [AtomicU64; MAX_REGIONS] = [const { AtomicU64::new(0) }; MAX_
 
 /// Names, indexed the same way. Fixed rather than stored, so the handler never chases a
 /// pointer that the faulting code may have invalidated.
-const REGION_NAMES: [&str; MAX_REGIONS] = ["image", "stubs", "stack", "other"];
+const REGION_NAMES: [&str; MAX_REGIONS] = [
+    "image",
+    "stubs",
+    "stack",
+    "other",
+    "the title's own modules",
+];
 
 /// Which slot each kind of region occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +57,13 @@ pub enum Region {
     Stubs,
     /// The guest stack.
     Stack,
+    /// Every module the title ships, as one span covering all of them.
+    ///
+    /// **One span rather than one per module**, because there are only so many slots and a
+    /// title ships a handful. The span includes the unmapped guard between modules, so an
+    /// address in a guard is named as a module - which overstates by a granule and is still
+    /// far better than the alternative, which was naming it as orbistoun's own code (D489).
+    TitleModules,
 }
 
 impl Region {
@@ -60,6 +73,7 @@ impl Region {
             Self::Image => 0,
             Self::Stubs => 1,
             Self::Stack => 2,
+            Self::TitleModules => 4,
         }
     }
 }
@@ -198,6 +212,54 @@ pub fn describe_module(module: String) {
 /// the one that mattered.
 static REPORTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Whether `len` bytes at `address` can be read without faulting.
+///
+/// # Why the fault reporter has to ask
+///
+/// Both byte windows below used to assume the page holding the faulting instruction pointer was
+/// mapped, "because the guest was executing in it". That is true of a **data** fault and false of
+/// an **execute** one: when a guest jumps to an address that is not code, `rip` *is* the unmapped
+/// address, and reading the instruction at it faults a second time. A fault inside a fault handler
+/// is not reported - it ends the process - so the first fault was never recorded and the run
+/// produced no trace at all (D471).
+///
+/// `VirtualQuery` allocates nothing and reads nothing at `address`, so it is safe on this path.
+#[cfg(windows)]
+fn readable(address: u64, len: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+
+    if address == 0 || len == 0 {
+        return false;
+    }
+    // SAFETY: every field of this structure is a plain integer or pointer, so all-zero is a
+    // valid initialised value; `VirtualQuery` overwrites it before it is read.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let size = size_of::<MEMORY_BASIC_INFORMATION>();
+    // SAFETY: `info` is a live, correctly sized buffer this call owns. `VirtualQuery` only
+    // *describes* the mapping at `address` - it does not dereference it - so asking about an
+    // unmapped address is exactly what it is for.
+    let written = unsafe { VirtualQuery(address as *const core::ffi::c_void, &raw mut info, size) };
+    if written == 0 || info.State != MEM_COMMIT {
+        return false;
+    }
+    // A guard page is committed and still faults on touch, which is the whole point of it.
+    if info.Protect & (PAGE_NOACCESS | PAGE_GUARD) != 0 {
+        return false;
+    }
+    // The whole window has to be inside the one region: the next one may be unmapped.
+    let end = (info.BaseAddress as u64).saturating_add(info.RegionSize as u64);
+    address.saturating_add(len as u64) <= end
+}
+
+/// Away from Windows the fault reporter is not implemented at all, so nothing here is reached.
+/// Answering "not readable" keeps the byte windows empty rather than risking a second fault.
+#[cfg(not(windows))]
+const fn readable(_address: u64, _len: usize) -> bool {
+    false
+}
+
 /// The bytes of the faulting instruction, copied straight from the instruction pointer.
 ///
 /// Returns a fixed buffer and how many of it are valid - no allocation, because this runs inside the
@@ -214,10 +276,14 @@ fn instruction_bytes(ip: u64) -> ([u8; 16], usize) {
     }
     let to_page_end = (PAGE - (ip & (PAGE - 1))) as usize;
     let len = to_page_end.min(out.len());
-    // SAFETY: `ip` is the instruction pointer of the guest that just faulted, so the page holding it
-    // is mapped and readable; `len` is clamped to the remainder of that one page, so the slice
-    // cannot cross into an unmapped neighbour. The bytes are read once into `out` and the borrow
-    // does not outlive this call.
+    // **Checked, not assumed.** An execute fault puts `rip` *at* the unmapped address, so the
+    // page the guest "was executing in" may not exist (D471).
+    if !readable(ip, len) {
+        return (out, 0);
+    }
+    // SAFETY: `readable` has just confirmed `len` bytes at `ip` are committed and readable, and
+    // `len` is clamped to the remainder of one page, so the slice cannot cross into an unmapped
+    // neighbour. The bytes are read once into `out` and the borrow does not outlive this call.
     let src = unsafe { std::slice::from_raw_parts(ip as *const u8, len) };
     out[..len].copy_from_slice(src);
     (out, len)
@@ -239,9 +305,14 @@ fn bytes_before(ip: u64) -> ([u8; 48], usize) {
     let into_page = (ip & (PAGE - 1)) as usize;
     let len = into_page.min(out.len());
     let start = ip - len as u64;
-    // SAFETY: `start .. ip` lies within the single page holding `ip`, which is mapped and readable
-    // because the guest was executing in it; `len` is clamped to how far `ip` is into that page, so
-    // the slice never precedes the page's start. Read once into `out`, borrow not held past the call.
+    // The same check, and the read that actually killed a run: `bytes_before(0x7fff0001)` starts
+    // at `0x7fff0000`, one byte below a placeholder the guest had jumped to (D471).
+    if !readable(start, len) {
+        return (out, 0);
+    }
+    // SAFETY: `readable` has just confirmed `len` bytes at `start` are committed and readable;
+    // `start .. ip` lies within the single page holding `ip`, so the slice never precedes that
+    // page's start. Read once into `out`, borrow not held past the call.
     let src = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
     out[..len].copy_from_slice(src);
     (out, len)
@@ -250,6 +321,37 @@ fn bytes_before(ip: u64) -> ([u8; 48], usize) {
 /// Written explicitly so a report line is one line however the stream is buffered.
 const NEWLINE: &str = "
 ";
+
+/// Says that the guest used one of orbistoun's own refusals as an address.
+///
+/// # Why this is not the emulator-bug message
+///
+/// The two look identical to the check above: a stub answers `0x7FFF_0001`, the guest reads it
+/// as a pointer and jumps through it, and the instruction pointer is then outside every region
+/// orbistoun placed - which is exactly the test for "our code faulted".
+///
+/// **It is the opposite diagnosis.** Nothing in this codebase misbehaved; a function nobody has
+/// written answered the way it is designed to, and the guest believed it. The reader wants the
+/// import in the header - that is the function to implement - not a host stack trace of the
+/// emulator working correctly (D128, D154, D186, D299).
+fn note_placeholder_fault(line: &mut Line, what: &'static str, exact: bool) {
+    line.text("  >> NOT AN EMULATOR BUG: this address is orbistoun's own `");
+    line.text(what);
+    line.text(if exact { "` answer" } else { "` block" });
+    line.text(NEWLINE);
+    line.text(
+        "     - a stub returned it and the guest used it as a pointer. The emulator did what",
+    );
+    line.text(NEWLINE);
+    line.text("     it was built to do, so the host stack below is the trampoline, not the cause.");
+    line.text(NEWLINE);
+    line.text("     **The import in the header is the last call, not the source** - it is usually");
+    line.text(NEWLINE);
+    line.text("     implemented. Look down the recorded calls for the most recent one returning");
+    line.text(NEWLINE);
+    line.text("     this value: that is the function to write.");
+    line.text(NEWLINE);
+}
 
 /// Says, unmistakably, that the fault is in orbistoun's own code rather than the guest's.
 ///
@@ -339,8 +441,17 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     line.text(NEWLINE);
 
     // **Say loudly whose bug this is** - `inside` is set only when the instruction pointer is
-    // outside the guest image, i.e. orbistoun's own code faulted, not the guest's.
-    if inside.is_some() {
+    // outside the guest image, which used to be taken as "orbistoun's own code faulted".
+    //
+    // That test cannot tell our code from **our own placeholder answers**: a stub returns
+    // `0x7FFF_0001`, the guest jumps through it, and the instruction pointer is outside every
+    // placed region for a reason that has nothing to do with a bug here. Checked first, because
+    // the two messages send a reader to opposite places.
+    let placeholder = orbistoun_core::placeholder_named(instruction_pointer)
+        .or_else(|| orbistoun_core::placeholder_named(faulting_address));
+    if let Some((what, exact)) = placeholder {
+        note_placeholder_fault(&mut line, what, exact);
+    } else if inside.is_some() {
         note_emulator_fault(&mut line);
     }
 
@@ -355,6 +466,7 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // is its distance from a function in this file: add that to `emit`'s own offset in the
     // binary and the symbol is one `nm` away (D380).
     if inside.is_some()
+        && placeholder.is_none()
         && let Some((name, offset)) = own_code_site(instruction_pointer)
     {
         line.text("  in orbistoun's own code, nearest implementation is ");
@@ -463,10 +575,83 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
             offset,
             inside_import: inside_import_name(instruction_pointer).map(str::to_owned),
             registers: Some(registers),
+            pointees: describe_pointees(&registers),
             frames: walk_frames(registers.rbp),
         }),
     );
     persist(&trace);
+}
+
+/// What each register holding a readable address is pointing at.
+///
+/// # Why a fault needs this and the argument dump was not enough
+///
+/// The argument dumper has named and dumped pointers since D198, but only for imports. A fault
+/// prints sixteen bare values, and at this title's wall the one that mattered was a short text
+/// label in `r12` - reading it meant arming a watchpoint on a stack address that orbistoun's own
+/// shims churn, which filled the recorder with host sites and never showed the guest's access
+/// (D522).
+///
+/// **Readable is asked, never assumed.** `is_mapped` is the same question the argument dumper
+/// asks, and a register that fails it is left out entirely rather than reported as unreadable -
+/// most of the sixteen hold scalars, and sixteen "not an address" lines would bury the two that
+/// are.
+fn describe_pointees(registers: &Registers) -> Vec<String> {
+    if !orbistoun_thunk::ranges_known() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (name, value) in registers.named() {
+        if value == 0 || !orbistoun_thunk::is_mapped(value) {
+            continue;
+        }
+        let Ok(at) = usize::try_from(value) else {
+            continue;
+        };
+        // SAFETY: `is_mapped` says this address is inside a region this run published as
+        // readable, and sixteen bytes from it stay inside it - the ranges are page-granular
+        // and no published range is shorter than that.
+        let bytes: [u8; 16] =
+            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<[u8; 16]>(at)) };
+        let hex = bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let where_ = locate(value).map_or_else(
+            || format!("{value:#x}"),
+            |(region, offset)| format!("{region}+{offset:#x}"),
+        );
+        // The text form only when it is text: a run of printable bytes ending in a
+        // terminator is a string a guest passed, and rendering arbitrary bytes as characters
+        // would invent one.
+        let text = printable_text(&bytes).map_or_else(String::new, |t| format!("  {t:?}"));
+        out.push(format!("{name} -> {where_} = {hex}{text}"));
+    }
+    out
+}
+
+/// The text `bytes` holds, when it holds text and not merely bytes that could be read as some.
+///
+/// # The rule, and why it is this strict
+///
+/// A terminated run of printable characters is a string a guest passed. Anything else is bytes,
+/// and rendering bytes as characters **invents a string** - which is the same failure as
+/// inventing a constant, in the one place a reader is most likely to believe it (principle 3).
+///
+/// So all three must hold: something before the terminator, a terminator inside the window
+/// (otherwise the run is only the start of something longer and the text would be a fragment),
+/// and every character printable. `"None"` passes; a pointer that happens to begin `0x65 0x4e`
+/// does not.
+fn printable_text(bytes: &[u8]) -> Option<String> {
+    let text: String = bytes
+        .iter()
+        .take_while(|b| **b != 0)
+        .map(|b| char::from(*b))
+        .collect();
+    let terminated = text.len() < bytes.len();
+    (!text.is_empty() && terminated && text.chars().all(|c| c.is_ascii_graphic() || c == ' '))
+        .then_some(text)
 }
 
 /// Says which paths the guest asked for and did not get.
@@ -959,6 +1144,10 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         // the reader to distrust all of it.
         total_calls: counts.iter().map(|(_, n)| *n).sum(),
         distinct: counts.len(),
+        // Asked of the port table rather than counted from the rows above, because a
+        // submission a port refused is still a call to something implemented and the rows
+        // cannot tell the two apart (D558).
+        frames: orbistoun_video::frames_presented(),
         // **Recorded, not just printed.** These used to reach stderr at the end of a run and
         // go no further, so a guest that talks to the kernel by number left nothing behind for
         // the work list to rank - and that is how every open-toolchain payload works (D401).
@@ -1058,8 +1247,13 @@ fn labelled(index: usize) -> String {
 /// The last calls the guest made, labelled.
 ///
 /// Taken from the ring the dispatcher has always filled. It holds the *first*
-/// [`orbistoun_thunk::MAX_RECORDED_CALLS`], so for any run that stays under that - which
-/// every run so far does, by an order of magnitude - the end of it is the true end.
+/// [`orbistoun_thunk::MAX_RECORDED_CALLS`], and the ring is **circular**, so these are the last
+/// calls the guest made however long it ran (D571).
+///
+/// It was not always: the ring used to fill once and stop, which made this the last 48 of the
+/// *first* 8,192 - calls #8,144-#8,191 of runs making four hundred thousand and twelve million,
+/// while the printer called them the ones before the fault. That is what D568 found and what
+/// making the ring circular fixed.
 fn tail_of_recorded() -> Vec<TracedCall> {
     let all = orbistoun_thunk::recorded_calls();
     let from = all.len().saturating_sub(TAIL_CALLS);
@@ -1068,7 +1262,7 @@ fn tail_of_recorded() -> Vec<TracedCall> {
         .map(|c| TracedCall {
             sequence: c.sequence,
             label: labelled(c.index as usize),
-            arg0: c.arg0,
+            args: c.args,
             from: c.from,
             returned: c.ret,
         })
@@ -1091,6 +1285,44 @@ pub fn persist(trace: &CallTrace) {
     // it is the only place a shell summary is guaranteed to be reached - including after a
     // fault, which is when somebody most wants to know what the guest was and was not told.
     crate::session::summarise();
+    // A reservation the guest could not make is otherwise invisible: `map` answers `NoMemory`
+    // and the guest faults far away, so the base and the reason never reach the report. Named
+    // here, once, from the host side where a `klog` line is safe (worklog 284, D459-class).
+    if let Some(failure) = orbistoun_mem::last_reserve_failure() {
+        // The count as well as the last one: two runs can report an identical last failure and
+        // still have failed a different number of reservations, which is the difference that
+        // matters when they took different paths (D487).
+        eprintln!(
+            "orbistoun: {} reservation(s) failed, first at {:#x}, last: base={:#x} len={:#x} - {}",
+            orbistoun_mem::reserve_failures(),
+            orbistoun_mem::first_reserve_failure_base().unwrap_or(0),
+            failure.base,
+            failure.len,
+            failure.reason
+        );
+    }
+    // A diagnostic that intervened says what it did. Silence here means none was asked
+    // for; a line reporting nothing fired means the run tested nothing, which is the one
+    // conclusion that must never be mistaken for an elimination (D325).
+    //
+    // Here rather than beside the call summary, which only two endings reach - a timeout
+    // and an exhausted budget. **A fault reached neither**, so every intervening diagnostic
+    // was silent on the most common ending this project has, which is the ending it was
+    // built to explain (D513).
+    for fill in [
+        orbistoun_kernel::direct_fill_summary(),
+        orbistoun_libc::heap_fill_summary(),
+        orbistoun_libc::heap_base_summary(),
+        // Not a diagnostic - a gap report, and unconditional for that reason. Nothing
+        // switched it on and nothing intervened; it says what the run did not do (D514).
+        orbistoun_kernel::module_start_summary(),
+        orbistoun_kernel::equeue_summary(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        eprintln!("orbistoun: {fill}");
+    }
     let Some(path) = TRACE_PATH.get() else {
         return;
     };
@@ -1341,18 +1573,6 @@ fn summarise_calls(stopped: &str, trace: &CallTrace) {
         "orbistoun: the guest was still running {stopped}; {} import calls across {} distinct imports",
         trace.total_calls, trace.distinct
     );
-    // A diagnostic that intervened says what it did. Silence here means none was asked
-    // for; a line reporting nothing fired means the run tested nothing, which is the one
-    // conclusion that must never be mistaken for an elimination (D325).
-    for fill in [
-        orbistoun_kernel::direct_fill_summary(),
-        orbistoun_libc::heap_fill_summary(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let _ = writeln!(err, "orbistoun: {fill}");
-    }
     for call in trace.calls.iter().take(MOST_CALLED_REPORTED) {
         // Integer tenths of a percent rather than floating point: the counts run into
         // the hundreds of millions, past the point where an `f64` holds them exactly,
@@ -1438,5 +1658,50 @@ mod tests {
             line.text("some text that is long enough to overrun");
         }
         assert_eq!(line.as_bytes().len(), Line::CAPACITY);
+    }
+}
+
+#[cfg(test)]
+mod pointee_tests {
+    use super::printable_text;
+
+    /// A terminated run of printable characters is text; everything else is bytes.
+    ///
+    /// # What this protects
+    ///
+    /// A fault dump is read closely and believed, so a quoted string in one has to *be* a
+    /// string. Two of these cases came out of the run this was built for: `"None"` is the
+    /// label a guest passed, and `65 4e f1 22 ...` is the start of a pointer that begins with
+    /// two characters and would read as `"eN"` under a looser rule (D522).
+    ///
+    /// **What it cannot check:** that the guest meant the bytes as text. A four-byte integer
+    /// whose bytes all happen to be printable and whose fifth byte is zero is indistinguishable
+    /// from a short string, and this reports it as one.
+    #[test]
+    fn only_terminated_printable_bytes_are_reported_as_text() {
+        let mut label = [0_u8; 16];
+        label[..4].copy_from_slice(b"None");
+        assert_eq!(printable_text(&label).as_deref(), Some("None"));
+
+        assert_eq!(
+            printable_text(&[0x65, 0x4e, 0xf1, 0x22, 0xff, 0xee, 0x1f, 0x3c]),
+            None,
+            "a pointer beginning with two printable bytes is not a string"
+        );
+        assert_eq!(
+            printable_text(&[0; 8]),
+            None,
+            "an empty run is not a string - every zeroed buffer would otherwise quote one"
+        );
+        assert_eq!(
+            printable_text(b"noterminator"),
+            None,
+            "an unterminated run is the start of something longer, and quoting it would show              a fragment as though it were the whole"
+        );
+        assert_eq!(
+            printable_text(b"has	tab ......"),
+            None,
+            "a control character is not printable, so the run is bytes"
+        );
     }
 }

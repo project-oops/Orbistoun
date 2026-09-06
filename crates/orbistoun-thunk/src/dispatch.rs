@@ -209,12 +209,57 @@ fn record_alignment(sequence: u64, index: u64, entry_rsp: u64) {
 /// Total calls seen, and the source of each record's ordering.
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// The first calls, in order. Stores `index + 1` so zero means "nothing here".
+/// The most recent calls. Stores `index + 1` so zero means "nothing here".
+///
+/// **Circular, since D571.** It used to fill once and stop, which made `CallTrace::tail` -
+/// documented as *the last calls the guest made*, printed as `last calls before the fault`, and
+/// given its purpose by D154 as the neighbourhood of the wall - be calls #8,144-#8,191 of runs
+/// making four hundred thousand and twelve million (D568). It now holds the last
+/// [`MAX_RECORDED_CALLS`], which is what every reader of it wanted.
 static RING: [AtomicU64; MAX_RECORDED_CALLS] = [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS];
 
-/// First argument of each recorded call, parallel to [`RING`].
-static RING_ARG0: [AtomicU64; MAX_RECORDED_CALLS] =
+/// Which call each slot holds, as `sequence + 1`, parallel to [`RING`].
+///
+/// **Needed only because the ring wraps.** While it filled once a slot's position *was* its
+/// sequence and nothing had to be stored; wrapped, slot 3 might hold call 3 or call 8,195, and a
+/// reader with no way to tell would report them in the wrong order.
+static RING_SEQ: [AtomicU64; MAX_RECORDED_CALLS] =
     [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS];
+
+/// How many of a run's *first* calls are kept whatever else happens.
+///
+/// The circular ring answers "what did it call last"; this answers "what did it call first", and
+/// they are different questions with different readers. Small because its one consumer - the halt
+/// summary - quotes eight (D571).
+pub const OPENING_CALLS: usize = 8;
+
+/// The opening of the run: `index + 1` for the first [`OPENING_CALLS`] calls, never overwritten.
+static RING_OPENING: [AtomicU64; OPENING_CALLS] = [const { AtomicU64::new(0) }; OPENING_CALLS];
+
+/// The opening record must be the cheap one, or keeping it separately buys nothing.
+///
+/// **A compile-time assertion, not a test.** Written first as one, it was a comparison of two
+/// constants that no runtime could make fail - coverage in appearance and nothing underneath.
+/// Clippy said so, and the right home for an invariant a compiler can settle is the compiler
+/// (D571).
+const _: () = assert!(OPENING_CALLS < MAX_RECORDED_CALLS);
+
+/// Every integer argument of each recorded call, parallel to [`RING`], six per call.
+///
+/// # Why all six and not just the first
+///
+/// It was `arg0` alone, and that made a whole class of evidence invisible: a placeholder handed to
+/// a function as a **size** shows up only if the size happens to be the first argument. The four
+/// gigabytes of D564 were visible purely because `malloc` takes its size there; the same value
+/// passed as `arg2` would have left no trace at all, and an attempt to classify unimplemented
+/// functions by what the guest does with their answers found exactly one usable observation across
+/// four runs because of it (D570).
+///
+/// **It costs nothing on the hot path**, which is the reason this was cheap: recording already
+/// stops after [`MAX_RECORDED_CALLS`], so the extra stores are bounded at that many times five
+/// however long the guest runs. The static cost is the arrays themselves.
+static RING_ARGS: [AtomicU64; MAX_RECORDED_CALLS * SAVED_ARGUMENT_REGISTERS] =
+    [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS * SAVED_ARGUMENT_REGISTERS];
 
 /// Where each recorded call came *from*, parallel to [`RING`].
 ///
@@ -1056,8 +1101,11 @@ pub struct RecordedCall {
     pub sequence: u64,
     /// Which import was called - an index into the table this thunk belongs to.
     pub index: u32,
-    /// The call's first integer argument, as it arrived in `rdi`.
-    pub arg0: u64,
+    /// The call's integer arguments, in register order - `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`.
+    ///
+    /// **All six, because a size is rarely the first one.** See [`RING_ARGS`] for what recording
+    /// only the first cost.
+    pub args: [u64; SAVED_ARGUMENT_REGISTERS],
     /// The guest address this call returns to - one instruction past the call site.
     ///
     /// Zero when it could not be read. Matches the addresses a fault's frame walk reports,
@@ -1108,43 +1156,62 @@ fn recorded_return(slot: usize) -> Option<u64> {
 /// trace. A call still being recorded reads as the one before it, which is the honest
 /// answer: that call had definitely started.
 pub fn last_call() -> Option<RecordedCall> {
-    let seen = usize::try_from(total_calls()).unwrap_or(usize::MAX);
-    let highest = seen.min(MAX_RECORDED_CALLS).checked_sub(1)?;
-    // Walk back over slots claimed but not yet written, rather than reporting index zero -
-    // which is a real import and would name the wrong function at the worst moment.
-    (0..=highest).rev().find_map(|i| {
-        RING[i]
-            .load(Ordering::Relaxed)
-            .checked_sub(1)
-            .map(|index| RecordedCall {
-                sequence: i as u64,
-                index: index as u32,
-                arg0: RING_ARG0[i].load(Ordering::Relaxed),
-                from: RING_FROM[i].load(Ordering::Relaxed),
-                ret: recorded_return(i),
-            })
+    // **The highest sequence, not the highest slot.** While the ring filled once those were the
+    // same; wrapped, the newest call can sit anywhere in the buffer, and taking the last slot
+    // would name whichever function happened to land there (D571).
+    let newest = (0..MAX_RECORDED_CALLS)
+        .filter(|i| RING[*i].load(Ordering::Relaxed) != 0)
+        .max_by_key(|i| RING_SEQ[*i].load(Ordering::Relaxed))?;
+    let index = RING[newest].load(Ordering::Relaxed).checked_sub(1)?;
+    Some(RecordedCall {
+        sequence: RING_SEQ[newest].load(Ordering::Relaxed).saturating_sub(1),
+        index: index as u32,
+        args: std::array::from_fn(|r| {
+            RING_ARGS[newest * SAVED_ARGUMENT_REGISTERS + r].load(Ordering::Relaxed)
+        }),
+        from: RING_FROM[newest].load(Ordering::Relaxed),
+        ret: recorded_return(newest),
     })
 }
 
-/// The first calls, in the order the guest made them.
+/// The most recent calls, in the order the guest made them.
 ///
-/// Truncated at [`MAX_RECORDED_CALLS`]; [`total_calls`] says whether that happened.
+/// At most [`MAX_RECORDED_CALLS`] of them; [`total_calls`] says how many there were altogether.
+///
+/// **Ordered by the recorded sequence, not by slot.** The ring wraps, so slot order is the order
+/// the buffer happens to sit in and says nothing about the guest (D571).
 pub fn recorded_calls() -> Vec<RecordedCall> {
-    let seen = usize::try_from(total_calls()).unwrap_or(usize::MAX);
-    (0..seen.min(MAX_RECORDED_CALLS))
+    let mut out: Vec<RecordedCall> = (0..MAX_RECORDED_CALLS)
         .filter_map(|i| {
             let stored = RING[i].load(Ordering::Relaxed);
             // Zero means the slot was claimed but not yet written - another thread is
             // mid-record. Skipped rather than reported as import zero, which is a real
             // index and would be a lie.
+            let sequence = RING_SEQ[i].load(Ordering::Relaxed).checked_sub(1)?;
             stored.checked_sub(1).map(|index| RecordedCall {
-                sequence: i as u64,
+                sequence,
                 index: index as u32,
-                arg0: RING_ARG0[i].load(Ordering::Relaxed),
+                args: std::array::from_fn(|r| {
+                    RING_ARGS[i * SAVED_ARGUMENT_REGISTERS + r].load(Ordering::Relaxed)
+                }),
                 from: RING_FROM[i].load(Ordering::Relaxed),
                 ret: recorded_return(i),
             })
         })
+        .collect();
+    out.sort_unstable_by_key(|c| c.sequence);
+    out
+}
+
+/// The indices of the run's first calls, in order, however long it ran.
+///
+/// Kept apart from the ring so the circular one can answer *what did it call last* without
+/// costing the other question - the halt summary quotes these (D571).
+pub fn opening_calls() -> Vec<u32> {
+    RING_OPENING
+        .iter()
+        .filter_map(|slot| slot.load(Ordering::Relaxed).checked_sub(1))
+        .map(|index| index as u32)
         .collect()
 }
 
@@ -1196,14 +1263,29 @@ unsafe extern "sysv64" fn on_guest_call(
         }
     }
 
-    if let Ok(slot) = usize::try_from(sequence) {
-        if slot < MAX_RECORDED_CALLS {
-            // SAFETY: the caller guarantees six readable values, and index 0 is `rdi`.
-            let first = unsafe { args.read() };
-            RING_ARG0[slot].store(first, Ordering::Relaxed);
+    if let Ok(position) = usize::try_from(sequence) {
+        // The opening, kept whole and never overwritten - a separate, tiny record so that making
+        // the main ring circular did not cost the other question (D571).
+        if let Some(opening) = RING_OPENING.get(position) {
+            opening.store(index + 1, Ordering::Relaxed);
+        }
+        {
+            let slot = position % MAX_RECORDED_CALLS;
+            for register in 0..SAVED_ARGUMENT_REGISTERS {
+                // SAFETY: the caller guarantees `SAVED_ARGUMENT_REGISTERS` readable values in
+                // register order, and `register` is bounded by that count - so the offset stays
+                // inside the array the caller provided.
+                let at = unsafe { args.add(register) };
+                // SAFETY: `at` is inside the caller's array, per the block above, and these are
+                // plain integers - no alignment or validity demand beyond being readable.
+                let value = unsafe { at.read() };
+                RING_ARGS[slot * SAVED_ARGUMENT_REGISTERS + register]
+                    .store(value, Ordering::Relaxed);
+            }
             RING_FROM[slot].store(call_site(entry_rsp), Ordering::Relaxed);
-            // Written after the argument so a reader never sees a populated index
-            // pointing at a stale argument.
+            RING_SEQ[slot].store(sequence.wrapping_add(1), Ordering::Relaxed);
+            // Written after the argument and the sequence, so a reader never sees a populated
+            // index pointing at a stale argument or at the wrong call's number.
             RING[slot].store(index.wrapping_add(1), Ordering::Relaxed);
         }
     }
@@ -1243,8 +1325,13 @@ unsafe extern "sysv64" fn on_guest_call(
     // The other half of the record, and the half nothing captured until now: what the call
     // answered. Written *after* the handler ran, so a slot read before then reads as
     // *unknown* rather than as this slot's initial zero - which `OK` also is (D459).
-    if let Ok(slot) = usize::try_from(sequence) {
-        if slot < MAX_RECORDED_CALLS {
+    if let Ok(position) = usize::try_from(sequence) {
+        // The same slot the call went into, and **only if it is still that call's**: after a wrap
+        // a later call owns the slot, and writing this answer there would attribute it to the
+        // wrong function - the one failure a circular ring can cause that a filling one cannot
+        // (D571).
+        let slot = position % MAX_RECORDED_CALLS;
+        if RING_SEQ[slot].load(Ordering::Relaxed) == sequence.wrapping_add(1) {
             RING_RET[slot].store(answer, Ordering::Relaxed);
             // Release, paired with the Acquire in `recorded_return`, so seeing the flag set
             // guarantees the answer beside it is this call's and not the stale initial word.
@@ -1433,9 +1520,31 @@ unsafe extern "sysv64" fn trampoline() {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RECORDED_CALLS, SAVED_ARGUMENT_REGISTERS, implemented_count, install_float_handlers,
-        is_implemented, trampoline_address,
+        MAX_RECORDED_CALLS, RING, RING_SEQ, SAVED_ARGUMENT_REGISTERS, implemented_count,
+        install_float_handlers, is_implemented, trampoline_address,
     };
+    use std::sync::atomic::Ordering;
+
+    /// **A slot's sequence is stored offset by one, so an untouched slot is empty rather than
+    /// call zero.**
+    ///
+    /// The same convention `RING` uses for the index, and for the same reason: zero is a real
+    /// call number, so a slot nothing has written must be distinguishable from the first call.
+    #[test]
+    fn an_untouched_slot_reads_as_empty_rather_than_as_call_zero() {
+        // A slot far past anything these tests exercise.
+        let untouched = MAX_RECORDED_CALLS - 1;
+        assert_eq!(
+            RING_SEQ[untouched].load(Ordering::Relaxed).checked_sub(1),
+            None,
+            "an unwritten sequence must not decode to call zero"
+        );
+        assert_eq!(
+            RING[untouched].load(Ordering::Relaxed).checked_sub(1),
+            None,
+            "nor an unwritten index to import zero"
+        );
+    }
 
     /// A function answering in `xmm0` counts as implemented.
     ///

@@ -22,6 +22,7 @@
 //! having **no** path to a graphics API, not by this crate having one.
 
 pub mod compute;
+pub mod framebuffer;
 pub use compute::{Availability, DispatchError, Output, dispatch, probe};
 
 use orbistoun_gpu::{BackendError, RenderBackend, RenderCommand};

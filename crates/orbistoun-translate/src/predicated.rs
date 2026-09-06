@@ -116,6 +116,8 @@ pub struct Predicated<'a> {
     constants: BTreeMap<u32, Id>,
     u32_type: Id,
     f32_type: Id,
+    f16_type: Id,
+    u16_type: Id,
     bool_type: Id,
     register_ptr: Id,
     registers: Id,
@@ -145,6 +147,8 @@ pub struct Predicated<'a> {
 /// one that misbehaves.
 fn declare_entry_point(builder: &mut Builder, main: Id, lane_input: Option<Id>, group: u32) {
     builder.header(op::CAPABILITY, &[capability::SHADER]);
+    builder.header(op::CAPABILITY, &[capability::FLOAT16]);
+    builder.header(op::CAPABILITY, &[capability::INT16]);
     builder.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
     let mut entry = vec![execution::GL_COMPUTE, main.0];
@@ -232,6 +236,8 @@ impl<'a> Predicated<'a> {
         let fn_type = builder.id();
         let u32_type = builder.id();
         let f32_type = builder.id();
+        let f16_type = builder.id();
+        let u16_type = builder.id();
         let bool_type = builder.id();
         let register_array = builder.id();
         let register_array_ptr = builder.id();
@@ -259,6 +265,8 @@ impl<'a> Predicated<'a> {
         builder.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
         builder.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
         builder.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+        builder.declare(op::TYPE_FLOAT, &[f16_type.0, 16]);
+        builder.declare(op::TYPE_INT, &[u16_type.0, 16, 0]);
         builder.declare(op::TYPE_BOOL, &[bool_type.0]);
         builder.declare(
             op::CONSTANT,
@@ -328,6 +336,8 @@ impl<'a> Predicated<'a> {
             constants: BTreeMap::new(),
             u32_type,
             f32_type,
+            f16_type,
+            u16_type,
             bool_type,
             register_ptr,
             registers,
@@ -654,6 +664,14 @@ impl Model for Predicated<'_> {
 
     fn f32_type(&self) -> Id {
         self.f32_type
+    }
+
+    fn f16_type(&self) -> Id {
+        self.f16_type
+    }
+
+    fn u16_type(&self) -> Id {
+        self.u16_type
     }
 
     /// Refused. This model has no lane masks.

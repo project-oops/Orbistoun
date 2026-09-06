@@ -544,7 +544,7 @@ fn the_default_policy_can_be_written_out_and_is_loud_by_default() {
         "the default must be the loud one, not silent success: {toml}"
     );
 
-    let (summary, count) = service.policy_summary();
+    let (summary, count, _propping) = service.policy_summary();
     assert!(!summary.is_empty());
     assert_eq!(count, 0, "a default policy overrides nothing");
 }

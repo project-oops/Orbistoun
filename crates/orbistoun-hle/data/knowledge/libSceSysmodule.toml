@@ -1,6 +1,22 @@
 library = "libSceSysmodule"
 
 [[function]]
+name = "sceSysmoduleIsLoaded"
+arity = 1
+purpose = "Reports whether a system module is loaded."
+returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `060-module/sysmodule-query` reported pass, value 0x805a1000. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Answers loaded for any non-zero module id: nothing here tracks which modules a title actually loaded, so a guest checking for one it never requested is told it is present.",
+    "A zero id answers the measured unloaded code rather than reporting a non-module as present.",
+]
+assumptions = [
+    "Which ids a stock system reports loaded, and whether the answer distinguishes anything beyond loaded from the one measured code, is unestablished.",
+]
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
 name = "sceSysmoduleLoadModule"
 arity = 1
 purpose = "Loads a system module the guest names by id, so its exports resolve."
@@ -13,14 +29,6 @@ note = "The modules are already linked in this emulator, so this reports success
 name = "sceSysmoduleUnloadModule"
 arity = 1
 purpose = "Unloads a system module the guest loaded by id."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-
-[[function]]
-name = "sceSysmoduleIsLoaded"
-arity = 1
-purpose = "Reports whether a system module is loaded."
 returns = "status"
 known_by = "assumed"
 found_on = "2026-09-01"

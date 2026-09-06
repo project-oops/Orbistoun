@@ -122,6 +122,24 @@ pub enum Reach {
     /// Not dying is an *outcome*, not a distance. It is recorded in [`Status::outcome`],
     /// and distance within this rung is measured by imports and then calls.
     Entered,
+    /// The guest got a frame to the output layer: it submitted a flip and a real port took it.
+    ///
+    /// # Why this one earns a rung where surviving did not
+    ///
+    /// D182 refused a rung for reaching the time limit because *not dying is an outcome, not a
+    /// distance* - a guest spinning on four unimplemented functions survives. This is the
+    /// opposite shape. A flip is accepted only after the guest has opened an output, set its
+    /// attributes, registered buffers and configured it, each against a real implementation;
+    /// there is no way to spin into it. It is a specific thing done, not a thing not happening.
+    ///
+    /// **It does not mean a picture was displayed.** Nothing scans a buffer out here, and a
+    /// flip completes the instant it is accepted. The claim is exactly "the guest reached the
+    /// layer that would present it", which is the furthest any title in this corpus has got
+    /// (D558).
+    ///
+    /// Distance within this rung is *still* imports and standing before frames - see
+    /// [`Status::beats`], where the reason is D182's, a second time.
+    Flipped,
 }
 
 impl Reach {
@@ -132,6 +150,7 @@ impl Reach {
             Self::Parsed => "parsed",
             Self::Linked => "linked",
             Self::Entered => "entered",
+            Self::Flipped => "flipped",
         }
     }
 }
@@ -184,6 +203,44 @@ pub struct Status {
     /// guard written to catch exactly that read only the default (D312).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub overrides: usize,
+    /// How many of those rest on nothing measured.
+    ///
+    /// **The half that decides whether this run was honest.** An answer taken from the target
+    /// is the emulator being *right*, and a run using it measures the emulator as it stands. An
+    /// answer somebody guessed until the guest moved is a prop. `overrides` cannot tell them
+    /// apart, so for twelve days every title with a learned fact loaded recorded an experiment
+    /// and the honest slot was unreachable - which is not what "propped up" was ever meant to
+    /// mean (D555, D557).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub propping: usize,
+    /// Frames the guest handed to the output layer.
+    ///
+    /// Zero for every title that never reached [`Reach::Flipped`], and the distance within that
+    /// rung once one does. Recorded rather than merely implied by the rung, because "reached its
+    /// first frame" and "has been running for a thousand" are the same rung and not the same
+    /// result (D558).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub frames: u64,
+    /// Distinct imports the guest called that had nothing behind them.
+    ///
+    /// # What [`Self::standing`] could not see
+    ///
+    /// `standing` is a percentage of **calls**, and calls belong to whatever the guest loops on.
+    /// A day that took this count from 35 to 20 moved `standing` from 100 to 100, because 914
+    /// stubbed calls out of 419,091 and 32 out of 418,464 both round to nothing. The record was
+    /// blind to the most direct measure there is of how much of the interface is real (D563).
+    ///
+    /// Counting **functions** is stable against a hot loop, and it is the work list: exactly the
+    /// number of things the guest asked for and did not get.
+    ///
+    /// # Why optional
+    ///
+    /// [`None`] means *this run did not measure it*, which every record written before D563 is.
+    /// It is not `Some(0)` - a title with nothing left unanswered - and collapsing the two would
+    /// let an old record claim a perfect score it never earned, then refuse every honest run
+    /// that followed. See [`Self::answered`] for how an unmeasured record ranks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unanswered: Option<usize>,
     /// The wall-clock limit the run was given, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_seconds: Option<u64>,
@@ -204,9 +261,20 @@ impl Status {
     /// **Either half counts.** Loosening the default and answering one function by name are
     /// the same act at different scales, and a measured policy does the second while leaving
     /// the first honest - so a check on the default alone waves it straight through (D312).
+    ///
+    /// **What counts as the second half narrowed, and did not disappear.** It used to be
+    /// `overrides > 0` - any function answered by name at all. That treats a hardware
+    /// measurement and a wild guess as the same act, and they are opposites: one is the
+    /// emulator being right, the other is somebody trying answers until the guest moved. It is
+    /// now the count of entries resting on nothing measured, which is the question the phrase
+    /// "propped up" was always asking (D557).
+    ///
+    /// It is strictly harder to satisfy than the old test in one direction only - a run can now
+    /// be honest where it was an experiment, never the reverse - because `propping` counts
+    /// regions as well as answers, which the old field never did at all.
     pub fn propped_up(&self) -> bool {
         (!self.default_return.is_empty() && self.default_return != "unimplemented")
-            || self.overrides > 0
+            || self.propping > 0
     }
 
     /// The policy in a phrase, for the line that says why an entry is set apart.
@@ -221,11 +289,62 @@ impl Status {
         } else {
             &self.default_return
         };
-        match self.overrides {
-            0 => default.to_owned(),
-            1 => format!("{default}, with 1 function answered by name"),
-            n => format!("{default}, with {n} functions answered by name"),
+        // Both numbers, because they answer different questions and reporting only the first
+        // is how the distinction went unnoticed for twelve days. Principle 3: a message naming
+        // a cause must come from the branch that determined it (D557).
+        let named = match self.overrides {
+            0 => return default.to_owned(),
+            1 => "1 function answered by name".to_owned(),
+            n => format!("{n} functions answered by name"),
+        };
+        match self.propping {
+            0 => format!("{default}, with {named}, all of it measured"),
+            n if n == self.overrides => format!("{default}, with {named}, none of it measured"),
+            n => format!("{default}, with {named}, {n} of them resting on nothing measured"),
         }
+    }
+
+    /// How many of the imports it called were answered by something real.
+    ///
+    /// **Zero where nothing measured it**, which is not a claim that nothing was answered - it is
+    /// a record that cannot say. Ranked as low as such a record can be, so the next run of that
+    /// title replaces it with a real number rather than being refused by a score it never earned
+    /// (D563).
+    #[must_use]
+    pub fn answered(&self) -> usize {
+        self.unanswered
+            .map_or(0, |missing| self.imports.saturating_sub(missing))
+    }
+
+    /// The order results are ranked in, in **one** place.
+    ///
+    /// # Three copies of this had already drifted
+    ///
+    /// [`Self::beats`] decides what gets recorded, [`frontier`] decides the order a shim shows,
+    /// and [`render_markdown`] decides the table - and each held its own copy. Neither of the
+    /// latter two gained `frames` when D558 added it, so this morning's rung ranked one way in
+    /// the record and another in the table nobody would have checked.
+    ///
+    /// `frontier`'s own documentation had already said why that is dangerous: *a table that
+    /// disagreed with the thing deciding what to record would be the more convincing of the two
+    /// and the wrong one*. It was right, and the fix is one function rather than three careful
+    /// edits (D563).
+    ///
+    /// **Order, and why:** the rung first; then how much of the interface was reached; then how
+    /// much of that was answered by something real; then the share of calls that were; then
+    /// frames; then calls. Everything after `imports` is a quality measure and must stay below
+    /// it - a guest that gets further calls more, and some of what it calls will be
+    /// unimplemented, so any of these ranked higher would report going further as going
+    /// backwards (D182, D558).
+    fn ranking_key(&self) -> (Reach, usize, usize, u32, u64, u64) {
+        (
+            self.reach,
+            self.imports,
+            self.answered(),
+            self.standing,
+            self.frames,
+            self.calls,
+        )
     }
 
     /// Whether two results were produced under settings that can be compared at all.
@@ -260,17 +379,18 @@ impl Status {
     ///
     /// Calls come last and are the weakest signal: a guest spinning on one unimplemented
     /// function accumulates them without learning anything.
+    ///
+    /// **Frames sit above calls and below imports, which is D182's reasoning a second time.**
+    /// A frame is an achievement where a call is not, so it outranks the weakest signal. But a
+    /// guest can sit in its present loop handing over the same buffer for ever, and ranking
+    /// frames above imports would sort that run above one that presented three times and then
+    /// got twice as far into the engine - the exact failure that cost `Entered` its rung above
+    /// "survived". The rung says it presented; the imports still say how far it got (D558).
     pub fn beats(&self, previous: &Self) -> bool {
         if !self.comparable_with(previous) {
             return false;
         }
-        (self.reach, self.imports, self.standing, self.calls)
-            > (
-                previous.reach,
-                previous.imports,
-                previous.standing,
-                previous.calls,
-            )
+        self.ranking_key() > previous.ranking_key()
     }
 }
 
@@ -282,6 +402,15 @@ impl Status {
     reason = "serde hands `skip_serializing_if` a reference to the field"
 )]
 fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// The same, for a count that is a `u64`.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde hands `skip_serializing_if` a reference to the field"
+)]
+fn is_zero_u64(n: &u64) -> bool {
     *n == 0
 }
 
@@ -299,8 +428,8 @@ fn is_zero(n: &usize) -> bool {
 /// be the more convincing of the two and the wrong one.
 pub fn frontier(mut titles: Vec<(String, Status)>) -> Vec<(String, Status)> {
     titles.sort_by(|a, b| {
-        (b.1.reach, b.1.imports, b.1.standing, b.1.calls)
-            .cmp(&(a.1.reach, a.1.imports, a.1.standing, a.1.calls))
+        b.1.ranking_key()
+            .cmp(&a.1.ranking_key())
             // Ties broken by name so the order is total. Without it the table reorders
             // between runs on titles that measured identically - which is exactly what the
             // two abort-at-53 entries do - and every diff shows spurious change.
@@ -324,10 +453,16 @@ pub fn render_frontier(titles: &[(String, Status)]) -> String {
         // one allocation fewer per line, and what the lint asks for.
         let _ = writeln!(
             out,
-            "{:<22} {:<10} {:>3} imports {:>10} calls {:>4}% standing   {}",
+            "{:<22} {:<10} {:>3} imports ({} answered) {:>10} calls {:>4}% standing   {}",
             title,
             status.reach.label(),
             status.imports,
+            // A dash where nothing measured it. Without this the line shows a run
+            // replacing one with MORE calls and gives no reason - which is what the
+            // frontier snapshot showed the moment `answered` started deciding (D563).
+            status
+                .unanswered
+                .map_or_else(|| "-".to_owned(), |_| status.answered().to_string()),
             status.calls,
             status.standing,
             status.outcome
@@ -371,34 +506,34 @@ pub fn render_markdown(rows: &[Row]) -> String {
 
     let mut ranked: Vec<&Row> = rows.iter().collect();
     ranked.sort_by(|a, b| {
-        (
-            b.status.reach,
-            b.status.imports,
-            b.status.standing,
-            b.status.calls,
-        )
-            .cmp(&(
-                a.status.reach,
-                a.status.imports,
-                a.status.standing,
-                a.status.calls,
-            ))
+        b.status
+            .ranking_key()
+            .cmp(&a.status.ranking_key())
             .then_with(|| a.title.cmp(&b.title))
     });
 
     let mut out = String::new();
-    out.push_str("| Title | Reach | Imports | Calls | Standing | Outcome | From | Measured |\n");
-    out.push_str("|---|---|--:|--:|--:|---|---|---|\n");
+    out.push_str(
+        "| Title | Reach | Imports | Answered | Calls | Standing | Outcome | From | Measured |\n",
+    );
+    out.push_str("|---|---|--:|--:|--:|--:|---|---|---|\n");
     for r in &ranked {
         let mark = if r.screenshot.is_some() { " 📷" } else { "" };
         let from = if r.experiment { "experiment" } else { "run" };
+        // A dash where nothing measured it, rather than a zero - the two mean opposite
+        // things and a column of zeroes would read as "nothing works anywhere" (D563).
+        let answered = match r.status.unanswered {
+            Some(_) => r.status.answered().to_string(),
+            None => "-".to_owned(),
+        };
         let _ = writeln!(
             out,
-            "| {}{} | {} | {} | {} | {}% | {} | {} | {} |",
+            "| {}{} | {} | {} | {} | {} | {}% | {} | {} | {} |",
             md_cell(&r.title),
             mark,
             r.status.reach.label(),
             r.status.imports,
+            answered,
             r.status.calls,
             r.status.standing,
             md_cell(&r.status.outcome),
@@ -617,7 +752,7 @@ impl Resolved {
 mod tests {
     use super::{
         CompatEntry, CompatKind, Layer, OverrideFile, Reach, Resolved, Row, Status, Value,
-        render_markdown,
+        frontier, render_markdown,
     };
     use std::collections::BTreeMap;
 
@@ -844,6 +979,9 @@ reason = "..."
             standing: 85,
             default_return: "unimplemented".to_owned(),
             overrides: 0,
+            propping: 0,
+            frames: 0,
+            unanswered: None,
             limit_seconds: Some(20),
             build: "0.1.0".to_owned(),
             measured_on: "2026-08-21".to_owned(),
@@ -1060,6 +1198,7 @@ reason = "..."
         let honest = status(Reach::Entered, 23, 222);
         let helped = Status {
             overrides: 1,
+            propping: 1,
             ..status(Reach::Entered, 40, 90_000)
         };
 
@@ -1075,16 +1214,356 @@ reason = "..."
         );
     }
 
+    /// **The narrowing does not let the old case through.**
+    ///
+    /// [`Status::propped_up`] used to fire on `overrides > 0` and now fires on `propping > 0`,
+    /// which is a strictly smaller set - so the thing worth asserting is not that the new rule
+    /// works but that it still rejects everything the old one did. A run whose answers rest on
+    /// nothing measured is the whole of what D312 was written to catch, and it is caught.
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the two rules agree on every input, because they deliberately do not: the case
+    /// immediately below is one the old rule rejected and this one accepts, on purpose. What is
+    /// pinned here is the direction - a run can move from experiment to honest by being
+    /// *measured*, and never by being counted differently.
+    #[test]
+    fn a_guessed_override_still_props_a_run_up_exactly_as_it_used_to() {
+        for guessed in 1..5_usize {
+            let helped = Status {
+                overrides: guessed,
+                propping: guessed,
+                ..status(Reach::Entered, 40, 90_000)
+            };
+            assert!(
+                helped.propped_up(),
+                "{guessed} answers resting on nothing measured, and the run read as honest"
+            );
+        }
+        // And the region-only case the old field could not see at all: no answers, one write
+        // into guest memory behind a byte count nothing measured.
+        let writes_only = Status {
+            overrides: 1,
+            propping: 1,
+            ..status(Reach::Entered, 40, 90_000)
+        };
+        assert!(
+            writes_only.propped_up(),
+            "a policy that writes guest memory and answers nothing is not an honest run"
+        );
+    }
+
+    /// **A measured answer is the emulator being right, and does not prop a run up.**
+    ///
+    /// The change D557 made, and the reason it is not a loosening: `propping` counts entries
+    /// resting on nothing measured, so an answer taken from the target leaves it at zero. A run
+    /// using one measures the emulator as it stands, which is exactly what the honest slot is
+    /// for - and for twelve days no title with a learned fact loaded could reach it (D555).
+    ///
+    /// # What this cannot assert
+    ///
+    /// **That the answer is right**, only that its provenance says somebody measured it. The
+    /// grading is [`orbistoun_hle::knowledge::Oracle::is_evidence`]'s to make, and a
+    /// mislabelled entry is indistinguishable from a correct one here by construction - which
+    /// is why the label is set from the measurement rather than by hand.
+    #[test]
+    fn a_measured_answer_does_not_prop_a_run_up() {
+        let honest = status(Reach::Entered, 23, 222);
+        let measured = Status {
+            overrides: 7,
+            propping: 0,
+            frames: 0,
+            unanswered: None,
+            ..status(Reach::Entered, 40, 90_000)
+        };
+
+        assert!(
+            !measured.propped_up(),
+            "seven answers, every one of them measured, and the run still read as an experiment"
+        );
+        assert!(
+            measured.comparable_with(&honest),
+            "so it compares with an honest run rather than being set apart from it"
+        );
+        assert!(
+            measured.beats(&honest),
+            "and a better result under a measured policy is an improvement worth recording"
+        );
+    }
+
+    /// **The three things that rank results agree, because there is only one of them.**
+    ///
+    /// `beats` decides what is recorded, `frontier` decides what a shim shows, and
+    /// `render_markdown` decides the table. They held three copies of one ordering and two had
+    /// already drifted - neither gained `frames` when D558 added it this morning. This asserts
+    /// they agree by construction rather than by care (D563).
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the ordering is *right*. It asserts only that a disagreement between the record and
+    /// the table is impossible, which is the failure `frontier`'s own documentation warned about
+    /// and the one nobody would have noticed.
+    #[test]
+    fn the_record_the_frontier_and_the_table_cannot_rank_differently() {
+        let entries = vec![
+            (
+                "far-but-unanswered".to_owned(),
+                Status {
+                    unanswered: Some(60),
+                    ..status(Reach::Flipped, 215, 431_448)
+                },
+            ),
+            (
+                "near-and-answered".to_owned(),
+                Status {
+                    unanswered: Some(0),
+                    ..status(Reach::Flipped, 197, 418_464)
+                },
+            ),
+            (
+                "presented-more".to_owned(),
+                Status {
+                    frames: 90,
+                    unanswered: Some(0),
+                    ..status(Reach::Flipped, 197, 418_464)
+                },
+            ),
+            (
+                "only-entered".to_owned(),
+                Status {
+                    unanswered: Some(1),
+                    ..status(Reach::Entered, 400, 900_000)
+                },
+            ),
+        ];
+
+        let ranked = frontier(entries.clone());
+        // Every adjacent pair must agree with `beats`, which is the relation the record uses.
+        for pair in ranked.windows(2) {
+            let (upper, lower) = (&pair[0], &pair[1]);
+            assert!(
+                !lower.1.beats(&upper.1),
+                "{} sorted below {} but beats it",
+                lower.0,
+                upper.0
+            );
+        }
+
+        // And the table renders in that same order.
+        let rows: Vec<Row> = ranked
+            .iter()
+            .map(|(title, status)| Row {
+                title: title.clone(),
+                status: status.clone(),
+                experiment: false,
+                screenshot: None,
+            })
+            .collect();
+        let table = render_markdown(&rows);
+        let order: Vec<usize> = ranked
+            .iter()
+            .map(|(title, _)| {
+                table
+                    .find(title.as_str())
+                    .expect("every title is in the table")
+            })
+            .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "the table's order differs from the frontier's"
+        );
+    }
+
+    /// **Answering more of the same interface is an improvement the record can see.**
+    ///
+    /// The gap D563 closes. Implementing a function the guest already called moves no reach, no
+    /// import and no call - it moves only how many of those calls were real - and `standing`, an
+    /// integer percentage of calls, could not see it: 914 stubbed of 419,091 and 32 of 418,464
+    /// both round to 100.
+    #[test]
+    fn answering_more_of_the_same_imports_is_an_improvement() {
+        let before = Status {
+            unanswered: Some(35),
+            ..status(Reach::Flipped, 197, 419_091)
+        };
+        let after = Status {
+            unanswered: Some(20),
+            // Fewer calls, and the same rounded standing - so nothing else in the tuple can be
+            // what carries this.
+            ..status(Reach::Flipped, 197, 418_464)
+        };
+        assert_eq!(
+            before.standing, after.standing,
+            "standing cannot tell them apart"
+        );
+        assert!(
+            after.beats(&before),
+            "fifteen more functions answered is progress"
+        );
+        assert!(!before.beats(&after));
+    }
+
+    /// **Answering more must never outrank reaching more.**
+    ///
+    /// The trap this ordering could fall into, and it is D182's shape a third time: a guest that
+    /// goes further calls *more* imports, and some of those will be unimplemented - so a run can
+    /// legitimately get further and have **more** unanswered than before. Ranked above `imports`,
+    /// that would report going further as going backwards.
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the position between `imports` and `standing` is the right one, only that it is below
+    /// `imports`. Whether answering ten functions is worth more than one percent of standing is a
+    /// judgement nothing here measures.
+    #[test]
+    fn answering_more_does_not_outrank_reaching_more() {
+        let narrow = Status {
+            unanswered: Some(0),
+            ..status(Reach::Flipped, 197, 418_464)
+        };
+        let further = Status {
+            unanswered: Some(33),
+            ..status(Reach::Flipped, 215, 431_448)
+        };
+
+        assert!(
+            further.beats(&narrow),
+            "reaching 18 more imports is progress even though 33 of them are unanswered"
+        );
+        assert!(!narrow.beats(&further));
+    }
+
+    /// **A record that never measured this cannot claim a perfect score.**
+    ///
+    /// Every entry written before D563 has no value, and `None` must not read as *nothing left
+    /// unanswered* - that would let a stale record outrank every honest run that followed it, and
+    /// the title would never record another result. The same trap `propping` sprang this morning
+    /// when 33 records deserialised as honest (D557).
+    #[test]
+    fn an_unmeasured_record_does_not_outrank_a_measured_one() {
+        let old = Status {
+            unanswered: None,
+            ..status(Reach::Flipped, 197, 418_464)
+        };
+        let measured = Status {
+            // Deliberately poor: almost nothing answered, and it still must win, because it
+            // measured something and the other did not.
+            unanswered: Some(196),
+            ..status(Reach::Flipped, 197, 418_464)
+        };
+
+        assert_eq!(old.answered(), 0, "a record that cannot say claims nothing");
+        assert!(
+            measured.beats(&old),
+            "one answered function beats an unmeasured record"
+        );
+        assert!(!old.beats(&measured));
+    }
+
+    /// **A guest that presented ranks above one that only entered.**
+    ///
+    /// The rung itself. A flip is accepted only after an output has been opened, its
+    /// attributes set, its buffers registered and its mode configured - so unlike surviving to
+    /// the time limit, it cannot be arrived at by doing nothing (D182, D558).
+    #[test]
+    fn presenting_a_frame_outranks_merely_entering() {
+        let entered = status(Reach::Entered, 400, 900_000);
+        let presented = Status {
+            frames: 1,
+            ..status(Reach::Flipped, 12, 40)
+        };
+
+        assert!(
+            presented.beats(&entered),
+            "a guest that got a frame to the output layer with a twelfth of the imports is              still further along than one that never reached it"
+        );
+        assert!(!entered.beats(&presented));
+    }
+
+    /// **Frames do not outrank imports, which is D182's mistake refused a second time.**
+    ///
+    /// A guest can sit in its present loop handing over the same buffer for ever. If frames
+    /// ranked above imports, that run would sort above one that presented three times and then
+    /// got twice as far into the engine - which is exactly how `Entered` came to be the last
+    /// rung: the least informative run in the corpus sorted to the top of the table.
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the ordering is *right*, only that it is the one D182 argued for. A corpus where
+    /// every title presents would want a different tiebreak, and nothing here would notice.
+    #[test]
+    fn a_guest_spinning_on_present_does_not_outrank_one_that_got_further() {
+        let spinning = Status {
+            frames: 100_000,
+            ..status(Reach::Flipped, 12, 466_000_000)
+        };
+        let further = Status {
+            frames: 3,
+            ..status(Reach::Flipped, 47, 933)
+        };
+
+        assert!(
+            further.beats(&spinning),
+            "a hundred thousand identical frames is not more of the interface than 47 imports"
+        );
+        assert!(!spinning.beats(&further));
+    }
+
+    /// **Frames still break a tie that nothing else can.**
+    ///
+    /// The other half: ranked below imports and standing, but above raw calls, because a frame
+    /// is something achieved where a call is only something counted.
+    #[test]
+    fn frames_decide_between_two_runs_that_are_otherwise_identical() {
+        let one = Status {
+            frames: 1,
+            ..status(Reach::Flipped, 47, 933)
+        };
+        let many = Status {
+            frames: 60,
+            ..status(Reach::Flipped, 47, 933)
+        };
+
+        assert!(many.beats(&one), "sixty frames is further than one");
+        assert!(!one.beats(&many));
+    }
+
+    /// **The rung is not reachable by claiming it.**
+    ///
+    /// A title's recorded reach comes from [`crate::Reach`], and a run that presented nothing
+    /// cannot sit at [`Reach::Flipped`] with zero frames - the promotion is driven by the port
+    /// table's own count. This pins the pairing that makes the rung mean anything; the
+    /// promotion itself is tested where it happens, against a trace.
+    #[test]
+    fn the_rung_and_the_count_agree() {
+        let honest = status(Reach::Entered, 47, 933);
+        assert_eq!(
+            honest.frames, 0,
+            "a title that never presented has no frames"
+        );
+
+        let presented = Status {
+            frames: 1,
+            ..status(Reach::Flipped, 47, 933)
+        };
+        assert!(
+            presented.frames > 0,
+            "and one at the rung above has at least one"
+        );
+    }
+
     /// Two experiments compare with each other; differing by one override is not a
     /// difference in kind.
     #[test]
     fn two_helped_runs_are_comparable_with_each_other() {
         let one = Status {
             overrides: 1,
+            propping: 1,
             ..status(Reach::Entered, 23, 222)
         };
         let two = Status {
             overrides: 3,
+            propping: 3,
             ..status(Reach::Entered, 40, 900)
         };
 

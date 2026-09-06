@@ -3,12 +3,13 @@
 What actually works. Deliberately unflattering - an emulator status page that overstates
 itself is useless to its own author six months later.
 
-**Nothing has been committed.** `git log` is empty, so every CI workflow in this repository
-has never run. That is worth saying first, because several claims below are checked by CI
-and none of those checks has ever executed anywhere but locally.
+**The repository is committed and published**, and its CI workflows run. That is worth saying
+first, because several claims below are checked by CI, so they are exercised on every push
+rather than only in a local run.
 
-It has already cost something: the line-continuation guard used `git grep`, which searches
-the index, and reported "none added" while seeing a fraction of the tree (D199).
+The index-versus-tree distinction has already cost something: the line-continuation guard used
+`git grep`, which searches the index, and reported "none added" while seeing a fraction of the
+tree (D199).
 
 ## The conformance probe runs
 
@@ -293,7 +294,7 @@ Deliberately left as gaps rather than filled with plausible values:
 - **Two `libc` functions are characterised but unnameable.** One is handed the guest's entry
   point and called once by every title; the other takes a `printf` format string. Their
   argument dumps say what they do (D194). Every naming source this project has is exhausted
-  for both - all 3,018 harvested standard names miss, their modules' strings do not contain
+  for both - every harvested standard name misses, their modules' strings do not contain
   them, no grammar shape reaches them. This is the case obSCEne exists for.
 - **Function arities** in the declarations are provisional where they are not marked
   otherwise. A wrong arity degrades trace fidelity; it does not break a call.
@@ -336,7 +337,7 @@ orbistoun's `Machine` presents a console by four axes - generation, kind (retail
 revision, and firmware - all configured in `shell.toml` and all refusing by default, because an
 unconfigured emulator does not claim to be a particular machine.
 
-The reference target, measured on real hardware (D405), is a retail PS5 on system software 12.40:
+The reference target, measured on real hardware (D405), is a retail Prospero-generation console on system software 12.40:
 
 ```toml
 [machine]

@@ -136,6 +136,12 @@ pub mod op {
     pub const IEQUAL: u16 = 170;
     /// A constant.
     pub const CONSTANT: u16 = 43;
+    /// A constant aggregate - a vector, or an array of them - from constant parts.
+    pub const CONSTANT_COMPOSITE: u16 = 44;
+    /// An aggregate built at run time from values, rather than from constants.
+    ///
+    /// What an export needs: four registers become the `vec4` a colour output takes.
+    pub const COMPOSITE_CONSTRUCT: u16 = 80;
     /// A fixed-length array type.
     pub const TYPE_ARRAY: u16 = 28;
     /// A structure type.
@@ -174,6 +180,15 @@ pub mod op {
     pub const FMUL: u16 = 133;
     /// Floating-point division.
     pub const FDIV: u16 = 136;
+    /// Converts a signed integer to the float of the same value.
+    pub const CONVERT_S_TO_F: u16 = 111;
+    /// Converts an unsigned integer to the float of the same value.
+    pub const CONVERT_U_TO_F: u16 = 112;
+    /// Converts an unsigned integer to another width - truncating to a narrower one, which is
+    /// how a packed field is narrowed to the sixteen bits a half occupies.
+    pub const UCONVERT: u16 = 113;
+    /// Converts a float to another width, widening a half to a single-precision float.
+    pub const FCONVERT: u16 = 115;
     /// Chooses between two values without branching.
     ///
     /// How a masked write is expressed when the alternative would be a merge block per
@@ -181,6 +196,9 @@ pub mod op {
     pub const SELECT: u16 = 169;
     /// Unsigned right shift.
     pub const SHIFT_RIGHT_LOGICAL: u16 = 194;
+    /// Signed right shift - the sign bit fills the vacated high bits, which is what makes it
+    /// the tool for sign-extending a narrow signed field up to a full word.
+    pub const SHIFT_RIGHT_ARITHMETIC: u16 = 195;
     /// Left shift.
     pub const SHIFT_LEFT_LOGICAL: u16 = 196;
     /// Unsigned integer less-than.
@@ -274,6 +292,16 @@ pub mod storage {
     /// listed in the entry point's interface, which is easy to forget and produces a
     /// module that is rejected rather than one that misbehaves.
     pub const INPUT: u32 = 1;
+    /// Written by the shader and read by the next stage, or by the framebuffer.
+    ///
+    /// Where a vertex shader puts its position and a fragment shader its colour. Like
+    /// [`INPUT`], an output variable must appear in the entry point's interface.
+    pub const OUTPUT: u32 = 3;
+    /// Module-scope storage private to one invocation.
+    ///
+    /// Used here for a constant table a shader indexes: a composite constant cannot be
+    /// indexed dynamically, but a `Private` variable initialised with one can.
+    pub const PRIVATE: u32 = 6;
 }
 
 /// Decorations.
@@ -286,6 +314,11 @@ pub mod decoration {
     pub const BINDING: u32 = 33;
     /// Marks a variable as one the implementation fills in.
     pub const BUILT_IN: u32 = 11;
+    /// Which interface slot an input or output occupies.
+    ///
+    /// A fragment shader's colour output needs one: location zero is colour attachment
+    /// zero, which is what a render pass's first attachment is.
+    pub const LOCATION: u32 = 30;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
@@ -306,6 +339,15 @@ pub mod capability {
     pub const GROUP_NON_UNIFORM: u32 = 61;
     /// Invocations may take a ballot across their subgroup.
     pub const GROUP_NON_UNIFORM_BALLOT: u32 = 64;
+    /// 16-bit floating-point types and arithmetic.
+    ///
+    /// Needed to widen a packed half to a float through a real 16-bit float type, which is
+    /// the driver's own IEEE conversion rather than a hand-rolled one that has to get
+    /// subnormals and infinities right without a way to notice when it does not.
+    pub const FLOAT16: u32 = 9;
+    /// 16-bit integer types, for narrowing a packed field to the width a half occupies before
+    /// it is read as one.
+    pub const INT16: u32 = 22;
 }
 
 /// Execution scopes, for the group operations.
@@ -324,6 +366,13 @@ pub mod built_in {
     ///
     /// The guest's lane number, when one invocation is one lane.
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
+    /// The clip-space position a vertex shader writes.
+    pub const POSITION: u32 = 0;
+    /// Which vertex of the draw this invocation is.
+    ///
+    /// Signed, in Vulkan's environment - the variable is declared `int`, and declaring it
+    /// unsigned produces a module a driver rejects rather than one that misbehaves.
+    pub const VERTEX_INDEX: u32 = 42;
 }
 
 /// Addressing models.
@@ -344,6 +393,8 @@ pub mod execution {
     pub const GL_COMPUTE: u32 = 5;
     /// A fragment shader.
     pub const FRAGMENT: u32 = 4;
+    /// A vertex shader.
+    pub const VERTEX: u32 = 0;
 }
 
 /// Execution modes.
@@ -761,6 +812,464 @@ pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
     b.finish()
 }
 
+/// Builds a vertex shader that covers the whole framebuffer with one triangle.
+///
+/// # Why this exists
+///
+/// The framebuffer oracle needs a draw, and a draw needs somewhere for its fragments to come
+/// from. This is the smallest vertex shader that produces them: three vertices at `(-1, -1)`,
+/// `(3, -1)` and `(-1, 3)` in clip space - a triangle twice the size of the viewport, so every
+/// pixel is inside it and the fragment shader runs for all of them (D550).
+///
+/// **Hand-written, not translated.** The oracle exists to check the translator, so a shader the
+/// translator produced could not check it. This is assembled instruction by instruction through
+/// the builder, which emits the words it is given.
+///
+/// # Why a constant table rather than arithmetic
+///
+/// The usual trick derives the position from `gl_VertexIndex` with shifts and a multiply-add.
+/// That is fewer declarations and more opcodes, and every opcode is somewhere this could be
+/// wrong. Three positions in an array indexed by the vertex index is one `OpAccessChain` and no
+/// arithmetic at all - and a wrong constant is visible by reading it, where a wrong shift is not.
+///
+/// A composite constant cannot be indexed dynamically, so the array lives in a `Private`
+/// variable initialised with one. That is what `Private` is here for.
+#[must_use]
+pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
+    let mut b = Builder::new();
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let i32_type = b.id();
+    let u32_type = b.id();
+    let vec4 = b.id();
+    let array = b.id();
+    let (minus_one, three, zero, one) = (b.id(), b.id(), b.id(), b.id());
+    let (corner, right, up) = (b.id(), b.id(), b.id());
+    let length = b.id();
+    let table = b.id();
+    let private_array = b.id();
+    let private_vec4 = b.id();
+    let output_vec4 = b.id();
+    let input_i32 = b.id();
+    let positions = b.id();
+    let position = b.id();
+    let vertex_index = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+    let index = b.id();
+    let slot = b.id();
+    let chosen = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+
+    // Every input and output variable the entry point touches is named in its interface.
+    // Leaving one out produces a module a driver rejects rather than one that misbehaves.
+    let mut entry = vec![execution::VERTEX, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.extend([position.0, vertex_index.0]);
+    b.header(op::ENTRY_POINT, &entry);
+
+    b.annotate(
+        op::DECORATE,
+        &[position.0, decoration::BUILT_IN, built_in::POSITION],
+    );
+    b.annotate(
+        op::DECORATE,
+        &[vertex_index.0, decoration::BUILT_IN, built_in::VERTEX_INDEX],
+    );
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    // Signedness 1: `gl_VertexIndex` is a signed int in Vulkan's environment.
+    b.declare(op::TYPE_INT, &[i32_type.0, 32, 1]);
+    b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+
+    // Clip-space coordinates, as bit patterns because that is what the format takes.
+    b.declare(
+        op::CONSTANT,
+        &[f32_type.0, minus_one.0, (-1.0f32).to_bits()],
+    );
+    b.declare(op::CONSTANT, &[f32_type.0, three.0, 3.0f32.to_bits()]);
+    b.declare(op::CONSTANT, &[f32_type.0, zero.0, 0.0f32.to_bits()]);
+    b.declare(op::CONSTANT, &[f32_type.0, one.0, 1.0f32.to_bits()]);
+    b.declare(op::CONSTANT, &[u32_type.0, length.0, 3]);
+
+    // The three corners. `w` is one and `z` is zero: no perspective, on the near plane.
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[vec4.0, corner.0, minus_one.0, minus_one.0, zero.0, one.0],
+    );
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[vec4.0, right.0, three.0, minus_one.0, zero.0, one.0],
+    );
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[vec4.0, up.0, minus_one.0, three.0, zero.0, one.0],
+    );
+    b.declare(op::TYPE_ARRAY, &[array.0, vec4.0, length.0]);
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[array.0, table.0, corner.0, right.0, up.0],
+    );
+
+    b.declare(
+        op::TYPE_POINTER,
+        &[private_array.0, storage::PRIVATE, array.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[private_vec4.0, storage::PRIVATE, vec4.0],
+    );
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(op::TYPE_POINTER, &[input_i32.0, storage::INPUT, i32_type.0]);
+
+    // The initialiser is the fourth operand, which is what makes the table indexable.
+    b.declare(
+        op::VARIABLE,
+        &[private_array.0, positions.0, storage::PRIVATE, table.0],
+    );
+    b.declare(op::VARIABLE, &[output_vec4.0, position.0, storage::OUTPUT]);
+    b.declare(op::VARIABLE, &[input_i32.0, vertex_index.0, storage::INPUT]);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+    b.function(op::LOAD, &[i32_type.0, index.0, vertex_index.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[private_vec4.0, slot.0, positions.0, index.0],
+    );
+    b.function(op::LOAD, &[vec4.0, chosen.0, slot.0]);
+    b.function(op::STORE, &[position.0, chosen.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// Builds a fragment shader that writes one colour to attachment zero.
+///
+/// # Why a constant and nothing else
+///
+/// The harness this feeds asks a single question - **does a fragment shader's output reach the
+/// attachment** - and anything the shader computed would make a failure ambiguous between the
+/// pipeline and the arithmetic. A constant makes the answer binary (D550).
+///
+/// Hand-written for the same reason as the vertex shader beside it: the oracle cannot be built
+/// out of the thing it checks.
+///
+/// The components are taken as bit patterns rather than floats so the caller's expectation and
+/// the shader's constant are written the same way once, and compared against a byte value the
+/// caller writes separately.
+#[must_use]
+pub fn constant_colour_fragment_module(colour: [f32; 4]) -> Vec<u32> {
+    let mut b = Builder::new();
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let vec4 = b.id();
+    let components = [b.id(), b.id(), b.id(), b.id()];
+    let value = b.id();
+    let output_vec4 = b.id();
+    let output = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+
+    let mut entry = vec![execution::FRAGMENT, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.push(output.0);
+    b.header(op::ENTRY_POINT, &entry);
+    // Required of every fragment entry point; Vulkan's framebuffer origin is the top left.
+    b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
+
+    // Location zero is colour attachment zero.
+    b.annotate(op::DECORATE, &[output.0, decoration::LOCATION, 0]);
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+    for (id, component) in components.iter().zip(colour) {
+        b.declare(op::CONSTANT, &[f32_type.0, id.0, component.to_bits()]);
+    }
+    let mut composite = vec![vec4.0, value.0];
+    composite.extend(components.iter().map(|id| id.0));
+    b.declare(op::CONSTANT_COMPOSITE, &composite);
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(op::VARIABLE, &[output_vec4.0, output.0, storage::OUTPUT]);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+    b.function(op::STORE, &[output.0, value.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// Declares the per-corner varying values as one constant array.
+///
+/// The same shape as the position table beside it - three `vec4` constants gathered into an
+/// array - so the vertex shader indexes both the same way. Split out for length.
+fn declare_varying_table(
+    b: &mut Builder,
+    f32_type: Id,
+    vec4: Id,
+    array: Id,
+    table: Id,
+    corners: [[f32; 4]; 3],
+) {
+    let mut vertices = Vec::with_capacity(3);
+    for value in corners {
+        let components: Vec<u32> = value
+            .iter()
+            .map(|component| {
+                let id = b.id();
+                b.declare(op::CONSTANT, &[f32_type.0, id.0, component.to_bits()]);
+                id.0
+            })
+            .collect();
+        let composite = b.id();
+        let mut words = vec![vec4.0, composite.0];
+        words.extend(components);
+        b.declare(op::CONSTANT_COMPOSITE, &words);
+        vertices.push(composite.0);
+    }
+    let mut words = vec![array.0, table.0];
+    words.extend(vertices);
+    b.declare(op::CONSTANT_COMPOSITE, &words);
+}
+
+/// Builds a vertex shader that covers the framebuffer and hands each corner a value.
+///
+/// # Why the oracle needs this
+///
+/// [`fullscreen_triangle_vertex_module`] emits a position and nothing else, so a fragment shader
+/// fed by it has no inputs. Interpolation - which is what `v_interp_p1_f32` and its pair
+/// compute, and the last capture-free family the translator refuses - cannot be checked against
+/// a pipeline that never interpolates anything (D554).
+///
+/// This is the same triangle with one addition: a `Location 0` output carrying `corners[i]` for
+/// vertex `i`. Everything else is unchanged, deliberately - the positions are the same constant
+/// table, so a failure here is about the varying rather than about the geometry.
+///
+/// Hand-assembled, like everything else in this oracle. The translator is what it exists to
+/// check.
+// A module is a linear sequence of declarations, and every identifier in it is a local the
+// next line needs. Splitting further means helpers taking six or eight ids apiece, which
+// moves the length rather than removing it and makes the order harder to read - the one
+// property that matters in a builder. The varying and position tables are already out.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
+    let mut b = Builder::new();
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let i32_type = b.id();
+    let u32_type = b.id();
+    let vec4 = b.id();
+    let array = b.id();
+    let (minus_one, three, zero, one) = (b.id(), b.id(), b.id(), b.id());
+    let (corner, right, up) = (b.id(), b.id(), b.id());
+    let length = b.id();
+    let table = b.id();
+    let private_array = b.id();
+    let private_vec4 = b.id();
+    let output_vec4 = b.id();
+    let input_i32 = b.id();
+    let positions = b.id();
+    let position = b.id();
+    let vertex_index = b.id();
+    let varyings = b.id();
+    let varying_table = b.id();
+    let varying_out = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+    let index = b.id();
+    let slot = b.id();
+    let chosen = b.id();
+    let varying_slot = b.id();
+    let varying_value = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+
+    let mut entry = vec![execution::VERTEX, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.extend([position.0, vertex_index.0, varying_out.0]);
+    b.header(op::ENTRY_POINT, &entry);
+
+    b.annotate(
+        op::DECORATE,
+        &[position.0, decoration::BUILT_IN, built_in::POSITION],
+    );
+    b.annotate(
+        op::DECORATE,
+        &[vertex_index.0, decoration::BUILT_IN, built_in::VERTEX_INDEX],
+    );
+    b.annotate(op::DECORATE, &[varying_out.0, decoration::LOCATION, 0]);
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    b.declare(op::TYPE_INT, &[i32_type.0, 32, 1]);
+    b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+
+    b.declare(
+        op::CONSTANT,
+        &[f32_type.0, minus_one.0, (-1.0f32).to_bits()],
+    );
+    b.declare(op::CONSTANT, &[f32_type.0, three.0, 3.0f32.to_bits()]);
+    b.declare(op::CONSTANT, &[f32_type.0, zero.0, 0.0f32.to_bits()]);
+    b.declare(op::CONSTANT, &[f32_type.0, one.0, 1.0f32.to_bits()]);
+    b.declare(op::CONSTANT, &[u32_type.0, length.0, 3]);
+
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[vec4.0, corner.0, minus_one.0, minus_one.0, zero.0, one.0],
+    );
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[vec4.0, right.0, three.0, minus_one.0, zero.0, one.0],
+    );
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[vec4.0, up.0, minus_one.0, three.0, zero.0, one.0],
+    );
+    b.declare(op::TYPE_ARRAY, &[array.0, vec4.0, length.0]);
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[array.0, table.0, corner.0, right.0, up.0],
+    );
+
+    declare_varying_table(&mut b, f32_type, vec4, array, varying_table, corners);
+
+    b.declare(
+        op::TYPE_POINTER,
+        &[private_array.0, storage::PRIVATE, array.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[private_vec4.0, storage::PRIVATE, vec4.0],
+    );
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(op::TYPE_POINTER, &[input_i32.0, storage::INPUT, i32_type.0]);
+
+    b.declare(
+        op::VARIABLE,
+        &[private_array.0, positions.0, storage::PRIVATE, table.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[
+            private_array.0,
+            varyings.0,
+            storage::PRIVATE,
+            varying_table.0,
+        ],
+    );
+    b.declare(op::VARIABLE, &[output_vec4.0, position.0, storage::OUTPUT]);
+    b.declare(
+        op::VARIABLE,
+        &[output_vec4.0, varying_out.0, storage::OUTPUT],
+    );
+    b.declare(op::VARIABLE, &[input_i32.0, vertex_index.0, storage::INPUT]);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+    b.function(op::LOAD, &[i32_type.0, index.0, vertex_index.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[private_vec4.0, slot.0, positions.0, index.0],
+    );
+    b.function(op::LOAD, &[vec4.0, chosen.0, slot.0]);
+    b.function(op::STORE, &[position.0, chosen.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[private_vec4.0, varying_slot.0, varyings.0, index.0],
+    );
+    b.function(op::LOAD, &[vec4.0, varying_value.0, varying_slot.0]);
+    b.function(op::STORE, &[varying_out.0, varying_value.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// Builds a fragment shader that writes its interpolated input straight out.
+///
+/// The counterpart to [`interpolated_vertex_module`]: a `Location 0` input, read and stored to a
+/// `Location 0` output with nothing in between. What lands in the attachment is therefore
+/// exactly what the pipeline interpolated, which is the thing being checked.
+#[must_use]
+pub fn passthrough_fragment_module() -> Vec<u32> {
+    let mut b = Builder::new();
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let vec4 = b.id();
+    let input_vec4 = b.id();
+    let output_vec4 = b.id();
+    let input = b.id();
+    let output = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+    let value = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+
+    let mut entry = vec![execution::FRAGMENT, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.extend([input.0, output.0]);
+    b.header(op::ENTRY_POINT, &entry);
+    b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
+
+    // The input's location must match the vertex shader's output location, which is how a
+    // varying is paired across the two stages.
+    b.annotate(op::DECORATE, &[input.0, decoration::LOCATION, 0]);
+    b.annotate(op::DECORATE, &[output.0, decoration::LOCATION, 0]);
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+    b.declare(op::TYPE_POINTER, &[input_vec4.0, storage::INPUT, vec4.0]);
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(op::VARIABLE, &[input_vec4.0, input.0, storage::INPUT]);
+    b.declare(op::VARIABLE, &[output_vec4.0, output.0, storage::OUTPUT]);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+    b.function(op::LOAD, &[vec4.0, value.0, input.0]);
+    b.function(op::STORE, &[output.0, value.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
 /// Why a module's identifiers do not hang together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleError {
@@ -986,9 +1495,26 @@ static SHAPES: &[ShapeEntry] = &[
     // Typed results: operand zero is the type, operand one the identifier.
     // Operand two of a constant is its literal value.
     (op::CONSTANT, Some(1), &[0], None, RestStride::Every),
+    // Result type, result, then every constituent - each an identifier that must exist.
+    (
+        op::CONSTANT_COMPOSITE,
+        Some(1),
+        &[0],
+        Some(2),
+        RestStride::Every,
+    ),
+    // Result type, result, then every constituent - the same shape as the constant form,
+    // and every constituent is an identifier that must already exist.
+    (
+        op::COMPOSITE_CONSTRUCT,
+        Some(1),
+        &[0],
+        Some(2),
+        RestStride::Every,
+    ),
     (op::CONSTANT_NULL, Some(1), &[0], None, RestStride::Every),
     // Operand two is the storage class; an initialiser, if present, follows it.
-    (op::VARIABLE, Some(1), &[0], None, RestStride::Every),
+    (op::VARIABLE, Some(1), &[0], Some(3), RestStride::Every),
     // Operand two is a function control mask, operand three the function type.
     (op::FUNCTION, Some(1), &[0, 3], None, RestStride::Every),
     // Every index after the base is an identifier rather than a literal - the detail
@@ -997,6 +1523,22 @@ static SHAPES: &[ShapeEntry] = &[
     (op::ACCESS_CHAIN, Some(1), &[0], Some(2), RestStride::Every),
     (op::LOAD, Some(1), &[0, 2], None, RestStride::Every),
     (op::BITCAST, Some(1), &[0, 2], None, RestStride::Every),
+    (
+        op::CONVERT_S_TO_F,
+        Some(1),
+        &[0, 2],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::CONVERT_U_TO_F,
+        Some(1),
+        &[0, 2],
+        None,
+        RestStride::Every,
+    ),
+    (op::UCONVERT, Some(1), &[0, 2], None, RestStride::Every),
+    (op::FCONVERT, Some(1), &[0, 2], None, RestStride::Every),
     (op::IADD, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::ISUB, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::IMUL, Some(1), &[0, 2, 3], None, RestStride::Every),
@@ -1006,6 +1548,13 @@ static SHAPES: &[ShapeEntry] = &[
     (op::FDIV, Some(1), &[0, 2, 3], None, RestStride::Every),
     (
         op::SHIFT_RIGHT_LOGICAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::SHIFT_RIGHT_ARITHMETIC,
         Some(1),
         &[0, 2, 3],
         None,

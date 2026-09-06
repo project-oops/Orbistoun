@@ -20,6 +20,10 @@ orbistoun-mem = { workspace = true }
 # For the stub table a run-time name lookup answers out of. No cycle: the thunk crate
 # depends only on `orbistoun-core` and `orbistoun-mem` (D366).
 orbistoun-thunk = { workspace = true }
+# For hashing a `sceKernelDlsym` name to the NID a guest module exports it under. The
+# guest asks by name and every export table is keyed by hash, so the hash has to happen
+# at the call - the loader cannot precompute it without already knowing the name (D517).
+orbistoun-nid = { workspace = true }
 # Diagnostics are declared in one registry so `orbistoun-cli doctor` can list every one
 # and say which crate reads it. `orbistoun-env` takes no orbistoun dependency, so this
 # cannot become a cycle (D325).

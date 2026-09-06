@@ -196,6 +196,149 @@ fn ftruncate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(crate::descriptor::set_length(args[0], args[1]))
 }
 
+/// How wide one `struct iovec` is, and where its two fields sit.
+///
+/// `{ void *iov_base; size_t iov_len; }` - two machine words on this target. Reference:
+/// POSIX.1-2008 `<sys/uio.h>`.
+const IOVEC_BYTES: u64 = 16;
+
+/// Reads one `iovec` from a guest's vector.
+fn iovec(vector: u64, index: u64) -> Option<(u64, u64)> {
+    if vector == 0 {
+        return None;
+    }
+    let at = vector.checked_add(index.checked_mul(IOVEC_BYTES)?)?;
+    let base = usize::try_from(at).ok()?;
+    // SAFETY: a guest-supplied `iovec` array under the identity mapping (D014), indexed
+    // within the count the guest itself passed - the same contract the real call has.
+    let iov_base = unsafe { std::ptr::read_unaligned(base as *const u64) };
+    // SAFETY: the second word of the same entry, eight bytes after the first.
+    let iov_len = unsafe { std::ptr::read_unaligned((base + 8) as *const u64) };
+    Some((iov_base, iov_len))
+}
+
+/// The shared body of the scatter/gather calls.
+///
+/// **Stops at the first short transfer**, as the specification requires: `readv` and `writev`
+/// answer the number of bytes actually moved, and continuing past a partial buffer would
+/// report a total the file never delivered.
+fn gather(args: &[u64; GUEST_ARG_REGISTERS], offset: Option<u64>, writing: bool) -> u64 {
+    let (fd, vector, count) = (args[0], args[1], args[2]);
+    let mut moved = 0_u64;
+    for index in 0..count {
+        let Some((base, len)) = iovec(vector, index) else {
+            return FAILED;
+        };
+        if len == 0 {
+            continue;
+        }
+        let at = offset.map(|start| start + moved);
+        let done = if writing {
+            let Some(bytes) = guest_bytes(base, len) else {
+                return FAILED;
+            };
+            match at {
+                Some(start) => crate::descriptor::write_at(fd, bytes, start),
+                None => crate::descriptor::write(fd, bytes),
+            }
+        } else {
+            let Some(into) = guest_bytes_mut(base, len) else {
+                return FAILED;
+            };
+            match at {
+                Some(start) => crate::descriptor::read_at(fd, into, start),
+                None => crate::descriptor::read(fd, into),
+            }
+        };
+        let Some(done) = done else {
+            return if moved == 0 { FAILED } else { moved };
+        };
+        moved += done as u64;
+        if (done as u64) < len {
+            break;
+        }
+    }
+    moved
+}
+
+/// `readv(fd, iov, iovcnt)` - a read scattered across several buffers.
+///
+/// Reference: POSIX.1-2008 `readv(2)`.
+fn readv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    gather(args, None, false)
+}
+
+/// `writev(fd, iov, iovcnt)` - a write gathered from several buffers.
+///
+/// Reference: POSIX.1-2008 `writev(2)`.
+fn writev(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    gather(args, None, true)
+}
+
+/// `preadv(fd, iov, iovcnt, offset)` - [`readv`] at an explicit offset, leaving the file
+/// position alone.
+///
+/// Reference: POSIX.1-2008 `preadv(2)`.
+fn preadv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    gather(args, Some(args[3]), false)
+}
+
+/// `pwritev(fd, iov, iovcnt, offset)` - [`writev`] at an explicit offset.
+///
+/// Reference: POSIX.1-2008 `pwritev(2)`.
+fn pwritev(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    gather(args, Some(args[3]), true)
+}
+
+/// `creat(path, mode)` - create a file for writing, truncating an existing one.
+///
+/// Reference: POSIX.1-2008 `creat(2)`, which defines it as exactly
+/// `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)`. The mode is not honoured for the same
+/// reason `open`'s is not here: this layer has no permission model to apply it to, and
+/// pretending otherwise would report an access control that does not exist.
+fn creat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(path) = crate::read_guest_path(args[0]) else {
+        return FAILED;
+    };
+    crate::descriptor::create(&path).unwrap_or(FAILED)
+}
+
+/// `fsync(fd)` - flush a file's contents to the storage behind it.
+///
+/// Reference: POSIX.1-2008 `fsync(2)`. A **real** flush: the whole point of the call is that a
+/// caller learns its bytes have landed, so answering success without asking the operating
+/// system gives the assurance and none of the substance.
+fn fsync(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    answered(crate::descriptor::sync(args[0]))
+}
+
+/// `fdatasync(fd)` - as [`fsync`], without promising to flush metadata.
+///
+/// Reference: POSIX.1-2008 `fdatasync(2)`. Flushing metadata as well is **more** than the call
+/// promises and is therefore conforming; the reverse would not be.
+fn fdatasync(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    answered(crate::descriptor::sync(args[0]))
+}
+
+/// `getpagesize()` - the size of a page, in bytes.
+///
+/// Reference: POSIX.1-2001 `getpagesize(2)`. Answered from `GUEST_PAGE_SIZE`, the size this
+/// emulator's own address space is built on, rather than from the host's - a guest that rounds
+/// an allocation to what this answers must get the number the mapper will actually use.
+fn getpagesize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    orbistoun_core::GUEST_PAGE_SIZE
+}
+
+/// `madvise(addr, len, advice)` - tell the system how a range will be used.
+///
+/// Reference: POSIX.1-2008 `posix_madvise(2)`: *"the advice is not binding"* and an
+/// implementation may ignore it. Ignoring it is therefore a conforming implementation rather
+/// than a stub - which is why this one answers success without acting, and is the rare case
+/// where doing nothing is the specification rather than a shortcut.
+fn madvise(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
 /// A guest buffer, as bytes this may write into.
 fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     if address == 0 {
@@ -412,6 +555,15 @@ fn sendfile(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// claim about the target; where its code lives is a claim about this repository (D367).
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("creat", creat),
+        ("readv", readv),
+        ("writev", writev),
+        ("preadv", preadv),
+        ("pwritev", pwritev),
+        ("fsync", fsync),
+        ("fdatasync", fdatasync),
+        ("getpagesize", getpagesize),
+        ("madvise", madvise),
         ("mkdir", mkdir),
         ("rmdir", rmdir),
         ("unlink", unlink),
@@ -440,7 +592,7 @@ mod tests {
     use crate::exclusively;
 
     /// A writable `/data` and a read-only `/app0`, which is the arrangement a guest gets.
-    fn an_installation(name: &str) -> std::path::PathBuf {
+    pub(super) fn an_installation(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("orbistoun-posix-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("data")).expect("data");
@@ -708,5 +860,84 @@ mod tests {
         std::fs::write(root.join("data/log"), b"0123456789").expect("a file");
         assert_eq!(call("truncate", &["/data/log"], 4), 0);
         assert_eq!(std::fs::read(root.join("data/log")).expect("read"), b"0123");
+    }
+}
+
+#[cfg(test)]
+mod scatter_gather {
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    use super::tests::an_installation;
+    use crate::exclusively;
+
+    /// An `iovec` array this test owns, plus the buffers it points at.
+    struct Vector {
+        _buffers: Vec<Box<[u8]>>,
+        entries: Box<[u64]>,
+    }
+
+    impl Vector {
+        fn of(pieces: &[&[u8]]) -> Self {
+            let mut buffers = Vec::new();
+            let mut entries = Vec::new();
+            for piece in pieces {
+                let owned: Box<[u8]> = piece.to_vec().into_boxed_slice();
+                entries.push(owned.as_ptr() as u64);
+                entries.push(owned.len() as u64);
+                buffers.push(owned);
+            }
+            Self {
+                _buffers: buffers,
+                entries: entries.into_boxed_slice(),
+            }
+        }
+
+        fn at(&self) -> u64 {
+            self.entries.as_ptr() as u64
+        }
+    }
+
+    fn call(f: fn(&[u64; GUEST_ARG_REGISTERS]) -> u64, args: [u64; 4]) -> u64 {
+        let mut regs = [0_u64; GUEST_ARG_REGISTERS];
+        regs[..4].copy_from_slice(&args);
+        f(&regs)
+    }
+
+    /// **The whole point of the vector form**: several buffers become one transfer, and the
+    /// answer is the total moved rather than the count of buffers.
+    #[test]
+    fn writev_gathers_every_buffer_and_answers_the_total() {
+        let _guard = exclusively();
+        let _root = an_installation("writev");
+        let fd = crate::descriptor::create("/data/gathered").expect("creates");
+        let vector = Vector::of(&[b"one", b"two", b"three"]);
+        let written = call(super::writev, [fd, vector.at(), 3, 0]);
+        assert_eq!(written, 11, "3 + 3 + 5 bytes, not 3 buffers");
+        crate::descriptor::close(fd);
+
+        let fd = crate::descriptor::open("/data/gathered").expect("opens");
+        let mut back = [0_u8; 11];
+        crate::descriptor::read(fd, &mut back);
+        assert_eq!(&back, b"onetwothree", "and in order");
+        crate::descriptor::close(fd);
+    }
+
+    /// A zero-length entry is skipped rather than treated as the end.
+    #[test]
+    fn an_empty_entry_does_not_end_the_transfer() {
+        let _guard = exclusively();
+        let _root = an_installation("empties");
+        let fd = crate::descriptor::create("/data/empties").expect("creates");
+        let vector = Vector::of(&[b"a", b"", b"b"]);
+        assert_eq!(call(super::writev, [fd, vector.at(), 3, 0]), 2);
+        crate::descriptor::close(fd);
+    }
+
+    /// `getpagesize` answers **this emulator's** page size, not the host's - a guest rounding
+    /// an allocation must get the number the mapper will actually use.
+    #[test]
+    fn getpagesize_answers_the_guest_page_size() {
+        let regs = [0_u64; GUEST_ARG_REGISTERS];
+        assert_eq!(super::getpagesize(&regs), orbistoun_core::GUEST_PAGE_SIZE);
     }
 }

@@ -1,54 +1,21 @@
 library = "libSceUlt"
 
 [[function]]
-name = "_sceUltMutexCreate"
-arity = 3
-purpose = "Constructs a named user-level-thread mutex where the guest asked, storing a handle in its first word."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-note = "An ordinary mutex on the shared sync primitives; the JSON initialiser creates one named \"ultmtx\" during static init (PPSA28061), and a stub answering the placeholder stranded it."
-
-[[function]]
-name = "_sceUltMutexLock"
-arity = 1
-purpose = "Blocks until the user-level-thread mutex is held by this thread."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-
-[[function]]
-name = "_sceUltMutexUnlock"
-arity = 1
-purpose = "Releases a user-level-thread mutex this thread holds."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-
-[[function]]
-name = "_sceUltMutexTryLock"
-arity = 1
-purpose = "Takes a user-level-thread mutex only if free, reporting busy when it is not."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-
-[[function]]
-name = "_sceUltMutexDestroy"
-arity = 1
-purpose = "Releases a user-level-thread mutex and clears the guest's handle."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-
-[[function]]
 name = "_sceUltConditionVariableCreate"
 arity = 4
 purpose = "Constructs a user-level-thread condition variable bound to a mutex, where the guest asked."
 returns = "status"
 known_by = "assumed"
 found_on = "2026-09-01"
-note = "The mutex is bound at creation; Wait takes only the variable. The JSON initialiser creates one named \"ultcv\" during static init (PPSA28061)."
+note = 'The mutex is bound at creation; Wait takes only the variable. The JSON initialiser creates one named "ultcv" during static init (PPSA28061).'
+
+[[function]]
+name = "_sceUltConditionVariableDestroy"
+arity = 1
+purpose = "Releases a user-level-thread condition variable and clears the guest's handle."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
 
 [[function]]
 name = "_sceUltConditionVariableSignal"
@@ -75,9 +42,42 @@ known_by = "assumed"
 found_on = "2026-09-01"
 
 [[function]]
-name = "_sceUltConditionVariableDestroy"
+name = "_sceUltMutexCreate"
+arity = 3
+purpose = "Constructs a named user-level-thread mutex where the guest asked, storing a handle in its first word."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+note = 'An ordinary mutex on the shared sync primitives; the JSON initialiser creates one named "ultmtx" during static init (PPSA28061), and a stub answering the placeholder stranded it.'
+
+[[function]]
+name = "_sceUltMutexDestroy"
 arity = 1
-purpose = "Releases a user-level-thread condition variable and clears the guest's handle."
+purpose = "Releases a user-level-thread mutex and clears the guest's handle."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltMutexLock"
+arity = 1
+purpose = "Blocks until the user-level-thread mutex is held by this thread."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltMutexTryLock"
+arity = 1
+purpose = "Takes a user-level-thread mutex only if free, reporting busy when it is not."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-01"
+
+[[function]]
+name = "_sceUltMutexUnlock"
+arity = 1
+purpose = "Releases a user-level-thread mutex this thread holds."
 returns = "status"
 known_by = "assumed"
 found_on = "2026-09-01"
@@ -90,3 +90,97 @@ returns = "status"
 known_by = "assumed"
 found_on = "2026-09-01"
 note = "Records the thread as created and returns success without running its entry - cooperative threads run only when yielded to, and no scheduler is built yet. A title that creates a worker and continues (the JSON initialiser) proceeds; one that yields expecting it to run reaches a named gap."
+
+[[function]]
+name = "_sceUltUlthreadRuntimeCreate"
+arity = 6
+purpose = "Constructs a named fibre runtime in memory the caller supplied."
+edge_cases = ["The same shape as the pool constructor. PPSA28061 builds one called 'sample runtime' immediately after a 'waiting queue' (D564)."]
+known_by = "guest-observed"
+assumptions = ["Constructing a runtime is not running threads on it. _sceUltUlthreadCreate remains unbuilt, so a guest that gets this far and then creates a fibre stops there instead - which is a better place to stop than a 2 GiB allocation."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "_sceUltWaitingQueueResourcePoolCreate"
+arity = 6
+purpose = "Constructs a named pool of waiting-queue resources in memory the caller supplied."
+edge_cases = [
+    "Six from the run: the object, a name, two counts, the work area the caller allocated, and an optional parameter. PPSA28061 names it 'waiting queue' (D564).",
+    "The handle goes in the object's first word, which is this library's own convention here - _sceUltMutexCreate follows it and the guest reads it back from there.",
+]
+known_by = "guest-observed"
+assumptions = ["The work area is accepted and never written to. An Ult object's state lives in this crate's table, the way every handle family here works."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltConditionVariableSignal"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltInitialize"
+arity = 3
+purpose = "Brings the user-level threading library up."
+edge_cases = ["PPSA28061 passes 0x1c, a pointer to a structure whose first word is 0x18, and 1. What any of them select is unestablished and nothing here reads them (D564)."]
+known_by = "guest-observed"
+assumptions = ["Reporting the library available is all a caller can act on. Nothing is initialised, because an Ult object's state is created by its own constructor and lives in this crate's table."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltMutexLock"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltMutexUnlock"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltUlthreadRuntimeGetWorkAreaSize"
+arity = 2
+purpose = "How much memory a caller must set aside for a fibre runtime."
+edge_cases = ["Arity two on the same evidence as the pool sizer. PPSA28061 asks for 16 threads and 3 worker threads (D564)."]
+known_by = "guest-observed"
+assumptions = ["The size is orbistoun's own number for the same reason the pool's is."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltWaitingQueueResourcePoolGetWorkAreaSize"
+arity = 2
+purpose = "How much memory a caller must set aside for a waiting-queue resource pool."
+edge_cases = [
+    "Arity two, fixed by the run: the third register holds 0x7fff0001, orbistoun's own placeholder left by an earlier stub - the evidence that fixed sceKernelCreateEqueue (D516) and scePthreadSetaffinity (D523). PPSA28061 asks for 16 threads and 16 sync objects.",
+    "Unimplemented, this answered the placeholder AS A SIZE and PPSA28061 passed it straight to malloc - 0x7fff0001 is 2 GiB, and this emulator served it. A size is a number the caller spends, so a placeholder here is not a loud failure but a very quiet 4 GiB across the two sizing calls (D564).",
+]
+known_by = "guest-observed"
+assumptions = ["The size is orbistoun's own number, not a measurement: it owns the constructor too and stores nothing in the block, so this is chosen to be non-zero and proportional to the request. A console that needs more would have its constructor reject a block this size, and nothing here would see that."]
+found_in = [
+    "PPSA02664-app0",
+    "PPSA28061-app0",
+]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."

@@ -64,6 +64,16 @@ pub mod ult {
             // (ulthread, name, entry, arg, context, sizeContext) in registers; a runtime and
             // optParam follow on the stack. Six is what is readable here, and only the first is used.
             "_sceUltUlthreadCreate" => 6,
+            // Arity two, fixed by the run: the third register holds orbistoun's own placeholder,
+            // left by an earlier stub (D516's evidence, D564).
+            "sceUltWaitingQueueResourcePoolGetWorkAreaSize" => 2,
+            "sceUltUlthreadRuntimeGetWorkAreaSize" => 2,
+            // (object, name, count, count, workArea, optParam) - the shape both constructors
+            // share, read off the guest's own calls.
+            "_sceUltWaitingQueueResourcePoolCreate" => 6,
+            "_sceUltUlthreadRuntimeCreate" => 6,
+            // Three values whose meaning is unestablished; nothing here reads them.
+            "sceUltInitialize" => 3,
         }
     }
 }
@@ -87,11 +97,11 @@ guest_module! {
         "sceKernelReserveVirtualRange" => 4,
         "sceKernelVirtualQuery" => 4,
         "sceKernelMprotect" => 3,
+        "sceKernelSetVirtualRangeName" => 3,
         "sceKernelAllocateMainDirectMemory" => 4,
         "sceKernelGetDirectMemorySize" => 0,
         "sceKernelDirectMemoryQuery" => 4,
         "sceKernelGetSystemSwVersion" => 1,
-        "sysctlbyname" => 5,
         "scePthreadCreate" => 5,
         "scePthreadJoin" => 2,
         "scePthreadSelf" => 0,
@@ -106,6 +116,7 @@ guest_module! {
         // return is the whole of what aborted two titles during static initialisation.
         "sceKernelCreateSema" => 6,
         "scePthreadMutexattrInit" => 1,
+        "scePthreadCondattrInit" => 1,
         "scePthreadMutexattrSettype" => 2,
         "scePthreadMutexattrGettype" => 2,
         "scePthreadMutexattrGetprotocol" => 2,
@@ -133,7 +144,26 @@ guest_module! {
         "posix_pthread_rwlock_destroy" => 1,
         "scePthreadBarrierInit" => 4, "scePthreadBarrierWait" => 1,
         "scePthreadBarrierDestroy" => 1,
+        // The POSIX-signature barrier init, which takes no name and so cannot share the
+        // vendor entry point (D385). Declared here beside `posix_pthread_rwlock_init`,
+        // which is the same split for the same reason.
+        "posix_pthread_barrier_init" => 3,
         "sceKernelCreateEventFlag" => 5, "sceKernelPollEventFlag" => 5,
+        // Arity 2 for both, from the arguments PPSA02664 passes: the third register holds
+        // `0x7fff0001` - orbistoun's own placeholder, left by an earlier stub - which is what
+        // fixes the count rather than a guess (D516, D524).
+        "sceKernelCreateEqueue" => 2, "sceKernelAddUserEventEdge" => 2,
+        "sceKernelWaitEqueue" => 5,
+        // Arities read off the guest's own calls: Get takes a handle and two adjacent
+        // out-parameters, Set a handle, a policy and a param pointer, and the two-argument
+        // pair a handle and one value (D561).
+        "scePthreadGetschedparam" => 3, "scePthreadSetschedparam" => 3,
+        "scePthreadSetprio" => 2, "scePthreadRename" => 2,
+        "scePthreadCondattrDestroy" => 1, "pthread_setcancelstate" => 2,
+        // `_sigprocmask` takes how, a set and an out-set; the guest passes 1, NULL and a stack
+        // pointer. `sceKernelUuidCreate` takes only the destination (D562).
+        "_sigprocmask" => 3, "sceKernelUuidCreate" => 1,
+        "sceKernelWaitEventFlag" => 5,
         "sceKernelSetEventFlag" => 2, "sceKernelClearEventFlag" => 2,
         "sceKernelDeleteEventFlag" => 1,
         "sceKernelPollSema" => 2, "sceKernelSignalSema" => 2,
@@ -148,6 +178,12 @@ guest_module! {
         "scePthreadAttrSetstacksize" => 2, "scePthreadAttrGetstacksize" => 2,
         "scePthreadAttrSetdetachstate" => 2, "scePthreadAttrGetdetachstate" => 2,
         "scePthreadAttrSetschedparam" => 2, "scePthreadAttrGetschedparam" => 2,
+        // The **thread** form, not the attribute form. Arity 2 for the same reason the
+        // attribute form has it - a subject and a mask - and PPSA02664 passes a small
+        // bitmask in the second register across 62 calls, with leftovers after it (D523).
+        "scePthreadSetaffinity" => 2,
+        "scePthreadAttrSetschedpolicy" => 2, "scePthreadAttrSetinheritsched" => 2,
+        "scePthreadAttrSetaffinity" => 2, "scePthreadAttrSetguardsize" => 2,
         "sceKernelReadTsc" => 0,
         "sceKernelGetTscFrequency" => 0,
         "sceKernelIsStack" => 1,
@@ -175,6 +211,10 @@ guest_module! {
         "posix_sigdelset" => 2,
         "posix_sigismember" => 2,
         "sceKernelUsleep" => 1,
+        // Arity 2, from the arguments PPSA02664 passes: a clock identifier and a writable
+        // stack address, with the third and fourth registers holding the same leftover
+        // (D536).
+        "sceKernelClockGettime" => 2,
 
     }
 }
@@ -245,10 +285,15 @@ fn direct_memory_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     //
     // **It was a boolean here and the console does not return a boolean.** A conformance run
     // read `3` from it for the region at the bottom of the map, which no `0` or `1` can be, so
-    // the previous meaning was provably not the platform's. What `3` denotes - a type, or some
-    // state - is still open, and one run distinguishes them: allocate with several types and
-    // query each back. Sweeping it 0..10 changed nothing a guest reacted to, so this is a
-    // conformance difference rather than one a title is waiting on (D083, D398).
+    // the previous meaning was provably not the platform's (D083, D398).
+    //
+    // **Settled, and this model was right before it could be checked.** What `3` denoted - a
+    // type, or some other state - stayed open until a capture did the one run that separates
+    // them: allocate a page with each of `WB_ONION` (0), `WC_GARLIC` (3) and `WB_GARLIC` (10)
+    // and read the field back for each. It answered `0x0`, `0x3` and `0xa` - the type asked
+    // for, every time. Three distinct answers also rule out the other reading, that the field
+    // is state and the type is somewhere else. Claimed by
+    // `the_third_query_field_is_the_memory_type_the_allocation_asked_for` (D507).
     if marked_query_fields() {
         // **Dyed banknotes.** Each field carries a value that names itself, so whatever the
         // guest does next says which one it read - no watchpoint and no new machinery, only
@@ -400,81 +445,6 @@ fn sw_version_body(version: &orbistoun_core::machine::SoftwareVersion) -> [u8; 0
     body
 }
 
-/// The bytes a named `sysctl` knob answers with, or `None` for one orbistoun does not carry.
-///
-/// The names are FreeBSD's, because the target kernel is FreeBSD-derived (see `docs/REFERENCES.md`):
-///
-/// - `kern.ostype` answers `"FreeBSD"`. That is not a guess but the one fact this whole project
-///   rests on stated back to the guest - a citable constant, the same way the C library is treated
-///   as POSIX with vendor naming.
-/// - `kern.osrelease` answers the **configured** machine's release ([`machine`]`().kernel_release`),
-///   which is empty until a machine sets one - orbistoun does not invent a kernel version (the
-///   reason `Machine::default().kernel_release` is empty). An unset release answers an empty,
-///   NUL-terminated string: a knob that exists with no value, rather than an invented one. A
-///   console measured `"0.0-prototype"` here (obSCEne `135-sysctl/osrelease`), which a machine
-///   profile may carry, but the default does not pretend to know it.
-///
-/// Every other name is refused rather than answered with something plausible: a payload doing
-/// firmware detection off a value nobody measured would take a path chosen by an invention
-/// (principle 3), which is the exact failure a sibling emulator hit and obSCEne exists to avoid.
-fn sysctl_value(name: &str, kernel_release: &str) -> Option<Vec<u8>> {
-    let c_string = |text: &str| {
-        let mut bytes = text.as_bytes().to_vec();
-        bytes.push(0);
-        bytes
-    };
-    match name {
-        "kern.ostype" => Some(c_string("FreeBSD")),
-        "kern.osrelease" => Some(c_string(kernel_release)),
-        _ => None,
-    }
-}
-
-/// `sysctlbyname(name, oldp, oldlenp, newp, newlen)` - read a named kernel knob.
-///
-/// Left to the default stub the call refused, and obSCEne's `135-sysctl/osrelease` failed - a
-/// refusal is what turns firmware detection off in a title that asks. This answers the knobs it can
-/// source honestly (see [`sysctl_value`]) and follows the POSIX/FreeBSD contract: with a destination
-/// it copies what fits and updates the length; with none it answers the size alone; and it never
-/// writes past the length it was given, which is the overrun obSCEne guards for.
-fn sysctlbyname(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (name_ptr, oldp, oldlenp) = (args[0], args[1], args[2]);
-    let vendor = |errno| u64::from(GuestError::vendor(errno).as_raw());
-    if name_ptr == 0 || oldlenp == 0 {
-        return vendor(orbistoun_core::errno::FAULT);
-    }
-    let name = read_name(name_ptr);
-    let Some(value) = sysctl_value(&name, &machine().kernel_release) else {
-        return vendor(orbistoun_core::errno::NO_ENTRY);
-    };
-    let capacity = read_word(oldlenp).unwrap_or(0);
-    if oldp != 0 {
-        if (value.len() as u64) > capacity {
-            // Too small: report the size the value needs and refuse, rather than truncate into a
-            // buffer the caller sized itself. FreeBSD answers `ENOMEM` here.
-            let _ = write_word(oldlenp, value.len() as u64);
-            return vendor(orbistoun_core::errno::NO_MEMORY);
-        }
-        let Ok(dest) = usize::try_from(oldp) else {
-            return vendor(orbistoun_core::errno::FAULT);
-        };
-        // SAFETY: `oldp` is a guest out-pointer under the identity mapping, and `value.len()` is
-        // no more than `capacity`, the length the caller declared its buffer holds, so the write
-        // stays inside it. An address the guest never mapped faults here as it would have in the guest.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                value.as_ptr(),
-                std::ptr::with_exposed_provenance_mut::<u8>(dest),
-                value.len(),
-            );
-        }
-    }
-    if !write_word(oldlenp, value.len() as u64) {
-        return vendor(orbistoun_core::errno::FAULT);
-    }
-    0
-}
-
 /// `sceKernelGetDirectMemorySize()`.
 ///
 /// How much physical memory exists. Answered from the same model the query walks, so the
@@ -605,8 +575,8 @@ fn c_mtx_lock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return thrd::ERROR;
     };
     let by = thread::adopt("main");
-    match sync::lock(handle, by) {
-        Some(true) => thrd::SUCCESS,
+    match sync::acquire(handle, by, sync::Blocking::Forever) {
+        Some(sync::Acquisition::Locked) => thrd::SUCCESS,
         _ => thrd::ERROR,
     }
 }
@@ -630,9 +600,9 @@ fn c_mtx_trylock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return thrd::ERROR;
     };
     let by = thread::adopt("main");
-    match sync::try_lock(handle, by) {
-        Some(sync::TryLock::Locked) => thrd::SUCCESS,
-        Some(sync::TryLock::Busy | sync::TryLock::Deadlock) => thrd::BUSY,
+    match sync::acquire(handle, by, sync::Blocking::Never) {
+        Some(sync::Acquisition::Locked) => thrd::SUCCESS,
+        Some(sync::Acquisition::Busy | sync::Acquisition::Deadlock) => thrd::BUSY,
         None => thrd::ERROR,
     }
 }
@@ -673,7 +643,7 @@ fn c_cnd_wait_inner(
     }
     let woken = sync::cond_wait(cond, timeout);
     if let Some(handle) = mutex {
-        sync::lock(handle, by);
+        sync::acquire(handle, by, sync::Blocking::Forever);
     }
     woken
 }
@@ -772,6 +742,95 @@ fn thrd_sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 // exclusion is real regardless. Success is zero, the value the JSON initialiser that first needs this
 // checks against.
 
+/// How much memory an Ult object needs behind it, per thing it was sized for.
+///
+/// # orbistoun's own number, because it owns both ends
+///
+/// The guest asks `GetWorkAreaSize`, allocates that much, and hands the block to `Create`. Both
+/// halves are implemented here, and **nothing is stored in the block** - an Ult object's state
+/// lives in this crate's own table, the way every handle family here works. So the size is a
+/// choice rather than a measurement, and it is chosen to be:
+///
+/// - **non-zero**, so a caller checking for a failed sizing sees success;
+/// - **proportional to the request**, so a caller that sanity-checks "more threads, more memory"
+///   is not surprised.
+///
+/// Unimplemented, `GetWorkAreaSize` answered the placeholder `0x7fff_0001` - and PPSA28061
+/// `malloc`ed it. **Twice.** That is 2 GiB a piece, and this emulator's `malloc` served both
+/// (D564).
+const ULT_WORK_AREA_PER_OBJECT: u64 = 0x80;
+
+/// A fixed part of the work area, so a request for nothing still gets a real block.
+const ULT_WORK_AREA_HEADER: u64 = 0x100;
+
+/// `sceUltWaitingQueueResourcePoolGetWorkAreaSize(threads, syncObjects)`.
+///
+/// **Arity two, fixed by the run**: the third register holds `0x7fff_0001`, orbistoun's own
+/// placeholder left by an earlier stub - the same evidence that fixed `sceKernelCreateEqueue`
+/// (D516) and `scePthreadSetaffinity` (D523). PPSA28061 asks for 16 and 16.
+fn ult_pool_work_area_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    ULT_WORK_AREA_HEADER
+        + args[0]
+            .saturating_add(args[1])
+            .saturating_mul(ULT_WORK_AREA_PER_OBJECT)
+}
+
+/// `sceUltUlthreadRuntimeGetWorkAreaSize(threads, workerThreads)`.
+///
+/// Arity two on the same evidence. PPSA28061 asks for 16 threads and 3 workers.
+fn ult_runtime_work_area_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    ULT_WORK_AREA_HEADER
+        + args[0]
+            .saturating_add(args[1])
+            .saturating_mul(ULT_WORK_AREA_PER_OBJECT)
+}
+
+/// `sceUltInitialize(...)` - bring the library up.
+///
+/// PPSA28061 passes `0x1c`, a pointer to a structure whose first word is `0x18`, and `1`. **What
+/// any of them select is unestablished** and nothing here reads them: this reports that the
+/// library is available, which is the only thing a caller can act on, and the arguments are
+/// recorded in the knowledge file rather than guessed at (D564).
+fn ult_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `_sceUltWaitingQueueResourcePoolCreate(pool, name, threads, syncObjects, workArea, optParam)`.
+///
+/// Constructs a named pool where the guest asked. **The handle goes in the object's first word**,
+/// which is this library's own convention here - the same one `_sceUltMutexCreate` follows, and
+/// the guest reads it back from there.
+///
+/// The work area is accepted and **not written to**; see [`ULT_WORK_AREA_PER_OBJECT`].
+fn ult_pool_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    ult_construct(args)
+}
+
+/// `_sceUltUlthreadRuntimeCreate(runtime, name, threads, workerThreads, workArea, optParam)`.
+///
+/// The same shape as the pool, and PPSA28061 builds one called `"sample runtime"` immediately
+/// after a `"waiting queue"`.
+///
+/// **This is not the fibre scheduler.** Constructing a runtime is not running threads on it -
+/// `_sceUltUlthreadCreate` remains unbuilt, and a guest that gets this far and then creates a
+/// fibre will stop there instead. That is a better place to stop than a 2 GiB allocation.
+fn ult_runtime_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    ult_construct(args)
+}
+
+/// The half a pool and a runtime share: a named object, sized by two counts.
+fn ult_construct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (out, name) = (args[0], args[1]);
+    if out == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let handle = sync::create_ult_object(&read_name(name), args[2], args[3]);
+    if !write_word(out, handle) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// `_sceUltMutexCreate(mutex, name, optParam)` - construct a named mutex where the guest asked.
 fn ult_mutex_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, name) = (args[0], args[1]);
@@ -790,8 +849,8 @@ fn ult_mutex_lock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(handle) = mutex_at(args[0]) else {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
-    match sync::lock(handle, thread::adopt("main")) {
-        Some(true) => OK,
+    match sync::acquire(handle, thread::adopt("main"), sync::Blocking::Forever) {
+        Some(sync::Acquisition::Locked) => OK,
         _ => u64::from(GuestError::InvalidArgument.as_raw()),
     }
 }
@@ -812,9 +871,9 @@ fn ult_mutex_trylock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(handle) = mutex_at(args[0]) else {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
-    match sync::try_lock(handle, thread::adopt("main")) {
-        Some(sync::TryLock::Locked) => OK,
-        Some(sync::TryLock::Busy | sync::TryLock::Deadlock) => {
+    match sync::acquire(handle, thread::adopt("main"), sync::Blocking::Never) {
+        Some(sync::Acquisition::Locked) => OK,
+        Some(sync::Acquisition::Busy | sync::Acquisition::Deadlock) => {
             u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw())
         }
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -893,7 +952,7 @@ fn ult_cond_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     let woken = sync::cond_wait(cond, None);
     if let Some(handle) = mutex {
-        sync::lock(handle, by);
+        sync::acquire(handle, by, sync::Blocking::Forever);
     }
     match woken {
         Some(_) => OK,
@@ -1014,9 +1073,18 @@ fn allocate_main_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// Where guest-requested mappings are placed when the guest expresses no preference.
 ///
-/// Clear of the image, the stacks and the thunk table, so a stray pointer into any of
-/// them is still recognisable by its address alone.
-pub const MAPPING_BASE: u64 = 0x0000_7200_0000_0000;
+/// Clear of the image, the stacks, the thunk table **and the thunk data blocks**, so a stray
+/// pointer into any of them is still recognisable by its address alone.
+///
+/// **It was `0x7200…`, which is `orbistoun_thunk::SUGGESTED_DATA_BASE` exactly** - the data
+/// blocks are reserved there at load, so the first guest map that expressed no preference
+/// landed on top of them: `VirtualAlloc` refused the address, `reserve` reported a conflict,
+/// and `map` answered `NoMemory`, which the guest read as out-of-memory and faulted through
+/// the null it kept (PPSA04263, `image+0x2ba64c1`). A title that reserves with a hint first
+/// (PPSA02664) never reached this base and so never hit it. Moved a clear terabyte above the
+/// data blocks; the two arenas each keep multiple terabytes of room below the `0x7FFF…`
+/// user-space ceiling (worklog 285).
+pub const MAPPING_BASE: u64 = 0x0000_7400_0000_0000;
 
 /// The address space guest mappings live in.
 ///
@@ -1275,6 +1343,271 @@ pub fn direct_fill_done() -> (u64, u64) {
     )
 }
 
+/// Where a placed module keeps the functions that have to run before its code is usable.
+///
+/// `array` is the runtime address of `DT_INIT_ARRAY` and `count` how many pointers it holds;
+/// `init` is `DT_INIT`, zero when the module has none. All three are addresses in the guest's
+/// own space, already offset by wherever the module was placed.
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleInitialisers {
+    /// `DT_INIT`, run before the array. Zero when absent.
+    pub init: u64,
+    /// `DT_INIT_ARRAY`, as a runtime address.
+    pub array: u64,
+    /// How many function pointers the array holds.
+    pub count: u64,
+}
+
+/// What the loader placed, by the library name the module answers to.
+static PLACED_MODULES: Mutex<Vec<(String, ModuleInitialisers)>> = Mutex::new(Vec::new());
+
+/// Tells this crate where a placed module's initialisers are, so a later start can run them.
+///
+/// # Why the loader tells the kernel rather than the kernel asking
+///
+/// The same reason [`note_region`] exists: a module's pages live in the loader's address
+/// space, which this crate never sees. `sceKernelLoadStartModule` is handed a **path** and
+/// nothing else, so without this it cannot find the module the guest is naming (D515).
+///
+/// The **contents** of the array are deliberately not read here. It holds function pointers
+/// that relocation writes, and a value read before relocation is the unrelocated one - so the
+/// address is recorded and the pointers are read at start time, which is after linking.
+pub fn note_module_initialisers(library: &str, initialisers: ModuleInitialisers) {
+    if let Ok(mut placed) = PLACED_MODULES.lock() {
+        if !placed.iter().any(|(name, _)| name == library) {
+            placed.push((library.to_owned(), initialisers));
+        }
+    }
+}
+
+/// Runs every placed module's initialisers, whether or not the guest asked for it.
+///
+/// # The question this answers, and why it is a diagnostic rather than behaviour
+///
+/// D515 starts a module when the guest calls `sceKernelLoadStartModule`, which is what that
+/// function's name says it does. It left open whether a module bound as an **import** - one
+/// the guest never asks to load, because the loader placed it and resolved against it - has
+/// its initialisers run at process start on the console. `libc.prx` is exactly that: placed,
+/// carrying one initialiser, and never started, because nothing ever loads it by name.
+///
+/// **Starting everything to make a title work would be inventing behaviour** (D515 says so in
+/// those words). So this is off by default and asks a question instead: if a run with it
+/// reaches further, an ordering is missing and the next job is to find out which module and
+/// when; if it changes nothing, a whole explanation is eliminated rather than argued (D519).
+///
+/// Answers how many modules were started and how many initialisers ran, so a run that
+/// intervened and did nothing says so rather than reading as an elimination (D325).
+pub fn start_every_placed_module() -> (usize, u64) {
+    let Ok(placed) = PLACED_MODULES.lock() else {
+        return (0, 0);
+    };
+    // Collected first: `run_initialisers` enters guest code, which can call back into this
+    // crate, and holding the lock across that would deadlock on the first module that does.
+    let all: Vec<(String, ModuleInitialisers)> = placed.clone();
+    drop(placed);
+    let mut ran = 0;
+    for (library, initialisers) in &all {
+        let count = run_initialisers(*initialisers);
+        started(library, u64::MAX, count);
+        ran += count;
+    }
+    (all.len(), ran)
+}
+
+/// The initialisers recorded for the module a guest path names, if any.
+///
+/// Matched on the **leaf** of the path. The guest names a module by its sandbox path
+/// (`/app0/Media/Modules/PS5Util.prx`) and the loader knows it by the library name it
+/// answers to; the file name is the one part both agree on, and it is what a title's own
+/// modules are unique by within a title.
+fn initialisers_for(path: &str) -> Option<ModuleInitialisers> {
+    let leaf = path.rsplit('/').next()?;
+    // The loader knows a module by the **import library name** it answers to, which carries no
+    // extension: the guest asks for `Il2CppUserAssemblies.prx` and the loader placed
+    // `Il2CppUserAssemblies`. Comparing the two directly matches nothing, which is what the
+    // first version of this did - and it reported "no initialisers recorded" for a module that
+    // had them, which reads as a missing module rather than a missing comparison (D515).
+    let stem = leaf.rsplit_once('.').map_or(leaf, |(stem, _)| stem);
+    let placed = PLACED_MODULES.lock().ok()?;
+    placed
+        .iter()
+        // Case-insensitively, because that is how the loader itself matches a title's files
+        // to its import names - one title in the corpus disagrees with its own spelling (D482).
+        .find(|(library, _)| library.eq_ignore_ascii_case(stem))
+        .map(|(_, initialisers)| *initialisers)
+}
+
+/// Runs a placed module's `DT_INIT` and `DT_INIT_ARRAY`, and says how many ran.
+///
+/// # Why this is what `Start` means here
+///
+/// Neither module a real title asked for exports `module_start`, and both carry `DT_INIT`
+/// and `DT_INIT_ARRAY` - the ordinary ELF mechanism, which is what a C++ module's static
+/// constructors are reached through. Running them is what makes the globals those
+/// constructors fill non-null, which is what the guest reads immediately afterwards (D514).
+///
+/// **Order is `DT_INIT` then the array, and the array in ascending order.** That is the
+/// System V ABI's own order, and the constructors within one module depend on it.
+fn run_initialisers(initialisers: ModuleInitialisers) -> u64 {
+    let mut ran = 0;
+    if initialisers.init != 0 {
+        // SAFETY: `DT_INIT` of a module this loader placed, relocated and protected
+        // executable - a function pointer the module itself declared, taking no arguments.
+        if unsafe { thread::call_guest(initialisers.init, [0, 0, 0]) }.is_some() {
+            ran += 1;
+        }
+    }
+    for slot in 0..initialisers.count {
+        let at = initialisers.array.saturating_add(slot.saturating_mul(8));
+        let Some(entry) = read_word(at) else {
+            // The array is outside anything readable, so the recorded address is wrong
+            // rather than the module being empty. Stop, rather than walk further into it.
+            break;
+        };
+        // A null or a `-1` is a legitimate empty slot the ABI allows, and skipping them is
+        // what a real runtime does rather than calling through them.
+        if entry == 0 || entry == u64::MAX {
+            continue;
+        }
+        // SAFETY: a pointer out of the module's own `DT_INIT_ARRAY`, which relocation has
+        // written, into text this loader protected executable. The three arguments are the
+        // `(argc, argv, envp)` an init-array entry is permitted to take and may ignore.
+        if unsafe { thread::call_guest(entry, [0, 0, 0]) }.is_some() {
+            ran += 1;
+        }
+    }
+    ran
+}
+
+/// Every `/app0` module a guest asked to load and start, and the handle it was given.
+///
+/// A `Mutex` rather than an atomic because the paths are what make the report worth
+/// reading, and a count alone would say a module was not started without saying which.
+static STARTED_NOTHING: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+/// Records that a module was given a handle and never started.
+fn started_nothing(path: &str, handle: u64) {
+    if let Ok(mut loads) = STARTED_NOTHING.lock() {
+        loads.push((path.to_owned(), handle));
+    }
+}
+
+/// Every module that was started, and how many initialisers each ran.
+static STARTED: Mutex<Vec<(String, u64, u64)>> = Mutex::new(Vec::new());
+
+/// Records that a module was started, and how many of its initialisers ran.
+///
+/// **A count of zero is reported rather than treated as success.** A module whose array was
+/// found and held nothing callable and a module that ran every constructor it has produce the
+/// same handle, and only one of them is a module the guest can use.
+fn started(path: &str, handle: u64, ran: u64) {
+    if let Ok(mut loads) = STARTED.lock() {
+        loads.push((path.to_owned(), handle, ran));
+    }
+}
+
+/// One line for a run report: the event queues a guest made, and what it registered on each.
+///
+/// [`None`] when none was created, so a quiet run stays quiet.
+///
+/// **A queue with nothing registered is worth saying out loud.** `sceKernelAddUserEventEdge`
+/// refuses a handle no queue answers, and a run where every registration was refused looks
+/// exactly like a run that made none - which is the ambiguity that makes a check worse than no
+/// check (D325, D524).
+#[must_use]
+pub fn equeue_summary() -> Option<String> {
+    let queues = sync::equeue_summary();
+    if queues.is_empty() {
+        return None;
+    }
+    let named = queues
+        .iter()
+        .map(|(name, count)| format!("{name:?} ({count} event(s))"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{} event queue(s): {named}", queues.len()))
+}
+
+/// One line for a run report: which modules were handed a handle and never started.
+///
+/// [`None`] when the guest asked for none, so a quiet run stays quiet.
+///
+/// **This is a gap report, not a diagnostic.** Nothing here is switched on by a variable and
+/// nothing intervenes; it says what `sceKernelLoadStartModule` did not do. Until something
+/// runs `DT_INIT_ARRAY`, a guest that calls into one of these modules is running code whose
+/// constructors never ran - which surfaces as a null field read somewhere with no connection
+/// to the load (D514).
+#[must_use]
+pub fn module_start_summary() -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Ok(started) = STARTED.lock() {
+        if !started.is_empty() {
+            let named = started
+                .iter()
+                .map(|(path, handle, ran)| {
+                    // `u64::MAX` is the bulk start before entry, which has no handle because
+                    // no guest asked for it. Rendering it as one would invent a handle.
+                    let how = if *handle == u64::MAX {
+                        "before entry".to_owned()
+                    } else {
+                        format!("handle {handle:#x}")
+                    };
+                    format!("{} ({ran} initialiser(s), {how})", leaf_of(path))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            // A module that ran nothing is called out separately: its array was found and
+            // held nothing callable, which is not the same as having started.
+            let empty = started.iter().filter(|(_, _, ran)| *ran == 0).count();
+            let mut line = format!("{} module(s) started: {named}", started.len());
+            if empty > 0 {
+                use std::fmt::Write as _;
+                let _ = write!(
+                    line,
+                    " - {empty} ran NO initialiser, which is not the same as having started"
+                );
+            }
+            parts.push(line);
+        }
+    }
+
+    // What the loader placed, named. The set is small, and every wrong conclusion in this
+    // area so far came from inferring it from something else - an import list that does not
+    // contain it, a filename that is not the library name (D515).
+    if let Ok(placed) = PLACED_MODULES.lock() {
+        if !placed.is_empty() {
+            let named = placed
+                .iter()
+                .map(|(library, i)| format!("{library}({} init)", i.count + u64::from(i.init != 0)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("loader placed with initialisers: {named}"));
+        }
+    }
+
+    if let Ok(loads) = STARTED_NOTHING.lock() {
+        if !loads.is_empty() {
+            let named = loads
+                .iter()
+                .map(|(path, handle)| format!("{} (handle {handle:#x})", leaf_of(path)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!(
+                "{} module(s) got a handle and were NOT started (the loader recorded no initialisers for them): {named}",
+                loads.len()
+            ));
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The file name a path ends in, or the whole path when it has no separator.
+fn leaf_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// One line for a run report: what the direct-memory fill actually did.
 ///
 /// [`None`] when no fill was asked for, so a quiet run stays quiet - the same shape as
@@ -1410,7 +1743,6 @@ fn read_word(address: u64) -> Option<u64> {
     Some(unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at)) })
 }
 
-/// Writes a machine word into guest memory.
 /// Writes a 32-bit value where a guest expects an `int`.
 ///
 /// **Four bytes, not eight, and the difference has bitten this crate twice.** A semaphore
@@ -1433,6 +1765,22 @@ fn write_int(address: u64, value: u32) -> bool {
     true
 }
 
+/// Reads a guest `int` - four bytes, not eight.
+///
+/// The counterpart to [`write_int`], and it exists for the same reason (D272): a `sched_param`
+/// is a four-byte structure and the guest packs it right against its neighbour. Reading eight
+/// would take the neighbour with it.
+fn read_int(address: u64) -> Option<u32> {
+    let at = usize::try_from(address).ok()?;
+    if at == 0 {
+        return None;
+    }
+    // SAFETY: as `read_word`, but four bytes - a guest-supplied `int *` under an identity
+    // mapping, read unaligned because the guest's alignment is its own business.
+    Some(unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(at)) })
+}
+
+/// Writes a machine word into guest memory.
 fn write_word(address: u64, value: u64) -> bool {
     let Ok(at) = usize::try_from(address) else {
         return false;
@@ -1444,6 +1792,29 @@ fn write_word(address: u64, value: u64) -> bool {
     // written unaligned because the guest's alignment is its own business.
     unsafe {
         std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(at), value);
+    }
+    true
+}
+
+/// Writes a block of bytes into guest memory.
+///
+/// For the structures a guest hands a buffer for and expects filled - a delivered event, here.
+/// Refuses a null destination for the same reason [`write_word`] does.
+fn write_block(address: u64, bytes: &[u8]) -> bool {
+    let Ok(at) = usize::try_from(address) else {
+        return false;
+    };
+    if at == 0 {
+        return false;
+    }
+    // SAFETY: as `write_word` - a guest-supplied destination under an identity mapping, and
+    // `bytes.len()` bytes of it, which is the size the guest asked to be filled.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            std::ptr::with_exposed_provenance_mut::<u8>(at),
+            bytes.len(),
+        );
     }
     true
 }
@@ -1665,20 +2036,35 @@ fn create_semaphore(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let name = read_name(args[1]);
 
     let handle = sync::create_semaphore(initial, ceiling, &name);
-    // **Four bytes, not eight.** The destination is an `int *`, not a `void **` - a
-    // semaphore handle and a mutex handle are different shapes, which obSCEne established
-    // from the public interface documentation (D210). This wrote a full word until then,
-    // so every `sceKernelCreateSema` put four bytes of handle into whatever the guest kept
-    // next to its semaphore. Nothing here could have noticed: the write succeeds, the
-    // handle round-trips, and the damage surfaces wherever that neighbour is read.
+    // **Eight bytes, and that reverses D210 on a measurement.**
+    //
+    // D210 narrowed this to four, reasoning from public interface documentation that the
+    // destination is an `int *` rather than a `void **`. A conformance run has now planted a
+    // `0xA5A5A5A5` guard in the word *after* an `int handle`, called this, and read the guard
+    // back as **`0x0`** - so the console writes eight bytes where it was given four, and
+    // obSCEne's own check reports it as a failure for that reason.
+    //
+    // Documentation lost to a measurement, which is this project's oracle ordering working
+    // rather than being overridden: `Measured` outranks `Published` precisely because a
+    // documented layout and a real one have already diverged once here (D468, the ctype
+    // tables).
+    //
+    // **A guest is built against the console, so orbistoun has to do what the console does.**
+    // Writing four bytes leaves the neighbour a title has allowed to be clobbered holding its
+    // old value, which is a difference a title can see and cannot be told about.
+    //
+    // The high half is zero because that is what the guard read: `0x0`, not the top half of a
+    // handle. Whether the console writes a 64-bit handle whose upper half happens to be zero
+    // or writes four bytes and clears four more is not distinguishable from one guard word,
+    // and both produce this (D509).
     //
     // SAFETY: the guest supplied this destination, which is the same contract the real call
     // has. Written unaligned because the guest's alignment is its own business, and an
     // address it has not mapped faults here exactly as it would have in the guest.
     unsafe {
         std::ptr::write_unaligned(
-            std::ptr::with_exposed_provenance_mut::<i32>(out as usize),
-            handle,
+            std::ptr::with_exposed_provenance_mut::<u64>(out as usize),
+            u64::from(handle as u32),
         );
     }
     OK
@@ -1767,13 +2153,16 @@ fn pthread_mutex_lock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
     let by = thread::adopt("main");
-    match sync::lock(handle, by) {
-        Some(true) => OK,
+    match sync::acquire(handle, by, sync::Blocking::Forever) {
+        Some(sync::Acquisition::Locked) => OK,
         // Two different failures, deliberately given two different codes. A refusal is
         // the guest deadlocking against itself on a non-recursive lock; a miss is a
         // handle naming nothing. Collapsing them would make the trace unable to tell a
-        // guest bug from a gap in this crate.
-        Some(false) => u64::from(GuestError::InvalidArgument.as_raw()),
+        // guest bug from a gap in this crate. **Neither can be a timeout here** - this
+        // call waits forever, so `Busy` can only be the self-relock.
+        Some(sync::Acquisition::Busy | sync::Acquisition::Deadlock) => {
+            u64::from(GuestError::InvalidArgument.as_raw())
+        }
         None => u64::from(GuestError::InvalidHandle.as_raw()),
     }
 }
@@ -1807,19 +2196,19 @@ fn pthread_mutex_trylock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
     let by = thread::adopt("main");
-    match sync::try_lock(handle, by) {
-        Some(sync::TryLock::Locked) => OK,
+    match sync::acquire(handle, by, sync::Blocking::Never) {
+        Some(sync::Acquisition::Locked) => OK,
         // Held by somebody else, or the owner re-taking a normal lock, which is the ordinary
         // outcome of this call rather than a misuse of it - the reason D256 gave it a code of
         // its own. **The console returned the busy errno** when asked to take a lock already
         // held, so the distinction is made with the value the machine uses (D398).
-        Some(sync::TryLock::Busy) => {
+        Some(sync::Acquisition::Busy) => {
             u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw())
         }
         // The owner re-taking an error-checking lock, which the console reports with the
         // invalid-argument errno (`0x8002_0016`) rather than the busy a normal lock gives -
         // a distinct code for a distinct condition, measured in 015-sync/mutex-recursion (D416).
-        Some(sync::TryLock::Deadlock) => {
+        Some(sync::Acquisition::Deadlock) => {
             u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw())
         }
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -2074,6 +2463,102 @@ fn sigemptyset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `_sigprocmask(how, set, oldset)` - examine or change the blocked-signal mask.
+///
+/// # What the guest asks for, and what it is told
+///
+/// PPSA02664 passes `how = 1` with a **null** `set` - the classic query idiom: `SIG_BLOCK` with
+/// nothing to block is a pure read of the current mask. Answering it with a placeholder left the
+/// guest reading its own stack as a signal mask.
+///
+/// `how` is FreeBSD's, which is citable: `SIG_BLOCK` 1, `SIG_UNBLOCK` 2, `SIG_SETMASK` 3.
+///
+/// **The mask is bookkeeping and nothing else.** Nothing here delivers signals, so blocking one
+/// changes no behaviour - the same statement `posix_sigemptyset` already makes, and it is
+/// recorded rather than implied by this reporting success (D271, D562).
+fn sigprocmask(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// FreeBSD's `SIG_BLOCK`, `SIG_UNBLOCK` and `SIG_SETMASK`.
+    const BLOCK: u64 = 1;
+    const UNBLOCK: u64 = 2;
+    const SETMASK: u64 = 3;
+
+    static MASK: Mutex<[u64; SIGSET_WORDS as usize]> = Mutex::new([0; SIGSET_WORDS as usize]);
+    let Ok(mut mask) = MASK.lock() else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+
+    // The old mask first: a call that changes and reports must report what it replaced, not
+    // what it installed.
+    if args[2] != 0 {
+        for (index, word) in mask.iter().enumerate() {
+            if !write_word(args[2].saturating_add(index as u64 * 8), *word) {
+                return u64::from(GuestError::InvalidArgument.as_raw());
+            }
+        }
+    }
+    if args[1] == 0 {
+        // A null set is a query, and `how` is not consulted - which is what the guest does.
+        return OK;
+    }
+    let mut incoming = [0_u64; SIGSET_WORDS as usize];
+    for (index, word) in incoming.iter_mut().enumerate() {
+        let Some(read) = read_word(args[1].saturating_add(index as u64 * 8)) else {
+            return u64::from(GuestError::InvalidArgument.as_raw());
+        };
+        *word = read;
+    }
+    match args[0] {
+        BLOCK => {
+            for (current, add) in mask.iter_mut().zip(incoming) {
+                *current |= add;
+            }
+        }
+        UNBLOCK => {
+            for (current, remove) in mask.iter_mut().zip(incoming) {
+                *current &= !remove;
+            }
+        }
+        SETMASK => *mask = incoming,
+        _ => return u64::from(GuestError::InvalidArgument.as_raw()),
+    }
+    OK
+}
+
+/// `sceKernelUuidCreate(out)` - writes a 128-bit identifier.
+///
+/// # Deterministic on purpose, which is a real trade
+///
+/// A UUID is meant to be unpredictable; this one is a counter. **Reproducibility wins here**,
+/// because the only progress measure this project has is whether one run reached further than
+/// the last, and a value that changed every run would be a difference between two runs that
+/// meant nothing (the same argument D256 makes for process time).
+///
+/// Unique within a run, which is what a guest using one as a key needs. Repeated across runs,
+/// which no guest here can observe and a person comparing two traces very much can.
+///
+/// The version and variant bits are set so it **is** a well-formed version-4 UUID: a guest that
+/// checks them gets the right answer, and one that does not is unaffected (D562).
+fn kernel_uuid_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    if args[0] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let count = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&count.to_be_bytes());
+    bytes[8..].copy_from_slice(&count.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes());
+    // Version 4 in the high nibble of byte 6, and the RFC 4122 variant in the top two bits of
+    // byte 8 - the two fields a reader checks to decide it is looking at a UUID at all.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    if !write_block(args[0], &bytes) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// Words in a `sigset_t`, which is `__uint32_t __bits[4]` on a FreeBSD-derived system.
 const SIGSET_WORDS: u64 = 2;
 
@@ -2187,7 +2672,7 @@ fn pthread_cond_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     let woken = sync::cond_wait(cond, None);
     if let Some(handle) = mutex {
-        sync::lock(handle, by);
+        sync::acquire(handle, by, sync::Blocking::Forever);
     }
     match woken {
         Some(true) => OK,
@@ -2272,22 +2757,22 @@ fn acquired(outcome: Option<bool>) -> u64 {
 
 /// `scePthreadRwlockRdlock(lock)`.
 fn pthread_rwlock_rdlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_read(h, true)))
+    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_read(h, sync::Blocking::Forever)))
 }
 
 /// `scePthreadRwlockTryrdlock(lock)`.
 fn pthread_rwlock_tryrdlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_read(h, false)))
+    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_read(h, sync::Blocking::Never)))
 }
 
 /// `scePthreadRwlockWrlock(lock)`.
 fn pthread_rwlock_wrlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_write(h, true)))
+    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_write(h, sync::Blocking::Forever)))
 }
 
 /// `scePthreadRwlockTrywrlock(lock)`.
 fn pthread_rwlock_trywrlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_write(h, false)))
+    acquired(rwlock_at(args[0]).and_then(|h| sync::rwlock_write(h, sync::Blocking::Never)))
 }
 
 /// `scePthreadRwlockUnlock(lock)`.
@@ -2322,12 +2807,29 @@ fn pthread_rwlock_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `scePthreadBarrierInit(barrier, attr, count, name)`.
 fn pthread_barrier_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[0] == 0 {
+    barrier_init(args[0], args[2], args[3])
+}
+
+/// `pthread_barrier_init(barrier, attr, count)` - the POSIX spelling, which takes no name.
+///
+/// A separate entry point rather than the same one, for the reason
+/// [`posix_pthread_rwlock_init`] is: the difference between the two spellings is arity, and an
+/// implementation cannot see its own. Bound to both, this would read `args[3]` on a
+/// three-argument call - whatever the guest happened to leave in `rcx` - and read a name out
+/// of it. That is the fault D385 cost an evening to, and it is why batch 4 refused to delegate
+/// this one to its vendor twin (worklog 305).
+fn posix_pthread_barrier_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    barrier_init(args[0], args[2], 0)
+}
+
+/// What both spellings do, once the name has been resolved by whoever had one.
+fn barrier_init(barrier: u64, count: u64, name: u64) -> u64 {
+    if barrier == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let needed = u32::try_from(args[2]).unwrap_or(1);
-    let handle = sync::create_barrier(needed, &read_name(args[3]));
-    if !write_word(args[0], handle) {
+    let needed = u32::try_from(count).unwrap_or(1);
+    let handle = sync::create_barrier(needed, &read_name(name));
+    if !write_word(barrier, handle) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -2368,6 +2870,248 @@ fn kernel_create_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `sceKernelClockGettime(clock_id, timespec)` - the vendor-named form of `clock_gettime`.
+///
+/// # What is shared and what is not
+///
+/// The clock families, the identifiers and the monotonic origin are `orbistoun_hle::clocks`,
+/// which POSIX `clock_gettime` also reads. That is deliberate: **a monotonic clock read through
+/// two names must not answer two different elapsed times**, and it would have, had the thirty
+/// lines been copied into this crate instead (D536).
+///
+/// What differs is failure, as it does for `stat` and `pread` (D525, D526). POSIX answers `-1`;
+/// a `sceKernel*` call answers a `0x8002_00xx` vendor code, and a caller testing for that would
+/// not recognise `-1`.
+///
+/// `EINVAL` for a clock this cannot answer, which is what the refusal *is*: the identifier
+/// named a clock - the per-process CPU time, `CLOCK_UPTIME` - that orbistoun has no honest
+/// source for. **Which errno the console answers is unmeasured**, so the test pins the family
+/// and the sign, not a code no run has established.
+fn kernel_clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some((seconds, nanos)) = orbistoun_hle::clocks::reading(args[0] as i64) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
+    if args[1] == 0 || !write_word(args[1], seconds) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    // The second field of the structure the caller described, eight bytes on.
+    if !write_word(args[1].saturating_add(8), nanos) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    OK
+}
+
+/// `sceKernelCreateEqueue(out, name)`.
+///
+/// # The shape came from the run
+///
+/// `arg0` is writable and in the guest's own mapping arena; `arg1` is a name the guest wrote
+/// itself - PPSA02664 passes `"eq to wait flip"` and `"flip equeu"`, which say what the queue is
+/// for. The third register holds `0x7fff_0001`, orbistoun's own placeholder left by an earlier
+/// stub, and that is what fixes the arity at two rather than a guess (D516, D524).
+///
+/// Same shape as [`kernel_create_event_flag`], deliberately: a null out-parameter is refused, the
+/// handle is written through it, and `OK` is answered. Unimplemented, **the out-parameter was
+/// never written**, so the guest's handle kept whatever it held - which is how every later call
+/// against that queue was handed a value orbistoun never gave out.
+fn kernel_create_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let handle = sync::create_equeue(&read_name(args[1]));
+    if !write_word(args[0], handle) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `sceKernelAddUserEventEdge(equeue, identifier)`.
+///
+/// Registers a user event against a queue. PPSA02664 registers two, identifiers `0x1` and `0x2`,
+/// against the queue it created for flips.
+///
+/// **The handle is checked and a bad one is refused**, with the same vendor `ESRCH` the event-flag
+/// family answers - measured by obSCEne's `015-sync/event-flag-rejects-bad-handle` (`0x80020003`),
+/// not the placeholder a guest would fail to recognise (D125). A registration against a queue
+/// nobody created is a guest holding a handle orbistoun never issued, and reporting success for it
+/// would promise delivery from a queue that does not exist.
+///
+/// **Delivery exists now, and the note that said it did not was stale.** This said
+/// `sceKernelWaitEqueue` was *"called zero times by this title since the flip count stopped
+/// lying (D516)"*. The title calls it **839 times** in an honest run and 12,924 past the shader
+/// wall, waiting on a completion nothing posted - see [`kernel_wait_equeue`] (D560).
+fn kernel_add_user_event_edge(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if sync::register_event(args[0], args[1]) {
+        OK
+    } else {
+        u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw())
+    }
+}
+
+/// `scePthreadGetschedparam(thread, policy, param)`.
+///
+/// # Four-byte writes, and the guest is why
+///
+/// PPSA02664 passes `policy` at `0x…c86c` and `param` at `0x…c868` - **four bytes apart**. An
+/// eight-byte write to either takes the other with it, which is D272's lesson arriving in the
+/// one place it is unmissable: the two out-parameters are adjacent by construction, because a
+/// `sched_param` is a single `int` and the caller put both on its stack together.
+///
+/// Hands back what was set. Where nothing set a policy it is zero, and **zero here means "nobody
+/// said" rather than a known default** - no lawful source gives the vendor's default policy, and
+/// inventing one would be a constant a guest could branch on (D561).
+fn pthread_getschedparam(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(record) = thread::record(args[0]) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    if args[1] == 0 || args[2] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    if !write_int(args[1], record.requested_policy as u32)
+        || !write_int(args[2], record.requested_priority as u32)
+    {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `scePthreadSetschedparam(thread, policy, param)`.
+///
+/// Stores both, so [`pthread_getschedparam`] hands back what a caller set - which is the whole
+/// of what a setter promises, and is what D523 said would be needed the moment anything read one
+/// back. **Neither is applied**: which host thread runs when is the host scheduler's to decide,
+/// exactly as `scePthreadAttrSetaffinity` already records for affinity.
+///
+/// The policy is stored verbatim. PPSA02664 passes `0x4000`, which is no POSIX constant, so
+/// nothing here knows what it selects and nothing here pretends to.
+fn pthread_setschedparam(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if !thread::is_issued(args[0]) {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    }
+    let Some(priority) = read_int(args[2]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    let policy = i32::from_ne_bytes((args[1] as u32).to_ne_bytes());
+    if thread::set_scheduling(
+        args[0],
+        Some(policy),
+        i32::from_ne_bytes(priority.to_ne_bytes()),
+    ) {
+        OK
+    } else {
+        u64::from(GuestError::InvalidHandle.as_raw())
+    }
+}
+
+/// `scePthreadSetprio(thread, priority)`.
+///
+/// The priority alone, so **the policy is left as it was** rather than reset to a value the
+/// caller never mentioned - which is why [`thread::set_scheduling`] takes an optional one.
+fn pthread_setprio(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if !thread::is_issued(args[0]) {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    }
+    let priority = i32::from_ne_bytes((args[1] as u32).to_ne_bytes());
+    if thread::set_scheduling(args[0], None, priority) {
+        OK
+    } else {
+        u64::from(GuestError::InvalidHandle.as_raw())
+    }
+}
+
+/// `scePthreadRename(thread, name)`.
+///
+/// **Worth more than its one call suggests.** The name is what a trace shows in place of a
+/// handle, so a title renaming a thread is telling the reader what that thread is for - the same
+/// reason `sceKernelCreateEqueue`'s names made the event queues readable (D522, D524).
+fn pthread_rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if !thread::is_issued(args[0]) {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    }
+    if args[1] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    if thread::rename(args[0], &read_name(args[1])) {
+        OK
+    } else {
+        u64::from(GuestError::InvalidHandle.as_raw())
+    }
+}
+
+/// `pthread_setcancelstate(state, oldstate)`.
+///
+/// POSIX, and one of the few in this family that genuinely has a POSIX analogue of the same name
+/// - D540 is the warning against assuming that, and it does not apply here.
+///
+/// **Stored and not acted on.** Orbistoun cancels no threads, so there is nothing for the state
+/// to gate; what a caller is promised is the previous value, and it gets it. PPSA02664 passes
+/// `1` - disable on FreeBSD - around a section it does not want interrupted, which costs nothing
+/// to honour when nothing interrupts.
+///
+/// The out-parameter is optional, as POSIX allows, and **four bytes**: it is an `int` (D272).
+fn posix_pthread_setcancelstate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let state = i32::from_ne_bytes((args[0] as u32).to_ne_bytes());
+    let Some(previous) = thread::swap_cancel_state(thread::current(), state) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    if args[1] != 0 && !write_int(args[1], previous as u32) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `sceKernelWaitEqueue(equeue, events, wanted, delivered, timeout)`.
+///
+/// # The shape came from the run, and the layout from FreeBSD
+///
+/// Arity five, and the argument roles are the guest's own: `arg0` a queue handle orbistoun
+/// issued, `arg1` a buffer it had just zeroed, `arg2` the number wanted (PPSA02664 passes 1),
+/// `arg3` an out-count, `arg4` a microsecond timeout pointer - NULL in every observed call.
+/// The delivered structure is `struct kevent`; see [`sync::PendingEvent`] for the layout and for
+/// which part of it is citable and which is not.
+///
+/// # It does not block, and that is a decision rather than an omission
+///
+/// A NULL timeout means an indefinite wait on hardware. Blocking here would hand the emulator a
+/// way to stop for ever with nothing able to wake it - the guest's own thread is the one that
+/// would have posted the completion in most of the paths this title takes - and a hang destroys
+/// a run's evidence where a busy loop merely costs time. So a queue with nothing ready reports
+/// **zero delivered**, which is what `kevent` reports on a timeout anyway, and the guest polls
+/// again.
+///
+/// That is honest but not free: it is why the call count is five figures. If a title ever needs a
+/// real block, it needs a poster on another thread first, and that is the thing to build (D560).
+///
+/// **A bad handle is refused** with the vendor `ESRCH` the rest of this family answers -
+/// `0x80020003`, measured by obSCEne's `015-sync/event-flag-rejects-bad-handle` - rather than a
+/// placeholder a guest would not recognise (D125).
+fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if !sync::equeue_exists(args[0]) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+    }
+    let Ok(wanted) = usize::try_from(args[2]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    if args[1] == 0 || wanted == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+
+    let events = sync::take_events(args[0], wanted);
+    for (index, event) in events.iter().enumerate() {
+        let at = args[1].saturating_add((index * sync::EVENT_BYTES) as u64);
+        if !write_block(at, &event.to_bytes()) {
+            return u64::from(GuestError::InvalidArgument.as_raw());
+        }
+    }
+    // The count is written through `arg3` and the return is a status - the shape the argument
+    // roles establish. Zero delivered is written as zero rather than skipped: a caller reading
+    // a stale count would act on an event it was never given.
+    if args[3] != 0 && !write_block(args[3], &(events.len() as u32).to_le_bytes()) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// `sceKernelPollEventFlag(flag, pattern, mode, result, timeout)`.
 ///
 /// **A miss is not an error.** Polling asks whether the pattern is set right now, and
@@ -2390,6 +3134,58 @@ fn kernel_poll_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             OK
         }
         None => u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw()),
+    }
+}
+
+/// `sceKernelWaitEventFlag(flag, pattern, mode, result, timeout)`.
+///
+/// Blocks the calling thread until the pattern is set - `mode` bit `0x01` requires every bit of it
+/// (AND), its absence any bit (OR) - clearing all the flag's bits (`0x10`) or just the matched
+/// pattern (`0x20`) on success, then answers `OK` and writes the pattern found through `result`. A
+/// NULL `timeout` waits indefinitely; otherwise it points at a microsecond count, and a wait that
+/// outlives it answers the vendor `ETIMEDOUT`.
+///
+/// The blocking counterpart of [`kernel_poll_event_flag`], and its absence was the wall PPSA04263
+/// spun against: unimplemented, the guest called it 304,583 times against a placeholder instead of
+/// parking on the event another thread would set (worklog 288).
+fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// Mode bit: every bit of the pattern must be present (AND); its absence means any (OR).
+    const WAIT_AND: u64 = 0x01;
+    /// Mode bit: clear every bit of the flag on a successful wait.
+    const WAIT_CLEAR_ALL: u64 = 0x10;
+    /// Mode bit: clear just the matched pattern on a successful wait.
+    const WAIT_CLEAR_PAT: u64 = 0x20;
+    /// FreeBSD `ETIMEDOUT`, under the measured `0x8002_0000` vendor mapping. The observed guest
+    /// waits indefinitely, so this path is unexercised; the value is the published errno, not a
+    /// measured one.
+    const ETIMEDOUT: u32 = 60;
+
+    let (flag, pattern, mode, result, timeout_ptr) = (args[0], args[1], args[2], args[3], args[4]);
+    // NULL waits forever; otherwise the pointer holds a microsecond count.
+    let timeout = if timeout_ptr == 0 {
+        None
+    } else {
+        read_word(timeout_ptr).map(std::time::Duration::from_micros)
+    };
+    let Some(outcome) = sync::event_flag_wait(
+        flag,
+        pattern,
+        mode & WAIT_AND != 0,
+        mode & WAIT_CLEAR_ALL != 0,
+        mode & WAIT_CLEAR_PAT != 0,
+        timeout,
+    ) else {
+        // ESRCH for a bad handle, as the rest of the event-flag family answers (measured on Poll).
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+    };
+    match outcome {
+        Some(bits) => {
+            if result != 0 {
+                write_word(result, bits);
+            }
+            OK
+        }
+        None => u64::from(GuestError::vendor(ETIMEDOUT).as_raw()),
     }
 }
 
@@ -2431,7 +3227,7 @@ fn sema_at(raw: u64) -> Option<sync::SemaphoreHandle> {
 
 /// `sceKernelPollSema(semaphore, need)` - takes without waiting.
 fn kernel_poll_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match sema_at(args[0]).and_then(sync::semaphore_try_wait) {
+    match sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Never)) {
         Some(true) => OK,
         Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw()),
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -2450,7 +3246,7 @@ fn kernel_signal_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceKernelWaitSema(semaphore, need, timeout)`.
 fn kernel_wait_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match sema_at(args[0]).and_then(sync::semaphore_wait) {
+    match sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Forever)) {
         Some(true) => OK,
         Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw()),
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -2509,7 +3305,7 @@ fn sem_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sem_wait(sem)` - take one, waiting for it.
 fn sem_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match posix_sema_at(args[0]).and_then(sync::semaphore_wait) {
+    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Forever)) {
         Some(true) => OK,
         _ => u64::from(GuestError::InvalidHandle.as_raw()),
     }
@@ -2517,7 +3313,7 @@ fn sem_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sem_trywait(sem)` - take one only if it is available.
 fn sem_trywait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match posix_sema_at(args[0]).and_then(sync::semaphore_try_wait) {
+    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Never)) {
         Some(true) => OK,
         // Available-but-empty and bad-handle are both non-zero, which is what a caller that
         // tests the result against zero needs; POSIX distinguishes them by `errno`, which
@@ -2553,6 +3349,43 @@ fn sem_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 const ATTR_TYPE: u64 = 0;
 /// Offset of the protocol, one word after the type.
 const ATTR_PROTOCOL: u64 = 8;
+
+/// Whether a mutex or condition variable is shared between processes.
+///
+/// **Stored and returned, not honoured** - and correctly so: the attribute object's contract
+/// is that a getter answers what its setter wrote (D272), while whether a *lock* acts on the
+/// value is the lock's business. There is one process here, so process-shared has nothing to
+/// mean; `scePthreadMutexInit` already declares that it does not read the attribute block.
+const MUTEXATTR_PSHARED: u64 = 16;
+
+/// A mutex's priority ceiling, stored on the same terms as [`MUTEXATTR_PSHARED`].
+const MUTEXATTR_PRIOCEILING: u64 = 24;
+
+/// Which clock a condition variable's timed waits are measured against.
+const CONDATTR_CLOCK: u64 = 16;
+
+/// Whether a condition variable is shared between processes, on the same terms.
+const CONDATTR_PSHARED: u64 = 24;
+
+/// `scePthreadCondattrInit(attr)` - allocates a condition-variable attribute object.
+///
+/// The same pointer-to-pointer shape as every attribute in this family (D272): the guest
+/// declares one null and passes its address, so this hands back the address of a fresh block.
+/// The object carries no field anything reads yet - a condattr holds a clock and a pshared
+/// flag, and nothing observed sets either - so an empty block is one a matching `CondInit`
+/// accepts, and its zeroes read as the default clock and process-private, which is what a
+/// freshly initialised condattr holds.
+fn pthread_condattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let block: Box<[u64; 4]> = Box::new([0; 4]);
+    let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    if !write_word(args[0], handle) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
 
 /// `scePthreadMutexattrInit(attr)` - allocates an attribute object and hands back its
 /// address.
@@ -2602,6 +3435,17 @@ fn pthread_mutexattr_settype(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
+    // **Type zero is refused, and that is measured.** A conformance run set each of 0..4 on one
+    // attribute object and read it back: 1, 2, 3 and 4 round-trip, and 0 does not - the probe
+    // records its refusal marker rather than a value. Storing it here made a guest that asked
+    // for a type the console will not give it carry on believing it had one.
+    //
+    // **The refusal is measured; the code is not.** No run recorded what `Settype` answers for
+    // zero, so this is orbistoun's own placeholder rather than a vendor code invented to fill
+    // the gap - loud in a trace, and impossible to mistake for a real errno (D398, D509).
+    if args[1] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
     if !write_word(object + ATTR_TYPE, args[1]) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
@@ -2858,6 +3702,22 @@ fn virtual_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceKernelSetVirtualRangeName(start, len, name)` - attaches a debug name to a virtual range.
+///
+/// **Accepted and answered `OK`, with nothing stored.** The name is advisory: it exists for host
+/// profiling and crash tools to label a range, and no guest-readable interface hands it back, so a
+/// guest cannot observe whether it was kept. Recording it would buy nothing the guest can see, and
+/// refusing it would fail a call that succeeds on hardware - the same shape as `sceKernelMunmap`
+/// answering `OK` without tearing a reservation down (D273). A null name or a zero-length range is
+/// the one thing refused, being a malformed request rather than an unobservable one.
+fn set_virtual_range_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (start, len, name) = (args[0], args[1], args[2]);
+    if start == 0 || len == 0 || name == 0 {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    OK
+}
+
 /// `sceKernelMprotect(addr, len, prot)` - change the protection of a range already reserved.
 ///
 /// A guest reserves a span, then calls this to make it usable before handing it to its own
@@ -3008,12 +3868,464 @@ fn pthread_attr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let block: Box<[u64; 8]> = Box::new([0; 8]);
+    // Sixteen words rather than eight: the attribute set grew past the original six fields
+    // and this crate owns the layout (see the field constants below), so widening it costs
+    // nothing and leaves room for the ones still unwritten.
+    let block: Box<[u64; 16]> = Box::new([0; 16]);
     let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
     if !write_word(args[0], handle) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
+}
+
+/// `pthread_attr_getguardsize(attr, out)` - POSIX.1-2008.
+fn pthread_attr_getguardsize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, ATTR_GUARD_SIZE)
+}
+
+/// `pthread_attr_getinheritsched(attr, out)` - POSIX.1-2008.
+fn pthread_attr_getinheritsched(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, ATTR_INHERIT_SCHED)
+}
+
+/// `pthread_attr_getschedpolicy(attr, out)` - POSIX.1-2008.
+fn pthread_attr_getschedpolicy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, ATTR_SCHED_POLICY)
+}
+
+/// `pthread_attr_getscope(attr, out)` - POSIX.1-2008.
+fn pthread_attr_getscope(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, ATTR_SCOPE)
+}
+
+/// `pthread_attr_setscope(attr, scope)` - POSIX.1-2008.
+fn pthread_attr_setscope(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, ATTR_SCOPE)
+}
+
+/// `pthread_mutexattr_getpshared(attr, out)` - POSIX.1-2008.
+fn pthread_mutexattr_getpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, MUTEXATTR_PSHARED)
+}
+
+/// `pthread_mutexattr_setpshared(attr, pshared)` - POSIX.1-2008.
+fn pthread_mutexattr_setpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, MUTEXATTR_PSHARED)
+}
+
+/// `pthread_mutexattr_getprioceiling(attr, out)` - POSIX.1-2008.
+fn pthread_mutexattr_getprioceiling(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, MUTEXATTR_PRIOCEILING)
+}
+
+/// `pthread_mutexattr_setprioceiling(attr, ceiling)` - POSIX.1-2008.
+fn pthread_mutexattr_setprioceiling(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, MUTEXATTR_PRIOCEILING)
+}
+
+/// `pthread_condattr_getclock(attr, out)` - POSIX.1-2008.
+fn pthread_condattr_getclock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, CONDATTR_CLOCK)
+}
+
+/// `pthread_condattr_setclock(attr, clock)` - POSIX.1-2008.
+fn pthread_condattr_setclock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, CONDATTR_CLOCK)
+}
+
+/// `pthread_condattr_getpshared(attr, out)` - POSIX.1-2008.
+fn pthread_condattr_getpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, CONDATTR_PSHARED)
+}
+
+/// `pthread_condattr_setpshared(attr, pshared)` - POSIX.1-2008.
+fn pthread_condattr_setpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, CONDATTR_PSHARED)
+}
+
+/// `pthread_condattr_destroy(attr)` - POSIX.1-2008.
+///
+/// The object is leaked rather than freed, exactly as the thread attribute's destroy does:
+/// a guest may destroy an attribute while a condition variable built from it is still live,
+/// and reclaiming here would leave that one reading freed memory. The storage is small and
+/// bounded by how many a guest initialises.
+fn pthread_condattr_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if attr_at(args[0]).is_none() {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `pthread_equal(a, b)` - whether two thread identifiers name the same thread.
+///
+/// POSIX.1-2008. **Non-zero for equal, zero for not** - the opposite sense to the `_np`
+/// comparison functions and to `strcmp`, which is the mistake worth naming: a caller reading
+/// this as a difference gets every answer backwards.
+fn pthread_equal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    u64::from(args[0] == args[1])
+}
+
+// --- barrier and read-write lock attributes, plus the scheduling odds and ends -----------------
+//
+// The attribute objects follow the shape `pthread_attr_init` established: this crate allocates
+// one, hands the guest a handle to it, and every accessor reads or writes a field by offset.
+// Storing a value and answering it later is the *whole* contract of an attribute object (D272);
+// whether a lock built from one acts on the value belongs to that lock's own account.
+
+/// Whether a barrier or read-write lock is shared between processes.
+///
+/// Stored and answered, not acted on - there is one process here, so process-shared has nothing
+/// to mean. See [`MUTEXATTR_PSHARED`] for the same reasoning at length.
+const LOCKATTR_PSHARED: u64 = 0;
+
+/// A read-write lock's kind, from the non-portable `gettype_np`/`settype_np` pair.
+const LOCKATTR_TYPE: u64 = 8;
+
+/// Allocates an attribute object and hands the guest a handle to it.
+///
+/// Shared by the barrier and read-write-lock attribute initialisers, which differ in nothing
+/// else - four words is the same size the condition-variable and mutex attributes use.
+fn lockattr_init(pointer: u64) -> u64 {
+    if pointer == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let block: Box<[u64; 4]> = Box::new([0; 4]);
+    let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    if !write_word(pointer, handle) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// Accepts a destroy without reclaiming the object.
+///
+/// The same choice the other attribute destroys make: a guest may destroy an attribute while
+/// something built from it is still live, and reclaiming here would leave that reading freed
+/// memory. The storage is small and bounded by how many a guest initialises.
+fn lockattr_destroy(pointer: u64) -> u64 {
+    if attr_at(pointer).is_none() {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `pthread_barrierattr_init(attr)` - POSIX.1-2008.
+fn pthread_barrierattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    lockattr_init(args[0])
+}
+
+/// `pthread_barrierattr_destroy(attr)` - POSIX.1-2008.
+fn pthread_barrierattr_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    lockattr_destroy(args[0])
+}
+
+/// `pthread_barrierattr_getpshared(attr, out)` - POSIX.1-2008.
+fn pthread_barrierattr_getpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, LOCKATTR_PSHARED)
+}
+
+/// `pthread_barrierattr_setpshared(attr, pshared)` - POSIX.1-2008.
+fn pthread_barrierattr_setpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, LOCKATTR_PSHARED)
+}
+
+/// `pthread_rwlockattr_init(attr)` - POSIX.1-2008.
+fn pthread_rwlockattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    lockattr_init(args[0])
+}
+
+/// `pthread_rwlockattr_destroy(attr)` - POSIX.1-2008.
+fn pthread_rwlockattr_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    lockattr_destroy(args[0])
+}
+
+/// `pthread_rwlockattr_getpshared(attr, out)` - POSIX.1-2008.
+fn pthread_rwlockattr_getpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, LOCKATTR_PSHARED)
+}
+
+/// `pthread_rwlockattr_setpshared(attr, pshared)` - POSIX.1-2008.
+fn pthread_rwlockattr_setpshared(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, LOCKATTR_PSHARED)
+}
+
+/// `pthread_rwlockattr_gettype_np(attr, out)` - the non-portable kind accessor.
+///
+/// Reference: FreeBSD `pthread_rwlockattr_settype_np(3)`. Stored and answered like the rest;
+/// the values it carries are the caller's own and are not interpreted here.
+fn pthread_rwlockattr_gettype_np(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_get(args, LOCKATTR_TYPE)
+}
+
+/// `pthread_rwlockattr_settype_np(attr, kind)` - the non-portable kind setter.
+fn pthread_rwlockattr_settype_np(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, LOCKATTR_TYPE)
+}
+
+/// `pthread_yield()` - offer the processor to another thread.
+///
+/// Reference: FreeBSD `pthread_yield(3)`; `sched_yield(2)` is the POSIX spelling of the same
+/// thing. A hint by definition - the scheduler is free to run this thread again immediately -
+/// so handing it to the host scheduler is the whole of it rather than an approximation.
+fn pthread_yield(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    std::thread::yield_now();
+    OK
+}
+
+/// `sched_yield()` - POSIX.1-2008, the same as [`pthread_yield`].
+fn sched_yield(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    std::thread::yield_now();
+    OK
+}
+
+/// `pthread_getconcurrency()` - the concurrency level a guest asked for.
+///
+/// Reference: POSIX.1-2008. **Zero unless the guest has set one**, which the standard states
+/// outright: it is a hint to an implementation that multiplexes threads, this one does not,
+/// and answering zero says "the system decides" rather than inventing a level.
+fn pthread_getconcurrency(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    concurrency().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `pthread_setconcurrency(level)` - records the hint so the getter can answer it.
+///
+/// Reference: POSIX.1-2008, which permits an implementation to ignore the value entirely. It
+/// is kept only so the pair agree with each other; nothing here reads it.
+fn pthread_setconcurrency(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    concurrency().store(args[0], std::sync::atomic::Ordering::Relaxed);
+    OK
+}
+
+/// The concurrency hint, which only its own two accessors read.
+fn concurrency() -> &'static std::sync::atomic::AtomicU64 {
+    static LEVEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &LEVEL
+}
+
+// --- the POSIX timed wait and once-only initialiser ----------------------------------------
+
+/// `pthread_cond_timedwait(cond, mutex, abstime)` - POSIX.1-2008.
+///
+/// **`abstime` is an absolute deadline, not a duration**, which is the half a caller's own code
+/// depends on: it computes "now plus a second" once and re-passes the same deadline around a
+/// spurious-wakeup loop, so treating it as a relative timeout restarts the clock every turn and
+/// the loop never ends. `duration_until` does the conversion, and a deadline already past
+/// becomes a zero wait rather than a negative one.
+///
+/// Carries the same non-atomicity the untimed [`pthread_cond_wait`] records: the condition
+/// variable and the mutex are independent objects here, so a signal landing between the unlock
+/// and the wait is lost where the platform would hold it.
+fn pthread_cond_timedwait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let deadline = read_xtime(args[2]);
+    let timeout = deadline.map_or(std::time::Duration::ZERO, |d| {
+        duration_until(d).unwrap_or(std::time::Duration::ZERO)
+    });
+    cond_timedwait(args[0], args[1], timeout)
+}
+
+/// The body both timed condition waits share, once the timeout is a plain span.
+///
+/// **Absolute against relative is resolved before this point**, by whichever spelling the
+/// guest called. Everything after it is identical, so it is written once.
+fn cond_timedwait(cond: u64, mutex: u64, timeout: std::time::Duration) -> u64 {
+    let Some(handle) = cond_at(cond) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    let held = mutex_at(mutex);
+    let by = thread::adopt("main");
+    if let Some(m) = held {
+        sync::unlock(m, by);
+    }
+    let woken = sync::cond_wait(handle, Some(timeout));
+    if let Some(m) = held {
+        sync::acquire(m, by, sync::Blocking::Forever);
+    }
+    match woken {
+        Some(true) => OK,
+        Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw()),
+        None => u64::from(GuestError::InvalidHandle.as_raw()),
+    }
+}
+
+/// `pthread_once(control, routine)` - runs an initialiser exactly once.
+///
+/// Reference: POSIX.1-2008 `pthread_once(3)`. **The routine takes no arguments and answers
+/// nothing**, unlike the C++ runtime's `_Execute_once` next door, whose callback is
+/// `InitOnce`-shaped and reports success - so this cannot simply forward to it. The flag is
+/// marked done *after* the routine returns, which is what makes a routine that never returns
+/// leave the flag unset rather than recorded complete.
+///
+/// **Not yet serialised across threads**, exactly as `_Execute_once` records of itself: two
+/// threads racing the same fresh flag could both run the initialiser. Nothing measured does,
+/// and a per-flag guard is the fix when something does.
+fn pthread_once(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// The flag's value once the initialiser has completed.
+    const DONE: u64 = 1;
+    let (control, routine) = (args[0], args[1]);
+    if control == 0 || routine == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    if read_word(control) == Some(DONE) {
+        return OK;
+    }
+    // SAFETY: `routine` is a guest function pointer the caller handed over, and `call_guest`
+    // runs it on a fresh stack through the thread registry's reentrant call - the same contract
+    // `_Execute_once` relies on. It takes no arguments, so the registers are left zero.
+    let ran = unsafe { thread::call_guest(routine, [0, 0, 0]) };
+    if ran.is_none() {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    write_word(control, DONE);
+    OK
+}
+
+// --- the timed acquisitions ---------------------------------------------------------
+//
+// Two families with one difference that matters: **the POSIX calls take an absolute
+// deadline and FreeBSD's `_np` spellings take a relative span.** A caller computes "now
+// plus a second" once and re-passes the same deadline around its retry loop, so reading an
+// absolute time as relative restarts the clock every turn and the loop never ends; reading
+// a relative span as absolute makes every wait expire instantly, because a span of one
+// second is a moment in 1970. Neither misreading fails loudly, which is why they get
+// separate readers rather than a flag.
+//
+// Reference: POSIX.1-2008 for `pthread_mutex_timedlock`, `pthread_rwlock_timedrdlock`,
+// `pthread_rwlock_timedwrlock`, `sem_timedwait` and `sem_getvalue`; Solaris
+// `sem_timedwait(3C)` and `pthread_cond_timedwait(3C)`, which document the
+// `sem_reltimedwait_np` and `pthread_cond_reltimedwait_np` spellings and their arities.
+
+/// Turns an **absolute** `timespec` into the moment a wait should give up.
+///
+/// `None` for a pointer that cannot be read, which the caller reports rather than treating
+/// as "no timeout" - a null deadline waiting forever is the one outcome a caller that asked
+/// for a bounded wait cannot recover from.
+fn deadline_at(pointer: u64) -> Option<sync::Blocking> {
+    let remaining = duration_until(read_xtime(pointer)?)?;
+    Some(patience_for(remaining))
+}
+
+/// Turns a **relative** `timespec` into the same, for FreeBSD's `_np` spellings.
+fn deadline_after(pointer: u64) -> Option<sync::Blocking> {
+    Some(patience_for(read_xtime(pointer)?))
+}
+
+/// A span from now, as a deadline.
+///
+/// A span so large that the host clock cannot represent the moment becomes "wait forever",
+/// which is what a guest asking for it meant. Answering an instant timeout instead would
+/// turn the most patient possible request into the least patient one.
+fn patience_for(span: std::time::Duration) -> sync::Blocking {
+    std::time::Instant::now()
+        .checked_add(span)
+        .map_or(sync::Blocking::Forever, sync::Blocking::Until)
+}
+
+/// Answers an acquisition that was given a deadline.
+///
+/// **`Some(false)` is a timeout here and busy elsewhere**, and only the caller knows which,
+/// because only the caller knows what patience it asked for. See [`acquired`] for the
+/// untimed form.
+fn timed_out(outcome: Option<bool>) -> u64 {
+    match outcome {
+        Some(true) => OK,
+        Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw()),
+        None => u64::from(GuestError::InvalidHandle.as_raw()),
+    }
+}
+
+/// `pthread_mutex_timedlock(mutex, abstime)` - POSIX.1-2008.
+fn pthread_mutex_timedlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(handle) = mutex_at(args[0]) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    let Some(until) = deadline_at(args[1]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    match sync::acquire(handle, thread::adopt("main"), until) {
+        Some(sync::Acquisition::Locked) => OK,
+        Some(sync::Acquisition::Busy) => {
+            u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw())
+        }
+        // The owner re-taking an error-checking lock, which no amount of waiting can
+        // resolve and which the console answers with the invalid-argument errno rather
+        // than a busy - measured in 015-sync/mutex-recursion (D416).
+        Some(sync::Acquisition::Deadlock) => {
+            u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw())
+        }
+        None => u64::from(GuestError::InvalidHandle.as_raw()),
+    }
+}
+
+/// `pthread_rwlock_timedrdlock(lock, abstime)` - POSIX.1-2008.
+fn pthread_rwlock_timedrdlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(until) = deadline_at(args[1]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    timed_out(rwlock_at(args[0]).and_then(|h| sync::rwlock_read(h, until)))
+}
+
+/// `pthread_rwlock_timedwrlock(lock, abstime)` - POSIX.1-2008.
+fn pthread_rwlock_timedwrlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(until) = deadline_at(args[1]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    timed_out(rwlock_at(args[0]).and_then(|h| sync::rwlock_write(h, until)))
+}
+
+/// `sem_timedwait(sem, abstime)` - POSIX.1-2008, an absolute deadline.
+///
+/// **Answers the code directly rather than `-1` with `errno` set**, which is the convention
+/// the rest of the `sem_*` family here already follows: this project does not maintain a
+/// guest `errno`, so a caller reading one would find whatever was there before. A guest
+/// testing the result against zero branches correctly either way.
+fn sem_timedwait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(until) = deadline_at(args[1]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, until)))
+}
+
+/// `sem_reltimedwait_np(sem, reltime)` - the same wait, given a span instead.
+fn sem_reltimedwait_np(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(until) = deadline_after(args[1]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, until)))
+}
+
+/// `sem_getvalue(sem, sval)` - how many the semaphore has free.
+///
+/// Reference: POSIX.1-2008. **Four bytes**, because `sval` is an `int *` - a whole word
+/// would put the top half in whatever the guest keeps next door, which has bitten this
+/// crate twice (D210, D272).
+///
+/// The standard permits a negative answer whose magnitude counts the waiters, and permits
+/// zero instead; this counts no waiters, so it answers the count and stops. It also states
+/// the value may already be stale by the time the caller sees it, so a snapshot is the
+/// contract rather than an approximation of it.
+fn sem_getvalue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (sem, out) = (args[0], args[1]);
+    if out == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let Some(value) = posix_sema_at(sem).and_then(sync::semaphore_value) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    if write_int(out, value) {
+        OK
+    } else {
+        u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
+/// `pthread_cond_reltimedwait_np(cond, mutex, reltime)` - a **relative** timed wait.
+///
+/// The same body as [`pthread_cond_timedwait`] with the other time reader, which is the
+/// only difference between the two calls and the whole reason both exist.
+fn pthread_cond_reltimedwait_np(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let timeout = read_xtime(args[2]).unwrap_or(std::time::Duration::ZERO);
+    cond_timedwait(args[0], args[1], timeout)
 }
 
 /// Fields a thread attribute object holds, by offset.
@@ -3025,6 +4337,18 @@ const ATTR_STACK_SIZE: u64 = 0;
 const ATTR_DETACH: u64 = 8;
 /// Scheduling priority, one further.
 const ATTR_PRIORITY: u64 = 16;
+/// Scheduling policy, one further.
+const ATTR_SCHED_POLICY: u64 = 24;
+/// Whether a thread inherits its creator's scheduling, one further.
+const ATTR_INHERIT_SCHED: u64 = 32;
+/// The CPU affinity mask, one further.
+const ATTR_AFFINITY: u64 = 40;
+/// The guard-page size, one further.
+const ATTR_GUARD_SIZE: u64 = 48;
+
+/// Contention scope - whether the thread competes for processor time within its process or
+/// across the system.
+const ATTR_SCOPE: u64 = 56;
 
 /// Stores one field of a thread attribute object.
 fn attr_set(args: &[u64; GUEST_ARG_REGISTERS], field: u64) -> u64 {
@@ -3092,6 +4416,59 @@ fn pthread_attr_setschedparam(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `scePthreadAttrGetschedparam(attr, out)`.
 fn pthread_attr_getschedparam(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     attr_get(args, ATTR_PRIORITY)
+}
+
+/// `scePthreadAttrSetschedpolicy(attr, policy)` - stored, so a later get reads it back.
+fn pthread_attr_setschedpolicy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, ATTR_SCHED_POLICY)
+}
+
+/// `scePthreadAttrSetinheritsched(attr, inherit)` - stored, so a later get reads it back.
+fn pthread_attr_setinheritsched(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, ATTR_INHERIT_SCHED)
+}
+
+/// `scePthreadAttrSetaffinity(attr, mask)`.
+///
+/// **The mask is stored, not applied.** Which host core a guest thread runs on is the host
+/// scheduler's to decide, and orbistoun does not pin guest threads; a guest reading the
+/// attribute back still gets what it set, which is all the setter's own contract promises.
+fn pthread_attr_setaffinity(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, ATTR_AFFINITY)
+}
+
+/// `scePthreadSetaffinity(thread, mask)` - the running-thread form.
+///
+/// # Accepted and not applied, which is the attribute form's own bargain
+///
+/// [`pthread_attr_setaffinity`] already says it: which host core a guest thread runs on is the
+/// host scheduler's to decide, and orbistoun does not pin guest threads. The attribute form can
+/// at least hand back what a caller set, because it owns a block to store it in. This one has
+/// nowhere to put it - orbistoun keeps no per-thread scheduling record - so the mask is
+/// accepted and dropped.
+///
+/// **That is a real difference from the attribute form and it is stated rather than glossed:**
+/// a guest that sets an affinity here and reads it back through `scePthreadGetaffinity` would
+/// not get what it set. Nothing observed does; the 62 calls PPSA02664 makes never read one back.
+/// The moment something does, this needs the per-thread record rather than a wider `Ok` (D523).
+///
+/// # Why `Ok` and not the placeholder
+///
+/// A stub answered `0x7fff_0001`, and a caller testing a scheduling call against zero reads
+/// that as a failure to set affinity - which is a *lie in the other direction*, because the
+/// call is one orbistoun can honestly accept. Nothing here reports success at applying it; the
+/// contract a setter promises is that the request was taken.
+///
+/// The thread handle is not checked. Orbistoun has no registry to check it against, and
+/// refusing a handle that cannot be verified would turn an accepted call into a refused one on
+/// no evidence.
+fn pthread_setaffinity(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `scePthreadAttrSetguardsize(attr, size)` - stored, so a later get reads it back.
+fn pthread_attr_setguardsize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    attr_set(args, ATTR_GUARD_SIZE)
 }
 
 /// `scePthreadAttrDestroy(attr)`.
@@ -3354,13 +4731,33 @@ const FAILED_STATUS: u64 = -1_i64 as u64;
 
 /// `sceKernelLoadStartModule(path, argc, argv, flags, opt, result)`.
 ///
-/// **Refused, and that is the honest answer.** orbistoun places one executable at load and
-/// has no way to bring another in afterwards, so every request fails - including one for a
-/// module that really exists. Answering a handle would tell a guest a library it is about
-/// to call is present.
+/// # What each kind of path answers, and where that came from
 ///
-/// Negative, because the success answer is a module handle and a small positive placeholder
-/// is exactly what a handle looks like (D273).
+/// A conformance run asked for eight paths and recorded the code for each
+/// (`110-modules/load`), so these are measured rather than chosen:
+///
+/// - **libkernel** is always resident and answers its well-known handle (D264, D400).
+/// - **`/system`** modules are the firmware's own copy; the platform does not load a second
+///   and answers the not-found errno.
+/// - **`/app0`** is a title's own module, which loads and gets a fresh handle.
+/// - Anything else is refused. `060-module/load-rejects-missing` loads a bogus path, and a
+///   stub answering success reported a nonexistent module as loaded - which is the
+///   honest-failure mistake exactly.
+///
+/// **The `/app0` handle value is opaque and deliberately does not match the console's.** Its
+/// handles reflect however many modules its own loader had already placed, so the number is a
+/// fact about that machine rather than about this interface. What a guest keys on is that each
+/// load gets a distinct non-negative handle.
+///
+/// A refusal is negative rather than a small positive placeholder, because the success answer
+/// is a handle and a placeholder is exactly what a handle looks like (D273).
+///
+/// # What this still does not do
+///
+/// **Answering a handle is not loading a module.** Nothing places a second image, and nothing
+/// registers its exports, so a guest that loads its own module and then calls into it finds
+/// nothing there. That is the remaining work, and it is what stands between PPSA02664 and
+/// `il2cpp_init`.
 fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let path = read_name(args[0]);
 
@@ -3370,10 +4767,27 @@ fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return LIBKERNEL_MODULE_HANDLE;
     }
 
-    // A `/system` module is the firmware's own copy; the platform does not load a second and
-    // answers the not-found errno instead - measured on hardware, which returns `0x8002_0002`
-    // for both `/system` paths in the probe (110-modules/load).
-    if path.starts_with("/system/") {
+    // A firmware module is the platform's own copy; it does not load a second and answers the
+    // not-found errno instead - measured, which returns `0x8002_0002` for both `/system` paths
+    // the probe asked for (110-modules/load).
+    //
+    // **Three directories, not one**, and this used to know about one of them. The probe only
+    // ever asked about `/system/common/lib/`, and a prefix generalised from it silently
+    // excluded `/system_ex/common_ex/lib/` - which holds 234 of the platform's 537 modules,
+    // more than the 274 in the directory that was covered. A `/system_ex` path fell through to
+    // the unrecognised-path refusal below and got the same errno by luck, for a reason that
+    // was not the true one. `/system/priv/lib/` was covered only because it happens to share
+    // the `/system/` prefix.
+    //
+    // Reference: `docs/PLATFORM_LIBRARIES.md` and `data/hardware/ps5-sprx-manifest.tsv` in the
+    // sibling conformance-probe repository, which enumerate the three directories and what
+    // each tier reaches. **The two `/system` answers are measured; the extension to
+    // `/system_ex` is not** - no probe has asked for one - so it is the same rule applied to a
+    // directory the same reasoning covers, and a run that asks would settle it.
+    if FIRMWARE_MODULE_DIRECTORIES
+        .iter()
+        .any(|dir| path.starts_with(dir))
+    {
         return u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw());
     }
 
@@ -3384,6 +4798,18 @@ fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if path.starts_with("/app0/") {
         let handle = NEXT_MODULE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         write_int(args[5], 0);
+        // **And now the `Start` half.** The module is already placed, relocated and
+        // protected - `place_title_modules` does that before the guest runs - so starting it
+        // is running its `DT_INIT` and `DT_INIT_ARRAY`, which is how a C++ module's static
+        // constructors are reached (D514, D515).
+        //
+        // A module the loader never told this crate about is still recorded as unstarted,
+        // because a handle and a silence are indistinguishable from a module that started -
+        // principle 3 exactly.
+        match initialisers_for(&path) {
+            Some(initialisers) => started(&path, handle, run_initialisers(initialisers)),
+            None => started_nothing(&path, handle),
+        }
         return handle;
     }
 
@@ -3393,6 +4819,22 @@ fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // path that is neither libkernel, a `/system` module, nor a `/app0` module is refused.
     u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw())
 }
+
+/// Where the platform keeps its own modules, so a request for one is refused rather than loaded.
+///
+/// A table rather than a prefix test, because the three are not one prefix: `/system_ex` is not
+/// under `/system`, and a rule that assumed it was covered 274 modules while missing 234.
+///
+/// Reference: the platform library survey in the sibling conformance-probe repository.
+const FIRMWARE_MODULE_DIRECTORIES: &[&str] = &[
+    // The application tier, mapped into every game sandbox - 274 modules.
+    "/system/common/lib/",
+    // The system-application tier: WebKit, the shell, media - 234 modules. **Not** under
+    // `/system/`, which is the whole reason this is a list.
+    "/system_ex/common_ex/lib/",
+    // Privileged services - 29 modules.
+    "/system/priv/lib/",
+];
 
 /// libkernel's module handle - the one well-known value in the space, confirmed on hardware.
 const LIBKERNEL_MODULE_HANDLE: u64 = 0x2001;
@@ -3455,6 +4897,49 @@ fn first_time_asked(name: &str) -> bool {
         .insert(name.to_owned())
 }
 
+/// What the guest's own binaries export, by NID, at the address they were placed.
+///
+/// # Why the kernel holds this at all
+///
+/// `sceKernelDlsym` is handed a **name**; every export table on this platform is keyed by a
+/// **hash of that name**. So the lookup cannot be precomputed by the loader - it does not know
+/// which names a guest will ask for, and a hash cannot be reversed. The loader registers what
+/// it placed, the kernel hashes at the call, and the two meet in the middle (D517).
+static GUEST_EXPORTS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+/// The hash suffix the loader is using, so a name can be turned into the NID it exports under.
+static NID_SUFFIX: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// Tells this crate what a guest binary exports, so `sceKernelDlsym` can answer for it.
+///
+/// `exports` are `(nid, address)` with the address already offset by wherever the module was
+/// placed. Called once per placed binary, and once for the executable - which is the case that
+/// matters: PPSA02664's eboot has exactly **one** export, `scriptingGetMem`, and asks for it by
+/// name through `dlsym` (D517).
+pub fn note_guest_exports(suffix: &[u8], exports: &[(u64, u64)]) {
+    let _ = NID_SUFFIX.set(suffix.to_vec());
+    if let Ok(mut known) = GUEST_EXPORTS.lock() {
+        for &(nid, address) in exports {
+            if !known.iter().any(|&(n, _)| n == nid) {
+                known.push((nid, address));
+            }
+        }
+    }
+}
+
+/// The address a guest binary exports `name` at, if one does.
+fn guest_export(name: &str) -> Option<u64> {
+    let suffix = NID_SUFFIX.get()?;
+    let nid = orbistoun_nid::NidHasher::new(suffix.clone())
+        .hash(name)
+        .as_raw();
+    let known = GUEST_EXPORTS.lock().ok()?;
+    known
+        .iter()
+        .find(|&&(candidate, _)| candidate == nid)
+        .map(|&(_, address)| address)
+}
+
 fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (module, name, out) = (args[0], args[1], args[2]);
     // A module handle is checked before the name. It is a 32-bit `SceKernelModule`, so only its low
@@ -3470,7 +4955,15 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     let name = read_name(name);
-    let address = orbistoun_thunk::name_thunk(&name);
+    // **The thunk table first, then the guest's own exports.** Purely additive: every name that
+    // resolved before resolves to the same address, and a name that did not now reaches the
+    // guest's own code instead of an error.
+    //
+    // Which of the two *should* win when both answer is not settled here, because nothing has
+    // been seen where both do. A guest asking for a symbol its own binary exports plainly wants
+    // its own code; a guest asking for a platform function wants orbistoun's. Ordering it the
+    // other way would change what already-working names answer, on no evidence (D517).
+    let address = orbistoun_thunk::name_thunk(&name).or_else(|| guest_export(&name));
 
     // **Every distinct name, once, answered or not.** A payload's resolution pass is the
     // clearest statement it ever makes of what it needs, and it makes it before doing
@@ -3645,9 +5138,9 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelDirectMemoryQuery", direct_memory_query),
     ("sceKernelGetSystemSwVersion", get_system_sw_version),
-    ("sysctlbyname", sysctlbyname),
     ("sceKernelDlsym", dlsym),
     ("pthread_detach", pthread_detach),
+    ("pthread_setcancelstate", posix_pthread_setcancelstate),
     ("pthread_exit", pthread_exit),
     // POSIX thread-specific-data keys - no vendor twin, written here beside the thread
     // registry and served under their POSIX names via `orbistoun-posix` (D453).
@@ -3658,6 +5151,27 @@ const TABLE: &[(&str, GuestFn)] = &[
     // The three whose POSIX spelling is one argument shorter than the vendor one, so the
     // POSIX spelling cannot simply delegate to it.
     ("pthread_create", posix_pthread_create),
+    ("pthread_attr_getguardsize", pthread_attr_getguardsize),
+    ("pthread_attr_getinheritsched", pthread_attr_getinheritsched),
+    ("pthread_attr_getschedpolicy", pthread_attr_getschedpolicy),
+    ("pthread_attr_getscope", pthread_attr_getscope),
+    ("pthread_attr_setscope", pthread_attr_setscope),
+    ("pthread_mutexattr_getpshared", pthread_mutexattr_getpshared),
+    ("pthread_mutexattr_setpshared", pthread_mutexattr_setpshared),
+    (
+        "pthread_mutexattr_getprioceiling",
+        pthread_mutexattr_getprioceiling,
+    ),
+    (
+        "pthread_mutexattr_setprioceiling",
+        pthread_mutexattr_setprioceiling,
+    ),
+    ("pthread_condattr_getclock", pthread_condattr_getclock),
+    ("pthread_condattr_setclock", pthread_condattr_setclock),
+    ("pthread_condattr_getpshared", pthread_condattr_getpshared),
+    ("pthread_condattr_setpshared", pthread_condattr_setpshared),
+    ("pthread_condattr_destroy", pthread_condattr_destroy),
+    ("pthread_equal", pthread_equal),
     ("pthread_cond_init", posix_pthread_cond_init),
     ("pthread_mutex_init", posix_pthread_mutex_init),
     (
@@ -3676,6 +5190,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadGetthreadid", pthread_getthreadid),
     ("sceKernelCreateSema", create_semaphore),
     ("scePthreadMutexattrInit", pthread_mutexattr_init),
+    ("scePthreadCondattrInit", pthread_condattr_init),
     ("scePthreadMutexattrSettype", pthread_mutexattr_settype),
     ("scePthreadMutexattrGettype", pthread_mutexattr_gettype),
     (
@@ -3721,11 +5236,70 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("posix_pthread_rwlock_trywrlock", pthread_rwlock_trywrlock),
     ("posix_pthread_rwlock_unlock", pthread_rwlock_unlock),
     ("posix_pthread_rwlock_destroy", pthread_rwlock_destroy),
+    // The barrier and read-write lock attribute accessors, registered (worklog 313).
+    ("pthread_barrierattr_init", pthread_barrierattr_init),
+    ("pthread_barrierattr_destroy", pthread_barrierattr_destroy),
+    (
+        "pthread_barrierattr_getpshared",
+        pthread_barrierattr_getpshared,
+    ),
+    (
+        "pthread_barrierattr_setpshared",
+        pthread_barrierattr_setpshared,
+    ),
+    ("pthread_rwlockattr_init", pthread_rwlockattr_init),
+    ("pthread_rwlockattr_destroy", pthread_rwlockattr_destroy),
+    (
+        "pthread_rwlockattr_getpshared",
+        pthread_rwlockattr_getpshared,
+    ),
+    (
+        "pthread_rwlockattr_setpshared",
+        pthread_rwlockattr_setpshared,
+    ),
+    (
+        "pthread_rwlockattr_gettype_np",
+        pthread_rwlockattr_gettype_np,
+    ),
+    (
+        "pthread_rwlockattr_settype_np",
+        pthread_rwlockattr_settype_np,
+    ),
+    ("pthread_yield", pthread_yield),
+    ("sched_yield", sched_yield),
+    ("pthread_getconcurrency", pthread_getconcurrency),
+    ("pthread_setconcurrency", pthread_setconcurrency),
+    // The POSIX timed wait and once-only initialiser, registered (worklog 314).
+    ("pthread_cond_timedwait", pthread_cond_timedwait),
+    ("pthread_once", pthread_once),
+    // The timed acquisitions, registered (worklog 315).
+    ("pthread_mutex_timedlock", pthread_mutex_timedlock),
+    ("pthread_rwlock_timedrdlock", pthread_rwlock_timedrdlock),
+    ("pthread_rwlock_timedwrlock", pthread_rwlock_timedwrlock),
+    ("sem_timedwait", sem_timedwait),
+    ("sem_reltimedwait_np", sem_reltimedwait_np),
+    ("sem_getvalue", sem_getvalue),
+    ("pthread_cond_reltimedwait_np", pthread_cond_reltimedwait_np),
     ("scePthreadBarrierInit", pthread_barrier_init),
+    ("posix_pthread_barrier_init", posix_pthread_barrier_init),
     ("scePthreadBarrierWait", pthread_barrier_wait),
     ("scePthreadBarrierDestroy", pthread_barrier_destroy),
     ("sceKernelCreateEventFlag", kernel_create_event_flag),
+    ("sceKernelCreateEqueue", kernel_create_equeue),
+    ("sceKernelAddUserEventEdge", kernel_add_user_event_edge),
+    ("sceKernelWaitEqueue", kernel_wait_equeue),
+    ("scePthreadGetschedparam", pthread_getschedparam),
+    ("scePthreadSetschedparam", pthread_setschedparam),
+    ("scePthreadSetprio", pthread_setprio),
+    ("scePthreadRename", pthread_rename),
+    ("_sigprocmask", sigprocmask),
+    ("sceKernelUuidCreate", kernel_uuid_create),
+    // A condattr holds a clock and a pshared flag, neither of which anything observed sets, so
+    // destroying one is accepting the call - the same shape as the mutexattr form beside it.
+    // The block itself is never freed, by this family's own convention.
+    ("scePthreadCondattrDestroy", pthread_mutexattr_accept),
     ("sceKernelPollEventFlag", kernel_poll_event_flag),
+    ("sceKernelWaitEventFlag", kernel_wait_event_flag),
     ("sceKernelSetEventFlag", kernel_set_event_flag),
     ("sceKernelClearEventFlag", kernel_clear_event_flag),
     ("sceKernelDeleteEventFlag", kernel_delete_event_flag),
@@ -3747,6 +5321,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelReserveVirtualRange", reserve_virtual_range),
     ("sceKernelVirtualQuery", virtual_query),
     ("sceKernelMprotect", mprotect),
+    ("sceKernelSetVirtualRangeName", set_virtual_range_name),
     ("mmap", mmap),
     ("sceKernelMmap", mmap),
     (
@@ -3770,6 +5345,17 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("_Thrd_sleep", thrd_sleep),
     // libSceUlt mutexes - declared in the `ult` module, implemented here beside `sync`.
     ("_sceUltMutexCreate", ult_mutex_create),
+    ("sceUltInitialize", ult_initialize),
+    (
+        "sceUltWaitingQueueResourcePoolGetWorkAreaSize",
+        ult_pool_work_area_size,
+    ),
+    (
+        "sceUltUlthreadRuntimeGetWorkAreaSize",
+        ult_runtime_work_area_size,
+    ),
+    ("_sceUltWaitingQueueResourcePoolCreate", ult_pool_create),
+    ("_sceUltUlthreadRuntimeCreate", ult_runtime_create),
     ("_sceUltMutexLock", ult_mutex_lock),
     ("_sceUltMutexUnlock", ult_mutex_unlock),
     ("_sceUltMutexTryLock", ult_mutex_trylock),
@@ -3798,6 +5384,14 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadAttrGetdetachstate", pthread_attr_getdetachstate),
     ("scePthreadAttrSetschedparam", pthread_attr_setschedparam),
     ("scePthreadAttrGetschedparam", pthread_attr_getschedparam),
+    ("scePthreadSetaffinity", pthread_setaffinity),
+    ("scePthreadAttrSetschedpolicy", pthread_attr_setschedpolicy),
+    (
+        "scePthreadAttrSetinheritsched",
+        pthread_attr_setinheritsched,
+    ),
+    ("scePthreadAttrSetaffinity", pthread_attr_setaffinity),
+    ("scePthreadAttrSetguardsize", pthread_attr_setguardsize),
     ("sceKernelReadTsc", read_tsc),
     ("sceKernelGetTscFrequency", get_tsc_frequency),
     ("sceKernelIsStack", is_stack),
@@ -3812,6 +5406,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("posix_getpagesize", getpagesize),
     ("posix_usleep", usleep),
     ("sceKernelUsleep", usleep),
+    ("sceKernelClockGettime", kernel_clock_gettime),
     ("posix_sigemptyset", sigemptyset),
     ("posix_sigfillset", sigfillset),
     ("posix_sigaddset", sigaddset),
@@ -3821,6 +5416,232 @@ const TABLE: &[(&str, GuestFn)] = &[
 
 #[cfg(test)]
 mod tests {
+
+    /// Makes a thread this crate has issued, for the calls that check a handle.
+    fn a_thread(name: &str) -> u64 {
+        super::thread::register(
+            name,
+            super::thread::Affinity(0),
+            0,
+            super::thread::AffinityPolicy::Observe,
+            4,
+        )
+        .expect("the thread table accepted a registration")
+    }
+
+    fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
+        let mut out = [0; GUEST_ARG_REGISTERS];
+        out[..4].copy_from_slice(&values);
+        out
+    }
+
+    /// **A work-area size is something a caller can actually allocate.**
+    ///
+    /// The bug this closes, stated as the property that was violated. Unimplemented, both sizing
+    /// calls answered the placeholder `0x7fff_0001` - and PPSA28061 passed it straight to
+    /// `malloc`, **twice**, asking for 2 GiB a piece, and got it. A size is a number the caller
+    /// spends, so a placeholder here is not a loud failure; it is a very quiet 4 GiB (D564).
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the size is *right*. Nothing measured says what the console needs, and orbistoun
+    /// stores nothing in the block - it is a number chosen to be spendable and proportional, and
+    /// the test pins those two properties and no more.
+    #[test]
+    fn a_work_area_size_is_something_a_caller_can_spend() {
+        for sizer in [
+            super::ult_pool_work_area_size as fn(&[u64; GUEST_ARG_REGISTERS]) -> u64,
+            super::ult_runtime_work_area_size,
+        ] {
+            let modest = sizer(&args([16, 16, 0, 0]));
+            assert!(modest > 0, "zero would read as a failed sizing");
+            assert!(
+                modest < 0x10_0000,
+                "sixteen threads asked for {modest:#x} bytes - a caller mallocs this"
+            );
+            assert_ne!(
+                modest,
+                u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+                "the placeholder is the exact value that cost 2 GiB"
+            );
+            // Proportional, so a caller sanity-checking "more threads, more memory" is not
+            // surprised - and asking for nothing still yields a real block.
+            assert!(
+                sizer(&args([64, 64, 0, 0])) > modest,
+                "more asked, more given"
+            );
+            assert!(
+                sizer(&args([0, 0, 0, 0])) > 0,
+                "a request for nothing still gets a block"
+            );
+        }
+    }
+
+    /// **A constructed Ult object leaves a handle this crate issued in its first word.**
+    ///
+    /// The convention `_sceUltMutexCreate` already set in this library, and the guest reads it
+    /// back from there. A handle nothing issued would let a later call be told a pool it invented
+    /// is fine - the reason D524 gave the event queues a table rather than a bare `Ok`.
+    #[test]
+    fn constructing_an_ult_object_leaves_a_real_handle_in_it() {
+        let mut object: u64 = 0;
+        let at = std::ptr::from_mut(&mut object) as usize as u64;
+        let name = b"waiting queue ";
+        let name_at = name.as_ptr() as usize as u64;
+
+        assert_eq!(
+            super::ult_pool_create(&args([at, name_at, 16, 16])),
+            super::OK
+        );
+        assert_ne!(object, 0, "the object's first word was left empty");
+        assert!(
+            super::sync::ult_object_exists(object),
+            "the guest was handed a value this crate never issued"
+        );
+
+        let named: Vec<String> = super::sync::ult_object_summary()
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        assert!(
+            named.iter().any(|n| n == "waiting queue"),
+            "the guest's own name for it was dropped: {named:?}"
+        );
+    }
+
+    /// **A null object is refused rather than written through.**
+    ///
+    /// # A break that did not fire, and why
+    ///
+    /// Removing the `out == 0` check alone does **not** fail this: `write_word` refuses a null
+    /// destination too, so the property survives on a second check downstream. A break removing
+    /// both does fire. Recorded because the two are not the same guarantee - the explicit check
+    /// says *this call refuses null*, and `write_word`'s says *this process will not write
+    /// through null*, which is a different promise made for a different reason (D564).
+    #[test]
+    fn constructing_an_ult_object_into_nothing_is_refused() {
+        assert_ne!(
+            super::ult_runtime_create(&args([0, 0, 16, 3])),
+            super::OK,
+            "a null destination was accepted, which is a write through null"
+        );
+    }
+
+    /// **The two out-parameters are four bytes apart, and neither may take the other with it.**
+    ///
+    /// This is D272's lesson in the one place it is unmissable. A `sched_param` is a single
+    /// `int`, so a caller putting a policy and a param on its stack together puts them
+    /// **adjacent** - PPSA02664 passes `0x…c86c` and `0x…c868`. An eight-byte write to either
+    /// destroys the other, and the guest would read a policy it never set with nothing in any
+    /// trace to say why.
+    ///
+    /// # What this cannot assert
+    ///
+    /// That the structure *is* one `int`. It is POSIX's `sched_param` and the guest's own
+    /// spacing agrees, but a vendor field beyond it would sit past what this writes and read as
+    /// whatever the caller left there.
+    #[test]
+    fn adjacent_schedparam_out_parameters_do_not_overwrite_each_other() {
+        let thread = a_thread("scheduled");
+        // Two adjacent `int`s with a sentinel either side, laid out as the guest lays them out.
+        let mut slots: [u32; 4] = [0xdead_beef, 0, 0, 0xfeed_face];
+        let param = std::ptr::from_mut(&mut slots[1]) as usize as u64;
+        let policy = param + 4;
+
+        assert!(super::thread::set_scheduling(thread, Some(0x4000), 0x100));
+        assert_eq!(
+            super::pthread_getschedparam(&args([thread, policy, param, 0])),
+            super::OK
+        );
+
+        assert_eq!(slots[1], 0x100, "the priority landed in the param slot");
+        assert_eq!(
+            slots[2], 0x4000,
+            "and the policy in the one four bytes above"
+        );
+        assert_eq!(
+            slots[0], 0xdead_beef,
+            "a write ran backwards past the param"
+        );
+        assert_eq!(slots[3], 0xfeed_face, "a write ran past the policy");
+    }
+
+    /// **A get hands back what a set was given, policy and priority both.**
+    ///
+    /// The property D523 said would be needed the moment anything read one back, and
+    /// `scePthreadGetschedparam` is called 34 times by PPSA02664 - so it is read back.
+    #[test]
+    fn scheduling_set_on_a_thread_is_what_comes_back() {
+        let thread = a_thread("round-trip");
+        let mut param: u32 = 0x2a;
+        let param_at = std::ptr::from_mut(&mut param) as usize as u64;
+        assert_eq!(
+            super::pthread_setschedparam(&args([thread, 0x4000, param_at, 0])),
+            super::OK
+        );
+
+        let record = super::thread::record(thread).expect("the thread is known");
+        assert_eq!(record.requested_policy, 0x4000, "the policy was stored");
+        assert_eq!(
+            record.requested_priority, 0x2a,
+            "and the priority read from *param"
+        );
+    }
+
+    /// **Setting a priority alone does not reset the policy.**
+    ///
+    /// `scePthreadSetprio` names one value, so touching the other would change something the
+    /// caller never mentioned - and a later get would report it as though the guest had asked.
+    #[test]
+    fn setting_a_priority_leaves_the_policy_alone() {
+        let thread = a_thread("prio-only");
+        assert!(super::thread::set_scheduling(thread, Some(0x4000), 1));
+        assert_eq!(
+            super::pthread_setprio(&args([thread, 0x200, 0, 0])),
+            super::OK
+        );
+
+        let record = super::thread::record(thread).expect("the thread is known");
+        assert_eq!(record.requested_priority, 0x200, "the priority moved");
+        assert_eq!(record.requested_policy, 0x4000, "and the policy did not");
+    }
+
+    /// **A handle this crate never issued is refused by every one of them.**
+    ///
+    /// Handles are addresses (D272's family), so an arbitrary guest value must never be treated
+    /// as one - accepting it would make a bad pointer from the guest into a write through it
+    /// here. Asserted across the whole set rather than one of them, because it is the kind of
+    /// check that gets added to the function being worked on and forgotten on its neighbours.
+    ///
+    /// # A break that did not fire, and why
+    ///
+    /// Removing the `is_issued` preamble from `pthread_rename` does **not** fail this - the
+    /// property survives on `thread::rename`'s own refusal, which is a second check downstream.
+    /// The two only both disappear together, and a break that removes both does fire. Recorded
+    /// because a guard that cannot tell which of two checks is holding it up is a guard that
+    /// would not notice one of them rotting: `is_issued` covers a handle handed out whose record
+    /// never landed, and nothing else here would see that.
+    #[test]
+    fn none_of_the_scheduling_calls_believe_an_unissued_handle() {
+        let bogus = 0xdead_beef_0bad_0bad_u64;
+        let mut scratch: [u32; 4] = [0; 4];
+        let at = std::ptr::from_mut(&mut scratch[0]) as usize as u64;
+        for (name, answer) in [
+            (
+                "getschedparam",
+                super::pthread_getschedparam(&args([bogus, at, at + 4, 0])),
+            ),
+            (
+                "setschedparam",
+                super::pthread_setschedparam(&args([bogus, 0, at, 0])),
+            ),
+            ("setprio", super::pthread_setprio(&args([bogus, 1, 0, 0]))),
+            ("rename", super::pthread_rename(&args([bogus, at, 0, 0]))),
+        ] {
+            assert_ne!(answer, super::OK, "{name} accepted a handle nothing issued");
+        }
+        assert_eq!(scratch, [0; 4], "and none of them wrote through it");
+    }
 
     /// A region the worker notes - the image, or a stack - is found by [`super::region_containing`],
     /// so `sceKernelVirtualQuery` answers for the guest's own code and stack rather than refusing
@@ -3862,30 +5683,6 @@ mod tests {
             super::region_containing(0x4000_0045_0000).is_none(),
             "cleared regions are gone"
         );
-    }
-
-    /// `sysctl_value` answers the knobs orbistoun can source and refuses the rest (D447).
-    #[test]
-    fn sysctl_answers_ostype_and_the_configured_release_and_refuses_the_rest() {
-        // ostype is the FreeBSD fact, NUL-terminated; osrelease is the configured release, also
-        // NUL-terminated, so its reported length matches the console's (13 chars + NUL = 14 for
-        // "0.0-prototype"). An unset release is an empty knob, not an invented one. Anything else
-        // is refused rather than answered plausibly.
-        assert_eq!(
-            super::sysctl_value("kern.ostype", "anything"),
-            Some(b"FreeBSD\0".to_vec())
-        );
-        assert_eq!(
-            super::sysctl_value("kern.osrelease", "0.0-prototype"),
-            Some(b"0.0-prototype\0".to_vec())
-        );
-        assert_eq!(
-            super::sysctl_value("kern.osrelease", ""),
-            Some(vec![0]),
-            "an unset release is an empty NUL-terminated string, not a refusal"
-        );
-        assert_eq!(super::sysctl_value("kern.version", ""), None);
-        assert_eq!(super::sysctl_value("hw.ncpu", ""), None);
     }
 
     /// **The resolver refuses rather than inventing an address** (D366).
@@ -4321,6 +6118,13 @@ mod tests {
             "_sceUltConditionVariableWait",
             "_sceUltConditionVariableDestroy",
             "_sceUltUlthreadCreate",
+            // The runtime and pool setup, same reason: declared in the `ult` module,
+            // implemented here beside the table that holds them (D564).
+            "sceUltInitialize",
+            "sceUltWaitingQueueResourcePoolGetWorkAreaSize",
+            "sceUltUlthreadRuntimeGetWorkAreaSize",
+            "_sceUltWaitingQueueResourcePoolCreate",
+            "_sceUltUlthreadRuntimeCreate",
             // And three more, for a second reason: these are the POSIX spellings of calls
             // this library *does* declare under vendor names, and they exist separately
             // because the POSIX signature is one argument shorter (D385).
@@ -4339,6 +6143,57 @@ mod tests {
             "sem_trywait",
             "sem_post",
             "sem_destroy",
+            // The timed acquisitions, added in bulk (worklog 315):
+            // declared in the POSIX module, implemented here beside the primitives
+            // whose deadlines they carry. There are no vendor twins for these.
+            "pthread_mutex_timedlock",
+            "pthread_rwlock_timedrdlock",
+            "pthread_rwlock_timedwrlock",
+            "sem_timedwait",
+            "sem_reltimedwait_np",
+            "sem_getvalue",
+            "pthread_cond_reltimedwait_np",
+            // The POSIX timed wait and once-only initialiser, added in bulk (worklog 314):
+            // declared in the POSIX module, implemented here beside the condition
+            // variables and the C++ runtime once-flag they sit next to.
+            "pthread_cond_timedwait",
+            "pthread_once",
+            // The barrier and read-write lock attribute accessors, added in bulk (worklog 313):
+            // declared in the POSIX module, implemented here beside the locks they
+            // configure. There are no vendor twins for these to be declared as.
+            "pthread_barrierattr_init",
+            "pthread_barrierattr_destroy",
+            "pthread_barrierattr_getpshared",
+            "pthread_barrierattr_setpshared",
+            "pthread_rwlockattr_init",
+            "pthread_rwlockattr_destroy",
+            "pthread_rwlockattr_getpshared",
+            "pthread_rwlockattr_setpshared",
+            "pthread_rwlockattr_gettype_np",
+            "pthread_rwlockattr_settype_np",
+            "pthread_yield",
+            "sched_yield",
+            "pthread_getconcurrency",
+            "pthread_setconcurrency",
+            // The attribute accessors and `pthread_equal`, added in bulk (worklog 310).
+            // Same argument as the semaphores above: declared in the POSIX module under
+            // their POSIX names, implemented here beside the attribute object they read
+            // and write. There are no vendor twins for these to be declared as.
+            "pthread_attr_getguardsize",
+            "pthread_attr_getinheritsched",
+            "pthread_attr_getschedpolicy",
+            "pthread_attr_getscope",
+            "pthread_attr_setscope",
+            "pthread_mutexattr_getpshared",
+            "pthread_mutexattr_setpshared",
+            "pthread_mutexattr_getprioceiling",
+            "pthread_mutexattr_setprioceiling",
+            "pthread_condattr_getclock",
+            "pthread_condattr_setclock",
+            "pthread_condattr_getpshared",
+            "pthread_condattr_setpshared",
+            "pthread_condattr_destroy",
+            "pthread_equal",
         ];
 
         // An implementation nobody declared can never be reached: resolution goes

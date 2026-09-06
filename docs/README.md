@@ -108,6 +108,8 @@ mention they existed.
   surprises worth knowing. Read with DECISIONS.md at the start of any session.
 - [TESTING.md](TESTING.md) - the test strategy, and the oracle problem it works around.
 - [SYMBOLS.md](SYMBOLS.md) - symbol database format and the NID hash suffix.
+- [ADDRESS_MAP.md](ADDRESS_MAP.md) - every fixed base and its owner. Check it before
+  choosing an address; it is gated against the source (D513).
 - [PROVENANCE.md](PROVENANCE.md) - how a symbol name is shown to be ours.
 - API reference - `cargo doc --workspace --open`, or the published `/doc/` on the site.
 

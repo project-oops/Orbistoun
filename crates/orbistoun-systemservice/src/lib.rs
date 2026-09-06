@@ -19,6 +19,16 @@
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
 
+pub mod app_content;
+pub mod common_dialog;
+pub mod coredump;
+pub mod error_dialog;
+pub mod json2;
+pub mod msg_dialog;
+pub mod remoteplay;
+pub mod save_data;
+pub mod web_browser_dialog;
+
 pub mod console;
 
 guest_module! {

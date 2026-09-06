@@ -20,7 +20,7 @@ independent of everything and of each other.
 | ⚪ | [Phase 0 - Synthetic fixtures](roadmap/002-phase-0-synthetic-fixtures-reduced.md) | no marker |
 | 🟢 | [Phase 0b - ABI spike](roadmap/003-phase-0b-abi-spike-done-both-platforms.md) | done |
 | 🟢 | [Phase 0c - Structural seams](roadmap/004-phase-0c-structural-seams-done.md) | done |
-| 🔴 | [Phase 0d - Test corpus tooling](roadmap/005-phase-0d-test-corpus-tooling-not-done.md) | not done |
+| 🟢 | [Phase 0d - Test corpus tooling](roadmap/005-phase-0d-test-corpus-tooling-not-done.md) | done |
 | 🟢 | [Phase 0e - Observability substrate](roadmap/006-phase-0e-observability-substrate-done.md) | done |
 | 🟢 | [Phase 1 - Container wrapper and dynamic segment](roadmap/007-phase-1-container-wrapper-and-dynamic.md) | done |
 | 🟢 | [Phase 1b - Corpus-wide survey report](roadmap/008-phase-1b-corpus-wide-survey-report-done.md) | done |

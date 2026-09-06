@@ -348,6 +348,14 @@ enum Command {
         /// Emit JSON, for a probe or an agent to consume rather than a person to read.
         #[arg(long)]
         json: bool,
+        /// Group by the premise entries share, rather than one line per function.
+        ///
+        /// **Because the list is shorter than its own length.** Most of these questions are
+        /// one sentence repeated across every entry resting on it, so a reader is shown
+        /// hundreds of asks where there are fewer things to establish - and a probe planning
+        /// a sweep cannot see that one sample would speak for a whole group (D538).
+        #[arg(long)]
+        premises: bool,
     },
     /// Rank what to implement next, across every guest run so far.
     ///
@@ -358,6 +366,13 @@ enum Command {
         /// How many entries to show.
         #[arg(long, default_value_t = 25)]
         top: usize,
+        /// Rank the *static* import lists instead of the call traces.
+        ///
+        /// What a guest might call, grouped by where an answer can come from. The trace
+        /// ranking answers "what is this guest leaning on"; this answers "what should
+        /// somebody write next", which for published interfaces needs no run at all.
+        #[arg(long)]
+        static_gap: bool,
     },
     /// Rebuild the standard-library word list from a FreeBSD source tree.
     ///
@@ -433,10 +448,49 @@ enum Command {
         #[arg(long)]
         repair: bool,
     },
+    /// Compute the import hash for one or more names.
+    ///
+    /// The other half of `exports`: that lists a module's symbols as hashes, and a vendor
+    /// module's are **all** encoded, so asking "does this module export `module_start`" means
+    /// hashing the name and looking for the number. Doing that by hand needs the suffix, which
+    /// is a run input rather than a constant (principle 5).
+    Nid {
+        /// Names to hash.
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
     /// Report what a guest module imports, without executing it.
     Imports {
         /// Path to a guest executable.
         path: std::path::PathBuf,
+        /// Show the modules the title ships that answer its own imports.
+        #[arg(long)]
+        own: bool,
+        /// With `--own`, place them and report which imports would bind into them.
+        #[arg(long)]
+        placed: bool,
+        /// With `--own`, place **and relocate** them against one shared stub table.
+        #[arg(long)]
+        linked: bool,
+        /// Show the vendor library and module tables instead of the imports.
+        ///
+        /// These are what an encoded import name's ids index, and neither is `DT_NEEDED`.
+        /// Whether their strings are bare names or paths is what decides how a loader finds
+        /// a module an executable imports from.
+        #[arg(long)]
+        libraries: bool,
+    },
+    /// Report what a guest module **provides**, without executing it.
+    ///
+    /// The other half of `imports`. A title ships its own modules and the executable imports
+    /// from them by NID, so what those modules export is what decides whether those imports
+    /// can ever bind.
+    Exports {
+        /// Path to a guest module.
+        path: std::path::PathBuf,
+        /// Only show symbols whose name or NID contains this.
+        #[arg(long)]
+        matching: Option<String>,
     },
     /// Ask a live probe one question and print what it answers.
     ///
@@ -928,6 +982,186 @@ fn cmd_report(service: &Service, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// `exports` - what a guest module provides, without executing it.
+fn cmd_exports(service: &Service, path: &std::path::Path, matching: Option<&str>) -> Result<()> {
+    let found = service.exports_path(path)?;
+    let mut shown = 0_usize;
+    for e in &found {
+        let name = e.symbol.as_deref().unwrap_or("<unnamed>");
+        if let Some(wanted) = matching {
+            if !name.contains(wanted) && !format!("{:#018x}", e.nid).contains(wanted) {
+                continue;
+            }
+        }
+        // Data is marked for the same reason a survey marks it: an importer that binds a data
+        // export as a function gets a thunk where it expects a value (D125, D307).
+        let data = if e.kind == orbistoun_proto::ImportKind::Object {
+            "  [data]"
+        } else {
+            ""
+        };
+        println!("{:#018x}  +{:#x}  {name}{data}", e.nid, e.offset);
+        shown += 1;
+    }
+    eprintln!("{shown} shown of {} exports", found.len());
+    Ok(())
+}
+
+/// `imports --own` - the modules a title ships that answer its own imports.
+fn cmd_title_modules(
+    service: &Service,
+    path: &std::path::Path,
+    placed: bool,
+    linked: bool,
+) -> Result<()> {
+    let found = service.title_modules_for(path)?;
+    for module in &found {
+        println!("{:<28}  {}", module.library, module.path.display());
+    }
+    eprintln!(
+        "{} of the title's own modules answer its imports",
+        found.len()
+    );
+    if linked {
+        return report_linked(service, path);
+    }
+    if !placed {
+        return Ok(());
+    }
+    report_placed(service, path, &found)
+}
+
+/// The `--linked` half: place the title's own modules **and relocate them**.
+///
+/// The step past `--placed`. A placed module has had its bytes copied and nothing else, so its
+/// internal pointers still read as link-time offsets; a relocated one is code the guest could
+/// actually be sent into.
+fn report_linked(service: &Service, path: &std::path::Path) -> Result<()> {
+    let bases = orbistoun_service::TitleBases {
+        modules: orbistoun_worker::TITLE_MODULE_BASE,
+        thunks: orbistoun_worker::THUNK_TABLE_BASE,
+        data: orbistoun_worker::DATA_BLOCK_BASE,
+    };
+    let linked =
+        service.link_title_modules(path, bases, &orbistoun_nid::SymbolDbFile::builtin())?;
+    for slot in &linked.slots {
+        let name = if slot.label.is_empty() {
+            "<the executable>"
+        } else {
+            &slot.label
+        };
+        println!(
+            "slots {:<28} {:>6}..{:<6} ({} symbols)",
+            name,
+            slot.offset,
+            slot.offset + slot.count,
+            slot.count
+        );
+    }
+    // Each segment's file-backed and zeroed halves, which is the `.data`/`.bss` split the
+    // loader already knows and nothing surfaced. An address inside the copied part came from
+    // the file; one past it is `.bss` and is zero because that is what `.bss` means.
+    for (library, image) in linked.placed.images() {
+        for segment in image.segments() {
+            println!(
+                "segment {library:<24} #{} {:#014x}  {:#x} copied  {:#x} zeroed  flags {:#x}",
+                segment.index, segment.address, segment.copied, segment.zeroed, segment.flags
+            );
+        }
+    }
+    for (library, tally) in &linked.tallies {
+        println!(
+            "relocated {library:<24} {} applied, {} unresolved, {} tls-deferred, {} unsupported",
+            tally.applied, tally.unresolved, tally.tls_deferred, tally.unsupported
+        );
+    }
+    for note in &linked.shared_data {
+        println!("shared data import: {note}");
+    }
+    let unresolved: usize = linked.tallies.iter().map(|(_, t)| t.unresolved).sum();
+    eprintln!(
+        "{} of the title's own modules linked, {unresolved} relocation(s) unresolved",
+        linked.tallies.len()
+    );
+    Ok(())
+}
+
+/// The `--placed` half: place them, and say which imports would bind into them.
+///
+/// **Placed, not relocated.** This reports; it hands nothing to a guest.
+fn report_placed(
+    service: &Service,
+    path: &std::path::Path,
+    found: &[orbistoun_service::titlemodules::TitleModule],
+) -> Result<()> {
+    let modules = service.place_title_modules(found, orbistoun_worker::TITLE_MODULE_BASE)?;
+    for (library, image) in modules.images() {
+        let (start, len) = image.span();
+        println!("placed {library:<22}  {start:#x}  {len} bytes");
+    }
+    for clash in modules.collisions() {
+        println!(
+            "collision {:#018x} in {} kept {} dropped {}",
+            clash.nid, clash.library, clash.kept, clash.dropped
+        );
+    }
+    let bytes = std::fs::read(path)?;
+    let imports = service.raw_imports_of(&bytes)?;
+    let (libraries, _modules) = service.module_tables(&bytes)?;
+    let resolution = modules.resolve(&imports, &libraries);
+    for b in &resolution.bound {
+        println!(
+            "binds {:<24} {:#018x} {:<44} {:#x}",
+            b.library, b.nid, b.name, b.address
+        );
+    }
+    for bad in &resolution.mismatches {
+        println!(
+            "kind mismatch {} wants {:?}, {} has {:?} - left on its stub",
+            bad.name, bad.wanted, bad.library, bad.found
+        );
+    }
+    for bad in &resolution.ambiguous {
+        println!(
+            "ambiguous {} answered by {} - left unbound",
+            bad.name,
+            bad.answered_by.join(", ")
+        );
+    }
+    for (library, count) in resolution.by_library() {
+        eprintln!("  {library:<24} answers {count}");
+    }
+    eprintln!(
+        "{} of {} imports would bind into the title's own modules ({} exported, {} kind mismatches)",
+        resolution.addresses.len(),
+        imports.len(),
+        modules.export_count(),
+        resolution.mismatches.len(),
+    );
+    Ok(())
+}
+
+/// `imports --libraries` - the vendor tables an encoded import name indexes.
+fn cmd_module_tables(service: &Service, path: &std::path::Path) -> Result<()> {
+    let bytes = std::fs::read(path)?;
+    let (libraries, modules) = service.module_tables(&bytes)?;
+    println!(
+        "libraries ({}), indexed by an import's library id:",
+        libraries.len()
+    );
+    for (id, name) in &libraries {
+        println!("  {id:>3}  {name}");
+    }
+    println!(
+        "modules ({}), indexed by an import's module id:",
+        modules.len()
+    );
+    for (id, name) in &modules {
+        println!("  {id:>3}  {name}");
+    }
+    Ok(())
+}
+
 /// `imports` - what a guest module needs, without executing it.
 fn cmd_imports(service: &Service, path: &std::path::Path) -> Result<()> {
     let survey = service.survey_path(path)?;
@@ -962,10 +1196,15 @@ fn cmd_imports(service: &Service, path: &std::path::Path) -> Result<()> {
         survey.unresolved()
     );
     if data > 0 {
+        // **This used to end "and orbistoun has no other one yet", which stopped being true
+        // in D323.** The loader reserves one zeroed page per data import and the resolver
+        // consults it before the thunk table, so a listing that still described the gap was
+        // telling a reader to go and fix something already fixed - and this is the surface
+        // somebody checks first (D510).
         eprintln!(
             concat!(
-                "{} of them name data, not a function - a thunk is the wrong kind of ",
-                "answer there and orbistoun has no other one yet"
+                "{} of them name data, not a function - a thunk is the wrong kind of answer ",
+                "there, so each is given a zeroed page of its own instead (D323)"
             ),
             data
         );
@@ -1045,6 +1284,9 @@ fn cmd_run(
     // Read before the run, because the run overwrites it. The comparison is the whole
     // point of keeping traces at all.
     let before = previous_trace(path);
+    // And its identity, so that "the run overwrites it" can be *checked* rather than
+    // assumed. A worker that dies without writing leaves this file untouched (D470).
+    let before_stamp = trace_stamp(path);
 
     let events = worker
         .request(&orbistoun_proto::Request::Run {
@@ -1073,10 +1315,25 @@ fn cmd_run(
 
     worker.shutdown().context("shutting the worker down")?;
 
-    // After the worker has exited, so the trace it wrote is complete.
-    if let Some(after) = previous_trace(path) {
-        report_progress(before.as_ref(), &after);
-        record_compat(path, &after);
+    // After the worker has exited, so the trace it wrote is complete - *if* it wrote one.
+    //
+    // **Checked, not assumed.** A worker that dies before it can record anything leaves the
+    // previous run's file in place, and reading it back presents an old measurement as this
+    // one - which compares equal to itself and reads as `same - nothing moved`, the most
+    // convincing possible way to say nothing happened. Six reports came out of one file that
+    // way (D470).
+    if orbistoun_report::trace::wrote_a_trace(before_stamp, trace_stamp(path)) {
+        if let Some(after) = previous_trace(path) {
+            report_progress(before.as_ref(), &after);
+            record_compat(path, &after);
+        }
+    } else {
+        println!();
+        println!("this run recorded no trace, so there is nothing of its own to report.");
+        println!("  the worker ended without writing one - a fault it could not report, or a");
+        println!("  crash inside orbistoun itself. A stored trace from an earlier run exists and");
+        println!("  is deliberately not shown: presenting it here would read as this run's");
+        println!("  measurement, and it is not one.");
     }
     Ok(())
 }
@@ -2083,6 +2340,12 @@ fn previous_trace(module: &std::path::Path) -> Option<orbistoun_report::trace::C
     let paths = orbistoun_paths::Paths::resolve();
     orbistoun_report::trace::load_previous(&paths.traces_dir(), module)
 }
+
+/// The identity of the trace file on disk, for telling this run's trace from an older one.
+fn trace_stamp(module: &std::path::Path) -> Option<orbistoun_report::trace::Stamp> {
+    let paths = orbistoun_paths::Paths::resolve();
+    orbistoun_report::trace::stamp_of(&paths.traces_dir(), module)
+}
 /// Says whether this run got further than the last.
 ///
 /// **Presentation only.** The measurement itself is `orbistoun_report::trace::compare`,
@@ -2247,6 +2510,23 @@ fn dump_line(d: &orbistoun_report::trace::ArgumentDump) -> String {
 /// is the conclusion drawn from it - and it is rendered from the same structured findings
 /// that go into the trace, so a person and a machine are reading the same thing rather
 /// than one parsing the other's prose (D179).
+/// How many findings a run prints when nothing says otherwise.
+///
+/// Six is what a person reading a run wants; `ORBISTOUN_FINDINGS` is for working one.
+const DEFAULT_FINDINGS: usize = 6;
+
+/// How many findings to print, given whatever the setting holds.
+///
+/// **A value that is not a number is the default, not zero.** `take(0)` prints nothing while
+/// still printing the heading, which reads as "this run found nothing" - the opposite of what
+/// a mistyped setting should say. Zero *asked for* is honoured, because suppressing the list
+/// deliberately is a thing somebody may want (D527).
+fn findings_to_show(setting: Option<String>) -> usize {
+    setting.map_or(DEFAULT_FINDINGS, |raw| {
+        raw.trim().parse::<usize>().unwrap_or(DEFAULT_FINDINGS)
+    })
+}
+
 fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
     use orbistoun_report::diagnose::Confidence;
 
@@ -2256,7 +2536,14 @@ fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
     }
     println!();
     println!("what to do about it");
-    for finding in findings.iter().take(6) {
+    // **Six by default, and the rest summarised as a count.** That is right for reading a run
+    // and wrong for working one: a finding past the sixth keeps its arguments, and those
+    // arguments are what name a call. This has now hidden the one that mattered twice - once
+    // read as "three stubs left", once blocking a wall investigation outright (D527).
+    for finding in findings
+        .iter()
+        .take(findings_to_show(orbistoun_env::FINDINGS.get()))
+    {
         let mark = match finding.confidence {
             Confidence::Certain => "!",
             Confidence::Likely => "?",
@@ -2411,7 +2698,25 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
         return;
     }
     println!();
-    println!("last calls before the fault");
+    // **Only the last calls if the recording reached the end**, and for most titles it does
+    // not: the ring keeps the first `MAX_RECORDED_CALLS` and stops, so a run of four hundred
+    // thousand calls leaves a "tail" sitting at call eight thousand. Presenting that as what
+    // the guest called last is a report claiming more than its measurement supports, which is
+    // the one thing principle 3 forbids the tools as well as the emulator (D568).
+    let reaches_end = trace
+        .tail
+        .last()
+        .is_some_and(|c| c.sequence + 1 >= trace.total_calls);
+    if reaches_end {
+        println!("last calls before the fault");
+    } else {
+        let first = trace.tail.first().map_or(0, |c| c.sequence);
+        let last = trace.tail.last().map_or(0, |c| c.sequence);
+        println!(
+            "calls #{first}-#{last} of {} - NOT the ones before the fault: the recorder fills once and stops, and this run made more",
+            trace.total_calls
+        );
+    }
 
     // Keyed on the answer as well as the label, so a run of calls that returned *different*
     // values does not collapse into one line that hides the very thing worth seeing - a
@@ -2422,7 +2727,7 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
             Some((label, _, ret, _, count)) if *label == call.label && *ret == call.returned => {
                 *count += 1;
             }
-            _ => runs.push((&call.label, call.arg0, call.returned, call.from, 1)),
+            _ => runs.push((&call.label, call.args[0], call.returned, call.from, 1)),
         }
     }
     for (label, arg0, returned, from, count) in runs {
@@ -3124,6 +3429,7 @@ fn print_provenance_summary(knowledge: &orbistoun_hle::knowledge::Knowledge) {
 
     let counts = [
         Oracle::Published,
+        Oracle::Differential,
         Oracle::Measured,
         Oracle::GuestObserved,
         Oracle::Assumed,
@@ -3953,8 +4259,7 @@ fn cmd_corpus_list(manifest: &std::path::Path) -> Result<()> {
             let pin = a
                 .sha256
                 .as_deref()
-                .map(|h| &h[..h.len().min(12)])
-                .unwrap_or("unpinned");
+                .map_or("unpinned", |h| &h[..h.len().min(12)]);
             println!("    {:<40} {pin}", a.file);
         }
     }
@@ -4148,10 +4453,10 @@ fn cmd_compat_markdown(
     let doc = format!(
         "# Compatibility\n\n\
          _Generated by `orbistoun-cli compat markdown` from the records in `compat/`. Do not edit \
-         by hand; re-run it. Ranked by how far each guest got - reach, then distinct imports, then \
-         standing, then calls._\n\n\
-         **From** is `run` for the honest default-entry baseline and `experiment` for a run \
-         recorded with overrides (less comparable - D181). A 📷 marks a guest with a captured \
+         by hand; re-run it. Ranked by how far each guest got - reach, then distinct imports, \
+         then how many of those imports were **answered** by something real, then standing, then frames, then calls._\n\n\
+         **Answered** is how many of the imports a title called landed on a real implementation rather than a placeholder. It is counted in **functions**, not calls: a percentage of calls belongs to whatever the guest loops on, which is why `standing` beside it could not see a day that took one title from 35 unanswered functions to 20 (D563). A dash means the run predates the measurement. **Reach** climbs `rejected`, `parsed`, `linked`, `entered`, `flipped` - the last meaning the guest got a frame to the output layer, which is a place reached and not a picture shown (D558). **From** is `run` for a result measuring the emulator as it stands and `experiment` for a run \
+         resting on an answer nothing measured (less comparable - D181, D557); an answer taken from the target is not a prop. A 📷 marks a guest with a captured \
          framebuffer; see the Screenshots section.\n\n\
          {table}"
     );
@@ -4793,14 +5098,35 @@ fn numbers_block(service: &Service) -> String {
 
     let mut declared = 0_usize;
     let mut implemented = 0_usize;
+    // **How many of the declared belong to a library that serves nothing at all.**
+    //
+    // Without this the headline reads as capability and is not. Before the networking, audio,
+    // media, dialog and graphics libraries a title imports were declared, the ratio was
+    // 674/647 - **96%** - because the denominator was very nearly "what we had already
+    // implemented". Declaring what guests actually ask for moved it to 947/647, and the
+    // honest reading of the drop is that the figure started meaning something (D500, D505).
+    //
+    // Counted by library rather than by symbol: a library with one implementation is being
+    // worked on, and a library with none has only had its names written down.
+    let mut serves: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     for d in service.declared_symbols() {
         declared += 1;
         implemented += usize::from(d.implemented);
+        let entry = serves.entry(d.library.clone()).or_default();
+        *entry = *entry || d.implemented;
     }
+    let names_only: usize = service
+        .declared_symbols()
+        .iter()
+        .filter(|d| !serves.get(&d.library).copied().unwrap_or(false))
+        .count();
+    let quiet_libraries = serves.values().filter(|served| !**served).count();
+    let quiet_plural = if quiet_libraries == 1 { "y" } else { "ies" };
 
     let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
     let resting: Vec<String> = [
         Oracle::Published,
+        Oracle::Differential,
         Oracle::Measured,
         Oracle::GuestObserved,
         Oracle::Assumed,
@@ -4846,6 +5172,7 @@ fn numbers_block(service: &Service) -> String {
 | | |
 |---|---|
 | Functions declared / implemented | {declared} / {implemented} |
+| Declared in a library that serves nothing | {names_only} across {quiet_libraries} librar{quiet_plural} - names written down, no implementation |
 | Recorded behaviours | {} - {} |
 | Open questions a hardware probe could settle | {} |
 | Symbol database | {} names - {} |
@@ -5079,7 +5406,7 @@ struct OpenQuestion {
 }
 
 /// `questions` - every open question, ranked by how often a guest calls the function.
-fn cmd_questions(top: Option<usize>, json: bool) {
+fn cmd_questions(top: Option<usize>, json: bool, premises: bool) {
     let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
     let called = calls_by_function();
 
@@ -5111,6 +5438,15 @@ fn cmd_questions(top: Option<usize>, json: bool) {
             .then_with(|| a.function.cmp(&b.function))
             .then_with(|| a.question.cmp(&b.question))
     });
+    // **Before `top` truncates.** A premise is the set of entries resting on it, so
+    // grouping a shortened queue answers a different question with the same words: it
+    // would report that four functions share something fourteen of them share, and say so
+    // as confidently as the full run does.
+    if premises {
+        print_premises(&queue, json, top);
+        return;
+    }
+
     if let Some(n) = top {
         queue.truncate(n);
     }
@@ -5145,6 +5481,138 @@ fn cmd_questions(top: Option<usize>, json: bool) {
         }
         println!("      ? {}", q.question);
     }
+}
+
+/// Print the queue grouped by the premise its entries share.
+///
+/// # Why this is worth a mode of its own
+///
+/// The per-function listing is the right shape for "what is unknown about this function"
+/// and the wrong shape for "what would a console sweep have to establish". Most of the
+/// queue is one sentence repeated: the entries resting on the commonest premise are a
+/// large fraction of the whole list, and read one at a time they look like that many
+/// separate asks. Grouped, a probe can sample a premise instead of enumerating it.
+///
+/// **Ranked by the calls behind the premise, not by how many entries carry it.** A premise
+/// shared by a hundred functions nothing ever calls is worth less than one shared by two
+/// that a guest is in constantly, and calls are the ranking this command already uses.
+fn print_premises(queue: &[OpenQuestion], json: bool, top: Option<usize>) {
+    let asked: Vec<(String, String)> = queue
+        .iter()
+        .map(|q| (q.function.clone(), q.question.clone()))
+        .collect();
+    // Calls are per function, and a function may rest on several premises - so a premise
+    // is credited with the calls of each function under it, and the totals across premises
+    // deliberately sum to more than the number of calls made.
+    let calls: std::collections::HashMap<&str, u64> = queue
+        .iter()
+        .map(|q| (q.function.as_str(), q.calls))
+        .collect();
+    let library: std::collections::HashMap<&str, &str> = queue
+        .iter()
+        .map(|q| (q.function.as_str(), q.library.as_str()))
+        .collect();
+
+    let mut grouped: Vec<(u64, orbistoun_hle::knowledge::SharedPremise)> =
+        orbistoun_hle::knowledge::shared_premises(&asked)
+            .into_iter()
+            .map(|p| {
+                let total = p
+                    .functions
+                    .iter()
+                    .map(|f| calls.get(f.as_str()).copied().unwrap_or(0))
+                    .sum();
+                (total, p)
+            })
+            .collect();
+    grouped.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.functions.len().cmp(&a.1.functions.len()))
+            .then_with(|| a.1.question.cmp(&b.1.question))
+    });
+
+    let rendered: Vec<SharedAsk> = grouped
+        .iter()
+        .map(|(total, premise)| {
+            let mut libraries: Vec<String> = premise
+                .functions
+                .iter()
+                .filter_map(|f| library.get(f.as_str()).map(|l| (*l).to_owned()))
+                .collect();
+            libraries.sort_unstable();
+            libraries.dedup();
+            // Named, because a sweep has to pick which of them to sample.
+            let mut functions = premise.functions.clone();
+            functions.sort_unstable();
+            functions.dedup();
+            SharedAsk {
+                question: premise.question.clone(),
+                functions,
+                libraries,
+                calls: *total,
+            }
+        })
+        .collect();
+
+    if json {
+        let shown = top.unwrap_or(rendered.len()).min(rendered.len());
+        match serde_json::to_string_pretty(&rendered[..shown]) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("could not render the premises: {e}"),
+        }
+        return;
+    }
+
+    let shown = top.unwrap_or(rendered.len()).min(rendered.len());
+    let shared = rendered.iter().filter(|a| a.functions.len() > 1).count();
+    let covered: usize = rendered
+        .iter()
+        .filter(|a| a.functions.len() > 1)
+        .map(|a| a.functions.len())
+        .sum();
+    println!(
+        "{} premises behind {} open questions - and {shared} of them carry {covered} of it",
+        rendered.len(),
+        queue.len()
+    );
+    if shown < rendered.len() {
+        println!("showing the {shown} with the most calls behind them");
+    }
+    println!();
+    for ask in rendered.iter().take(shown) {
+        println!(
+            "  {:>10} calls   {} {} across {} librar{}",
+            ask.calls,
+            ask.functions.len(),
+            if ask.functions.len() == 1 {
+                "function"
+            } else {
+                "functions"
+            },
+            ask.libraries.len(),
+            if ask.libraries.len() == 1 { "y" } else { "ies" }
+        );
+        println!("      ? {}", ask.question);
+        println!("        {}", ask.functions.join(", "));
+        println!();
+    }
+}
+
+/// One premise, and everything resting on it - what `questions --premises` emits.
+#[derive(serde::Serialize)]
+struct SharedAsk {
+    /// The question, in the wording its entries share.
+    question: String,
+    /// Every entry asking it, so a sweep can choose which to sample.
+    functions: Vec<String>,
+    /// Which libraries those span. A premise crossing two is the more interesting kind.
+    libraries: Vec<String>,
+    /// The calls behind it - each function's total, summed.
+    ///
+    /// A function resting on several premises is counted in each, so these deliberately
+    /// sum to more than the calls a guest made. The number ranks the premise; it is not a
+    /// share of anything.
+    calls: u64,
 }
 
 /// How often each function has been called, across every trace on disk.
@@ -5218,6 +5686,184 @@ fn report_kernel_calls(
         // what it is for.
         let argument = argument.map_or_else(|| "-".to_owned(), |a| format!("{a:#x}"));
         println!("{number:>6}  {runs:>5}  {argument}");
+    }
+}
+
+/// What is imported and unimplemented, grouped by where an answer can come from.
+///
+/// **The counterpart to [`cmd_worklist`], and deliberately not a replacement.** That one totals
+/// the call traces, which is a fact about runs that have happened; this reads the import tables,
+/// which is a fact about what the guests would need if they got that far. For a published
+/// interface the second is enough to act on - the standard is the oracle, so the function can be
+/// written and tested without any guest reaching it - and waiting for a run to trip over one is
+/// a session spent per function (D472).
+fn cmd_worklist_static(service: &Service, top: usize) {
+    use orbistoun_hle::origin::{self, Origin};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let implemented: BTreeSet<String> = service
+        .declared_symbols()
+        .iter()
+        .filter(|d| d.implemented)
+        .map(|d| d.symbol.clone())
+        .collect();
+    // **Implemented is not the same as finished.** A function that answers the easy case and
+    // gives up counts as present here and is not, so the ones that declare what they do not do
+    // are counted separately rather than folded into the same number (D474).
+    let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
+    let mut partial: BTreeMap<String, String> = BTreeMap::new();
+
+    let mut modules = 0_usize;
+    let mut unnamed: BTreeMap<String, usize> = BTreeMap::new();
+    // Distinct by name, because the same function imported by four titles is one job.
+    let mut missing: BTreeMap<Origin, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    let mut needed: BTreeMap<Origin, BTreeSet<String>> = BTreeMap::new();
+    // Counted flat as well as per library, because a symbol two libraries both name is **one
+    // job**, and summing the per-library sets reported more missing than needed - a number that
+    // is impossible on its face, which is the kind a report must not print (principle 3).
+    let mut missing_names: BTreeMap<Origin, BTreeSet<String>> = BTreeMap::new();
+
+    for entry in std::fs::read_dir("titles").into_iter().flatten().flatten() {
+        let module = entry.path().join("eboot.bin");
+        if !module.is_file() {
+            continue;
+        }
+        let Ok(survey) = service.survey_path(&module) else {
+            continue;
+        };
+        modules += 1;
+        for import in &survey.imports {
+            let library = import.library.as_deref().unwrap_or("?");
+            let Some(symbol) = import.symbol.as_deref() else {
+                *unnamed.entry(library.to_owned()).or_default() += 1;
+                continue;
+            };
+            let where_from = origin::of(library, symbol);
+            needed
+                .entry(where_from)
+                .or_default()
+                .insert(symbol.to_owned());
+            if implemented.contains(symbol)
+                && let Some(known) = knowledge.get(symbol)
+                && !known.partial.is_empty()
+            {
+                partial.insert(symbol.to_owned(), known.partial.clone());
+            }
+            if !implemented.contains(symbol) {
+                missing_names
+                    .entry(where_from)
+                    .or_default()
+                    .insert(symbol.to_owned());
+                missing
+                    .entry(where_from)
+                    .or_default()
+                    .entry(library.to_owned())
+                    .or_default()
+                    .insert(symbol.to_owned());
+            }
+        }
+    }
+
+    print_static_gap(modules, &needed, &missing_names, &partial);
+
+    print_static_gap_lists(&missing, &unnamed, top);
+}
+
+/// The counted half of the static gap report: how many of each kind, and what is unfinished.
+///
+/// Split from [`cmd_worklist_static`] because the two halves have nothing to say to each
+/// other - one gathers, one prints - and together they were past the length this workspace
+/// lints for.
+fn print_static_gap(
+    modules: usize,
+    needed: &std::collections::BTreeMap<
+        orbistoun_hle::origin::Origin,
+        std::collections::BTreeSet<String>,
+    >,
+    missing_names: &std::collections::BTreeMap<
+        orbistoun_hle::origin::Origin,
+        std::collections::BTreeSet<String>,
+    >,
+    partial: &std::collections::BTreeMap<String, String>,
+) {
+    use orbistoun_hle::origin::Origin;
+    use std::collections::BTreeSet;
+
+    println!("{modules} modules, by where an answer has to come from");
+    println!();
+    for (where_from, label) in [
+        (
+            Origin::Documented,
+            "documented - write in bulk, no guest needed",
+        ),
+        (
+            Origin::TitleOwn,
+            "the title's own modules - load them, do not implement",
+        ),
+        (
+            Origin::Vendor,
+            "vendor - the guest is the only oracle, so one at a time",
+        ),
+    ] {
+        let have = needed.get(&where_from).map_or(0, BTreeSet::len);
+        let gap = missing_names.get(&where_from).map_or(0, BTreeSet::len);
+        println!("  {have:>5} needed, {gap:>5} missing   {label}");
+    }
+
+    println!();
+    if partial.is_empty() {
+        println!("nothing is declared partial - which is not the same as everything being");
+        println!("complete, only that no incompleteness has been written down.");
+    } else {
+        println!(
+            "{} implemented but declared partial - present, and not finished:",
+            partial.len()
+        );
+        for (name, what) in partial {
+            println!("  {name}");
+            println!("      {what}");
+        }
+    }
+}
+
+/// The listed half: the documented gap by library, and what has no name at all.
+fn print_static_gap_lists(
+    missing: &std::collections::BTreeMap<
+        orbistoun_hle::origin::Origin,
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    >,
+    unnamed: &std::collections::BTreeMap<String, usize>,
+    top: usize,
+) {
+    use orbistoun_hle::origin::Origin;
+
+    if let Some(by_lib) = missing.get(&Origin::Documented) {
+        println!();
+        println!("the documented gap, by library - this is the batch list");
+        for (library, names) in by_lib {
+            let mut sorted: Vec<&String> = names.iter().collect();
+            sorted.sort();
+            println!("  {library} ({} missing)", sorted.len());
+            for name in sorted.iter().take(top) {
+                println!("    {name}");
+            }
+            if sorted.len() > top {
+                // Said out loud rather than truncated silently: a list that stops without
+                // saying so reads as a list that ended (principle 3).
+                println!(
+                    "    ... and {} more (--top to see further)",
+                    sorted.len() - top
+                );
+            }
+        }
+    }
+    if !unnamed.is_empty() {
+        println!();
+        let total: usize = unnamed.values().sum();
+        println!("{total} imports have no name yet, so nothing can be said about them:");
+        for (library, count) in unnamed {
+            println!("  {count:>5}  {library}");
+        }
     }
 }
 
@@ -5927,7 +6573,29 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         Command::Symbols { filter } => cmd_symbols(service, filter.as_deref()),
         Command::Policy => println!("{}", service.default_policy_toml()?),
         Command::Inspect { path } => cmd_inspect(service, &path)?,
-        Command::Imports { path } => cmd_imports(service, &path)?,
+        Command::Nid { names } => {
+            for name in &names {
+                println!("{:#018x}  {name}", service.hash_name(name).as_raw());
+            }
+        }
+        Command::Imports {
+            path,
+            own,
+            placed,
+            linked,
+            libraries,
+        } => {
+            if own {
+                cmd_title_modules(service, &path, placed, linked)?;
+            } else if libraries {
+                cmd_module_tables(service, &path)?;
+            } else {
+                cmd_imports(service, &path)?;
+            }
+        }
+        Command::Exports { path, matching } => {
+            cmd_exports(service, &path, matching.as_deref())?;
+        }
         Command::Ask { .. } | Command::Session { .. } => dispatch_probe(cli.command)?,
         Command::Probe {
             path,
@@ -6029,8 +6697,18 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         Command::Paths => cmd_paths(),
         Command::Env => cmd_env(),
         Command::Firmware { all } => cmd_firmware_layout(service, all),
-        Command::Questions { top, json } => cmd_questions(top, json),
-        Command::Worklist { top } => cmd_worklist(top),
+        Command::Questions {
+            top,
+            json,
+            premises,
+        } => cmd_questions(top, json, premises),
+        Command::Worklist { top, static_gap } => {
+            if static_gap {
+                cmd_worklist_static(service, top);
+            } else {
+                cmd_worklist(top);
+            }
+        }
         Command::Harvest {
             ref source,
             ref out,
@@ -6820,6 +7498,38 @@ fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A mistyped setting prints the default, not nothing.**
+    ///
+    /// `take(0)` still prints the "what to do about it" heading and then no findings, which
+    /// reads as "this run found nothing" - the opposite of what a typo should say. Zero asked
+    /// for explicitly is honoured, because suppressing the list deliberately is reasonable.
+    ///
+    /// **What this cannot check:** that the number chosen is enough. It is a cap, and a cap is
+    /// only ever right for the question being asked - which is why it is a setting now and not
+    /// a constant (D527).
+    #[test]
+    fn a_mistyped_findings_setting_falls_back_rather_than_printing_none() {
+        use super::{DEFAULT_FINDINGS, findings_to_show};
+        assert_eq!(
+            findings_to_show(None),
+            DEFAULT_FINDINGS,
+            "unset is the default"
+        );
+        assert_eq!(findings_to_show(Some("40".to_owned())), 40);
+        assert_eq!(findings_to_show(Some(" 40 ".to_owned())), 40, "trimmed");
+        assert_eq!(
+            findings_to_show(Some("lots".to_owned())),
+            DEFAULT_FINDINGS,
+            "a typo must not silence the list - an empty list under a heading reads as a              run that found nothing"
+        );
+        assert_eq!(
+            findings_to_show(Some("0".to_owned())),
+            0,
+            "but zero asked for is honoured"
+        );
+    }
+
     /// **A hash the database can already name does not stay on the work list.**
     ///
     /// The failing case, written first. The old rule removed only what a given run had

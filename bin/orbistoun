@@ -265,6 +265,91 @@ tables() {
     [ "$failed" -eq 0 ] || { bad "a generated table no longer matches its generator - it was edited by hand, or the generator changed"; return 1; }
 }
 
+# --- the reference the differential is run against ----------------------------
+# **The committed run must still be what the reference program produces.**
+#
+# `tools/differential/reference.c` records what a published C library does, and the checked-in
+# output is what `crates/orbistoun-service/tests/differential.rs` compares orbistoun against.
+# Edit the program without re-recording and the tests keep passing while comparing against a
+# run nobody can reproduce - which is the same failure the generated-table check exists for.
+#
+# Needs a machine with the reference library, so it warns rather than fails when there is
+# none: a step that cannot run is not a step that passed, and saying so is the difference.
+differential() {
+    step "the committed reference run matches the reference program"
+    local src="tools/differential/reference.c"
+    local committed="crates/orbistoun-hle/data/differential/glibc-2.39.txt"
+    if [ ! -f "$committed" ]; then
+        bad "$committed is missing - re-record with the reference program"
+        return 1
+    fi
+    if ! command -v wsl >/dev/null 2>&1; then
+        warn "no reference library reachable - the committed run is unverified this time"
+        return 0
+    fi
+    local fresh="$committed.regenerated"
+    # **The Windows spelling, because the other side is a different filesystem view.** This
+    # shell's `$PWD` is `/c/...`, which means nothing inside WSL; `pwd -W` gives the Windows
+    # path that `wslpath` can translate. The first version passed `$PWD` straight through, so
+    # the build silently found no source and the gate warned every time - a step that always
+    # warns is a step nobody reads.
+    local here
+    here=$(pwd -W 2>/dev/null || pwd)
+    if ! wsl -d Ubuntu -- bash -lc "cd \"\$(wslpath -a '$here')/tools/differential\" && cc -O0 -Wall -Wextra -o /tmp/obs-reference reference.c && /tmp/obs-reference" 2>/dev/null | tr -d '\r' > "$fresh"; then
+        rm -f "$fresh"
+        warn "the reference program could not be built or run - the committed run is unverified"
+        return 0
+    fi
+    if [ ! -s "$fresh" ]; then
+        rm -f "$fresh"
+        warn "the reference program produced nothing - the committed run is unverified"
+        return 0
+    fi
+    if diff -q "$committed" "$fresh" >/dev/null; then
+        printf '  ok       %s cases, matching %s
+' "$(grep -c '^REF|case|' "$committed")" "$src"
+        rm -f "$fresh"
+        return 0
+    fi
+    echo "  the committed run differs from what the reference program produces now:"
+    diff "$committed" "$fresh" | head -20
+    rm -f "$fresh"
+    bad "re-record the reference run, or the differential is comparing against history"
+    return 1
+}
+
+# --- what a console was measured to do ---------------------------------------
+# **The one gate whose failure means "a hardware run said something nobody has answered".**
+#
+# `crates/orbistoun-hle/data/hardware.toml` is generated from the conformance captures and
+# holds every measurement the runs took. `crates/orbistoun-service/tests/hardware.rs` requires
+# each constant one to be either asserted against orbistoun or written down as outstanding with
+# a reason - so a new capture arrives as a work list rather than as a file nobody reads.
+#
+# Regenerating the table is deliberately *not* part of this: the captures live in a sibling
+# repository which may not be checked out, and a step that quietly passes when its input is
+# absent is worse than one that is not run at all. The committed table is the input here.
+hardware() {
+    step "measured hardware behaviour is asserted or declared outstanding"
+    local table="crates/orbistoun-hle/data/hardware.toml"
+    if [ ! -f "$table" ]; then
+        bad "$table is missing - regenerate with: cargo run -p orbistoun-gen -- measurements"
+        return 1
+    fi
+    if ! cargo test -q -p orbistoun-service --test hardware 2>&1 | tail -30; then
+        bad "a measurement is neither asserted nor declared outstanding, or a claim no longer holds"
+        return 1
+    fi
+    # Counted from the generated table, which has one line per measurement, rather than from
+    # the Rust source - a grep for the outstanding list matched five reasons that begin with a
+    # digit and reported 26 for a list of 21. The test asserts the split; this reports the size.
+    local total constant
+    total=$(grep -c '^\[\[measurement\]\]' "$table")
+    constant=$(grep -c '^constant = true$' "$table")
+    printf '  ok       %s measurements, %s constant and accounted for
+' "$total" "$constant"
+}
+
 # --- harvested constants -----------------------------------------------------
 # **Proof of sourcing, not a style check.** The ABI constants are the one table in this
 # repository that is neither derived by experiment nor written by a person: they are copied
@@ -505,6 +590,8 @@ check() {
     also generated_numbers
     also symbols_audit
     also tables
+    also hardware
+    also differential
     # Scoped like the rest, and the first draft was not. The reasoning for exempting it was
     # that formatting needs no compilation, so another session's half-written crate cannot
     # stop it - which is false, and the very first scoped run proved it by failing on exactly

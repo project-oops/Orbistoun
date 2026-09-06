@@ -1066,7 +1066,7 @@ impl App {
                 ui.separator();
                 ui.heading("last calls before the fault");
                 for call in &trace.tail {
-                    ui.monospace(format!("{}({:#x})", call.label, call.arg0));
+                    ui.monospace(format!("{}({:#x})", call.label, call.args[0]));
                 }
             }
 

@@ -2806,6 +2806,8 @@ dependencies = [
  "clap",
  "oops-log",
  "orbistoun-env",
+ "orbistoun-hle",
+ "orbistoun-nid",
  "regex",
  "sha1",
  "toml 0.8.23",
@@ -2830,6 +2832,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "orbistoun-gpu",
+ "orbistoun-shader",
  "orbistoun-spirv",
  "orbistoun-translate",
  "thiserror 2.0.20",
@@ -2889,6 +2892,7 @@ dependencies = [
  "orbistoun-env",
  "orbistoun-hle",
  "orbistoun-mem",
+ "orbistoun-nid",
  "orbistoun-thunk",
  "serde",
  "toml 0.8.23",
@@ -2902,6 +2906,7 @@ dependencies = [
  "orbistoun-env",
  "orbistoun-fs",
  "orbistoun-hle",
+ "orbistoun-mem",
  "orbistoun-thunk",
  "toml 0.8.23",
 ]
@@ -2959,6 +2964,13 @@ dependencies = [
  "sha1",
  "thiserror 2.0.20",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "orbistoun-net"
+version = "0.1.0"
+dependencies = [
+ "orbistoun-hle",
 ]
 
 [[package]]
@@ -3045,6 +3057,7 @@ dependencies = [
 name = "orbistoun-service"
 version = "0.1.0"
 dependencies = [
+ "orbistoun-abi",
  "orbistoun-audio",
  "orbistoun-core",
  "orbistoun-elf",
@@ -3057,6 +3070,7 @@ dependencies = [
  "orbistoun-libc",
  "orbistoun-loader",
  "orbistoun-mem",
+ "orbistoun-net",
  "orbistoun-nid",
  "orbistoun-paths",
  "orbistoun-posix",
@@ -3157,6 +3171,7 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-core",
  "orbistoun-hle",
+ "orbistoun-kernel",
 ]
 
 [[package]]
@@ -3183,6 +3198,7 @@ dependencies = [
  "orbistoun-shell",
  "orbistoun-systemservice",
  "orbistoun-thunk",
+ "orbistoun-video",
  "serde_json",
  "tempfile",
  "windows-sys 0.61.2",

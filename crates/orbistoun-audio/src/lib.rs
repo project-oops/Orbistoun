@@ -12,6 +12,11 @@
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
 
+pub mod ajm;
+pub mod audio3d;
+pub mod audio_in;
+pub mod audio_out2;
+
 /// The high half libSceAudioOut numbers its errors from, rather than the kernel's `0x8002_0000`.
 ///
 /// **Measured.** obSCEne's `090-audio/close-rejects-bad-handle` answered `0x80260003` on hardware -

@@ -25,7 +25,9 @@ pub mod machine;
 pub mod park;
 pub mod stop;
 
-pub use error::{GuestError, GuestResult, VENDOR_ERROR_BASE, errno};
+pub use error::{
+    GuestError, GuestResult, PLACEHOLDER_BASE, VENDOR_ERROR_BASE, errno, placeholder_named,
+};
 pub use handle::{Handle, HandleAllocator};
 pub use stop::{StopReason, stop};
 

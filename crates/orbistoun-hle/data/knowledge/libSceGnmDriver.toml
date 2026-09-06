@@ -1,19 +1,35 @@
 library = "libSceGnmDriver"
 
 [[function]]
-name = "sceGnmDispatchInitDefaultHardwareState"
-arity = 2
-purpose = "Writes the default hardware-state preamble into a compute command buffer."
-returns = "count"
-known_by = "assumed"
-found_on = "2026-09-01"
-note = "Answers how many dwords it wrote, so the guest advances its command pointer by that much."
-
-[[function]]
 name = "sceGnmDispatchDirect"
 arity = 6
 purpose = "Writes a direct compute dispatch (thread-group counts) into a command buffer as a PM4 type-3 packet."
 returns = "count"
+edge_cases = [
+    "Measured on hardware: obSCEne `165-gnm/dispatch-direct` reported pass, value 0x6. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Writes the documented five-dword `DISPATCH_DIRECT` packet for x by y by z thread groups and answers `0`, or a rejection when the buffer cannot hold it.",
+    "The flags argument is accepted and not modelled: nothing observed reads it back, and the dispatch it would modify is one this does not execute.",
+    "A console's own builder writes more around the packet - the surrounding hardware state - which is why the call requires a larger buffer than the packet alone. That state is not modelled, so the rest of the buffer is left as the guest prepared it rather than filled with an invented encoding.",
+]
+assumptions = [
+    "What the flags argument selects, and what the surrounding hardware state a console writes contains, is unestablished.",
+]
 known_by = "assumed"
 found_on = "2026-09-01"
 note = "The DISPATCH_DIRECT opcode with the three group dimensions; answers the dword count written."
+
+[[function]]
+name = "sceGnmDispatchInitDefaultHardwareState"
+arity = 2
+purpose = "Writes the default hardware-state preamble into a compute command buffer."
+returns = "count"
+edge_cases = [
+    "Measured on hardware: obSCEne `165-gnm/dispatch-init` reported pass, value 0x100. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Writes the default compute hardware state into the command buffer and answers the number of dwords it reserved, `0x100` - the size obSCEne records the call returning - or `0` when the buffer is too small.",
+]
+assumptions = [
+    "What the default state's contents are is unestablished. Only the size it reserves has been measured, so a guest that reads the buffer back rather than appending to it sees whatever was already there.",
+]
+known_by = "assumed"
+found_on = "2026-09-01"
+note = "Answers how many dwords it wrote, so the guest advances its command pointer by that much."

@@ -1,6 +1,30 @@
 library = "libkernel"
 
 [[function]]
+name = "_sigprocmask"
+arity = 3
+purpose = "Examines or changes the set of signals blocked from delivery."
+edge_cases = [
+    "Arity three from the run: how, a set and an out-set. PPSA02664 passes how = 1 with a NULL set, which is the query idiom - SIG_BLOCK with nothing to block is a pure read of the current mask (D562).",
+    "how is FreeBSD's and citable: SIG_BLOCK 1, SIG_UNBLOCK 2, SIG_SETMASK 3. A value outside those is refused rather than treated as one of them.",
+    "A sigset_t is sixteen bytes - four 32-bit words on a FreeBSD-derived system - not eight. Writing one word left three quarters of the set holding the guest's stack, which obSCEne caught in the set functions (D271).",
+]
+known_by = "guest-observed"
+assumptions = ["The mask is bookkeeping and nothing else: orbistoun delivers no signals, so blocking one changes no behaviour. A guest installing a handler will find it never runs."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
+
+[[function]]
+name = "getsockopt"
+arity = 5
+purpose = "Reads a socket option."
+returns = "status"
+partial = "Answers SO_ERROR and IP_TTL only. Every other option is refused by name rather than answered, because a value this layer cannot read has none to hand back and a caller acts on what it is given."
+known_by = "published"
+cites = "POSIX.1-2008 getsockopt(2)."
+found_on = "2026-09-02"
+
+[[function]]
 name = "posix_getpagesize"
 arity = 0
 purpose = "The guest's page size."
@@ -12,13 +36,27 @@ found_on = "2026-08-25"
 note = "Reads the platform constant rather than asking the host: a host with 16K pages still has to present 4K semantics."
 
 [[function]]
+name = "posix_pthread_barrier_init"
+arity = 3
+purpose = "the POSIX spelling, which takes no name."
+known_by = "published"
+cites = "POSIX"
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
 name = "posix_pthread_rwlock_destroy"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -26,9 +64,13 @@ name = "posix_pthread_rwlock_init"
 arity = 2
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -36,9 +78,13 @@ name = "posix_pthread_rwlock_rdlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -46,9 +92,13 @@ name = "posix_pthread_rwlock_tryrdlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -56,9 +106,13 @@ name = "posix_pthread_rwlock_trywrlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -66,9 +120,13 @@ name = "posix_pthread_rwlock_unlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -76,9 +134,13 @@ name = "posix_pthread_rwlock_wrlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -88,7 +150,7 @@ purpose = "Adds one signal to a set."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Same delivery caveat as posix_sigemptyset."]
+assumptions = ["Nothing here delivers signals, so a guest that builds a set and installs a handler will find the handler never runs."]
 found_on = "2026-08-25"
 
 [[function]]
@@ -98,7 +160,7 @@ purpose = "Removes one signal from a set."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Same delivery caveat as posix_sigemptyset."]
+assumptions = ["Nothing here delivers signals, so a guest that builds a set and installs a handler will find the handler never runs."]
 found_on = "2026-08-25"
 
 [[function]]
@@ -119,7 +181,7 @@ purpose = "Puts every signal in a set."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Same delivery caveat as posix_sigemptyset."]
+assumptions = ["Nothing here delivers signals, so a guest that builds a set and installs a handler will find the handler never runs."]
 found_on = "2026-08-25"
 
 [[function]]
@@ -129,7 +191,7 @@ purpose = "Whether a signal is in a set."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Same delivery caveat as posix_sigemptyset."]
+assumptions = ["Nothing here delivers signals, so a guest that builds a set and installs a handler will find the handler never runs."]
 found_on = "2026-08-25"
 note = "Another boolean that had to exist before the rest could be believed: unimplemented it answered an error code, which reads as yes, so a set that had just been emptied reported every signal still in it (D271)."
 
@@ -145,10 +207,28 @@ found_on = "2026-08-25"
 note = "Actually sleeps. Returning immediately would make a title's frame pacing run as fast as the host can loop, and a guest polling with a short sleep between attempts would spin."
 
 [[function]]
+name = "sceKernelAddUserEventEdge"
+arity = 2
+purpose = "Registers a user event, by identifier, against an event queue."
+edge_cases = [
+    "Arity 2: the third register holds 0x7fff0001, orbistoun's own placeholder left by an earlier stub, which is what fixes the count rather than a guess.",
+    'PPSA02664 registers identifiers 0x1 and 0x2 against the queue it named "flip equeu", both accepted once sceKernelCreateEqueue began writing its out-parameter.',
+    "A handle no queue answers is refused with the vendor ESRCH the event-flag family answers, not a placeholder: a registration accepted against a queue nobody created promises delivery from something that does not exist.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA02664"]
+found_on = "2026-09-03"
+
+[[function]]
 name = "sceKernelAllocateDirectMemory"
 arity = 6
 purpose = "Reserves a span of physical memory. The guest maps it into its address space separately - this is closer to a physical allocator the application drives than to malloc."
 returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `018-relational/direct-memory-round-trip` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x10000 in `data/hardware/ps5-full.txt`; reported pass, value 0x7fc000 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `018-relational/allocations-do-not-overlap` reported pass, value 0x4000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `020-memory/allocate` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x10000 in `data/hardware/ps5-full.txt`; reported pass, value 0x7fc000 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+]
 found_by = "generated"
 known_by = "guest-observed"
 assumptions = ["Arity and return kind are inferred from the name and its neighbours in the same family. No guest has exercised this entry far enough to establish either."]
@@ -204,6 +284,7 @@ name = "sceKernelAvailableFlexibleMemorySize"
 arity = 1
 purpose = "How much memory may be mapped without reserving physical pages first."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `020-memory/flexible-available` reported pass, value 0x1b400000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
@@ -219,17 +300,64 @@ purpose = "An event flag: a word of bits threads test and wait on."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = ["There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them."]
 found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelClockGettime"
+arity = 2
+purpose = "Reads a named clock into a two-field time structure."
+edge_cases = [
+    "Arity 2: PPSA02664 passes a clock identifier and a writable stack address, and the third and fourth registers hold the same leftover value - which is what fixes the count.",
+    "arg0 = 0 is CLOCK_REALTIME from the harvested table. The clock families, identifiers and monotonic origin are shared with POSIX clock_gettime through orbistoun-hle, so a monotonic clock read through either name answers one elapsed time.",
+    "Failure differs from the POSIX form as it does for stat and pread: this answers a 0x8002_00xx vendor code, never -1. EINVAL for a clock with no honest source - which errno the console answers is unmeasured.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA02664"]
+found_on = "2026-09-04"
+
+[[function]]
+name = "sceKernelConfiguredFlexibleMemorySize"
+arity = 1
+purpose = "The configured flexible-memory total, distinct from *available* (configured minus mapped): the ceiling, which does not move as the guest maps. Was unimplemented - obSCEne under orbistoun answered the placeholder and its 020-memory/flexible-configured check failed - and the value it must answer is now measured, 0x1c00_0000 ([direct::flexible_configured]), the system default since no title overrides it (D442, D444)."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "sceKernelCreateEqueue"
+arity = 2
+purpose = "Creates an event queue and writes its handle through the caller's out-parameter."
+edge_cases = [
+    'arg0 is a writable pointer the handle is written through, arg1 a caller-supplied name: PPSA02664 passes "eq to wait flip" and "flip equeu", naming the queue it then waits on for flip completion.',
+    "Unimplemented, the out-parameter is never written, so the caller's handle keeps whatever it held - zero - and every later sceKernelWaitEqueue is passed a null queue. Observed: 1,294,358 such calls in one run.",
+    "Arity is 2: the third register held 0x7fff0001, orbistoun's own placeholder left by an earlier stub call, not an argument.",
+]
+known_by = "guest-observed"
+found_in = [
+    "PPSA02664-app0",
+    "PPSA02664",
+]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceKernelCreateEventFlag"
 arity = 5
 purpose = "An event flag: a word of bits threads test and wait on."
 returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `018-relational/event-flag-handles-distinct` reported pass, value 0x8. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `018-relational/event-flag-handles-reusable` reported pass, value 0x6. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "The attribute word and the fifth argument are not modelled: `sync::create_event_flag` takes only the initial bits and the name.",
+]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them.",
+    "What the attribute word and the fifth argument select is unestablished.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -240,6 +368,7 @@ edge_cases = [
     "Its name could not be generated - the vocabulary held 'Semaphore' and the vendor wrote 'Sema' - and was read as a literal string out of a completely different title's data, then confirmed by hash.",
     "The out-parameter is an int, not a pointer-width word. A mutex handle is a void* and a semaphore handle is an int; writing a full word through it puts four bytes into whatever the guest keeps next door.",
     "Argument 1 is a name string, not the initial count. Reading it as a count shifts every later argument by one position, which presents as counts that are wrong with nothing noticing.",
+    "Measured on hardware: obSCEne `018-relational/handle-fits-its-out-parameter` reported fail, value 0x0 - the call wrote past the end of the int it was given. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 known_by = "published"
 cites = "obSCEne platform.h, marked OBS_FROM_SPEC - public interface documentation; obSCEne D154"
@@ -260,7 +389,7 @@ purpose = "An event flag: a word of bits threads test and wait on."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = ["There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them."]
 found_on = "2026-08-25"
 
 [[function]]
@@ -270,7 +399,10 @@ purpose = "A counting semaphore."
 returns = "status"
 found_by = "static"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them.",
+    "A bad handle answers this project's placeholder (`0x7fff_0003`) here, while the event-flag family answers the ESRCH obSCEne measured (`0x80020003`). Whether the semaphore family fails the same way is unestablished - the measurement covers only event flags.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -296,6 +428,11 @@ edge_cases = [
     "A contiguous map cannot distinguish 'end' from 'start + size' in the second field, because each region begins where the last ended - so the guest feeding back the previous end produces identical offsets under either layout. That question is still open and needs a map with a gap in it, not a map with more regions.",
     "Field 1 is the walk cursor and nothing else, confirmed by design rather than by accident: writing self-identifying values into the three fields (ORBISTOUN_MARK_QUERY) showed the guest feeding back 0xbbbb000200000000 - the dye for field 1 carrying the real end in its low bits - as its very next query offset (D219).",
     "The guest does NOT validate what it reads. It accepted 0xbbbb000200000000 as a physical offset without complaint and queried it. So whatever makes it reject the map, it is not a sanity check on the values in this structure.",
+    "Measured on hardware: obSCEne `130-layout/direct-memory-query` reported pass, value 0x18. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `130-layout/direct-memory-query-flags` reported pass, value 0x0. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `130-layout/query-size-ladder` reported partial - every size was accepted, so the size argument is not validated. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `150-memory-map/walk` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x1 in `data/hardware/ps5-full.txt`; reported pass, value 0x2 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `150-memory-map/after-allocation` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x2 in `data/hardware/ps5-full.txt`; reported pass, value 0x3 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
 ]
 answerable_by = [
     "map-shape",
@@ -346,6 +483,10 @@ edge_cases = [
     "The answer is the same stub the linker resolves an import to, so a function reached by name and the same function reached by an import are one address with one counter and one trace entry. A resolver that built its own answers would have made a call behave differently depending on which route found it (D366).",
     "A name nothing implements is a failure with no write. Answering an address for a name this cannot serve hands the guest something to call that is not what it asked for, and inventing success is what stops the caller checking.",
     "The module handle is ignored. A name is library-independent here for the same reason a NID is - the hash is of the name alone - so a guest asking two modules for one name gets one answer.",
+    "Measured on hardware: obSCEne `060-module/dlsym-rejects-bad-handle` reported pass, value 0x80020003. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `110-modules/symbol` reported partial, value 0xffffffff80020003 - a module loaded but would not resolve a symbol. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `140-oracle/resolve-by-name` reported skip - nothing resolves by name, including a symbol known to be present. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `140-oracle/resolve-census` reported skip - the oracle does not answer, so there is nothing to walk. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 known_by = "guest-observed"
 assumptions = [
@@ -366,12 +507,19 @@ returns = "count"
 edge_cases = [
     "MEASURED: a target console answered 0x140000000 - five gibibytes. This project had assumed eight, and the value is not a power of two, so it was never going to be reached by guessing.",
     "A guest reads this before walking the map, and sizes the walk against it - so it must agree with what the query reports or the walk runs past the end.",
+    "Measured on hardware: obSCEne `020-memory/direct-size` reported pass, value 0x140000000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "measured"
 cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceKernelGetGPI"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 2 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceKernelGetModuleInfo"
@@ -383,6 +531,8 @@ edge_cases = [
     "Answers a negative status rather than this project's Unimplemented placeholder. The placeholder is deliberately positive so it can never be confused with a firmware value, which for a status makes it read as success with a small code - the conformance probe reported that number straight back (D395).",
     "sceKernelGetModuleList already answers honestly, and the handle and name are already held; the only missing thing is the structure's shape, which is a measurement rather than a reasoning problem.",
     "MEASURED: refuses handle 0x0 with EINVAL (0x80020016) regardless of declared size 256..1024 - so the earlier layout probe failed on the null handle, not the layout, which remains unmeasured",
+    "Measured on hardware: obSCEne `110-modules/names` reported fail, value 0x80020016 - the platform would not describe any module. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `110-modules/info-size` reported fail, value 0x80020016 - no size was accepted. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "static"
 known_by = "guest-observed"
@@ -402,6 +552,8 @@ returns = "status"
 edge_cases = [
     "MEASURED: a 12.40 console returned 32 handles: 0x0, 0x2001, 0x2, 0x11, 0x13, 0x14, 0x15, 0x16, 0x25, 0x26, 0x27 and up - app modules get small integers, libkernel is 0x2001, and the list begins with 0x0",
     "MEASURED: 0x2001 is a live module handle, confirming it as libkernel's - LoadStartModule(libkernel) also returns 0x2001. This is the value elfldr/pldmgr fall back to (D400)",
+    "Measured on hardware: obSCEne `110-modules/list` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x1f in `data/hardware/ps5-full.txt`; reported pass, value 0x20 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `110-modules/handles` reported pass, value 0x20. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
@@ -417,7 +569,12 @@ name = "sceKernelGetProcessTime"
 arity = 0
 purpose = "Microseconds elapsed since the process began."
 returns = "count"
-edge_cases = ["MEASURED: the unit is microseconds. A target console was asked to sleep 0x4e20 microseconds and this clock advanced 0x4fbb over the same interval - a match no other unit produces. It was previously inferred from the name's family, and the probe's own monotonic check would have passed just as happily on a wrong unit."]
+edge_cases = [
+    "MEASURED: the unit is microseconds. A target console was asked to sleep 0x4e20 microseconds and this clock advanced 0x4fbb over the same interval - a match no other unit produces. It was previously inferred from the name's family, and the probe's own monotonic check would have passed just as happily on a wrong unit.",
+    "Measured on hardware: obSCEne `010-kernel/process-time` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0xc3 in `data/hardware/ps5-full.txt`; reported pass, value 0x83 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `018-relational/clock-never-goes-backwards` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x105c2b in `data/hardware/ps5-full.txt`; reported pass, value 0x102465 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `120-measure/clocks-advance` reported pass, value 0x3. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+]
 found_by = "generated"
 known_by = "guest-observed"
 cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
@@ -432,6 +589,7 @@ purpose = "Elapsed time since the process began, counted in the target's own tic
 edge_cases = [
     "Runs at the rate sceKernelGetProcessTimeCounterFrequency reports, which a target console gave as 0x5f259b8e",
     "Measured from process start, so two runs of one title stay comparable",
+    "Measured on hardware: obSCEne `010-kernel/process-time-counter` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x469883c2 in `data/hardware/ps5-full.txt`; reported pass, value 0x4586cd13 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
 ]
 known_by = "measured"
 cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30, section 120-measure"
@@ -448,15 +606,41 @@ cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30, 
 found_on = "2026-08-30"
 
 [[function]]
+name = "sceKernelGetSystemSwVersion"
+arity = 1
+purpose = "The system software version, written into the caller's struct."
+returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `130-layout/system-software-version` reported pass, value 0x28. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "The structure is `{ size_t size; char version_string[0x1c]; uint32_t version; }`, 0x28 bytes. Only the 0x20 bytes from offset 8 are written - the caller's size word is left alone.",
+    "The number reported is not the system firmware. obSCEne measured `13.090.001`, packed `0x1309_0001`, the same across three module runs, while the same console's banner says 12.40 (D420). Wiring this to the firmware would answer 12.40, which hardware refutes.",
+    "Read from the configured machine profile rather than a constant; an unset value refuses the call rather than inventing a version.",
+]
+known_by = "assumed"
+assumptions = ["Whether the packed version word and the version string can disagree, and what the string's format is beyond the one measured value, is unestablished."]
+found_on = "2026-09-01"
+note = "Reads the presented machine's software_version; refuses with the no-entry errno when the machine states none rather than fabricating one."
+
+[[function]]
 name = "sceKernelGetTscFrequency"
 arity = 0
 purpose = "Ticks per second of the time stamp counter."
 returns = "status"
-edge_cases = ["MEASURED: a target console answered 0x5f259b8e. It gave the same value to sceKernelGetProcessTimeCounterFrequency in the same run, so the two counters share one rate rather than merely being modelled that way here."]
+edge_cases = [
+    "MEASURED: a target console answered 0x5f259b8e. It gave the same value to sceKernelGetProcessTimeCounterFrequency in the same run, so the two counters share one rate rather than merely being modelled that way here.",
+    "Measured on hardware: obSCEne `010-kernel/tsc-frequency` reported pass, value 0x5f259b8e. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `120-measure/frequencies` reported pass, value 0x2. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+]
 found_by = "generated"
 known_by = "measured"
 cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
 found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelGettimeofday"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 3 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceKernelIsCex"
@@ -500,7 +684,10 @@ name = "sceKernelIsNeoMode"
 arity = 0
 purpose = "Whether this is the more capable hardware revision."
 returns = "count"
-edge_cases = ["A boolean, and unimplemented it answered the placeholder - non-zero, therefore true, therefore a guest believing it is on hardware it is not. The same shape as the devkit family and found the same way (D393)."]
+edge_cases = [
+    "A boolean, and unimplemented it answered the placeholder - non-zero, therefore true, therefore a guest believing it is on hardware it is not. The same shape as the devkit family and found the same way (D393).",
+    "Measured on hardware: obSCEne `005-generation/neo-mode` reported pass, value 0x1. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+]
 found_by = "static"
 known_by = "guest-observed"
 assumptions = ["Answered false. orbistoun presents one machine and this is the half of it that says which; nothing here is measured against either revision."]
@@ -512,6 +699,7 @@ name = "sceKernelIsStack"
 arity = 1
 purpose = "Whether an address lies in the calling thread's stack."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `010-kernel/is-stack` reported fail, value 0x0 - a stack address and a static one were reported alike. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = ["Answered from the span the worker actually mapped, and false when nothing has told it. A wrong yes is worse than a refusal: a guest told a static is stack memory may free it."]
@@ -535,8 +723,15 @@ name = "sceKernelLoadStartModule"
 arity = 6
 purpose = "Loads a module and runs its entry point."
 returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `060-module/load-rejects-missing` reported pass, value 0x80020002. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `110-modules/load` reported pass, value 0x3. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `060-module/runtime-load-binds-imports` reported skip - this platform linked the library already, so there is no outstanding import to repair. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `061-imports/unbound-are-absent` reported partial, value 0x4 - some libraries were not asked about, because loading them ends the process on this platform. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "**The out-parameter is not written on a refused load.** obSCEne poisoned the sixth argument with 0xC7C7C7C7 and called this down twenty-four firmware search paths; every one answered 0x80020002 and left the poison intact. The earlier capture initialised that field to zero and read zero back, which measured the probe rather than the platform (orbistoun's decision 497) - the poison is what made untouched a visible answer.",
+]
 found_by = "generated"
-known_by = "assumed"
+known_by = "guest-observed"
 assumptions = [
     "Refused, always. orbistoun places one executable at load and has no way to bring another in afterwards, so this fails even for a module that really exists - answering a handle would tell a guest a library it is about to call is present.",
     "Negative on failure, because the success answer is a module handle and a small positive placeholder is exactly what a handle looks like.",
@@ -548,6 +743,7 @@ name = "sceKernelMapDirectMemory"
 arity = 6
 purpose = "Maps reserved physical memory into the guest's virtual address space."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `020-memory/map` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x200374000 in `data/hardware/ps5-full.txt`; reported pass, value 0x200b64000 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = ["Arity and return kind are inferred from the name and its neighbours in the same family. No guest has exercised this entry far enough to establish either."]
@@ -558,6 +754,7 @@ name = "sceKernelMapFlexibleMemory"
 arity = 4
 purpose = "Allocates from the pool and maps it in one step."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `020-memory/flexible-round-trip` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x200374000 in `data/hardware/ps5-full.txt`; reported pass, value 0x200b64000 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = ["Semantics are inferred from the name and its neighbours in the same family; nothing on the target has confirmed them."]
@@ -622,6 +819,16 @@ kind = "usize"
 note = "zero means no preference"
 
 [[function]]
+name = "sceKernelMmap"
+arity = 6
+purpose = "Maps pages of memory into the guest address space."
+returns = "pointer"
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Semantics follow POSIX mmap(2) and FreeBSD SYS_mmap 477. An allocation allocates from the guest address space pool."]
+found_on = "2026-08-31"
+
+[[function]]
 name = "sceKernelMprotect"
 arity = 3
 purpose = "Changes the protection of a mapped range. Declared, not implemented."
@@ -638,6 +845,7 @@ name = "sceKernelMunmap"
 arity = 2
 purpose = "Unmaps a span from the guest address space."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `020-memory/unmap-rejects-null` reported pass, value 0x80020016. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
 found_by = "static"
 known_by = "assumed"
 assumptions = [
@@ -647,25 +855,20 @@ assumptions = [
 found_on = "2026-08-25"
 
 [[function]]
-name = "sceKernelMmap"
-arity = 6
-purpose = "Maps pages of memory into the guest address space."
-returns = "pointer"
-found_by = "static"
-known_by = "assumed"
-assumptions = [
-    "Semantics follow POSIX mmap(2) and FreeBSD SYS_mmap 477. An allocation allocates from the guest address space pool.",
-]
-found_on = "2026-08-31"
-
-[[function]]
 name = "sceKernelPollEventFlag"
 arity = 5
 purpose = "An event flag: a word of bits threads test and wait on."
 returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `015-sync/event-flag-rejects-bad-handle` reported pass, value 0x80020003. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Only bit 0 of the mode word is modelled - it means every bit of the pattern must be present. Every other bit is ignored.",
+]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them.",
+    "What the mode word's remaining bits select - an any-of match, clearing the pattern on success, a wake ordering - is unestablished.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -673,9 +876,14 @@ name = "sceKernelPollSema"
 arity = 2
 purpose = "A counting semaphore."
 returns = "status"
+edge_cases = ["The `need` count is not modelled: this takes one unit or answers busy."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them.",
+    "A bad handle answers this project's placeholder (`0x7fff_0003`) here, while the event-flag family answers the ESRCH obSCEne measured (`0x80020003`). Whether the semaphore family fails the same way is unestablished - the measurement covers only event flags.",
+    "What a `need` above one asks for is unestablished.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -686,6 +894,7 @@ returns = "status"
 edge_cases = [
     "MEASURED: the counter runs at 0x5f259b8e ticks a second, read back from a target console. The same run cross-checked it without meaning to - a 20000us sleep advanced the counter 0x1f12cd9 ticks while the microsecond clock advanced 0x4fbb, which is 1.5963 GHz by a second route. This retires the nominal billion the arithmetic used to be built on.",
     "It must advance: a stub answering a constant makes every elapsed measurement zero, which reads as a sleep that returned instantly - which is exactly what the probe reported before this existed.",
+    "Measured on hardware: obSCEne `120-measure/identify-clocks` reported pass, value 0x3. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "measured"
@@ -755,17 +964,30 @@ purpose = "An event flag: a word of bits threads test and wait on."
 returns = "status"
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = ["There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them."]
 found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelSetVirtualRangeName"
+arity = 3
+purpose = "attaches a debug name to a virtual range."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
 name = "sceKernelSignalSema"
 arity = 2
 purpose = "A counting semaphore."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `018-relational/semaphore-state-is-per-object` reported skip - the handle does not fit its out-parameter on this platform, so it cannot be used through one; see 018-relational/handle-fits-its-out-parameter. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
 found_by = "static"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them.",
+    "A bad handle answers this project's placeholder (`0x7fff_0003`) here, while the event-flag family answers the ESRCH obSCEne measured (`0x80020003`). Whether the semaphore family fails the same way is unestablished - the measurement covers only event flags.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -773,6 +995,7 @@ name = "sceKernelUsleep"
 arity = 1
 purpose = "Sleeps for a number of microseconds."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `050-time/usleep` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0xbb6 in `data/hardware/ps5-full.txt`; reported pass, value 0xa75 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = ["Behaviour follows the POSIX analogue; nothing on the target has confirmed it."]
@@ -780,13 +1003,70 @@ found_on = "2026-08-25"
 note = "The vendor spelling of the same call."
 
 [[function]]
+name = "sceKernelUuidCreate"
+arity = 1
+purpose = "Writes a 128-bit unique identifier into the caller's buffer."
+edge_cases = ["Arity one from the run: the destination, a 32-byte zeroed block in the guest's image. The registers after it hold high-entropy leftovers, not arguments (D562)."]
+known_by = "guest-observed"
+assumptions = [
+    "Deterministic - a counter, not a random value. Reproducibility wins here because the only progress measure this project has is whether one run reached further than the last, and an identifier that changed every run would be a difference between two traces that meant nothing (the D256 argument for process time).",
+    "The version and variant bits are set so it is a well-formed version-4 UUID. Nothing measured says the console produces version 4; it is the shape a reader that checks would expect.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceKernelVirtualQuery"
+arity = 4
+purpose = "Describes the mapping that holds an address, so a guest can bound it before placing something."
+returns = "status"
+edge_cases = [
+    "Stubbed, it answered a placeholder and the guest read a mapping that was not there, computing a bad address and writing through it - the D125 shape, and the wall past sceKernelReserveVirtualRange for the titles measured.",
+    "Answers where the containing region starts and ends, at offsets 0 and 8. The rest of SceKernelVirtualQueryInfo - a protection, a type, a name - is left as the caller prepared it, exactly as sceVideoOutGetResolutionStatus writes only the fields it can cite.",
+    "An address in no region is answered with the code the console answers for one, not a fabricated mapping.",
+]
+known_by = "assumed"
+assumptions = ["That the start and end are the first two fields, at offsets 0 and 8. The remaining layout of SceKernelVirtualQueryInfo has no lawful source here, which is why nothing past them is written."]
+found_on = "2026-09-01"
+note = "Finds the region containing the queried address in the same address space mmap and the reservation use, writing start and end (offsets 0 and 8). An address in no region gets the console's not-found code."
+
+[[function]]
+name = "sceKernelWaitEqueue"
+arity = 5
+purpose = "Waits for events on an event queue and reports how many it delivered."
+edge_cases = [
+    "arg0 the queue, arg1 an output array of event structures, arg2 how many are wanted (PPSA02664 passes 1), arg3 an out-count, arg4 a microsecond timeout pointer - NULL in every observed call, which is an indefinite wait.",
+    "PPSA02664 calls it 1,177 times in one run against a queue nothing delivers to, after submitting a flip and registering a flip event that nothing records.",
+]
+known_by = "guest-observed"
+assumptions = ["**Delivery is implemented now, from a published layout rather than a measured one.** `sceKernelWaitEqueue` is `kevent(2)` and the target kernel is FreeBSD-derived, so `struct kevent` is the citable reference: ident at +0x00, filter +0x08, flags +0x0a, fflags +0x0c, data +0x10, udata +0x18. **The size is the open question** - FreeBSD 12 appends `uint64_t ext[4]`, taking it from 0x20 to 0x40, and every offset above is common to both, so a guest reading only these six fields cannot tell them apart. Delivering flip completions took the call count from 839 to 605 in an honest run and from 12,924 to 1,127 past the shader wall, which says the guest accepts what it is given and stops re-asking; it does not say the structure is right (D560)."]
+found_in = ["PPSA02664"]
+found_on = "2026-09-03"
+
+[[function]]
+name = "sceKernelWaitEventFlag"
+arity = 5
+purpose = "The blocking counterpart of PollEventFlag: parks the calling thread until the flag's bits match the pattern (AND all bits, or OR any bit), clearing on success as the mode asks, then writes the pattern found."
+returns = "status"
+known_by = "assumed"
+assumptions = ["Semantics follow the standard event-flag wait. The mode bits (AND 0x01, CLEAR_ALL 0x10, CLEAR_PAT 0x20) are the documented SCE values but unconfirmed on this target, and ETIMEDOUT (60) for a timed-out wait is the published FreeBSD errno rather than a measured code - the observed guest waits indefinitely, so that path is unexercised."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-09-02"
+
+[[function]]
 name = "sceKernelWaitSema"
 arity = 3
 purpose = "A counting semaphore."
 returns = "status"
+edge_cases = ["The `need` count and the timeout are not modelled: `sync::semaphore_wait` takes one unit and blocks indefinitely, so a guest asking for three units with a deadline gets neither."]
 found_by = "static"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "There is no POSIX function of this name: the semantics are inferred from the name, the argument shape and the rest of the family, not from a standard. Nothing on the target has confirmed them.",
+    "A bad handle answers this project's placeholder (`0x7fff_0003`) here, while the event-flag family answers the ESRCH obSCEne measured (`0x80020003`). Whether the semaphore family fails the same way is unestablished - the measurement covers only event flags.",
+    "What a `need` above one asks for, and what the third argument does - its unit, and whether a zero means poll rather than wait - is unestablished.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -797,7 +1077,7 @@ returns = "status"
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
     "The block is leaked rather than freed, as every handle here is: a guest that destroys and then uses one gets a stale object rather than a fault into freed memory.",
 ]
@@ -808,12 +1088,12 @@ name = "scePthreadAttrGetdetachstate"
 arity = 2
 purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
 returns = "status"
+edge_cases = ["The out-parameter is a four-byte int. Writing a whole word through it would take the caller's neighbouring variable with it (D272)."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
-    "The out-parameter is a four-byte int. Writing a whole word through it would take the caller's neighbouring variable with it (D272).",
 ]
 found_on = "2026-08-25"
 
@@ -822,12 +1102,12 @@ name = "scePthreadAttrGetschedparam"
 arity = 2
 purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
 returns = "status"
+edge_cases = ["The out-parameter is a four-byte int. Writing a whole word through it would take the caller's neighbouring variable with it (D272)."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
-    "The out-parameter is a four-byte int. Writing a whole word through it would take the caller's neighbouring variable with it (D272).",
 ]
 found_on = "2026-08-25"
 
@@ -839,7 +1119,7 @@ returns = "status"
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
 ]
 found_on = "2026-08-25"
@@ -849,13 +1129,24 @@ name = "scePthreadAttrInit"
 arity = 1
 purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
 returns = "status"
+edge_cases = ["Measured on hardware: obSCEne `010-kernel/thread-attributes` reported pass, value 0x1. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
 ]
 found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrSetaffinity"
+arity = 2
+purpose = "The mask is stored, not applied. Which host core a guest thread runs on is the host scheduler's to decide, and orbistoun does not pin guest threads; a guest reading the attribute back still gets what it set, which is all the setter's own contract promises."
+edge_cases = ["The mask is stored, not applied. Which host core a guest thread runs on is the host scheduler's to decide, and orbistoun does not pin guest threads; a guest reading the attribute back still gets what it set, which is all the setter's own contract promises."]
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
 name = "scePthreadAttrSetdetachstate"
@@ -865,10 +1156,28 @@ returns = "status"
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
 ]
 found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrSetguardsize"
+arity = 2
+purpose = "stored, so a later get reads it back."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "scePthreadAttrSetinheritsched"
+arity = 2
+purpose = "stored, so a later get reads it back."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
 name = "scePthreadAttrSetschedparam"
@@ -878,10 +1187,19 @@ returns = "status"
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
 ]
 found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrSetschedpolicy"
+arity = 2
+purpose = "stored, so a later get reads it back."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
 name = "scePthreadAttrSetstacksize"
@@ -891,7 +1209,7 @@ returns = "status"
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name; nothing on the target has confirmed them.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
 ]
 found_on = "2026-08-25"
@@ -901,9 +1219,13 @@ name = "scePthreadBarrierDestroy"
 arity = 1
 purpose = "A barrier that releases once the expected number of threads have arrived."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -911,9 +1233,13 @@ name = "scePthreadBarrierInit"
 arity = 4
 purpose = "A barrier that releases once the expected number of threads have arrived."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -921,9 +1247,13 @@ name = "scePthreadBarrierWait"
 arity = 1
 purpose = "A barrier that releases once the expected number of threads have arrived."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -931,9 +1261,13 @@ name = "scePthreadCondBroadcast"
 arity = 1
 purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -941,9 +1275,13 @@ name = "scePthreadCondDestroy"
 arity = 1
 purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -951,9 +1289,16 @@ name = "scePthreadCondInit"
 arity = 3
 purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
 returns = "status"
+edge_cases = [
+    "Measured on hardware: obSCEne `015-sync/condvar-handles-distinct` reported pass, value 0x6. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls.",
+]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -961,9 +1306,13 @@ name = "scePthreadCondSignal"
 arity = 1
 purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -971,10 +1320,33 @@ name = "scePthreadCondWait"
 arity = 2
 purpose = "A condition variable. The wait releases the guest mutex around it and retakes it after, which is not atomic here - the two are independent objects in this crate, so a signal arriving in the gap is lost where on the platform it would not be."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadCondattrDestroy"
+arity = 1
+purpose = "Releases a condition-variable attribute object."
+edge_cases = ["Accepted, the same shape as scePthreadMutexattrDestroy beside it. A condattr holds a clock and a pshared flag and nothing observed sets either, so there is nothing to tear down (D561)."]
+known_by = "guest-observed"
+assumptions = ["The block is never freed, by this family's own convention: a guest holding a stale attribute then reads zeroes rather than freed memory."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
+
+[[function]]
+name = "scePthreadCondattrInit"
+arity = 1
+purpose = "allocates a condition-variable attribute object."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-09-02"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
 name = "scePthreadCreate"
@@ -994,6 +1366,8 @@ edge_cases = [
     "Because of that, a guest asking for a non-default stack size silently gets the default. If a title overruns, this is the first thing to suspect.",
     "Each thread gets its own stack, spaced further apart than a stack is tall - packed adjacently, an overrun lands in a neighbour and reads as memory corruption rather than as a stack overflow.",
     "A spawn failure is reported rather than swallowed. A guest told its thread started when it did not will wait forever on something that cannot happen, and the hang gets attributed to whatever it was waiting for.",
+    "Measured on hardware: obSCEne `015-sync/thread-churn` reported pass, value 0x28. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `018-relational/thread-identities-differ` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x880002c20 in `data/hardware/ps5-full.txt`; reported pass, value 0x880004c60 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
@@ -1028,6 +1402,46 @@ note = "passed through unexamined into the first argument register"
 name = "name"
 kind = "cstr"
 note = "thread name; cosmetic, read bounded to 64 bytes"
+
+[[function]]
+name = "scePthreadGetaffinity"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "scePthreadGetschedparam"
+arity = 3
+purpose = "Reads back a running thread's scheduling policy and priority."
+edge_cases = [
+    "Two out-parameters, both writable stack addresses four bytes apart: PPSA02664 passes 0x6000007fc88c and 0x6000007fc888 across 32 calls, so each is a four-byte field. arg3 onward are leftovers, which is what fixes the arity at 3.",
+    "NOT implemented deliberately: orbistoun keeps no per-thread scheduling record, so any policy or priority written back would be invented. The attribute form stores what a caller set and can answer honestly; the thread form has nothing to answer from.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA02664"]
+found_on = "2026-09-03"
+
+[[function]]
+name = "scePthreadGetthreadid"
+arity = 0
+purpose = """
+The calling thread's unique integer id (FreeBSD pthread_getthreadid_np).
+
+Answers the same registry handle scePthreadSelf does - a per-thread value unique and stable
+for the thread's life. Distinct in type from the ScePthread handle but serving the same
+identity question, and this HLE does not model a separate LWP-id namespace. The caller is
+adopted so the process's first thread, which runs guest code without ever being created, gets
+a real id rather than zero.
+"""
+returns = "count"
+edge_cases = [
+    "Called 22.5k times in one PPSA21564 boot. Unimplemented it answered the placeholder 0x7FFF0001, so every thread reported one shared id - which a guest keying anything on thread identity reads as a single thread.",
+    "Returns the same value as scePthreadSelf. That is deliberate (both uniquely identify the thread and the handle is a safe zeroed-block address if dereferenced, per D151); a guest expecting the two namespaces to differ is not modelled.",
+]
+known_by = "assumed"
+assumptions = ["Modelled on FreeBSD pthread_getthreadid_np: no arguments, a per-thread integer id. The correspondence is inferred from the name; the exact id namespace and width are not verified against the target library."]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-01"
 
 [[function]]
 name = "scePthreadJoin"
@@ -1073,9 +1487,11 @@ name = "scePthreadMutexInit"
 arity = 3
 purpose = "Creates a lock and writes its handle into the location the guest supplies."
 returns = "status"
+partial = "The attribute block is not parsed, so the recursion mode is the default rather than whatever the guest asked for. The first thing to suspect if a title deadlocks on a lock it takes twice."
 edge_cases = [
     "The attribute block is not parsed, for the same reason as thread creation - so the recursion mode is always the default (non-recursive). A title that deadlocks on a lock it takes twice is the symptom, and this is the cause.",
     "A host `Mutex` cannot be used directly: its guard's lifetime is the critical section, and the guest locks in one call and unlocks in another with arbitrary guest code in between. There is no host frame to hold a guard in.",
+    "Measured on hardware: obSCEne `018-relational/mutex-handles-distinct` reported pass, value 0x6. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
@@ -1132,6 +1548,7 @@ returns = "status"
 edge_cases = [
     "MEASURED: taking a lock the caller already holds returns 0x80020010 - the busy errno under the vendor encoding. This was a placeholder chosen only to differ from success.",
     "MEASURED: the answer depends on the mutex type. A target console returned success for type 2, which re-acquires, the busy code for types 1 and 3, and the invalid-argument code for type 4. So a guest that sets a type and then re-locks is branching on something this project has to model, not a detail.",
+    "Measured on hardware: obSCEne `018-relational/mutex-excludes-another-thread` reported pass, value 0x80020010. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "measured"
@@ -1147,14 +1564,15 @@ returns = "status"
 edge_cases = [
     "Releasing a lock the caller does not hold is refused rather than performed. Performing it would let two guest threads into the same critical section, and the corruption that followed would be attributed to whatever they were protecting rather than to here.",
     "A recursive lock counts its acquisitions, so an unlock at depth two leaves it held. Releasing on the first unlock would let another thread in while the owner still believed it was inside.",
+    "Measured on hardware: obSCEne `015-sync/mutex-unlock-unheld` reported pass, value 0xffffffff80020001. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Unlocking a mutex nobody holds answers 0x80020001, and a target console returned it. Before that it was a hypothesis resting on one value from an emulator, which could itself have been inferring the same rule and so was evidence of nothing.",
+    "The vendor encoding `0x8002_0000 | errno` is established, not a structure worth testing for: D398 provoked seven failures across five unrelated call families on a target console and every one came back in that shape. This entry's own code is one of them.",
 ]
 found_by = "generated"
-known_by = "assumed"
+known_by = "guest-observed"
 assumptions = [
     "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
     "The vendor arities differ from POSIX where a name argument is present, so the analogy cannot be relied on for the signature even where it holds for the shape.",
-    "CONFIRMED ON HARDWARE: unlocking a mutex nobody holds returns 0x80020001. This was previously a hypothesis resting on one value from an emulator that could itself have been inferring it; a target console has now returned the same code.",
-    "Vendor error codes appear to be 0x8002_0000 | errno. Same provenance as above, and the same caveat: it is a structure worth testing for, not an established encoding.",
 ]
 found_on = "2026-08-20"
 note = "This is the finding that validates GuestError's placeholder rule: real vendor codes have the high bit set, and our placeholders deliberately avoid it, so the two can never be confused. See obSCEne D154 via the bridge."
@@ -1174,7 +1592,7 @@ edge_cases = [
 known_by = "guest-observed"
 assumptions = [
     "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
-    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
 ]
 found_in = [
     "PPSA02664-app0",
@@ -1187,11 +1605,15 @@ name = "scePthreadMutexattrGetprotocol"
 arity = 2
 purpose = "A mutex attribute object. The argument is a pointer to a pointer: the guest declares one as NULL and passes its address, so init allocates and hands back the address."
 returns = "status"
+edge_cases = [
+    "The out-parameter is a four-byte int. Writing a whole word through it overwrote the caller's neighbouring variable - which was a loop counter, so the check ran until the call budget stopped it (D272).",
+    "The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls.",
+]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values.",
-    "The out-parameter is a four-byte int. Writing a whole word through it overwrote the caller's neighbouring variable - which was a loop counter, so the check ran until the call budget stopped it (D272).",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
 ]
 found_on = "2026-08-25"
 
@@ -1200,11 +1622,15 @@ name = "scePthreadMutexattrGettype"
 arity = 2
 purpose = "A mutex attribute object. The argument is a pointer to a pointer: the guest declares one as NULL and passes its address, so init allocates and hands back the address."
 returns = "status"
+edge_cases = [
+    "The out-parameter is a four-byte int. Writing a whole word through it overwrote the caller's neighbouring variable - which was a loop counter, so the check ran until the call budget stopped it (D272).",
+    "The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls.",
+]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values.",
-    "The out-parameter is a four-byte int. Writing a whole word through it overwrote the caller's neighbouring variable - which was a loop counter, so the check ran until the call budget stopped it (D272).",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
 ]
 found_on = "2026-08-25"
 
@@ -1218,7 +1644,7 @@ edge_cases = [
 known_by = "guest-observed"
 assumptions = [
     "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
-    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
 ]
 found_in = [
     "PPSA02664-app0",
@@ -1236,7 +1662,7 @@ edge_cases = [
 known_by = "guest-observed"
 assumptions = [
     "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
-    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
 ]
 found_in = [
     "PPSA02664-app0",
@@ -1250,11 +1676,13 @@ purpose = "Builds or tears down a mutex attribute object. Our mutexes are Condva
 edge_cases = [
     "Named by the guest itself: two titles print this name, with the source file and line, once printf exists to carry the message. The hash then confirms it independently (D187).",
     "Returning the unimplemented placeholder made two titles abort during static initialisation. Accepting and reporting success is the whole of the work.",
+    "Measured on hardware: obSCEne `015-sync/mutexattr-round-trip` reported pass, value 0x4. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `015-sync/mutex-recursion` reported pass, value 0x1. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 known_by = "guest-observed"
 assumptions = [
     "Nothing is written to the attribute object. This is the D171 shape - an out-parameter left untouched - and holds only while nothing reads the attribute back. A Get counterpart would read whatever the stack held, with no trace signature.",
-    "Modelled on the POSIX call of the same shape; the correspondence is inferred from the name and the guest's usage, never verified against the target library.",
+    "Modelled on the POSIX call of the same shape. The correspondence is inferred from the name and the guest's usage, never verified against the target library.",
 ]
 found_in = [
     "PPSA02664-app0",
@@ -1263,13 +1691,30 @@ found_in = [
 found_on = "2026-08-22"
 
 [[function]]
+name = "scePthreadRename"
+arity = 2
+purpose = "Renames a thread, for a debugger or a log to read."
+edge_cases = [
+    "Arity two from the run: a thread handle and a pointer to a name. PPSA02664 renames one thread (D561).",
+    "Worth more than its one call: the name is what a trace shows in place of a handle, so a title renaming a thread is saying what that thread is for - the same value the event-queue names had (D522, D524).",
+]
+known_by = "guest-observed"
+assumptions = ["The name is read as a NUL-terminated string, bounded, the same way every other name in this family is read."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
+
+[[function]]
 name = "scePthreadRwlockDestroy"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -1277,9 +1722,13 @@ name = "scePthreadRwlockInit"
 arity = 3
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -1287,9 +1736,13 @@ name = "scePthreadRwlockRdlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -1297,9 +1750,13 @@ name = "scePthreadRwlockTryrdlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -1307,9 +1764,13 @@ name = "scePthreadRwlockTrywrlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -1317,11 +1778,13 @@ name = "scePthreadRwlockUnlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
 assumptions = [
-    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values.",
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
     "The unlock call is not told whether the lock was held for reading or writing, so a writer release is inferred from the writer flag. A guest that unlocks without holding it is reported rather than ignored.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
 ]
 found_on = "2026-08-25"
 
@@ -1330,9 +1793,13 @@ name = "scePthreadRwlockWrlock"
 arity = 1
 purpose = "A read/write lock: readers share, a writer excludes everybody."
 returns = "status"
+edge_cases = ["The failure codes are this project's placeholders rather than established values. They avoid the high bit, so a guest cannot mistake one for the vendor encoding D398 measured on this library's calls."]
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them, and the error codes are placeholders rather than established values."]
+assumptions = [
+    "Semantics follow the POSIX analogue of the same name. Nothing on the target has confirmed them.",
+    "Which errno values the target returns, and on which conditions, is unverified.",
+]
 found_on = "2026-08-25"
 
 [[function]]
@@ -1352,6 +1819,8 @@ edge_cases = [
     "That is why a handle is the address of a real zeroed block rather than a small integer: a handle of `1` reproduces exactly the same fault at a lower address (D151).",
     "The block is never written, because the real structure's layout is not known from any lawful source. Every field the guest reads is zero - which for a pointer field means null, and a guest that checks for null takes its own error path instead of dereferencing garbage.",
     "The blocks are never freed either, so a handle kept past its thread's life reads as zeroes rather than as a use-after-free.",
+    "Measured on hardware: obSCEne `018-relational/thread-identity-stable` reported pass, value 0x880000020. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
+    "Measured on hardware: obSCEne `030-thread/self` reported pass, value 0x880000020. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
@@ -1363,28 +1832,50 @@ found_in = ["PPSA25872-app0"]
 found_on = "2026-08-20"
 
 [[function]]
-name = "scePthreadGetthreadid"
-arity = 0
-purpose = """
-The calling thread's unique integer id (FreeBSD pthread_getthreadid_np).
+name = "scePthreadSetaffinity"
+arity = 2
+purpose = "Sets which cores a running thread may be scheduled on."
+edge_cases = ["arg1 is a small bitmask - PPSA02664 passes 0x1ffb and 0x1 across 62 calls - and the registers after it carry leftovers, so the arity is 2, the same shape as scePthreadAttrSetaffinity."]
+known_by = "guest-observed"
+found_in = [
+    "PPSA02664-app0",
+    "PPSA02664",
+]
+found_on = "2026-09-03"
+note = "Called 5 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
-Answers the same registry handle scePthreadSelf does - a per-thread value unique and stable
-for the thread's life. Distinct in type from the ScePthread handle but serving the same
-identity question, and this HLE does not model a separate LWP-id namespace. The caller is
-adopted so the process's first thread, which runs guest code without ever being created, gets
-a real id rather than zero.
-"""
-returns = "count"
+[[function]]
+name = "scePthreadSetprio"
+arity = 2
+purpose = "Sets a running thread's priority, leaving its policy alone."
+edge_cases = ["Arity two from the run: a thread handle and 0x100. Only the priority is named, so the stored policy is left as it was rather than reset to a value the caller never mentioned (D561)."]
+known_by = "guest-observed"
+assumptions = ["Stored and not applied, as with scePthreadSetschedparam."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 2 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "scePthreadSetschedparam"
+arity = 3
+purpose = "Sets a running thread's scheduling policy and priority."
 edge_cases = [
-    "Called 22.5k times in one PPSA21564 boot. Unimplemented it answered the placeholder 0x7FFF0001, so every thread reported one shared id - which a guest keying anything on thread identity reads as a single thread.",
-    "Returns the same value as scePthreadSelf. That is deliberate (both uniquely identify the thread and the handle is a safe zeroed-block address if dereferenced, per D151); a guest expecting the two namespaces to differ is not modelled.",
+    "Arity three from the run: arg0 a thread handle orbistoun issued, arg1 a policy, arg2 a pointer to a sched_param whose first field is the priority as a four-byte int (D561).",
+    "PPSA02664 passes 0x4000 as the policy. That is no POSIX policy constant - those are small integers - so it is a vendor value, and orbistoun stores it verbatim without interpreting it.",
 ]
-known_by = "assumed"
+known_by = "guest-observed"
 assumptions = [
-    "Modelled on FreeBSD pthread_getthreadid_np: no arguments, a per-thread integer id. The correspondence is inferred from the name; the exact id namespace and width are not verified against the target library.",
+    "Neither policy nor priority is applied. Which host thread runs when is the host scheduler's business, the same bargain scePthreadAttrSetaffinity already records for affinity (D523).",
+    "That sched_param is one int. POSIX's is, and the guest's own stack spacing agrees - it puts the policy four bytes above the param - but a vendor field past it would go unwritten.",
 ]
-found_in = ["PPSA21564-app0"]
-found_on = "2026-09-01"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-04"
+
+[[function]]
+name = "statfs"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-03"
+note = "Called 83 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sysctlbyname"
@@ -1414,21 +1905,3 @@ assumptions = [
 ]
 found_on = "2026-08-30"
 note = "Number and call shape read from four running payloads; see D403. Firmware value comes from the configurable Machine.firmware, zero refusing the call."
-
-[[function]]
-name = "sceKernelGetSystemSwVersion"
-arity = 1
-purpose = "The system software version, written into the caller's struct."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-note = "Reads the presented machine's software_version; refuses with the no-entry errno when the machine states none rather than fabricating one."
-
-[[function]]
-name = "sceKernelVirtualQuery"
-arity = 4
-purpose = "Describes the mapping that holds an address - where it starts and ends - so a guest can place things around it."
-returns = "status"
-known_by = "assumed"
-found_on = "2026-09-01"
-note = "Finds the region containing the queried address in the same address space mmap and the reservation use, writing start and end (offsets 0 and 8). An address in no region gets the console's not-found code."

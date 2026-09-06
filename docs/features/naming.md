@@ -6,8 +6,8 @@ others show sixteen hex characters.
 
 ## Why it is hard
 
-The hash is the first eight bytes of a SHA-1 over the function's name plus a fixed suffix, big
-endian. It is one-way. There is no table to look the answer up in, and nothing to invert.
+The hash is the first eight bytes of a SHA-1 over the function's name plus a fixed suffix,
+little-endian. It is one-way. There is no table to look the answer up in, and nothing to invert.
 
 So naming is **generate and test**: propose a name, hash it, compare. That sounds hopeless and is
 not, because the check is exact. A collision is not evidence - it is proof. Nothing else in this

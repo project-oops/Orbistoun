@@ -426,18 +426,37 @@ fn a_format_wanting_more_arguments_than_arrived_is_refused() {
     assert_eq!(dest.as_str(), "");
 }
 
-/// A null destination, a null format, or no room at all, each answer zero.
+/// A destination that cannot be written to answers zero - **except when the size is zero.**
+///
+/// The exception is the standard's, not an inconsistency. A null destination and a null
+/// format are both "there is nothing to do here". A *size* of zero is a question: ISO C
+/// 7.21.6.5 has `snprintf` write nothing and still return the length the output would have
+/// needed, because that is how a caller sizes a buffer before allocating it.
+///
+/// This test asserted zero for all three, and so pinned the bug. A reference library answered
+/// the length where orbistoun answered zero, which is what surfaced it (D479).
 #[test]
-fn a_write_with_nowhere_to_go_answers_zero() {
+fn a_write_with_nowhere_to_go_answers_zero_but_no_room_answers_the_length() {
     let dest = Buf::zeroed(16);
     let template = Buf::text("%d", 4);
     assert_eq!(call("snprintf_s", &[0, 16, template.at(), 1]), 0);
-    assert_eq!(call("snprintf_s", &[dest.at(), 0, template.at(), 1]), 0);
     assert_eq!(call("snprintf_s", &[dest.at(), 16, 0, 1]), 0);
     assert_eq!(
         dest.bytes()[0],
         0,
         "a null format still terminates the destination"
+    );
+
+    let untouched = Buf::text("PREVIOUS", 16);
+    assert_eq!(
+        call("snprintf_s", &[untouched.at(), 0, template.at(), 1]),
+        1,
+        "one character would have been written"
+    );
+    assert_eq!(
+        untouched.as_str(),
+        "PREVIOUS",
+        "and the destination is not touched, terminator included"
     );
 }
 

@@ -100,6 +100,19 @@ pub struct Properties {
     /// on how a shader was compiled, the host's subgroup is whatever the hardware says,
     /// and the ratio between them is what any lane-mapped translation is built around.
     pub subgroup_size: u32,
+    /// Whether a **fragment** shader on this device may write a storage buffer.
+    ///
+    /// Reported as what was *enabled*, not as what the hardware could do. A Vulkan
+    /// feature the device was not created with is unusable however capable the silicon
+    /// is, so the physical device's answer would be the wrong one to hand a caller
+    /// deciding whether a translated fragment module can store (D552).
+    ///
+    /// It decides the shape of the fragment path rather than merely permitting it. A
+    /// translated module keeps its registers in `Private` storage already, so the only
+    /// storage-buffer writes are the observation window the epilogue fills and a guest
+    /// memory store - and a fragment variant that omits the first and refuses the second
+    /// needs this feature not at all.
+    pub fragment_stores: bool,
 }
 
 /// Whether a device is available to run anything.
@@ -399,12 +412,12 @@ fn read_back(
 /// Queue submission and command pools need external synchronisation, and the harness
 /// runs tests on several threads. One lock around the whole dispatch is coarse and
 /// correct; the device is the bottleneck anyway, so a finer scheme would buy nothing.
-struct Session {
-    instance: ash::Instance,
-    physical: vk::PhysicalDevice,
-    device: ash::Device,
-    queue: vk::Queue,
-    family: u32,
+pub(crate) struct Session {
+    pub(crate) instance: ash::Instance,
+    pub(crate) physical: vk::PhysicalDevice,
+    pub(crate) device: ash::Device,
+    pub(crate) queue: vk::Queue,
+    pub(crate) family: u32,
     properties: Properties,
 }
 
@@ -415,7 +428,7 @@ struct Session {
 /// is cached alongside, so a machine with no device does not repeat the whole setup for
 /// every call - and the stage that failed is kept, because "no device" and "a device
 /// that refused us" want different responses.
-fn session() -> Result<&'static std::sync::Mutex<Session>, DispatchError> {
+pub(crate) fn session() -> Result<&'static std::sync::Mutex<Session>, DispatchError> {
     static SESSION: std::sync::OnceLock<
         Result<std::sync::Mutex<Session>, (&'static str, vk::Result)>,
     > = std::sync::OnceLock::new();
@@ -465,7 +478,15 @@ impl Session {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        let device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_info);
+        // **Nothing is requested.** Every feature a Vulkan device offers is off until asked
+        // for, and asking for one this project does not use would be a claim in the
+        // capability report that no code backs. `fragment_stores_and_atomics` is the one
+        // that has come up - the fragment path is designed not to need it (D552) - so it
+        // stays off and the report says so.
+        let wanted_features = vk::PhysicalDeviceFeatures::default();
+        let device_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queue_info)
+            .enabled_features(&wanted_features);
         // SAFETY: the physical device is valid and the create info outlives the call.
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
@@ -488,6 +509,10 @@ impl Session {
             ),
             subnormals_preserved: float_controls.shader_denorm_preserve_float32 == vk::TRUE,
             subgroup_size: subgroup.subgroup_size,
+            // What was asked for at device creation, which is nothing - see the field's
+            // note. Written as a comparison against the request rather than as `false` so
+            // that enabling it later updates this by construction.
+            fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,
         };
 
         Ok(Self {
