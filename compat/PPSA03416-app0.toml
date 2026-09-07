@@ -5,15 +5,15 @@
 [status]
 reach = "flipped"
 outcome = "image+0x1389269"
-imports = 187
-calls = 467537
+imports = 192
+calls = 467541
 standing = 100
 default_return = "unimplemented"
 frames = 1
-unanswered = 14
+unanswered = 12
 limit_seconds = 12
 build = "0.1.0"
-measured_on = "2026-09-04"
+measured_on = "2026-09-07"
 
 [experiment]
 reach = "entered"

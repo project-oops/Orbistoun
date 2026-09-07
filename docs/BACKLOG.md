@@ -43,6 +43,7 @@ Committed work is in [ROADMAP.md](ROADMAP.md); rejected directions are in
 | ⚪ | [Compatibility table](backlog/033-compatibility-table.md) | no marker |
 | ⚪ | [Previous-generation container support](backlog/034-previous-generation-container-support.md) | no marker |
 | ⚪ | [Resolved since this list was written](backlog/035-resolved-since-this-list-was-written.md) | no marker |
+| ⚪ | [The names sweep records the path it was given](backlog/036-the-names-sweep-records-the-path-it-was-given.md) | no marker |
 
 | | meaning |
 |---|---|

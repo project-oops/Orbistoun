@@ -239,15 +239,43 @@ impl FaultSite {
     /// means what it looks like it means.
     pub const TOUCHED: [&'static str; 3] = ["write to", "read of", "instruction fetch from"];
 
+    /// The kind a breakpoint carries when the faulting address is inside the stub table.
+    ///
+    /// **Only when that has actually been checked.** Every breakpoint used to be reported
+    /// under this string, from a table keyed on the exception code alone - so a guest that
+    /// executed a trap instruction of its own was told it had entered a stub off its start,
+    /// with no part of the program having looked at where it was. The report contradicted
+    /// itself in one line, naming the address as stub padding and locating it in the title's
+    /// own modules, and a session read the false half and recorded it as a finding (D576).
+    pub const BREAKPOINT_IN_STUBS: &'static str = "breakpoint - stub padding - at";
+    /// A breakpoint at an address the stub table demonstrably does not cover.
+    ///
+    /// Says what was determined and stops there. A trap instruction the guest executed
+    /// itself, an assertion in its own code, and a debugger attaching all land here, and
+    /// nothing in a fault record tells them apart - so this names none of them.
+    pub const BREAKPOINT_OUTSIDE_STUBS: &'static str = "breakpoint - not stub padding - at";
+    /// A breakpoint that could not be placed, because no stub table was registered.
+    ///
+    /// Distinct from [`Self::BREAKPOINT_OUTSIDE_STUBS`] on purpose: "checked, and it is not
+    /// there" and "there was nothing to check against" are different states, and collapsing
+    /// them would put this back to claiming more than it measured one level down.
+    pub const BREAKPOINT_UNPLACED: &'static str = "breakpoint - at";
+
     /// Kinds whose [`address`](Self::address) is **the faulting instruction itself**.
     ///
     /// These exceptions carry no address parameters, so the reporter fills the field with
     /// the instruction pointer. The number is real, and it is not somewhere the guest
     /// asked for - so comparing it across runs answers a question nobody asked.
-    pub const AT_THE_INSTRUCTION: [&'static str; 3] = [
+    ///
+    /// **Five, since the breakpoint split into three.** A consumer deciding whether an
+    /// address is one the guest asked for has to see every kind that is not; a kind absent
+    /// from here is one such a consumer classifies by falling through (D576).
+    pub const AT_THE_INSTRUCTION: [&'static str; 5] = [
         "illegal instruction at",
-        "breakpoint - stub padding - at",
+        Self::BREAKPOINT_IN_STUBS,
         "stack overflow at",
+        Self::BREAKPOINT_OUTSIDE_STUBS,
+        Self::BREAKPOINT_UNPLACED,
     ];
 
     /// Whether [`address`](Self::address) is somewhere the guest asked for.

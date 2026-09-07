@@ -78,6 +78,30 @@ pub mod ult {
     }
 }
 
+/// The wait-on-address family, under the library name the guest imports it by.
+///
+/// The platform's kernel module exports more than one library, and a guest names the one it
+/// wants: `libkernel_sync_on_address` sits beside `libkernel` and `libkernel_fs`, and a trace
+/// labels the calls with it. The two names were proved by hash against the 12.40 export layout
+/// this tree already carried, after a search of three and a half billion generated candidates
+/// had missed them for a word-order guess (D572).
+pub mod sync_on_address {
+    use orbistoun_hle::guest_module;
+
+    guest_module! {
+        "libkernel_sync_on_address" {
+            // (address, value): the two registers PPSA25872 fills. Across the 48 calls the ring
+            // held and the 90 it dumped, the next three read zero on every one and the sixth
+            // held a leftover host address on some - so two is what carries meaning (D573).
+            "sceKernelSyncOnAddressWait" => 2,
+            // (address, count): a count of one in both captured calls, with the third and
+            // fourth registers also one and the fifth 0x7ffffffe. Whether those are arguments
+            // or leftovers is unestablished; nothing here reads them.
+            "sceKernelSyncOnAddressWake" => 2,
+        }
+    }
+}
+
 guest_module! {
     "libkernel" {
         "sceKernelAllocateDirectMemory" => 6,
@@ -176,6 +200,10 @@ guest_module! {
         "sceKernelReleaseFlexibleMemory" => 2,
         "scePthreadAttrInit" => 1, "scePthreadAttrDestroy" => 1,
         "scePthreadAttrSetstacksize" => 2, "scePthreadAttrGetstacksize" => 2,
+        // (thread, attr) and (attr, out): the shapes of FreeBSD pthread_attr_get_np and
+        // pthread_attr_getstackaddr, and what three titles pass, once each, to find the stack
+        // their collector scans (D575).
+        "scePthreadAttrGet" => 2, "scePthreadAttrGetstackaddr" => 2,
         "scePthreadAttrSetdetachstate" => 2, "scePthreadAttrGetdetachstate" => 2,
         "scePthreadAttrSetschedparam" => 2, "scePthreadAttrGetschedparam" => 2,
         // The **thread** form, not the attribute form. Arity 2 for the same reason the
@@ -1160,6 +1188,26 @@ fn region_containing(addr: u64) -> Option<(u64, u64)> {
     STACK_SPAN.get().copied().and_then(holds)
 }
 
+/// Whether `[base, base + len)` lies wholly inside `region`, given as `[start, end)`.
+///
+/// Pure, so the containment rule is testable without any mapping existing - the shape
+/// principle 8 asks for, and the same split [`region_containing`] already has from the tables
+/// it reads. Saturating throughout: a guest is free to ask for a length that overflows, and an
+/// overflow that wrapped would report a range as contained by a region it dwarfs.
+const fn range_within(base: u64, len: u64, region: (u64, u64)) -> bool {
+    let (start, end) = region;
+    base >= start && base.saturating_add(len) <= end
+}
+/// The region wholly covering `[base, base + len)`, from every place one is recorded.
+///
+/// [`region_containing`] answers for a single address; a protection change is about a span, and
+/// a span that begins in a placed region and runs off its end is not one that region covers.
+/// **One region, not the union of several**: a range crossing from one into another spans the
+/// gap between them, and the gap is address space nothing placed.
+fn region_covering(base: u64, len: u64) -> Option<(u64, u64)> {
+    let region = region_containing(base)?;
+    range_within(base, len, region).then_some(region)
+}
 /// The next address to place a mapping at.
 ///
 /// Bump-allocated and never reused. A guest that unmaps and remaps would otherwise be
@@ -3262,6 +3310,71 @@ fn kernel_delete_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceKernelSyncOnAddressWait(address, value)` - sleep while the 64-bit word at `address`
+/// holds `value`, until a wake on the same address.
+///
+/// **The platform's futex wait, and the function 78% of every call this project had recorded
+/// went to** (D566). Unimplemented it answered the placeholder, and PPSA25872 asked again 2.27
+/// million times in twelve seconds - on thirteen distinct words, one call site, thirteen threads
+/// created - because a wait that returns without waiting is a busy loop by construction.
+///
+/// Modelled on FreeBSD's `_umtx_op(2)` with `UMTX_OP_WAIT`, the lawful reference for the shape:
+/// compare, sleep only on equality, and answer success at once when the word already differs.
+/// The caller re-reads the word afterwards - that is the contract, because the wake may have
+/// come first. The compare happens under the wait queue's lock ([`sync::wait_on_address`]), so
+/// a wake landing between the guest's write and its wake call cannot be lost.
+///
+/// Sixty-four bits, because in the 12.40 layout this entry point is shared with the `Wait64`
+/// spelling while `Wait32` has its own (`orbistoun-firmware/data/libkernel-vaddrs.txt`).
+///
+/// **A non-zero third register is refused, not waited on.** Every observed call passes zero
+/// there. It may be a timeout in a unit nothing here has established, and modelling it as
+/// "forever" would be a plausible answer to a question that was not read (principle 3); the
+/// placeholder is loud in a trace and names the call to look at.
+fn sync_on_address_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (address, expected, third) = (args[0], args[1], args[2]);
+    if address == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    if third != 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    match sync::wait_on_address(
+        address,
+        expected,
+        || read_word(address),
+        sync::Blocking::Forever,
+    ) {
+        Some(sync::AddressWait::Woken | sync::AddressWait::Mismatch) => OK,
+        // Unreachable under `Forever`, and kept so the match stays total for the day a timeout
+        // is modelled: the published errno under the measured vendor base.
+        Some(sync::AddressWait::TimedOut) => {
+            u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw())
+        }
+        None => u64::from(GuestError::InvalidArgument.as_raw()),
+    }
+}
+
+/// `sceKernelSyncOnAddressWake(address, count)` - wake up to `count` threads asleep on `address`.
+///
+/// FreeBSD `_umtx_op(2)` with `UMTX_OP_WAKE`. Success whether or not anybody was asleep: a wake
+/// racing its wait is the ordinary case for a futex, whose word carries the state, and a wake
+/// with nobody listening is deliberately not remembered ([`sync::wake_on_address`]). PPSA25872
+/// calls it thirteen times, once per thread it created, on words 0x30 below the ones its waits
+/// name - which of its threads sleep on which word is not something a trace records.
+fn sync_on_address_wake(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (address, count) = (args[0], args[1]);
+    if address == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let count = u32::try_from(count).unwrap_or(u32::MAX);
+    if sync::wake_on_address(address, count).is_some() {
+        OK
+    } else {
+        u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
 /// The POSIX unnamed-semaphore family - `sem_init` and the calls a guest's own concurrency
 /// primitives are built on.
 ///
@@ -3727,10 +3840,20 @@ fn set_virtual_range_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// With no pool, the next allocation returned null and the guest wrote through it: a fault at
 /// its allocator (`image+0xafcc08`) with no visible relation to the missing `mprotect`.
 ///
-/// The range is re-protected against the same address space `mmap` and the reservation use, so
-/// a typo cannot re-protect this process's own code (`AddressSpace::protect` refuses a range it
-/// does not own). Two honest simplifications, both from orbistoun's identity-mapped model rather
-/// than guessed:
+/// **Two places hold a guest region, and both are consulted.** The address space this crate
+/// hands mappings out of is one; the other is the set of regions somebody else placed and
+/// reported here - a module's pages, the executable's image (D446, D489). A guest re-protecting
+/// its own module is asking about the second, and refusing it because the first had never heard
+/// of it was a wall: PPSA03416 asks for 256 MiB across its own module, checks the answer, and on
+/// the failure path calls a routine its compiler believes never returns (D577).
+///
+/// A typo still cannot re-protect this process's own code, which is what
+/// `AddressSpace::protect` refusing an unowned range was for: the range has to lie wholly inside
+/// **one** region this process placed for the guest, and a range covered by nothing is refused
+/// exactly as before.
+///
+/// Two honest simplifications remain, both from orbistoun's identity-mapped model rather than
+/// guessed:
 ///
 /// - **The range is kept readable.** [`protection_from_guest`] reads the low bits as POSIX
 ///   `PROT_*`, and the value a guest passes here (`0xf2` for PPSA02664) has the write bit without
@@ -3751,15 +3874,54 @@ fn mprotect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     let mut protection = protection_from_guest(prot);
     protection.read = true;
-    let Ok(mut space) = mappings().lock() else {
-        return vendor(orbistoun_core::errno::INVALID);
+
+    // **Which authority covers the range is decided before either is asked to act.**
+    // `AddressSpace::protect` records a reservation failure for the report when it is handed a
+    // range it does not own (worklog 284), and a range this crate never mapped is not a failure
+    // here - it is the other case below. Asking it first and falling through would file a
+    // diagnostic about every successful protection of a module's own memory.
+    //
+    // The guard is scoped so the lock is released before `region_covering`, which takes it
+    // again through `region_containing`.
+    let owned = {
+        let Ok(mut space) = mappings().lock() else {
+            return vendor(orbistoun_core::errno::INVALID);
+        };
+        space
+            .owns(addr, len)
+            .then(|| space.protect(addr, len, protection))
     };
-    let outcome = space.protect(addr, len, protection);
-    drop(space);
-    match outcome {
+    if let Some(outcome) = owned {
+        return match outcome {
+            Ok(()) => OK,
+            // The range is this crate's own and the host still refused it.
+            Err(_) => vendor(orbistoun_core::errno::INVALID),
+        };
+    }
+
+    // Not a mapping this crate handed out - and for a guest re-protecting its own module that
+    // is the ordinary case, not an error. A module's pages are placed elsewhere and reported
+    // here (D446, D489), which is the same set of regions `sceKernelVirtualQuery` and
+    // `sceKernelIsStack` already answer from. A guest asking to make its own text writable is
+    // asking for something the platform allows.
+    //
+    // **Refusing it was a wall.** PPSA03416 asks for 256 MiB of write access across its own
+    // module, checks the result, and on the failure path calls a routine its compiler believes
+    // never returns - which returns, onto the trap placed after it. Answered, the title reaches
+    // 192 imports instead of 186 (D577).
+    //
+    // Containment is what keeps the original guard: `AddressSpace::protect` refuses an unowned
+    // range so that a typo cannot re-protect this process's own code, and a range inside a
+    // region this process placed for the guest cannot be that. A range covered by nothing is
+    // still refused.
+    if region_covering(addr, len).is_none() {
+        return vendor(orbistoun_core::errno::INVALID);
+    }
+    match orbistoun_mem::platform::protect(addr, len, protection) {
         Ok(()) => OK,
-        // The range is not one orbistoun reserved. The console answers `EINVAL` for an address
-        // that is not a valid mapping; this reports the same rather than inventing a code.
+        // The region is the guest's, and the host would not change it. Reported as the console
+        // reports an invalid mapping rather than as success: the guest is about to act on the
+        // answer, and the whole of this function's value is that the answer is true.
         Err(_) => vendor(orbistoun_core::errno::INVALID),
     }
 }
@@ -4349,6 +4511,8 @@ const ATTR_GUARD_SIZE: u64 = 48;
 /// Contention scope - whether the thread competes for processor time within its process or
 /// across the system.
 const ATTR_SCOPE: u64 = 56;
+/// The lowest address of the stack, one further - pointer-wide, like the size (D575).
+const ATTR_STACK_ADDR: u64 = 64;
 
 /// Stores one field of a thread attribute object.
 fn attr_set(args: &[u64; GUEST_ARG_REGISTERS], field: u64) -> u64 {
@@ -4390,6 +4554,75 @@ fn pthread_attr_getstacksize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     let Some(value) = read_word(object + ATTR_STACK_SIZE) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    if args[1] == 0 || !write_word(args[1], value) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `scePthreadAttrGet(thread, attr)` - fills an attribute object with a running thread's
+/// attributes.
+///
+/// FreeBSD's `pthread_attr_get_np(3)` is the lawful reference for the shape: the object must
+/// already be initialised, and it comes back describing the thread as it *is* - stack, size,
+/// priority, policy, affinity - rather than as it was asked for. The guest that established it
+/// asks about **itself**: `scePthreadSelf`, then this, then the stack address and size, which is
+/// the sequence a garbage collector runs to find the bottom of the stack it must scan.
+/// Unimplemented, three titles computed that bottom from a placeholder and scanned upward off
+/// the top of the real stack, into the first unmapped page above it (D575).
+///
+/// The stack comes from the thread's own record, and for the thread the guest was entered on -
+/// which reserved nothing and runs on the span the worker placed - from the span the worker told
+/// this crate about. A thread with neither is refused rather than described: an attribute object
+/// holding a made-up stack is exactly the wrong answer this exists to stop.
+fn pthread_attr_get(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, attr) = (args[0], args[1]);
+    let Some(object) = attr_at(attr) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    let Some(record) = thread::record(handle) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    let entered = handle == thread::current() && thread::this_stack().is_none();
+    let stack =
+        thread::stack_of(handle).or_else(|| entered.then(|| STACK_SPAN.get().copied()).flatten());
+    let Some((base, len)) = stack else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    let fields = [
+        (ATTR_STACK_ADDR, base),
+        (ATTR_STACK_SIZE, len),
+        (
+            ATTR_PRIORITY,
+            u64::from(u32::from_ne_bytes(record.requested_priority.to_ne_bytes())),
+        ),
+        (
+            ATTR_SCHED_POLICY,
+            u64::from(u32::from_ne_bytes(record.requested_policy.to_ne_bytes())),
+        ),
+        (ATTR_AFFINITY, record.effective_affinity.0),
+        (ATTR_GUARD_SIZE, orbistoun_mem::stack::GUARD_SIZE),
+    ];
+    for (field, value) in fields {
+        if !write_word(object + field, value) {
+            return u64::from(GuestError::InvalidArgument.as_raw());
+        }
+    }
+    OK
+}
+
+/// `scePthreadAttrGetstackaddr(attr, out)` - the lowest address of the stack an attribute names.
+///
+/// FreeBSD `pthread_attr_getstackaddr(3)`: the value set on the object, which is null on one
+/// nothing has set - so a fresh object answers zero and success, as the reference does. Written
+/// pointer-wide, as [`pthread_attr_getstacksize`] is: an address, not an `int`.
+fn pthread_attr_getstackaddr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(object) = attr_at(args[0]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    let Some(value) = read_word(object + ATTR_STACK_ADDR) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     if args[1] == 0 || !write_word(args[1], value) {
@@ -5307,6 +5540,8 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelSignalSema", kernel_signal_sema),
     ("sceKernelWaitSema", kernel_wait_sema),
     ("sceKernelDeleteSema", kernel_delete_sema),
+    ("sceKernelSyncOnAddressWait", sync_on_address_wait),
+    ("sceKernelSyncOnAddressWake", sync_on_address_wake),
     // POSIX unnamed semaphores - no vendor twin, served under their POSIX names via
     // `orbistoun-posix` (D455).
     ("sem_init", sem_init),
@@ -5380,6 +5615,8 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadAttrDestroy", pthread_attr_destroy),
     ("scePthreadAttrSetstacksize", pthread_attr_setstacksize),
     ("scePthreadAttrGetstacksize", pthread_attr_getstacksize),
+    ("scePthreadAttrGet", pthread_attr_get),
+    ("scePthreadAttrGetstackaddr", pthread_attr_getstackaddr),
     ("scePthreadAttrSetdetachstate", pthread_attr_setdetachstate),
     ("scePthreadAttrGetdetachstate", pthread_attr_getdetachstate),
     ("scePthreadAttrSetschedparam", pthread_attr_setschedparam),
@@ -6075,6 +6312,15 @@ mod tests {
         );
     }
 
+    /// Every name this crate's own `guest_module!` blocks declare: `libkernel`, and the
+    /// wait-on-address library declared beside it under the name the guest imports it by (D572).
+    fn declared_here() -> Vec<&'static str> {
+        [super::MODULE, super::sync_on_address::MODULE]
+            .iter()
+            .flat_map(|m| m.imports.iter().map(|i| i.name))
+            .collect()
+    }
+
     #[test]
     fn every_implementation_is_also_declared_here_or_says_why_not() {
         /// Implemented here and declared in another library, deliberately.
@@ -6199,7 +6445,7 @@ mod tests {
         // An implementation nobody declared can never be reached: resolution goes
         // through the declared symbol list, so the two drifting apart would leave code
         // that looks written and never runs.
-        let declared: Vec<&str> = super::MODULE.imports.iter().map(|i| i.name).collect();
+        let declared = declared_here();
         for (name, _) in implementations() {
             assert!(
                 declared.contains(name) || DECLARED_ELSEWHERE.contains(name),
@@ -6376,5 +6622,137 @@ mod tests {
         args[1] = 0; // len = 0
         let addr = super::mmap(&args);
         assert_eq!(addr, !0, "mmap of length 0 must return MAP_FAILED");
+    }
+
+    #[test]
+    fn a_thread_describes_its_own_stack_and_a_stranger_is_refused() {
+        // The sequence a garbage collector runs to find the bottom of the stack it scans. A
+        // placeholder here became a scan off the top of the real stack in three titles (D575).
+        super::note_stack_span(0x6000_0000_1000, 8 * 1024 * 1024);
+        let span = super::STACK_SPAN.get().copied().expect("a main span");
+        let me = super::thread::adopt("attr-get");
+        let mut attr: u64 = 0;
+        let attr_at = std::ptr::from_mut(&mut attr) as usize as u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = attr_at;
+        assert_eq!(super::pthread_attr_init(&args), 0);
+
+        args = [me, attr_at, 0, 0, 0, 0];
+        assert_eq!(
+            super::pthread_attr_get(&args),
+            0,
+            "the calling thread is describable"
+        );
+
+        let (mut address, mut size) = (1_u64, 1_u64);
+        args = [
+            attr_at,
+            std::ptr::from_mut(&mut address) as usize as u64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(super::pthread_attr_getstackaddr(&args), 0);
+        args = [
+            attr_at,
+            std::ptr::from_mut(&mut size) as usize as u64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(super::pthread_attr_getstacksize(&args), 0);
+        assert_eq!(
+            (address, size),
+            span,
+            "the span the worker placed, not a made-up one"
+        );
+
+        // A handle nobody registered is refused, not described - the attribute object would
+        // otherwise carry a stack that exists nowhere.
+        args = [0xdead_0000, attr_at, 0, 0, 0, 0];
+        assert_eq!(
+            super::pthread_attr_get(&args),
+            u64::from(super::GuestError::InvalidHandle.as_raw())
+        );
+    }
+
+    /// One static for this whole module, per D399: an instance declared inside a test would
+    /// start its own cursor at zero and hand a neighbour the same address.
+    static RANGE: orbistoun_mem::test_bases::Range =
+        orbistoun_mem::test_bases::Range::nth(orbistoun_mem::test_bases::crates::KERNEL);
+
+    #[test]
+    fn a_range_is_covered_only_when_one_region_holds_all_of_it() {
+        // Pure, so the rule is checked without any mapping existing. Both edges, because an
+        // off-by-one either way is the difference between refusing a guest's own module and
+        // letting a range run off the end of one.
+        let region = (0x1_0000, 0x1_2000);
+        assert!(
+            super::range_within(0x1_0000, 0x2000, region),
+            "an exact fit"
+        );
+        assert!(super::range_within(0x1_0800, 0x800, region), "inside");
+        assert!(
+            !super::range_within(0x1_0000, 0x2001, region),
+            "one byte past the end is not covered"
+        );
+        assert!(
+            !super::range_within(0x0_FFFF, 0x10, region),
+            "starting before the region is not covered"
+        );
+        assert!(
+            !super::range_within(0x1_0800, u64::MAX, region),
+            "a length that would overflow must not wrap into looking contained"
+        );
+    }
+
+    /// A guest may re-protect a region somebody else placed for it - its own module's pages -
+    /// and a range covered by nothing is still refused.
+    ///
+    /// The wall this fixes: PPSA03416 asks for write access across its own module, is refused
+    /// because `mappings()` never mapped it, checks the answer, and takes a failure path that
+    /// ends on a trap (D577).
+    #[test]
+    fn a_noted_region_can_be_re_protected_and_a_gap_cannot() {
+        let base = RANGE.take();
+        let len = orbistoun_core::GUEST_PAGE_SIZE * 4;
+
+        // Reserved through an address space of this test's own, so the global `mappings()` -
+        // the one `mprotect` consults first - genuinely does not own it. That is the case
+        // being tested: the region exists, and this crate did not make it. Held for the whole
+        // test, because dropping it releases the pages.
+        let mut placed_elsewhere = orbistoun_mem::AddressSpace::new();
+        placed_elsewhere
+            .reserve(base, len, orbistoun_mem::Protection::READ_WRITE)
+            .expect("a test range to stand in for a placed module");
+
+        // Write, as a guest asks for it: the low bits are POSIX `PROT_*`.
+        let args: [u64; GUEST_ARG_REGISTERS] = [base, len, 0x2, 0, 0, 0];
+
+        super::clear_noted_regions();
+        assert_ne!(
+            super::mprotect(&args),
+            super::OK,
+            "a region nothing has reported is refused, which is the guard that stops a typo \
+             re-protecting this process's own code"
+        );
+
+        super::note_region(base, len);
+        assert_eq!(
+            super::mprotect(&args),
+            super::OK,
+            "and a region this process placed for the guest is its to re-protect"
+        );
+
+        // Past the end of the reported region: covered by nothing, so still refused.
+        let past = [base, len + orbistoun_core::GUEST_PAGE_SIZE, 0x2, 0, 0, 0];
+        assert_ne!(
+            super::mprotect(&past),
+            super::OK,
+            "a range running off the end of the region is not covered by it"
+        );
+        super::clear_noted_regions();
     }
 }

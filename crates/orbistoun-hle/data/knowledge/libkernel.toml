@@ -1084,6 +1084,27 @@ assumptions = [
 found_on = "2026-08-25"
 
 [[function]]
+name = "scePthreadAttrGet"
+arity = 2
+purpose = "Fills an initialised thread attribute object with a running thread's attributes - its stack address and size, priority, policy and affinity - as FreeBSD's pthread_attr_get_np does."
+edge_cases = [
+    "The stack is the thread's own record, and for the thread the guest was entered on the span the worker placed. A thread with neither is refused rather than described, because an attribute object holding a made-up stack is the wrong answer this exists to prevent.",
+    "Three titles call it once, about themselves, then read the stack address and size: the sequence a garbage collector runs to find the bottom of the stack it scans. Answered with a placeholder, all three scanned upward off the top of the real stack and faulted in the first unmapped page above it; answered, all three went FURTHER - PPSA25872 121 to 141 imports, PPSA02664 119 to 197, PPSA03416 119 to 186 (D575).",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on FreeBSD pthread_attr_get_np(3). That the vendor spelling takes (thread, attr) in that order is read off the guest's calls - the first argument is the handle scePthreadSelf answered a moment earlier - and not confirmed against the target.",
+    "The detach state and scope are left as the object holds them; what the target reports for a running thread is unestablished.",
+    "Which errno the target answers for an unknown thread is unverified; this answers the project's placeholder.",
+]
+found_in = [
+    "PPSA25872-app0",
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-09-07"
+
+[[function]]
 name = "scePthreadAttrGetdetachstate"
 arity = 2
 purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
@@ -1110,6 +1131,23 @@ assumptions = [
     "The object layout is defined by this crate. That is defensible only because every call that touches one is here - the real layout is not known from any lawful source.",
 ]
 found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadAttrGetstackaddr"
+arity = 2
+purpose = "Reads the stack address an attribute object holds - the lowest address of the stack - into a pointer-wide out-parameter."
+edge_cases = [
+    "An object nothing has set answers zero and success, as FreeBSD's pthread_attr_getstackaddr(3) does for a null stackaddr attribute; the value is real, not a placeholder.",
+    "Pointer-wide, like scePthreadAttrGetstacksize beside it: an address written as an int would leave the caller's neighbouring variable holding the top half.",
+]
+known_by = "guest-observed"
+assumptions = ["That the address the target reports is the lowest byte of the stack, as FreeBSD's is, rather than its top. A collector computing bottom = address + size proceeds past its wall on that reading (D575), which is consistent with it and does not prove it."]
+found_in = [
+    "PPSA25872-app0",
+    "PPSA02664-app0",
+    "PPSA03416-app0",
+]
+found_on = "2026-09-07"
 
 [[function]]
 name = "scePthreadAttrGetstacksize"

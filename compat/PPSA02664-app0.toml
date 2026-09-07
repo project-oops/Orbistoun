@@ -4,16 +4,16 @@
 
 [status]
 reach = "flipped"
-outcome = "image+0xf56e09"
+outcome = "image+0x39f7c"
 imports = 197
-calls = 418278
+calls = 421864
 standing = 100
 default_return = "unimplemented"
 frames = 1
-unanswered = 20
+unanswered = 18
 limit_seconds = 25
 build = "0.1.0"
-measured_on = "2026-09-04"
+measured_on = "2026-09-07"
 
 [experiment]
 reach = "flipped"

@@ -102,7 +102,7 @@ pub enum Blocking {
     /// Wait until this moment, then give up.
     ///
     /// **An instant, not a span**, because a span is ambiguous about when it started - see
-    /// [`wait_while`] for the bug that distinction prevents.
+    /// `wait_while` for the bug that distinction prevents.
     Until(Instant),
 }
 
@@ -505,7 +505,7 @@ fn with_cond<R>(handle: CondHandle, f: impl FnOnce(&GuestCond) -> R) -> Option<R
 /// success. Both passed when run alone, which is what a spurious wakeup looks like.
 ///
 /// So the count is the condition and the wake is only a prompt to re-read it - the same
-/// discipline [`wait_while`] applies to every other primitive here, and for the same reason.
+/// discipline `wait_while` applies to every other primitive here, and for the same reason.
 /// The deadline is re-read each turn so a run of spurious wakes cannot extend the total wait.
 pub fn cond_wait(handle: CondHandle, timeout: Option<Duration>) -> Option<bool> {
     with_cond(handle, |c| {
@@ -1201,6 +1201,139 @@ pub fn event_flag_name_of(handle: EventFlagHandle) -> Option<String> {
     with_event_flag(handle, |e| e.name.clone())
 }
 
+// --- waiting on an address ------------------------------------------------------------
+
+/// What a wait on an address came back with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressWait {
+    /// The word already held something other than what the caller expected, so there was
+    /// nothing to sleep for. Not a failure: the guest re-reads the word next, which is the
+    /// whole contract - the wake may have come before the wait did.
+    Mismatch,
+    /// A wake on this address arrived while sleeping.
+    Woken,
+    /// Patience ran out with no wake, or the caller would not wait at all.
+    TimedOut,
+}
+
+/// The threads asleep on one address, and the wakes handed to them.
+#[derive(Debug, Default)]
+struct AddressQueue {
+    /// Threads currently asleep here.
+    waiting: u32,
+    /// Wakes granted and not yet collected by a sleeper.
+    ///
+    /// **Never more than `waiting`.** A wake with nobody asleep leaves nothing behind - that
+    /// is the futex contract, in which the word carries the state and the wake only ends a
+    /// sleep. A wait that arrives after the wake it needed re-reads the word, sees it changed,
+    /// and does not sleep; one that reads the old value sleeps until the *next* wake. Keeping a
+    /// stray token would wake a later, unrelated sleeper for no reason.
+    tokens: u32,
+}
+
+/// One address's queue: the count under a lock, and the condition its sleepers wait on.
+struct AddressWaiters {
+    state: Mutex<AddressQueue>,
+    woken: Condvar,
+}
+
+/// Every address anything has ever waited on.
+///
+/// Entries are never removed. Dropping one while a sleeper still holds its `Arc` would leave
+/// that sleeper on a queue no wake can find - a lost wakeup with nothing in a trace to say so.
+/// The set is bounded by the distinct addresses a guest waits on, which for the one title
+/// measured is thirteen (D573).
+fn address_waiters() -> &'static Mutex<BTreeMap<u64, Arc<AddressWaiters>>> {
+    static TABLE: OnceLock<Mutex<BTreeMap<u64, Arc<AddressWaiters>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// The queue for `address`, made if this is the first wait on it.
+fn address_queue(address: u64) -> Option<Arc<AddressWaiters>> {
+    let mut table = address_waiters().lock().ok()?;
+    Some(Arc::clone(table.entry(address).or_insert_with(|| {
+        Arc::new(AddressWaiters {
+            state: Mutex::new(AddressQueue::default()),
+            woken: Condvar::new(),
+        })
+    })))
+}
+
+/// Sleeps while the word at `address` holds `expected`, until a wake on the same address or
+/// patience runs out.
+///
+/// `read` fetches the word. It is called **under the queue's lock**, which is the one thing
+/// that makes this correct rather than merely usual: a waker writes the word and then wakes,
+/// and a sleeper that read the old value has already joined the queue before the lock is
+/// released into the sleep - so the wake finds it. Read before taking the lock, the wake could
+/// land in the gap and the sleeper would wait for a second wake that never comes. That is why
+/// the read is a closure rather than a value the caller looked up first.
+///
+/// The read is a closure for a second reason, the one principle 8 gives: guest memory stays in
+/// the crate root, and this module can then be tested with a word it owns.
+///
+/// `None` only for a host lock that is poisoned or a word that could not be read.
+pub fn wait_on_address(
+    address: u64,
+    expected: u64,
+    read: impl FnOnce() -> Option<u64>,
+    until: Blocking,
+) -> Option<AddressWait> {
+    let queue = address_queue(address)?;
+    let mut state = queue.state.lock().ok()?;
+    if read()? != expected {
+        return Some(AddressWait::Mismatch);
+    }
+    state.waiting += 1;
+    let Some(mut state) = wait_while(&queue.woken, state, until, |q| q.tokens == 0) else {
+        // Gave up, and the guard went with it. Re-take the lock to leave the queue - and
+        // if a wake landed in that gap it counted this thread, so a token no remaining
+        // sleeper can claim is this thread's and is collected rather than left to wake a
+        // stranger later.
+        let mut state = queue.state.lock().ok()?;
+        state.waiting -= 1;
+        if state.tokens > state.waiting {
+            state.tokens -= 1;
+            return Some(AddressWait::Woken);
+        }
+        return Some(AddressWait::TimedOut);
+    };
+    state.tokens -= 1;
+    state.waiting -= 1;
+    Some(AddressWait::Woken)
+}
+
+/// Wakes up to `count` threads asleep on `address`, and says how many that was.
+///
+/// Zero is the ordinary answer, not an error: a wake races the wait by design, and the word
+/// is what carries the state. `None` only for a poisoned host lock.
+pub fn wake_on_address(address: u64, count: u32) -> Option<u32> {
+    let queue = address_waiters().lock().ok()?.get(&address).cloned();
+    let Some(queue) = queue else {
+        return Some(0);
+    };
+    let mut state = queue.state.lock().ok()?;
+    let granted = count.min(state.waiting.saturating_sub(state.tokens));
+    if granted > 0 {
+        state.tokens += granted;
+        queue.woken.notify_all();
+    }
+    Some(granted)
+}
+
+/// How many threads are asleep on `address` right now.
+///
+/// A snapshot, for reports and tests; anything may wake or sleep before the caller acts on it.
+pub fn waiting_on_address(address: u64) -> u32 {
+    let Ok(table) = address_waiters().lock() else {
+        return 0;
+    };
+    table
+        .get(&address)
+        .and_then(|q| q.state.lock().ok().map(|s| s.waiting))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Acquisition, Blocking, Recursion, acquire, create, destroy, name_of, unlock};
@@ -1573,5 +1706,169 @@ mod tests {
             !super::equeue_exists(0xdead_beef_0bad_0bad),
             "a handle nothing issued must not look like a queue"
         );
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    //! The futex contract, and each test states the failure it exists to catch. The word is a
+    //! test-owned atomic rather than guest memory, which is what the read closure is for.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{AddressWait, Blocking, wait_on_address, waiting_on_address, wake_on_address};
+
+    /// Addresses are keys, so each test takes its own and no wake crosses between them.
+    fn fresh_address() -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(0x7400_0000_0000);
+        NEXT.fetch_add(0x100, Ordering::Relaxed)
+    }
+
+    /// Waits until `n` threads are asleep on `address`, or fails the test.
+    fn settle(address: u64, n: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while waiting_on_address(address) != n {
+            assert!(
+                Instant::now() < deadline,
+                "sleepers never arrived on {address:#x}"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A sleeper on `address` that expects the word to hold zero.
+    fn sleeper(address: u64, word: &Arc<AtomicU64>) -> thread::JoinHandle<Option<AddressWait>> {
+        let word = Arc::clone(word);
+        thread::spawn(move || {
+            wait_on_address(
+                address,
+                0,
+                || Some(word.load(Ordering::SeqCst)),
+                Blocking::Forever,
+            )
+        })
+    }
+
+    #[test]
+    fn a_word_that_already_changed_is_not_waited_on() {
+        // The wake came first and the word says so. Sleeping here is the lost-wakeup hang.
+        let address = fresh_address();
+        let got = wait_on_address(address, 0, || Some(1), Blocking::Forever);
+        assert_eq!(got, Some(AddressWait::Mismatch));
+        assert_eq!(
+            waiting_on_address(address),
+            0,
+            "nothing was left on the queue"
+        );
+    }
+
+    #[test]
+    fn a_sleeper_is_woken_by_a_wake_on_its_own_address() {
+        let address = fresh_address();
+        let word = Arc::new(AtomicU64::new(0));
+        let asleep = sleeper(address, &word);
+        settle(address, 1);
+        word.store(1, Ordering::SeqCst);
+        assert_eq!(
+            wake_on_address(address, 1),
+            Some(1),
+            "one sleeper, one woken"
+        );
+        assert_eq!(asleep.join().ok().flatten(), Some(AddressWait::Woken));
+        assert_eq!(waiting_on_address(address), 0);
+    }
+
+    #[test]
+    fn a_wake_with_nobody_asleep_is_not_remembered() {
+        // The futex contract: the word carries the state, the wake only ends a sleep. A token
+        // kept from this wake would end the timed wait below early, and the assertion on
+        // `TimedOut` is what would catch that - this test was watched failing with the guard
+        // in `wake_on_address` removed.
+        let address = fresh_address();
+        assert_eq!(wake_on_address(address, 1), Some(0));
+        let until = Blocking::Until(Instant::now() + Duration::from_millis(40));
+        let got = wait_on_address(address, 0, || Some(0), until);
+        assert_eq!(got, Some(AddressWait::TimedOut));
+        assert_eq!(
+            waiting_on_address(address),
+            0,
+            "a timed-out sleeper leaves the queue"
+        );
+    }
+
+    #[test]
+    fn a_wake_of_one_leaves_the_other_asleep() {
+        // Waking everybody on a count of one is a spurious wakeup the guest did not ask for,
+        // and a guest whose thread pool hands out work one wake at a time would run two
+        // workers on one job.
+        let address = fresh_address();
+        let word = Arc::new(AtomicU64::new(0));
+        let first = sleeper(address, &word);
+        let second = sleeper(address, &word);
+        settle(address, 2);
+        assert_eq!(wake_on_address(address, 1), Some(1));
+        // Exactly one wakes; the queue settles at one sleeper rather than zero.
+        settle(address, 1);
+        assert_eq!(wake_on_address(address, 1), Some(1));
+        assert_eq!(first.join().ok().flatten(), Some(AddressWait::Woken));
+        assert_eq!(second.join().ok().flatten(), Some(AddressWait::Woken));
+    }
+
+    #[test]
+    fn a_wake_on_another_address_does_not_count() {
+        let address = fresh_address();
+        let other = fresh_address();
+        let word = Arc::new(AtomicU64::new(0));
+        let asleep = sleeper(address, &word);
+        settle(address, 1);
+        assert_eq!(wake_on_address(other, 1), Some(0), "nobody sleeps there");
+        assert_eq!(
+            waiting_on_address(address),
+            1,
+            "and the real sleeper is untouched"
+        );
+        assert_eq!(wake_on_address(address, 1), Some(1));
+        assert_eq!(asleep.join().ok().flatten(), Some(AddressWait::Woken));
+    }
+
+    #[test]
+    fn a_wake_asking_for_more_than_are_asleep_reports_what_it_woke() {
+        // The answer is what happened, not what was asked for - a guest counting wakes
+        // against workers would otherwise be told about workers that do not exist.
+        let address = fresh_address();
+        let word = Arc::new(AtomicU64::new(0));
+        let asleep = sleeper(address, &word);
+        settle(address, 1);
+        assert_eq!(wake_on_address(address, 8), Some(1));
+        assert_eq!(asleep.join().ok().flatten(), Some(AddressWait::Woken));
+        // And nothing was left over for the next sleeper to trip on.
+        let until = Blocking::Until(Instant::now() + Duration::from_millis(40));
+        assert_eq!(
+            wait_on_address(address, 0, || Some(0), until),
+            Some(AddressWait::TimedOut)
+        );
+    }
+
+    #[test]
+    fn a_caller_that_will_not_wait_is_refused_rather_than_slept() {
+        let address = fresh_address();
+        let got = wait_on_address(address, 0, || Some(0), Blocking::Never);
+        assert_eq!(got, Some(AddressWait::TimedOut));
+        assert_eq!(waiting_on_address(address), 0);
+    }
+
+    #[test]
+    fn an_unreadable_word_is_a_miss_rather_than_a_sleep() {
+        // Sleeping on a word that could not be read would be waiting for a wake on an address
+        // the guest may not even own, forever, with nothing naming the cause.
+        let address = fresh_address();
+        assert_eq!(
+            wait_on_address(address, 0, || None, Blocking::Forever),
+            None
+        );
+        assert_eq!(waiting_on_address(address), 0);
     }
 }

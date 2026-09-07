@@ -2441,21 +2441,13 @@ fn putchar(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// repeated.
 ///
 /// Reference: C++ `std::random_device` (`[rand.device]`); the generator is `splitmix64`.
+///
+/// **The stream itself moved to `orbistoun-core` (D578)**, so the random devices in
+/// `orbistoun-fs` answer from one pool rather than a second copy of this generator. The
+/// reasoning above is unchanged and now lives beside it.
 fn random_device(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    /// The `splitmix64` increment, also the seed - any odd constant serves, and this is the
-    /// one the reference uses.
-    const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-
-    static STATE: AtomicU64 = AtomicU64::new(GAMMA);
-    let mut z = STATE
-        .fetch_add(GAMMA, Ordering::Relaxed)
-        .wrapping_add(GAMMA);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    u64::from((z & 0xFFFF_FFFF) as u32)
+    // The low 32 bits: `std::random_device::result_type` is `unsigned int`.
+    u64::from(orbistoun_core::entropy::next_word() as u32)
 }
 
 /// `getpid()` - the process the guest is running in.

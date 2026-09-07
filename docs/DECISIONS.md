@@ -519,13 +519,13 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D495 | [The game asks for its modules by name, and `LoadStartModule` starts nothing](decisions/D495-the-game-asks-for-its-modules-by-name-and-load-start-starts-nothing.md) | measured | 2026-09-03 |
 | 🟢 | D496 | [These modules declare no code to run at load, and `DT_FINI` is why that is a finding](decisions/D496-these-modules-declare-no-code-to-run-at-load.md) | measured | 2026-09-03 |
 | 🟢 | D497 | [Half the encoder probes measure the probe's own initialiser](decisions/D497-half-the-encoder-probes-measure-the-probes-own-initialiser.md) | measured | 2026-09-03 |
-| 🟢 | D498 | [strtol converts the zero in 0x, and a stale work item is not a work item](decisions/D498-strtol-converts-the-zero-in-0x.md) | measured | 2026-09-03 |
+| 🟢 | D498 | [`strtol` converts the zero in `"0x"`, and a stale work item is not a work item](decisions/D498-strtol-converts-the-zero-in-0x.md) | measured | 2026-09-03 |
 | 🟢 | D499 | [The residual oscillation is one allocation round, and it moves the verdict again](decisions/D499-the-residual-oscillation-is-one-allocation-round.md) | measured | 2026-09-03 |
 | 🟢 | D500 | [Every A/V/input subsystem implements the lifecycle and not the data path](decisions/D500-the-lifecycle-is-implemented-and-the-data-path-is-not.md) | measured | 2026-09-03 |
 | 🟢 | D501 | [The citations were already here, in the wrong field](decisions/D501-the-citations-were-already-here-in-the-wrong-field.md) | measured | 2026-09-03 |
 | 🟢 | D502 | [Ten outstanding measurements were never going to be claimed](decisions/D502-ten-outstanding-measurements-were-never-going-to-be-claimed.md) | decided | 2026-09-03 |
-| 🟢 | D503 | [Seven hardware claims from data already in hand, and nine more non-claims](decisions/D503-seven-hardware-claims-from-data-already-in-hand.md) | measured | 2026-09-03 |
-| 🟢 | D504 | [The current generation graphics API, declared as names and nothing else](decisions/D504-the-current-generations-graphics-api-declared-as-names.md) | decided | 2026-09-03 |
+| 🟢 | D503 | [Seven hardware claims from data already in hand, and nine more non-claims](decisions/D503-seven-hardware-claims-from-data-already-in-hand.md) | hardware | 2026-09-03 |
+| 🟢 | D504 | [The current generation's graphics API, declared as names and nothing else](decisions/D504-the-current-generations-graphics-api-declared-as-names.md) | decided | 2026-09-03 |
 | 🟢 | D505 | [The declared surface now matches what guests ask for, and the coverage figure got worse](decisions/D505-the-declared-surface-now-matches-what-guests-ask-for.md) | decided | 2026-09-03 |
 | 🟢 | D506 | [The encoder measurements record a non-resolution, and thirty names had no provenance](decisions/D506-the-encoder-measurements-record-a-non-resolution.md) | measured | 2026-09-03 |
 | 🟢 | D507 | [A second capture settles the third query field, and demotes thirty measurements](decisions/D507-a-second-capture-settles-the-third-query-field.md) | measured | 2026-09-03 |
@@ -533,59 +533,59 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D509 | [The console writes eight bytes where documentation said four](decisions/D509-the-console-writes-eight-bytes-where-documentation-said-four.md) | measured | 2026-09-03 |
 | 🟢 | D510 | [A message that describes a gap outlives the gap](decisions/D510-a-message-that-describes-a-gap-outlives-the-gap.md) | decided | 2026-09-03 |
 | 🟢 | D511 | [Two formatter bugs in one run, both in the padding nobody tested](decisions/D511-two-formatter-bugs-in-one-run.md) | measured | 2026-09-03 |
-| 🟢 | D512 | [vsnprintf closes the list, and the break proves which cases were carrying it](decisions/D512-the-differential-covers-every-libc-function-it-can.md) | measured | 2026-09-03 |
+| 🟢 | D512 | [`vsnprintf` closes the list, and the break proves which cases were carrying it](decisions/D512-the-differential-covers-every-libc-function-it-can.md) | measured | 2026-09-03 |
 | 🟢 | D513 | [The oscillation was the guest's own allocator, and the deciding input was ordering](decisions/D513-the-oscillation-was-the-guests-own-allocator.md) | measured | 2026-09-03 |
 | 🟢 | D514 | [The wall is a module that was loaded, placed, and never started](decisions/D514-the-wall-is-a-module-that-was-never-started.md) | measured | 2026-09-03 |
 | 🟢 | D515 | [Starting the modules took the wall down, and the guest reached its frame loop](decisions/D515-starting-a-module-took-the-wall-down.md) | measured | 2026-09-03 |
-| 🟢 | D516 | [Nothing is ever pending, and the guest left its frame loop](decisions/D516-nothing-is-ever-pending.md) | guest-observed | 2026-09-03 |
-| 🟢 | D517 | [dlsym never knew the guest's own exports, and the wall did not move anyway](decisions/D517-dlsym-never-knew-the-guests-own-exports.md) | measured | 2026-09-03 |
-| 🟡 | D518 | [The null global has exactly one writer (and the guard I blamed is never reached)](decisions/D518-the-null-global-has-exactly-one-writer.md) | measured | 2026-09-03 |
+| ⚪ | D516 | [Nothing is ever pending, and the guest left its frame loop](decisions/D516-nothing-is-ever-pending.md) | unrecorded | 2026-09-03 |
+| 🟢 | D517 | [`dlsym` never knew the guest's own exports, and the wall did not move anyway](decisions/D517-dlsym-never-knew-the-guests-own-exports.md) | measured | 2026-09-03 |
+| 🟢 | D518 | [The null global has exactly one writer (and the guard I blamed is never reached)](decisions/D518-the-null-global-has-exactly-one-writer.md) | measured | 2026-09-03 |
 | 🟢 | D519 | [The guest calls into its module before the memory manager exists, and D518 blamed the wrong guard](decisions/D519-the-guest-calls-its-module-before-the-memory-manager-exists.md) | measured | 2026-09-03 |
 | 🟢 | D520 | [Starting every placed module before entry is not the missing ordering](decisions/D520-starting-every-module-early-is-not-the-missing-ordering.md) | measured | 2026-09-03 |
 | 🟢 | D521 | [The callback has no branch that avoids the read, so one of D519's two readings is dead](decisions/D521-the-callback-has-no-branch-that-avoids-the-read.md) | measured | 2026-09-03 |
 | 🟢 | D522 | [A fault now says what its registers point at, and the label is "None"](decisions/D522-a-fault-now-says-what-its-registers-point-at.md) | measured | 2026-09-03 |
-| 🟢 | D523 | [The thread affinity setter, and the one beside it that stays unimplemented](decisions/D523-the-thread-affinity-setter-and-the-one-beside-it-that-stays-unimplemented.md) | guest-observed | 2026-09-03 |
-| 🟢 | D524 | [The event queue exists so a handle means something, not so events can be delivered](decisions/D524-the-event-queue-exists-because-a-handle-has-to-mean-something.md) | guest-observed | 2026-09-03 |
-| 🟢 | D525 | [The vendor stat is not the POSIX one under another name, and it opened eight functions](decisions/D525-the-vendor-stat-is-not-the-posix-one-under-another-name.md) | guest-observed | 2026-09-03 |
-| 🟢 | D526 | [A positioned read took the guest into the GPU, and the wall finally moved](decisions/D526-a-positioned-read-took-the-guest-into-the-gpu.md) | guest-observed | 2026-09-03 |
-| 🟢 | D527 | [The wall is sceAgcCreateShader, and a hardcoded cap was hiding it](decisions/D527-the-wall-is-a-shader-and-the-cap-was-hiding-it.md) | guest-observed | 2026-09-03 |
+| ⚪ | D523 | [The thread affinity setter, and the one beside it that stays unimplemented](decisions/D523-the-thread-affinity-setter-and-the-one-beside-it-that-stays-unimplemented.md) | unrecorded | 2026-09-03 |
+| ⚪ | D524 | [The event queue exists so a handle means something, not so events can be delivered](decisions/D524-the-event-queue-exists-because-a-handle-has-to-mean-something.md) | unrecorded | 2026-09-03 |
+| ⚪ | D525 | [The vendor `stat` is not the POSIX one under another name, and it opened eight functions](decisions/D525-the-vendor-stat-is-not-the-posix-one-under-another-name.md) | unrecorded | 2026-09-03 |
+| ⚪ | D526 | [A positioned read took the guest into the GPU, and the wall finally moved](decisions/D526-a-positioned-read-took-the-guest-into-the-gpu.md) | unrecorded | 2026-09-03 |
+| ⚪ | D527 | [The wall is `sceAgcCreateShader`, and a hardcoded cap was hiding it](decisions/D527-the-wall-is-a-shader-and-the-cap-was-hiding-it.md) | unrecorded | 2026-09-03 |
 | 🟢 | D528 | [Two walls that need a measurement, and the mechanism that asks for one](decisions/D528-two-walls-that-need-a-measurement-and-the-mechanism-that-asks-for-it.md) | decided | 2026-09-03 |
 | 🟢 | D529 | [The record format already carried what D512 said it lacked](decisions/D529-the-record-format-already-carried-what-it-was-said-to-lack.md) | decided | 2026-09-04 |
 | 🟢 | D530 | [The wide family is verified, and one case is the reason it was worth doing](decisions/D530-the-wide-family-verified-and-the-case-that-bites.md) | measured | 2026-09-04 |
-| 🟢 | D531 | [The interleaved sequence is the only thing that tells strtok_r from strtok](decisions/D531-the-interleaved-sequence-is-the-only-thing-that-tells-them-apart.md) | measured | 2026-09-04 |
-| 🟢 | D532 | [strftime, and the question that found it](decisions/D532-strftime-and-the-question-that-found-it.md) | measured | 2026-09-04 |
+| 🟢 | D531 | [The interleaved sequence is the only thing that tells `strtok_r` from `strtok`](decisions/D531-the-interleaved-sequence-is-the-only-thing-that-tells-them-apart.md) | measured | 2026-09-04 |
+| 🟢 | D532 | [`strftime`, and the question that found it](decisions/D532-strftime-and-the-question-that-found-it.md) | measured | 2026-09-04 |
 | 🟢 | D533 | [libm splits in two, and only half of it belongs in a differential](decisions/D533-libm-splits-in-two-and-only-half-belongs-here.md) | measured | 2026-09-04 |
 | 🟢 | D534 | [Two rounding rules that pin each other](decisions/D534-two-rounding-rules-that-pin-each-other.md) | measured | 2026-09-04 |
-| 🟢 | D535 | [strdup covered, and a missing terminator is only caught by luck](decisions/D535-a-missing-terminator-is-only-caught-by-luck.md) | measured | 2026-09-04 |
-| 🟢 | D536 | [One clock, two names, and one origin](decisions/D536-one-clock-two-names-and-one-origin.md) | guest-observed | 2026-09-04 |
+| 🟢 | D535 | [`strdup` covered, and a missing terminator is only caught by luck](decisions/D535-a-missing-terminator-is-only-caught-by-luck.md) | measured | 2026-09-04 |
+| ⚪ | D536 | [One clock, two names, and one origin](decisions/D536-one-clock-two-names-and-one-origin.md) | unrecorded | 2026-09-04 |
 | 🟢 | D537 | [The reasoning was in the code, and the record said nothing](decisions/D537-the-reasoning-was-in-the-code-and-the-record-said-nothing.md) | decided | 2026-09-04 |
 | 🟢 | D538 | [Two thirds of the ask list is forty sentences](decisions/D538-two-thirds-of-the-ask-list-is-forty-sentences.md) | decided | 2026-09-04 |
 | 🟢 | D539 | [One question, written a hundred and forty-nine ways](decisions/D539-one-question-written-a-hundred-and-forty-nine-ways.md) | decided | 2026-09-04 |
 | 🟢 | D540 | [The ask list was asking for a function that does not exist](decisions/D540-the-ask-list-was-asking-for-a-function-that-does-not-exist.md) | decided | 2026-09-04 |
 | 🟢 | D541 | [A measurement was sitting in the list of things nobody knows](decisions/D541-a-measurement-was-sitting-in-the-list-of-things-nobody-knows.md) | decided | 2026-09-04 |
 | 🟢 | D542 | [Six records said nothing was known while holding a measurement, and the axis closes](decisions/D542-six-records-said-nothing-was-known-while-holding-a-measurement.md) | decided | 2026-09-04 |
-| 🟢 | D543 | [`dlsym` succeeds where the console refuses, and the reason written down was not the reason](decisions/D543-dlsym-succeeds-where-the-console-refuses.md) | guest-observed | 2026-09-04 |
+| 🟢 | D543 | [`dlsym` succeeds where the console refuses, and the reason written down was not the reason](decisions/D543-dlsym-succeeds-where-the-console-refuses.md) | decided | 2026-09-04 |
 | 🟢 | D544 | [Forty-seven measured values that no test looked at](decisions/D544-forty-seven-measured-values-that-no-test-looked-at.md) | measured | 2026-09-04 |
-| 🟢 | D545 | [The relations are testable where the numbers are not](decisions/D545-the-relations-are-testable-where-the-numbers-are-not.md) | measured | 2026-09-04 |
+| 🟢 | D545 | [The relations are testable where the numbers are not](decisions/D545-the-relations-are-testable-where-the-numbers-are-not.md) | decided | 2026-09-04 |
 | 🟢 | D546 | [A permanent resident of the work queue](decisions/D546-a-permanent-resident-of-the-work-queue.md) | decided | 2026-09-04 |
-| 🟢 | D547 | [The relation needed a mount, not a guest](decisions/D547-the-relation-needed-a-mount-not-a-guest.md) | measured | 2026-09-04 |
-| 🔴 | D548 | [The wall is an experiment, and there is no guest to run](decisions/D548-the-wall-is-an-experiment-and-there-is-no-guest-to-run.md) - **retracted by D555** | superseded | 2026-09-04 |
-| 🟢 | D549 | [The oracle the roadmap said did not exist](decisions/D549-the-oracle-the-roadmap-said-did-not-exist.md) | measured | 2026-09-04 |
-| 🟢 | D550 | [The oracle draws](decisions/D550-the-oracle-draws.md) | measured | 2026-09-04 |
+| 🟢 | D547 | [The relation needed a mount, not a guest](decisions/D547-the-relation-needed-a-mount-not-a-guest.md) | decided | 2026-09-04 |
+| ⚪ | D548 | [The wall is an experiment, and there is no guest to run](decisions/D548-the-wall-is-an-experiment-and-there-is-no-guest-to-run.md) | unrecorded | 2026-09-04 |
+| 🟢 | D549 | [The oracle the roadmap said did not exist](decisions/D549-the-oracle-the-roadmap-said-did-not-exist.md) | decided | 2026-09-04 |
+| 🟢 | D550 | [The oracle draws](decisions/D550-the-oracle-draws.md) | decided | 2026-09-04 |
 | 🟢 | D551 | [The export was already decoded, and its blocker had half expired](decisions/D551-the-export-was-already-decoded.md) | decided | 2026-09-04 |
-| 🟢 | D552 | [The fragment path does not need the feature, and the report must not claim it](decisions/D552-the-fragment-path-does-not-need-the-feature.md) | measured | 2026-09-04 |
-| 🟢 | D553 | [The translator draws](decisions/D553-the-translator-draws.md) | measured | 2026-09-04 |
-| 🟢 | D554 | [The oracle carries a varying, before anything interpolates](decisions/D554-the-oracle-carries-a-varying.md) | measured | 2026-09-04 |
-| 🟢 | D555 | [The wall was real, the record was twelve days stale, and the library was never empty](decisions/D555-the-wall-was-real-and-the-record-was-twelve-days-stale.md) | measured | 2026-09-04 |
+| 🟢 | D552 | [The fragment path does not need the feature, and the report must not claim it](decisions/D552-the-fragment-path-does-not-need-the-feature.md) | decided | 2026-09-04 |
+| 🟢 | D553 | [The translator draws](decisions/D553-the-translator-draws.md) | decided | 2026-09-04 |
+| 🟢 | D554 | [The oracle carries a varying, before anything interpolates](decisions/D554-the-oracle-carries-a-varying.md) | decided | 2026-09-04 |
+| 🟢 | D555 | [The wall was real, the record was twelve days stale, and the library was never empty](decisions/D555-the-wall-was-real-and-the-record-was-twelve-days-stale.md) | decided | 2026-09-04 |
 | 🟢 | D556 | [The out-parameter is the whole of the wall, and the capture that could answer it does not exist yet](decisions/D556-the-out-parameter-is-the-whole-wall.md) | measured | 2026-09-04 |
-| 🟡 | D557 | [A measured answer is not a prop, and a region always was one](decisions/D557-a-measured-answer-is-not-a-prop.md) | assumed | 2026-09-04 |
+| 🟢 | D557 | [A measured answer is not a prop, and a region always was one](decisions/D557-a-measured-answer-is-not-a-prop.md) | measured | 2026-09-04 |
 | 🟢 | D558 | [A rung for the first frame, and where frames may not rank](decisions/D558-a-rung-for-the-first-frame.md) | measured | 2026-09-04 |
 | 🟢 | D559 | [The Agc argument classes, and how to get past the arity gate without guessing](decisions/D559-the-agc-argument-classes-and-the-arity-gate.md) | measured | 2026-09-04 |
-| 🟢 | D560 | [Events are delivered, from a published layout, and the wait does not block](decisions/D560-events-are-delivered-from-a-published-layout.md) | guest-observed | 2026-09-04 |
-| 🟢 | D561 | [The per-thread scheduling record D523 said would be needed](decisions/D561-the-per-thread-scheduling-record-d523-predicted.md) | guest-observed | 2026-09-04 |
-| 🟢 | D562 | [The tail, worked in order of what a placeholder does](decisions/D562-the-tail-worked-by-what-a-placeholder-does.md) | guest-observed | 2026-09-04 |
+| ⚪ | D560 | [Events are delivered, from a published layout, and the wait does not block](decisions/D560-events-are-delivered-from-a-published-layout.md) | unrecorded | 2026-09-04 |
+| ⚪ | D561 | [The per-thread scheduling record D523 said would be needed](decisions/D561-the-per-thread-scheduling-record-d523-predicted.md) | unrecorded | 2026-09-04 |
+| ⚪ | D562 | [The tail, worked in order of what a placeholder does](decisions/D562-the-tail-worked-by-what-a-placeholder-does.md) | unrecorded | 2026-09-04 |
 | 🟢 | D563 | [The record could not see the work, and three copies of the ordering had drifted](decisions/D563-the-record-could-not-see-the-work.md) | measured | 2026-09-04 |
-| 🟢 | D564 | [A placeholder answered as a *size* is a very quiet four gigabytes](decisions/D564-a-placeholder-as-a-size-is-a-quiet-four-gigabytes.md) | guest-observed | 2026-09-04 |
+| ⚪ | D564 | [A placeholder answered as a *size* is a very quiet four gigabytes](decisions/D564-a-placeholder-as-a-size-is-a-quiet-four-gigabytes.md) | unrecorded | 2026-09-04 |
 | 🟢 | D565 | [The first measured command packets, and a census that contradicts its own report](decisions/D565-the-first-measured-command-packets.md) | measured | 2026-09-04 |
 | 🟢 | D566 | [The biggest item in the work list has no name, and no return value fixes it](decisions/D566-the-biggest-item-in-the-work-list-has-no-name.md) | measured | 2026-09-04 |
 | 🟢 | D567 | [A placeholder that names its own source](decisions/D567-a-placeholder-that-names-its-own-source.md) | measured | 2026-09-04 |
@@ -593,6 +593,12 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D569 | [A diagnostic nobody asked about, and the record it overwrote](decisions/D569-a-diagnostic-nobody-asked-about.md) | measured | 2026-09-04 |
 | 🟢 | D570 | [Six arguments, a refuted hypothesis, and a filter that turned out to be load-bearing](decisions/D570-six-arguments-and-a-refuted-hypothesis.md) | measured | 2026-09-04 |
 | 🟢 | D571 | [The ring is circular, and the trade it seemed to require was false](decisions/D571-the-ring-is-circular-and-the-trade-was-false.md) | measured | 2026-09-04 |
+| 🟢 | D572 | [The unnamed futex had a name in the tree, and the search missed it for a word order](decisions/D572-the-unnamed-futex-had-a-name-in-the-tree.md) | measured | 2026-09-07 |
+| 🟢 | D573 | [A wait that returns without waiting is a busy loop, so the wait now waits](decisions/D573-a-wait-that-returns-without-waiting-is-a.md) | measured | 2026-09-07 |
+| 🟢 | D574 | [Three tools that reported more than they measured, on one afternoon](decisions/D574-three-tools-that-reported-more-than-they.md) | measured | 2026-09-07 |
+| 🟢 | D575 | [The stack the collector scans, and the wall three titles shared](decisions/D575-the-stack-the-collector-scans-and-the.md) | measured | 2026-09-07 |
+| 🟢 | D576 | [A breakpoint was called stub padding without anything looking at the address](decisions/D576-a-breakpoint-was-called-stub-padding-without.md) | measured | 2026-09-07 |
+| 🟢 | D577 | [A guest may re-protect the regions somebody else placed for it](decisions/D577-a-guest-may-re-protect-the-regions-somebody.md) | measured | 2026-09-07 |
 
 | | meaning |
 |---|---|

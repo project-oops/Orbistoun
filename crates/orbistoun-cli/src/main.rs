@@ -2721,20 +2721,39 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
     // Keyed on the answer as well as the label, so a run of calls that returned *different*
     // values does not collapse into one line that hides the very thing worth seeing - a
     // function that answered a pointer once and zero the next time (D459).
-    let mut runs: Vec<(&str, u64, Option<u64>, u64, u64)> = Vec::new();
+    let mut runs: Vec<Run<'_>> = Vec::new();
     for call in &trace.tail {
         match runs.last_mut() {
-            Some((label, _, ret, _, count)) if *label == call.label && *ret == call.returned => {
-                *count += 1;
+            Some(run) if run.label == call.label && run.returned == call.returned => {
+                run.count += 1;
+                run.firsts.insert(call.args[0]);
             }
-            _ => runs.push((&call.label, call.args[0], call.returned, call.from, 1)),
+            _ => runs.push(Run {
+                label: &call.label,
+                arg0: call.args[0],
+                returned: call.returned,
+                from: call.from,
+                count: 1,
+                firsts: std::iter::once(call.args[0]).collect(),
+            }),
         }
     }
-    for (label, arg0, returned, from, count) in runs {
-        let repeat = if count > 1 {
-            format!(" x{count}")
-        } else {
-            String::new()
+    for Run {
+        label,
+        arg0,
+        returned,
+        from,
+        count,
+        firsts,
+    } in runs
+    {
+        // A collapsed run shows its first call's first argument, and only that. When the calls
+        // in it did not share one, say so: D566 read a run of forty-eight as "one address" off
+        // exactly this line, and the addresses were thirteen (D573).
+        let repeat = match (count, firsts.len()) {
+            (1, _) => String::new(),
+            (n, 1) => format!(" x{n}"),
+            (n, distinct) => format!(" x{n} on {distinct} distinct first arguments"),
         };
         // The call site is shown beside the call because it is the same address space the
         // fault's frame walk reports - so a frame in the stack trace stops being a bare
@@ -2756,6 +2775,19 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
         // visible with no other tooling.
         println!("  {label}({arg0:#x}){answered}{repeat}{site}");
     }
+}
+
+/// One line of the tail: a run of consecutive calls sharing a label and an answer.
+struct Run<'a> {
+    label: &'a str,
+    /// The first call's first argument, which is what the line shows.
+    arg0: u64,
+    returned: Option<u64>,
+    from: u64,
+    count: u64,
+    /// Every distinct first argument across the run, so the line can say when `arg0` was
+    /// not the only one (D574).
+    firsts: std::collections::BTreeSet<u64>,
 }
 
 /// Where a library's knowledge file lives.

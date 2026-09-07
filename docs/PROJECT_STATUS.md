@@ -96,24 +96,50 @@ guest code. None produces a pixel, and no guest has yet spawned a thread.
 
 | Title | Reach | Imports | Calls | Standing | Ends |
 |---|---|---|---|---|---|
-| obscene | entered | 178 | 87,658 | 100% | `ran to the time limit` |
+| PPSA02664-app0 | flipped | 197 | 421,864 | 100% | `image+0x39f7c` |
+| obscene | flipped | 193 | 278,722 | 100% | `ran to the time limit` |
+| PPSA03416-app0 | flipped | 192 | 467,541 | 100% | `image+0x1389269` |
+| PPSA25872-app0 | entered | 141 | 20,000,000 | 2% | `ran to the time limit` |
+| PPSA04263-app0 | entered | 70 | 28,341 | 100% | `image+0x196b91a` |
+| PPSA21564-app0 | entered | 57 | 500,260 | 100% | `the title's own modules+0x7af792` |
 | PPSA28061-app0 | entered | 47 | 933 | 94% | `image+0x43c4` |
-| PPSA02664-app0 | entered | 23 | 222 | 96% | `image+0xafc959` |
-| PPSA03416-app0 | entered | 23 | 222 | 96% | `image+0xafc959` |
-| PPSA25872-app0 | entered | 14 | 1,735 | 100% | `image+0x7b591e` |
-| PPSA21564-app0 | entered | 13 | 131 | 97% | `image+0x70a932c` |
-| PPSA04263-app0 | entered | 4 | 98,957,030 | 100% | `ran to the time limit` |
 
 Under a measured policy - stubs answering by name, so these reach further by
 construction and are not comparable with the table above:
 
-- **PPSA02664-app0** reached 27 imports, ending at `image+0xafcc08`, with 1 function answered by name
-- **PPSA03416-app0** reached 25 imports, ending at `image+0xafcc08`, with 1 function answered by name
-- **PPSA04263-app0** reached 4 imports, ending at `ran to the time limit`, with 1 function answered by name
-- **PPSA21564-app0** reached 13 imports, ending at `image+0x70a932c`, with 1 function answered by name
-- **PPSA25872-app0** reached 14 imports, ending at `image+0x7b591e`, with 1 function answered by name
-- **PPSA28061-app0** reached 56 imports, ending at `image+0x43c4`, with 1 function answered by name
-- **obscene** reached 178 imports, ending at `ran to the time limit`, with 1 function answered by name
+- **BFpilot_v0.4.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **BackPork_0.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **CheatRunner_v0.17** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **Lapy-JB-Daemon_v1.2** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **PPSA02664-app0** reached 215 imports, ending at `image+0x42c76`, with 2 functions answered by name
+- **PPSA03416-app0** reached 39 imports, ending at `image+0xb14be3`, with 1 function answered by name
+- **PPSA04263-app0** reached 72 imports, ending at `image+0x196b91a`, with 1 function answered by name
+- **PPSA21564-app0** reached 55 imports, ending at `image+0x11ccd`, with 1 function answered by name
+- **PPSA25872-app0** reached 56 imports, ending at `image+0x7b594e`, with 1 function answered by name
+- **PPSA28061-app0** reached 60 imports, ending at `the guest called abort`, with 1 function answered by name
+- **ShadowMountPlus_1.6beta16** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **WebKit-Autoloader-Installer_v0.4.0** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **elfldr_v0.26** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **etaHEN_2.5B** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ftpsrv-drakmor_1.15-ng-stable** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ftpsrv_v0.21.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **garlic-savemgr_v1.13** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **klogsrv_v0.9** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **kstuff-lite_v1.10** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **kstuff-toggle_0.6** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **kstuff_v1.6.7** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **nanoDNS_0.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **obscene** reached 193 imports, ending at `ran to the time limit`, with 1 function answered by name
+- **pldmgr_v0.5.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **prosperous** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ps5-app-dumper_v1.11** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ps5-linux-loader_v2.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ps5-web-file-manager_v1.7** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ps5debug-NG_1.3.0** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **ps5upload_v5.14.0** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **shsrv_v0.20** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **websrv_v0.34** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **zftpd_v1.5.0** reached 0 imports, ending at `0x1`, with 1 function answered by name
 
 <!-- end titles -->
 
@@ -143,9 +169,10 @@ So the three current walls are **phase 4 completion problems**, not threading on
 
 | | |
 |---|---|
-| Functions declared / implemented | 374 / 332 |
-| Recorded behaviours | 342 - 189 published, 6 measured, 35 guest-observed, 112 assumed |
-| Open questions a hardware probe could settle | 302 |
+| Functions declared / implemented | 946 / 677 |
+| Declared in a library that serves nothing | 243 across 29 libraries - names written down, no implementation |
+| Recorded behaviours | 706 - 363 published, 11 measured, 66 guest-observed, 249 assumed |
+| Open questions a hardware probe could settle | 774 |
 | Symbol database | 30086 names - 630 from this repository, 29439 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

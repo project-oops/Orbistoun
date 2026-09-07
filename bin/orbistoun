@@ -121,16 +121,25 @@ decide() {
     trap 'rmdir "$lock" 2>/dev/null || true' RETURN
 
     local next
-    next=$(grep -oE '^## D[0-9]+' docs/DECISIONS.md | sed 's/^## D//' | sort -n | tail -1)
-    next=$((next + 1))
+    # From the files, not the index: the index is generated from them, so it holds no `## D`
+    # headings to count - and counting it answered one, which would have reused D001.
+    next=$(ls docs/decisions | sed -n 's/^D\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1)
+    next=$((10#$next + 1))
 
+    # The same slug rule as tools/split-decisions.sh, so the file the tool would have made and
+    # the file made here are the same file.
+    local slug file
+    slug="$(printf '%s' "$title" | tr 'A-Z' 'a-z' | tr -d '`' \
+        | sed 's/[^a-z0-9]\+/-/g; s/^-\+//; s/-\+$//' | cut -c1-40 | sed 's/-[^-]*$//')"
+    file="docs/decisions/D$next-$slug.md"
     {
-        printf '\n## D%s - %s\n\n' "$next" "$title"
-        printf '**RESERVED** - being written. An entry left in this state is a number claimed\n'
+        printf '# D%s - %s\n\n' "$next" "$title"
+        printf '**Status:** RESERVED\n**Date:** %s\n\n' "$(date +%F)"
+        printf 'RESERVED - being written. An entry left in this state is a number claimed\n'
         printf 'and never spent, and the gate refuses one.\n'
-    } >> docs/DECISIONS.md
+    } > "$file"
 
-    printf 'D%s\n' "$next"
+    printf '%s\n' "$file"
 }
 
 decisions() {
@@ -827,8 +836,8 @@ names() {
     cargo build --release -p orbistoun-cli
 
     mkdir -p symbols
-    if [ ! -d titles ]; then
-        warn "no titles/ directory - nothing to search against"
+    if [ -z "$(titles_root)" ]; then
+        warn "no titles/ directory and no built library - nothing to search against"
         warn "the generator produces candidate names; confirming one needs a real"
         warn "import table to collide with. See docs/PROVENANCE.md."
         return 0
@@ -842,8 +851,8 @@ names() {
     # `--from-trace` because the runtime harvester is part of the system and the traces
     # are right there. It costs one small JSON read per module and says what it found,
     # including when that is nothing - which is the state it is in today (D213).
-    step "names titles/"
-    ./target/release/orbistoun-cli names titles \
+    step "names $(titles_root)/"
+    ./target/release/orbistoun-cli names "$(titles_root)" \
         --out symbols/generated.json \
         --wanted symbols/wanted.txt \
         --from-trace
@@ -992,7 +1001,7 @@ doctor() {
 
     step "guest modules"
     local titles=0
-    for module in titles/*/eboot.bin; do
+    for module in "$(titles_root)"/*/eboot.bin; do
         [ -e "$module" ] || continue
         titles=$((titles + 1))
         printf '  ok       %s
@@ -1054,31 +1063,56 @@ symbols_stale() {
 #
 # Takes an id because that is what a person has: they know which title they are chasing,
 # not where its executable sits inside the layout.
+# The directory to search for guest modules: `titles/` while it holds any, else the tool's
+# own library. One rule for every verb that walks the corpus, so `run`, `names` and `sweep`
+# cannot disagree about where it is - which they did, silently, once `titles/` was empty.
+titles_root() {
+    local module
+    for module in titles/*/eboot.bin; do
+        [ -e "$module" ] && { printf 'titles'; return 0; }
+    done
+    library_dir
+}
+
+# Where the built tool keeps its title library, or nothing if it has not been built yet.
+#
+# The tool's own answer, read back rather than guessed: the platform data directory is a rule
+# the paths crate owns, and a second copy of it here would be the D220 shape - one setting,
+# two sites, and the one that matters left out.
+library_dir() {
+    [ -x ./target/release/orbistoun-cli ] || return 0
+    ./target/release/orbistoun-cli paths 2>/dev/null | sed -n 's/^library  *//p'
+}
+
 resolve_module() {
     local wanted="$1"
     if [ -f "$wanted" ]; then
         printf '%s' "$wanted"
         return 0
     fi
-    for candidate in titles/"$wanted"/eboot.bin titles/"$wanted"*/eboot.bin; do
+    local library
+    library="$(library_dir)"
+    for candidate in titles/"$wanted"/eboot.bin titles/"$wanted"*/eboot.bin \
+                     ${library:+"$library/$wanted"/eboot.bin "$library/$wanted"*/eboot.bin}; do
         if [ -f "$candidate" ]; then
             printf '%s' "$candidate"
             return 0
         fi
     done
+    # Nothing matched, and that has to be said. This used to fall off the end with the loop's
+    # own status - success - so `run` launched an empty path, the tool printed a usage error
+    # that `|| true` swallowed, and the report that followed was of zero traces (D574).
+    return 1
 }
-
-# Lists what is available locally, for when a title cannot be resolved.
 list_titles() {
-    local found=0
-    for module in titles/*/eboot.bin; do
+    local found=0 library
+    library="$(library_dir)"
+    for module in titles/*/eboot.bin ${library:+"$library"/*/eboot.bin}; do
         [ -e "$module" ] || continue
         found=1
-        printf '  %s
-' "$(basename "$(dirname "$module")")"
+        printf '  %s\n' "$(basename "$(dirname "$module")")"
     done
-    [ "$found" -eq 0 ] && printf '  (none - put a title directory under titles/)
-'
+    [ "$found" -eq 0 ] && printf '  (none - put a title directory under titles/, or run orbistoun-cli corpus sync)\n'
     return 0
 }
 
@@ -1103,14 +1137,16 @@ available:
     fi
     shift || true
 
+    # Built before the title is resolved, because resolving may ask the tool where its own
+    # library is - and the build was the next step either way.
+    step "cargo build --release -p orbistoun-cli"
+    cargo build --release -p orbistoun-cli
+
     local module
     if ! module="$(resolve_module "$wanted")"; then
         die "no guest module for '$wanted'. Available:
 $(list_titles)"
     fi
-
-    step "cargo build --release -p orbistoun-cli"
-    cargo build --release -p orbistoun-cli
 
     if symbols_stale "$module"; then
         step "names are stale - searching (this is the slow part, and only when needed)"
@@ -1122,7 +1158,7 @@ $(list_titles)"
         # `--from-trace` for the same reason it is in the `names` verb: the runtime
         # harvester is part of the system, and a refresh that skips a source is a
         # different refresh depending on which command asked for it.
-        ./target/release/orbistoun-cli names titles \
+        ./target/release/orbistoun-cli names "$(titles_root)" \
             --out "$SYMBOLS_DB" --wanted "$SYMBOLS_WANTED" --from-trace ||
             warn "the name search failed"
     else
@@ -1154,7 +1190,7 @@ sweep() {
     names
 
     step "running every module (limit ${ORBISTOUN_LIMIT:-20}s each)"
-    for module in titles/*/eboot.bin; do
+    for module in "$(titles_root)"/*/eboot.bin; do
         [ -e "$module" ] || continue
         printf '
 --- %s

@@ -3,8 +3,9 @@
 //! Guest code faulting is the expected outcome for a long time yet, so the exit status
 //! of a dead worker is a primary diagnostic rather than an edge case. A bare number
 //! means nothing to a reader; "access violation" says immediately that the guest
-//! dereferenced something unmapped, and "breakpoint" says it ran off the end of a stub
-//! into the padding, which is a different bug entirely.
+//! dereferenced something unmapped, and "breakpoint" says a trap instruction was
+//! executed - which is a different bug entirely, though *which* bug needs the address
+//! and this table has none of them (D576).
 //!
 //! Pure, and therefore testable without killing anything - the D016 pattern.
 
@@ -34,7 +35,11 @@ const FAULTS: &[(u32, &str)] = &[
     (0xC000_008C, "array bounds exceeded"),
     (
         0x8000_0003,
-        "breakpoint - execution reached stub padding, so a stub was entered off its start",
+        // No address reaches here - this table is keyed on the exit code alone - so it
+        // must not name a cause. Stub padding is one thing a breakpoint can be; a trap
+        // the guest executed itself is another, and the fault record is what tells them
+        // apart (D576).
+        "breakpoint - a trap instruction; the fault record says whether it was stub padding",
     ),
 ];
 
@@ -47,7 +52,7 @@ const FAULTS: &[(i32, &str)] = &[
     ),
     (
         5,
-        "trap - execution reached stub padding, or a debugger interrupted it",
+        "trap - stub padding, a trap the guest executed, or a debugger",
     ),
     (6, "abort"),
     (7, "bus error - a misaligned or unbacked access"),
@@ -127,9 +132,11 @@ mod tests {
     }
 
     #[test]
-    fn reaching_stub_padding_is_distinguished_from_a_memory_fault() {
-        // Different bug entirely: a stub entered off its start rather than a bad
-        // pointer. Collapsing the two would send a reader looking in the wrong place.
+    fn a_breakpoint_is_distinguished_from_a_memory_fault() {
+        // Different bug entirely: a trap instruction rather than a bad pointer.
+        // Collapsing the two would send a reader looking in the wrong place. What this
+        // does *not* assert is which kind of breakpoint it was - that needs the address,
+        // which reaches the fault record and not this table (D576).
         #[cfg(windows)]
         let described = describe(Some(0x8000_0003_u32 as i32), None);
         #[cfg(unix)]

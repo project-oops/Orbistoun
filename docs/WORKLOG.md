@@ -362,7 +362,7 @@ context cannot re-derive.
 | 2026-09-03 | [(/loop) The guest says which modules to start, and we do not start them](worklog/345-the-guest-says-which-modules-to-start.md) |
 | 2026-09-03 | [(/loop) Six absences, and the tag that made them mean something](worklog/346-six-absences-and-the-tag-that-made-them-mean-something.md) |
 | 2026-09-03 | [(/loop) 24 claims, 24 non-claims, and a restore that broke a mutex](worklog/347-24-claims-24-non-claims-and-a-restore-that-broke-a-mutex.md) |
-| 2026-09-03 | [(/loop) A conformance bug, a stale work item, and a lying instrument](worklog/348-a-conformance-bug-a-stale-work-item-and-a-lying-instrument.md) |
+| 2026-09-03 | [(/loop) a conformance bug, a stale work item, and a lying instrument](worklog/348-a-conformance-bug-a-stale-work-item-and-a-lying-instrument.md) |
 | 2026-09-03 | [(/loop) The oscillation is one allocation round, and the backlog is now the whole list](worklog/349-the-oscillation-is-one-allocation-round.md) |
 | 2026-09-03 | [(/loop) What the 96% does not say, a stale red phase, and three more libc functions](worklog/350-what-the-96-percent-does-not-say.md) |
 | 2026-09-03 | [(/loop) The citations were already here, and R9 was already closed](worklog/351-the-citations-were-already-here.md) |
@@ -375,12 +375,12 @@ context cannot re-derive.
 | 2026-09-03 | [(/loop) Eight bytes where documentation said four](worklog/358-eight-bytes-and-a-round-trip.md) |
 | 2026-09-03 | [(/loop) A closed gap that both surfaces still called open](worklog/359-a-closed-gap-that-both-surfaces-called-open.md) |
 | 2026-09-03 | [(/loop) Two formatter bugs, in the padding nobody had tested](worklog/360-two-formatter-bugs.md) |
-| 2026-09-03 | [(/loop) vsnprintf closes the list, and the break names the cases carrying it](worklog/361-vsnprintf-closes-the-list.md) |
+| 2026-09-03 | [(/loop) `vsnprintf` closes the list, and the break names the cases carrying it](worklog/361-vsnprintf-closes-the-list.md) |
 | 2026-09-03 | [(/loop) The oscillation is settled: it was the guest's own allocator](worklog/362-the-oscillation-is-settled.md) |
 | 2026-09-03 | [(/loop) The wall named: a module that was loaded, placed, and never started](worklog/363-the-wall-is-a-module-never-started.md) |
 | 2026-09-03 | [(/loop) The wall is down: the guest reached its frame loop](worklog/364-the-wall-is-down.md) |
 | 2026-09-03 | [(/loop) Nothing is ever pending: the guest left its frame loop](worklog/365-nothing-is-ever-pending.md) |
-| 2026-09-03 | [(/loop) dlsym never knew the guest's own exports; the wall did not move](worklog/366-dlsym-and-a-wall-that-did-not-move.md) |
+| 2026-09-03 | [(/loop) `dlsym` never knew the guest's own exports; the wall did not move](worklog/366-dlsym-and-a-wall-that-did-not-move.md) |
 | 2026-09-03 | [(/loop) One writer, thirty-seven readers, and a guard that never passes](worklog/367-one-writer-thirty-seven-readers.md) |
 | 2026-09-03 | [(/loop) I blamed a guard that never ran](worklog/368-i-blamed-a-guard-that-never-ran.md) |
 | 2026-09-03 | [(/loop) Starting every module early is not the missing ordering](worklog/369-starting-everything-early-is-not-it.md) |
@@ -388,17 +388,17 @@ context cannot re-derive.
 | 2026-09-03 | [(/loop) A fault now says what its registers point at, and the label is "None"](worklog/371-a-fault-says-what-it-points-at.md) |
 | 2026-09-03 | [(/loop) One thread call implemented, one deliberately not](worklog/372-one-implemented-one-deliberately-not.md) |
 | 2026-09-03 | [(/loop) The event queue exists so a handle means something](worklog/373-the-event-queue.md) |
-| 2026-09-03 | [(/loop) The vendor stat is not the POSIX one under another name](worklog/374-the-vendor-stat.md) |
+| 2026-09-03 | [(/loop) The vendor `stat` is not the POSIX one under another name](worklog/374-the-vendor-stat.md) |
 | 2026-09-03 | [(/loop) A positioned read took the guest into the GPU](worklog/375-a-positioned-read-into-the-gpu.md) |
-| 2026-09-03 | [(/loop) The wall is sceAgcCreateShader, and a cap was hiding it](worklog/376-the-wall-is-a-shader.md) |
+| 2026-09-03 | [(/loop) The wall is `sceAgcCreateShader`, and a cap was hiding it](worklog/376-the-wall-is-a-shader.md) |
 | 2026-09-03 | [(/loop) Two walls that need a measurement, routed to the mechanism that asks](worklog/377-routing-two-walls-to-the-console.md) |
 | 2026-09-04 | [(/loop) The record format already carried what it was said to lack](worklog/378-the-format-already-carried-it.md) |
 | 2026-09-04 | [(/loop) The wide family verified, and the case that bites](worklog/379-the-wide-family-verified.md) |
 | 2026-09-04 | [(/loop) The interleaved sequence, and the sixteen cases that were blind](worklog/380-the-interleaved-sequence.md) |
-| 2026-09-04 | [(/loop) strftime, and the question that found it](worklog/381-strftime-and-the-question.md) |
+| 2026-09-04 | [(/loop) `strftime`, and the question that found it](worklog/381-strftime-and-the-question.md) |
 | 2026-09-04 | [(/loop) libm splits in two, and only half belongs here](worklog/382-libm-splits-in-two.md) |
 | 2026-09-04 | [(/loop) Two rounding rules that pin each other](worklog/383-two-rounding-rules.md) |
-| 2026-09-04 | [(/loop) strdup covered, and a missing terminator is only caught by luck](worklog/384-caught-by-luck.md) |
+| 2026-09-04 | [(/loop) `strdup` covered, and a missing terminator is only caught by luck](worklog/384-caught-by-luck.md) |
 | 2026-09-04 | [(/loop) One clock, two names, and one origin](worklog/385-one-clock-two-names.md) |
 | 2026-09-04 | [(/loop) The reasoning was in the code, and the record said nothing](worklog/386-the-record-said-nothing.md) |
 | 2026-09-04 | [(/loop) Two thirds of the ask list is forty sentences](worklog/387-two-thirds-of-the-ask-list.md) |
@@ -419,19 +419,23 @@ context cannot re-derive.
 | 2026-09-04 | [(/loop) The translator draws](worklog/402-the-translator-draws.md) |
 | 2026-09-04 | [(/loop) The oracle carries a varying](worklog/403-the-oracle-carries-a-varying.md) |
 | 2026-09-04 | [(/loop) The wall was real, the record was twelve days stale, VINTRP translates](worklog/404-the-wall-was-real.md) |
-| 2026-09-04 | [(/loop) The out-parameter is the whole of the wall](worklog/405-the-out-parameter-is-the-whole-wall.md) |
-| 2026-09-04 | [(/loop) A rung for the first frame, and a prop that was never counted](worklog/406-a-rung-for-the-first-frame.md) |
-| 2026-09-04 | [The Agc probe set, aimed from the guest's own arguments](worklog/407-the-agc-probe-set.md) |
-| 2026-09-04 | [The flip completion had no reader](worklog/408-the-flip-completion-had-no-reader.md) |
-| 2026-09-04 | [The pthread family, and a prediction kept](worklog/409-the-pthread-family-and-a-prediction-kept.md) |
-| 2026-09-04 | [The tail, and what was decided not to do](worklog/410-the-tail-and-what-was-decided-not-to-do.md) |
-| 2026-09-04 | [The record could not see the work](worklog/411-the-record-could-not-see-the-work.md) |
-| 2026-09-04 | [The whole corpus was twelve days stale](worklog/412-the-whole-corpus-was-twelve-days-stale.md) |
-| 2026-09-04 | [libSceUlt, and the quiet four gigabytes](worklog/413-libsceult-and-the-quiet-four-gigabytes.md) |
-| 2026-09-04 | [The first command packets came back](worklog/414-the-first-command-packets-came-back.md) |
-| 2026-09-04 | [The constructor was the wrong question](worklog/415-the-constructor-was-the-wrong-question.md) |
-| 2026-09-04 | [Seventy-eight percent of every call](worklog/416-seventy-eight-percent-of-every-call.md) |
-| 2026-09-04 | [A placeholder that says who](worklog/417-a-placeholder-that-says-who.md) |
-| 2026-09-04 | [The classification failed, and found two bugs on the way](worklog/418-the-classification-failed-and-found-two-bugs.md) |
-| 2026-09-04 | [Six arguments, and a hypothesis that was wrong](worklog/419-six-arguments-and-a-refuted-hypothesis.md) |
-| 2026-09-04 | [The ring is circular, and the trade was false](worklog/420-the-ring-is-circular.md) |
+| - | [405. The out-parameter is the whole of the wall](worklog/405-the-out-parameter-is-the-whole-wall.md) |
+| - | [406. A rung for the first frame, and a prop that was never counted](worklog/406-a-rung-for-the-first-frame.md) |
+| - | [407. The Agc probe set, aimed from the guest's own arguments](worklog/407-the-agc-probe-set.md) |
+| - | [408. The flip completion had no reader](worklog/408-the-flip-completion-had-no-reader.md) |
+| - | [409. The pthread family, and a prediction kept](worklog/409-the-pthread-family-and-a-prediction-kept.md) |
+| - | [410. The tail, and what was decided not to do](worklog/410-the-tail-and-what-was-decided-not-to-do.md) |
+| - | [411. The record could not see the work](worklog/411-the-record-could-not-see-the-work.md) |
+| - | [412. The whole corpus was twelve days stale](worklog/412-the-whole-corpus-was-twelve-days-stale.md) |
+| - | [413. libSceUlt, and the quiet four gigabytes](worklog/413-libsceult-and-the-quiet-four-gigabytes.md) |
+| - | [414. The first command packets came back](worklog/414-the-first-command-packets-came-back.md) |
+| - | [415. The constructor was the wrong question](worklog/415-the-constructor-was-the-wrong-question.md) |
+| - | [416. Seventy-eight percent of every call](worklog/416-seventy-eight-percent-of-every-call.md) |
+| - | [417. A placeholder that says who](worklog/417-a-placeholder-that-says-who.md) |
+| - | [418. The classification failed, and found two bugs on the way](worklog/418-the-classification-failed-and-found-two-bugs.md) |
+| - | [419. Six arguments, and a hypothesis that was wrong](worklog/419-six-arguments-and-a-refuted-hypothesis.md) |
+| - | [420. The ring is circular, and the trade was false](worklog/420-the-ring-is-circular.md) |
+| - | [421. The futex had a name, and the wait now waits](worklog/421-the-futex-had-a-name-and-the-wait-now-waits.md) |
+| - | [422. The stack the collector scans](worklog/422-the-stack-the-collector-scans.md) |
+| - | [423. The fault message was guessing, and it cost a finding](worklog/423-the-fault-message-was-guessing.md) |
+| - | [424. The protection call learns about the other half of the map](worklog/424-the-protection-call-learns-the-other-half.md) |

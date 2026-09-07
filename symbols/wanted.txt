@@ -5,7 +5,7 @@
 # title. Accumulated across every module ever searched; entries disappear as
 # the vocabulary grows to explain them.
 #
-# Generated - never hand-edited. Refresh with: ./orbistoun.sh names
+# Generated - never hand-edited. Refresh with: ./bin/orbistoun names
 0x0007597c78ac493f
 0x000b6a68ba9720a7
 0x000c6038c3460613
@@ -2285,6 +2285,7 @@
 0x439abac5c45c46dd
 0x439e52ac121280ef
 0x43a67475a28c1177
+0x43aa41dfa1b56277
 0x43aa91cf3e0f949f
 0x43ac5417eaa7cea1
 0x43b407087f2ed421
@@ -4789,7 +4790,6 @@
 0x903e626a7740911c
 0x904e50f9f549d6e7
 0x90523d5dd621d084
-0x90591532c0bf6cab
 0x9062aaa06eb93a10
 0x90741e310823b883
 0x9079660568c88e33
@@ -6202,7 +6202,6 @@
 0xbcdab7512d699ece
 0xbce04cb2ead6837d
 0xbcf997048b473058
-0xbd04891e6902ce1d
 0xbd064eebb1b6da2b
 0xbd0aa0925e4cebb2
 0xbd0f83e9eac38f2d

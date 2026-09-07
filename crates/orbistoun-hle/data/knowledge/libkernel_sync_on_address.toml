@@ -1,0 +1,39 @@
+library = "libkernel_sync_on_address"
+
+[[function]]
+name = "sceKernelSyncOnAddressWait"
+arity = 2
+purpose = "Sleeps while the 64-bit word at an address holds the value given, until a wake on the same address - the platform's futex wait."
+edge_cases = [
+    "A word that already differs answers success at once and the caller re-reads it: the wake may have come first, and sleeping then is the lost-wakeup hang. The compare is made under the wait queue's lock, so a wake landing between the guest's write and its wake call is not lost.",
+    "Sixty-four bits: in the 12.40 export layout this entry point is shared with the Wait64 spelling while Wait32 has its own (orbistoun-firmware/data/libkernel-vaddrs.txt).",
+    "Unimplemented, PPSA25872 called it 2.27 million times in twelve seconds on thirteen words 0x150 apart, from one call site, having created thirteen threads - 78% of every call this project had recorded (D566). Modelled, the same run makes 26 calls and the spin is gone (D573).",
+    "A non-zero third register is refused with the placeholder rather than waited on: every observed call passes zero there, and whether it is a timeout, and in what unit, is unestablished.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on FreeBSD _umtx_op(2) with UMTX_OP_WAIT: compare, sleep only on equality, success on a wake or a differing word. That the platform's wrapper follows it is inferred from the name, the library's own spelling of it, and the guest's usage; a probe on hardware would settle it.",
+    "The third, fourth and fifth registers read zero on every observed call and are not read. A timeout, if there is one, and its unit are unestablished; a timed wait would answer the published ETIMEDOUT under the measured vendor base, and that path is unexercised.",
+    "Which errno the target answers for a null or unreadable address is unverified; this answers the project's placeholder.",
+]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-07"
+note = "Name proved by hash: 0xbd04891e6902ce1d. obSCEne's mined corpus carries it under the byte-reversed spelling 0x1dce02691e8904bd, which is why a search for the hash as this tree prints it found nothing there (D572)."
+
+[[function]]
+name = "sceKernelSyncOnAddressWake"
+arity = 2
+purpose = "Wakes up to a count of threads sleeping on an address - the platform's futex wake."
+edge_cases = [
+    "Success whether or not anybody was asleep, and a wake with nobody listening is not remembered: the word carries the state and the wake only ends a sleep. A remembered wake would end a later, unrelated sleep early.",
+    "Exactly the count asked for are woken, not everybody sleeping there: PPSA25872 asks for one, per thread, and a pool handing out work one wake at a time would otherwise run two workers on one job.",
+    "PPSA25872 calls it thirteen times - once per thread it created - on words 0x30 below the ones its waits name, with a count of one in both calls whose arguments were captured.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on FreeBSD _umtx_op(2) with UMTX_OP_WAKE. The third, fourth and fifth registers held 1, 1 and 0x7ffffffe in both captured calls; whether those are arguments or leftovers is unestablished, and nothing reads them.",
+    "Whether the answer carries the number woken, as some futex interfaces do, or only a status is unverified; this answers a plain status.",
+]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-07"
+note = "Name proved by hash: 0x90591532c0bf6cab, which obSCEne's corpus carries byte-reversed as 0xab6cbfc032155990 (D572)."

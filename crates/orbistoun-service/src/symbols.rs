@@ -34,10 +34,11 @@ pub struct DeclaredSymbol {
 /// hand-called `register` per crate - and adding `libc` to only one of them produced a
 /// function that `orbistoun-cli symbols` listed, that a trace named correctly, and that
 /// resolved to nothing. Every layer agreed except the one that mattered (D123).
-pub(crate) fn modules() -> [ModuleDesc; 41] {
+pub(crate) fn modules() -> [ModuleDesc; 42] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
+        orbistoun_kernel::sync_on_address::MODULE,
         orbistoun_libc::MODULE,
         orbistoun_posix::MODULE,
         orbistoun_gpu::MODULE,

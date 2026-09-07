@@ -52,6 +52,7 @@ learned = [
   "Correction",
   "Ctl",
   "Detach",
+  "Dev",
   "Dialog",
   "Display",
   "Do",
@@ -96,6 +97,7 @@ learned = [
   "Join",
   "Jump",
   "Key",
+  "Kit",
   "Layout",
   "Leave",
   "Length",
@@ -357,6 +359,7 @@ verb = [
   "Update",
   "Validate",
   "Wait",
+  "Wake",
   "Write",
 ]
 
@@ -488,6 +491,9 @@ object = [
   "Submission",
   "Surface",
   "Sync",
+  # Read off the 12.40 export layout this tree already carries (orbistoun-firmware/data/
+  # libkernel-vaddrs.txt) and confirmed by hash against PPSA25872's import table (D572).
+  "SyncOnAddress",
   "Texture",
   "Thread",
   "ThreadId",

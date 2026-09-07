@@ -54,6 +54,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libkernel_fs.toml"),
     ),
     (
+        "libkernel_sync_on_address",
+        include_str!("../data/knowledge/libkernel_sync_on_address.toml"),
+    ),
+    (
         "libSceSystemService",
         include_str!("../data/knowledge/libSceSystemService.toml"),
     ),

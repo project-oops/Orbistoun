@@ -24099,6 +24099,7 @@
     "sceKernelIsAuthenticNeo",
     "sceKernelIsCEX",
     "sceKernelIsDebuggerAttached",
+    "sceKernelIsDevKit",
     "sceKernelIsDevelopmentMode",
     "sceKernelIsDevkit",
     "sceKernelIsDisableRazor",
@@ -154429,8 +154430,8 @@
     },
     "sceAgcAcbDispatchIndirect": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 469811,
+      "pattern": "prefix-module-object-verb",
+      "index": 3536,
       "on": "2026-08-20"
     },
     "sceAgcAcbDmaData": {
@@ -154466,31 +154467,31 @@
     "sceAgcAcbPopMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 513345,
+      "index": 523260,
       "on": "2026-08-20"
     },
     "sceAgcAcbPushMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 519420,
+      "index": 529380,
       "on": "2026-08-20"
     },
     "sceAgcAcbResetQueue": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 537975,
+      "index": 548070,
       "on": "2026-08-20"
     },
     "sceAgcAcbSetFlip": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 543465,
+      "index": 553605,
       "on": "2026-08-20"
     },
     "sceAgcAcbSetMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 543720,
+      "index": 553860,
       "on": "2026-08-20"
     },
     "sceAgcAcbWaitRegMem": {
@@ -154502,7 +154503,7 @@
     "sceAgcAcbWriteData": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 581580,
+      "index": 594045,
       "on": "2026-08-20"
     },
     "sceAgcAddPrimStateRegisters": {
@@ -154580,7 +154581,7 @@
     "sceAgcCreateShader": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 23865,
+      "index": 24030,
       "on": "2026-08-20"
     },
     "sceAgcDcbAcquireMem": {
@@ -154604,7 +154605,7 @@
     "sceAgcDcbDispatchIndirect": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 30491,
+      "index": 30911,
       "on": "2026-08-20"
     },
     "sceAgcDcbDmaData": {
@@ -154622,7 +154623,7 @@
     "sceAgcDcbDrawIndex": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4117755,
+      "index": 4205370,
       "on": "2026-08-20"
     },
     "sceAgcDcbDrawIndexAuto": {
@@ -154634,7 +154635,7 @@
     "sceAgcDcbDrawIndexIndirect": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4117766,
+      "index": 4205381,
       "on": "2026-08-20"
     },
     "sceAgcDcbDrawIndexIndirectGetSize": {
@@ -154664,7 +154665,7 @@
     "sceAgcDcbDrawIndirect": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 30506,
+      "index": 30926,
       "on": "2026-08-20"
     },
     "sceAgcDcbEventWrite": {
@@ -154700,19 +154701,19 @@
     "sceAgcDcbPopMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4158345,
+      "index": 4246260,
       "on": "2026-08-20"
     },
     "sceAgcDcbPushMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4164420,
+      "index": 4252380,
       "on": "2026-08-20"
     },
     "sceAgcDcbResetQueue": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4182975,
+      "index": 4271070,
       "on": "2026-08-20"
     },
     "sceAgcDcbRewind": {
@@ -154754,13 +154755,13 @@
     "sceAgcDcbSetFlip": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4188465,
+      "index": 4276605,
       "on": "2026-08-20"
     },
     "sceAgcDcbSetIndexBuffer": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4188645,
+      "index": 4276785,
       "on": "2026-08-20"
     },
     "sceAgcDcbSetIndexCount": {
@@ -154784,7 +154785,7 @@
     "sceAgcDcbSetMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4188720,
+      "index": 4276860,
       "on": "2026-08-20"
     },
     "sceAgcDcbSetNumInstances": {
@@ -154850,7 +154851,7 @@
     "sceAgcDcbWriteData": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 4226580,
+      "index": 4317045,
       "on": "2026-08-20"
     },
     "sceAgcDmaDataPatchSetDstAddressOrOffset": {
@@ -154886,7 +154887,7 @@
     "sceAgcDriverGetResourceName": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 27063270,
+      "index": 27743130,
       "on": "2026-08-25"
     },
     "sceAgcDriverGetResourceRegistrationMaxNameLength": {
@@ -154921,8 +154922,8 @@
     },
     "sceAgcDriverRegisterResource": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 19921935,
+      "pattern": "prefix-module-verb-object",
+      "index": 242745,
       "on": "2026-08-25"
     },
     "sceAgcDriverSetHsOffchipParam": {
@@ -154939,14 +154940,14 @@
     },
     "sceAgcDriverSubmitAcb": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 19946295,
+      "pattern": "prefix-module-verb-object",
+      "index": 267285,
       "on": "2026-08-20"
     },
     "sceAgcDriverSubmitDcb": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 19946670,
+      "pattern": "prefix-module-verb-object",
+      "index": 267660,
       "on": "2026-08-20"
     },
     "sceAgcDriverSubmitMultiDcbs": {
@@ -154975,8 +154976,8 @@
     },
     "sceAgcDriverUnregisterResource": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 37727760,
+      "pattern": "prefix-module-verb-object",
+      "index": 285585,
       "on": "2026-08-25"
     },
     "sceAgcFuseShaderHalves": {
@@ -155006,7 +155007,7 @@
     "sceAgcGetPacketSize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 7271385,
+      "index": 7378275,
       "on": "2026-08-20"
     },
     "sceAgcGetRegisterDefaults2": {
@@ -155024,7 +155025,7 @@
     "sceAgcGetSemaphoreLabel": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 7319340,
+      "index": 7426590,
       "on": "2026-08-20"
     },
     "sceAgcInit": {
@@ -155084,7 +155085,7 @@
     "sceAgcSetSemaphoreMemory": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 14427150,
+      "index": 14640090,
       "on": "2026-08-20"
     },
     "sceAgcSetShRegIndirectPatchAddRegisters": {
@@ -155168,7 +155169,7 @@
     "sceAjmBatchCancel": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 397515,
+      "index": 407415,
       "on": "2026-08-24"
     },
     "sceAjmBatchErrorDump": {
@@ -155180,7 +155181,7 @@
     "sceAjmBatchInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 397860,
+      "index": 407760,
       "on": "2026-08-24"
     },
     "sceAjmBatchJobClearContext": {
@@ -155258,7 +155259,7 @@
     "sceAjmBatchStart": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 398265,
+      "index": 408165,
       "on": "2026-08-24"
     },
     "sceAjmBatchStartBuffer": {
@@ -155270,7 +155271,7 @@
     "sceAjmBatchWait": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 398490,
+      "index": 408390,
       "on": "2026-08-24"
     },
     "sceAjmDecAt9ParseConfigData": {
@@ -155287,14 +155288,14 @@
     },
     "sceAjmFinalize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 39556350,
+      "pattern": "prefix-module-verb-object",
+      "index": 342720,
       "on": "2026-08-20"
     },
     "sceAjmInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 39422700,
+      "pattern": "prefix-module-verb-object",
+      "index": 354960,
       "on": "2026-08-20"
     },
     "sceAjmInstanceCodecType": {
@@ -155306,13 +155307,13 @@
     "sceAjmInstanceCreate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 460245,
+      "index": 472110,
       "on": "2026-08-24"
     },
     "sceAjmInstanceDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 460275,
+      "index": 472140,
       "on": "2026-08-24"
     },
     "sceAjmInstanceExtend": {
@@ -155342,13 +155343,13 @@
     "sceAjmModuleRegister": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 373275,
+      "index": 380640,
       "on": "2026-08-20"
     },
     "sceAjmModuleUnregister": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 373590,
+      "index": 380955,
       "on": "2026-08-20"
     },
     "sceAjmStrError": {
@@ -155378,7 +155379,7 @@
     "sceAmprCommandBufferClearBuffer": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 61541910,
+      "index": 63305415,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferConstructor": {
@@ -155408,37 +155409,37 @@
     "sceAmprCommandBufferGetSize": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 61581885,
+      "index": 63345675,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferPopMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 61603545,
+      "index": 63367500,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferPushMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 61609620,
+      "index": 63373620,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferReset": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 456495,
+      "index": 466110,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferSetBuffer": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 61633035,
+      "index": 63397215,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferSetMarker": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 61633920,
+      "index": 63398100,
       "on": "2026-08-20"
     },
     "sceAmprCommandBufferWriteAddressOnCompletion": {
@@ -155677,8 +155678,8 @@
     },
     "sceAppContentInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 86386500,
+      "pattern": "prefix-module-verb-object",
+      "index": 652800,
       "on": "2026-08-20"
     },
     "sceAppContentRequestPatchInstall": {
@@ -156896,13 +156897,13 @@
     "sceAudio3dInitialize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 931500,
+      "index": 950640,
       "on": "2026-08-20"
     },
     "sceAudio3dObjectReserve": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 1019160,
+      "index": 1040970,
       "on": "2026-08-25"
     },
     "sceAudio3dObjectSetAttribute": {
@@ -156931,8 +156932,8 @@
     },
     "sceAudio3dPortClose": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 130653000,
+      "pattern": "prefix-module-object-verb",
+      "index": 987810,
       "on": "2026-08-20"
     },
     "sceAudio3dPortCreate": {
@@ -156950,7 +156951,7 @@
     "sceAudio3dPortFlush": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 968040,
+      "index": 988050,
       "on": "2026-08-20"
     },
     "sceAudio3dPortFreeState": {
@@ -157004,7 +157005,7 @@
     "sceAudio3dPortOpen": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 968205,
+      "index": 988215,
       "on": "2026-08-20"
     },
     "sceAudio3dPortPush": {
@@ -157051,8 +157052,8 @@
     },
     "sceAudio3dTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 135047250,
+      "pattern": "prefix-module-verb-object",
+      "index": 1020000,
       "on": "2026-08-20"
     },
     "sceAudioDeviceControlGet": {
@@ -157075,8 +157076,8 @@
     },
     "sceAudioInClose": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 1020720,
+      "pattern": "prefix-module-verb-object",
+      "index": 1058760,
       "on": "2026-08-20"
     },
     "sceAudioInCountPorts": {
@@ -157208,7 +157209,7 @@
     "sceAudioInOpen": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 1091475,
+      "index": 1113840,
       "on": "2026-08-20"
     },
     "sceAudioInOpenEx": {
@@ -157406,7 +157407,7 @@
     "sceAudioOut2Initialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 1062060,
+      "index": 1089945,
       "on": "2026-08-24"
     },
     "sceAudioOut2LoContextGetQueueLevel": {
@@ -157586,7 +157587,7 @@
     "sceAudioOutGetPortState": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 164747580,
+      "index": 169415520,
       "on": "2026-08-20"
     },
     "sceAudioOutGetSimulatedBusUsableStatusByBusType": {
@@ -162403,8 +162404,8 @@
     },
     "sceCommonDialogInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 204484500,
+      "pattern": "prefix-module-verb-object",
+      "index": 1546320,
       "on": "2026-08-20"
     },
     "sceCommonDialogIsUsed": {
@@ -163021,14 +163022,14 @@
     },
     "sceContentDeleteInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 216569700,
+      "pattern": "prefix-module-verb-object",
+      "index": 1695240,
       "on": "2026-08-20"
     },
     "sceContentDeleteTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 233462250,
+      "pattern": "prefix-module-verb-object",
+      "index": 1764600,
       "on": "2026-08-20"
     },
     "sceContentExportCancel": {
@@ -163093,20 +163094,20 @@
     },
     "sceContentExportInit2": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 236250676,
+      "pattern": "prefix-module-verb-object",
+      "index": 1842121,
       "on": "2026-08-20"
     },
     "sceContentExportStart": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 1860975,
+      "index": 1899240,
       "on": "2026-08-20"
     },
     "sceContentExportTerm": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 252871875,
+      "pattern": "prefix-module-verb-object",
+      "index": 1911480,
       "on": "2026-08-20"
     },
     "sceContentExportValidateContents": {
@@ -163171,8 +163172,8 @@
     },
     "sceContentSearchInit": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 263260125,
+      "pattern": "prefix-module-verb-object",
+      "index": 1991040,
       "on": "2026-08-20"
     },
     "sceContentSearchOpenMetadata": {
@@ -163201,8 +163202,8 @@
     },
     "sceContentSearchTerm": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 272554875,
+      "pattern": "prefix-module-verb-object",
+      "index": 2060400,
       "on": "2026-08-20"
     },
     "sceConvertKeycodeGetCharacter": {
@@ -164347,14 +164348,14 @@
     },
     "sceErrorDialogInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 2187420,
+      "pattern": "prefix-module-verb-object",
+      "index": 2290920,
       "on": "2026-08-20"
     },
     "sceErrorDialogOpen": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 2187525,
+      "pattern": "prefix-module-verb-object",
+      "index": 2305200,
       "on": "2026-08-20"
     },
     "sceErrorDialogOpenDetail": {
@@ -164371,14 +164372,14 @@
     },
     "sceErrorDialogTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 2187930,
+      "pattern": "prefix-module-verb-object",
+      "index": 2360280,
       "on": "2026-08-20"
     },
     "sceErrorDialogUpdateStatus": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 295384395,
+      "pattern": "prefix-module-verb-object",
+      "index": 2374215,
       "on": "2026-08-20"
     },
     "sceFiberFinalize": {
@@ -167648,7 +167649,7 @@
     "sceGameLiveStreamingInitialize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 2535300,
+      "index": 2588760,
       "on": "2026-08-20"
     },
     "sceGameLiveStreamingLaunchLiveViewer": {
@@ -167839,8 +167840,8 @@
     },
     "sceGameLiveStreamingTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 351560250,
+      "pattern": "prefix-module-verb-object",
+      "index": 2658120,
       "on": "2026-08-20"
     },
     "sceGameLiveStreamingUnregisterCallback": {
@@ -170522,7 +170523,7 @@
     "sceHttp2CreateTemplate": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4236960,
+      "index": 4343910,
       "on": "2026-08-24"
     },
     "sceHttp2DeleteCookieBox": {
@@ -170533,14 +170534,14 @@
     },
     "sceHttp2DeleteRequest": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 436492800,
+      "pattern": "prefix-module-verb-object",
+      "index": 3302100,
       "on": "2026-08-20"
     },
     "sceHttp2DeleteTemplate": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4239615,
+      "index": 4346595,
       "on": "2026-08-24"
     },
     "sceHttp2GetAllResponseHeaders": {
@@ -170599,14 +170600,14 @@
     },
     "sceHttp2Init": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 433226475,
+      "pattern": "prefix-module-verb-object",
+      "index": 3331320,
       "on": "2026-08-20"
     },
     "sceHttp2ReadData": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 433111455,
+      "pattern": "prefix-module-verb-object",
+      "index": 3362325,
       "on": "2026-08-20"
     },
     "sceHttp2ReadDataAsync": {
@@ -170629,8 +170630,8 @@
     },
     "sceHttp2SendRequest": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 447154425,
+      "pattern": "prefix-module-verb-object",
+      "index": 3381660,
       "on": "2026-08-20"
     },
     "sceHttp2SendRequestAsync": {
@@ -170785,8 +170786,8 @@
     },
     "sceHttp2Term": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 433149525,
+      "pattern": "prefix-module-verb-object",
+      "index": 3400680,
       "on": "2026-08-20"
     },
     "sceHttp2WaitAsync": {
@@ -171008,7 +171009,7 @@
     "sceHttpCreateEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4044195,
+      "index": 4146285,
       "on": "2026-08-24"
     },
     "sceHttpCreateRequest": {
@@ -171092,13 +171093,13 @@
     "sceHttpDeleteConnection": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 3086445,
+      "index": 3152145,
       "on": "2026-08-20"
     },
     "sceHttpDeleteRequest": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 3087480,
+      "index": 3153180,
       "on": "2026-08-20"
     },
     "sceHttpDeleteTemplate": {
@@ -171110,7 +171111,7 @@
     "sceHttpDestroyEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4049505,
+      "index": 4151655,
       "on": "2026-08-24"
     },
     "sceHttpGetAcceptEncodingGZIPEnabled": {
@@ -171212,7 +171213,7 @@
     "sceHttpInit": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 3116475,
+      "index": 3182400,
       "on": "2026-08-20"
     },
     "sceHttpParseResponseHeader": {
@@ -171229,8 +171230,8 @@
     },
     "sceHttpReadData": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 413428455,
+      "pattern": "prefix-module-verb-object",
+      "index": 3213405,
       "on": "2026-08-20"
     },
     "sceHttpRedirectCacheFlush": {
@@ -171253,8 +171254,8 @@
     },
     "sceHttpSendRequest": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 427286505,
+      "pattern": "prefix-module-verb-object",
+      "index": 3232740,
       "on": "2026-08-20"
     },
     "sceHttpSetAcceptEncodingGZIPEnabled": {
@@ -171457,8 +171458,8 @@
     },
     "sceHttpTerm": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 413466525,
+      "pattern": "prefix-module-verb-object",
+      "index": 3251760,
       "on": "2026-08-20"
     },
     "sceHttpTryGetNonblock": {
@@ -171476,7 +171477,7 @@
     "sceHttpUnsetEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4192875,
+      "index": 4296645,
       "on": "2026-08-25"
     },
     "sceHttpUriBuild": {
@@ -172172,19 +172173,19 @@
     "sceImeDialogGetResult": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 3553290,
+      "index": 3628560,
       "on": "2026-08-20"
     },
     "sceImeDialogGetStatus": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 3553545,
+      "index": 3628815,
       "on": "2026-08-20"
     },
     "sceImeDialogInit": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 472592475,
+      "pattern": "prefix-module-verb-object",
+      "index": 3629160,
       "on": "2026-08-20"
     },
     "sceImeDialogInitInternal": {
@@ -172213,8 +172214,8 @@
     },
     "sceImeDialogTerm": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 472661325,
+      "pattern": "prefix-module-verb-object",
+      "index": 3698520,
       "on": "2026-08-20"
     },
     "sceImeDicAddWord": {
@@ -172369,8 +172370,8 @@
     },
     "sceImeUpdate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 452992500,
+      "pattern": "prefix-module-verb-object",
+      "index": 3563880,
       "on": "2026-08-20"
     },
     "sceImeVshClearPreedit": {
@@ -172927,8 +172928,8 @@
     },
     "sceKernelCancelEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 572263710,
+      "pattern": "prefix-module-verb-object",
+      "index": 4329555,
       "on": "2026-08-20"
     },
     "sceKernelCancelSema": {
@@ -172969,8 +172970,8 @@
     },
     "sceKernelClearEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 572810460,
+      "pattern": "prefix-module-verb-object",
+      "index": 4333635,
       "on": "2026-08-20"
     },
     "sceKernelClearGameDirectMemory": {
@@ -173053,8 +173054,8 @@
     },
     "sceKernelCreateEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 573903960,
+      "pattern": "prefix-module-verb-object",
+      "index": 4341795,
       "on": "2026-08-20"
     },
     "sceKernelCreateSblock": {
@@ -173191,8 +173192,8 @@
     },
     "sceKernelDeleteEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570831975,
+      "pattern": "prefix-module-verb-object",
+      "index": 4343835,
       "on": "2026-08-20"
     },
     "sceKernelDeleteFileEvent": {
@@ -173240,7 +173241,7 @@
     "sceKernelDeleteUserEvent": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 574339260,
+      "index": 590925420,
       "on": "2026-08-20"
     },
     "sceKernelDeleteWriteEvent": {
@@ -173630,7 +173631,7 @@
     "sceKernelGetEventId": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 578004765,
+      "index": 594644595,
       "on": "2026-08-20"
     },
     "sceKernelGetEventUserData": {
@@ -173846,7 +173847,7 @@
     "sceKernelGetProcessTime": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 578094765,
+      "index": 594735270,
       "on": "2026-08-20"
     },
     "sceKernelGetProcessTimeCounter": {
@@ -174461,6 +174462,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelIsDevKit": {
+      "found": "static",
+      "by": "module-strings",
+      "from": "titles/obscene/eboot.bin",
+      "on": "2026-09-07"
+    },
     "sceKernelIsDevelopmentMode": {
       "found": "static",
       "by": "module-strings",
@@ -174590,7 +174597,7 @@
     "sceKernelLoadStartModule": {
       "found": "generated",
       "pattern": "prefix-module-verb-verb-object",
-      "index": 309062700,
+      "index": 319993485,
       "on": "2026-08-25"
     },
     "sceKernelLoadStartModuleForSysmodule": {
@@ -174637,26 +174644,26 @@
     },
     "sceKernelMapDirectMemory2": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570874321,
+      "pattern": "prefix-module-verb-object",
+      "index": 4386496,
       "on": "2026-08-23"
     },
     "sceKernelMapFlexibleMemory": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570874575,
+      "pattern": "prefix-module-verb-object",
+      "index": 4386750,
       "on": "2026-08-20"
     },
     "sceKernelMapNamedFlexibleMemory": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 579972900,
+      "index": 596641590,
       "on": "2026-08-24"
     },
     "sceKernelMapNamedFlexibleMemoryInternal": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 579972904,
+      "index": 596641594,
       "on": "2026-08-24"
     },
     "sceKernelMapNamedSystemFlexibleMemory": {
@@ -174835,14 +174842,14 @@
     },
     "sceKernelPollEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570880575,
+      "pattern": "prefix-module-verb-object",
+      "index": 4392795,
       "on": "2026-08-20"
     },
     "sceKernelPollSema": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 5641125,
+      "index": 5782740,
       "on": "2026-08-24"
     },
     "sceKernelPread": {
@@ -174943,8 +174950,8 @@
     },
     "sceKernelReadTsc": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570892080,
+      "pattern": "prefix-module-verb-object",
+      "index": 4404390,
       "on": "2026-08-25"
     },
     "sceKernelReadv": {
@@ -174961,8 +174968,8 @@
     },
     "sceKernelReleaseFlexibleMemory": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570900900,
+      "pattern": "prefix-module-verb-object",
+      "index": 4413270,
       "on": "2026-08-24"
     },
     "sceKernelReleaseTraceDirectMemory": {
@@ -175135,8 +175142,8 @@
     },
     "sceKernelSetEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 570912975,
+      "pattern": "prefix-module-verb-object",
+      "index": 4425435,
       "on": "2026-08-20"
     },
     "sceKernelSetFsstParam": {
@@ -175448,13 +175455,13 @@
     "sceKernelWaitEqueue": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 5730150,
+      "index": 5872770,
       "on": "2026-08-24"
     },
     "sceKernelWaitEventFlag": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 590033085,
+      "pattern": "prefix-module-verb-object",
+      "index": 4462155,
       "on": "2026-08-20"
     },
     "sceKernelWaitSema": {
@@ -175820,7 +175827,7 @@
     "sceLibcMspaceCreate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 5832165,
+      "index": 5981055,
       "on": "2026-08-24"
     },
     "sceLibcMspaceCreateForMonoMutex": {
@@ -175832,13 +175839,13 @@
     "sceLibcMspaceDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 5832195,
+      "index": 5981085,
       "on": "2026-08-24"
     },
     "sceLibcMspaceFree": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 5832375,
+      "index": 5981265,
       "on": "2026-08-24"
     },
     "sceLibcMspaceGetAddressRanges": {
@@ -177614,7 +177621,7 @@
     "sceMouseInit": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 4720275,
+      "index": 4820520,
       "on": "2026-08-20"
     },
     "sceMouseMbusInit": {
@@ -177626,13 +177633,13 @@
     "sceMouseOpen": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 4736475,
+      "index": 4836840,
       "on": "2026-08-20"
     },
     "sceMouseRead": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 4750650,
+      "index": 4851120,
       "on": "2026-08-20"
     },
     "sceMouseSetHandType": {
@@ -177902,7 +177909,7 @@
     "sceMsgDialogGetResult": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 5011290,
+      "index": 5117760,
       "on": "2026-08-20"
     },
     "sceMsgDialogGetStatus": {
@@ -177914,7 +177921,7 @@
     "sceMsgDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 5013900,
+      "index": 5120400,
       "on": "2026-08-20"
     },
     "sceMsgDialogOpen": {
@@ -177943,14 +177950,14 @@
     },
     "sceMsgDialogTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 669493350,
+      "pattern": "prefix-module-verb-object",
+      "index": 5189760,
       "on": "2026-08-20"
     },
     "sceMsgDialogUpdateStatus": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 5096595,
+      "index": 5203695,
       "on": "2026-08-20"
     },
     "sceMusicCoreServerCheckCoreStatus": {
@@ -179233,8 +179240,8 @@
     },
     "sceNetCtlCheckCallback": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 710228415,
+      "pattern": "prefix-module-verb-object",
+      "index": 5373525,
       "on": "2026-08-20"
     },
     "sceNetCtlCheckCallbackForLibIpcInt": {
@@ -179323,8 +179330,8 @@
     },
     "sceNetCtlGetInfo": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 715825350,
+      "pattern": "prefix-module-verb-object",
+      "index": 5415120,
       "on": "2026-08-20"
     },
     "sceNetCtlGetInfoIpcInt": {
@@ -179365,8 +179372,8 @@
     },
     "sceNetCtlGetResult": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 708642090,
+      "pattern": "prefix-module-verb-object",
+      "index": 5415600,
       "on": "2026-08-20"
     },
     "sceNetCtlGetResultIpcInt": {
@@ -179419,8 +179426,8 @@
     },
     "sceNetCtlGetState": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 708642330,
+      "pattern": "prefix-module-verb-object",
+      "index": 5415840,
       "on": "2026-08-20"
     },
     "sceNetCtlGetState2IpcInt": {
@@ -179455,8 +179462,8 @@
     },
     "sceNetCtlInit": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 715969125,
+      "pattern": "prefix-module-verb-object",
+      "index": 5416200,
       "on": "2026-08-23"
     },
     "sceNetCtlIsBandwidthManagementEnabledIpcInt": {
@@ -179467,8 +179474,8 @@
     },
     "sceNetCtlRegisterCallback": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 720912150,
+      "pattern": "prefix-module-verb-object",
+      "index": 5453085,
       "on": "2026-08-20"
     },
     "sceNetCtlRegisterCallbackForLibIpcInt": {
@@ -179521,14 +179528,14 @@
     },
     "sceNetCtlTerm": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 725263875,
+      "pattern": "prefix-module-verb-object",
+      "index": 5485560,
       "on": "2026-08-20"
     },
     "sceNetCtlUnregisterCallback": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 708867615,
+      "pattern": "prefix-module-verb-object",
+      "index": 5495925,
       "on": "2026-08-20"
     },
     "sceNetCtlUnregisterCallbackForLibIpcInt": {
@@ -179678,13 +179685,13 @@
     "sceNetEpollDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6736155,
+      "index": 6907455,
       "on": "2026-08-24"
     },
     "sceNetEpollWait": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6737010,
+      "index": 6908310,
       "on": "2026-08-24"
     },
     "sceNetErrnoLoc": {
@@ -180259,8 +180266,8 @@
     },
     "sceNetSocketClose": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 705105000,
+      "pattern": "prefix-module-object-verb",
+      "index": 5333865,
       "on": "2026-08-20"
     },
     "sceNetSyncCreate": {
@@ -181273,8 +181280,8 @@
     },
     "sceNpAuthDeleteRequest": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 728296680,
+      "pattern": "prefix-module-verb-object",
+      "index": 5535900,
       "on": "2026-08-20"
     },
     "sceNpAuthGetAuthorizationCode": {
@@ -181315,8 +181322,8 @@
     },
     "sceNpAuthPollAsync": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 728343914,
+      "pattern": "prefix-module-verb-object",
+      "index": 5583494,
       "on": "2026-08-25"
     },
     "sceNpAuthSetTimeout": {
@@ -181327,8 +181334,8 @@
     },
     "sceNpAuthWaitAsync": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 728412764,
+      "pattern": "prefix-module-verb-object",
+      "index": 5652854,
       "on": "2026-08-25"
     },
     "sceNpBandwidthTestAbort": {
@@ -181556,7 +181563,7 @@
     "sceNpCommerceDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7301220,
+      "index": 7486935,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogInitializeInternal": {
@@ -181568,13 +181575,13 @@
     "sceNpCommerceDialogOpen": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7301325,
+      "index": 7487040,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7301730,
+      "index": 7487445,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogUpdateStatus": {
@@ -181735,8 +181742,8 @@
     },
     "sceNpEntitlementAccessDeleteRequest": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 790601880,
+      "pattern": "prefix-module-verb-object",
+      "index": 5982660,
       "on": "2026-08-20"
     },
     "sceNpEntitlementAccessGenerateTransactionId": {
@@ -181771,8 +181778,8 @@
     },
     "sceNpEntitlementAccessInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 794974500,
+      "pattern": "prefix-module-verb-object",
+      "index": 6013920,
       "on": "2026-08-20"
     },
     "sceNpEntitlementAccessPollConsumableEntitlementInfo": {
@@ -181940,7 +181947,7 @@
     "sceNpGameIntentInitialize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6034500,
+      "index": 6162840,
       "on": "2026-08-20"
     },
     "sceNpGameIntentLaunchApp": {
@@ -181964,13 +181971,13 @@
     "sceNpGameIntentReceiveIntent": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 7952820,
+      "index": 8152770,
       "on": "2026-08-24"
     },
     "sceNpGameIntentTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 807128550,
+      "pattern": "prefix-module-verb-object",
+      "index": 6232200,
       "on": "2026-08-20"
     },
     "sceNpGetAccountAge": {
@@ -186697,26 +186704,26 @@
     },
     "sceNpTrophy2CreateContext": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 869109750,
+      "pattern": "prefix-module-verb-object",
+      "index": 6575295,
       "on": "2026-08-20"
     },
     "sceNpTrophy2CreateHandle": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6438330,
+      "index": 6575775,
       "on": "2026-08-20"
     },
     "sceNpTrophy2DestroyContext": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6441900,
+      "index": 6579375,
       "on": "2026-08-20"
     },
     "sceNpTrophy2DestroyHandle": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6442380,
+      "index": 6579855,
       "on": "2026-08-20"
     },
     "sceNpTrophy2GetGameInfo": {
@@ -186739,14 +186746,14 @@
     },
     "sceNpTrophy2RegisterContext": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 866289300,
+      "pattern": "prefix-module-verb-object",
+      "index": 6644655,
       "on": "2026-08-20"
     },
     "sceNpTrophy2RegisterUnlockCallback": {
       "found": "generated",
       "pattern": "prefix-module-verb-verb-object",
-      "index": 468585165,
+      "index": 485163165,
       "on": "2026-08-25"
     },
     "sceNpTrophy2ShowTrophyList": {
@@ -186758,7 +186765,7 @@
     "sceNpTrophy2UnregisterUnlockCallback": {
       "found": "generated",
       "pattern": "prefix-module-verb-verb-object",
-      "index": 471646965,
+      "index": 488290485,
       "on": "2026-08-25"
     },
     "sceNpTrophyAbortHandle": {
@@ -188161,20 +188168,20 @@
     },
     "sceNpUniversalDataSystemCreateContext": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 885903450,
+      "pattern": "prefix-module-verb-object",
+      "index": 6724215,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemCreateEvent": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 885903735,
+      "pattern": "prefix-module-verb-object",
+      "index": 6724500,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemCreateHandle": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 885903930,
+      "pattern": "prefix-module-verb-object",
+      "index": 6724695,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemCreateRecordArray": {
@@ -188197,20 +188204,20 @@
     },
     "sceNpUniversalDataSystemDestroyContext": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 889339500,
+      "pattern": "prefix-module-verb-object",
+      "index": 6728295,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemDestroyEvent": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 889377975,
+      "pattern": "prefix-module-verb-object",
+      "index": 6728580,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemDestroyHandle": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 885907980,
+      "pattern": "prefix-module-verb-object",
+      "index": 6728775,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemDestroyRecordArray": {
@@ -188257,8 +188264,8 @@
     },
     "sceNpUniversalDataSystemInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 885791700,
+      "pattern": "prefix-module-verb-object",
+      "index": 6758520,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemIntAbortHandle": {
@@ -188521,14 +188528,14 @@
     },
     "sceNpUniversalDataSystemRegisterContext": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 885826500,
+      "pattern": "prefix-module-verb-object",
+      "index": 6793575,
       "on": "2026-08-20"
     },
     "sceNpUniversalDataSystemTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 902684250,
+      "pattern": "prefix-module-verb-object",
+      "index": 6827880,
       "on": "2026-08-20"
     },
     "sceNpUnregisterGamePresenceCallbackA": {
@@ -188864,25 +188871,25 @@
     "sceNpWebApi2CreateRequest": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6876255,
+      "index": 7023060,
       "on": "2026-08-20"
     },
     "sceNpWebApi2CreateUserContext": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 928359600,
+      "index": 955203855,
       "on": "2026-08-20"
     },
     "sceNpWebApi2DeleteRequest": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6878280,
+      "index": 7025100,
       "on": "2026-08-20"
     },
     "sceNpWebApi2DeleteUserContext": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 928632975,
+      "index": 955481295,
       "on": "2026-08-20"
     },
     "sceNpWebApi2GetHttpResponseHeaderValue": {
@@ -188905,8 +188912,8 @@
     },
     "sceNpWebApi2Initialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 6853020,
+      "pattern": "prefix-module-verb-object",
+      "index": 7056360,
       "on": "2026-08-20"
     },
     "sceNpWebApi2InitializeForPresence": {
@@ -189020,7 +189027,7 @@
     "sceNpWebApi2ReadData": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 6938055,
+      "index": 7085325,
       "on": "2026-08-20"
     },
     "sceNpWebApi2SendMultipartRequest": {
@@ -189031,8 +189038,8 @@
     },
     "sceNpWebApi2SendRequest": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 939229425,
+      "pattern": "prefix-module-verb-object",
+      "index": 7104660,
       "on": "2026-08-20"
     },
     "sceNpWebApi2SetMultipartContentType": {
@@ -189049,8 +189056,8 @@
     },
     "sceNpWebApi2Terminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 942050250,
+      "pattern": "prefix-module-verb-object",
+      "index": 7125720,
       "on": "2026-08-20"
     },
     "sceNpWebApiAbortHandle": {
@@ -190952,13 +190959,13 @@
     "scePlayerInvitationDialogClose": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 7306200,
+      "index": 7462320,
       "on": "2026-08-23"
     },
     "scePlayerInvitationDialogGetResult": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 991452150,
+      "pattern": "prefix-module-verb-object",
+      "index": 7500480,
       "on": "2026-08-23"
     },
     "scePlayerInvitationDialogGetStatus": {
@@ -190969,8 +190976,8 @@
     },
     "scePlayerInvitationDialogInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 984206700,
+      "pattern": "prefix-module-verb-object",
+      "index": 7503120,
       "on": "2026-08-24"
     },
     "scePlayerInvitationDialogOpen": {
@@ -190981,20 +190988,20 @@
     },
     "scePlayerInvitationDialogTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1001099250,
+      "pattern": "prefix-module-verb-object",
+      "index": 7572480,
       "on": "2026-08-20"
     },
     "scePlayerInvitationDialogUpdateStatus": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1002741195,
+      "pattern": "prefix-module-verb-object",
+      "index": 7586415,
       "on": "2026-08-20"
     },
     "scePlayerSelectionDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 7561350,
+      "index": 7721400,
       "on": "2026-08-20"
     },
     "scePngDecCreate": {
@@ -193465,8 +193472,8 @@
     },
     "sceRtcGetTick": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1109357550,
+      "pattern": "prefix-module-verb-object",
+      "index": 8394375,
       "on": "2026-08-20"
     },
     "sceRtcGetTickResolution": {
@@ -193550,7 +193557,7 @@
     "sceRtcSetTick": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 8271900,
+      "index": 8447415,
       "on": "2026-08-20"
     },
     "sceRtcSetTime_t": {
@@ -193790,7 +193797,7 @@
     "sceRudpRead": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 8610,
+      "index": 8875,
       "on": "2026-08-25"
     },
     "sceRudpSetEventHandler": {
@@ -193814,13 +193821,13 @@
     "sceRudpTerminate": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 8630,
+      "index": 8895,
       "on": "2026-08-25"
     },
     "sceRudpWrite": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 8639,
+      "index": 8905,
       "on": "2026-08-25"
     },
     "sceS3dConversionClose": {
@@ -194029,8 +194036,8 @@
     },
     "sceSaveDataDelete": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 8310780,
+      "pattern": "prefix-module-verb-object",
+      "index": 8512920,
       "on": "2026-08-20"
     },
     "sceSaveDataDelete5": {
@@ -194066,7 +194073,7 @@
     "sceSaveDataDialogClose": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 10932960,
+      "index": 11210730,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogGetResult": {
@@ -194084,7 +194091,7 @@
     "sceSaveDataDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 10933260,
+      "index": 11211030,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogIsReadyToDisplay": {
@@ -194096,7 +194103,7 @@
     "sceSaveDataDialogOpen": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 10933365,
+      "index": 11211135,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogProgressBarInc": {
@@ -194114,7 +194121,7 @@
     "sceSaveDataDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 10933770,
+      "index": 11211540,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogUpdateStatus": {
@@ -194204,7 +194211,7 @@
     "sceSaveDataGetEventResult": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 1129129290,
+      "index": 1161732480,
       "on": "2026-08-20"
     },
     "sceSaveDataGetFormat": {
@@ -194228,7 +194235,7 @@
     "sceSaveDataGetParam": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 8364465,
+      "index": 8542695,
       "on": "2026-08-20"
     },
     "sceSaveDataGetProgress": {
@@ -194299,8 +194306,8 @@
     },
     "sceSaveDataInitialize3": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 8311022,
+      "pattern": "prefix-module-verb-object",
+      "index": 8545562,
       "on": "2026-08-20"
     },
     "sceSaveDataInitializeForCdlg": {
@@ -194365,8 +194372,8 @@
     },
     "sceSaveDataPrepare": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 8311170,
+      "pattern": "prefix-module-verb-object",
+      "index": 8565960,
       "on": "2026-08-20"
     },
     "sceSaveDataPromote5": {
@@ -194431,8 +194438,8 @@
     },
     "sceSaveDataSetParam": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1122037515,
+      "pattern": "prefix-module-verb-object",
+      "index": 8595735,
       "on": "2026-08-20"
     },
     "sceSaveDataSetSaveDataLibraryUser": {
@@ -194491,8 +194498,8 @@
     },
     "sceSaveDataTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 8311530,
+      "pattern": "prefix-module-verb-object",
+      "index": 8614920,
       "on": "2026-08-20"
     },
     "sceSaveDataTransferringMount": {
@@ -194954,7 +194961,7 @@
     "sceShareInitialize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 8658900,
+      "index": 8843400,
       "on": "2026-08-20"
     },
     "sceSharePlayCrashDaemon": {
@@ -194989,8 +194996,8 @@
     },
     "sceSharePlayInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1181036700,
+      "pattern": "prefix-module-verb-object",
+      "index": 8992320,
       "on": "2026-08-20"
     },
     "sceSharePlayNotifyDialogOpen": {
@@ -195074,7 +195081,7 @@
     "sceSharePlayTerminate": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 8873550,
+      "index": 9061680,
       "on": "2026-08-20"
     },
     "sceShareRegisterContentEventCallback": {
@@ -195091,8 +195098,8 @@
     },
     "sceShareTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1178246250,
+      "pattern": "prefix-module-verb-object",
+      "index": 8912760,
       "on": "2026-08-20"
     },
     "sceShareUnregisterContentEventCallback": {
@@ -196621,26 +196628,26 @@
     },
     "sceSigninDialogInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1208317500,
+      "pattern": "prefix-module-verb-object",
+      "index": 9141240,
       "on": "2026-08-20"
     },
     "sceSigninDialogOpen": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1210231125,
+      "pattern": "prefix-module-verb-object",
+      "index": 9155520,
       "on": "2026-08-20"
     },
     "sceSigninDialogTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1217612250,
+      "pattern": "prefix-module-verb-object",
+      "index": 9210600,
       "on": "2026-08-20"
     },
     "sceSigninDialogUpdateStatus": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1200802395,
+      "pattern": "prefix-module-verb-object",
+      "index": 9224535,
       "on": "2026-08-20"
     },
     "sceSlimglClientLiveTimeout": {
@@ -197509,8 +197516,8 @@
     },
     "sceSslInit": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 9040005,
+      "pattern": "prefix-module-verb-object",
+      "index": 9288120,
       "on": "2026-08-20"
     },
     "sceSslLoadCert": {
@@ -197581,8 +197588,8 @@
     },
     "sceSslTerm": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 9040515,
+      "pattern": "prefix-module-verb-object",
+      "index": 9357480,
       "on": "2026-08-20"
     },
     "sceSslUnloadCert": {
@@ -197839,8 +197846,8 @@
     },
     "sceSysmoduleLoadModule": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1248655500,
+      "pattern": "prefix-module-verb-object",
+      "index": 9446325,
       "on": "2026-08-20"
     },
     "sceSysmoduleLoadModuleByNameInternal": {
@@ -198505,8 +198512,8 @@
     },
     "sceSystemServiceGetStatus": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1266821445,
+      "pattern": "prefix-module-verb-object",
+      "index": 9585615,
       "on": "2026-08-20"
     },
     "sceSystemServiceGetTitleWorkaroundInfo": {
@@ -198686,7 +198693,7 @@
     "sceSystemServiceParamGetInt": {
       "found": "generated",
       "pattern": "prefix-module-object-verb-object",
-      "index": 1271575425,
+      "index": 1308316215,
       "on": "2026-08-21"
     },
     "sceSystemServiceParamGetString": {
@@ -198709,8 +198716,8 @@
     },
     "sceSystemServiceReceiveEvent": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1259799735,
+      "pattern": "prefix-module-verb-object",
+      "index": 9619260,
       "on": "2026-08-20"
     },
     "sceSystemServiceReenableMusicPlayer": {
@@ -199238,13 +199245,13 @@
     "sceUltConditionVariableDestroy": {
       "found": "generated",
       "pattern": "prefix-module-object-verb",
-      "index": 9645675,
+      "index": 9851910,
       "on": "2026-08-20"
     },
     "sceUltConditionVariableSignal": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1302249150,
+      "pattern": "prefix-module-object-verb",
+      "index": 9852525,
       "on": "2026-08-20"
     },
     "sceUltConditionVariableSignalAll": {
@@ -199255,14 +199262,14 @@
     },
     "sceUltConditionVariableWait": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1302281550,
+      "pattern": "prefix-module-object-verb",
+      "index": 9852765,
       "on": "2026-08-20"
     },
     "sceUltFinalize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 9667350,
+      "index": 9873600,
       "on": "2026-08-20"
     },
     "sceUltGetConditionVariableInfo": {
@@ -199322,19 +199329,19 @@
     "sceUltInitialize": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 9679500,
+      "index": 9885840,
       "on": "2026-08-20"
     },
     "sceUltMutexDestroy": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1310330925,
+      "pattern": "prefix-module-object-verb",
+      "index": 9913230,
       "on": "2026-08-20"
     },
     "sceUltMutexLock": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1310369400,
+      "pattern": "prefix-module-object-verb",
+      "index": 9913515,
       "on": "2026-08-20"
     },
     "sceUltMutexTryLock": {
@@ -199345,8 +199352,8 @@
     },
     "sceUltMutexUnlock": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1310434200,
+      "pattern": "prefix-module-object-verb",
+      "index": 9913995,
       "on": "2026-08-20"
     },
     "sceUltQueueDataResourcePoolDestroy": {
@@ -200551,8 +200558,8 @@
     },
     "sceUserServiceGetEvent": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1325957850,
+      "pattern": "prefix-module-verb-object",
+      "index": 10031340,
       "on": "2026-08-20"
     },
     "sceUserServiceGetEventCalendarType": {
@@ -201704,7 +201711,7 @@
     "sceUserServiceGetUserName": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 1326121020,
+      "index": 1364428650,
       "on": "2026-08-20"
     },
     "sceUserServiceGetUserStatus": {
@@ -201769,8 +201776,8 @@
     },
     "sceUserServiceInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 9769020,
+      "pattern": "prefix-module-verb-object",
+      "index": 10034760,
       "on": "2026-08-20"
     },
     "sceUserServiceInitialize2": {
@@ -203029,8 +203036,8 @@
     },
     "sceUserServiceTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 9769530,
+      "pattern": "prefix-module-verb-object",
+      "index": 10104120,
       "on": "2026-08-20"
     },
     "sceUserServiceTerminateForShellCore": {
@@ -204019,8 +204026,8 @@
     },
     "sceVideoOutAddFlipEvent": {
       "found": "generated",
-      "pattern": "prefix-module-verb-verb-object",
-      "index": 735025035,
+      "pattern": "prefix-module-verb-object-object",
+      "index": 1418100540,
       "on": "2026-08-20"
     },
     "sceVideoOutAddPreVblankStartEvent": {
@@ -204187,8 +204194,8 @@
     },
     "sceVideoOutDeleteFlipEvent": {
       "found": "generated",
-      "pattern": "prefix-module-verb-verb-object",
-      "index": 736628835,
+      "pattern": "prefix-module-verb-object-object",
+      "index": 1421152380,
       "on": "2026-08-20"
     },
     "sceVideoOutDeletePreVblankStartEvent": {
@@ -204332,7 +204339,7 @@
     "sceVideoOutGetEventId": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 1385007765,
+      "index": 1425022515,
       "on": "2026-08-20"
     },
     "sceVideoOutGetHdmiKsvList_": {
@@ -204392,7 +204399,7 @@
     "sceVideoOutGetVblankStatus": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 1385176620,
+      "index": 1425194655,
       "on": "2026-08-20"
     },
     "sceVideoOutGetVideoOutModeByBusSpecifier_": {
@@ -204494,7 +204501,7 @@
     "sceVideoOutSetBufferAttribute2": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 1392043816,
+      "index": 1432163731,
       "on": "2026-08-20"
     },
     "sceVideoOutSetDisplayEventPosition": {
@@ -204799,8 +204806,8 @@
     },
     "sceVideoOutUnregisterBuffers": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1395852900,
+      "pattern": "prefix-module-verb-object",
+      "index": 10559190,
       "on": "2026-08-22"
     },
     "sceVideoOutWaitVblank": {
@@ -205634,7 +205641,7 @@
     "sceVoiceChatTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 13786050,
+      "index": 14135190,
       "on": "2026-08-24"
     },
     "sceVoiceConnectIPortToOPort": {
@@ -205645,14 +205652,14 @@
     },
     "sceVoiceCreatePort": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1420357275,
+      "pattern": "prefix-module-verb-object",
+      "index": 10745970,
       "on": "2026-08-20"
     },
     "sceVoiceDeletePort": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1420457790,
+      "pattern": "prefix-module-verb-object",
+      "index": 10748010,
       "on": "2026-08-20"
     },
     "sceVoiceDisconnectIPortFromOPort": {
@@ -205663,8 +205670,8 @@
     },
     "sceVoiceEnd": {
       "found": "generated",
-      "pattern": "prefix-module-verb-object-object",
-      "index": 1422643500,
+      "pattern": "prefix-module-verb-object",
+      "index": 10763040,
       "on": "2026-08-20"
     },
     "sceVoiceGetBitRate": {
@@ -205688,7 +205695,7 @@
     "sceVoiceGetPortInfo": {
       "found": "generated",
       "pattern": "prefix-module-verb-object-object",
-      "index": 1424458860,
+      "index": 1465614480,
       "on": "2026-08-20"
     },
     "sceVoiceGetResourceInfo": {
@@ -205706,7 +205713,7 @@
     "sceVoiceInit": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 10552275,
+      "index": 10777320,
       "on": "2026-08-20"
     },
     "sceVoiceInitHQ": {
@@ -205922,13 +205929,13 @@
     "sceVoiceStart": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 10608975,
+      "index": 10834440,
       "on": "2026-08-20"
     },
     "sceVoiceStop": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
-      "index": 10611000,
+      "index": 10836480,
       "on": "2026-08-20"
     },
     "sceVoiceUpdatePort": {
@@ -206533,8 +206540,8 @@
     },
     "sceWebBrowserDialogClose": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 10643520,
+      "pattern": "prefix-module-verb-object",
+      "index": 10887480,
       "on": "2026-08-20"
     },
     "sceWebBrowserDialogGetEvent": {
@@ -206545,8 +206552,8 @@
     },
     "sceWebBrowserDialogGetResult": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1436913090,
+      "pattern": "prefix-module-verb-object",
+      "index": 10925640,
       "on": "2026-08-20"
     },
     "sceWebBrowserDialogGetStatus": {
@@ -206557,8 +206564,8 @@
     },
     "sceWebBrowserDialogInitialize": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 10643820,
+      "pattern": "prefix-module-verb-object",
+      "index": 10928280,
       "on": "2026-08-20"
     },
     "sceWebBrowserDialogNavigate": {
@@ -206569,8 +206576,8 @@
     },
     "sceWebBrowserDialogOpen": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 10643925,
+      "pattern": "prefix-module-verb-object",
+      "index": 10942560,
       "on": "2026-08-20"
     },
     "sceWebBrowserDialogOpenForPredeterminedContent": {
@@ -206599,14 +206606,14 @@
     },
     "sceWebBrowserDialogTerminate": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb",
-      "index": 10644330,
+      "pattern": "prefix-module-verb-object",
+      "index": 10997640,
       "on": "2026-08-20"
     },
     "sceWebBrowserDialogUpdateStatus": {
       "found": "generated",
-      "pattern": "prefix-module-object-verb-object",
-      "index": 1437144195,
+      "pattern": "prefix-module-verb-object",
+      "index": 11011575,
       "on": "2026-08-20"
     },
     "sceWebInitialize": {

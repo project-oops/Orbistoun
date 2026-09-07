@@ -101,6 +101,43 @@ pub fn locate(address: u64) -> Option<(&'static str, u64)> {
     })
 }
 
+/// Which breakpoint kind an address deserves, given where the stub table is.
+///
+/// **Pure, and split from the lookup for the reason [`locate`] is: the handler that uses it
+/// cannot be stepped through.** A wrong answer here is a message asserting a cause at the
+/// exact moment the message matters most, which is how every breakpoint came to be reported
+/// as stub padding without anything having looked at the address (D576).
+///
+/// Three answers, because there are three things that can be known: the address is inside the
+/// stub table, it is outside a table whose span is known, or no span was registered and the
+/// question cannot be asked. Collapsing the last two would be the same overstatement in
+/// miniature.
+#[must_use]
+pub fn breakpoint_kind_in(address: u64, stub_base: u64, stub_len: u64) -> &'static str {
+    use orbistoun_report::trace::FaultSite;
+    if stub_len == 0 {
+        return FaultSite::BREAKPOINT_UNPLACED;
+    }
+    if address >= stub_base && address < stub_base.saturating_add(stub_len) {
+        FaultSite::BREAKPOINT_IN_STUBS
+    } else {
+        FaultSite::BREAKPOINT_OUTSIDE_STUBS
+    }
+}
+
+/// The breakpoint kind for `address`, against the stub span this process registered.
+///
+/// The thin effectful half: it reads the two atomics [`describe_region`] filled and hands
+/// them to the decision above.
+#[must_use]
+pub fn breakpoint_kind(address: u64) -> &'static str {
+    breakpoint_kind_in(
+        address,
+        REGION_BASE[Region::Stubs.slot()].load(Ordering::Relaxed),
+        REGION_LEN[Region::Stubs.slot()].load(Ordering::Relaxed),
+    )
+}
+
 /// A fixed-size line builder.
 ///
 /// No allocation and no locks, because a handler may run while the allocator lock is
@@ -885,7 +922,10 @@ mod imp {
                 (what, parameters[1] as u64)
             }
             ILLEGAL_INSTRUCTION => (at_instruction[0], rip),
-            BREAKPOINT => (at_instruction[1], rip),
+            // The address decides which of the three breakpoint kinds this is. It used
+            // to be `at_instruction[1]` unconditionally - the stub-padding one - which
+            // asserted a cause nothing had checked (D576).
+            BREAKPOINT => (super::breakpoint_kind(rip), rip),
             STACK_OVERFLOW => (at_instruction[2], rip),
             // Anything else is not ours to explain. Debuggers and language runtimes
             // raise exceptions routinely, and reporting those as guest faults would be
@@ -1703,5 +1743,62 @@ mod pointee_tests {
             None,
             "a control character is not printable, so the run is bytes"
         );
+    }
+
+    #[test]
+    fn a_breakpoint_is_only_called_stub_padding_where_the_stubs_are() {
+        use orbistoun_report::trace::FaultSite;
+
+        // The case the old message assumed for every breakpoint: inside the table.
+        assert_eq!(
+            super::breakpoint_kind_in(0x1_0040, 0x1_0000, 0x1000),
+            FaultSite::BREAKPOINT_IN_STUBS
+        );
+        // The case that made this necessary. PPSA03416 trapped at an address the region
+        // table itself named as the title's own modules, and the report called it stub
+        // padding in the same line (D576). Below the table and above it, because an
+        // off-by-one on either edge would put that message back.
+        assert_eq!(
+            super::breakpoint_kind_in(0x0_FFFF, 0x1_0000, 0x1000),
+            FaultSite::BREAKPOINT_OUTSIDE_STUBS
+        );
+        assert_eq!(
+            super::breakpoint_kind_in(0x1_1000, 0x1_0000, 0x1000),
+            FaultSite::BREAKPOINT_OUTSIDE_STUBS,
+            "one past the end is outside"
+        );
+        assert_eq!(
+            super::breakpoint_kind_in(0x1_0FFF, 0x1_0000, 0x1000),
+            FaultSite::BREAKPOINT_IN_STUBS,
+            "the last byte is inside"
+        );
+        // No table registered: the question could not be asked, and saying "not stub
+        // padding" would be the same overstatement one level down.
+        assert_eq!(
+            super::breakpoint_kind_in(0x1_0040, 0, 0),
+            FaultSite::BREAKPOINT_UNPLACED
+        );
+    }
+
+    #[test]
+    fn every_breakpoint_kind_is_listed_as_an_instruction_address() {
+        // The three are read by consumers deciding whether the address is somewhere the
+        // guest touched. A kind missing from that list is one a consumer classifies by
+        // falling through, which is how a fault kind ends up silently wrong.
+        use orbistoun_report::trace::FaultSite;
+        for kind in [
+            FaultSite::BREAKPOINT_IN_STUBS,
+            FaultSite::BREAKPOINT_OUTSIDE_STUBS,
+            FaultSite::BREAKPOINT_UNPLACED,
+        ] {
+            assert!(
+                FaultSite::AT_THE_INSTRUCTION.contains(&kind),
+                "{kind} is not listed as an instruction address"
+            );
+            assert!(
+                !FaultSite::TOUCHED.contains(&kind),
+                "{kind} is not an address the guest asked for"
+            );
+        }
     }
 }

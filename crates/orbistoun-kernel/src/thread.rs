@@ -239,6 +239,12 @@ pub struct ThreadRecord {
     /// of what that call promises. **Not acted on**: orbistoun cancels no threads, so there is
     /// nothing for the state to gate (D561).
     pub cancel_state: i32,
+    /// The guest stack it runs on - the lowest usable address and the length - once it has
+    /// reserved one. [`None`] for the thread the guest was entered on, whose span the crate root
+    /// holds, and for a thread that has not started yet. Recorded so `scePthreadAttrGet` can
+    /// answer about a thread by handle, which is a different question from the one
+    /// [`this_stack`] answers about the caller (D575).
+    pub stack: Option<(u64, u64)>,
     /// Whether it has finished.
     pub finished: bool,
 }
@@ -314,6 +320,7 @@ pub fn register(
         requested_priority,
         requested_policy: 0,
         cancel_state: 0,
+        stack: None,
         finished: false,
     };
     table().lock().ok()?.insert(handle, record);
@@ -702,6 +709,22 @@ thread_local! {
 /// Records the guest stack this thread runs on.
 fn note_this_stack(base: u64, len: u64) {
     MY_STACK.with(|held| held.set(Some((base, len))));
+    // And into the record, so the question can be asked about this thread by handle.
+    if let Ok(mut table) = table().lock()
+        && let Some(record) = table.get_mut(&current())
+    {
+        record.stack = Some((base, len));
+    }
+}
+
+/// The guest stack a thread runs on, by handle: the lowest usable address and the length.
+///
+/// [`None`] for a handle nobody registered, for a thread that has not reserved its stack yet,
+/// and for the thread the guest was entered on - its span belongs to the crate root, which
+/// is told it rather than deriving it (D275).
+#[must_use]
+pub fn stack_of(handle: ThreadHandle) -> Option<(u64, u64)> {
+    table().lock().ok()?.get(&handle)?.stack
 }
 
 /// The guest stack this thread runs on, if it is a guest thread.

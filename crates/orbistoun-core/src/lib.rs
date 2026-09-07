@@ -20,6 +20,7 @@
 mod error;
 mod handle;
 
+pub mod entropy;
 pub mod klog;
 pub mod machine;
 pub mod park;

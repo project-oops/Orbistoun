@@ -16,6 +16,11 @@ Fault names are a table, not a number: "access violation" says the guest derefer
 something unmapped, while "breakpoint" says execution reached stub padding, which is a
 different bug entirely.
 
+**The breakpoint half of that was superseded on 2026-09-07 by D576.** The message named stub
+padding for every breakpoint, from a table keyed on the exception code with no address in it,
+so it asserted a cause nothing had checked. It is decided by the address against the stub
+span now, and says which of the three things it determined.
+
 **First real result.** All four commercial executables place, link, protect, enter, and
 then fault with an access violation. Identical across all four, which makes it a
 systematic missing piece rather than a per-title quirk - most likely the absent thread

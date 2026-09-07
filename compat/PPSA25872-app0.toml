@@ -4,15 +4,15 @@
 
 [status]
 reach = "entered"
-outcome = "the title's own modules+0xba940"
-imports = 129
-calls = 7004897
-standing = 5
+outcome = "ran to the time limit"
+imports = 141
+calls = 20000000
+standing = 2
 default_return = "unimplemented"
-unanswered = 11
+unanswered = 9
 limit_seconds = 12
 build = "0.1.0"
-measured_on = "2026-09-04"
+measured_on = "2026-09-07"
 
 [experiment]
 reach = "entered"
