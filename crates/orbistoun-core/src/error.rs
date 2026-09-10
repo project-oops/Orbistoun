@@ -85,6 +85,16 @@ pub mod errno {
     /// The argument is outside what the call accepts. Observed from querying memory with an
     /// undefined flag, and from asking for a module description the wrong way.
     pub const INVALID: u32 = 22;
+    /// Ask again. Observed from installing a second exception handler for a signal that already
+    /// has one (obSCEne `030-thread/exception-handler`, sweep 20260909-140114), which answers
+    /// `0x8002_0023`.
+    ///
+    /// **Named from the number, against the reading that came with it.** The sweep glossed that
+    /// value as `EEXIST`; `EEXIST` is 17 in this platform's own harvested headers and 35 is
+    /// `EAGAIN`. The measurement is the number, the gloss is not part of it, and taking the name
+    /// on trust would have put a wrong constant in this module for every later call to reuse
+    /// (D648).
+    pub const AGAIN: u32 = 35;
 
     // --- published, not measured ------------------------------------------------------
     //

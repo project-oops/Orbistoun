@@ -686,20 +686,24 @@ fn anything_that_is_not_the_word_present_is_not_a_claim_that_it_is() {
 
 #[test]
 fn record_kinds_with_no_real_material_are_left_unparsed_on_purpose() {
-    // `call`, `responsive`, `measure` and `progress` are in the record format's table and
-    // appear in **no** output this project has ever seen - not in the captured exchanges,
-    // not in the example report. Writing parsers for them would be transcribing a document
-    // rather than reading evidence, which is the thing every other table here is built to
-    // avoid.
+    // These are in the record format's table and appear in **no** output this project has
+    // ever seen - not in the captured exchanges, not in the example report. Writing parsers
+    // for them would be transcribing a document rather than reading evidence, which is the
+    // thing every other table here is built to avoid.
     //
     // Nothing is lost by waiting: an unrecognised kind is kept verbatim, so material
-    // arriving later is readable before anyone writes code for it. This test pins that,
-    // and it is the reason the gap is safe rather than an oversight.
+    // arriving later is readable before anyone writes code for it. This test pins that, and
+    // it is the reason the gap is safe rather than an oversight.
+    //
+    // **`measure` used to be on this list and has graduated.** Three reports arrived
+    // carrying 3,319 of them, which is the whole of what this test was waiting for; it is
+    // read by `tests/measure.rs` now. The rest stay here on the same terms, and the same
+    // thing should happen to each of them when material turns up (D605).
     use orbistoun_probe::{Line, Record};
 
     for line in [
         "OBS|call|libkernel|sceKernelOpen|0|returned|0x2",
-        "OBS|measure|020-memory/allocate|sceKernelAllocateDirectMemory|bytes|4096|B",
+        "OBS|progress|boot|reached|0x3|stage",
     ] {
         let Ok(Line::Record(Record::Other { kind, fields })) = orbistoun_probe::parse_line(line)
         else {

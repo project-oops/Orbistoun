@@ -42,6 +42,14 @@ pub struct GuestTrial {
     title: PathBuf,
     traces: PathBuf,
     env: Vec<(String, String)>,
+    /// The symbol database every run is given, if the caller has one.
+    ///
+    /// **Load-bearing, and it was missing.** The database decides which imports have names, a
+    /// named import is one an implementation can be found for, and an unnamed one gets a stub -
+    /// so a run without it is a *different program*. PPSA02664 walls at `image+0x39f7c` with the
+    /// database and at `image+0xf56e09` without it, and every verdict this dispatcher produced
+    /// was measured against the second while being compared with the first (D599).
+    symbols: Option<PathBuf>,
 }
 
 impl GuestTrial {
@@ -57,7 +65,18 @@ impl GuestTrial {
             title: title.into(),
             traces: traces.into(),
             env: Vec::new(),
+            symbols: None,
         }
+    }
+
+    /// Gives every run the symbol database the caller was given.
+    ///
+    /// Without it a sweep measures a guest whose unnamed imports all landed on stubs, and then
+    /// compares the result against a loop that named them (D599).
+    #[must_use]
+    pub fn with_symbols(mut self, symbols: Option<PathBuf>) -> Self {
+        self.symbols = symbols;
+        self
     }
 
     /// Sets a variable on every run this makes.
@@ -140,6 +159,11 @@ impl GuestTrial {
     /// If the run could not be made, or wrote no trace.
     pub fn spawn(&self, axes: &[Axis]) -> Result<Outcome, Error> {
         let mut command = Command::new(&self.binary);
+        // **Before the subcommand**, because it is a global option - and it is the difference
+        // between measuring the program the loop measures and measuring another one (D599).
+        if let Some(symbols) = &self.symbols {
+            command.arg("--symbols-db").arg(symbols);
+        }
         command.arg("run").arg(&self.title);
         for (key, value) in &self.env {
             command.env(key, value);
@@ -158,6 +182,21 @@ impl GuestTrial {
             command.env(name, value);
         }
 
+        // **An axis that reports by writing has its writing let through.** `output()` captures
+        // the child's error stream and drops it, so every byte a watch or a snapshot printed
+        // was discarded - while `Taken::Watched`'s own documentation said *"what it saw is on
+        // the run's error stream, by design"*. It was on the child's, and nothing forwarded it.
+        //
+        // Gated on the axis rather than always: a sweep is hundreds of boots and inheriting
+        // all of them would bury the result in guest output. These two produce no verdict of
+        // their own - what they print *is* the finding - so for them there is nothing else to
+        // read (D586).
+        let reports_by_writing = axes
+            .iter()
+            .any(|a| matches!(a, Axis::Read { .. } | Axis::Watch { .. }));
+        if reports_by_writing {
+            command.stderr(std::process::Stdio::inherit());
+        }
         // A faulting guest is the normal outcome and often a non-zero exit, so the status
         // is not checked. What matters is whether a trace was written, and that is
         // checked below.

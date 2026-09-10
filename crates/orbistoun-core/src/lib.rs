@@ -20,10 +20,12 @@
 mod error;
 mod handle;
 
+pub mod category;
 pub mod entropy;
 pub mod klog;
 pub mod machine;
 pub mod park;
+pub mod said;
 pub mod stop;
 
 pub use error::{

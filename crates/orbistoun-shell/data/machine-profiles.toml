@@ -15,13 +15,13 @@
 # software-version is a *separate* number: sceKernelGetSystemSwVersion answers 13.090.001 /
 # 0x13090001, not the 12.40 firmware, measured identically across three obSCEne module runs (D420).
 # Both representations are stated because the encoding relating them is not documented.
-["ps5-cex-12.40"]
-generation = "ps5"
+["prospero-cex-12.40"]
+generation = "prospero"
 kind = "cex"
 revision = "base"
 firmware = 4672            # 0x1240 = 12.40
 kernel-release = "0.0-prototype"
 
-["ps5-cex-12.40".software-version]
+["prospero-cex-12.40".software-version]
 display = "13.090.001"
 packed = 319356929        # 0x13090001

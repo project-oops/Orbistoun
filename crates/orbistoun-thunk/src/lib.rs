@@ -45,12 +45,14 @@ pub mod syscall;
 
 pub use dispatch::{
     ArgumentDump, DUMP_BYTES, ForcedWrite, GuestFn, Plant, Pointing, RecordedCall, abi_conformance,
-    argument_dumps, call_counts, entry_alignment_conforms, forced_return_count,
-    forced_write_counts, implemented_count, implemented_count_within, install_call_budget,
-    install_float_handlers, install_forced_dumps, install_forced_returns, install_forced_writes,
-    install_handlers, install_policy_returns, install_policy_writes, install_readable_ranges,
-    install_stub_returns, install_writable_ranges, is_implemented, is_mapped, last_call,
-    note_readable_range, opening_calls, ranges_known, recorded_calls, stack_arguments, total_calls,
+    argument_dumps, call_counts, current_call, current_thread, dropped_ranges, dumps_dropped,
+    entry_alignment_conforms, forced_return_count, forced_write_counts, host_thread,
+    implemented_count, implemented_count_within, install_call_budget, install_float_handlers,
+    install_forced_dumps, install_forced_returns, install_forced_writes, install_handlers,
+    install_policy_returns, install_policy_writes, install_readable_ranges, install_stub_returns,
+    install_writable_ranges, is_implemented, is_mapped, last_call, note_readable_range,
+    opening_calls, opening_sequence, ranges_known, readable_span, recorded_calls, stack_arguments,
+    total_calls,
 };
 
 use orbistoun_mem::{AddressSpace, MemError, Protection};
@@ -321,6 +323,15 @@ pub struct DataBlocks {
     slots: std::collections::BTreeMap<usize, u64>,
     /// The same addresses by name, for implementations that must write one.
     named: std::collections::BTreeMap<String, u64>,
+    /// What lives at each address, for a report naming what a register points at.
+    ///
+    /// **Keyed the other way round from [`Self::named`], and that is the point.** Three of a
+    /// title's modules import `__stack_chk_guard`, and each gets storage of its own - so a
+    /// name-keyed map holds one of the three addresses and answers nothing about the other two.
+    /// Keying by address instead lets a repeated name label every page it was given, which is
+    /// what a faulting register needs, while the by-name map keeps answering the different
+    /// question an implementation asks (D647).
+    labels: std::collections::BTreeMap<u64, String>,
 }
 
 /// Where the current run's data imports live, by name.
@@ -337,6 +348,18 @@ static DATA_SYMBOLS: std::sync::OnceLock<std::collections::BTreeMap<String, u64>
 /// this supports, and the first one's addresses are the live ones.
 pub fn install_data_symbols(named: std::collections::BTreeMap<String, u64>) {
     let _ = DATA_SYMBOLS.set(named);
+}
+
+/// Where the current run's data imports live, by address.
+///
+/// The address-keyed half of the pair, so a name several modules import still labels every page
+/// it was given (D647).
+static DATA_LABELS: std::sync::OnceLock<std::collections::BTreeMap<u64, String>> =
+    std::sync::OnceLock::new();
+
+/// Publishes what lives at each data-import address for this run.
+pub fn install_data_labels(labels: std::collections::BTreeMap<u64, String>) {
+    let _ = DATA_LABELS.set(labels);
 }
 
 /// The address of a named data import, or [`None`] if the guest does not import it.
@@ -406,6 +429,31 @@ pub fn name_thunk(name: &str) -> Option<u64> {
     NAME_THUNKS.get()?.get(name).copied()
 }
 
+/// Every name this run declares in the libkernel family, published for `sceKernelDlsym`.
+static LIBKERNEL_NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+    std::sync::OnceLock::new();
+
+/// Publishes which names belong to libkernel, so a resolver can narrow by module handle.
+///
+/// **Published here because no one crate knows the answer.** The console's libkernel is spread
+/// across this project's `libkernel`, `libkernel_fs` and `libkernel_sync_on_address`
+/// declarations, which live in different crates and must not reach sideways for each other
+/// (D536). The service sees them all, so the service says, and this is the same place it
+/// publishes the by-name stubs themselves (D629).
+pub fn install_libkernel_names(names: std::collections::BTreeSet<String>) {
+    let _ = LIBKERNEL_NAMES.set(names);
+}
+
+/// Whether `name` is one libkernel declares - or [`None`] when nothing has published a list.
+///
+/// [`None`] and `Some(true)` are deliberately different from each other and both mean "do not
+/// refuse". A caller narrowing an answer on this must treat "nobody said" as permission,
+/// because a list that was never installed is silence, not a denial.
+#[must_use]
+pub fn name_is_libkernel(name: &str) -> Option<bool> {
+    LIBKERNEL_NAMES.get().map(|names| names.contains(name))
+}
+
 impl DataBlocks {
     /// Reserves one zeroed page for each import in `imports`, keyed by index and by name.
     ///
@@ -416,25 +464,35 @@ impl DataBlocks {
         let mut space = AddressSpace::new();
         let mut slots = std::collections::BTreeMap::new();
         let mut named = std::collections::BTreeMap::new();
+        let mut labels = std::collections::BTreeMap::new();
         if imports.is_empty() {
             return Ok(Self {
                 _space: space,
                 slots,
                 named,
+                labels,
             });
         }
 
         let len = (imports.len() as u64).saturating_mul(page);
         space.reserve(base, len, Protection::READ_WRITE)?;
+        // **Published as readable, so a fault can say what a register points at.** These pages
+        // are this project's own reservation - twenty of them for PPSA21564, mostly C++ vtables -
+        // and a register holding one printed as a bare number because the reader skips any
+        // address no published span covers. The same omission D593 found for the title's own
+        // modules, in the region right beside it (D639).
+        note_readable_range(base, len);
         for (nth, (index, name)) in imports.iter().enumerate() {
             let at = base.saturating_add((nth as u64).saturating_mul(page));
             slots.insert(*index, at);
             named.insert(name.clone(), at);
+            labels.insert(at, name.clone());
         }
         Ok(Self {
             _space: space,
             slots,
             named,
+            labels,
         })
     }
 
@@ -453,6 +511,12 @@ impl DataBlocks {
     #[must_use]
     pub fn named(&self) -> std::collections::BTreeMap<String, u64> {
         self.named.clone()
+    }
+
+    /// What lives at each address, for publishing to the fault reporter.
+    #[must_use]
+    pub fn labels(&self) -> std::collections::BTreeMap<u64, String> {
+        self.labels.clone()
     }
 
     /// The address for a symbol index, or [`None`] if it does not name data.
@@ -600,6 +664,47 @@ mod data_tests {
             blocks.address_of_name("optind"),
             None,
             "a name the guest never imported has no storage, and none is invented"
+        );
+    }
+
+    /// **A name two modules both import labels both of its pages.**
+    ///
+    /// The regression this was written for: `__stack_chk_guard` is imported by a title's
+    /// executable and by every module it ships, each correctly getting storage of its own. A
+    /// by-name map holds one address for the name, so the other pages had no label at all - and
+    /// the register pointing at one of them printed as a bare number, which is the exact failure
+    /// naming the region was supposed to end (D647).
+    ///
+    /// Asserted on the *later* page, because the first one is the case that already worked.
+    #[test]
+    fn a_repeated_name_labels_every_page_it_was_given() {
+        let blocks = DataBlocks::build(
+            base(),
+            &[
+                (3, "__stack_chk_guard".to_owned()),
+                (11, "__stack_chk_guard".to_owned()),
+            ],
+            0x1000,
+        )
+        .expect("reserves");
+        let labels = blocks.labels();
+        let second = blocks.address_of(11).expect("has storage");
+
+        assert_ne!(
+            blocks.address_of(3),
+            blocks.address_of(11),
+            "two imports of one name still get separate storage"
+        );
+        assert_eq!(
+            labels.get(&second).map(String::as_str),
+            Some("__stack_chk_guard"),
+            "the second page is labelled too, which the by-name map cannot do"
+        );
+        assert_eq!(labels.len(), 2, "one label per page, not one per name");
+        assert_eq!(
+            blocks.named().len(),
+            1,
+            "and the by-name map really is lossy here - which is why it is not the one asked"
         );
     }
 
@@ -778,4 +883,65 @@ mod tests {
         assert_eq!(&code[DISPATCH_AT..DISPATCH_AT + 2], &MOV_R10_IMM64);
         assert_eq!(&code[DISPATCH_AT + 2..DISPATCH_AT + 10], &[0; 8]);
     }
+}
+
+/// Stubs reachable by bare name for imports **nothing implements**, when a run asks for them.
+///
+/// Empty unless a run installed it, which is what makes the diagnostic behind it precise: a run
+/// that did not ask behaves exactly as before, and the difference between the two is the whole
+/// measurement (D632).
+static DECLARED_THUNKS: std::sync::OnceLock<std::collections::BTreeMap<String, u64>> =
+    std::sync::OnceLock::new();
+
+/// Publishes by-name stubs for declared imports, so `sceKernelDlsym` can answer for them.
+///
+/// # The inconsistency this exists to measure
+///
+/// A name reached by **import** lands on a stub that answers the placeholder. The same name
+/// reached by `sceKernelDlsym` is refused, because the by-name table holds only what this project
+/// implements. So one function has two answers depending on how the guest asked, and
+/// `sceKernelDlsym`'s own doc claims the opposite - *"a function reached this way and the same
+/// function reached by an import are the same address"*, which is true of the implemented ones
+/// and of no others.
+///
+/// The console resolves both. Whether orbistoun should is a real question with two sides - a
+/// guest handed a stub calls it and gets a placeholder, where a guest handed null may take a
+/// fallback path it would have preferred - so this is installed only under a diagnostic and the
+/// run is measured, rather than the behaviour being changed on an argument (D620's method).
+pub fn install_declared_thunks(named: std::collections::BTreeMap<String, u64>) {
+    let _ = DECLARED_THUNKS.set(named);
+}
+
+/// The stub for a declared-but-unimplemented name, when a run published them.
+#[must_use]
+pub fn declared_thunk(name: &str) -> Option<u64> {
+    DECLARED_THUNKS.get()?.get(name).copied()
+}
+
+/// The data import whose page holds `address`, and how far into it.
+///
+/// # Why a fault needs this
+///
+/// A data import is served as **one zeroed page** (D307), and twenty of PPSA21564's are C++
+/// vtables - `_ZTVSt9bad_alloc`, `_ZTVN10__cxxabiv117__class_type_infoE` and the rest. A zeroed
+/// vtable is a table of null function pointers, so the first virtual call through one reads a
+/// null and dies at a small offset, which is exactly what that title does.
+///
+/// The report named none of it. The region is not one of the five the fault handler knows, so the
+/// registers pointing into it printed as bare numbers and the connection between "twenty blank
+/// pages went in" and "a null came out" had to be made by hand (D639).
+///
+/// **Exact page, never nearest-preceding.** Each block is one page and they are contiguous, so a
+/// nearest-preceding search would name the block *before* a gap as though it owned the address.
+/// An address in no block gets [`None`], which is the honest answer.
+#[must_use]
+pub fn data_symbol_at(address: u64) -> Option<(&'static str, u64)> {
+    let page = address & !(orbistoun_core::GUEST_PAGE_SIZE - 1);
+    // Asked of the address-keyed table, because the by-name one loses every page after the
+    // first when two modules import the same name - which is the ordinary case for
+    // `__stack_chk_guard` and made a faulting register print as a bare number (D647).
+    DATA_LABELS
+        .get()?
+        .get(&page)
+        .map(|name| (name.as_str(), address - page))
 }

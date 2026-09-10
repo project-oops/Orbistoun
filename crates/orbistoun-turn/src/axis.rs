@@ -144,6 +144,22 @@ pub enum Axis {
         /// How many words, at most four.
         words: usize,
     },
+    /// Read a span of guest memory back once the guest has stopped.
+    ///
+    /// **Observes, like [`Self::Watch`], and unlike everything else here.** It snapshots and
+    /// prints; the guest runs the program it would have run, so a verdict beside it needs no
+    /// caveat.
+    ///
+    /// The question it answers is the one the argument dump runs out of room for. A dump shows
+    /// thirty-two bytes at a pointer; a structure a call was handed is longer than that, and it
+    /// is allocated while the guest runs - so until the snapshot survived an address that did
+    /// not exist at entry, this could not be asked at all (D580, D586).
+    Read {
+        /// Where the structure starts.
+        address: u64,
+        /// How many bytes.
+        length: u64,
+    },
 }
 
 impl Axis {
@@ -170,6 +186,10 @@ impl Axis {
             }
             Self::Fill { region, byte } => (region.variable(), format!("{byte:02x}")),
             Self::MapShape { shape } => (orbistoun_env::MAP_SHAPE.name, (*shape).to_owned()),
+            Self::Read { address, length } => (
+                orbistoun_env::WATCH.name,
+                format!("{address:#x}+{length:#x}"),
+            ),
             Self::Watch { base, words } => (
                 orbistoun_env::WATCHPOINT.name,
                 (0..*words)
@@ -223,6 +243,9 @@ impl Axis {
             }
             Self::MapShape { shape } => {
                 format!("does the guest accept a {shape} physical memory map?")
+            }
+            Self::Read { address, length } => {
+                format!("what does the guest have at {address:#x}+{length:#x} when it stops?")
             }
             Self::Fill { region, .. } => {
                 format!("does the run depend on unwritten {region:?} memory?")

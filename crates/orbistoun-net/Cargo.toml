@@ -14,3 +14,9 @@ workspace = true
 
 [dependencies]
 orbistoun-hle = { workspace = true }
+
+[dev-dependencies]
+# Only the test needs it: the base itself is a plain `u32`, and the assertion that it
+# reconstructs the measured codes goes through `GuestError::vendor_in` because that is the
+# function a shim will actually call (D627).
+orbistoun-core = { workspace = true }

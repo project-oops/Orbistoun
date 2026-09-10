@@ -33,7 +33,8 @@
 //! a request is *mapped* and the original is *kept* - see [`AffinityPolicy`] (D150).
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// How the guest sees a thread.
 ///
@@ -218,6 +219,13 @@ pub fn configured() -> Settings {
 pub struct ThreadRecord {
     /// The handle the guest holds.
     pub handle: ThreadHandle,
+    /// The host thread this one is running on, or zero before it has run.
+    ///
+    /// **The join between two tables that could not be read against each other.** The recorded
+    /// calls carry a host thread; this table carries names and handles. Without the join a report
+    /// can say "eleven threads exist, main is not finished" or "the last forty-eight calls were
+    /// all one thread" and never that they are different threads (D651).
+    pub host: u64,
     /// The name the guest gave it, if any. Traces are far more readable with it.
     pub name: String,
     /// Where the guest wanted it to run. Kept whether or not it was honoured.
@@ -269,19 +277,30 @@ pub const CONTROL_BLOCK_WORDS: usize = 32;
 
 /// Hands out handles: the address of a fresh zeroed block.
 ///
-/// The blocks are deliberately **never freed**. A guest keeping a handle past the
-/// thread's life is then a read of zeroes rather than a use-after-free, and the count is
-/// bounded by how many threads a title makes.
+/// **From the one region every guest-visible handle comes from**, so handle *n* is the same
+/// address in every run. This kept a region of its own for a day, which was the same mistake
+/// one level down: the fix belonged where the bug lives - eight sites handing out host heap
+/// addresses - rather than at the one site where it was noticed (`blocks`, D584).
+///
+/// The blocks are deliberately **never freed**. A guest keeping a handle past the thread's
+/// life is then a read of zeroes rather than a use-after-free, and the count is bounded by
+/// how many threads a title makes.
 fn next_handle() -> ThreadHandle {
-    let block: Box<[u64; CONTROL_BLOCK_WORDS]> = Box::new([0; CONTROL_BLOCK_WORDS]);
-    // Eight-byte aligned by construction, so a guest reading a word out of it does an
-    // aligned read - which a `Vec<u8>` would not have guaranteed.
-    let address = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    let address = orbistoun_mem::blocks::block(CONTROL_BLOCK_WORDS);
     debug_assert_ne!(
         address, NO_THREAD,
         "a live thread must not look like no thread"
     );
     address
+}
+
+/// Whether the handles this run issued are the ones it would issue again.
+///
+/// **A run that fell back to the host heap has not got them**, and a reader comparing two runs
+/// needs to be told rather than to infer it from addresses that look plausible either way.
+#[must_use]
+pub fn handles_repeat() -> bool {
+    orbistoun_mem::blocks::repeat()
 }
 
 /// Handles this crate has issued, so a guest-supplied value can be checked before it is
@@ -314,6 +333,8 @@ pub fn register(
     }
     let record = ThreadRecord {
         handle,
+        // Zero until it runs; `become_thread` fills it in on the thread itself.
+        host: 0,
         name: name.to_owned(),
         requested_affinity,
         effective_affinity: effective,
@@ -590,6 +611,30 @@ const REENTRANT_STACK_BASE: u64 = 0x0000_6800_0000_0000;
 /// pointer the guest itself handed over. The arguments are passed unexamined, so a dereferenced one
 /// must be a valid guest address.
 pub unsafe fn call_guest(entry: u64, args: [u64; 3]) -> Option<u64> {
+    // SAFETY: forwarded unchanged to the general form, whose contract this one's repeats.
+    unsafe { call_guest_placing(entry, |_, _| args) }
+}
+
+/// [`call_guest`], with the arguments chosen once the stack exists.
+///
+/// # Why a callback rather than three more parameters
+///
+/// A signal handler is handed a pointer to a structure **on the stack it runs on** - measured, and
+/// not a detail: pointed at a region of orbistoun's own instead, PPSA25872 walks forward from it
+/// until it leaves that region, because it is scanning for roots rather than reading a struct. A
+/// scan is bounded by the allocation it is in, so the context has to live in a real one (D656).
+///
+/// Only this function knows where that stack is, and it is released when the call returns, so the
+/// address cannot be handed out beforehand or kept afterwards. `place` receives the stack's lowest
+/// usable address and its length and answers the three arguments.
+///
+/// # Safety
+///
+/// As [`call_guest`]. Anything `place` writes must stay within the span it is given.
+pub unsafe fn call_guest_placing(
+    entry: u64,
+    place: impl FnOnce(u64, u64) -> [u64; 3],
+) -> Option<u64> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(REENTRANT_STACK_BASE);
     // One stack plus a gap, so nested reentrant calls never share a stack; the base advances and is
@@ -601,6 +646,7 @@ pub unsafe fn call_guest(entry: u64, args: [u64; 3]) -> Option<u64> {
             .ok()?;
     // So a callback's own arguments dump as stack addresses rather than wild pointers (D387).
     orbistoun_thunk::note_readable_range(stack.lowest_usable(), stack.len());
+    let args = place(stack.lowest_usable(), stack.len());
     // SAFETY: the caller vouches `entry` is executable guest code; `stack` is a fresh, aligned,
     // guarded guest stack that outlives the call - dropped below, after it returns.
     let result = unsafe {
@@ -655,6 +701,102 @@ pub fn current() -> ThreadHandle {
 /// Called once, at the top of a spawned thread, before any guest code runs on it.
 pub fn become_thread(handle: ThreadHandle) {
     current_handle().with(|c| c.set(handle));
+    // Recorded here rather than at registration: a thread is created by one thread and *runs* on
+    // another, so the host identity is only knowable once it is the one asking.
+    if let Ok(mut table) = table().lock() {
+        if let Some(record) = table.get_mut(&handle) {
+            record.host = orbistoun_thunk::host_thread();
+        }
+    }
+    // The signal slot is cached in a thread-local here for the same reason, and because a wait
+    // predicate must be able to read it without taking any lock (D652).
+    if let Ok(mut slots) = signal_slots().lock() {
+        let slot = Arc::clone(slots.entry(handle).or_default());
+        MY_SIGNALS.with(|s| *s.borrow_mut() = Some(slot));
+    }
+}
+
+/// One thread's signal state: what has been raised on it, and whether it is somewhere a raise
+/// can reach.
+///
+/// # Why an `Arc` of atomics rather than a field in [`ThreadRecord`]
+///
+/// The pending flag is read from inside a condition-variable predicate, which runs **under the
+/// wait queue's own lock**. Reading it from the thread table there would take the table lock
+/// while holding the queue lock - and `sceKernelRaiseException` takes them the other way round,
+/// which is a lock-order inversion and eventually a deadlock. A slot each thread caches by
+/// `Arc` is read with no lock at all, so the inversion cannot arise (D652).
+#[derive(Debug, Default)]
+pub struct SignalSlot {
+    /// The signal number raised and not yet run, or zero for none.
+    pending: AtomicU64,
+    /// Whether this thread is asleep somewhere that will notice a pending signal.
+    ///
+    /// **Not "asleep".** A thread spinning in guest code is unreachable, and so is one blocked in
+    /// a wait that does not consult the flag. This says only: *this* thread is inside a wait that
+    /// checks, so a signal raised on it now will run.
+    parked: AtomicBool,
+}
+
+/// Every thread's signal slot, by handle.
+fn signal_slots() -> &'static Mutex<BTreeMap<ThreadHandle, Arc<SignalSlot>>> {
+    static SLOTS: OnceLock<Mutex<BTreeMap<ThreadHandle, Arc<SignalSlot>>>> = OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+thread_local! {
+    /// This thread's own slot, so reading it needs no lock.
+    ///
+    /// Filled by [`become_thread`], which runs on the thread itself and holds no queue lock.
+    static MY_SIGNALS: std::cell::RefCell<Option<Arc<SignalSlot>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// This thread's slot, if it has been adopted.
+fn my_slot() -> Option<Arc<SignalSlot>> {
+    MY_SIGNALS.with(|s| s.borrow().clone())
+}
+
+/// Marks `signum` as raised on `handle`, answering whether the thread can be reached.
+///
+/// **`false` is the honest refusal and the whole point.** A thread that is not parked in a wait
+/// that consults its slot will never run the handler, so saying so lets the caller refuse rather
+/// than answer a success the guest would act on (D652).
+pub fn raise_pending(handle: ThreadHandle, signum: u64) -> bool {
+    let Ok(slots) = signal_slots().lock() else {
+        return false;
+    };
+    let Some(slot) = slots.get(&handle) else {
+        return false;
+    };
+    if !slot.parked.load(Ordering::Acquire) {
+        return false;
+    }
+    slot.pending.store(signum, Ordering::Release);
+    true
+}
+
+/// Whether a signal is waiting to run on this thread. Lock-free, for a wait predicate.
+#[must_use]
+pub fn signal_pending() -> bool {
+    my_slot().is_some_and(|slot| slot.pending.load(Ordering::Acquire) != 0)
+}
+
+/// Takes the signal waiting on this thread, leaving none.
+pub fn take_pending() -> Option<u64> {
+    let slot = my_slot()?;
+    match slot.pending.swap(0, Ordering::AcqRel) {
+        0 => None,
+        signum => Some(signum),
+    }
+}
+
+/// Records that this thread is, or is no longer, inside a wait that consults its slot.
+///
+/// Returns the previous value so a nested wait restores rather than clears - a handler that
+/// itself waits must not leave the outer wait looking unreachable.
+pub fn set_parked(parked: bool) -> bool {
+    my_slot().is_some_and(|slot| slot.parked.swap(parked, Ordering::AcqRel))
 }
 
 /// A hook run at the top of every spawned guest thread, before it enters guest code.
@@ -764,6 +906,65 @@ fn next_stack_index() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A thread that is not parked refuses the signal**, which is the honesty this rests on.
+    ///
+    /// The whole mechanism answers `0` to the guest for a raise it accepts, and `0` means the
+    /// handler will run. It can only run on a thread asleep in a wait that consults its slot, so
+    /// a raise at any other moment must be refused rather than accepted and dropped - a dropped
+    /// signal is a collector waiting forever for an acknowledgement it was promised (D652).
+    ///
+    /// The negative case first, because accepting when it cannot deliver is the failure that
+    /// would be invisible.
+    #[test]
+    fn a_raise_on_a_thread_that_is_not_parked_is_refused() {
+        let handle = super::adopt("not-parked");
+        assert!(handle != NO_THREAD, "the thread has a handle");
+
+        assert!(
+            !super::raise_pending(handle, 30),
+            "a thread that is awake cannot be reached, and says so"
+        );
+        assert!(
+            !super::signal_pending(),
+            "and nothing was left pending to surprise a later wait"
+        );
+    }
+
+    /// A raise on a parked thread is accepted, delivered once, and leaves nothing behind.
+    #[test]
+    fn a_raise_on_a_parked_thread_is_taken_exactly_once() {
+        let handle = super::adopt("parked");
+        let was = super::set_parked(true);
+
+        assert!(
+            super::raise_pending(handle, 30),
+            "a parked thread is reachable"
+        );
+        assert!(super::signal_pending(), "and the wait predicate can see it");
+        assert_eq!(
+            super::take_pending(),
+            Some(30),
+            "the signal number survives"
+        );
+        assert_eq!(
+            super::take_pending(),
+            None,
+            "and taking it twice does not run a handler twice"
+        );
+        assert!(!super::signal_pending());
+
+        super::set_parked(was);
+    }
+
+    /// A raise naming a thread nothing issued is refused rather than remembered.
+    #[test]
+    fn a_raise_on_an_unknown_handle_is_refused() {
+        assert!(
+            !super::raise_pending(0xdead_beef, 30),
+            "a handle this crate never handed out has no slot to write into"
+        );
+    }
     /// **A thread that is not running a guest stack says so**, rather than claiming one.
     ///
     /// The failure this protects against is the silent direction: `sceKernelIsStack` falling

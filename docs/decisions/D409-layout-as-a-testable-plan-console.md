@@ -22,7 +22,7 @@ was the false positive that made the old collision output unreadable.
 ### Named console profiles
 
 Every payload run meant hand-setting firmware and the release string in `shell.toml`.
-`--profile ps5-cex-12.40` now presents the measured reference machine (D403, D405) for one run,
+`--profile prospero-cex-12.40` now presents the measured reference machine (D403, D405) for one run,
 from `orbistoun-shell/data/machine-profiles.toml`. Validated in the CLI before the worker spawns,
 so an unknown name fails fast with the alternatives; applied in the worker over the loaded
 settings via an env the parent sets. The default machine still refuses firmware, so a profile is

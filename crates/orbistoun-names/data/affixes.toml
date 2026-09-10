@@ -1,0 +1,94 @@
+# Rules that turn a name this project already holds into a candidate for one it does not.
+#
+# # Why this file exists
+#
+# The generator in `vendor.toml` builds names out of *words* - a prefix, a module, a verb,
+# an object. It cannot reach `snprintf_s` from `snprintf`, because `snprintf` is not a word
+# in any of its lists and never will be: it is a whole name, already proved.
+#
+# A console's own kernel export table is what made the gap visible. Thirty-eight of its
+# addresses export two hashes each, and where both sides were already named the pattern was
+# never compositional - it was `foo` beside `_foo`, `inet_pton` beside `__inet_pton`,
+# `fileno` beside `fileno_unlocked`, a C++ complete constructor beside its base constructor.
+# One function, two spellings, and the second spelling is a *rule applied to the first*
+# (D606).
+#
+# # What a rule may be
+#
+# A prefix, a suffix, or a substitution. Nothing conditional, nothing that looks at what it
+# is transforming - a rule that had to inspect its seed would be a small program, and this
+# file would stop being data (principle 5).
+#
+# # Extending this is the method
+#
+# Same asymmetry as everywhere else in the search: a match is proof, and a miss proves only
+# "not in what was tried". Adding a rule costs one hash per seed and no rebuild.
+#
+# The empty prefix and the empty suffix are deliberate. Without them a rule could only ever
+# apply at both ends at once, and every one-ended variant would be out of reach.
+
+# Prepended, verbatim.
+prefixes = [
+  "",
+  # The C library's own convention for the symbol beneath a cancellation point. Both
+  # spellings are exported, and the console's export table has them at one address.
+  "_",
+  # The second underscore is a separate convention, not a doubling of the first:
+  # `__inet_pton` and `_inet_pton` are different names and only one of them exists.
+  "__",
+  # A vendor name wearing the prefix its own header omits.
+  "sce",
+]
+
+# Appended, verbatim.
+suffixes = [
+  "",
+  # A second version of a call, which the vendor numbers rather than renaming.
+  "2",
+  "3",
+  # The revised-interface convention the C library uses for a bounds-checked variant.
+  "_s",
+  # A lock-free variant, beside the one that takes the stream lock.
+  "_unlocked",
+  # Reentrant, and the large-file variant, both standard C-library conventions.
+  "_r",
+  "64",
+  # Non-portable extension, the threading library's own marker.
+  "_np",
+  # Internal, which the vendor spells out rather than abbreviating.
+  "Internal",
+]
+
+# Applied only where the left side appears, replacing every occurrence.
+#
+# The Itanium C++ ABI numbers constructors and destructors by which of the three jobs they
+# do, and a class exports more than one at the same address whenever two of them are the
+# same code. Recovering `D1Ev` from `D2Ev` is a substitution and nothing else - no prefix or
+# suffix reaches it.
+[[substitution]]
+from = "C1E"
+to = "C2E"
+
+[[substitution]]
+from = "C2E"
+to = "C1E"
+
+[[substitution]]
+from = "D1E"
+to = "D2E"
+
+[[substitution]]
+from = "D2E"
+to = "D1E"
+
+[[substitution]]
+from = "D1E"
+to = "D0E"
+
+[[substitution]]
+from = "D2E"
+to = "D0E"
+
+[[substitution]]
+from = "D0E"
+to = "D1E"

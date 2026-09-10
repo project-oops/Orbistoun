@@ -5,7 +5,7 @@ With the emulation changes in place, tested every local guest ELF. The result is
 firmware and handoff work was aiming at: **obSCEne runs against orbistoun exactly as it runs against
 hardware, to `OBS|end`.**
 
-Guests, all under `--profile ps5-cex-12.40` + `ORBISTOUN_ENTRY_ARGUMENT=handoff`:
+Guests, all under `--profile prospero-cex-12.40` + `ORBISTOUN_ENTRY_ARGUMENT=handoff`:
 
 - **prosperous/klog.elf** - the wall that was at `image+0x2708` last session is gone; klog now enters
   its server loop (read / setsockopt / mmap / munmap / vendor_system_version, 100+ syscalls) and runs

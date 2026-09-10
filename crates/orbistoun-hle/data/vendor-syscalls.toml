@@ -30,3 +30,49 @@
 # Provenance: guest-observed. The number was read from four running programs; the shape of the
 # answer was read from the instructions that consume it. See D403.
 SYS_vendor_system_version = 649
+
+# `sceKernelVirtualQuery`, by number rather than by name.
+#
+# The conformance probe's payload build calls this **4,213 times in one run** and gets `ENOSYS`
+# to every one. What it is doing is legible from the arguments alone: the first is an address
+# that walks *backwards* through the guest image in `0x4000` steps - `0x400000280000`,
+# `0x40000027c000`, `0x400000278000` - which is a program mapping out its own address space one
+# region at a time and never being told where a region ends, so it steps by hand and never stops.
+#
+# **The function is implemented here; only the number was missing.** `sceKernelVirtualQuery` has
+# answered by name since the address space existed. A guest that asks for it as a name is served
+# and a guest that asks for it as a number is refused, which is the same one-function-two-answers
+# shape D632 found in `sceKernelDlsym` - and it is why an emulator that can answer this call
+# watched a guest ask four thousand times and said nothing but `ENOSYS`.
+#
+# Provenance: guest-observed, and corroborated in source. The number was read from a running
+# program's syscall trace; the sibling conformance-probe repository's own `runtime.c` issues
+# `obs_invoke_syscall(603, address, flags, info, info_size)` under the name
+# `sceKernelVirtualQuery`, which is this project's own code and so citable rather than inferred.
+# See D641.
+SYS_sceKernelVirtualQuery = 603
+
+# The direct-memory trio, by number.
+#
+# **Reached only once 603 was bound**, which is what makes them observed rather than guessed:
+# before that the probe's memory walk never got past `sceKernelVirtualQuery`, and these three
+# numbers appeared in no trace. With the walk answered the guest asks for `572`, then `573`,
+# then `574`, in that order - allocate, map, release - which is the shape of a program taking a
+# span of direct memory, putting it somewhere, and giving it back.
+#
+# The sibling conformance-probe repository's `runtime.c` names all three, and names them
+# *conditionally*: it issues `obs_invoke_syscall(572, …)` for `sceKernelAllocateDirectMemory`
+# unconditionally, and picks `obs_is_ps5() ? 585 : 573` for map and `obs_is_ps5() ? 586 : 574`
+# for release. **This guest asked for 573 and 574**, the lower pair - so under orbistoun its
+# generation test answers "not the current one", which is a fact about what this emulator
+# presents and is worth knowing on its own.
+#
+# **585 and 586 are deliberately absent.** They are the other half of that conditional and no
+# guest here has asked for either. This file's bar is that a guest was watched asking, and
+# adding a number because its sibling was observed is exactly the "it seemed likely" this
+# table refuses.
+#
+# Provenance: guest-observed, corroborated in this project's own sibling source. See D641.
+SYS_sceKernelAllocateDirectMemory = 572
+SYS_sceKernelMapDirectMemory = 573
+SYS_sceKernelReleaseDirectMemory = 574

@@ -1,19 +1,25 @@
+[title]
+id = "PPSA03416"
+name = "Summer Sports Games"
+content_version = "01.001.000"
+master_version = "01.00"
+
 [compat]
 
 [settings]
 
 [status]
 reach = "flipped"
-outcome = "image+0x1389269"
-imports = 192
-calls = 467541
+outcome = "image+0x39f7c"
+imports = 198
+calls = 469663
 standing = 100
 default_return = "unimplemented"
 frames = 1
-unanswered = 12
-limit_seconds = 12
+unanswered = 15
+limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-07"
+measured_on = "2026-09-09"
 
 [experiment]
 reach = "entered"

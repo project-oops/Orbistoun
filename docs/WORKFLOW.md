@@ -188,6 +188,25 @@ by the loader, the kernel and the HLE layer, so it lives near the top of the dep
 spine. The environment registry lives at the bottom, because `orbistoun-paths` needs it to
 work out where the data root - and therefore `config.toml` - is (D221).
 
+### One more, and it is a path rather than a setting
+
+`ORBISTOUN_PROBE_REPORTS` names a directory of obSCEne reports. `./bin/orbistoun names` reads
+every `*.obs.log` under it and hands the name search the hashes those reports say the platform
+exports - hashes to look for, never names (D605, D606).
+
+```bash
+ORBISTOUN_PROBE_REPORTS=<wherever the reports are> ./bin/orbistoun names
+```
+
+**In the environment rather than in the repository on purpose.** The reports live in the
+sibling conformance-probe project. A path to them written into a script here would be a build
+dependency between two repositories - the coupling D207 exists to prevent - and would fail for
+anybody holding one checkout and not the other. Unset, `names` searches exactly what it always
+did.
+
+It is not in `orbistoun-cli env`, because it is not a diagnostic and nothing below the shims
+reads it: the shell driver turns it into `--from-report` arguments and the tool sees only paths.
+
 ## The diagnostics
 
 ```bash

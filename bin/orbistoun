@@ -18,6 +18,7 @@
 #   ./bin/orbistoun fix            # cargo fmt + clippy --fix. More than `fmt`, so it is
 #                                  # asked for by name rather than folded into it.
 #   ./bin/orbistoun run <title>    # boot one title: refresh names if stale, run, report
+#   ./bin/orbistoun turn <title>   # one turn of the loop with nobody reading the findings
 #   ./bin/orbistoun cli <args...>  # the orbistoun binary, raw
 #   ./bin/orbistoun docs           # build the API docs AND open them in a browser
 #   ./bin/orbistoun site           # assemble the Pages bundle into ./site for preview
@@ -145,7 +146,19 @@ decide() {
 decisions() {
     step "decision numbers are unique"
     local duplicates known unlisted stale reserved
-    duplicates=$(grep -oE '^## D[0-9]+' docs/DECISIONS.md | sed 's/^## //' | sort | uniq -d || true)
+    # **Read off the index table, not off headings.** This used to grep for `^## D123`,
+    # which was the shape of the log when every entry lived in one file. The entries moved
+    # into `docs/decisions/` and the headings went with them, so the pattern matched nothing
+    # and the guard concluded that *every* listed number had stopped duplicating - the exact
+    # opposite of the truth, and an instruction to delete a backlog that was still entirely
+    # live. A guard reading a field that no longer exists reports confidently and is wrong,
+    # which is principle 3 one level down (D608).
+    duplicates=$(grep -oE '^\| [^|]* \| D[0-9]+ ' docs/DECISIONS.md \
+        | grep -oE 'D[0-9]+' | sort | uniq -d || true)
+    if [ -z "$duplicates" ] && [ "$(grep -cE '^\| [^|]* \| D[0-9]+ ' docs/DECISIONS.md)" -eq 0 ]; then
+        bad "no decision numbers found in docs/DECISIONS.md - this guard is reading the wrong shape again"
+        return 1
+    fi
     known=$(grep -vE '^#|^$' docs/decision-number-backlog.txt | sort || true)
 
     # A reservation is a number claimed and not spent. Cheap to leave behind - a session
@@ -851,11 +864,30 @@ names() {
     # `--from-trace` because the runtime harvester is part of the system and the traces
     # are right there. It costs one small JSON read per module and says what it found,
     # including when that is nothing - which is the state it is in today (D213).
+
+    # **A conformance report is an optional input, named from the environment.** The reports
+    # live in the sibling project, and a path to it written down here would be a build
+    # dependency between two repositories - the coupling D207 exists to prevent, and one that
+    # fails for anybody without both checkouts. `ORBISTOUN_PROBE_REPORTS` names a directory
+    # when somebody has one; with it unset this is exactly the search it always was.
+    #
+    # What they contribute is *hashes to look for*, never names: a console's export table
+    # lists what the platform offers, whether or not any title has ever imported it, and a
+    # collision search has no other way to reach those (D605, D606).
+    reports=()
+    if [ -n "${ORBISTOUN_PROBE_REPORTS:-}" ] && [ -d "$ORBISTOUN_PROBE_REPORTS" ]; then
+        while IFS= read -r report; do
+            reports+=(--from-report "$report")
+        done < <(find "$ORBISTOUN_PROBE_REPORTS" -name '*.obs.log' -type f | sort)
+        warn "searching $(( ${#reports[@]} / 2 )) probe report(s) named by ORBISTOUN_PROBE_REPORTS"
+    fi
+
     step "names $(titles_root)/"
     ./target/release/orbistoun-cli names "$(titles_root)" \
         --out symbols/generated.json \
         --wanted symbols/wanted.txt \
-        --from-trace
+        --from-trace \
+        "${reports[@]+"${reports[@]}"}"
 
     # `--repair` because the search that just ran learns words, and every learned word
     # renumbers the candidates a generated record cites (D195/D213). `--verify-harvest`
@@ -1175,6 +1207,38 @@ $(list_titles)"
     ./target/release/orbistoun-cli worklist --top 15
 }
 
+
+# One turn of the loop with nobody reading the findings.
+#
+# The same resolution and the same symbol database `run` uses, and that is the whole
+# reason this verb exists: `orbistoun-cli turn` on its own is given no database, so the
+# guest it sweeps has a different set of named imports - a different program - from the
+# one `run` measures. That cost a session's worth of verdicts before anybody noticed
+# (D599), and a verb is harder to get wrong than a flag somebody has to remember.
+turn() {
+    local wanted="${1:-}"
+    if [ -z "$wanted" ]; then
+        printf 'usage: ./bin/orbistoun turn <title-id> [-- <extra args>]
+
+available:
+'
+        list_titles
+        exit 1
+    fi
+    shift || true
+
+    step "cargo build --release -p orbistoun-cli"
+    cargo build --release -p orbistoun-cli
+
+    local module
+    if ! module="$(resolve_module "$wanted")"; then
+        die "no guest module for '$wanted'. Available:
+$(list_titles)"
+    fi
+
+    step "turning the loop against $module"
+    ./target/release/orbistoun-cli --symbols-db "$SYMBOLS_DB" turn "$module" "$@"
+}
 # One turn of the development loop: sweep every guest and report what they wanted.
 #
 # Refresh names, run every module available, then say what to implement next. This is
@@ -1273,6 +1337,7 @@ case "$cmd" in
     sweep)      sweep ;;
     doctor)     doctor "$@" ;;
     run)        run "$@" ;;
+    turn)       turn "$@" ;;
     cli)        cargo run -q -p orbistoun-cli -- "$@" ;;
     ""|-h|--help|help) usage ;;
     *)          die "unknown verb: $cmd (try --help)" ;;

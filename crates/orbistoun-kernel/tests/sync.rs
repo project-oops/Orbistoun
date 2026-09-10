@@ -297,17 +297,23 @@ fn a_semaphore_hands_out_its_count_and_then_refuses() {
     assert_ne!(s, sync::NO_SEMAPHORE);
     assert_eq!(sync::semaphore_name_of(s).as_deref(), Some("slots"));
 
-    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
-    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
     assert_eq!(
-        sync::semaphore_wait(s, sync::Blocking::Never),
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
+        Some(true)
+    );
+    assert_eq!(
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
+        Some(true)
+    );
+    assert_eq!(
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
         Some(false),
         "the count is spent"
     );
 
     assert_eq!(sync::semaphore_signal(s, 1), Some(true));
     assert_eq!(
-        sync::semaphore_wait(s, sync::Blocking::Never),
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
         Some(true),
         "and returned"
     );
@@ -346,15 +352,21 @@ fn a_signal_past_the_ceiling_is_refused_rather_than_clamped() {
 
     // Refused means unchanged: the three still there are all takeable, and no more.
     for _ in 0..3 {
-        assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
+        assert_eq!(
+            sync::semaphore_wait(s, 1, sync::Blocking::Never),
+            Some(true)
+        );
     }
-    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(false));
+    assert_eq!(
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
+        Some(false)
+    );
 
     // An addition that would not even fit in the counter is refused before the ceiling
     // comparison, rather than wrapping to a small number that passes it.
     assert_eq!(sync::semaphore_signal(s, u32::MAX), Some(false));
     assert_eq!(
-        sync::semaphore_wait(s, sync::Blocking::Never),
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
         Some(false),
         "and nothing appeared"
     );
@@ -369,7 +381,7 @@ fn a_semaphore_waiter_blocks_until_it_is_signalled() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let _ = tx.send(sync::semaphore_wait(s, sync::Blocking::Forever));
+        let _ = tx.send(sync::semaphore_wait(s, 1, sync::Blocking::Forever));
     });
 
     assert!(
@@ -390,11 +402,11 @@ fn a_semaphore_handle_naming_nothing_answers_nothing() {
     assert!(sync::semaphore_destroy(s));
     assert!(!sync::semaphore_destroy(s));
 
-    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), None);
+    assert_eq!(sync::semaphore_wait(s, 1, sync::Blocking::Never), None);
     assert_eq!(sync::semaphore_signal(s, 1), None);
     assert_eq!(sync::semaphore_name_of(s), None);
     assert_eq!(
-        sync::semaphore_wait(sync::NO_SEMAPHORE, sync::Blocking::Never),
+        sync::semaphore_wait(sync::NO_SEMAPHORE, 1, sync::Blocking::Never),
         None
     );
 }
@@ -1001,7 +1013,7 @@ fn a_timed_wait_never_gives_up_before_its_deadline() {
     let s = sync::create_semaphore(0, 4, "never-signalled");
     for turn in 0..50 {
         let started = std::time::Instant::now();
-        let outcome = sync::semaphore_wait(s, sync::Blocking::Until(started + SHORT));
+        let outcome = sync::semaphore_wait(s, 1, sync::Blocking::Until(started + SHORT));
         let waited = started.elapsed();
         assert_eq!(outcome, Some(false), "turn {turn}: nothing to take");
         assert!(
@@ -1017,7 +1029,7 @@ fn a_timed_semaphore_take_gives_up_and_can_be_rescued() {
 
     let started = std::time::Instant::now();
     assert_eq!(
-        sync::semaphore_wait(s, sync::Blocking::Until(started + BRIEF)),
+        sync::semaphore_wait(s, 1, sync::Blocking::Until(started + BRIEF)),
         Some(false),
         "nothing to take"
     );
@@ -1030,6 +1042,7 @@ fn a_timed_semaphore_take_gives_up_and_can_be_rescued() {
     assert_eq!(
         sync::semaphore_wait(
             s,
+            1,
             sync::Blocking::Until(std::time::Instant::now() + PATIENCE)
         ),
         Some(true),
@@ -1043,7 +1056,10 @@ fn a_timed_semaphore_take_gives_up_and_can_be_rescued() {
 fn a_semaphore_reports_the_count_it_will_hand_out() {
     let s = sync::create_semaphore(3, 4, "counted");
     assert_eq!(sync::semaphore_value(s), Some(3));
-    assert_eq!(sync::semaphore_wait(s, sync::Blocking::Never), Some(true));
+    assert_eq!(
+        sync::semaphore_wait(s, 1, sync::Blocking::Never),
+        Some(true)
+    );
     assert_eq!(sync::semaphore_value(s), Some(2), "one fewer after a take");
     assert_eq!(sync::semaphore_signal(s, 1), Some(true));
     assert_eq!(

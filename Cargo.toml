@@ -124,6 +124,13 @@ oops-log = { path = "../oops-libs/crates/oops-log" }
 # library that pulls egui, which is why it is a crate rather than a module of a shared one.
 oops-docs = { path = "../oops-libs/crates/oops-docs" }
 oops-paths = { path = "../oops-libs/crates/oops-paths" }
+# The second reader, for the differential in `crates/orbistoun-elf/tests/differential.rs`.
+# A dev-dependency only: SELFish is a sibling project and orbistoun's own reader is the one that
+# runs a guest. Two readers over one corpus is the only instrument either project has for its own
+# parsing bugs (D653).
+selfish-elf = { path = "../selfish/crates/selfish-elf" }
+selfish-nid = { path = "../selfish/crates/selfish-nid" }
+selfish-container = { path = "../selfish/crates/selfish-container" }
 
 # Serde + config (symbol databases, stub policy files)
 serde = { version = "1", features = ["derive"] }

@@ -2,7 +2,7 @@
 //!
 //! A run against a specific console needs its firmware, its release string, its generation and
 //! kind - and typing those on every invocation is both tedious and a place for a transcription
-//! error to creep in. A profile bundles them under a name (`ps5-cex-12.40`), so `--profile` sets
+//! error to creep in. A profile bundles them under a name (`prospero-cex-12.40`), so `--profile` sets
 //! the whole machine at once from a value this project measured and cited.
 //!
 //! The profiles live in `data/machine-profiles.toml`, keyed by name, with fields matching
@@ -24,7 +24,7 @@ fn table() -> &'static toml::Table {
 
 /// The machine a named profile presents, or `None` if there is no such profile.
 ///
-/// The name is the exact table key - `ps5-cex-12.40`. A profile deserialises into a `Machine`
+/// The name is the exact table key - `prospero-cex-12.40`. A profile deserialises into a `Machine`
 /// directly; a key that is present but malformed is a bug in the data file, so it panics rather
 /// than being silently skipped.
 #[must_use]
@@ -50,7 +50,7 @@ mod tests {
     /// The reference profile loads and carries the measured 12.40 values.
     #[test]
     fn the_reference_profile_carries_the_measured_values() {
-        let m = super::machine("ps5-cex-12.40").expect("the reference profile exists");
+        let m = super::machine("prospero-cex-12.40").expect("the reference profile exists");
         assert_eq!(
             m.firmware, 0x1240,
             "12.40 in the packed form call 649 answers"
@@ -78,12 +78,12 @@ mod tests {
     /// An unknown name is `None`, so a caller can list the alternatives rather than guess.
     #[test]
     fn an_unknown_profile_is_none() {
-        assert!(super::machine("ps5-cex-99.99").is_none());
+        assert!(super::machine("prospero-cex-99.99").is_none());
     }
 
     /// The names list is non-empty and includes the reference profile.
     #[test]
     fn names_lists_the_reference_profile() {
-        assert!(super::names().iter().any(|n| n == "ps5-cex-12.40"));
+        assert!(super::names().iter().any(|n| n == "prospero-cex-12.40"));
     }
 }

@@ -596,6 +596,10 @@ pub fn shared_premises(asked: &[(String, String)]) -> Vec<SharedPremise> {
 pub const FOUND_BY_LABELS: &[&str] = &[
     "published-standard",
     "generated",
+    // Derived from a name this project already held, by a rule in the affix file. Cheaper
+    // to recheck than `generated` and recorded apart from it, because "a rule applied to
+    // `snprintf`" and "candidate 587,962,681 of a grammar" are not the same claim (D606).
+    "affixed",
     "static",
     "runtime",
     "supplied",
@@ -685,6 +689,7 @@ fn audited_label(name: &str) -> Option<&'static str> {
                 let label = match derivation.method {
                     orbistoun_nid::Method::PublishedStandard { .. } => "published-standard",
                     orbistoun_nid::Method::Generated { .. } => "generated",
+                    orbistoun_nid::Method::Affixed { .. } => "affixed",
                     orbistoun_nid::Method::Static { .. } => "static",
                     orbistoun_nid::Method::Runtime { .. } => "runtime",
                     orbistoun_nid::Method::Supplied { .. } => "supplied",

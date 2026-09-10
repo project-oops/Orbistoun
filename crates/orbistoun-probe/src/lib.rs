@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use orbistoun_hle::knowledge::{FunctionKnowledge, Oracle, Returns};
+use orbistoun_nid::Nid;
 
 /// The prefix every record carries.
 const RECORD: &str = "OBS";
@@ -586,6 +587,34 @@ pub enum Record {
         /// How much to trust it, or `None` on a record written before the field existed.
         provenance: Option<Provenance>,
     },
+    /// One number a probe measured, in the section that measured it.
+    ///
+    /// **The most numerous record kind in every report, and this crate read none of them.**
+    /// Every one landed in [`Record::Other`] and was carried without interpretation, which
+    /// the protocol permits and which was the right default while nothing consumed them.
+    /// What made it worth fixing is that three reports carried 3,319 of these and the
+    /// reader's own summary said how many records it had read - a count that was true and
+    /// an impression that was not (D605).
+    ///
+    /// The shape is fixed at seven fields. Unlike a `res`, a measurement carries no
+    /// verdict: it is a number and the name of what was counted, and what it means is the
+    /// consumer's business.
+    Measure {
+        /// Section that took the measurement, prefixed so it sorts into running order.
+        section: String,
+        /// What was measured: a symbol, a path, a sysctl name, an encoded hash.
+        subject: String,
+        /// Which quantity of the subject this is.
+        field: String,
+        /// The value, verbatim.
+        ///
+        /// **Not parsed here.** Most are hexadecimal and some are not, and a reader that
+        /// silently turned an unparseable value into zero would manufacture a measurement
+        /// (principle 3). [`Measurement::number`] parses, and says when it could not.
+        value: String,
+        /// What the value counts: `bytes`, `ticks`, `address`, `offset`, and so on.
+        unit: String,
+    },
     /// Any other record kind, carried without interpretation.
     ///
     /// The protocol permits new record kinds within a version and requires a consumer to
@@ -786,6 +815,7 @@ fn parse_record(fields: &[&str]) -> Result<Record, String> {
             // stop.
             provenance: Provenance::parse(at(6)),
         }),
+        "measure" => Ok(parse_measure(at(2), at(3), at(4), at(5), at(6))),
         "refused" => Ok(Record::Refused {
             seq: sequence(2)?,
             reason: Refusal::parse(at(3)),
@@ -795,6 +825,21 @@ fn parse_record(fields: &[&str]) -> Result<Record, String> {
             kind: other.to_owned(),
             fields: fields[2..].iter().map(|f| (*f).to_owned()).collect(),
         }),
+    }
+}
+
+/// A measured number, with the section that measured it.
+///
+/// Split out of [`parse_record`] for length rather than for meaning, and the fields are
+/// taken by name so a caller cannot silently pass them in the wrong order - which is the
+/// one mistake a five-string signature invites.
+fn parse_measure(section: &str, subject: &str, field: &str, value: &str, unit: &str) -> Record {
+    Record::Measure {
+        section: section.to_owned(),
+        subject: subject.to_owned(),
+        field: field.to_owned(),
+        value: value.to_owned(),
+        unit: unit.to_owned(),
     }
 }
 
@@ -978,6 +1023,7 @@ impl Transcript {
                         }
                     }
                     Record::Other { .. }
+                    | Record::Measure { .. }
                     | Record::Res { .. }
                     | Record::Try { .. }
                     | Record::Build { .. }
@@ -2016,5 +2062,267 @@ impl Transcript {
             }
         }
         summary
+    }
+}
+
+/// The section a console's own kernel export table arrives under.
+///
+/// Named once because two readers spelling it differently is a silent miss, and a miss
+/// here looks exactly like a report that did not carry the table.
+pub const KEXPORT_SECTION: &str = "140-oracle/kexport-table";
+
+/// The field a kexport record puts its address in.
+const KEXPORT_FIELD: &str = "vaddr";
+
+/// One number a probe measured, with the section that took it and what it is worth.
+///
+/// # Why this is not a [`Finding`]
+///
+/// A finding carries a verdict - something passed, partly passed or failed - and its
+/// grade turns on that verdict being about the platform. A measurement has no verdict at
+/// all. It is a quantity and the name of what was counted, and every interpretation of it
+/// belongs to whoever asked. Conflating the two would let "the cache reported 32768" and
+/// "the cache behaved correctly" wear the same type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Measurement {
+    /// Section that took it.
+    pub section: String,
+    /// What was measured.
+    pub subject: String,
+    /// Which quantity of the subject this is.
+    pub field: String,
+    /// The value, verbatim and unparsed.
+    pub value: String,
+    /// What the value counts.
+    pub unit: String,
+    /// `Oracle::Measured` only from the target, exactly as every other fact is graded.
+    pub known_by: Oracle,
+}
+
+impl Measurement {
+    /// The value as a number, or `None` when it is not one.
+    ///
+    /// **Hexadecimal only when it says so.** A bare `10` is ten, not sixteen, and a
+    /// reader that guessed would turn a correct measurement into a wrong one without
+    /// changing a character of the record.
+    #[must_use]
+    pub fn number(&self) -> Option<u64> {
+        hex(&self.value).or_else(|| self.value.parse().ok())
+    }
+}
+
+/// One symbol a console's kernel exports, as its own export table spells it.
+///
+/// # What this is worth, and what it is not
+///
+/// The table carries a hash and an address. It carries **no name**, so nothing here can
+/// name anything on its own - the name comes from this project's own vocabulary, by
+/// hashing a candidate and seeing whether the hash agrees. That is the same oracle the
+/// brute-force search has always used, and it is why reading this table imports no
+/// material from anywhere: the hashes are numbers and the words are ours (principle 1).
+///
+/// What it *does* carry that nothing else does is **which hashes the platform exports at
+/// all**, and **which of them are the same function**. Two hashes at one address are one
+/// function under two names, and that is a fact about the platform no amount of guessing
+/// recovers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelExport {
+    /// The hash, decoded.
+    pub nid: Nid,
+    /// The eleven characters it arrived as, kept so a record can be found again by eye.
+    pub encoded: String,
+    /// Where it resolves in the kernel's own address space.
+    pub vaddr: u64,
+    /// `Oracle::Measured` only from the target.
+    pub known_by: Oracle,
+}
+
+/// Two or more exports the console places at one address.
+///
+/// One function, several names. The strongest thing in the table: given a name for any
+/// member, every other member is a **variant of that name**, and a variant is a candidate
+/// a search can test - where a hash with nothing beside it is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportAlias {
+    /// The address they share.
+    pub vaddr: u64,
+    /// The exports there, in the order the table listed them.
+    pub exports: Vec<KernelExport>,
+}
+
+impl Transcript {
+    /// Every measurement the run recorded, graded by what it ran on.
+    pub fn measurements(&self, origin: &Origin) -> Vec<Measurement> {
+        let known_by = if origin.is_target {
+            Oracle::Measured
+        } else {
+            Oracle::Assumed
+        };
+        self.every_record()
+            .filter_map(|record| match record {
+                Record::Measure {
+                    section,
+                    subject,
+                    field,
+                    value,
+                    unit,
+                } => Some(Measurement {
+                    section: section.clone(),
+                    subject: subject.clone(),
+                    field: field.clone(),
+                    value: value.clone(),
+                    unit: unit.clone(),
+                    known_by,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many measurements each section took.
+    ///
+    /// **So a consumer can say what it did not use.** Three reports carried 3,319
+    /// measurements at a point when this crate read none of them, and nothing said so:
+    /// the reader's record count was correct and its impression was not. A per-section
+    /// tally makes the unread part of a report as visible as the read part (D605).
+    pub fn measured_sections(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for record in self.every_record() {
+            if let Record::Measure { section, .. } = record {
+                *counts.entry(section.clone()).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    /// The kernel export table, decoded.
+    ///
+    /// **A record whose subject is not eleven characters of the alphabet is skipped, not
+    /// guessed at.** The section is identified by name, so anything else appearing under
+    /// it would otherwise decode to a plausible hash - and a plausible hash is the one
+    /// error this project has no way to notice afterwards (D070).
+    pub fn kernel_exports(&self, origin: &Origin) -> Vec<KernelExport> {
+        let known_by = if origin.is_target {
+            Oracle::Measured
+        } else {
+            Oracle::Assumed
+        };
+        self.every_record()
+            .filter_map(|record| match record {
+                Record::Measure {
+                    section,
+                    subject,
+                    field,
+                    value,
+                    ..
+                } if section == KEXPORT_SECTION && field == KEXPORT_FIELD => Some(KernelExport {
+                    nid: orbistoun_nid::decode_nid(subject)?,
+                    encoded: subject.clone(),
+                    vaddr: hex(value)?,
+                    known_by,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Groups exports by the address they share, keeping only the addresses with more than one.
+///
+/// Order is by address so two runs of one report produce the same list, which is what
+/// makes a difference between two reports readable (D181).
+#[must_use]
+pub fn export_aliases(exports: &[KernelExport]) -> Vec<ExportAlias> {
+    let mut by_address: BTreeMap<u64, Vec<KernelExport>> = BTreeMap::new();
+    for export in exports {
+        by_address
+            .entry(export.vaddr)
+            .or_default()
+            .push(export.clone());
+    }
+    by_address
+        .into_iter()
+        .filter(|(_, exports)| exports.len() > 1)
+        .map(|(vaddr, exports)| ExportAlias { vaddr, exports })
+        .collect()
+}
+
+/// One check two transcripts disagree about.
+///
+/// # Why a verdict diff is the strongest tool this project has
+///
+/// The conformance probe is the only guest whose source we hold, it passes on a console, and it
+/// runs under orbistoun. So the same binary can be run in both places and its own verdicts
+/// compared - and every check that passes there and fails here is a **named, sourced defect**,
+/// with the probe's own sentence explaining what it expected.
+///
+/// That is a different kind of evidence from everything else here. A title's wall says *where* it
+/// stopped; this says *what is wrong*, in the words of the thing that tried it (D622).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Divergence {
+    /// The check, `section/name`.
+    pub check: String,
+    /// What it concluded in the transcript taken as the reference.
+    pub reference: Status,
+    /// What it concluded in the one being judged.
+    pub subject: Status,
+    /// The subject's own words about it, empty when it said nothing.
+    pub detail: String,
+}
+
+impl Transcript {
+    /// Every check this transcript concluded, by name.
+    ///
+    /// The last verdict wins where a check ran twice, which is what a re-run means.
+    #[must_use]
+    pub fn verdicts(&self) -> BTreeMap<String, (Status, String)> {
+        let mut out = BTreeMap::new();
+        for record in self.every_record() {
+            if let Record::Res {
+                check,
+                status,
+                detail,
+                ..
+            } = record
+            {
+                out.insert(check.clone(), (status.clone(), detail.clone()));
+            }
+        }
+        out
+    }
+
+    /// Checks that concluded differently here than in `reference`.
+    ///
+    /// **Only where both ran it.** A check one side skipped is not a disagreement about
+    /// behaviour, it is a difference in what was reachable - and reporting it as a defect would
+    /// bury the ones that are (principle 3).
+    ///
+    /// Ordered worst-first: a check that passes in the reference and fails here is the finding;
+    /// one that merely partially passes is a lead.
+    #[must_use]
+    pub fn diverges_from(&self, reference: &Self) -> Vec<Divergence> {
+        let theirs = reference.verdicts();
+        let mut out: Vec<Divergence> = self
+            .verdicts()
+            .into_iter()
+            .filter_map(|(check, (subject, detail))| {
+                let (their_status, _) = theirs.get(&check)?;
+                (their_status != &subject).then(|| Divergence {
+                    check,
+                    reference: their_status.clone(),
+                    subject,
+                    detail,
+                })
+            })
+            .collect();
+        out.sort_by_key(|d| {
+            (
+                // Passed there and failed here, first.
+                u8::from(!(d.reference == Status::Pass && d.subject == Status::Fail)),
+                u8::from(d.reference != Status::Pass),
+                d.check.clone(),
+            )
+        });
+        out
     }
 }

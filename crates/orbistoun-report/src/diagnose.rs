@@ -70,6 +70,14 @@ pub enum Gap {
     AbiViolation,
     /// A file read that delivered less than was asked for.
     ShortRead,
+    /// Arguments captured because somebody asked for them by name.
+    ///
+    /// **The one finding that is an answer rather than a gap.** A dump was only ever shown
+    /// hanging off some *other* finding about the same import, so naming an implemented import
+    /// with `ORBISTOUN_DUMP` captured its arguments and then discarded them - which is precisely
+    /// the case forcing was added for: "the case that matters is when the implementation is
+    /// yours and you suspect it" (D198, D625).
+    Captured,
 }
 
 impl Gap {
@@ -85,6 +93,7 @@ impl Gap {
             Self::GuestGaveUp | Self::Spinning | Self::Faulted => "the calls immediately before it",
             Self::AbiViolation => "crates/orbistoun-thunk, and how the guest is entered",
             Self::ShortRead => "crates/orbistoun-fs",
+            Self::Captured => "the implementation you asked about",
         }
     }
 }
@@ -197,6 +206,10 @@ pub fn findings(trace: &CallTrace) -> Vec<Finding> {
     out.extend(faulted(trace));
     out.extend(unnamed(trace));
     out.extend(unimplemented(trace));
+    // Last, because it is the only one that asks what the others already claim: an
+    // unimplemented import keeps its dump where it has always been shown.
+    let claimed = captured(trace, &out);
+    out.extend(claimed);
 
     // Ranked by how much can be trusted, then by how much of the run it concerns. A
     // consumer taking the top item should be taking the one least likely to waste its
@@ -238,7 +251,18 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         "an address in no region this run mapped".to_owned()
     };
 
-    let last: Vec<String> = trace.tail.iter().rev().take(4).map(traced_line).collect();
+    // **This thread's calls, then a couple of somebody else's, labelled.** The tail is every
+    // thread's and the fault is one thread's; reading them as one sequence is what turned a wait
+    // blocked on one thread into the presumed cause of a fault on another, across four
+    // decisions, without anybody having checked (D621).
+    //
+    // The other threads are still shown, because a guest that faults while another thread holds
+    // something is a real situation, and hiding it would replace one wrong reading with a
+    // blinder one.
+    let last: Vec<String> = on_this_thread(trace, f.host_thread)
+        .into_iter()
+        .chain(on_other_threads(trace, f.host_thread))
+        .collect();
 
     let mut evidence = vec![format!("{} {:#x} is {shape}", f.kind, f.address)];
     if let Some(r) = &f.registers {
@@ -250,7 +274,7 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
     // After the raw dump, because it is longer and a reader wants the values first. Empty
     // unless something the guest held pointed at memory this run had mapped (D522).
     evidence.extend(f.pointees.iter().cloned());
-    evidence.extend(last.into_iter().map(|c| format!("{PRECEDED_BY}{c}")));
+    evidence.extend(last);
 
     Some(Finding {
         gap: Gap::Faulted,
@@ -259,10 +283,16 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         confidence: Confidence::Certain,
         subject: f.region.clone(),
         what: format!(
-            "the guest faulted at {}, {} {:#x}",
+            "the guest faulted at {}, {} {:#x}{}",
             describe_site(f),
             f.kind,
-            f.address
+            f.address,
+            // **Which thread, when there is one.** The calls listed underneath are every
+            // thread's, so without this a reader pairs a fault with a call that happened
+            // somewhere else - which is how a blocked wait came to be treated as the cause of
+            // a fault nobody had linked it to (D621).
+            f.thread
+                .map_or_else(String::new, |t| format!(", on guest thread {t:#x}"))
         ),
         evidence,
         action: Some(
@@ -426,17 +456,66 @@ fn traced_line(c: &TracedCall) -> String {
     }
 }
 
+/// The last few calls made on the thread a fault happened on.
+///
+/// With no thread recorded - an older trace, or a fault before anything claimed a thread - this
+/// is the last few calls full stop, which is what it always was.
+fn on_this_thread(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
+    trace
+        .tail
+        .iter()
+        .rev()
+        .filter(|c| faulted_on.is_none_or(|t| c.thread == t))
+        .take(4)
+        .map(|c| format!("{PRECEDED_BY}{}", traced_line(c)))
+        .collect()
+}
+
+/// A couple of calls from whatever else was running, said to be somebody else's.
+///
+/// Empty when no thread was recorded, because then there is nothing to contrast with and every
+/// line would read as an aside.
+fn on_other_threads(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
+    trace
+        .tail
+        .iter()
+        .rev()
+        .filter(|c| faulted_on.is_some_and(|t| c.thread != t))
+        .take(2)
+        .map(|c| format!("{PRECEDED_BY}{}  [another thread]", traced_line(c)))
+        .collect()
+}
 /// The last few calls a run made, as evidence lines.
 ///
 /// Shared by the findings whose action tells a reader to look at them, so the list a person is
 /// sent to and the list a dispatcher sweeps are the same list (D299).
 fn preceding(trace: &CallTrace) -> Vec<String> {
-    trace
+    // **The faulting thread's calls first, and the rest said to be somebody else's.** The tail is
+    // every thread's, and a fault is one thread's. Reading them as one sequence is what turned a
+    // wait blocked on one thread into the presumed cause of a fault on another, across four
+    // decisions, without anybody having checked (D621).
+    let faulted_on = trace.fault.as_ref().and_then(|f| f.host_thread);
+    let mine: Vec<&TracedCall> = trace
         .tail
         .iter()
         .rev()
+        .filter(|c| faulted_on.is_none_or(|t| c.thread == t))
         .take(4)
+        .collect();
+    let others: Vec<&TracedCall> = trace
+        .tail
+        .iter()
+        .rev()
+        .filter(|c| faulted_on.is_some_and(|t| c.thread != t))
+        .take(2)
+        .collect();
+    mine.into_iter()
         .map(|c| format!("{PRECEDED_BY}{}", traced_line(c)))
+        .chain(
+            others
+                .into_iter()
+                .map(|c| format!("{PRECEDED_BY}{}  [another thread]", traced_line(c))),
+        )
         .collect()
 }
 
@@ -651,9 +730,18 @@ fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
                 "{} was called {} times and nothing implements it",
                 c.label, c.calls
             ),
-            evidence: vec![
-                "the call landed on a stub, which answered a placeholder".to_owned(),
-            ],
+            evidence: {
+                let mut evidence =
+                    vec!["the call landed on a stub, which answered a placeholder".to_owned()];
+                // **The pointers it was handed belong to the finding, not to whoever prints
+                // it.** A shim was rendering these beside the finding while the finding itself
+                // carried one sentence, so anything reading a finding programmatically - the
+                // dispatcher above all - could not see that the call had been given a
+                // structure at all. Principle 13: a shim holding what the crate should is how
+                // the other two drift (D586).
+                evidence.extend(pointer_arguments(trace, &c.label));
+                evidence
+            },
             action: Some(format!(
                 "implement it in the crate declaring {}; record what it returns in its knowledge file first, because a function answering a pointer must never answer an error code",
                 c.label.split("::").next().unwrap_or("that library")
@@ -663,31 +751,133 @@ fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
         .collect()
 }
 
+/// Every argument of `label` that pointed somewhere the run could read.
+///
+/// **Only the ones with bytes**, which is the run's own test for whether an argument was a
+/// pointer at all: the dump reads a value only from a span published as readable, so a scalar
+/// such as a size, a flag or a count comes back with none. Rendering a count as an address
+/// would send a reader, or a dispatcher, to whatever happens to live at that number.
+///
+/// Written as the shim rendered it, `value -> region+offset`, because that shape is what a
+/// reader already recognises and what `orbistoun-turn` parses an address out of.
+fn pointer_arguments(trace: &CallTrace, label: &str) -> Vec<String> {
+    trace
+        .dumps
+        .iter()
+        .filter(|d| d.label == label && !d.bytes.is_empty())
+        .map(|d| format!("arg{} = {:#x} -> {} = {}", d.slot, d.value, d.at, d.bytes))
+        .collect()
+}
+
+/// Arguments captured for imports nothing else in this report speaks for.
+///
+/// # Why forcing a dump could produce nothing
+///
+/// Dumps reach a reader only through [`pointer_arguments`], which is consulted while building a
+/// finding *about that import*. Every finding that consults it is about an import nothing
+/// implements. So naming an implemented import with `ORBISTOUN_DUMP` took the dump, kept it in
+/// the trace, and printed none of it - and the run looked exactly like one where the guest never
+/// made the call.
+///
+/// That is the case forcing exists for. D198 put it plainly: *"the case that matters is when the
+/// implementation is yours and you suspect it"*. Collection honoured that from the start and
+/// reporting never did, which is a third instance of the same shape this session - a tool
+/// answering while omitting what it was asked (D613, D615, D623).
+///
+/// `already` is every subject some other finding covers, so an unimplemented import's dump is
+/// still shown where it always was rather than a second time here.
+fn captured(trace: &CallTrace, already: &[Finding]) -> Vec<Finding> {
+    // **Only imports somebody named.** A dump is taken for every unimplemented import as well,
+    // and the default condition tests the integer handler - so a function answering in `xmm0`
+    // has none, is dumped, and is not unimplemented, which put `libc::acos` and `libc::asin` at
+    // the head of the findings list ahead of the wall. An answer is only an answer to somebody
+    // who asked (D637).
+    let mut labels: Vec<&str> = trace
+        .dumps
+        .iter()
+        .filter(|d| !d.bytes.is_empty())
+        .map(|d| d.label.as_str())
+        .filter(|label| trace.forced_dumps.iter().any(|f| f == label))
+        .collect();
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+        .into_iter()
+        .filter(|label| !already.iter().any(|f| f.subject.as_deref() == Some(*label)))
+        .map(|label| {
+            // **No evidence lines of its own.** The printer already renders every dump whose
+            // label appears in `what`, so listing the pointer arguments here as well printed
+            // each of them twice - which reads as two calls (D625).
+            let calls = trace.dumps.iter().filter(|d| d.label == label).count();
+            Finding {
+                gap: Gap::Captured,
+                // It is a recording, not an inference: these are the bytes that were there.
+                confidence: Confidence::Certain,
+                subject: Some(label.to_owned()),
+                what: format!("{label} was asked about, and here is what it was passed"),
+                evidence: vec![format!("{calls} captured argument value(s), listed below")],
+                action: Some(
+                    concat!(
+                        "compare each against what the implementation expects - a dump is ",
+                        "evidence about the caller, not a verdict on the callee"
+                    )
+                    .to_owned(),
+                ),
+                // Below every gap: an answer to a question somebody asked is worth printing
+                // and worth nothing as a ranking, and this must never outrank a fault.
+                weight: 0,
+            }
+        })
+        .collect()
+}
+
 /// Imports still known only by hash.
+///
+/// **The advice differs by who wrote the symbol.** A vendor library's unnamed hash is a gap in
+/// this project's vocabulary and the name search is the answer. A hash from a module the *title
+/// ships* is the game's own symbol: no vendor word list will ever hold it, no amount of searching
+/// will find it, and saying "extend the vocabulary" sends a reader to spend an afternoon on
+/// something that cannot work. Six of the seven unnamed imports in the corpus are that kind,
+/// including the busiest call ever recorded here (D630, D631).
 fn unnamed(trace: &CallTrace) -> Vec<Finding> {
     trace
         .calls
         .iter()
         .filter(|c| c.label.contains("::0x"))
-        .map(|c| Finding {
-            gap: Gap::Unnamed,
-            confidence: Confidence::Certain,
-            subject: Some(c.label.clone()),
-            what: format!("{} was called {} times and has no name", c.label, c.calls),
-            evidence: vec!["the hash resolved to no name in the symbol database".to_owned()],
-            // Names the commands, because "extend the vocabulary" is advice and a command
-            // is an action. `suggest` is mentioned rather than run: it is slow, optional,
-            // and nothing on this path should ever wait on a model.
-            action: Some(
-                concat!(
-                    "extend the candidate vocabulary and re-run the name search - a name ",
-                    "is confirmed by the hash agreeing, never by consulting a table. ",
-                    "`./bin/orbistoun names` re-runs it; `./bin/orbistoun suggest` asks a ",
-                    "local model for words first, for when the vocabulary is what is short"
-                )
-                .to_owned(),
-            ),
-            weight: c.calls,
+        .map(|c| {
+            let library = c.label.split("::").next().unwrap_or_default();
+            let shipped = trace.title_modules.iter().any(|m| m == library);
+            Finding {
+                gap: Gap::Unnamed,
+                confidence: Confidence::Certain,
+                subject: Some(c.label.clone()),
+                what: format!("{} was called {} times and has no name", c.label, c.calls),
+                evidence: vec![if shipped {
+                    format!("{library} is a module this title ships, so the hash is the game's own symbol")
+                } else {
+                    "the hash resolved to no name in the symbol database".to_owned()
+                }],
+                // Names the commands, because "extend the vocabulary" is advice and a command
+                // is an action. `suggest` is mentioned rather than run: it is slow, optional,
+                // and nothing on this path should ever wait on a model.
+                action: Some(if shipped {
+                    concat!(
+                        "do not search a vendor vocabulary for this - it is the title's own ",
+                        "code, and the module exporting it is already placed and started, so ",
+                        "what the guest wants is its export rather than a name"
+                    )
+                    .to_owned()
+                } else {
+                    concat!(
+                        "extend the candidate vocabulary and re-run the name search - a name ",
+                        "is confirmed by the hash agreeing, never by consulting a table. ",
+                        "`./bin/orbistoun names` re-runs it; `./bin/orbistoun suggest` asks a ",
+                        "local model for words first, for when the vocabulary is what is short"
+                    )
+                    .to_owned()
+                }),
+                weight: c.calls,
+            }
         })
         .collect()
 }
@@ -699,8 +889,8 @@ mod tests {
         tagged_stub,
     };
     use crate::trace::{
-        AbiReport, CallTrace, CalledImport, Conditions, FaultSite, FormatReport, ReadReport,
-        Registers, TracedCall,
+        AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport,
+        ReadReport, Registers, TracedCall,
     };
 
     /// Registers with every field a distinct value well above the null page, so a test can zero
@@ -804,6 +994,11 @@ mod tests {
 
     fn empty() -> CallTrace {
         CallTrace {
+            forced_dumps: Vec::new(),
+            threads: Vec::new(),
+            said: Vec::new(),
+            quiet: None,
+            title_modules: Vec::new(),
             module: "m".to_owned(),
             reached: "Entered".to_owned(),
             total_calls: 0,
@@ -824,12 +1019,107 @@ mod tests {
 
     fn call(label: &str, arg0: u64) -> TracedCall {
         TracedCall {
+            thread: 0,
             sequence: 1,
             label: label.to_owned(),
             args: [arg0, 0, 0, 0, 0, 0],
             from: 0x1000,
             returned: None,
         }
+    }
+
+    /// **A captured-arguments finding answers a question, so it needs somebody to have asked.**
+    ///
+    /// Arguments are dumped for every unimplemented import as well, and the default condition
+    /// tests the *integer* handler - so a function answering in `xmm0` has none, gets dumped, and
+    /// is not unimplemented either. Without the forced list this fired for those, and `libc::acos`
+    /// and `libc::asin` printed ahead of the actual wall in an ordinary run of the corpus's own
+    /// conformance eboot (D637).
+    ///
+    /// Both directions, because a version that emitted nothing at all would satisfy the first
+    /// assertion on its own - and emitting nothing is what this finding did for its whole first
+    /// day (D625).
+    #[test]
+    fn arguments_are_reported_only_for_imports_somebody_named() {
+        let dump = |label: &str| ArgumentDump {
+            label: label.to_owned(),
+            slot: 0,
+            at: "stack+0x10".to_owned(),
+            value: 0x6000_0000_0010,
+            bytes: "00 01 02 03".to_owned(),
+            text: String::new(),
+        };
+
+        let mut unasked = empty();
+        unasked.dumps = vec![dump("libc::acos")];
+        assert!(
+            !findings(&unasked).iter().any(|f| f.gap == Gap::Captured),
+            "a dump taken by the default rule is not an answer to anybody"
+        );
+
+        let mut asked = empty();
+        asked.dumps = vec![dump("libc::acos")];
+        asked.forced_dumps = vec!["libc::acos".to_owned()];
+        assert!(
+            findings(&asked)
+                .iter()
+                .any(|f| f.gap == Gap::Captured && f.subject.as_deref() == Some("libc::acos")),
+            "and an import somebody named must still be answered, or the finding is inert"
+        );
+    }
+
+    /// **A hash from a module the title ships gets different advice, and it has to.**
+    ///
+    /// The other branch tells a reader to extend a vendor vocabulary and re-run the search.
+    /// For a symbol the game's own module exports, that search cannot succeed however long it
+    /// is run - and six of the seven unnamed imports in this corpus are that kind, including
+    /// the busiest call ever recorded here (D630, D631).
+    ///
+    /// Both branches are asserted, because a version that gave the new advice to everything
+    /// would satisfy the first half alone.
+    #[test]
+    fn an_unnamed_hash_from_the_titles_own_module_is_not_sent_to_a_vendor_word_list() {
+        let mut trace = empty();
+        trace.calls = vec![
+            CalledImport {
+                index: 0,
+                label: "PS5Util::0xf948d02a4f9f5ace".to_owned(),
+                calls: 19_689_015,
+                implemented: false,
+            },
+            CalledImport {
+                index: 1,
+                label: "libSceAgc::0x53bbd82b51d172db".to_owned(),
+                calls: 1,
+                implemented: false,
+            },
+        ];
+        trace.title_modules = vec!["PS5Util".to_owned()];
+
+        let found = findings(&trace);
+        let shipped = found
+            .iter()
+            .find(|f| f.subject.as_deref() == Some("PS5Util::0xf948d02a4f9f5ace"))
+            .expect("the busiest unnamed import produces a finding");
+        assert!(
+            shipped
+                .action
+                .as_deref()
+                .is_some_and(|a| a.contains("the title's own code")),
+            "a symbol the game exports is not a gap in anybody's vocabulary"
+        );
+
+        let vendor = found
+            .iter()
+            .find(|f| f.subject.as_deref() == Some("libSceAgc::0x53bbd82b51d172db"))
+            .expect("a vendor hash produces a finding too");
+        assert!(
+            vendor
+                .action
+                .as_deref()
+                .is_some_and(|a| a.contains("extend the candidate vocabulary")),
+            "and a vendor library's unnamed hash still gets the search that can find it"
+        );
     }
 
     #[test]
@@ -978,6 +1268,8 @@ mod tests {
         // the prose.
         let mut trace = empty();
         trace.fault = Some(FaultSite {
+            thread: None,
+            host_thread: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0x7FFF_0001,
@@ -997,6 +1289,11 @@ mod tests {
     /// A trace whose call list places two imports at known stub slots.
     fn trace_with_slots() -> CallTrace {
         CallTrace {
+            forced_dumps: Vec::new(),
+            threads: Vec::new(),
+            said: Vec::new(),
+            quiet: None,
+            title_modules: Vec::new(),
             module: "m".to_owned(),
             reached: "Entered".to_owned(),
             total_calls: 2,

@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // layer and both shims can see them. Only the producing side is here (D160).
 use orbistoun_report::trace::{
     AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport, Frame,
-    ReadReport, Registers, TAIL_CALLS, TracedCall,
+    Quiet, ReadReport, Registers, TAIL_CALLS, TracedCall,
 };
 
 /// How many regions can be named in a fault report.
@@ -44,7 +44,7 @@ const REGION_NAMES: [&str; MAX_REGIONS] = [
     "image",
     "stubs",
     "stack",
-    "other",
+    "guest mappings",
     "the title's own modules",
 ];
 
@@ -64,6 +64,16 @@ pub enum Region {
     /// address in a guard is named as a module - which overstates by a granule and is still
     /// far better than the alternative, which was naming it as orbistoun's own code (D489).
     TitleModules,
+    /// The arena guest-requested mappings are placed in, as far as it has been used.
+    ///
+    /// **Registered when the guest stops rather than before it starts**, unlike every other
+    /// region here: this one does not exist at entry and grows as the guest maps. That is
+    /// enough for an argument dump, which is collected after the guest has stopped, and it is
+    /// *not* enough for the fault handler - a run killed from outside names a faulting address
+    /// in the arena as a bare number. Said here rather than discovered, because a region that
+    /// is sometimes registered is exactly the kind of thing a reader would assume was always
+    /// (D579).
+    Mappings,
 }
 
 impl Region {
@@ -73,6 +83,7 @@ impl Region {
             Self::Image => 0,
             Self::Stubs => 1,
             Self::Stack => 2,
+            Self::Mappings => 3,
             Self::TitleModules => 4,
         }
     }
@@ -101,6 +112,146 @@ pub fn locate(address: u64) -> Option<(&'static str, u64)> {
     })
 }
 
+/// Imports the loader bound into a module the title ships, by stub index.
+static BOUND_TO_MODULES: std::sync::OnceLock<std::collections::BTreeSet<usize>> =
+    std::sync::OnceLock::new();
+
+/// Records which imports were bound into a title's own module.
+///
+/// **So the report can catch its own contradiction.** An import bound to a placed module is
+/// called *in that module*; orbistoun never sees it, and no call is counted against its stub. So
+/// a bound import with calls on its stub is impossible - and it is exactly what PPSA25872 shows,
+/// nineteen million times, while the binding account says the import was bound (D640).
+///
+/// One of those two statements is wrong and until now nothing compared them.
+pub fn name_bound_imports(indices: std::collections::BTreeSet<usize>) {
+    let _ = BOUND_TO_MODULES.set(indices);
+}
+
+/// Bound imports that were nevertheless called through a stub, with their call counts.
+///
+/// Empty is the correct answer and the usual one. A non-empty list is a contradiction between
+/// two things this run believes, and it names them rather than leaving a reader to notice.
+pub(crate) fn bound_but_called() -> Vec<(String, u64)> {
+    let Some(bound) = BOUND_TO_MODULES.get() else {
+        return Vec::new();
+    };
+    let counts = orbistoun_thunk::call_counts();
+    bound
+        .iter()
+        .filter_map(|index| {
+            let calls = counts.get(*index).copied().unwrap_or(0);
+            (calls > 0).then(|| (label_of(*index).unwrap_or("unknown").to_owned(), calls))
+        })
+        .collect()
+}
+
+/// Imports a run named with `ORBISTOUN_DUMP`, by label.
+static FORCED_DUMPS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Records which imports a run asked about, so a captured-arguments finding answers only those.
+pub fn name_forced_dumps(labels: Vec<String>) {
+    let _ = FORCED_DUMPS.set(labels);
+}
+
+/// The libraries a title's own placed modules provide, by the name their imports carry.
+static TITLE_MODULES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Records which library names belong to modules the title itself ships.
+///
+/// **So the report can stop giving advice that cannot work.** A hash from one of these is the
+/// game's own symbol and no vendor vocabulary will ever hold it; telling a reader to extend one
+/// is an afternoon spent on something with no answer (D631).
+pub fn name_title_modules(libraries: Vec<String>) {
+    let _ = TITLE_MODULES.set(libraries);
+}
+
+/// Functions the guest module names in its own symbol table, sorted by address.
+///
+/// `(offset into the image, extent, name)`. Empty for every stripped module, which is every
+/// commercial title - and not empty for the open-toolchain guests, which are the ones this
+/// project runs most and reads least well at a fault (D628).
+static GUEST_CODE: std::sync::OnceLock<Vec<(u64, u64, String)>> = std::sync::OnceLock::new();
+
+/// Records what a guest module calls its own functions, for naming an address in it.
+///
+/// Called once, before entry. Sorting here rather than at lookup is what keeps the fault path
+/// allocation-free: the handler does a binary search over a slice and formats a `&str` it does
+/// not own (principle 9).
+pub fn name_guest_functions(mut functions: Vec<(u64, u64, String)>) {
+    functions.sort_unstable_by_key(|(at, _, _)| *at);
+    let _ = GUEST_CODE.set(functions);
+}
+
+/// The guest function an image offset falls in, and how far into it.
+///
+/// **Only when the symbol says it covers the offset.** Where the producer recorded an extent,
+/// an offset past the end of the nearest preceding function is *not* in that function - it is
+/// in a gap, or in something the table does not name, and saying otherwise would put a
+/// confident wrong name on a fault. Where the extent is zero the nearest preceding name is
+/// offered anyway, with the distance beside it, which is the same hint-not-fact bargain
+/// `own_code_site` makes one region over.
+fn guest_code_site(offset: u64) -> Option<(&'static str, u64)> {
+    let functions = GUEST_CODE.get()?;
+    let index = functions
+        .partition_point(|(at, _, _)| *at <= offset)
+        .checked_sub(1)?;
+    let (at, size, name) = functions.get(index)?;
+    let into = offset - at;
+    (*size == 0 || into < *size).then_some((name.as_str(), into))
+}
+
+/// The whole span this run published, from the lowest region base to the highest end.
+///
+/// [`None`] when nothing has been described yet.
+///
+/// # What it is for
+///
+/// An address-shaped value that no region covers has two readings that look identical and are
+/// not: a pointer into something this run never declared, and **a register the call never set**.
+/// A call whose real arity is three leaves three registers holding whatever the caller last put
+/// there, and the dump prints six because six is what it captures.
+///
+/// The distinction is checkable at the envelope. `sceAgcDriverAddEqEvent` was dumped with
+/// `arg3 = 0x7ff7620bcab0`, which is above every region a guest was given - so it is not a guest
+/// pointer this run failed to declare, it is a host address, and two runs of one build then
+/// confirmed it by disagreeing about it (D615).
+///
+/// **Outside the envelope is not proof of a stale register.** A guest can compute a wild pointer,
+/// and `orbistoun-abi` still hands out a host address in two places. It is a fact about where the
+/// value sits, which is what the report says, and the reading is left to the reader.
+#[must_use]
+pub fn published_envelope() -> Option<(u64, u64)> {
+    let mut lowest = u64::MAX;
+    let mut highest = 0;
+    for i in 0..MAX_REGIONS {
+        let base = REGION_BASE[i].load(Ordering::Relaxed);
+        let len = REGION_LEN[i].load(Ordering::Relaxed);
+        if len == 0 {
+            continue;
+        }
+        lowest = lowest.min(base);
+        highest = highest.max(base.saturating_add(len));
+    }
+    (highest > 0).then_some((lowest, highest))
+}
+
+/// How an address-shaped value that no region covers should be described.
+///
+/// Split from the rendering so the sentence is testable without a run, which is the same reason
+/// [`locate`] is pure: the message matters most exactly where it cannot be stepped through.
+#[must_use]
+pub fn describe_unreadable(address: u64) -> String {
+    const UNREADABLE: &str = "in no span this run published as readable, and address-shaped";
+    match published_envelope() {
+        Some((low, high)) if address < low || address >= high => {
+            format!(
+                "{UNREADABLE} - and outside every region this run gave the guest ({low:#x}..{high:#x})"
+            )
+        }
+        _ => UNREADABLE.to_owned(),
+    }
+}
 /// Which breakpoint kind an address deserves, given where the stub table is.
 ///
 /// **Pure, and split from the lookup for the reason [`locate`] is: the handler that uses it
@@ -223,7 +374,26 @@ impl Line {
     pub fn address(&mut self, value: u64) -> &mut Self {
         self.hex(value);
         if let Some((name, offset)) = locate(value) {
-            self.text(" (").text(name).text("+").hex(offset).text(")");
+            self.text(" (").text(name).text("+").hex(offset);
+            // **And the guest's own name for it, where the module carries one.** An offset
+            // into the image is a byte; a function name is a place to start reading. Only
+            // the image, because the other regions are ours and are named already (D628).
+            if name == REGION_NAMES[Region::Image as usize]
+                && let Some((symbol, into)) = guest_code_site(offset)
+            {
+                self.text(" ").text(symbol).text("+").hex(into);
+            }
+            self.text(")");
+        } else if let Some((name, into)) = orbistoun_thunk::data_symbol_at(value) {
+            // **The sixth region, without a sixth slot.** A data import is a zeroed page this
+            // project handed the guest, and the five regions the handler knows do not include
+            // them - so a register pointing at one printed as a bare number, and twenty blank
+            // C++ vtables were invisible in the fault that came out of them (D639).
+            self.text(" (data ")
+                .text(name)
+                .text("+")
+                .hex(into)
+                .text(")");
         }
         self
     }
@@ -585,8 +755,7 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // What the guest asked the kernel for directly, which a fault is very often the end of.
     // Same trade as the trace below: this allocates, and it runs after everything that must
     // not.
-    syscalls_asked_for();
-    paths_wanted();
+    what_the_guest_asked_for();
 
     // Then the call trace, which is the part worth having. A guest that faults has
     // still said what it wanted, and losing that means the run produced nothing.
@@ -611,6 +780,13 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
             region,
             offset,
             inside_import: inside_import_name(instruction_pointer).map(str::to_owned),
+            // The handler runs on the faulting thread, so this is that thread's handle.
+            // Zero is "nothing claimed this host thread", which is a real state and not a
+            // thread called zero - so it is `None` rather than a number nobody issued.
+            thread: Some(orbistoun_kernel::thread::current()).filter(|h| *h != 0),
+            // The same identifier the recorded calls carry, so the tail can be filtered to
+            // this thread rather than read as though every line were on it (D621).
+            host_thread: Some(orbistoun_thunk::current_thread()),
             registers: Some(registers),
             pointees: describe_pointees(&registers),
             frames: walk_frames(registers.rbp),
@@ -655,8 +831,16 @@ fn describe_pointees(registers: &Registers) -> Vec<String> {
             .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
             .join(" ");
+        // **And the data-import pages, which are not one of the five regions.** A register
+        // pointing at a zeroed page this project handed the guest printed as a bare number, so
+        // twenty blank C++ vtables were invisible in the fault that came out of one (D639).
         let where_ = locate(value).map_or_else(
-            || format!("{value:#x}"),
+            || {
+                orbistoun_thunk::data_symbol_at(value).map_or_else(
+                    || format!("{value:#x}"),
+                    |(name, into)| format!("data {name}+{into:#x}"),
+                )
+            },
             |(region, offset)| format!("{region}+{offset:#x}"),
         );
         // The text form only when it is text: a run of printable bytes ending in a
@@ -721,6 +905,209 @@ pub(crate) fn paths_wanted() {
         "  each is a directory or file the platform has and the mount table does not - a work item, spelled by the thing that wanted it"
     );
     let _ = err.flush();
+}
+
+/// Says what the guest opened, when the run was asked to record it.
+///
+/// **The half [`paths_wanted`] cannot show.** That one names what was missing, and a run can
+/// fail the opposite way: PPSA03416 opened what it asked for and still performed one read of
+/// zero bytes, with only its four failed probes visible - all four of them a layout the title
+/// does not use (D578). Off unless `ORBISTOUN_TRACE_OPENS` is set, because successes are the
+/// common case and recording them is not free on the guest's stack.
+///
+/// **Silence and nothing-asked-for are different findings**, so a run that was recording and
+/// opened nothing says so rather than printing nothing at all. That is the whole reason this
+/// asks the recorder whether it was on.
+pub(crate) fn paths_opened() {
+    use std::io::Write as _;
+
+    if !orbistoun_fs::opened::recording() {
+        return;
+    }
+    let opened = orbistoun_fs::opened::answered();
+    let mut err = std::io::stderr();
+    if opened.is_empty() {
+        let _ = writeln!(
+            err,
+            "orbistoun: the guest opened nothing - it read no file at all, which is a finding rather than an empty list"
+        );
+        let _ = err.flush();
+        return;
+    }
+    let _ = writeln!(
+        err,
+        "orbistoun: the guest opened {} path{}:",
+        opened.len(),
+        if opened.len() == 1 { "" } else { "s" }
+    );
+    for path in &opened {
+        let _ = writeln!(err, "  {path}");
+    }
+    let _ = err.flush();
+
+    // **And what each read got.** A list of opens says the guest found its files; this says
+    // what came back, which for a title that reads zero bytes is the whole finding (D595).
+    let reads = orbistoun_fs::opened::reads_made();
+    if reads.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        err,
+        "orbistoun: and read from them {} time(s):",
+        reads.len()
+    );
+    for line in &reads {
+        let _ = writeln!(err, "  {line}");
+    }
+    let _ = err.flush();
+}
+
+/// Every mapping the guest was given, in the order it was given them.
+///
+/// **The half a run has never reported.** A run says which reservations *failed* and nothing
+/// about the hundreds that succeeded, so a pointer into guest memory could not be traced back
+/// to the call that produced it - and two runs whose arena addresses differ could be seen to
+/// differ and not where. The arena is bump-allocated, so order is the finding and the list is
+/// printed in it (D581).
+pub(crate) fn maps_given() {
+    use std::io::Write as _;
+
+    if !orbistoun_kernel::mapped::recording() {
+        return;
+    }
+    let given = orbistoun_kernel::mapped::given();
+    let mut err = std::io::stderr();
+    if given.is_empty() {
+        let _ = writeln!(
+            err,
+            "orbistoun: the guest was given no mapping at all, which is a finding rather than an empty list"
+        );
+        let _ = err.flush();
+        return;
+    }
+    // Cumulative, because the question a diff asks is *which* placement first moved - and an
+    // address on its own does not say how much was placed before it.
+    let mut total = 0_u64;
+    let _ = writeln!(
+        err,
+        "orbistoun: the guest was given {} mapping(s):",
+        given.len()
+    );
+    for (index, m) in given.iter().enumerate() {
+        total = total.saturating_add(m.len);
+        let _ = writeln!(
+            err,
+            "  {index:4}  call {:<8}  {:#018x} +{:#x}  {}{}  (cumulative {:#x})  during {}{}",
+            m.at_call,
+            m.base,
+            m.len,
+            if m.readable { "r" } else { "-" },
+            if m.hinted { " asked-for" } else { " arena    " },
+            total,
+            // Named here because this is the layer that holds the import table. An index with
+            // no name is still worth printing: it is stable across runs and diffs.
+            m.during
+                .and_then(|i| label_of(i as usize))
+                .unwrap_or("nothing yet"),
+            // A refusal reads as an event the guest asked for and did not get, which is what
+            // it is - and is the line that was missing (D602).
+            m.refused
+                .as_deref()
+                .map_or_else(String::new, |why| format!("  REFUSED: {why}"))
+        );
+    }
+    let _ = err.flush();
+}
+
+/// Everything the guest asked the system for, in one call.
+///
+/// **One function because there are two call sites**, and they have to agree. A guest that
+/// faults and a guest that stops cleanly leave through different paths, and each has to say the
+/// same things - adding a fourth reporter to one of them and not the other is how a record ends
+/// up existing for crashes and not for clean runs. That happened to `paths_opened` on the way in
+/// (D578), and was found by testing rather than by reading.
+/// Says what the guest formatted, which is usually how it explains itself.
+///
+/// **The last ones**, because a title says the interesting thing just before it stops. Printed
+/// after the guest has stopped, like every other record here (D381, D590).
+pub(crate) fn what_it_said() {
+    use std::io::Write as _;
+
+    if !orbistoun_libc::said::recording() {
+        return;
+    }
+    let said = orbistoun_libc::said::rendered();
+    let mut err = std::io::stderr();
+    if said.is_empty() {
+        let _ = writeln!(
+            err,
+            "orbistoun: the guest formatted nothing at all, which is a finding rather than an empty list"
+        );
+        let _ = err.flush();
+        return;
+    }
+    let _ = writeln!(
+        err,
+        "orbistoun: the guest formatted {} string(s):",
+        said.len()
+    );
+    for text in &said {
+        let _ = writeln!(err, "  {text}");
+    }
+    let _ = err.flush();
+}
+
+/// Says when the argument dump ran out of room.
+///
+/// **A dump that was wanted and not taken reads as a call that passed nothing worth showing.**
+/// The buffer holds a few hundred, and a guest calling many unimplemented functions fills it long
+/// before an interesting one - so a run that dropped any has to say by how much, or asking for one
+/// import and getting a list without it looks like an answer (D623).
+pub(crate) fn dumps_dropped() {
+    use std::io::Write as _;
+
+    let dropped = orbistoun_thunk::dumps_dropped();
+    if dropped == 0 {
+        return;
+    }
+    let mut err = std::io::stderr();
+    let _ = writeln!(
+        err,
+        "orbistoun: {dropped} argument dump(s) wanted after the buffer was full - name an import with ORBISTOUN_DUMP to spend the room on it"
+    );
+    let _ = err.flush();
+}
+
+/// Says when the argument dump ran out of room to remember where it may read.
+///
+/// **A dropped range and a wrong pointer print identically**, so a run that dropped any has to
+/// say so - otherwise every unreadable argument in it reads as the guest's mistake (D588).
+pub(crate) fn ranges_dropped() {
+    use std::io::Write as _;
+
+    let dropped = orbistoun_thunk::dropped_ranges();
+    if dropped == 0 {
+        return;
+    }
+    let mut err = std::io::stderr();
+    let _ = writeln!(
+        err,
+        "orbistoun: {dropped} readable range(s) could not be remembered - an argument pointing into one of them reports as unreadable, and that is this run's blind spot rather than a bad pointer"
+    );
+    let _ = err.flush();
+}
+
+pub(crate) fn what_the_guest_asked_for() {
+    syscalls_asked_for();
+    dumps_dropped();
+    bound_yet_called();
+    tables_disagree();
+    paths_wanted();
+    paths_opened();
+    maps_given();
+    ranges_dropped();
+    opening_calls();
+    what_it_said();
 }
 
 /// Says what the guest asked the kernel for directly.
@@ -1103,12 +1490,22 @@ fn walk_frames(rbp: u64) -> Vec<Frame> {
     frames
 }
 
-/// Names the import the guest was inside, when the fault was not in guest code.
+/// Names the import **this thread** was inside, when the fault was not in guest code.
 ///
 /// An instruction pointer inside a region orbistoun placed is the guest running its own
 /// code, and the import that got it there is history rather than cause. Outside every
-/// placed region it is *our* code running on the guest's behalf - and then the last
-/// import the guest entered is almost certainly the one that faulted.
+/// placed region it is *our* code running on the guest's behalf - and then the import the
+/// faulting thread is inside is the one that faulted.
+///
+/// # It asked the wrong thread
+///
+/// This read `last_call`, which answers with the newest call **any** thread made. The
+/// sentence above says "the last import the guest entered", and for a single-threaded guest
+/// that is the same thing. For a multithreaded one it is whatever another thread happened to
+/// be doing, named in the one field that exists to point at a function to fix.
+///
+/// D616 found the identical mistake in the mapping record and gave the thunk a per-thread
+/// answer. This is the place it mattered most and was fixed second (D621).
 ///
 /// Allocation-free: the label is a `&'static str` out of the import table, because this
 /// runs before the part of the report that is allowed to allocate.
@@ -1116,7 +1513,8 @@ fn inside_import_name(instruction_pointer: u64) -> Option<&'static str> {
     if locate(instruction_pointer).is_some() {
         return None;
     }
-    label_of(orbistoun_thunk::last_call()?.index as usize)
+    // The handler runs on the faulting thread, so the thread-local is that thread's.
+    label_of(orbistoun_thunk::current_call()? as usize)
 }
 
 /// Records where to persist the trace, and which module it belongs to.
@@ -1206,6 +1604,11 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
             }
         },
         dumps: collected_dumps(),
+        title_modules: TITLE_MODULES.get().cloned().unwrap_or_default(),
+        forced_dumps: FORCED_DUMPS.get().cloned().unwrap_or_default(),
+        quiet: QUIET.get().copied(),
+        threads: thread_notes(),
+        said: orbistoun_core::said::lines(),
         conditions: {
             // Merged at read time, because the conditions are recorded before the import
             // labels exist and resolving which import to plant into needs them (D218).
@@ -1300,11 +1703,37 @@ fn tail_of_recorded() -> Vec<TracedCall> {
     all[from..]
         .iter()
         .map(|c| TracedCall {
+            thread: c.thread,
             sequence: c.sequence,
             label: labelled(c.index as usize),
             args: c.args,
             from: c.from,
             returned: c.ret,
+        })
+        .collect()
+}
+
+/// Every guest thread, joined against the calls still in the recorded window.
+///
+/// The join is what makes either table useful: the thread registry knows names and handles, the
+/// ring knows what was called and on which host thread, and only together can a report say *which
+/// named thread* went quiet (D651).
+fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
+    let recorded = orbistoun_thunk::recorded_calls();
+    orbistoun_kernel::thread::all()
+        .into_iter()
+        .map(|record| {
+            let newest = recorded
+                .iter()
+                .filter(|call| record.host != 0 && call.thread == record.host)
+                .max_by_key(|call| call.sequence);
+            orbistoun_report::trace::ThreadNote {
+                handle: record.handle,
+                name: record.name,
+                finished: record.finished,
+                last_call: newest.map(|call| labelled(call.index as usize)),
+                last_sequence: newest.map(|call| call.sequence),
+            }
         })
         .collect()
 }
@@ -1417,8 +1846,11 @@ fn guest_stopped(reason: orbistoun_core::StopReason, code: u64) -> ! {
     // `shsrv` and `zftpd` all stop. So the two reports that read a record after the guest has
     // stopped were installed on the fault path and the ordinary return, and never fired for
     // any of the payloads that actually work (D387).
-    syscalls_asked_for();
-    paths_wanted();
+    // **All three reporters, through the one function that names them.** This path called two
+    // of them by hand and so was the site that missed `paths_opened` when it was added - the
+    // third time a reporter has been wired into some of the ways a run can end and not all of
+    // them (D387, worklog 425). Naming them here again is what made that possible.
+    what_the_guest_asked_for();
     let module = MODULE.get().map_or("unknown", String::as_str);
     let trace = collect_calls(module, "Entered");
     persist(&trace);
@@ -1451,6 +1883,14 @@ pub fn install_stop_handler() {
 /// `0x600000800c90` does not - it says the guest handed over a local, which is what
 /// distinguishes an out-parameter from a pointer into its own data.
 fn collected_dumps() -> Vec<ArgumentDump> {
+    // **The arena is registered here, at the one place its name is used.** Every other region
+    // is known before the guest is entered; this one does not exist then and grows as the
+    // guest maps, so it is read at collection time instead. Here rather than on each of the
+    // ways a run can end, because that list is what a reporter keeps being wired into
+    // incompletely (D579).
+    if let Some((base, len)) = orbistoun_kernel::arena_extent() {
+        describe_region(Region::Mappings, base, len);
+    }
     orbistoun_thunk::argument_dumps()
         .into_iter()
         .map(|d| ArgumentDump {
@@ -1464,14 +1904,20 @@ fn collected_dumps() -> Vec<ArgumentDump> {
             // rendering as a bare number, because those two look identical and mean
             // opposite things - one is a count, the other is a pointer that is wrong or a
             // region this run never declared (D217).
+            //
+            // **It says *published*, because that is what was checked.** The dump reads only
+            // from spans something published as readable, and for months every mapping a
+            // guest made at runtime was absent from that list - so a pointer into a perfectly
+            // ordinary heap structure was reported as though the address were wrong. *Not
+            // mapped* and *nobody told the dump about it* are different findings and the tool
+            // can only establish the second, which is the distinction principle 3 exists for
+            // (D579, D580).
             at: match d.pointing {
                 orbistoun_thunk::Pointing::Mapped => locate(d.address).map_or_else(
                     || format!("{:#x}", d.address),
                     |(r, o)| format!("{r}+{o:#x}"),
                 ),
-                orbistoun_thunk::Pointing::Unreadable => {
-                    "no region this run mapped, and address-shaped".to_owned()
-                }
+                orbistoun_thunk::Pointing::Unreadable => describe_unreadable(d.address),
                 orbistoun_thunk::Pointing::Scalar => String::new(),
             },
             bytes: if d.pointing.was_read() {
@@ -1553,9 +1999,15 @@ pub fn note_experiments(what: String) {
 }
 
 /// Reports what the guest managed first, if it runs out of time.
+///
+/// **The sleep is a sampling loop now.** A thread that sleeps for the whole limit and then
+/// collects can say the run lasted twenty seconds and nothing else; it cannot say the guest
+/// stopped calling anything after two and a half of them, which is the difference between slow
+/// and stuck and the only question worth asking of a run that hit the clock (D645).
 pub fn start_time_limit(seconds: u64, module: String) {
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        let quiet = wait_watching_for_silence(seconds);
+        note_quiet(quiet);
         let trace = collect_calls(&module, "Entered");
         // Persisted *before* the summary is printed and before the process ends. A
         // guest that had to be stopped is exactly the case where the trace matters
@@ -1565,6 +2017,68 @@ pub fn start_time_limit(seconds: u64, module: String) {
         std::process::exit(TIME_LIMIT_EXIT);
     });
 }
+
+/// How often the counters are read while a run is in flight.
+///
+/// **Cheap enough to ignore and coarse enough to be honest.** Two relaxed loads four times a
+/// second cost the guest nothing measurable, and a quarter-second is well under any silence
+/// worth reporting - [`Quiet::is_notable`] will not fire below a second.
+const SAMPLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Sleeps out the limit, watching for the guest to stop asking the host for anything.
+///
+/// Returns where the last activity was, not a verdict. The guest may be blocked or may be
+/// computing; this says only when it last crossed into the host, and every place the result is
+/// printed says the same.
+fn wait_watching_for_silence(seconds: u64) -> Quiet {
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(seconds);
+    let mut seen = activity();
+    // Zero, not "unknown": a guest that never calls anything was silent for the whole run, and
+    // that is a true and useful thing to report rather than a gap.
+    let mut last = std::time::Duration::ZERO;
+    loop {
+        let elapsed = started.elapsed();
+        let Some(left) = limit.checked_sub(elapsed) else {
+            break;
+        };
+        std::thread::sleep(SAMPLE.min(left));
+        let now = activity();
+        if now != seen {
+            seen = now;
+            last = started.elapsed();
+        }
+    }
+    let run = started.elapsed();
+    Quiet {
+        silent_ms: u64::try_from(run.saturating_sub(last).as_millis()).unwrap_or(u64::MAX),
+        last_activity_ms: u64::try_from(last.as_millis()).unwrap_or(u64::MAX),
+        run_ms: u64::try_from(run.as_millis()).unwrap_or(u64::MAX),
+        sample_ms: u64::try_from(SAMPLE.as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+/// Everything the guest has asked the host for, as one monotonic number.
+///
+/// Both halves, because either alone is silent about a whole class of guest: a title calls
+/// imports and almost no syscalls, an open-toolchain payload builds a gadget and then calls
+/// nothing but syscalls. Watching one of them would report the other as permanently quiet.
+fn activity() -> u64 {
+    orbistoun_thunk::total_calls().saturating_add(orbistoun_thunk::syscall::syscalls_made())
+}
+
+/// Records the silence for the trace to carry.
+fn note_quiet(quiet: Quiet) {
+    let _ = QUIET.set(quiet);
+}
+
+/// The silence, once something has measured it.
+///
+/// A third slot beside the conditions and the experiments, for the same reason they are slots:
+/// the trace is collected from a handler with no route back up to the thread that measured it
+/// (D160). Empty for every run the clock did not end, which is what makes `None` mean "nobody
+/// looked" rather than "there was none".
+static QUIET: std::sync::OnceLock<Quiet> = std::sync::OnceLock::new();
 
 /// The module a budgeted run is executing, for the stop callback to name.
 static BUDGET_MODULE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -1613,6 +2127,12 @@ fn summarise_calls(stopped: &str, trace: &CallTrace) {
         "orbistoun: the guest was still running {stopped}; {} import calls across {} distinct imports",
         trace.total_calls, trace.distinct
     );
+    // **Printed whether or not it is notable.** The number a reader most often wants from a
+    // run that hit the clock is when it went quiet, and a line that appears only sometimes
+    // teaches people to read its absence as "fine" rather than as "not measured" (D159).
+    if let Some(quiet) = trace.quiet {
+        let _ = writeln!(err, "orbistoun: it {}", quiet.describe());
+    }
     for call in trace.calls.iter().take(MOST_CALLED_REPORTED) {
         // Integer tenths of a percent rather than floating point: the counts run into
         // the hundreds of millions, past the point where an `f64` holds them exactly,
@@ -1647,13 +2167,49 @@ pub fn install() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Line, Region, describe_region, locate};
+    use super::{Line, Region, describe_region, describe_unreadable, locate, published_envelope};
 
     #[test]
     fn an_address_inside_a_registered_region_is_named_with_its_offset() {
         // The difference between one bit of information and a work list.
         describe_region(Region::Image, 0x4000_0000_0000, 0x10_0000);
         assert_eq!(locate(0x4000_0000_1234), Some(("image", 0x1234)));
+    }
+
+    /// An address outside every region is said to be outside; one merely undeclared is not.
+    ///
+    /// **Both halves, because the useful sentence is the one that does not always fire.** A
+    /// description that appended "outside every region" unconditionally would be true of
+    /// nothing in particular and would read as though it had checked (D615).
+    ///
+    /// These share the process-wide region table with every other test in this module, so the
+    /// regions are described here rather than assumed - the envelope is whatever the whole file
+    /// has registered, and only its extremes matter.
+    #[test]
+    fn an_address_beyond_the_envelope_is_distinguished_from_one_merely_undeclared() {
+        describe_region(Region::Image, 0x4000_0000_0000, 0x10_0000);
+        describe_region(Region::Stack, 0x6000_0000_0000, 0x10_0000);
+        let (low, high) = published_envelope().expect("regions were described");
+        assert!(low <= 0x4000_0000_0000 && high >= 0x6000_0010_0000);
+
+        // A host address, above everything a guest was given.
+        let beyond = describe_unreadable(0x7ff7_620b_cab0);
+        assert!(
+            beyond.contains("outside every region this run gave the guest"),
+            "an address past the envelope must say so: {beyond}"
+        );
+
+        // Inside the envelope and in no region: undeclared, which is a different finding and
+        // must not borrow the stronger sentence.
+        let between = describe_unreadable(0x5000_0000_0000);
+        assert!(
+            !between.contains("outside every region"),
+            "an address between two regions is undeclared, not outside: {between}"
+        );
+        assert!(
+            between.contains("address-shaped"),
+            "and still says that much"
+        );
     }
 
     #[test]
@@ -1670,6 +2226,27 @@ mod tests {
         describe_region(Region::Stack, 0x6000_0000_0000, 0x1000);
         assert_eq!(locate(0x6000_0000_0FFF), Some(("stack", 0xFFF)));
         assert_eq!(locate(0x6000_0000_1000), None);
+    }
+
+    /// The arena has a name, so a pointer into it stops reading like a count.
+    ///
+    /// **The slot it occupies used to be called `other` and nothing ever registered it**, so
+    /// every address a guest mapped at runtime - which is where an allocator puts the
+    /// structures a call is handed - fell through `locate` and printed as a bare number
+    /// (D579). Registered late in the run rather than before it, because it does not exist
+    /// at entry.
+    #[test]
+    fn an_address_in_the_mapping_arena_is_named() {
+        describe_region(Region::Mappings, 0x7400_0000_0000, 0x100_0000);
+        assert_eq!(
+            locate(0x7400_0089_D210),
+            Some(("guest mappings", 0x89_D210))
+        );
+        assert_eq!(
+            locate(0x7400_0100_0000),
+            None,
+            "past how far the guest reached, so not the arena's to name"
+        );
     }
 
     #[test]
@@ -1701,6 +2278,37 @@ mod tests {
     }
 }
 
+/// Lists the run's opening calls, in order, with where each was made from.
+///
+/// **The head of the sequence, where the trace keeps the tail.** The tail exists for the fault;
+/// this exists for the question two runs raise when they diverge - and the position *is* the call
+/// ordinal, so it lines up with the mapping record without anybody counting (D603).
+pub(crate) fn opening_calls() {
+    use std::io::Write as _;
+
+    if !orbistoun_env::TRACE_CALLS.is_set() {
+        return;
+    }
+    let calls = orbistoun_thunk::opening_sequence();
+    let mut err = std::io::stderr();
+    if calls.is_empty() {
+        let _ = writeln!(
+            err,
+            "orbistoun: the guest made no call at all, which is a finding rather than an empty list"
+        );
+        let _ = err.flush();
+        return;
+    }
+    let _ = writeln!(err, "orbistoun: its opening {} call(s):", calls.len());
+    for (sequence, index, from) in &calls {
+        let _ = writeln!(
+            err,
+            "  call {sequence:<6} {:<52} from {from:#x}",
+            label_of(*index as usize).unwrap_or("unknown")
+        );
+    }
+    let _ = err.flush();
+}
 #[cfg(test)]
 mod pointee_tests {
     use super::printable_text;
@@ -1800,5 +2408,52 @@ mod pointee_tests {
                 "{kind} is not an address the guest asked for"
             );
         }
+    }
+}
+
+/// Says so when the tables an import index is used against are not the same length.
+///
+/// **One index, several tables.** A stub slot, a label, a call counter and a binding are all keyed
+/// by the same number, and they are built in different places from different counts. When two of
+/// them disagree an index means different things depending on which table it is used against - so
+/// a call is attributed to the wrong import, and every number about it is confidently wrong
+/// (D490, D640).
+///
+/// Printed only when they disagree, because agreeing is the ordinary state and a line that fires
+/// every run is one people learn to skip.
+pub(crate) fn tables_disagree() {
+    let labels = IMPORT_LABELS.get().map_or(0, Vec::len);
+    let counters = orbistoun_thunk::call_counts().len();
+    if labels == counters {
+        return;
+    }
+    eprintln!(
+        "orbistoun: the tables an import index is used against are different lengths - \
+         {labels} label(s), {counters} call counter(s)"
+    );
+    eprintln!(
+        "orbistoun:   an index past the shortest of those names one import and counts another"
+    );
+}
+/// Says so when a bound import was called through a stub anyway.
+///
+/// **A contradiction between two things this run believes.** An import bound into a placed module
+/// is called inside that module; orbistoun never sees it. So a bound import with stub calls cannot
+/// happen - and PPSA25872 shows one, nineteen million times, while the binding account says it was
+/// bound. Nothing compared the two until this line, and the wall sat there for a month reading as
+/// a missing implementation (D640).
+pub(crate) fn bound_yet_called() {
+    let offenders = bound_but_called();
+    if offenders.is_empty() {
+        return;
+    }
+    let total: u64 = offenders.iter().map(|(_, calls)| *calls).sum();
+    eprintln!(
+        "orbistoun: {} import(s) were bound into a module this title ships and were called \
+         through a stub anyway, {total} time(s) - the binding did not reach the relocation",
+        offenders.len()
+    );
+    for (label, calls) in offenders.iter().take(6) {
+        eprintln!("orbistoun:   {label}, {calls} call(s)");
     }
 }

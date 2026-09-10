@@ -675,6 +675,12 @@ fn a_guest_barrier_of_one_releases_on_arrival() {
 fn a_guest_event_flag_distinguishes_a_miss_from_a_bad_handle() {
     /// The mode bit meaning every bit of the pattern must be present.
     const WAIT_AND: u64 = 0x01;
+    /// The mode bit meaning any bit of the pattern will do.
+    ///
+    /// **Passed explicitly, because zero is not a mode.** These calls used `0`, which read as
+    /// `or` only because the old implementation tested one bit and found it clear. A console
+    /// answers `0x80020016` to a mode naming neither (D610).
+    const WAIT_OR: u64 = 0x02;
 
     let flag = Slot::one();
     let name = Name::new("state");
@@ -692,7 +698,7 @@ fn a_guest_event_flag_distinguishes_a_miss_from_a_bad_handle() {
     assert_eq!(
         call(
             "sceKernelPollEventFlag",
-            &[handle, 0b0100, 0, result.at(), 0]
+            &[handle, 0b0100, WAIT_OR, result.at(), 0]
         ),
         OK
     );
@@ -709,7 +715,7 @@ fn a_guest_event_flag_distinguishes_a_miss_from_a_bad_handle() {
     assert_eq!(
         call(
             "sceKernelPollEventFlag",
-            &[handle, 0b0111, 0, result.at(), 0]
+            &[handle, 0b0111, WAIT_OR, result.at(), 0]
         ),
         OK,
         "but some of them are"
@@ -729,7 +735,7 @@ fn a_guest_event_flag_distinguishes_a_miss_from_a_bad_handle() {
     assert_eq!(
         call(
             "sceKernelPollEventFlag",
-            &[handle, 0b0110, 0, result.at(), 0]
+            &[handle, 0b0110, WAIT_OR, result.at(), 0]
         ),
         BUSY,
         "clear keeps only the bits it names"
@@ -739,7 +745,7 @@ fn a_guest_event_flag_distinguishes_a_miss_from_a_bad_handle() {
     assert_eq!(
         call(
             "sceKernelPollEventFlag",
-            &[handle, 0b0001, 0, result.at(), 0]
+            &[handle, 0b0001, WAIT_OR, result.at(), 0]
         ),
         NO_SUCH,
         "which is a different answer from a miss"
@@ -759,8 +765,13 @@ fn an_event_flag_poll_with_no_result_pointer_still_answers() {
     call("sceKernelCreateEventFlag", &[flag.at(), name.at(), 0, 1, 0]);
     let handle = flag.read(0);
 
-    assert_eq!(call("sceKernelPollEventFlag", &[handle, 1, 0, 0, 0]), OK);
-    assert_eq!(call("sceKernelPollEventFlag", &[handle, 2, 0, 0, 0]), BUSY);
+    // `0x02` is `or`, spelled out: a mode of zero names neither `and` nor `or` and is an
+    // argument error on the console, so it cannot stand in for "the default" (D610).
+    assert_eq!(call("sceKernelPollEventFlag", &[handle, 1, 0x02, 0, 0]), OK);
+    assert_eq!(
+        call("sceKernelPollEventFlag", &[handle, 2, 0x02, 0, 0]),
+        BUSY
+    );
 
     call("sceKernelDeleteEventFlag", &[handle]);
 }
@@ -809,7 +820,10 @@ fn a_guest_semaphore_is_taken_signalled_and_deleted() {
     );
 
     assert_eq!(call("sceKernelDeleteSema", &[handle]), OK);
-    assert_eq!(call("sceKernelPollSema", &[handle]), INVALID_HANDLE);
+    // One, spelled out. `sceKernelPollSema` takes the count as its second argument, and an
+    // omitted argument is a request for zero - which a console refuses rather than granting
+    // trivially (D610).
+    assert_eq!(call("sceKernelPollSema", &[handle, 1]), INVALID_HANDLE);
     assert_eq!(call("sceKernelDeleteSema", &[handle]), INVALID_HANDLE);
 }
 
@@ -932,32 +946,43 @@ fn a_sleep_of_nothing_returns_at_once() {
     );
 }
 
-/// An address is on the stack only if somebody said where the stack is.
+/// `sceKernelIsStack` reports the span through its out-parameters and answers zero.
+///
+/// **This used to assert a predicate**, on the reading its name invites: non-zero for an
+/// address inside the stack and zero for one outside. The console answers `0` to a local and
+/// to a static alike, in twenty-three runs, and puts the bounds in the two words after the
+/// address - so the old assertions were pinning an inversion of what it does (D612).
 ///
 /// **One test, because the span is process-wide.** Recorded before it is asked about, which
-/// is the whole contract: with no span noted there is nothing to compare against, and
-/// answering yes anyway would be an invention.
+/// is the whole contract: with no span noted there is nothing to report.
 #[test]
-fn an_address_is_on_the_stack_only_within_the_span_that_was_noted() {
+fn is_stack_reports_the_span_that_was_noted_and_answers_zero() {
     let base = 0x7000_0000_u64;
     let len = 0x1_0000_u64;
     orbistoun_kernel::note_stack_span(base, len);
 
-    assert_ne!(call("sceKernelIsStack", &[base]), 0, "the first byte is in");
-    assert_ne!(
-        call("sceKernelIsStack", &[base + len - 1]),
-        0,
-        "and the last"
+    let mut low = 0xA5A5_A5A5_A5A5_A5A5_u64;
+    let mut high = 0xA5A5_A5A5_A5A5_A5A5_u64;
+    let (low_at, high_at) = (
+        std::ptr::from_mut(&mut low) as u64,
+        std::ptr::from_mut(&mut high) as u64,
     );
+
     assert_eq!(
-        call("sceKernelIsStack", &[base - 1]),
+        call("sceKernelIsStack", &[base, low_at, high_at]),
         0,
-        "just below is out"
+        "a successful call answers zero"
     );
-    assert_eq!(
-        call("sceKernelIsStack", &[base + len]),
-        0,
-        "and one past the end is out"
-    );
-    assert_eq!(call("sceKernelIsStack", &[0]), 0);
+    assert_eq!(low, base, "the low bound is the base of the span");
+    assert_eq!(high, base + len, "and the high bound is one past its end");
+
+    // **And the same for an address outside it.** The console does not distinguish, so
+    // neither does this - a caller asking about a static still learns where its stack is.
+    low = 0;
+    high = 0;
+    assert_eq!(call("sceKernelIsStack", &[base - 1, low_at, high_at]), 0);
+    assert_eq!((low, high), (base, base + len));
+
+    // Null out-parameters are how a caller says it wants neither, and must not fault.
+    assert_eq!(call("sceKernelIsStack", &[base, 0, 0]), 0);
 }

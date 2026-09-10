@@ -162,8 +162,20 @@ fn clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// whenever the sleep was not cut short - and nothing here can cut one short, because nothing
 /// here delivers a signal.
 fn sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    std::thread::sleep(std::time::Duration::from_secs(args[0]));
+    slept(std::time::Duration::from_secs(args[0]));
     0
+}
+
+/// Waits, and tells the clock that time passed.
+///
+/// **One function because the second half is easy to forget.** Three calls here sleep, and a
+/// guest that sleeps ten milliseconds and then reads a clock which moved a microsecond
+/// concludes the sleep did not happen - the failure D275 records for a counter that did not
+/// advance, arriving by a different route. Under the host clock the second call does nothing,
+/// because the sleep moved it already (D582).
+fn slept(how_long: std::time::Duration) {
+    std::thread::sleep(how_long);
+    orbistoun_hle::clocks::advance(how_long.as_nanos());
 }
 
 /// `usleep(microseconds)` - the same, finer.
@@ -171,7 +183,7 @@ fn sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Reference: POSIX.1-2001 `usleep(3)`. Answers zero on success; the only documented failure
 /// is an interruption, which cannot happen here for the reason [`sleep`] gives.
 fn usleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    std::thread::sleep(std::time::Duration::from_micros(args[0]));
+    slept(std::time::Duration::from_micros(args[0]));
     OK
 }
 
@@ -204,7 +216,7 @@ fn nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // built the structure wrongly should be told, not quietly corrected.
         return FAILED;
     }
-    std::thread::sleep(std::time::Duration::new(seconds, nanos as u32));
+    slept(std::time::Duration::new(seconds, nanos as u32));
     if remaining != 0 {
         write_pair(remaining, 0, 0);
     }

@@ -1,0 +1,14 @@
+library = "libSceNet"
+
+[[function]]
+name = "sceNetRecv"
+arity = 4
+purpose = "Reads from a socket. On a non-blocking socket with nothing to read, it refuses rather than waiting."
+edge_cases = [
+    "Measured on hardware: a **connected** socket with nothing to read answers 0x80410123, and a **listening** socket answers 0x80410139. Two different codes for what reads as one condition, which is the sort of distinction a reimplementation flattens (D617).",
+    "Nothing implements this yet. The codes are recorded before the function exists so that whoever writes it starts from a measurement instead of a plausible constant - the 0x8041 prefix is libSceNet's own error space, not the 0x8002 kernel one.",
+    "**libSceNet numbers its errors from 0x8041_0100, not 0x8041_0000 - derived by pairing.** One sweep read the same two conditions through both the vendor call and the POSIX one, recording the vendor code beside __error(): a would-block recv on a connected socket is 0x80410123 with errno 35 (EAGAIN, 0x23), and a recv on a listening socket is 0x80410139 with errno 57 (ENOTCONN, 0x39). Both are base | errno with base 0x8041_0100. Either code alone says nothing about which byte carries the errno; the pairing is what establishes it. sceNetBind refusing with 0x80410130 corroborates - 0x30 is 48, EADDRINUSE, and the POSIX bind in the same check had already taken the address - but its errno was not read independently. Recorded as orbistoun_net::NET_ERROR_BASE with a test that reconstructs all three, and a negative test because 0x8041_0000 | errno is wrong by exactly 0x100 on every value: close enough to look right in a log and never equal to what a guest compares against (D627).",
+]
+known_by = "guest-observed"
+cites = "obSCEne 102-net/recv-would-block, on a target console"
+found_on = "2026-09-08"

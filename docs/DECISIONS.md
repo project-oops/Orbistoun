@@ -599,6 +599,93 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D575 | [The stack the collector scans, and the wall three titles shared](decisions/D575-the-stack-the-collector-scans-and-the.md) | measured | 2026-09-07 |
 | 🟢 | D576 | [A breakpoint was called stub padding without anything looking at the address](decisions/D576-a-breakpoint-was-called-stub-padding-without.md) | measured | 2026-09-07 |
 | 🟢 | D577 | [A guest may re-protect the regions somebody else placed for it](decisions/D577-a-guest-may-re-protect-the-regions-somebody.md) | measured | 2026-09-07 |
+| 🟢 | D578 | [The random devices, and a record of what a guest actually opened](decisions/D578-the-random-devices-and-a-record-of-what-a.md) | measured | 2026-09-07 |
+| 🟢 | D579 | [The mapping arena had no name and its bytes were unreadable](decisions/D579-the-mapping-arena-had-no-name-and-its.md) | measured | 2026-09-07 |
+| 🟢 | D580 | [A watch that killed the run, and a message that said mapped when it meant published](decisions/D580-a-watch-that-killed-the-run-and-a.md) | measured | 2026-09-07 |
+| 🟢 | D581 | [Every mapping the guest was given, in order](decisions/D581-every-mapping-the-guest-was-given-in.md) | measured | 2026-09-08 |
+| 🟢 | D582 | [The clock a guest reads has to repeat, and still move](decisions/D582-the-clock-a-guest-reads-has-to-repeat.md) | measured | 2026-09-08 |
+| 🟢 | D583 | [The loop checks that a run repeats before it believes any comparison](decisions/D583-the-loop-checks-that-a-run-repeats.md) | measured | 2026-09-08 |
+| 🟢 | D584 | [Every handle the guest is given comes from one region](decisions/D584-every-handle-the-guest-is-given-comes.md) | measured | 2026-09-08 |
+| 🟢 | D585 | [A fresh thread attribute set is not entirely zero, and the console said so](decisions/D585-a-fresh-thread-attribute-set-is-not.md) | measured | 2026-09-08 |
+| 🟢 | D586 | [The loop reads back the structure a call was handed](decisions/D586-the-loop-reads-back-the-structure-a.md) | measured | 2026-09-08 |
+| 🟢 | D587 | [The asynchronous file path, named and reported](decisions/D587-the-asynchronous-file-path-named-and.md) | measured | 2026-09-08 |
+| 🟢 | D588 | [Write implies read, the dump ran out of room, and D580 was wrong](decisions/D588-write-implies-read-and-the-dump-ran-out.md) | measured | 2026-09-08 |
+| 🟢 | D589 | [Delivering the file the asynchronous path resolved changes nothing](decisions/D589-delivering-the-file-the-asynchronous.md) | measured | 2026-09-08 |
+| 🟢 | D590 | [The guest explains itself, and nothing was reading it](decisions/D590-the-guest-explains-itself-and-nothing.md) | measured | 2026-09-08 |
+| 🟢 | D591 | [The title ships the index the asynchronous file path needs](decisions/D591-the-title-ships-the-index-the.md) | measured | 2026-09-08 |
+| 🟢 | D592 | [The replacement library is guest code, and the index is read](decisions/D592-the-replacement-library-is-guest-code.md) | measured | 2026-09-08 |
+| 🟢 | D593 | [The modules a title ships were unreadable to every diagnostic](decisions/D593-the-modules-a-title-ships-were.md) | measured | 2026-09-08 |
+| 🟢 | D594 | [The wall is a library the dump replaced, not three functions](decisions/D594-the-wall-is-a-library-the-dump-replaced.md) | measured | 2026-09-08 |
+| 🟢 | D595 | [A read of four hundred and two bytes printed as zero](decisions/D595-a-read-of-four-hundred-and-two-bytes.md) | measured | 2026-09-08 |
+| 🟢 | D596 | [Every message carries where it was said from](decisions/D596-every-message-carries-where-it-was-said.md) | measured | 2026-09-08 |
+| 🟢 | D597 | [Nothing ever wrote the command, and a second summary read as none](decisions/D597-nothing-ever-wrote-the-command-and-a.md) | measured | 2026-09-08 |
+| 🟢 | D598 | [Two titles are two kinds of dump, and one names the code it wanted](decisions/D598-two-titles-are-two-kinds-of-dump-and.md) | measured | 2026-09-08 |
+| 🟢 | D599 | [The dispatcher was measuring a different program](decisions/D599-the-dispatcher-was-measuring-a.md) | measured | 2026-09-08 |
+| 🟢 | D600 | [A bogus finding disappears, and the check passes on a run that still varies](decisions/D600-a-bogus-finding-disappears-and-the.md) | measured | 2026-09-08 |
+| 🟢 | D601 | [Guest-visible blocks belong in the memory crate](decisions/D601-guest-visible-blocks-belong-in-the.md) | decided | 2026-09-08 |
+| 🟢 | D602 | [The drift is a guest branch, not a mapping we refused](decisions/D602-the-drift-is-a-guest-branch-not-a.md) | measured | 2026-09-08 |
+| 🟢 | D603 | [The head of the call sequence, and a redirection that measured nothing](decisions/D603-the-head-of-the-call-sequence-and-a.md) | measured | 2026-09-08 |
+| 🟢 | D604 | [A placement that would not step past a conflict](decisions/D604-a-placement-that-would-not-step-past-a.md) | measured | 2026-09-08 |
+| 🟢 | D605 | [The largest record kind in every report, read by nothing](decisions/D605-the-largest-record-kind-in-every.md) | measured | 2026-09-08 |
+| 🟡 | D606 | [A name is a seed for the next name](decisions/D606-a-name-is-a-seed-for-the-next-name.md) | assumed | 2026-09-08 |
+| 🟢 | D607 | [The sweep kept the weaker of two true records](decisions/D607-the-sweep-kept-the-weaker-of-two.md) | measured | 2026-09-08 |
+| 🟢 | D608 | [A guard reading a shape that no longer exists](decisions/D608-a-guard-reading-a-shape-that-no.md) | measured | 2026-09-08 |
+| 🟢 | D609 | [The corpus was five files of twenty-eight](decisions/D609-the-corpus-was-five-files-of-twenty.md) | measured | 2026-09-08 |
+| 🟢 | D610 | [The count and the mode were both ignored](decisions/D610-the-count-and-the-mode-were-both.md) | measured | 2026-09-08 |
+| 🟢 | D611 | [A parser that required a prefix the probe does not always write](decisions/D611-a-parser-that-required-a-prefix.md) | measured | 2026-09-08 |
+| 🟢 | D612 | [The predicate that was never a predicate](decisions/D612-the-predicate-that-was-never-a.md) | measured | 2026-09-08 |
+| 🟢 | D613 | [A wait that did not wait, and a record that answered for somebody else](decisions/D613-a-wait-that-did-not-wait-and-a.md) | measured | 2026-09-08 |
+| 🟢 | D614 | [The timeout that arrived early](decisions/D614-the-timeout-that-arrived-early.md) | measured | 2026-09-08 |
+| 🟢 | D615 | [A queue nobody registered, and two nobody waited on](decisions/D615-a-queue-nobody-registered-and-two.md) | measured | 2026-09-08 |
+| 🟢 | D616 | [The record asked the wrong thread](decisions/D616-the-record-asked-the-wrong-thread.md) | measured | 2026-09-08 |
+| 🟢 | D617 | [A second batch, and the pipeline that was built for it](decisions/D617-a-second-batch-and-the-pipeline.md) | measured | 2026-09-08 |
+| 🟢 | D618 | [Evidence going missing made a claim stronger](decisions/D618-evidence-going-missing-made-a-claim.md) | measured | 2026-09-08 |
+| 🟢 | D619 | [The other work list](decisions/D619-the-other-work-list.md) | measured | 2026-09-08 |
+| 🟢 | D620 | [A question put to the guest, and the answer was no](decisions/D620-a-question-put-to-the-guest-and.md) | measured | 2026-09-08 |
+| 🟢 | D621 | [The report paired a fault with another thread's calls](decisions/D621-the-report-paired-a-fault-with.md) | measured | 2026-09-08 |
+| 🟢 | D622 | [The probe runs here too](decisions/D622-the-probe-runs-here-too.md) | measured | 2026-09-08 |
+| 🟢 | D623 | [The dump answered a different question](decisions/D623-the-dump-answered-a-different.md) | measured | 2026-09-08 |
+| 🟢 | D624 | [The differential counted items and called them findings](decisions/D624-the-differential-counted-items.md) | measured | 2026-09-08 |
+| 🟢 | D625 | [A dump was taken and never shown](decisions/D625-a-dump-was-taken-and-never.md) | measured | 2026-09-08 |
+| 🟢 | D626 | [Seven of the differences were the probe declining to call](decisions/D626-seven-differences-were-the-probe.md) | measured | 2026-09-08 |
+| 🟢 | D627 | [Two spellings of one condition gave the encoding](decisions/D627-two-spellings-of-one-condition.md) | measured | 2026-09-08 |
+| 🟢 | D628 | [The guest names its own functions](decisions/D628-the-guest-names-its-own.md) | measured | 2026-09-08 |
+| 🟢 | D629 | [A module handle now narrows the answer, for one handle](decisions/D629-a-module-handle-now-narrows.md) | measured | 2026-09-08 |
+| 🟢 | D630 | [The title's own code was mapped, and stubbed anyway](decisions/D630-the-titles-own-code-was-mapped.md) | measured | 2026-09-08 |
+| 🟢 | D631 | [Advice that cannot succeed](decisions/D631-advice-that-cannot-succeed.md) | measured | 2026-09-08 |
+| 🟢 | D632 | [One function, two answers, decided by how the guest asked](decisions/D632-one-function-two-answers.md) | measured | 2026-09-08 |
+| 🟢 | D633 | [Three walls, one subsystem](decisions/D633-three-walls-one-subsystem.md) | measured | 2026-09-08 |
+| 🟢 | D634 | [The ratchet cannot say "worse"](decisions/D634-the-ratchet-cannot-say-worse.md) | measured | 2026-09-08 |
+| 🟢 | D635 | [The branch that printed nothing](decisions/D635-the-branch-that-printed-nothing.md) | measured | 2026-09-09 |
+| 🟢 | D636 | [A record older than the repository](decisions/D636-a-record-older-than-the-repository.md) | measured | 2026-09-09 |
+| 🟢 | D637 | [An answer needs somebody who asked](decisions/D637-an-answer-needs-somebody-who-asked.md) | measured | 2026-09-09 |
+| 🟢 | D638 | [One defect, against the leg that compares like for like](decisions/D638-one-defect-against-the-like-for-like-leg.md) | measured | 2026-09-09 |
+| 🟢 | D639 | [Twenty blank pages nobody mentioned](decisions/D639-twenty-blank-pages-nobody-mentioned.md) | measured | 2026-09-09 |
+| 🟢 | D640 | [Every import accounted for, with a reason](decisions/D640-every-import-accounted-for.md) | measured | 2026-09-09 |
+| 🟢 | D641 | [Four numbers, and the wall moved](decisions/D641-a-number-is-a-name-the-guest-did-not-spell.md) | measured | 2026-09-09 |
+| 🟢 | D642 | [Two tables that answer each other](decisions/D642-two-tables-that-answer-each-other.md) | measured | 2026-09-09 |
+| 🟢 | D643 | [One name, and a third title reached the same wall](decisions/D643-one-name-and-a-third-title-reached-the-same-wall.md) | measured | 2026-09-09 |
+| 🟢 | D644 | [The binding reached the relocation](decisions/D644-the-binding-reached-the-relocation.md) | measured | 2026-09-09 |
+| 🟢 | D645 | [A signal the guest sends itself](decisions/D645-a-signal-the-guest-sends-itself.md) | measured | 2026-09-09 |
+| 🟢 | D646 | [The clock samples instead of sleeping](decisions/D646-the-clock-samples-instead-of-sleeping.md) | measured | 2026-09-09 |
+| 🟢 | D647 | [The name a faulting register points at](decisions/D647-the-name-a-faulting-register-points-at.md) | measured | 2026-09-09 |
+| 🟢 | D648 | [Half a signal contract is worth implementing](decisions/D648-half-a-signal-contract-is-worth-implementing.md) | measured | 2026-09-09 |
+| 🟢 | D649 | [A name that cannot be confirmed](decisions/D649-a-name-that-cannot-be-confirmed.md) | published | 2026-09-09 |
+| 🟢 | D650 | [The signal goes to another thread](decisions/D650-the-signal-goes-to-another-thread.md) | measured | 2026-09-09 |
+| 🟢 | D651 | [The thread that was not calling](decisions/D651-the-thread-that-was-not-calling.md) | measured | 2026-09-09 |
+| 🟢 | D652 | [The pending-signal slot](decisions/D652-the-pending-signal-slot.md) | measured | 2026-09-09 |
+| 🟢 | D653 | [A second reader over one corpus](decisions/D653-a-second-reader-over-one-corpus.md) | measured | 2026-09-09 |
+| 🟢 | D654 | [Four harness errors and no reader defects](decisions/D654-four-harness-errors-and-no-reader-defects.md) | measured | 2026-09-09 |
+| 🟢 | D655 | [The symbol level agrees](decisions/D655-the-symbol-level-agrees.md) | measured | 2026-09-09 |
+| 🟢 | D656 | [The context has to be on a real stack](decisions/D656-the-context-has-to-be-on-a-real-stack.md) | measured | 2026-09-09 |
+| 🟢 | D657 | [Both warnings were mirrors](decisions/D657-both-warnings-were-mirrors.md) | measured | 2026-09-09 |
+| 🟢 | D658 | [What the guest said](decisions/D658-what-the-guest-said.md) | measured | 2026-09-09 |
+| 🟢 | D659 | [Two walls that hardware cannot reach](decisions/D659-two-walls-that-hardware-cannot-reach.md) | measured | 2026-09-09 |
+| 🟡 | D660 | [A page per title](decisions/D660-a-page-per-title.md) | assumed | 2026-09-09 |
+| 🟢 | D661 | [Three roots, not one](decisions/D661-three-roots-not-one.md) | measured | 2026-09-09 |
+| 🟡 | D662 | [Category is a permission, not a label](decisions/D662-category-is-a-permission-not-a-label.md) | published | 2026-09-10 |
+| 🟢 | D663 | [The codenames are the vocabulary](decisions/D663-the-codenames-are-the-vocabulary.md) | measured | 2026-09-10 |
+| 🟢 | D664 | [An origin list, with every failure named](decisions/D664-an-origin-list-with-every-failure-named.md) | measured | 2026-09-10 |
 
 | | meaning |
 |---|---|

@@ -323,7 +323,7 @@ mod tests {
             language: "ja-JP".to_owned(),
             // A machine that is not the default, so the round trip is asserting something.
             machine: orbistoun_core::machine::Machine {
-                generation: orbistoun_core::machine::Generation::Ps4,
+                generation: orbistoun_core::machine::Generation::Orbis,
                 kind: orbistoun_core::machine::Kind::Dex,
                 revision: orbistoun_core::machine::Revision::Pro,
                 kernel_release: "measured-somewhere".to_owned(),

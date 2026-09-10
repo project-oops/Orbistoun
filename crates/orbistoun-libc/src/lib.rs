@@ -36,6 +36,7 @@ mod ctype;
 mod cxx;
 mod locks;
 pub mod math;
+pub mod said;
 mod scan;
 pub mod streams;
 mod varargs;
@@ -1653,6 +1654,10 @@ fn render_with(format: &[u8], args: &mut impl Arguments) -> Result<Vec<u8>, Form
             out.extend_from_slice(&body);
         }
     }
+    // **Every renderer reaches here**, so a message is recorded whether it was printed, written
+    // to a descriptor, or formatted into a buffer the guest keeps to itself - and the last is the
+    // case that matters, because a title explains why it is stopping into a buffer (D590).
+    said::note(&out);
     Ok(out)
 }
 
@@ -1704,7 +1709,13 @@ fn snprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let template = unsafe { std::slice::from_raw_parts(ptr(format).cast_const(), len) };
 
     let rendered = match render_format(template, &args[3..]) {
-        Ok(text) => text,
+        Ok(text) => {
+            // **Captured here, where the words exist.** A guest that formats a message and hands
+            // it to a write path this project does not implement has still said the thing, and
+            // that is the case most worth seeing (D658).
+            orbistoun_core::said::note(&text);
+            text
+        }
         Err(fault) => {
             note_fault(fault);
             if size != 0 {
@@ -2123,7 +2134,13 @@ fn printf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let template = unsafe { std::slice::from_raw_parts(ptr(format).cast_const(), len) };
 
     let rendered = match render_format(template, &args[1..]) {
-        Ok(text) => text,
+        Ok(text) => {
+            // **Captured here, where the words exist.** A guest that formats a message and hands
+            // it to a write path this project does not implement has still said the thing, and
+            // that is the case most worth seeing (D658).
+            orbistoun_core::said::note(&text);
+            text
+        }
         Err(fault) => {
             // Recorded rather than printed. Whatever the guest meant to say, this is not
             // it, and a mangled diagnostic is the text somebody would then reason from.
@@ -2223,7 +2240,13 @@ fn fprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: `c_len` established `len` readable bytes from `format`.
     let template = unsafe { std::slice::from_raw_parts(ptr(format).cast_const(), len) };
     let rendered = match render_format(template, &args[2..]) {
-        Ok(text) => text,
+        Ok(text) => {
+            // **Captured here, where the words exist.** A guest that formats a message and hands
+            // it to a write path this project does not implement has still said the thing, and
+            // that is the case most worth seeing (D658).
+            orbistoun_core::said::note(&text);
+            text
+        }
         Err(fault) => {
             note_fault(fault);
             return 0;

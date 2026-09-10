@@ -10,7 +10,7 @@ runtime surprise, and `orbistoun-cli firmware` prints the layout. It immediately
 collisions in the packed unimplemented region that were invisible before - a real follow-up
 (stub-sizing), now visible.
 
-**Console profiles (Plan 2).** `--profile ps5-cex-12.40` presents the measured reference machine
+**Console profiles (Plan 2).** `--profile prospero-cex-12.40` presents the measured reference machine
 without hand-editing shell.toml; validated in the CLI, applied in the worker. Removes the
 friction that was on every payload run.
 

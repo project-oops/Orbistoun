@@ -95,6 +95,7 @@ pub fn open(guest_path: &str) -> Option<u64> {
     // **Devices before the mount table**, because a device has no host path to resolve to
     // and asking the table about one would answer "not there" for something that is (D389).
     if let Some(device) = crate::device::named(guest_path) {
+        crate::opened::note(guest_path);
         return insert(Target::Device(device));
     }
     let Some(host) = crate::mount::resolve(guest_path) else {
@@ -106,6 +107,7 @@ pub fn open(guest_path: &str) -> Option<u64> {
         crate::wanted::note(guest_path);
         return None;
     };
+    crate::opened::note(guest_path);
     insert_file(file)
 }
 
@@ -128,6 +130,7 @@ pub fn create(guest_path: &str) -> Option<u64> {
         .truncate(true)
         .open(host)
         .ok()?;
+    crate::opened::note(guest_path);
     insert_file(file)
 }
 
@@ -239,6 +242,9 @@ pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
 pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
     use std::io::Write as _;
     if fd == STDOUT || fd == STDERR {
+        // The third channel a guest can speak through, kept beside the other two so the run
+        // report does not depend on which one a title happened to pick (D658).
+        orbistoun_core::said::note(bytes);
         let mut stderr = std::io::stderr();
         let _ = stderr.write_all(bytes);
         // Flushed per write, because a probe's output is only useful if it survives the

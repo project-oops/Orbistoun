@@ -24,6 +24,25 @@ use orbistoun_hle::hardware::{Measurement, Measurements};
 
 /// Measurements this file asserts orbistoun against.
 const CLAIMED: &[&str] = &[
+    // Return codes a console gave and orbistoun now answers, asserted below (D611).
+    "031-stackattr/address-is-the-base:sceKernelIsStack:is-stack",
+    "031-stackattr/fresh-attr-names-no-stack:scePthreadAttrGetstackaddr:stack-address",
+    "031-stackattr/fresh-attr-names-no-stack:scePthreadAttrGetstacksize:stack-size",
+    "032-syncaddr/wake-releases-a-waiter:sceKernelSyncOnAddressWake:returned",
+    "032-syncaddr/wake-releases-a-waiter:sceKernelSyncOnAddressWake:retry-all",
+    "032-syncaddr/wake-with-no-waiter:sceKernelSyncOnAddressWake:returned",
+    "130-layout/net-interfaces:getifaddrs:return_code",
+    "130-layout/user-service:sceUserServiceGetInitialUser:return_code",
+    // The sync bounds a console measured and orbistoun answered wrongly until D610 -
+    // the semaphore count and the event-flag wait mode, both asserted below.
+    "016-syncbounds/sema-count:sceKernelPollSema:need-0-of-empty",
+    "016-syncbounds/sema-count:sceKernelPollSema:need-1-of-1-left",
+    "016-syncbounds/sema-count:sceKernelPollSema:need-2-of-1-left",
+    "016-syncbounds/sema-count:sceKernelPollSema:need-2-of-3",
+    "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x00-both-of-one",
+    "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x01-both-of-one",
+    "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x02-both-of-one",
+    "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x11-both-of-one",
     // Every firmware path the encoder probe tried, refused with the same code (D497).
     "106-encoder/path-probe:/system/common/lib/libSceVencCore.sprx:handle",
     "106-encoder/path-probe:/system/priv/lib/libSceVencCore.sprx:handle",
@@ -55,9 +74,15 @@ const CLAIMED: &[&str] = &[
     "035-libc/fpu-environment:mxcsr:ftz_flush_to_zero",
     "035-libc/fpu-environment:mxcsr:rounding_mode",
     "035-libc/fpu-environment:mxcsr:exception_masks",
-    // The raw value too: it is the four fields above plus the sticky precision flag, and
-    // the split between configuration and status is published rather than guessed.
-    "035-libc/fpu-environment:mxcsr:raw",
+    // **The raw value is not here, and that is the finding rather than a gap.** It was, on
+    // the reasoning that it is the four fields above plus one sticky precision flag. Reading
+    // every capture rather than five of them shows it is `0x9fe0` in twelve runs and `0x9fc0`
+    // in three, so the precision flag is not a property of the platform at all - it is
+    // whether the console's own startup happened to do inexact arithmetic before the probe
+    // looked. A varying measurement may not be claimed by anything, so it is claimed by
+    // nothing; the assertion that survives it is in
+    // `the_consoles_float_configuration_is_the_raw_value_without_its_status_flags`, which
+    // now claims every value any run saw rather than one of them (D609).
     // One attribute object, set then get, for each of 0..4 - the run the queue asked for.
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:default-type",
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:type-0-read-back",
@@ -97,10 +122,7 @@ const CLAIMED: &[&str] = &[
     "015-sync/mutex-recursion:scePthreadMutexTrylock:type-2-second-acquisition",
     "015-sync/mutex-recursion:scePthreadMutexTrylock:type-3-second-acquisition",
     "015-sync/mutex-recursion:scePthreadMutexTrylock:type-4-second-acquisition",
-    "130-layout/direct-memory-query-flags:sceKernelDirectMemoryQuery:flags-0",
     "130-layout/direct-memory-query-flags:sceKernelDirectMemoryQuery:flags-1",
-    "130-layout/direct-memory-query-flags:sceKernelDirectMemoryQuery:flags-2",
-    "130-layout/direct-memory-query-flags:sceKernelDirectMemoryQuery:flags-4",
     "110-modules/load:sceKernelLoadStartModule:libkernel",
     "110-modules/load:sceKernelLoadStartModule:system-libc",
     "110-modules/load:sceKernelLoadStartModule:system-fios2",
@@ -116,7 +138,6 @@ const CLAIMED: &[&str] = &[
     "130-layout/memory-type:wb-garlic:third-field",
     // The two encoder system modules the console loads; the seven it refuses stay in the
     // queue, because that refusal may belong to the capture's application category.
-    "106-encoder/sysmodule-load:VENC:rc",
     "106-encoder/sysmodule-load:VIDEOREC:rc",
     // The other four paths obSCEne loaded, recovered from its own quantity table.
     "110-modules/load:sceKernelLoadStartModule:system-libc-internal",
@@ -179,14 +200,6 @@ const OPAQUE: &[(&str, &str)] = &[
         "as VENC above: the probe's own constant, reported back",
     ),
     (
-        "106-encoder/module-handle:loaded:handle",
-        "a handle from the console's own numbering - **the case the list above cites as forcing this table to exist**, and it had been left in the queue anyway. It reflects how many modules that loader had already placed, so asserting it pins orbistoun to somebody else's bookkeeping",
-    ),
-    (
-        "106-encoder/module-list:total:count",
-        "how many modules that process had loaded, which is a fact about that machine at that moment rather than about any call. orbistoun loads one, and matching the number would mean loading modules it has no reason to load",
-    ),
-    (
         "120-measure/identify-clocks:sceKernelUsleep:requested",
         "**the check's own input, read back.** The record is the sleep the probe asked for, not anything the console chose, so a platform that ignores the request entirely produces the same reading - D497's family, one layer up from an out-parameter",
     ),
@@ -199,39 +212,7 @@ const OPAQUE: &[(&str, &str)] = &[
         "the same per-machine value as the entry above, taken by a second check. It was in the work queue, where it could never be completed: matching `0.0-prototype` means matching one console's configuration, which is the definition of opaque rather than a thing to do. Its reason said `as above` and pointed at the *other* neighbour - a knob orbistoun refuses (D397) - which is how a permanent resident of the queue read as work for as long as it did (D546)",
     ),
     (
-        "035-libc/getpctype:_Getpctype:pointer",
-        "the console's own load address for its C library; orbistoun's table is wherever the guest allocator put it, and a guest reaches it by calling the function rather than by address",
-    ),
-    (
-        "035-libc/getpctype:_Getptolower:pointer",
-        "the console's own load address for its C library; orbistoun's table is wherever the guest allocator put it, and a guest reaches it by calling the function rather than by address",
-    ),
-    (
-        "035-libc/getpctype:_Getptoupper:pointer",
-        "the console's own load address for its C library; orbistoun's table is wherever the guest allocator put it, and a guest reaches it by calling the function rather than by address",
-    ),
-    (
-        "120-measure/cpuid:cpuid:max_basic_leaf",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
-        "120-measure/cpuid:cpuid:signature_eax",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
-        "120-measure/cpuid:cpuid:feature_ecx",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
         "120-measure/cpuid:cpuid:feature_edx",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
-        "120-measure/cpuid:cpuid:stepping",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
-        "120-measure/cpuid:cpuid:model",
         "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
     ),
     (
@@ -239,24 +220,447 @@ const OPAQUE: &[(&str, &str)] = &[
         "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
     ),
     (
-        "120-measure/cpuid:cpuid_ext:feature_ecx",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
         "120-measure/cpuid:cpuid_ext:feature_edx",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
-        "120-measure/cpuid:rdtscp:tsc_aux_raw",
-        "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
-    ),
-    (
-        "120-measure/cpuid:rdtscp:core_id",
         "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
     ),
     (
         "120-measure/cpuid:rdtscp:numa_node_id",
         "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
+    ),
+    // --- the console's own address space -----------------------------------------------
+    //
+    // Reading every capture rather than five of them brought 110 new constants at once, and
+    // this is the half of them nothing here can ever answer. Each carries the same reason
+    // because it *is* the same reason, said once per entry rather than once for a class: a
+    // shared note would let a later entry join the class without anybody deciding it had
+    // (D609).
+    (
+        "100-input/dualsense-symbols:scePadDeviceClassGetExtendedInformation:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadDeviceClassParseData:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadGetControllerInformation:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadGetTriggerEffectState:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadSetTriggerEffect:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadSetVibrationForce:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadSetVibrationMode:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardClose:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardInit:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardOpen:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardReadState:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmBatchStartBuffer:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmBatchWait:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmFinalize:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmInitialize:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmInstanceCreate:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmInstanceDestroy:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmModuleRegister:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "130-layout/net-interfaces:eth0:flags",
+        "the interface flags of one machine's network stack - which interfaces exist and what they are configured as is that console's setup, not the platform's. `getifaddrs` answering at all is claimable and is listed apart",
+    ),
+    (
+        "130-layout/net-interfaces:lo0:flags",
+        "the interface flags of one machine's network stack - which interfaces exist and what they are configured as is that console's setup, not the platform's. `getifaddrs` answering at all is claimable and is listed apart",
+    ),
+    (
+        "130-layout/net-interfaces:wlan0:flags",
+        "the interface flags of one machine's network stack - which interfaces exist and what they are configured as is that console's setup, not the platform's. `getifaddrs` answering at all is claimable and is listed apart",
+    ),
+    (
+        "130-layout/net-interfaces:wlan1:flags",
+        "the interface flags of one machine's network stack - which interfaces exist and what they are configured as is that console's setup, not the platform's. `getifaddrs` answering at all is claimable and is listed apart",
+    ),
+    (
+        "130-layout/user-service:sceUserServiceGetInitialUser:user_id",
+        "one console's user identifier. A number that machine assigned to an account is not a property of the platform, and orbistoun answering it would be reproducing somebody's bookkeeping",
+    ),
+    (
+        "136-kernel/handoff:allproc_addr:val",
+        "the kernel's handoff to an exploit payload, which is below the user-space boundary this project works inside - orbistoun runs guest code, it does not become a payload, so there is nothing here for it to answer",
+    ),
+    (
+        "136-kernel/handoff:rwpair_0:val",
+        "the kernel's handoff to an exploit payload, which is below the user-space boundary this project works inside - orbistoun runs guest code, it does not become a payload, so there is nothing here for it to answer",
+    ),
+    (
+        "136-kernel/handoff:rwpair_1:val",
+        "the kernel's handoff to an exploit payload, which is below the user-space boundary this project works inside - orbistoun runs guest code, it does not become a payload, so there is nothing here for it to answer",
+    ),
+    (
+        "136-kernel/handoff:rwpipe_0:val",
+        "the kernel's handoff to an exploit payload, which is below the user-space boundary this project works inside - orbistoun runs guest code, it does not become a payload, so there is nothing here for it to answer",
+    ),
+    (
+        "136-kernel/handoff:rwpipe_1:val",
+        "the kernel's handoff to an exploit payload, which is below the user-space boundary this project works inside - orbistoun runs guest code, it does not become a payload, so there is nothing here for it to answer",
+    ),
+    (
+        "138-layout/addresses:getpid:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:malloc:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelAllocateDirectMemory:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelClose:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelDirectMemoryQuery:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelDlsym:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelGetDirectMemorySize:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelGetModuleInfo:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelGetModuleList:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelGetProcessTime:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelLoadStartModule:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelMapDirectMemory:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelOpen:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelRead:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelReadTsc:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelUsleep:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceKernelWrite:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:scePthreadCreate:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:scePthreadJoin:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:sceSysmoduleLoadModule:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "138-layout/addresses:strlen:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    // --- the second batch of reports, on the same terms (D617) ---------------------------
+    //
+    // Sockets, keyboard and mouse resolving on the console. Where each landed is that
+    // machine's, and how long the probe waited for an operator is that afternoon's.
+    (
+        "101-input-ext/keyboard-held:sceKeyboardReadState:hold-shift-and-a-letter-now",
+        "how long the probe waited for an operator, or for a socket that was never going to answer. A duration measured on that machine and on that day, not a property of the platform",
+    ),
+    (
+        "101-input-ext/mouse-moving:sceMouseRead:move-and-hold-a-button-now",
+        "how long the probe waited for an operator, or for a socket that was never going to answer. A duration measured on that machine and on that day, not a property of the platform",
+    ),
+    (
+        "101-input-ext/reachability:sceKeyboardReadState:resolved",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetAccept:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetAccept:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetAccept:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetBind:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetBind:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetBind:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetConnect:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetConnect:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetConnect:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetListen:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetListen:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetListen:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetRecv:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetRecv:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetRecv:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSend:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSend:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSend:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSetsockopt:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSetsockopt:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSetsockopt:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSocket:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSocket:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSocket:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSocketClose:dlsym",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSocketClose:dlsym-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "102-net/resolve:sceNetSocketClose:import-null",
+        "an address or handle on the console, which orbistoun cannot answer - it places its own, and every base it uses is in docs/ADDRESS_MAP.md. That the symbol resolves at all is the fact worth having and is recorded beside it",
+    ),
+    (
+        "101-input-ext/kbd-read:sceKeyboardReadState:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
+    ),
+    (
+        "101-input-ext/mouse-read:sceMouseInit:unlinked-stub",
+        "the address of a stub the loader left unlinked in that build - a fact about that build's relocation, not about the platform, and orbistoun places its own stubs at bases listed in docs/ADDRESS_MAP.md",
+    ),
+    (
+        "102-net/resolve:__error:kexport",
+        "an address on the console, found by walking the kernel export table - the payload environment's own route, and something this project models nothing of, deliberately. Orbistoun places its own addresses; every base it uses is in docs/ADDRESS_MAP.md and none of them is this",
+    ),
+    (
+        "102-net/resolve:__sys_socketex:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:_sendto:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:_setsockopt:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:accept:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:bind:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:close:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:connect:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:fcntl:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:listen:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "102-net/resolve:recv:kexport",
+        "as `__error:kexport` above: an address found by the kernel export-table walk",
+    ),
+    (
+        "106-encoder/sysmodules:sceSysmoduleIsLoaded:table-vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol is in the table is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "106-encoder/sysmodules:sceSysmoduleLoadModule:table-vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol is in the table is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:__sys_socketex:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:bind:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:listen:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:accept:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:recv:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:_sendto:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:close:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:_setsockopt:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:connect:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:fcntl:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/posix-symbols:__error:vaddr",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
+    ),
+    (
+        "102-net/socket-resolve:__sys_socketex:address",
+        "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. That the symbol resolves is the fact worth having, and it is recorded beside this",
     ),
 ];
 
@@ -265,6 +669,10 @@ const OPAQUE: &[(&str, &str)] = &[
 /// Each entry is one unit of work with an unambiguous completion condition: make orbistoun
 /// answer what the console answered, then move the id into [`CLAIMED`] with a test.
 const OUTSTANDING: &[(&str, &str)] = &[
+    (
+        "000-hw/sw-version:sceKernelGetSystemSwVersion:rc",
+        "the console answers `0` because a console has a software version. Orbistoun refuses with `0x80020002` when none is configured, which is deliberate - answering a made-up version is the thing D420 declined to do - so the call is right and the claim needs a machine presented before it. **Not written**: `machine::present` is a process-wide `OnceLock`, so a test that set it would decide what every other test in that binary sees, according to which ran first. It needs a harness that owns the process, not a line in this one (D611)",
+    ),
     (
         "106-encoder/sysmodule-load:AVC_DEC:rc",
         "the console answers `0x805a1000` for this module and `0` for VENC and VIDEOREC, which orbistoun claims. **Orbistoun's shim does not refuse anything** - it answers `0` to every identifier, on the reasoning that every library a title imports is already resolved before the guest runs (D125). Matching the refusal would mean refusing seven identifiers because one capture, taken at one application category, was refused them - and obSCEne's D301 records that category deciding an unrelated call. Needs a capture at a different category to say whether this is a property of the module or of the asker",
@@ -279,10 +687,6 @@ const OUTSTANDING: &[(&str, &str)] = &[
     ),
     (
         "106-encoder/sysmodule-load:HEVC_ENC:rc",
-        "the console answers `0x805a1000` for this module and `0` for VENC and VIDEOREC, which orbistoun claims. **Orbistoun's shim does not refuse anything** - it answers `0` to every identifier, on the reasoning that every library a title imports is already resolved before the guest runs (D125). Matching the refusal would mean refusing seven identifiers because one capture, taken at one application category, was refused them - and obSCEne's D301 records that category deciding an unrelated call. Needs a capture at a different category to say whether this is a property of the module or of the asker",
-    ),
-    (
-        "106-encoder/sysmodule-load:VIDEODEC:rc",
         "the console answers `0x805a1000` for this module and `0` for VENC and VIDEOREC, which orbistoun claims. **Orbistoun's shim does not refuse anything** - it answers `0` to every identifier, on the reasoning that every library a title imports is already resolved before the guest runs (D125). Matching the refusal would mean refusing seven identifiers because one capture, taken at one application category, was refused them - and obSCEne's D301 records that category deciding an unrelated call. Needs a capture at a different category to say whether this is a property of the module or of the asker",
     ),
     (
@@ -450,10 +854,6 @@ const OUTSTANDING: &[(&str, &str)] = &[
         "the console reports this encoder library *absent* - a fact about which tier a title may reach, not about a call. Completion: model the tiers the manifest records",
     ),
     (
-        "110-modules/tier-probe:obs_module_open_tier:resolved_tiers",
-        "how many privilege tiers a title-level process could open a module from; orbistoun models no tiers",
-    ),
-    (
         "120-measure/cache-topology:cache:line_size_bytes",
         "0x40 - the console's L1 line size, read through `cpuid`, which answers the host's here (see the cpuid entries in OPAQUE)",
     ),
@@ -507,10 +907,6 @@ const OUTSTANDING: &[(&str, &str)] = &[
     // produces**: `0x80020001` is `errno::NOT_OWNER`, `0x80020010` is `BUSY`, `0x80020016` is
     // `INVALID`, `0x80020002` is `NO_ENTRY`, `0x80020003` is `NO_SUCH`. What keeps them here
     // is the *condition*, not the value - each needs its check's setup reproduced.
-    (
-        "110-modules/symbol:sceKernelDlsym:memcpy",
-        "**orbistoun does not fail here, it succeeds - which is worse.** The probe loads libkernel (handle `0x2001`, agreed by three measurements) and asks it for `memcpy`; the console answers ESRCH, so libkernel does not export it. Orbistoun publishes every implementation in one flat by-name table and `dlsym` looks a name up there **without consulting the module handle at all**, so it answers `0` and writes an address for a symbol the named module does not have - measured in `tests/dlsym_divergence.rs`, which also records why a claim written with an invalid handle would pass while checking nothing (orbistoun already answers this exact code on that branch, D366). Completion: a per-module export list for the platform's own libraries, which nothing lawful here provides - the earlier note that the loader could not resolve anything stopped being true when guest exports were added (D517) and was never the reason",
-    ),
     // --- the module loader, which loads nothing ---------------------------------------------
     // --- knobs orbistoun cannot source ------------------------------------------------------
     (
@@ -519,6 +915,830 @@ const OUTSTANDING: &[(&str, &str)] = &[
     ),
     // --- needs a harness rather than a call --------------------------------------------------
     // --- behaviour not modelled --------------------------------------------------------------
+    // --- brought in by reading every capture (D609) --------------------------------------
+    //
+    // Two kinds, and the split is the point. The first is a condition of a function
+    // orbistoun implements that nothing asserts yet - ordinary work. The second is a symbol
+    // the console resolves and this project **does not declare at all**, which is a gap that
+    // was previously unknown rather than merely undone: thirty-one of them, across the
+    // controller, keyboard, mouse, audio decoder and AJM libraries.
+    (
+        "000-hw/tsc-frequency:sceKernelGetTscFrequency:hz",
+        "`sceKernelGetTscFrequency` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "031-stackattr/address-is-the-base:sceKernelIsStack:high",
+        "`sceKernelIsStack` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "031-stackattr/address-is-the-base:sceKernelIsStack:low",
+        "`sceKernelIsStack` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "031-stackattr/address-is-the-base:scePthreadAttrGetstackaddr:placement",
+        "`scePthreadAttrGetstackaddr` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "031-stackattr/self-describes:scePthreadAttrGetstackaddr:stack-address",
+        "`scePthreadAttrGetstackaddr` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "031-stackattr/self-describes:scePthreadAttrGetstacksize:stack-size",
+        "`scePthreadAttrGetstacksize` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "085-videobuf/buffer-shape:sceVideoOutRegisterBuffers:onion,0x4000,1",
+        "`sceVideoOutRegisterBuffers` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "085-videobuf/framebuffer-refusal:sceVideoOutRegisterBuffers:baseline",
+        "`sceVideoOutRegisterBuffers` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadDeviceClassGetExtendedInformation:unresolved",
+        "the console resolves `scePadDeviceClassGetExtendedInformation` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadDeviceClassParseData:unresolved",
+        "the console resolves `scePadDeviceClassParseData` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadGetControllerInformation:unresolved",
+        "the console resolves `scePadGetControllerInformation` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadGetTriggerEffectState:unresolved",
+        "the console resolves `scePadGetTriggerEffectState` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadSetTriggerEffect:unresolved",
+        "the console resolves `scePadSetTriggerEffect` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadSetVibrationForce:unresolved",
+        "`scePadSetVibrationForce` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "100-input/dualsense-symbols:scePadSetVibrationMode:unresolved",
+        "the console resolves `scePadSetVibrationMode` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardClose:unresolved",
+        "the console resolves `sceKeyboardClose` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardInit:unresolved",
+        "the console resolves `sceKeyboardInit` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardOpen:unresolved",
+        "the console resolves `sceKeyboardOpen` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardReadState:unresolved",
+        "the console resolves `sceKeyboardReadState` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseClose:unresolved",
+        "the console resolves `sceMouseClose` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseInit:unresolved",
+        "the console resolves `sceMouseInit` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseOpen:unresolved",
+        "the console resolves `sceMouseOpen` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseRead:unresolved",
+        "the console resolves `sceMouseRead` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/related-libs:libSceAjm:absent",
+        "`libSceAjm` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "108-audiodec/related-libs:libSceAudioIn:absent",
+        "`libSceAudioIn` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "108-audiodec/related-libs:libSceAudiodec:absent",
+        "`libSceAudiodec` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "108-audiodec/related-libs:libSceOpusCeltDec:absent",
+        "`libSceOpusCeltDec` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "108-audiodec/related-libs:libSceOpusDec:absent",
+        "`libSceOpusDec` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecClearContext:unresolved",
+        "the console resolves `sceAudiodecClearContext` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecCreateDecoder:unresolved",
+        "the console resolves `sceAudiodecCreateDecoder` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecCreateDecoderEx:unresolved",
+        "the console resolves `sceAudiodecCreateDecoderEx` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecDecode:unresolved",
+        "the console resolves `sceAudiodecDecode` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecDecodeEx:unresolved",
+        "the console resolves `sceAudiodecDecodeEx` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecDeleteDecoder:unresolved",
+        "the console resolves `sceAudiodecDeleteDecoder` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecInitialize:unresolved",
+        "the console resolves `sceAudiodecInitialize` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "108-audiodec/symbols:sceAudiodecTerminate:unresolved",
+        "the console resolves `sceAudiodecTerminate` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "130-layout/pad-controller:scePadGetHandle:handle",
+        "the console resolves `scePadGetHandle` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "130-layout/user-service:sceUserServiceGetLoginUserIdList:return_code",
+        "the console resolves `sceUserServiceGetLoginUserIdList` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
+    ),
+    (
+        "130-layout/user-service:sceUserServiceGetUserName:return_code",
+        "`sceUserServiceGetUserName` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
+    ),
+    // --- what the network calls answered, before anything implements them (D617) ---------
+    //
+    // Nine values from a subsystem orbistoun has not started. They are recorded now precisely
+    // because nothing implements them: `sceNetRecv` answering `0x80410123` when it would block
+    // is a code somebody would otherwise invent, and the measurement is here first.
+    (
+        "101-input-ext/mouse-moving:sceMouseRead:extent-four",
+        "orbistoun does not declare `sceMouseRead` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x0` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "101-input-ext/mouse-moving:sceMouseRead:extent-one",
+        "orbistoun does not declare `sceMouseRead` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x0` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/listener:sceNetBind:bound",
+        "orbistoun does not declare `sceNetBind` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x0` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/listener:sceNetListen:listening",
+        "orbistoun does not declare `sceNetListen` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x0` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/nonblocking-option:sceNetSetsockopt:0x1200-accepted",
+        "orbistoun does not declare `sceNetSetsockopt` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x0` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/recv-would-block:sceNetRecv:connected-return",
+        "orbistoun does not declare `sceNetRecv` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x80410123` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/recv-would-block:sceNetRecv:listener-return",
+        "orbistoun does not declare `sceNetRecv` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x80410139` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/sockaddr-bind:sceNetBind:sin_len-0-refused",
+        "orbistoun does not declare `sceNetBind` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x80410130` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/sockaddr-bind:sceNetBind:sin_len-16-refused",
+        "orbistoun does not declare `sceNetBind` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x80410130` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
+    ),
+    (
+        "102-net/sockaddr-bind:sceNetBind:sin_len-16-bound",
+        "the console binds a `sockaddr_in` whose `sin_len` says 16 and answers `0x0`. Orbistoun refuses both lengths, which is what `102-net/sockaddr-bind` reports as *bind refused both sockaddr lengths* in the differential. Done when this crate's bind accepts a 16-byte sockaddr and answers `0x0`",
+    ),
+    (
+        "102-net/sockaddr-bind:sceNetBind:sin_len-0-bound",
+        "and the same address bound with `sin_len` left at zero, also `0x0`: the field is not validated. The two in-tree sockaddr shapes reconcile because neither length is refused. Done alongside the entry above - one of them passing without the other would mean the length is being read",
+    ),
+    (
+        "102-net/accept-inherits:sceNetSend:sent",
+        "a send on an accepted socket returned `0xbf88` - a partial count, not a would-block - so an accepted socket does not inherit the listener's non-blocking flag in the way the count alone would suggest. Done when this crate's accept path is written far enough to have an answer of its own to compare",
+    ),
+    (
+        "102-net/resolve:sceNetSocket:walk-null",
+        "the kernel export-table walk answers null for `sceNetSocket` in the payload leg: libSceNet is not reachable that way at all, which is a finding rather than a failure to look (REQ-20260908T1400Z-0001). Nine of these, one per socket call, and they stand or fall together. Done when this project models which modules a leg can reach, which it does not today",
+    ),
+    (
+        "102-net/resolve:sceNetBind:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetListen:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetAccept:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetRecv:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetSend:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetSocketClose:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetSetsockopt:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "102-net/resolve:sceNetConnect:walk-null",
+        "as `sceNetSocket:walk-null` above: null from the export-table walk in the payload leg",
+    ),
+    (
+        "090-audio/open-shapes:sceAudioOutOpen:rejected-rc",
+        "`0x80260008` is what the console answers an audio-out open it will not accept - a real vendor code in libSceAudioOut's own space, which is worth having written down before anything here answers that call. Done when this project opens audio outputs and refuses a bad shape with this code rather than a placeholder",
+    ),
+    (
+        "090-audio/volume-flag:sceAudioOutSetVolume:accepted",
+        "no volume flag returned success on the console either - the value is `0x0` accepted flags. Done when the audio crate has a volume path with an answer of its own",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseInit:xotext",
+        "**library text is execute-only on the console.** The flag is zero: the probe could call the symbol and could not read the bytes at it. Orbistoun maps its stub pages readable, so a guest that reads a prologue to work out a layout - which obSCEne itself does - sees something here and nothing there. Ten of these, four libraries. Done when stub pages are mapped execute-only and a read of one faults the way the console's does",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseOpen:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseClose:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/mouse-symbols:sceMouseRead:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/mouse-read:sceMouseRead:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardInit:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardOpen:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardClose:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/keyboard-symbols:sceKeyboardReadState:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/kbd-read:sceKeyboardReadState:xotext",
+        "as `sceMouseInit:xotext` above: the text is execute-only on the console and readable here",
+    ),
+    (
+        "101-input-ext/mouse-read:sceMouseRead:callable",
+        "the console's `sceMouseRead` address is callable, which is the half of the pair `xotext` above does not say: execute-only means callable *and* unreadable, and a flag for only one of the two would read as the symbol being absent. Done alongside the execute-only mapping",
+    ),
+    (
+        "101-input-ext/kbd-read:sceKeyboardReadState:callable",
+        "as `sceMouseRead:callable` above: callable on the console, and the readable half is `xotext`",
+    ),
+    (
+        "102-net/recv-would-block:errno:connected-errno",
+        "**`35` - plain BSD `EAGAIN` - is what `__error()` holds after a would-block recv on a connected socket, while `sceNetRecv` reports `0x80410123` for the same condition.** Two spellings of one state, and `0x123` is not `35`, so libSceNet's space is not `0x8041_0000 | errno` the way libkernel's is `0x8002_0000 | errno`. Worth having written down before anything here answers either. Done when this crate has a recv that can be asked",
+    ),
+    (
+        "102-net/recv-would-block:errno:listener-errno",
+        "`57`, `ENOTCONN`, from a recv on a *listener* - the red herring the resolved REQ-20260908T1400Z-0001 warns about, since it looks like a would-block answer and is not. Done alongside the connected case",
+    ),
+    (
+        "102-net/recv-would-block:recv:connected-return",
+        "`-1`, with the errno above carrying the reason: the POSIX layer reports the classic pair rather than a vendor code. Done alongside the errno entries",
+    ),
+    (
+        "102-net/recv-would-block:recv:listener-return",
+        "`-1` from a recv on a listener, paired with `ENOTCONN`. Done alongside the errno entries",
+    ),
+    (
+        "102-net/nonblocking-option:_setsockopt:0x1200-accepted",
+        "`0x0`: `SO_NBIO` is `0x1200`, accepted. Done when this crate sets non-blocking on a socket and accepts that option value",
+    ),
+    (
+        "102-net/nonblocking-option:fcntl:O_NONBLOCK-return",
+        "`-1`: `fcntl` `F_SETFL` **fails** where the `0x1200` socket option succeeds, so the two routes to non-blocking are not equivalent on this platform. That asymmetry is the finding; done when this crate refuses the same one",
+    ),
+    (
+        "102-net/sockaddr-bind:bind:sin_len-16-bound",
+        "`0x0`: the POSIX `bind` accepts a `sockaddr_in` whose `sin_len` says 16. Done when this crate's bind accepts it",
+    ),
+    (
+        "102-net/sockaddr-bind:bind:sin_len-0-bound",
+        "`0x0`: and the same address with `sin_len` left at zero, so the field is not validated. Done alongside the entry above - one passing without the other would mean the length is being read",
+    ),
+    (
+        "102-net/listener:bind:bound",
+        "`0x0`: a listener binds. Done when this crate opens and binds a socket",
+    ),
+    (
+        "102-net/listener:listen:listening",
+        "`0x0`: and listens. Done alongside the bind entry",
+    ),
+    (
+        "102-net/listener:SYS_socket:descriptor",
+        "`0xc` - the descriptor a raw `SYS_socket` returned. A descriptor number is not a platform constant in the way a return code is, but it is what the payload leg got, and the same `0xc` comes back through three routes below, which is what says they are one socket. Done when this crate hands out descriptors of its own to compare",
+    ),
+    (
+        "102-net/listener:__sys_socketex:named",
+        "`0xc` again, through `__sys_socketex` with a name argument: the same descriptor as the raw syscall, so the named form is the same call. Done alongside the descriptor entry",
+    ),
+    (
+        "102-net/listener:__sys_socketex:null-name",
+        "`0xc` again with a null name, so the name argument is accepted either way. Done alongside the descriptor entry",
+    ),
+    (
+        "102-net/resolve:SYS_socket:syscall-fd",
+        "`0xc`: the payload reaches a socket **by raw syscall** where libSceNet resolves by no route at all (REQ-20260908T1400Z-0001). That is the route this leg actually has, and it is the one orbistoun does not offer a payload today (D626). Done when a payload under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/accept-inherits:send:total-sent",
+        "`0xbf88` bytes went out before the socket saturated. Done when this crate has a send with a buffer of its own",
+    ),
+    (
+        "102-net/accept-inherits:send:sends-until-saturated",
+        "`2`: two sends filled it, which is what makes the byte count above a buffer size rather than a coincidence",
+    ),
+    (
+        "102-net/accept-inherits:send:would-block-code",
+        "`-1` from the POSIX send once saturated, with the errno below",
+    ),
+    (
+        "102-net/accept-inherits:errno:saturation-errno",
+        "`35`, `EAGAIN`, the same POSIX spelling the connected recv gives - so saturation and no-data-yet are one errno, and only the direction distinguishes them",
+    ),
+    (
+        "102-net/accept-inherits:sceNetSend:would-block-code",
+        "`0x80410123` - the vendor spelling of the `35` above, through `sceNetSend` rather than `send`. The pair is the evidence that the two layers report one condition two ways",
+    ),
+    (
+        "101-input-ext/mouse-read:sceMouseRead:rc",
+        "`0x0`: the console's `sceMouseRead` succeeds. Orbistoun answers a placeholder - it is the third most-called unimplemented import in the payload run, 63 calls. Done when the input crate implements it and answers `0x0` for a valid handle",
+    ),
+    (
+        "101-input-ext/kbd-read:sceKeyboardReadState:rc",
+        "`0x0`: the console's `sceKeyboardReadState` succeeds, and it is the second most-called unimplemented import in the payload run at 82 calls. Done when the input crate implements it and answers `0x0` for a valid handle",
+    ),
+    (
+        "102-net/socket-bind:sceNetBind:bound",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-listen:sceNetListen:listening",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/posix-symbols:__sys_socketex:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:bind:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:listen:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:accept:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:recv:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:_sendto:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:close:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:_setsockopt:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:connect:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:fcntl:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/posix-symbols:__error:callable",
+        "the POSIX socket layer's symbol census, answered by the console for another agent's request. Orbistoun declares libSceNet and implements none of it (D617, D627). Done when the net crate has a socket path and this census can be compared",
+    ),
+    (
+        "102-net/socket-syscall:SYS_socket:syscall-fd",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-create:SYS_socket:descriptor",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-syscall-97:bind-port-9899:bound",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-syscall-97:listen-port-9899:listening",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-create:__sys_socketex:named",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-create:__sys_socketex:null-name",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-bind:bind:bound",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/socket-listen:listen:listening",
+        "the console obtains a socket by raw syscall and binds and listens on it - the route the payload actually has, and the one orbistoun does not offer (D626). Done when a guest under orbistoun can obtain a descriptor the same way",
+    ),
+    (
+        "102-net/posix-fcntl:fcntl:F_SETFL",
+        "measured on the console and nothing here implements the call it describes. Done when the declaring crate has an implementation to compare against",
+    ),
+    (
+        "102-net/posix-would-block:__error:errno",
+        "measured on the console and nothing here implements the call it describes. Done when the declaring crate has an implementation to compare against",
+    ),
+    (
+        "102-net/posix-accept:fcntl:F_GETFL",
+        "measured on the console and nothing here implements the call it describes. Done when the declaring crate has an implementation to compare against",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2QueryComputeMemoryInfo:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2AllocateComputeQueue:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2ReleaseComputeQueue:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2CreateDecoder:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2DeleteDecoder:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2Decode:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2Flush:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2Reset:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "107-videodec/symbols:sceVideodec2GetPictureInfo:unresolved",
+        "the video-decoder entry points the console reports unresolved even on hardware. Recorded so that a future run showing them resolved is visibly a change rather than a surprise; orbistoun declares libSceVideodec2 and implements none of it",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmInitialize:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmFinalize:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmModuleRegister:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmInstanceCreate:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmInstanceDestroy:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmBatchStartBuffer:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "108-audiodec/ajm:sceAjmBatchWait:unresolved",
+        "the AJM audio-decoder census on the console. Orbistoun declares libSceAjm and implements none of it, so there is nothing here to disagree with yet. Done when the audio crate has a decode path",
+    ),
+    (
+        "166-agc/create-shader:sceAgcCreateShader:rc-wellformed",
+        "**the wall, measured at last.** sceAgcCreateShader answers 0x8a6c002f and writes nothing, for a well-formed header, for the 0xd8 and 0x118 payload shapes, and for PPSA03416's own 0x108 shape supplied by this project - so the header is not the variable. A null argument answers 0xb. Orbistoun answers its Unimplemented placeholder; forcing the measured code instead was tried and moved nothing, so the out-parameter is what the guest acts on (D621, D641). Done when something here fills that structure",
+    ),
+    (
+        "166-agc/create-shader:sceAgcCreateShader:rc-payload-118",
+        "**the wall, measured at last.** sceAgcCreateShader answers 0x8a6c002f and writes nothing, for a well-formed header, for the 0xd8 and 0x118 payload shapes, and for PPSA03416's own 0x108 shape supplied by this project - so the header is not the variable. A null argument answers 0xb. Orbistoun answers its Unimplemented placeholder; forcing the measured code instead was tried and moved nothing, so the out-parameter is what the guest acts on (D621, D641). Done when something here fills that structure",
+    ),
+    (
+        "166-agc/create-shader:sceAgcCreateShader:rc-ppsa03416",
+        "**the wall, measured at last.** sceAgcCreateShader answers 0x8a6c002f and writes nothing, for a well-formed header, for the 0xd8 and 0x118 payload shapes, and for PPSA03416's own 0x108 shape supplied by this project - so the header is not the variable. A null argument answers 0xb. Orbistoun answers its Unimplemented placeholder; forcing the measured code instead was tried and moved nothing, so the out-parameter is what the guest acts on (D621, D641). Done when something here fills that structure",
+    ),
+    (
+        "166-agc/create-shader:sceAgcCreateShader:rc-null",
+        "**the wall, measured at last.** sceAgcCreateShader answers 0x8a6c002f and writes nothing, for a well-formed header, for the 0xd8 and 0x118 payload shapes, and for PPSA03416's own 0x108 shape supplied by this project - so the header is not the variable. A null argument answers 0xb. Orbistoun answers its Unimplemented placeholder; forcing the measured code instead was tried and moved nothing, so the out-parameter is what the guest acts on (D621, D641). Done when something here fills that structure",
+    ),
+    (
+        "100-input/sysmodule-callable:sceSysmoduleLoadModule:callable",
+        "whether the input sysmodule loads and is callable on the console. Orbistoun refuses every firmware module path with ENOENT, which is measured and correct, so this cannot match until sysmodule loading means something here. Done alongside the input read functions",
+    ),
+    (
+        "100-input/sysmodule-load:libScePad:module_id",
+        "whether the input sysmodule loads and is callable on the console. Orbistoun refuses every firmware module path with ENOENT, which is measured and correct, so this cannot match until sysmodule loading means something here. Done alongside the input read functions",
+    ),
+    (
+        "100-input/sysmodule-load:sceSysmoduleLoadModule:rc",
+        "whether the input sysmodule loads and is callable on the console. Orbistoun refuses every firmware module path with ENOENT, which is measured and correct, so this cannot match until sysmodule loading means something here. Done alongside the input read functions",
+    ),
+    (
+        "100-input/resolve:scePadInit:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadInit:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadInit:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadOpen:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadOpen:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadOpen:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadClose:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadClose:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadClose:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadReadState:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadReadState:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadReadState:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceAddDevice:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceAddDevice:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceAddDevice:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceDeleteDevice:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceDeleteDevice:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceDeleteDevice:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceInsertData:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceInsertData:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadVirtualDeviceInsertData:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadSetParticularMode:dlsym",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadSetParticularMode:kexport",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/resolve:scePadSetParticularMode:dynlib",
+        "the input SDK's symbol census: whether each pad, keyboard and mouse entry point resolves on the console. Orbistoun declares libScePad and libSceKeyboard and implements neither read path, so nothing here has an answer of its own. Done when the input crate implements the read functions and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/sysmodule-callable:sceSysmoduleLoadModule:callable",
+        "whether the encoder sysmodule loads and is callable on the console. Orbistoun refuses firmware module paths, so this cannot match yet. Done when sysmodule loading is modelled",
+    ),
+    (
+        "106-encoder/sysmodules:sceSysmoduleUnloadModule:table-vaddr",
+        "whether the encoder sysmodule loads and is callable on the console. Orbistoun refuses firmware module paths, so this cannot match yet. Done when sysmodule loading is modelled",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-1",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-2",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-3",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-4",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-5",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-6",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-7",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "080-video/visual-flip:sceVideoOutSubmitFlip:rc-8",
+        "flip pacing measured by return codes and flip status, answered for another agent's request. Orbistoun's video-out accepts flips and does not pace them, so it has no timing of its own to compare. Done when the video crate paces submission",
+    ),
+    (
+        "100-input/batched-read:scePadRead:returned",
+        "how far a pad read writes, and the stride of a batched one, with no controller attached. Orbistoun implements no pad read (scePadReadState is the most-called unimplemented import in the corpus), so there is nothing here to disagree with. Done when the input crate implements it and writes the measured extent",
+    ),
+    (
+        "100-input/button-bits:scePadReadState:press-create-ps-touchpad-mic-now",
+        "the pad record's stick range and button bit layout, measured on the console. The layout is what an implementation must fill in; recorded before anything here fills anything. Done alongside the pad read",
+    ),
+    (
+        "100-input/stick-trigger-range:scePadReadState:sweep-sticks-and-pull-triggers-now",
+        "the pad record's stick range and button bit layout, measured on the console. The layout is what an implementation must fill in; recorded before anything here fills anything. Done alongside the pad read",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreQueryMemorySize:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreQueryMemorySize:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreQueryMemorySize:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreCreateEncoder:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreCreateEncoder:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreCreateEncoder:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreGetAuData:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreGetAuData:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreGetAuData:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreSetInputFrame:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreSetInputFrame:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreSetInputFrame:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreStartSequence:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreStartSequence:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreStartSequence:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreStopSequence:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreStopSequence:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreStopSequence:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreDeleteEncoder:dlsym",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreDeleteEncoder:kexport",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "106-encoder/resolve:sceVencCoreDeleteEncoder:dynlib",
+        "the video-encoder symbol census on the console, answered for another agent's request. Orbistoun declares no encoder library and implements none of it. Done when an encoder crate exists and this census can be compared rather than only recorded",
+    ),
+    (
+        "100-input/read-extent:scePadReadState:extent",
+        "how far a pad read writes, and the stride of a batched one, with no controller attached. Orbistoun implements no pad read (scePadReadState is the most-called unimplemented import in the corpus), so there is nothing here to disagree with. Done when the input crate implements it and writes the measured extent",
+    ),
+    (
+        "100-input/read-extent:scePadReadState:rc",
+        "how far a pad read writes, and the stride of a batched one, with no controller attached. Orbistoun implements no pad read (scePadReadState is the most-called unimplemented import in the corpus), so there is nothing here to disagree with. Done when the input crate implements it and writes the measured extent",
+    ),
+    (
+        "100-input/batched-read:scePadRead:extent",
+        "how far a pad read writes, and the stride of a batched one, with no controller attached. Orbistoun implements no pad read (scePadReadState is the most-called unimplemented import in the corpus), so there is nothing here to disagree with. Done when the input crate implements it and writes the measured extent",
+    ),
 ];
 
 /// Calls an implementation by the name a guest would import it under.
@@ -904,7 +2124,19 @@ fn the_memory_query_accepts_the_flags_the_console_accepted() {
     for flag in [0_u64, 1, 2, 4] {
         let id =
             format!("130-layout/direct-memory-query-flags:sceKernelDirectMemoryQuery:flags-{flag}");
-        let expected = measurement(&id).value().expect("a code is a number") as u32;
+        // **Every code any run answered, not the first one listed.** Three of the four
+        // conditions stopped being constant once every capture was read rather than five of
+        // them: `flags-0` answered `0x0` sixteen times and `0x8002000d` three times, and
+        // `flags-2` and `flags-4` answered the invalid-argument code eighteen times and `0x0`
+        // once. Whether a query with no allocation finds something is a property of the state
+        // the machine was in, not of the flag - so the claim is membership of what was seen,
+        // which is what `values` exists for (D609).
+        let seen: Vec<u32> = measurement(&id)
+            .values()
+            .into_iter()
+            .map(|value| value as u32)
+            .collect();
+        assert!(!seen.is_empty(), "flag {flag}: no code was ever measured");
 
         // The same buffer size the probe declared, so the conditions match rather than
         // resemble each other.
@@ -913,9 +2145,10 @@ fn the_memory_query_accepts_the_flags_the_console_accepted() {
             "sceKernelDirectMemoryQuery",
             [0, flag, info.as_mut_ptr() as u64, info.len() as u64, 0, 0],
         );
-        assert_eq!(
-            answered as u32, expected,
-            "flag {flag}: the console answered {expected:#x}"
+        assert!(
+            seen.contains(&(answered as u32)),
+            "flag {flag}: orbistoun answered {:#x}, which no console run reported - they said {seen:#x?}",
+            answered as u32
         );
     }
 }
@@ -1433,25 +2666,39 @@ fn the_consoles_float_configuration_is_the_raw_value_without_its_status_flags() 
     /// has done, never how it was set up.
     const STATUS_FLAGS: u64 = 0x3f;
 
-    let raw = measurement("035-libc/fpu-environment:mxcsr:raw")
-        .value()
-        .expect("the raw MXCSR is a number");
+    let raw = measurement("035-libc/fpu-environment:mxcsr:raw");
+    let seen = raw.values();
+    assert!(
+        !seen.is_empty(),
+        "the raw MXCSR must have been measured at least once"
+    );
 
     orbistoun_abi::enter::adopt_guest_float_environment();
     let live = u64::from(orbistoun_abi::enter::float_environment());
 
+    // **Every value any run reported, not one of them.** The measurement is not constant, so
+    // asserting `observation` would be asserting whichever run the generator happened to list
+    // first - and `values()` exists for exactly this: the variation is permitted, the claim is
+    // membership.
+    for value in &seen {
+        assert_eq!(
+            value & !STATUS_FLAGS,
+            live,
+            "the console reported {value:#x}; without status flags that is {:#x} \
+             and orbistoun installs {live:#x}",
+            value & !STATUS_FLAGS
+        );
+    }
+
+    // **And every bit they differ in is status.** Without this the assertions above would also
+    // pass if orbistoun had set a configuration bit the console clears, because masking hides
+    // it. The runs differ in the precision flag alone - twelve saw `0x9fe0`, three saw
+    // `0x9fc0` - which is what makes it status rather than platform (D609).
+    let differing = seen.iter().fold(0, |acc, value| acc | (value ^ seen[0]));
     assert_eq!(
-        raw & !STATUS_FLAGS,
-        live,
-        "the console's {raw:#x} without its status flags is {:#x}, and orbistoun installs          {live:#x}",
-        raw & !STATUS_FLAGS
-    );
-    // **And the difference is only status.** Without this the assertion above would also pass
-    // if orbistoun had set a configuration bit the console clears, because masking hides it.
-    assert_eq!(
-        raw & STATUS_FLAGS,
-        0x20,
-        "the only bit the console carries and orbistoun does not is the precision flag"
+        differing & !STATUS_FLAGS,
+        0,
+        "the runs disagree outside the status bits, so the configuration is not constant"
     );
 }
 
@@ -1502,5 +2749,294 @@ fn a_firmware_encoder_path_is_refused() {
     assert_eq!(
         checked, 24,
         "twenty-four paths were measured; a loop that compared fewer would pass by doing less"
+    );
+}
+
+/// **Polling a semaphore honours the count asked for, at every boundary the console measured.**
+///
+/// # What this caught
+///
+/// `sceKernelPollSema` ignored its second argument entirely and took one whatever was asked
+/// for. Two of the four conditions were wrong, and the damaging one is `need-2-of-1-left`: the
+/// console answers busy, orbistoun answered ok **having taken the one that was there**, so a
+/// caller believing it held two goes on to release two and the count runs away upward (D610).
+///
+/// The setup is the probe's own: a semaphore created with the initial count the condition
+/// names, then one poll.
+#[test]
+fn polling_a_semaphore_answers_the_measured_code_for_each_count() {
+    for (condition, initial, need) in [
+        ("need-0-of-empty", 0_u64, 0_u64),
+        ("need-1-of-1-left", 1, 1),
+        ("need-2-of-1-left", 1, 2),
+        ("need-2-of-3", 3, 2),
+    ] {
+        let expected = measurement(&format!(
+            "016-syncbounds/sema-count:sceKernelPollSema:{condition}"
+        ))
+        .value()
+        .expect("a code is a number") as u32;
+
+        // **A word, not an `int`.** `sceKernelCreateEventFlag` writes eight bytes through this
+        // pointer and `sceKernelCreateSema` four, so a narrow local is written past by one of
+        // them - which is a stack smash rather than a wrong answer, and is how this was found.
+        let mut handle = 0_u64;
+        let name = std::ffi::CString::new(format!("orbistoun-{condition}")).expect("text");
+        assert_eq!(
+            call(
+                "sceKernelCreateSema",
+                [
+                    std::ptr::from_mut(&mut handle) as u64,
+                    name.as_ptr() as u64,
+                    0,
+                    initial,
+                    // A ceiling above every initial count these conditions use, so the create
+                    // never fails for a reason this test is not about.
+                    8,
+                    0,
+                ],
+            ),
+            0,
+            "{condition}: the semaphore must exist before it can be polled"
+        );
+
+        let answered = call("sceKernelPollSema", [handle, need, 0, 0, 0, 0]);
+        assert_eq!(
+            answered as u32, expected,
+            "{condition}: asking for {need} of {initial}, the console answered {expected:#x}"
+        );
+        call("sceKernelDeleteSema", [handle, 0, 0, 0, 0, 0]);
+    }
+}
+
+/// **A wait mode naming neither `and` nor `or` is an argument error.**
+///
+/// # The branch that was two branches wearing one condition
+///
+/// The implementation read `mode & 0x01` and treated everything else as `or`. That is right for
+/// `0x02` and wrong for `0x00`, and the two were indistinguishable because a pattern that fails
+/// an `and` usually satisfies an `or` - so the wrong branch produced the right answer in every
+/// case anybody had tried. The console separates them: `0x00` answers `0x80020016` where `0x02`
+/// answers ok (D610).
+///
+/// The probe's setup, in its own words: a two-bit pattern with one bit set, polled under four
+/// modes.
+#[test]
+fn an_event_flag_answers_the_measured_code_for_each_wait_mode() {
+    /// The two bits the pattern names.
+    const PATTERN: u64 = 0b11;
+    /// The one of them the flag is created holding.
+    const PRESENT: u64 = 0b01;
+
+    for mode in [0x00_u64, 0x01, 0x02, 0x11] {
+        let expected = measurement(&format!(
+            "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-{mode:#04x}-both-of-one"
+        ))
+        .value()
+        .expect("a code is a number") as u32;
+
+        let mut handle = 0_u64;
+        let name = std::ffi::CString::new(format!("orbistoun-mode-{mode:#04x}")).expect("text");
+        assert_eq!(
+            call(
+                "sceKernelCreateEventFlag",
+                [
+                    std::ptr::from_mut(&mut handle) as u64,
+                    name.as_ptr() as u64,
+                    0,
+                    PRESENT,
+                    0,
+                    0,
+                ],
+            ),
+            0,
+            "mode {mode:#04x}: the flag must exist before it can be polled"
+        );
+
+        let answered = call("sceKernelPollEventFlag", [handle, PATTERN, mode, 0, 0, 0]);
+        assert_eq!(
+            answered as u32, expected,
+            "mode {mode:#04x}: one bit of two set, the console answered {expected:#x}"
+        );
+        call("sceKernelDeleteEventFlag", [handle, 0, 0, 0, 0, 0]);
+    }
+}
+
+/// **Waking an address nobody is waiting on succeeds.**
+///
+/// The condition is the one worth pinning, because the tempting implementation refuses it: a
+/// wake that found no waiter did nothing, and a call that did nothing looks like a call that
+/// failed. The console answers `0` - the count of waiters released is not the return value, and
+/// a caller must not read "none were waiting" as an error (D611).
+#[test]
+fn waking_an_address_with_no_waiter_succeeds() {
+    let expected =
+        measurement("032-syncaddr/wake-with-no-waiter:sceKernelSyncOnAddressWake:returned")
+            .value()
+            .expect("a code is a number") as u32;
+
+    // An address in this test's own frame that nothing has ever waited on. The call takes a
+    // guest address and guest memory is the host's under an identity mapping.
+    let mut nobody_waits_here = 0_u32;
+    let answered = call(
+        "sceKernelSyncOnAddressWake",
+        [
+            std::ptr::from_mut(&mut nobody_waits_here) as u64,
+            1,
+            0,
+            0,
+            0,
+            0,
+        ],
+    );
+    assert_eq!(
+        answered as u32, expected,
+        "the console answered {expected:#x} to a wake with nothing waiting"
+    );
+
+    // **And the same code where a waiter *was* released.** Three conditions across two checks
+    // record one fact - that this call answers `0` - and `two_checks_of_one_fact_do_not_disagree`
+    // refuses to let them be filed differently, correctly: a claim covering one covers all three.
+    //
+    // What is asserted is the return code and not the release. Whether a waiter was woken is a
+    // second fact, it is not what these measurements carry, and reproducing it needs a thread
+    // that blocks - so it is not smuggled in here under a code that would pass without it.
+    for also in [
+        "032-syncaddr/wake-releases-a-waiter:sceKernelSyncOnAddressWake:returned",
+        "032-syncaddr/wake-releases-a-waiter:sceKernelSyncOnAddressWake:retry-all",
+    ] {
+        assert_eq!(
+            measurement(also).value().expect("a code is a number") as u32,
+            expected,
+            "{also}: the same call answering the same code, so one claim covers it"
+        );
+    }
+}
+
+/// **The system software version query answers, and the enumeration of users does too.**
+///
+/// Four return codes from three calls, each `0` on the console. Grouped because the claim is the
+/// same in each case and the setup is one out-parameter: what is being pinned is that orbistoun
+/// answers rather than refusing, which is what a guest branches on before it reads anything
+/// (D611).
+#[test]
+fn the_queries_that_answer_zero_on_the_console_answer_zero_here() {
+    // Room for whatever each call writes, well past what any of them is known to use, so a
+    // write past the field this test knows about lands in the buffer rather than the stack.
+    let mut out = [0_u8; 512];
+
+    for (id, symbol) in [
+        (
+            "130-layout/net-interfaces:getifaddrs:return_code",
+            "getifaddrs",
+        ),
+        (
+            "130-layout/user-service:sceUserServiceGetInitialUser:return_code",
+            "sceUserServiceGetInitialUser",
+        ),
+    ] {
+        let expected = measurement(id).value().expect("a code is a number") as u32;
+        out.fill(0);
+        let answered = call(symbol, [out.as_mut_ptr() as u64, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            answered as u32, expected,
+            "{symbol}: the console answered {expected:#x}"
+        );
+    }
+}
+
+/// **A freshly initialised thread attribute names no stack and a default size.**
+///
+/// Two measurements of one object, and they are worth having together: an attribute that
+/// answered an address before anybody set one would be handing out somebody else's stack, and a
+/// size of zero would make every `scePthreadCreate` from a default attribute fail (D611).
+#[test]
+fn a_fresh_thread_attribute_names_no_stack_and_the_measured_default_size() {
+    let expected_address = measurement(
+        "031-stackattr/fresh-attr-names-no-stack:scePthreadAttrGetstackaddr:stack-address",
+    )
+    .value()
+    .expect("an address is a number");
+    let expected_size = measurement(
+        "031-stackattr/fresh-attr-names-no-stack:scePthreadAttrGetstacksize:stack-size",
+    )
+    .value()
+    .expect("a size is a number");
+
+    // **The storage, not the handle.** Every call in this family takes a `ScePthreadAttr *` -
+    // the address of the caller's variable - and reads the handle out of it, so passing the
+    // handle itself has the implementation read a word from wherever that handle happens to
+    // point. That is a stack read at an arbitrary address, which is how this test first
+    // announced itself: an access violation rather than a wrong answer.
+    let mut attr = 0_u64;
+    let attr_at = std::ptr::from_mut(&mut attr) as u64;
+    assert_eq!(
+        call("scePthreadAttrInit", [attr_at, 0, 0, 0, 0, 0]),
+        0,
+        "the attribute must initialise before it can be read"
+    );
+
+    let mut address = u64::MAX;
+    assert_eq!(
+        call(
+            "scePthreadAttrGetstackaddr",
+            [attr_at, std::ptr::from_mut(&mut address) as u64, 0, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        address, expected_address,
+        "a fresh attribute names no stack, and the console answers {expected_address:#x}"
+    );
+
+    let mut size = u64::MAX;
+    assert_eq!(
+        call(
+            "scePthreadAttrGetstacksize",
+            [attr_at, std::ptr::from_mut(&mut size) as u64, 0, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        size, expected_size,
+        "the console's default stack size is {expected_size:#x}"
+    );
+
+    call("scePthreadAttrDestroy", [attr_at, 0, 0, 0, 0, 0]);
+}
+
+/// **`sceKernelIsStack` answers zero and reports the span through its out-parameters.**
+///
+/// The measurement that says so is the one D611 refused to claim, because the console answered
+/// `0` where orbistoun answered `1`. Reading the probe's own check settled it: the call takes
+/// three arguments, the return is a status, and the bounds are the output. Orbistoun answered an
+/// inverted flag and wrote nothing (D612).
+///
+/// What is asserted is the return code. The bounds a console reported are that machine's
+/// addresses and are listed as opaque; that orbistoun writes *its* span is asserted in
+/// `orbistoun-kernel`'s own tests, where the span can be set.
+#[test]
+fn asking_where_the_stack_is_answers_the_measured_status() {
+    let expected = measurement("031-stackattr/address-is-the-base:sceKernelIsStack:is-stack")
+        .value()
+        .expect("a code is a number") as u32;
+
+    let mut low = 0_u64;
+    let mut high = 0_u64;
+    let local = 0_u64;
+    let answered = call(
+        "sceKernelIsStack",
+        [
+            std::ptr::from_ref(&local) as u64,
+            std::ptr::from_mut(&mut low) as u64,
+            std::ptr::from_mut(&mut high) as u64,
+            0,
+            0,
+            0,
+        ],
+    );
+    assert_eq!(
+        answered as u32, expected,
+        "the console answered {expected:#x} for an address in its own stack"
     );
 }

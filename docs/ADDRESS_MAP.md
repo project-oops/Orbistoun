@@ -34,6 +34,7 @@ because two were the two anybody remembers.
 | `0x0000_5E2A_0000_0000` | `POISON_BASE` | `orbistoun-worker` | Where a poisoned handoff field points |
 | `0x0000_5E2B_0000_0000` | `DESCRIBED_BASE` | `orbistoun-kernel` | Where a marker in an undescribed structure points |
 | `0x0000_5E2C_0000_0000` | `DEFAULT_BASE` | `orbistoun-libc` | The fixed-base heap, when `ORBISTOUN_HEAP_BASE` does not say (D513) |
+| `0x0000_5E2D_0000_0000` | `GUEST_BLOCK_BASE` | `orbistoun-mem` | Every block handed to the guest as a handle, so handle *n* is the same address every run (D584) |
 | `0x0000_6000_0000_0000` | `GUEST_STACK_BASE` | `orbistoun-worker` | The guest stack |
 | `0x0000_6100_0000_0000` | `THREAD_STACK_BASE` | `orbistoun-kernel` | Guest thread stacks |
 | `0x0000_6800_0000_0000` | `REENTRANT_STACK_BASE` | `orbistoun-kernel` | Stacks for reentrant guest calls |
@@ -48,8 +49,8 @@ because two were the two anybody remembers.
 ## Two conventions worth following
 
 **`0x0000_5E2*_0000_0000` is the family for regions of orbistoun's own invention** - things a
-guest never asked for that exist so a wrong pointer is recognisable when it surfaces. Six
-occupants, spaced four gibibytes apart, next free is `0x0000_5E2D`. Anything the guest asked
+guest never asked for that exist so a wrong pointer is recognisable when it surfaces. Seven
+occupants, spaced four gibibytes apart, next free is `0x0000_5E2E`. Anything the guest asked
 for by name belongs elsewhere; anything orbistoun made up belongs here.
 
 **Everything else is spaced a tebibyte apart**, which is far more room than any of them uses

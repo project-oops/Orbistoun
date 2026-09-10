@@ -263,6 +263,18 @@ pub unsafe extern "sysv64" fn orbistoun_syscall_dispatch(saved: *const u64) -> u
     implementation(&arguments)
 }
 
+/// How many system calls the guest has made, cheaply, while it is still running.
+///
+/// **Separate from [`syscalls_in_order`] because of when it is read.** That one walks a
+/// sixty-four entry array and builds a `Vec`, which is correct once the guest has stopped and
+/// wrong while it is running - the quiet sampler reads this several times a second and must not
+/// allocate to do it (principle 9). One relaxed load answers the only question a sampler has:
+/// has the number moved since last time?
+#[must_use]
+pub fn syscalls_made() -> u64 {
+    ASKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     /// A number nothing implements fails the way a kernel fails.

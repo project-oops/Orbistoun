@@ -16,6 +16,7 @@
 //!
 //! Declarations only. Arities are provisional.
 
+pub mod amprindex;
 pub mod descriptor;
 pub mod device;
 pub mod escape;
@@ -26,6 +27,7 @@ pub mod kqueue;
 pub mod metadata;
 pub mod mount;
 pub mod open;
+pub mod opened;
 pub mod posix;
 pub mod sandbox;
 pub mod select;
@@ -355,6 +357,10 @@ fn kernel_debug_out_text(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // The host stream descriptors 1 and 2 land on - the worker's stderr, kept clear of the
     // stdout protocol it speaks (D170). Raw bytes, because a log line is not promised to be UTF-8.
+    // Kept for the run report as well as forwarded: a guest that only reaches this channel is
+    // saying the same thing an engine says through `printf`, and the report should not care
+    // which of the two a title happened to use (D658).
+    orbistoun_core::said::note(&bytes);
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(&bytes);
     let _ = stderr.flush();

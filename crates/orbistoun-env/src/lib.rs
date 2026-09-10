@@ -233,6 +233,27 @@ pub const LLM_API_KEY: Var = Var {
     read_by: "orbistoun-llm",
 };
 
+/// Let `sceKernelDlsym` answer for names this project declares but does not implement.
+///
+/// # The inconsistency it measures
+///
+/// A name reached by **import** lands on a stub answering the placeholder; the same name reached
+/// by `sceKernelDlsym` is refused, because the by-name table holds only implemented functions.
+/// One function, two answers, decided by how the guest asked - and 266 names in a single payload
+/// run are on the wrong side of it.
+///
+/// The console resolves both. Whether this should is genuinely two-sided: a guest handed a stub
+/// calls it and gets a placeholder, where a guest handed null may take a fallback it would have
+/// preferred. So the alternative is a flag to be measured rather than a change to be argued
+/// (D632).
+pub const DLSYM_STUBS: Var = Var {
+    name: "ORBISTOUN_DLSYM_STUBS",
+    kind: Kind::Diagnostic,
+    summary: "resolve declared-but-unimplemented names by name too - does a guest do better or worse?",
+    example: "1",
+    read_by: "orbistoun-worker",
+    effect: Effect::Intervenes,
+};
 // --- Diagnostics -------------------------------------------------------------
 
 /// Force argument dumps for named imports.
@@ -245,6 +266,31 @@ pub const DUMP: Var = Var {
     effect: Effect::Observes,
 };
 
+/// Post a flip completion to every event queue, not only the ones registered for it.
+///
+/// # The question it asks
+///
+/// A title registers a completion on its own queue through `sceAgcDriverAddEqEvent`, which
+/// nothing implements, and then blocks on that queue for ever - while the two queues orbistoun
+/// *does* feed are never waited on (D615). Nothing can post there, and nothing here knows what
+/// identifier a post would carry: the registration call passes the queue and two zeroes.
+///
+/// This does not guess at the registration. It asks the narrower question a flip can answer on
+/// its own: **if that wait completed, what would the guest do next?** A guest that proceeds says
+/// a flip completion is near enough what it was waiting for; one that wakes and immediately
+/// faults says which field of a delivered event it read. Either is evidence, and neither is an
+/// implementation.
+///
+/// Off by default, and it intervenes: a run under it is not a measurement of the emulator, and
+/// the report says so (D224, D226, D227).
+pub const FLIP_TO_ALL: Var = Var {
+    name: "ORBISTOUN_FLIP_TO_ALL",
+    kind: Kind::Diagnostic,
+    summary: "post a flip completion to every queue - would waking that wait get the guest further?",
+    example: "1",
+    read_by: "orbistoun-video",
+    effect: Effect::Intervenes,
+};
 /// Fill the guest stack before entering.
 pub const STACK_FILL: Var = Var {
     name: "ORBISTOUN_STACK_FILL",
@@ -322,6 +368,140 @@ pub const STAT_LAYOUT: Var = Var {
     summary: "which generation of `struct stat` and `struct dirent` a guest is given - `freebsd11` (default) or `current`",
     example: "current",
     read_by: "orbistoun-fs",
+    effect: Effect::Observes,
+};
+
+/// Record every path a guest successfully opened, and report them at the end.
+///
+/// # Why this is a setting and not a diagnostic
+///
+/// It changes what is **reported**, not what the guest does - the same place `ORBISTOUN_FINDINGS`
+/// sits. A diagnostic here means a variable that changes the program in order to learn from the
+/// difference, and a verdict earned under one carries a caveat; this earns none, because the
+/// guest cannot tell it is on.
+///
+/// # Why it is off by default, when the failures are always recorded
+///
+/// `orbistoun-fs` records every path it *could not* answer unconditionally, and that costs
+/// nothing on an ordinary run because failures are rare. Successes are the common case - a title
+/// streaming assets opens hundreds - and paying a lock and a string for each on the guest's own
+/// stack is the kind of observation that changes the thing observed (principle 9).
+///
+/// So it is asked for when the question is "what did it actually read", which is a question with
+/// a wall behind it: PPSA03416 performed one file read of zero bytes in a whole run, and only the
+/// paths it *failed* to open were visible (D578).
+pub const TRACE_OPENS: Var = Var {
+    name: "ORBISTOUN_TRACE_OPENS",
+    kind: Kind::Setting,
+    summary: "record every path a guest opens successfully and list them at the end - off by default, because the failures are the rare case and the successes are not",
+    example: "1",
+    read_by: "orbistoun-fs",
+    effect: Effect::Observes,
+};
+
+/// Which clock a guest reads.
+///
+/// **The default repeats, because a measurement that cannot be repeated is not one** (D181,
+/// D238). D256 declined to pin the clock on the grounds that a pinned one stops any title that
+/// waits for time to pass, and was right - so the default is not pinned, it *advances by a
+/// fixed step per reading*, which repeats and still moves (D582).
+///
+/// `host` restores the wall clock, for when the question is how long something really took.
+pub const CLOCK: Var = Var {
+    name: "ORBISTOUN_CLOCK",
+    kind: Kind::Setting,
+    summary: "which clock the guest reads - `logical` (default) advances a fixed step per reading, so two runs agree; `host` reads real time, which no two runs do",
+    example: "host",
+    read_by: "orbistoun-hle",
+    effect: Effect::Observes,
+};
+
+/// The run's opening calls, in order, with the address each was made from.
+///
+/// **The head of the sequence, where the trace keeps only the tail.** The tail exists for the
+/// fault - what was called just before it died. The head answers a different question that has
+/// come up repeatedly and had no record: *what did two runs do differently before they diverged?*
+/// PPSA03416's whole import drift is one branch between call 219 and call 226 (D602), and
+/// nothing could say what those calls were (D603).
+pub const TRACE_CALLS: Var = Var {
+    name: "ORBISTOUN_TRACE_CALLS",
+    kind: Kind::Setting,
+    summary: "list the run's opening calls in order, with the address each was made from - the head of the sequence, where the trace keeps the tail",
+    example: "1",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
+/// Every mapping a guest was given, in the order it was given them.
+///
+/// The same asymmetry [`TRACE_OPENS`] closes for the filesystem: a run reports the reservations
+/// that *failed* and nothing about the ones that succeeded, so a pointer into guest memory
+/// cannot be traced back to the call that produced it.
+///
+/// It is also what a determinism question needs. The arena is bump-allocated, so an address is a
+/// function of everything placed before it - two runs whose addresses differ can be seen to
+/// differ and not where, unless the sequence is recorded (D581).
+/// Every string the guest rendered with a format function, in order.
+///
+/// **What a title says about itself just before it stops.** A guest usually explains why it is
+/// giving up, and most of that explanation never reaches a stream: it is formatted into a buffer
+/// the guest hands to its own logger, or to a service nothing implements. Rendered here and seen
+/// nowhere (D590).
+pub const TRACE_FORMAT: Var = Var {
+    name: "ORBISTOUN_TRACE_FORMAT",
+    kind: Kind::Setting,
+    summary: "record every string the guest formats and list them at the end - off by default, because a title formats constantly",
+    example: "1",
+    read_by: "orbistoun-libc",
+    effect: Effect::Observes,
+};
+
+/// Which arguments of the asynchronous path's resolve call take the identifier and the size.
+///
+/// Two digits: the argument that receives the identifier, then the one that receives the size.
+/// The index says what the answers are and nothing says where they go, so the assignment is
+/// named by a run and graded by the guest - six permutations, one boot each (D592).
+pub const APR_ANSWER: Var = Var {
+    name: "ORBISTOUN_APR_ANSWER",
+    kind: Kind::Diagnostic,
+    summary: "which arguments of the asynchronous path's resolve call take the identifier and the size, as two digits - the index says what the answers are and nothing says where they go",
+    example: "23",
+    read_by: "orbistoun-kernel",
+    effect: Effect::Intervenes,
+};
+
+/// Deliver the file the asynchronous file path resolved, into the buffer its command header
+/// names.
+///
+/// **An experiment, and it intervenes.** Nothing establishes that the buffer means what this
+/// assumes: the guest submits a header claiming one command of twenty bytes over storage that is
+/// entirely zero, having never called the library function that would put a command there
+/// (D587). Reading the resolved file in anyway is a guess, and the guest is the only thing that
+/// can grade it - so a verdict under this carries a caveat, which is what `Intervenes` buys.
+pub const APR_DELIVER: Var = Var {
+    name: "ORBISTOUN_APR_DELIVER",
+    kind: Kind::Diagnostic,
+    summary: "read the file the asynchronous file path resolved into the buffer its command header names - does the guest accept bytes it was not told how to ask for?",
+    example: "1",
+    read_by: "orbistoun-kernel",
+    effect: Effect::Intervenes,
+};
+
+/// Every mapping a guest was given, in the order it was given them.
+///
+/// The same asymmetry [`TRACE_OPENS`] closes for the filesystem: a run reports the reservations
+/// that *failed* and nothing about the ones that succeeded, so a pointer into guest memory
+/// cannot be traced back to the call that produced it.
+///
+/// It is also what a determinism question needs. The arena is bump-allocated, so an address is a
+/// function of everything placed before it - two runs whose addresses differ can be seen to
+/// differ and not where, unless the sequence is recorded (D581).
+pub const TRACE_MAPS: Var = Var {
+    name: "ORBISTOUN_TRACE_MAPS",
+    kind: Kind::Setting,
+    summary: "record every mapping the guest is given, in order, and list them at the end - off by default, because a title maps for as long as it runs",
+    example: "1",
+    read_by: "orbistoun-kernel",
     effect: Effect::Observes,
 };
 
@@ -495,7 +675,7 @@ pub const POKE: Var = Var {
 pub const WATCH: Var = Var {
     name: "ORBISTOUN_WATCH",
     kind: Kind::Diagnostic,
-    summary: "snapshot <addr>[+len] before the guest runs and report every word it changed",
+    summary: "snapshot <addr>[+len] and report what changed - or, for a region the guest maps while it runs, what it holds when the guest stops",
     example: "0x4000019e9c00+0x80",
     read_by: "orbistoun-worker",
     effect: Effect::Observes,
@@ -540,6 +720,8 @@ pub const REGISTRY: &[Var] = &[
     COMMIT,
     LLM_API_KEY,
     DUMP,
+    DLSYM_STUBS,
+    FLIP_TO_ALL,
     STACK_FILL,
     DIRECT_FILL,
     BSS_FILL,
@@ -549,6 +731,13 @@ pub const REGISTRY: &[Var] = &[
     DESCRIBE,
     RESOLVE,
     STAT_LAYOUT,
+    TRACE_OPENS,
+    TRACE_MAPS,
+    TRACE_CALLS,
+    APR_DELIVER,
+    APR_ANSWER,
+    TRACE_FORMAT,
+    CLOCK,
     RUNTIME_GLOBALS,
     HEAP_FILL,
     HEAP_BASE,
@@ -612,6 +801,8 @@ mod tests {
         super::COMMIT,
         super::LLM_API_KEY,
         super::DUMP,
+        super::DLSYM_STUBS,
+        super::FLIP_TO_ALL,
         super::STACK_FILL,
         super::DIRECT_FILL,
         super::BSS_FILL,
@@ -621,6 +812,13 @@ mod tests {
         super::DESCRIBE,
         super::RESOLVE,
         super::STAT_LAYOUT,
+        super::TRACE_OPENS,
+        super::TRACE_MAPS,
+        super::TRACE_CALLS,
+        super::APR_DELIVER,
+        super::APR_ANSWER,
+        super::TRACE_FORMAT,
+        super::CLOCK,
         super::RUNTIME_GLOBALS,
         super::HEAP_FILL,
         super::HEAP_BASE,

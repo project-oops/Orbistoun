@@ -1,3 +1,9 @@
+[title]
+id = "PPSA04263"
+name = "Grand Theft Auto V"
+content_version = "01.010.002"
+master_version = "01.00"
+
 [compat]
 
 [settings]
@@ -6,13 +12,13 @@
 reach = "entered"
 outcome = "image+0x196b91a"
 imports = 70
-calls = 28341
+calls = 30261
 standing = 100
 default_return = "unimplemented"
 unanswered = 7
-limit_seconds = 12
+limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-04"
+measured_on = "2026-09-07"
 
 [experiment]
 reach = "entered"

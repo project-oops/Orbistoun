@@ -29,6 +29,16 @@ pub enum StopReason {
     Aborted,
     /// `exit` - an ordinary, deliberate end.
     Exited,
+    /// A signal was raised on a thread and nothing was installed to handle it.
+    ///
+    /// **A third way to stop, and the two above could only misreport it.** Measured: a
+    /// `sceKernelRaiseException` for a signal with no handler does not return - the process takes
+    /// the signal and dies (obSCEne `030-thread/exception-handler`, sweep 20260909-151910).
+    /// Reporting that as `Aborted` would name a call the guest never made, and answering a
+    /// placeholder instead would let it run on past the point where hardware ended it (D650).
+    ///
+    /// The `code` is the signal number.
+    Signalled,
 }
 
 impl StopReason {
@@ -37,6 +47,7 @@ impl StopReason {
         match self {
             Self::Aborted => "the guest called abort",
             Self::Exited => "the guest called exit",
+            Self::Signalled => "the guest raised a signal nothing was installed to handle",
         }
     }
 }

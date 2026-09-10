@@ -134,9 +134,15 @@ pub fn fresh_handle() -> FileHandle {
 }
 
 /// Hands out handles: the address of a fresh zeroed block, never freed.
+///
+/// **From the one region every guest-visible handle comes from**, so a `FILE *` is the same
+/// address in every run. This was the ninth `Box::leak` handing the guest a host heap address,
+/// and it survived the eight D584 fixed because that search was scoped to `orbistoun-kernel` -
+/// which is also the crate the shared allocator was in, and out of reach from here. Moving it
+/// down to `orbistoun-mem`, where guest-visible memory belongs, put it in reach of both
+/// subsystems without either reaching sideways (D601).
 fn next_handle() -> FileHandle {
-    let block: Box<[u64; CONTROL_BLOCK_WORDS]> = Box::new([0; CONTROL_BLOCK_WORDS]);
-    std::ptr::from_mut(Box::leak(block)) as usize as u64
+    orbistoun_mem::blocks::block(CONTROL_BLOCK_WORDS)
 }
 
 /// Opens a guest path for reading.
@@ -149,6 +155,7 @@ fn next_handle() -> FileHandle {
 pub fn open(guest_path: &str) -> Option<FileHandle> {
     let host = crate::mount::resolve(guest_path)?;
     let file = std::fs::File::open(host).ok()?;
+    crate::opened::note(guest_path);
     let handle = next_handle();
     table().lock().ok()?.insert(
         handle,
@@ -224,6 +231,13 @@ pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
         (read, was_at_end)
     })?;
     let (read, was_at_end) = outcome;
+    // **Which file, and how much it asked for.** `read_stats` counts reads and bytes, which says
+    // a run read almost nothing and cannot say which read of which file returned what - and for
+    // a title that performs one read of zero bytes, those are the only two things worth knowing
+    // (D595).
+    if let Some(path) = path_of(handle) {
+        crate::opened::note_read(&path, into.len(), read);
+    }
     if let Ok(mut stats) = stats().lock() {
         stats.reads += 1;
         stats.bytes += read as u64;
@@ -248,6 +262,16 @@ pub enum From {
 }
 
 impl From {
+    /// How it is written in a record a person reads.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Current => "here",
+            Self::End => "end",
+        }
+    }
+
     /// The POSIX `SEEK_*` value, which is what a guest passes.
     ///
     /// Published values, and the same on every System V platform: set 0, current 1, end 2.
@@ -271,6 +295,10 @@ pub fn seek(handle: FileHandle, from: From, offset: i64) -> Option<u64> {
             From::End => std::io::SeekFrom::End(offset),
         };
         let at = open.file.seek(to).unwrap_or(0);
+        // **A seek is how a guest asks how big a file is.** Seeking to the end and reading the
+        // position is the oldest way to do it, and a title that then reports the file as
+        // corrupt has been told a size by this call and nothing else records what (D596).
+        crate::opened::note_seek(open.path.as_str(), from.label(), offset, at);
         // Seeking clears the end marker, which is what makes the read-to-end then
         // rewind then read-again pattern work.
         open.at_end = false;

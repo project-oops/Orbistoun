@@ -31,7 +31,7 @@ Three choices worth recording:
 
 Recorded `assumed` on the field's *shape* (the `SoftwareVersion` struct, the refuse-when-unset
 choice) - the *value* is `measured` under D420. End-to-end: obSCEne's `130-layout` dump under
-`--profile ps5-cex-12.40` now emits `13.090.001` / `0x1309_0001` byte-for-byte, `pass 0x28`. Core,
+`--profile prospero-cex-12.40` now emits `13.090.001` / `0x1309_0001` byte-for-byte, `pass 0x28`. Core,
 kernel and shell tests pass; clippy clean. The TOML sub-table header had to quote the dotted profile
-name (`["ps5-cex-12.40".software-version]`) or the dots parse as key separators.
+name (`["prospero-cex-12.40".software-version]`) or the dots parse as key separators.
 

@@ -1,18 +1,24 @@
+[title]
+id = "PPSA25872"
+name = "Terminator 2D: NO FATE"
+content_version = "01.002.000"
+master_version = "01.00"
+
 [compat]
 
 [settings]
 
 [status]
 reach = "entered"
-outcome = "ran to the time limit"
-imports = 141
-calls = 20000000
-standing = 2
+outcome = "image+0x17554a3"
+imports = 151
+calls = 321973
+standing = 100
 default_return = "unimplemented"
-unanswered = 9
-limit_seconds = 12
+unanswered = 6
+limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-07"
+measured_on = "2026-09-09"
 
 [experiment]
 reach = "entered"

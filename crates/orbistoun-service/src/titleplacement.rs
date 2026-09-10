@@ -507,3 +507,95 @@ mod tests {
         assert_eq!(resolved.mismatches[0].found, Kind::Object);
     }
 }
+
+/// Why one import did not bind to a module the title ships.
+///
+/// **A count of failures is not a reason for any of them.** Six imports of PPSA25872 are answered
+/// by modules it ships, all six landed on placeholders, and the run said nothing at all - not how
+/// many resolved, not how many were kept, not which step declined. Working it out took reading
+/// four functions across three crates, and the answer was in none of them until somebody ran it
+/// (D640).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unbound {
+    /// The import names a library id the module's own table does not list.
+    NoLibraryName,
+    /// The library is named, and no module the title ships exports under that name.
+    NoSuchLibrary,
+    /// The library is placed, and it does not export this hash.
+    NotExported,
+    /// More than one module answered a name that carries no attribution.
+    Ambiguous,
+    /// The hash matched and the kind did not - a function wanted where an object is exported,
+    /// or the reverse. Binding it anyway would hand the guest data where it will call, or a
+    /// function where it will read.
+    KindMismatch,
+    /// It resolved, and orbistoun implements it - so this project answers instead.
+    KeptByOrbistoun,
+}
+
+impl Unbound {
+    /// One line a reader can act on.
+    #[must_use]
+    pub const fn why(self) -> &'static str {
+        match self {
+            Self::NoLibraryName => {
+                "the import carries a library id the module's own library table does not list"
+            }
+            Self::NoSuchLibrary => "no module this title ships exports under that library name",
+            Self::NotExported => "that module is placed and does not export this hash",
+            Self::Ambiguous => "more than one module answered a name that carries no attribution",
+            Self::KindMismatch => {
+                "that module exports the hash with a different kind - one wants a function and the other has an object, or the reverse"
+            }
+            Self::KeptByOrbistoun => "orbistoun implements it, so this project answers instead",
+        }
+    }
+}
+
+/// Every import that did not bind to a title module, and why not.
+#[derive(Debug, Clone)]
+pub struct BindingAccount {
+    /// How many imports the executable declares.
+    pub imports: usize,
+    /// How many were bound to a module the title ships.
+    pub bound: usize,
+    /// The rest, by reason, with an example for each.
+    pub unbound: Vec<(Unbound, String, usize)>,
+    /// Which of the title's modules answered, and how many each.
+    ///
+    /// **The half a count cannot give.** "Sixty-four bound" and "sixty-four bound, none of them
+    /// from the module whose function is called nineteen million times" are different
+    /// statements, and only the second is a diagnosis (D640).
+    pub by_library: Vec<(String, usize)>,
+}
+
+impl BindingAccount {
+    /// The lines a run prints about it.
+    ///
+    /// **Printed even when everything bound**, because "six of six bound" and silence are
+    /// different statements and only one of them is evidence.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![format!(
+            "orbistoun: {} of {} import(s) bound to a module this title ships",
+            self.bound, self.imports
+        )];
+        if self.by_library.is_empty() {
+            out.push("orbistoun:   none of them, so every call goes to a stub".to_owned());
+        } else {
+            let each: Vec<String> = self
+                .by_library
+                .iter()
+                .map(|(library, count)| format!("{library} {count}"))
+                .collect();
+            out.push(format!("orbistoun:   from {}", each.join(", ")));
+        }
+        for (why, library, count) in &self.unbound {
+            out.push(format!(
+                "orbistoun:   {count} unbound from {library} - {}",
+                why.why()
+            ));
+        }
+        out
+    }
+}

@@ -54,19 +54,106 @@ fn started() -> Instant {
     *START.get_or_init(Instant::now)
 }
 
-/// Seconds and nanoseconds since the epoch, as the host knows them.
+/// Where the wall clock starts when it is not the host's.
+///
+/// A fixed instant, so a guest that formats a date gets the same string every run. `2026-01-01
+/// 00:00:00 UTC`, chosen for being obviously synthetic rather than plausibly today - a
+/// timestamp a reader might mistake for a real one is the failure principle 3 names.
+const FIXED_EPOCH_SECONDS: u64 = 1_767_225_600;
+
+/// How far the logical clock moves each time a guest looks at it.
+///
+/// # Why it moves at all, and why by this much
+///
+/// D256 refused to pin the clock, and was right about the reason: *"pinning it would stop any
+/// title that waits for time to pass"*. A clock that repeats does not have to be a clock that
+/// stands still - one that advances by a fixed step per observation does both, and that is the
+/// option D256 did not have in front of it.
+///
+/// One microsecond because it is small enough that a guest timing its own work reads a
+/// plausible number, and large enough that a spin-wait on a millisecond terminates in a
+/// thousand reads rather than a million. A guest that sleeps advances it by what it asked for,
+/// through [`advance`], so waiting for real durations still works.
+const STEP_NANOS: u128 = 1_000;
+
+/// The logical clock, in nanoseconds since the guest started.
+static LOGICAL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the guest reads a repeating clock rather than the host's.
+///
+/// Cached, because this is read on every clock call a guest makes and `Var::get` allocates.
+fn logical() -> bool {
+    static LOGICAL: OnceLock<bool> = OnceLock::new();
+    // Anything but an explicit `host` is the repeating clock: the default is the one that
+    // makes a run comparable, because a measurement that cannot be repeated is not one
+    // (D181, D238, D582).
+    *LOGICAL.get_or_init(|| orbistoun_env::CLOCK.get().as_deref() != Some("host"))
+}
+
+/// Nanoseconds since the guest started, from whichever clock this run reads.
+///
+/// **One source, so two names cannot disagree.** The platform's `GetProcessTime`, its tick
+/// counter and POSIX `clock_gettime` are the same span in different units, and a guest
+/// converting between them lands somewhere else if they are read from different clocks.
+#[must_use]
+pub fn since_start_nanos() -> u128 {
+    if logical() {
+        let before = LOGICAL_NANOS.fetch_add(
+            u64::try_from(STEP_NANOS).unwrap_or(1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        return u128::from(before);
+    }
+    started().elapsed().as_nanos()
+}
+
+/// Moves the logical clock forward by `nanos`, for a guest that asked to wait.
+///
+/// **A sleep is time passing, and the clock has to agree.** A guest that sleeps ten
+/// milliseconds and then reads a clock that moved a microsecond concludes the sleep did not
+/// happen - which is the failure D275 records for a tick counter that did not advance at all.
+/// Does nothing under the host clock, where the sleep moved it already.
+pub fn advance(nanos: u128) {
+    if !logical() {
+        return;
+    }
+    LOGICAL_NANOS.fetch_add(
+        u64::try_from(nanos).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Whether this run's clock repeats, for the report to say so.
+#[must_use]
+pub fn repeats() -> bool {
+    logical()
+}
+
+/// Seconds and nanoseconds since the epoch, as this run's clock knows them.
 #[must_use]
 pub fn wall_clock() -> (u64, u64) {
+    if logical() {
+        let nanos = since_start_nanos();
+        let seconds = u64::try_from(nanos / u128::from(NANOS_PER_SECOND)).unwrap_or(0);
+        let rest = u64::try_from(nanos % u128::from(NANOS_PER_SECOND)).unwrap_or(0);
+        return (FIXED_EPOCH_SECONDS.saturating_add(seconds), rest);
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or((0, 0), |d| (d.as_secs(), u64::from(d.subsec_nanos())))
 }
 
+/// Nanoseconds in a second, named once because three conversions here need it.
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
 /// Seconds and nanoseconds since this process started.
 #[must_use]
 pub fn since_start() -> (u64, u64) {
-    let elapsed = started().elapsed();
-    (elapsed.as_secs(), u64::from(elapsed.subsec_nanos()))
+    let nanos = since_start_nanos();
+    (
+        u64::try_from(nanos / u128::from(NANOS_PER_SECOND)).unwrap_or(u64::MAX),
+        u64::try_from(nanos % u128::from(NANOS_PER_SECOND)).unwrap_or(0),
+    )
 }
 
 /// What the clock `asked` names reads, or [`None`] for one this cannot answer.
@@ -132,5 +219,60 @@ mod tests {
                  guest measuring CPU time and receiving wall time cannot tell"
             );
         }
+    }
+
+    /// **A clock that repeats must still move**, or every spin-wait becomes an infinite loop.
+    ///
+    /// This is the whole of D256's objection to pinning the clock, and the property that makes
+    /// the logical one an answer to it rather than an override of it. Watched failing: with
+    /// `STEP_NANOS` set to zero, two readings are equal and this rejects it.
+    #[test]
+    fn the_clock_advances_on_every_reading() {
+        let first = super::since_start_nanos();
+        let second = super::since_start_nanos();
+        assert!(
+            second > first,
+            "two readings gave the same time, so a guest waiting for time to pass never stops"
+        );
+    }
+
+    /// A sleep moves the clock by what was asked for.
+    ///
+    /// A guest that sleeps ten milliseconds and reads a clock that moved a microsecond concludes
+    /// the sleep did not happen - the failure D275 records for a counter that never advanced,
+    /// arriving by a different route.
+    #[test]
+    fn a_sleep_moves_the_clock_by_what_it_asked_for() {
+        if !super::repeats() {
+            // Under the host clock the sleep moved it already and `advance` is a no-op, which
+            // is the documented behaviour rather than something to assert against.
+            return;
+        }
+        let before = super::since_start_nanos();
+        super::advance(10_000_000);
+        let after = super::since_start_nanos();
+        assert!(
+            after >= before + 10_000_000,
+            "a ten-millisecond sleep did not move the clock ten milliseconds"
+        );
+    }
+
+    /// The wall clock starts from a fixed instant, so a formatted date repeats.
+    #[test]
+    fn the_wall_clock_starts_somewhere_obviously_synthetic() {
+        if !super::repeats() {
+            return;
+        }
+        let (seconds, _) = super::wall_clock();
+        assert!(
+            seconds >= super::FIXED_EPOCH_SECONDS,
+            "the wall clock ran before its own epoch"
+        );
+        // Two years of guest time would be a run nobody has had; the point is that this is
+        // nowhere near a real 'now', so a reader cannot mistake it for one.
+        assert!(
+            seconds < super::FIXED_EPOCH_SECONDS + 63_072_000,
+            "the wall clock is far enough from its epoch to look like a real timestamp"
+        );
     }
 }

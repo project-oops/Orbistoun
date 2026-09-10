@@ -1,0 +1,27 @@
+library = "libkernel_unity"
+
+[[function]]
+name = "sceKernelInstallExceptionHandler"
+arity = 2
+purpose = "Registers a guest function to run when a signal is raised on a thread. Called as (signum, handler)."
+edge_cases = [
+    "**Called as (0x1e, 0x480001700210) - signal 30 and an address inside the title's own modules.** The handler's first instructions are ff 05 02 be 00 00 (inc dword [rip+0xbe02], a counter) then 83 ff 1e (cmp edi, 0x1e), so the handler itself checks the signal number it is passed against 30. That is the arity and the argument order confirmed from the guest's own code rather than assumed.",
+    "**Paired with sceKernelRaiseException, and the pair is PPSA25872's wall.** The title installs this handler, raises signal 30 on its own main thread, and stops. Answering the install without ever running the handler is the shape of failure principle 3 names: the registration looks accepted and the guest waits on something that will never happen.",
+    "**NOT implemented.** Implementing it means storing the handler per signal and having sceKernelRaiseException call it on the named thread with the signal number in edi - which is running guest code on a thread orbistoun does not own, so it is a subsystem rather than a stub (D645).",
+]
+known_by = "guest-observed"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-09"
+
+[[function]]
+name = "sceKernelRaiseException"
+arity = 2
+purpose = "Raises a signal on a guest thread, so the handler installed for it runs there. Called as (thread, signum)."
+edge_cases = [
+    "**Called as (0x5e2d00000000, 0x1e) - the main thread's handle and signal 30.** 30 is SIGUSR1, harvested in abi-constants.toml. arg2 onward are consecutive stack locals and host addresses, which is leftover registers rather than arguments.",
+    "**This is the wall PPSA25872 stops at, and the trace ends on it.** The title makes 310,987 calls at 100% standing, calls sceKernelInstallExceptionHandler(0x1e, handler), calls this once, and then makes no further call at all - identical totals at a 20-second limit and a 90-second one, so it is blocked rather than busy (D645).",
+    "**NOT implemented, and a placeholder is why the guest stops.** On the console this transfers control to the installed handler on the named thread; here it answers 0x7fff0001 and nothing runs, so whatever waits for the handler to acknowledge waits forever. An implementation has to run guest code on another thread, which is why it is recorded rather than attempted in passing.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-09"

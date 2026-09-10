@@ -621,7 +621,7 @@ impl<'a> Container<'a> {
     ///
     /// # Errors
     ///
-    /// As [`Self::symbol_tables`], plus a symbol count too large to be real.
+    /// As `symbol_tables`, plus a symbol count too large to be real.
     pub fn raw_imports(
         &self,
         whole: &[u8],
@@ -639,7 +639,7 @@ impl<'a> Container<'a> {
     ///
     /// # Errors
     ///
-    /// As [`Self::symbol_tables`], plus a symbol count too large to be real.
+    /// As `symbol_tables`, plus a symbol count too large to be real.
     pub fn raw_exports(
         &self,
         whole: &[u8],
@@ -791,6 +791,174 @@ impl<'a> Container<'a> {
     }
 }
 
+/// Raw ELF64 section header.
+///
+/// # Why this exists when the loader never reads one
+///
+/// Loading a module needs program headers and nothing else - the section table is a link-time
+/// artefact and a stripped binary has none. Every commercial title here is stripped, so this
+/// parser ignored sections entirely for its whole life.
+///
+/// **The open-toolchain guests are not stripped.** obSCEne's payload carries twenty-four
+/// sections including `.symtab`, and it is the guest this project runs most and understands
+/// least at a fault: a report saying `image+0x28a163` names the byte and not the function,
+/// while the answer is sitting in the file (D628).
+///
+/// Nothing here is on the load path. It is read once, before entry, purely so a report can
+/// speak.
+#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+pub struct Elf64SectionHeader {
+    /// Offset into the section-name string table.
+    pub name: little_endian::U32,
+    /// Section type - [`SHT_SYMTAB`] is the one this reads.
+    pub sh_type: little_endian::U32,
+    /// Section attribute flags.
+    pub flags: little_endian::U64,
+    /// Guest virtual address, where the section is loaded.
+    pub addr: little_endian::U64,
+    /// File offset of the section contents.
+    pub offset: little_endian::U64,
+    /// Size of the section in bytes.
+    pub size: little_endian::U64,
+    /// Section index this one links to - for a symbol table, its string table.
+    pub link: little_endian::U32,
+    /// Extra information, section-type dependent.
+    pub info: little_endian::U32,
+    /// Required alignment.
+    pub addralign: little_endian::U64,
+    /// Size of one entry, for sections that hold a table.
+    pub entsize: little_endian::U64,
+}
+
+/// A static symbol table, `SHT_SYMTAB`. Distinct from `SHT_DYNSYM`, which the dynamic
+/// segment already reaches and which carries only what a module exports.
+pub const SHT_SYMTAB: u32 = 2;
+
+/// Raw ELF64 symbol table entry.
+#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+pub struct Elf64Symbol {
+    /// Offset into the linked string table.
+    pub name: little_endian::U32,
+    /// Type and binding, packed - see [`STT_FUNC`].
+    pub info: u8,
+    /// Visibility.
+    pub other: u8,
+    /// Section index, or a special value.
+    pub shndx: little_endian::U16,
+    /// The address, for a defined symbol.
+    pub value: little_endian::U64,
+    /// The extent, where the producer recorded one.
+    pub size: little_endian::U64,
+}
+
+/// The symbol type meaning "a function", in the low nibble of `info`.
+pub const STT_FUNC: u8 = 2;
+
+/// One function a guest module names in its own symbol table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSymbol {
+    /// The name as the producer spelled it, unmangled and not hashed.
+    pub name: String,
+    /// Its address, as the module was linked - so an offset from the image base for a
+    /// position-independent one, which is every guest here.
+    pub value: u64,
+    /// Its extent, or zero where the producer recorded none.
+    pub size: u64,
+}
+
+impl Container<'_> {
+    /// Every function named in this module's own `SHT_SYMTAB`, if it has one.
+    ///
+    /// An empty list is the ordinary answer for a stripped module and is **not** an error: a
+    /// commercial title has no section table at all, and refusing one would make this
+    /// unusable for the guests it is meant to help alongside.
+    ///
+    /// Only `STT_FUNC` with a non-zero address, because the purpose is naming a code address
+    /// and a data symbol at the same value would shadow the function that is actually there.
+    ///
+    /// # Errors
+    ///
+    /// Never - a malformed or absent section table yields an empty list, which is what
+    /// "this module cannot tell me" means. Kept in the `Result` shape of its neighbours so
+    /// that a future reader which *can* fail does not change every call site.
+    pub fn function_symbols(&self, whole: &[u8]) -> Result<Vec<StaticSymbol>, ElfError> {
+        let Some((symbols, strings)) = self.symtab_bytes(whole) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for entry in symbols.chunks_exact(size_of::<Elf64Symbol>()) {
+            let Ok(symbol) = Elf64Symbol::read_from_bytes(entry) else {
+                continue;
+            };
+            // The low nibble is the type; the high nibble is the binding, which does not
+            // matter here - a static function and a global one both name an address.
+            if symbol.info & 0x0f != STT_FUNC || symbol.value.get() == 0 {
+                continue;
+            }
+            let Some(name) = string_at(strings, symbol.name.get() as usize) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            out.push(StaticSymbol {
+                name,
+                value: symbol.value.get(),
+                size: symbol.size.get(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The bytes of the first `SHT_SYMTAB` and of the string table it links to.
+    ///
+    /// [`None`] whenever anything does not add up - no section table, a header that does not
+    /// fit, a link out of range, a table running past the end of the file. Hostile bytes reach
+    /// this the same way they reach every other parser here, so every index is checked and
+    /// nothing is assumed to be consistent with anything else.
+    fn symtab_bytes<'bytes>(&self, whole: &'bytes [u8]) -> Option<(&'bytes [u8], &'bytes [u8])> {
+        let entry = usize::from(self.header.shentsize.get());
+        if entry < size_of::<Elf64SectionHeader>() {
+            return None;
+        }
+        let count = usize::from(self.header.shnum.get());
+        let start = usize::try_from(self.header.shoff.get()).ok()?;
+        let table = whole.get(start..start.checked_add(count.checked_mul(entry)?)?)?;
+
+        let read = |index: usize| -> Option<Elf64SectionHeader> {
+            let at = index.checked_mul(entry)?;
+            let bytes = table.get(at..at + size_of::<Elf64SectionHeader>())?;
+            Elf64SectionHeader::read_from_bytes(bytes).ok()
+        };
+        let contents = |header: &Elf64SectionHeader| -> Option<&'bytes [u8]> {
+            let at = usize::try_from(header.offset.get()).ok()?;
+            let len = usize::try_from(header.size.get()).ok()?;
+            whole.get(at..at.checked_add(len)?)
+        };
+
+        for index in 0..count {
+            let header = read(index)?;
+            if header.sh_type.get() != SHT_SYMTAB {
+                continue;
+            }
+            // **The linked string table, not `.strtab` by name.** A section's name is itself a
+            // string-table lookup, so trusting the name would mean trusting the very table
+            // being located. `sh_link` says it directly.
+            let strings = read(usize::try_from(header.link.get()).ok()?)?;
+            return Some((contents(&header)?, contents(&strings)?));
+        }
+        None
+    }
+}
+
+/// A NUL-terminated name at `offset`, or [`None`] when the offset is outside the table.
+fn string_at(strings: &[u8], offset: usize) -> Option<String> {
+    let rest = strings.get(offset..)?;
+    let end = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+}
 #[cfg(test)]
 mod tests {
     use super::{Container, ElfError};

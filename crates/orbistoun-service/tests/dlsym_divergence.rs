@@ -104,28 +104,58 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
          different reason entirely, which is why claiming the measurement through this path \
          would be green and meaningless"
     );
-
-    // (3) The divergence. One entry stands in for the table a load would install.
+    // (3) The divergence, as it stands now. One entry stands in for the table a load installs.
     let mut named = std::collections::BTreeMap::new();
     named.insert("memcpy".to_owned(), PRETEND_ADDRESS);
     orbistoun_thunk::install_name_thunks(named);
 
-    let answer = call(
+    // **Before a libkernel list is published, nothing is refused.** "Nobody said which module
+    // exports this" must not become "this module does not export it", so the narrowing below
+    // is inert until somebody publishes an answer - and this is the state a run gets if the
+    // service never does (D629).
+    let unnarrowed = call(
         "sceKernelDlsym",
         [0x2001, name.as_ptr() as u64, out_at, 0, 0, 0],
     );
     assert_eq!(
-        answer, 0,
-        "orbistoun resolves from a flat table without consulting the handle, so it succeeds \
-         here; if this is no longer 0 the divergence has changed and the OUTSTANDING entry \
-         for this measurement needs rewriting"
+        unnarrowed, 0,
+        "with no list published, the flat table answers as it always did"
+    );
+
+    // **With the list published, the handle narrows the answer to the console's.** libkernel
+    // does not export `memcpy`; this now says so.
+    orbistoun_thunk::install_libkernel_names(
+        ["sceKernelDlsym".to_owned(), "scePthreadCreate".to_owned()]
+            .into_iter()
+            .collect(),
+    );
+    out = 0;
+    let narrowed = call(
+        "sceKernelDlsym",
+        [0x2001, name.as_ptr() as u64, out_at, 0, 0, 0],
     );
     assert_eq!(
-        out, PRETEND_ADDRESS,
-        "and it writes an address into the guest's out-parameter, which the console left alone"
+        narrowed as u32, console as u32,
+        "libkernel's handle and a name libkernel does not declare now answers what the console \
+         answered, which is the whole of this measurement"
     );
-    assert_ne!(
-        answer as u32, console as u32,
-        "this is the disagreement being recorded: success against the console's ESRCH"
+    assert_eq!(
+        out, 0,
+        "and writes nothing, as the console did - a refusal that filled the out-parameter would \
+         leave a caller acting on an address it was told it did not get"
+    );
+
+    // **A name libkernel *does* declare still resolves through the same handle**, which is the
+    // half that makes this a narrowing rather than a refusal. Written because a guard that
+    // refused everything would also pass the assertion above.
+    let keeper = std::ffi::CString::new("scePthreadCreate").expect("no interior NUL");
+    let still = call(
+        "sceKernelDlsym",
+        [0x2001, keeper.as_ptr() as u64, out_at, 0, 0, 0],
+    );
+    assert_eq!(
+        still as u32, 0x7fff_0001,
+        "it is declared in libkernel, so the narrowing lets it through to the ordinary answer - \
+         which here is 'nothing implements it', because this test installed no thunk for it"
     );
 }

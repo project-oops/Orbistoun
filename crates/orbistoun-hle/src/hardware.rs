@@ -55,7 +55,7 @@ impl Measurement {
     /// The value as a number, when it is written as one.
     #[must_use]
     pub fn value(&self) -> Option<u64> {
-        parse_hex(&self.observation)
+        parse_number(&self.observation)
     }
 
     /// Every value any run reported for this, as numbers.
@@ -71,18 +71,30 @@ impl Measurement {
     pub fn values(&self) -> Vec<u64> {
         std::iter::once(self.observation.as_str())
             .chain(self.disagreed.iter().map(String::as_str))
-            .filter_map(parse_hex)
+            .filter_map(parse_number)
             .collect()
     }
 }
 
-/// Reads the leading `0x` number out of a field.
+/// Reads the leading number out of a field, hexadecimal when it says so and decimal otherwise.
 ///
 /// A `disagreed` entry carries its provenance after the value - `0x5f259b8e in ps5-full.txt`
 /// - so this takes the first whitespace-delimited token rather than the whole string.
-fn parse_hex(text: &str) -> Option<u64> {
+///
+/// # Why decimal is read at all
+///
+/// **It required the prefix, and the probe does not always write one.** `000-hw/sw-version`
+/// records `0` and `000-hw/tsc-frequency` records `1596300187`, so every measurement from
+/// those checks answered `None` - which a caller writing `.expect("a number")` finds
+/// immediately and a caller writing `.unwrap_or(0)` never finds at all. The second is the
+/// dangerous shape and is the reason this is a parse rather than a guess: `0x10` is sixteen,
+/// `10` is ten, and a field that is a word is still `None` (D611).
+fn parse_number(text: &str) -> Option<u64> {
     let first = text.split_whitespace().next()?;
-    u64::from_str_radix(first.strip_prefix("0x")?, 16).ok()
+    first.strip_prefix("0x").map_or_else(
+        || first.parse().ok(),
+        |hex| u64::from_str_radix(hex, 16).ok(),
+    )
 }
 
 /// Every measurement a set of runs produced.
@@ -148,6 +160,36 @@ impl Measurements {
 #[cfg(test)]
 mod tests {
     use super::Measurements;
+
+    /// A value written without a `0x` is decimal, and a value that is a word is neither.
+    ///
+    /// **Asserting on the refusal and on the base.** Reading `10` as sixteen would be a wrong
+    /// measurement that looks exactly like a right one, and reading a word as zero would be
+    /// worse - so the failing cases are what this pins (D611).
+    #[test]
+    fn a_measurement_is_read_in_the_base_it_was_written_in() {
+        use super::parse_number;
+
+        assert_eq!(parse_number("0x10"), Some(16), "a prefix means hexadecimal");
+        assert_eq!(
+            parse_number("10"),
+            Some(10),
+            "and its absence means decimal"
+        );
+        assert_eq!(parse_number("0"), Some(0), "including plain zero");
+        assert_eq!(
+            parse_number("1596300187"),
+            Some(1_596_300_187),
+            "the frequency check writes decimal, and dropping it lost the measurement"
+        );
+        assert_eq!(parse_number("FreeBSD"), None, "a word is not a number");
+        assert_eq!(parse_number(""), None, "and nor is nothing");
+        assert_eq!(
+            parse_number("0x5f259b8e in ps5-full.txt"),
+            Some(0x5f25_9b8e),
+            "a disagreement carries its provenance after the value"
+        );
+    }
 
     /// The shipped table parses, so [`Measurements::builtin`] cannot panic in a caller.
     #[test]

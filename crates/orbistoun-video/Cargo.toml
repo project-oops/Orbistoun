@@ -15,4 +15,5 @@ workspace = true
 [dependencies]
 orbistoun-core = { workspace = true }
 orbistoun-hle = { workspace = true }
+orbistoun-env = { workspace = true }
 orbistoun-kernel = { workspace = true }

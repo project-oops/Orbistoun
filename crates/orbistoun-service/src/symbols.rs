@@ -83,7 +83,7 @@ pub(crate) fn modules() -> [ModuleDesc; 42] {
 
 /// Every implementation the subsystem crates provide, by symbol name.
 ///
-/// The counterpart to [`modules`], and kept beside it for the same reason: a function
+/// The counterpart to `modules`, and kept beside it for the same reason: a function
 /// declared in one place and implemented in another drifts apart silently, and the
 /// failure mode is code that looks written and never runs.
 /// The implementation a guest would reach by importing `name`.

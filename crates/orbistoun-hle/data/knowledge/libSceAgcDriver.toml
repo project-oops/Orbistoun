@@ -1,6 +1,24 @@
 library = "libSceAgcDriver"
 
 [[function]]
+name = "sceAgcDriverAddEqEvent"
+arity = 6
+purpose = "Registers a completion event against an event queue, so the driver has somewhere to post when submitted graphics work finishes."
+edge_cases = [
+    "Argument zero is the equeue handle a guest then waits on: PPSA03416 registers 0x5e2d0000ee40 and 0x5e2d0000efe0 here, and its render thread blocks in sceKernelWaitEqueue on the first of them. Nothing implements this, so nothing is ever registered and nothing can ever be posted - which is why that wait never completes (D613).",
+    "The shape mirrors sceVideoOutAddFlipEvent(equeue, handle, udata), which orbistoun does implement by calling sync::register_event_with_udata. What differs is who posts: a flip completes the instant it is accepted because there is no scanout, and no equivalent statement has been established for driver work.",
+    "Two runs of one build disagree on arguments three, four and five: arg3 and arg4 are host addresses that change every run, and arg5 read 0x17/0x20 in one run and 0x80/0x60 in the next. **They are not arguments.** The declaration says six because nothing knew better; the evidence says at most three are real. Argument zero is stable across runs and is the queue - the other two stable values are both zero (D615).",
+    "The two calls name exactly the two queues that have no registrations: UnityFTMFlipQueue (0x5e2d0000ee40, which the render thread then blocks on) and EOP QUEUE (0x5e2d0000efe0). The two queues orbistoun does feed, through sceVideoOutAddFlipEvent, are never waited on.",
+]
+known_by = "assumed"
+assumptions = [
+    "That argument zero is the queue and not a driver handle. It is read from two calls whose value matches a queue the guest created, which is evidence and not a specification.",
+    "That the surplus registers carry nothing. It is measured across two runs of one build, which is this project's own standard for a measurement, and it is not a reading of the interface.",
+]
+found_on = "2026-09-08"
+note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What has to be decided first is what completes driver work in an emulator with no GPU execution - the question D560 answered for flips and nobody has answered for this."
+
+[[function]]
 name = "sceAgcDriverGetDefaultOwner"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"

@@ -1,3 +1,9 @@
+[title]
+id = "PPSA21564"
+name = "ASTRO BOT"
+content_version = "01.007.000"
+master_version = "01.00"
+
 [compat]
 
 [settings]

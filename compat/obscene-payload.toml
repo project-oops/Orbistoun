@@ -1,0 +1,16 @@
+[compat]
+
+[settings]
+
+[status]
+reach = "flipped"
+outcome = "0x5e2d"
+imports = 187
+calls = 4904
+standing = 100
+default_return = "unimplemented"
+frames = 8
+unanswered = 10
+limit_seconds = 20
+build = "0.1.0"
+measured_on = "2026-09-09"

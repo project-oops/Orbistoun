@@ -108,6 +108,51 @@ pub enum Step {
         /// Every import the run called that nothing implements, in the order it called them.
         candidates: Vec<String>,
     },
+    /// Run twice with nothing applied, and see whether the two agree.
+    ///
+    /// # Why this is a step and why it is the first one
+    ///
+    /// Every other step here is a comparison: plant a value and see whether the fault moves,
+    /// force a return and see whether the guest gets further. **All of them assume that two
+    /// runs of one build behave identically**, which D181 and D238 require and which nothing
+    /// had ever checked. A sweep run against a guest that varies on its own reports the
+    /// variation as the effect of the intervention - the exact shape of principle 3's
+    /// *"an intervention that moves a wall is not a diagnosis"*, arriving one level down where
+    /// no caveat is printed.
+    ///
+    /// Measured, and it was not hypothetical: a thread handle taken from the host heap and a
+    /// clock read from the host made two runs of PPSA03416 agree about **one** of forty-nine
+    /// mappings (D582).
+    ///
+    /// Two runs, not more. One disagreement is enough to know, and a step that boots ten times
+    /// to raise confidence in a negative costs ten boots to learn nothing new.
+    CheckRepeats,
+    /// Read back the structure an unimplemented call was handed.
+    ///
+    /// # The step that closes the gap between a pointer and what is behind it
+    ///
+    /// A finding shows thirty-two bytes at an argument, which is the dump's fixed window. The
+    /// structure a call was given is longer than that, and the interesting fields are past it -
+    /// PPSA03416 hands `sceKernelAprSubmitCommandBufferAndGetResult` a command buffer whose
+    /// header fits in the window and whose command data is behind a pointer at `+0x10`.
+    ///
+    /// Reading further meant typing an address out of a previous run's output into
+    /// `ORBISTOUN_WATCH` by hand, and that address is allocated while the guest runs - so until
+    /// the snapshot stopped killing the run on an address absent at entry, it could not be
+    /// asked at all (D580). Both ends are mechanical now: the address comes from the finding's
+    /// own evidence, and what comes back is bytes (D586).
+    ///
+    /// **It observes.** Nothing is planted and nothing is forced, so a verdict beside it
+    /// carries no caveat - the one property that lets it run on every finding that has an
+    /// address rather than only on a wall somebody is already suspicious of.
+    ReadStructure {
+        /// Where the structure starts, from an argument the finding recorded.
+        address: u64,
+        /// How many bytes to read back.
+        length: u64,
+        /// Which import was handed it, so the report says whose structure this is.
+        subject: String,
+    },
     /// Nothing here is mechanical.
     Person {
         /// Why not - a statement, never a shrug.
@@ -153,12 +198,23 @@ pub fn step(finding: &Finding) -> Step {
         ),
         // Deliberately not automated. The loop is allowed to find the wall; writing what
         // goes behind it is a person's job, and generating it unverified is not planned.
-        Gap::Unimplemented => Step::Person {
-            why: concat!(
-                "implementing a function is a person writing code - the loop finds the ",
-                "wall, it does not build what goes behind it"
-            ),
-        },
+        // **Reading what it was handed is not implementing it.** Writing the function stays a
+        // person's, and it is a person's *better informed* for knowing what was in the
+        // structure - which was reachable only by typing an address out of a previous run
+        // until the snapshot could survive one that appears mid-run (D586).
+        Gap::Unimplemented => handed_structure(finding).map_or(
+            Step::Person {
+                why: concat!(
+                    "implementing a function is a person writing code - the loop finds the ",
+                    "wall, it does not build what goes behind it"
+                ),
+            },
+            |address| Step::ReadStructure {
+                address,
+                length: STRUCTURE_BYTES,
+                subject: finding.subject.clone().unwrap_or_default(),
+            },
+        ),
         // **Looking is a sweep.** The finding's own action says "find what answered with that
         // code just before", which is an instruction to go looking - and every candidate is
         // already in the trace, at a tenth of a second each (D299).
@@ -175,6 +231,16 @@ pub fn step(finding: &Finding) -> Step {
                 Step::FindPlaceholderSource { candidates }
             }
         }
+        // **A person, and deliberately.** This finding exists because somebody typed a variable
+        // naming an import they suspect; what to conclude from the bytes is exactly the
+        // judgement they were making, and a loop that acted on it would be answering a
+        // question it did not ask (D625).
+        Gap::Captured => Step::Person {
+            why: concat!(
+                "arguments were captured because somebody asked for them - reading them is ",
+                "the question they were asking, not a step the loop can take for them"
+            ),
+        },
         Gap::AbiViolation => Step::Person {
             why: concat!(
                 "how the guest is entered is a property of the thunk, and no diagnostic ",
@@ -220,7 +286,12 @@ pub fn step(finding: &Finding) -> Step {
 /// asked of the address rather than of any call - so no finding produces it.
 #[must_use]
 pub fn plan(findings: &[Finding], fault: Option<u64>) -> Vec<Step> {
-    let mut steps: Vec<Step> = Vec::new();
+    // **First, and unconditionally.** Everything below it is a comparison between two runs,
+    // so a run that does not agree with itself makes every one of them unreadable - and until
+    // this existed nothing checked, which is how a wall was chased for an afternoon on
+    // evidence that alternated (D582). Ahead of the findings rather than ranked among them,
+    // because it is a precondition of reading any of them rather than a lead of its own.
+    let mut steps: Vec<Step> = vec![Step::CheckRepeats];
     for finding in findings {
         let step = step(finding);
         // A `Person` step is kept once per distinct reason: repeating the same sentence
@@ -309,6 +380,39 @@ pub enum Taken {
         /// How many were tried.
         tried: usize,
     },
+    /// Two runs of this build agreed, so every comparison below it means something.
+    Repeats {
+        /// Where both faulted, if they did.
+        fault: Option<u64>,
+        /// How many distinct imports both reached.
+        reached: usize,
+    },
+    /// Two runs of this build did **not** agree.
+    ///
+    /// **This invalidates the rest of the turn rather than sitting beside it.** Every other
+    /// step compares a run under an intervention against a run without one, and a guest that
+    /// varies on its own puts that variation into the difference - so a sweep reports the
+    /// noise as its finding. Carried as its own outcome, with both readings, because "they
+    /// differed" without saying how is a claim a reader cannot check.
+    DoesNotRepeat {
+        /// The first run's fault and reach.
+        first: (Option<u64>, usize),
+        /// The second run's.
+        second: (Option<u64>, usize),
+    },
+    /// A structure a call was handed was read back, and its bytes are on the error stream.
+    ///
+    /// **Carries no verdict, because it is not a comparison.** Every other outcome here says
+    /// whether something moved; this one says what was there. A step that reported "changed" or
+    /// "unchanged" about an observation would be inventing a baseline it never took.
+    Read {
+        /// Where it read.
+        address: u64,
+        /// Whose structure it is.
+        subject: String,
+        /// Whether the run still reached the guest at all.
+        reached: usize,
+    },
     /// Automatic in principle, and not runnable from here.
     ///
     /// **Distinct from a refusal.** `NameAHash` needs a model and a local runtime that a
@@ -383,6 +487,36 @@ impl Taken {
             ),
             Self::NotSourced { tried } => format!(
                 "tried {tried} answer(s); the code the guest followed came from none of them"
+            ),
+            Self::Repeats { fault, reached } => format!(
+                "two runs agree: {} imports, {}",
+                reached,
+                fault.map_or_else(|| "no fault".to_owned(), |f| format!("fault {f:#x}"))
+            ),
+            // **Says what it costs, because the number alone reads as a curiosity.** A reader
+            // who is told two runs differed and not that it makes every line below unreadable
+            // will read the lines below.
+            Self::DoesNotRepeat { first, second } => format!(
+                concat!(
+                    "*** two runs of this build DISAGREE - {} imports/{} against {} ",
+                    "imports/{}; every comparison below measures that as well as its own ",
+                    "intervention"
+                ),
+                first.1,
+                first
+                    .0
+                    .map_or_else(|| "no fault".to_owned(), |f| format!("{f:#x}")),
+                second.1,
+                second
+                    .0
+                    .map_or_else(|| "no fault".to_owned(), |f| format!("{f:#x}"))
+            ),
+            Self::Read {
+                address,
+                subject,
+                reached,
+            } => format!(
+                "read {subject}'s structure at {address:#x} - the bytes are above, {reached} imports reached"
             ),
             Self::Elsewhere(why) => format!("not from here: {why}"),
             Self::Declined(why) => format!("stopped: {why}"),
@@ -526,6 +660,29 @@ pub fn take(trial: &mut impl crate::experiment::Trial, step: &Step) -> Result<Ta
                 tried: candidates.len(),
             })
         }
+        // Two baselines, nothing applied to either. The comparison is on the two signals the
+        // rest of this crate compares - where it died and how far it got - because a step that
+        // called a run different on a signal no other step reads would refuse turns for a
+        // variation none of them could have noticed.
+        Step::CheckRepeats => {
+            let first = trial.run(None)?;
+            let second = trial.run(None)?;
+            if first.fault == second.fault && first.reached == second.reached {
+                return Ok(Taken::Repeats {
+                    fault: first.fault,
+                    reached: first.reached,
+                });
+            }
+            Ok(Taken::DoesNotRepeat {
+                first: (first.fault, first.reached),
+                second: (second.fault, second.reached),
+            })
+        }
+        Step::ReadStructure {
+            address,
+            length,
+            subject,
+        } => read_structure(trial, *address, *length, subject),
         Step::NameAHash { .. } => Ok(Taken::Elsewhere(
             "naming needs a model and a local runtime, which a sweep does not start",
         )),
@@ -566,6 +723,31 @@ pub fn turn(
         out.push(taken);
     }
     Ok(out)
+}
+
+/// Reads a structure back and reports where it looked.
+///
+/// One run, observing. What comes back is on the run's error stream, like the watchpoint and
+/// for the same reason: a guest may die before any summary is reached, so the bytes are
+/// printed as they are read rather than collected and shown at the end (D276).
+///
+/// Split out of `take` only because that function was over its line budget.
+///
+/// # Errors
+///
+/// If the run could not be made at all.
+fn read_structure(
+    trial: &mut impl crate::experiment::Trial,
+    address: u64,
+    length: u64,
+    subject: &str,
+) -> Result<Taken, crate::Error> {
+    let outcome = trial.spawn_axes(&[crate::axis::Axis::Read { address, length }])?;
+    Ok(Taken::Read {
+        address,
+        subject: subject.to_owned(),
+        reached: outcome.reached,
+    })
 }
 
 /// Gives the guest what the sweep says it was missing, and asks whether that was enough.
@@ -764,6 +946,37 @@ const SMALLEST_POINTER: u64 = 0x1_0000;
 ///
 /// Aligned down to a word, because a watchpoint of eight bytes needs an eight-byte-aligned
 /// address and the hardware refuses rather than rounding - see `orbistoun_worker::watchpoint`.
+/// How much of a structure to read back.
+///
+/// Two hundred and fifty-six bytes: eight times the argument dump's window, and enough that
+/// the live case - a command buffer header plus the allocator's neighbours - is legible in one
+/// run. Fixed rather than grown, because a length that depended on what was found would make
+/// two runs read different amounts and stop being comparable.
+const STRUCTURE_BYTES: u64 = 0x100;
+
+/// A guest address an unimplemented call was handed, from the finding's own evidence.
+///
+/// **Only a pointer the run resolved to a region.** An argument dump renders a pointer it could
+/// read as `-> stack+0x7fb458 = ..` or `-> guest mappings+0x8a3520 = ..`, and one it could not
+/// as bare text - so requiring the arrow is what separates an address from a length that
+/// happens to be large. Reading back an integer the guest passed by value would snapshot
+/// whatever is at that number, which is a plausible-looking answer to a question nobody asked.
+///
+/// The first such argument, not the widest: a call's subject structure is conventionally its
+/// first pointer, and picking between several would be a judgement this has no basis for.
+fn handed_structure(finding: &Finding) -> Option<u64> {
+    finding.evidence.iter().find_map(|line| {
+        let (value, rest) = line.split_once(" -> ")?;
+        // A region name and an offset, which is what the dump prints only when it read there.
+        if !rest.contains('+') {
+            return None;
+        }
+        let hex = value.rsplit_once("= ").map_or(value, |(_, v)| v).trim();
+        let address = u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()?;
+        (address >= SMALLEST_POINTER).then_some(address & !7)
+    })
+}
+
 fn faulting_object(finding: &Finding) -> Option<u64> {
     if finding.gap != Gap::Faulted {
         return None;
@@ -987,6 +1200,7 @@ mod tests {
         assert_eq!(
             plan(&findings, None),
             vec![
+                Step::CheckRepeats,
                 Step::NameAHash {
                     hash: "0xabc".to_owned()
                 },
@@ -1005,8 +1219,11 @@ mod tests {
     fn the_reports_ranking_survives() {
         let findings = vec![faulted(), finding(Gap::Unnamed, Some("libkernel::0xabc"))];
         let plan = plan(&findings, None);
-        assert!(matches!(plan[0], Step::SweepArguments { .. }));
-        assert!(matches!(plan[1], Step::NameAHash { .. }));
+        // Index 1 and 2: the repeatability check leads, and the report's own order follows it
+        // unchanged - which is what this test is about.
+        assert!(matches!(plan[0], Step::CheckRepeats));
+        assert!(matches!(plan[1], Step::SweepArguments { .. }));
+        assert!(matches!(plan[2], Step::NameAHash { .. }));
     }
 
     /// **The axes are asked of the address, so no finding produces them.**
@@ -1372,7 +1589,9 @@ mod tests {
         let findings: Vec<_> = (0..40)
             .map(|_| finding(Gap::Unimplemented, Some("libkernel::sceFoo")))
             .collect();
-        assert_eq!(plan(&findings, None).len(), 1);
+        // Two: the repeatability check that leads every plan, and one refusal for forty
+        // identical findings.
+        assert_eq!(plan(&findings, None).len(), 2);
     }
 
     /// **The diagnostic that said something is the one that gets named.**
@@ -1434,6 +1653,75 @@ mod tests {
         assert!(
             said.contains("applied zero times"),
             "an unapplied diagnostic must not read as a clean negative: {said}"
+        );
+    }
+
+    /// **A guest that varies on its own is reported, not swept past.**
+    ///
+    /// Watched failing: comparing only the fault address lets this through, because the live
+    /// case that prompted it faults at `0xa0` both times and reaches 192 imports once and 193
+    /// the next - and the dispatcher then starred `libc::memcpy answered the code the guest
+    /// followed; zero reaches 193 against 192`, which is that variation reported as a finding
+    /// about memcpy (D583).
+    #[test]
+    fn a_run_that_disagrees_with_itself_is_the_first_thing_said() {
+        /// A guest that reaches one more import the second time and dies in the same place.
+        struct Drifts {
+            runs: usize,
+        }
+        impl crate::experiment::Trial for Drifts {
+            fn run(
+                &mut self,
+                _experiment: Option<&crate::experiment::Experiment>,
+            ) -> Result<crate::experiment::Outcome, crate::Error> {
+                self.runs += 1;
+                Ok(outcome(0xa0, false, 192 + self.runs % 2))
+            }
+            fn spawn_axes(
+                &mut self,
+                _axes: &[crate::axis::Axis],
+            ) -> Result<crate::experiment::Outcome, crate::Error> {
+                Ok(outcome(0xa0, true, 193))
+            }
+        }
+        let taken = take(&mut Drifts { runs: 0 }, &Step::CheckRepeats).expect("two runs");
+        let Taken::DoesNotRepeat { first, second } = taken else {
+            panic!("a drifting guest was reported as repeatable: {taken:?}");
+        };
+        assert_ne!(first.1, second.1, "the two reaches must be what differed");
+        assert!(
+            taken_says_it_costs_something(&Taken::DoesNotRepeat { first, second }),
+            "the line must say what the disagreement costs, not only that it happened"
+        );
+    }
+
+    /// Whether the sentence names the consequence rather than only the fact.
+    fn taken_says_it_costs_something(taken: &Taken) -> bool {
+        taken.say().contains("every comparison below")
+    }
+
+    /// A guest that agrees with itself says so, so the rest of the turn can be read.
+    #[test]
+    fn a_run_that_agrees_with_itself_says_what_both_runs_saw() {
+        let mut guest = Gated { runs: 0 };
+        let taken = take(&mut guest, &Step::CheckRepeats).expect("two runs");
+        assert!(
+            matches!(taken, Taken::Repeats { .. }),
+            "a steady guest was reported as drifting: {taken:?}"
+        );
+    }
+
+    /// The check leads every plan, including one with no findings at all.
+    ///
+    /// **Ahead of the findings rather than among them.** A plan that ranked it would put it
+    /// below whatever the report thought was worse, and everything above it would then have
+    /// been read before the line saying it could not be.
+    #[test]
+    fn every_plan_checks_that_the_run_repeats_first() {
+        assert_eq!(
+            plan(&[], None).first(),
+            Some(&Step::CheckRepeats),
+            "a turn with nothing to do still has to establish the run is readable"
         );
     }
 }

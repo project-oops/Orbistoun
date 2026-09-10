@@ -243,6 +243,7 @@ pub fn verify(
     derivation: &Derivation,
     patterns: &[Pattern],
     standard: &[String],
+    affixes: &crate::affix::Affixes,
 ) -> bool {
     match &derivation.method {
         Method::PublishedStandard { .. } => standard.iter().any(|n| n == name),
@@ -251,6 +252,12 @@ pub fn verify(
             .find(|p| &p.name == pattern)
             .and_then(|p| p.name_at(*index))
             .is_some_and(|produced| produced == name),
+        // **The rule, not the seed.** That the seed is itself a name this project holds is
+        // a property of the whole file rather than of one record, so it is checked where
+        // every record is in view. Here there is only one, and a check that could not see
+        // the rest would have to take the seed on trust while reporting it as verified
+        // (D606).
+        Method::Affixed { seed, rule } => affixes.produces(seed, rule, name),
         // None of these can be rechecked from this repository alone, which is the only
         // material CI holds. That is not the same as unverifiable: a static harvest is
         // reproducible by anyone with the module, deterministically, and a runtime one by
@@ -453,9 +460,21 @@ mod tests {
             },
             "2026-01-01",
         );
-        assert!(super::verify("sceKernelClose", &good, &patterns, &standard));
+        assert!(super::verify(
+            "sceKernelClose",
+            &good,
+            &patterns,
+            &standard,
+            &crate::affix::Affixes::default()
+        ));
         assert!(
-            !super::verify("sceKernelOpen", &good, &patterns, &standard),
+            !super::verify(
+                "sceKernelOpen",
+                &good,
+                &patterns,
+                &standard,
+                &crate::affix::Affixes::default()
+            ),
             "index 1 is Close, not Open"
         );
     }
@@ -472,7 +491,13 @@ mod tests {
             },
             "2026-01-01",
         );
-        assert!(!super::verify("ab", &stale, &patterns, &[]));
+        assert!(!super::verify(
+            "ab",
+            &stale,
+            &patterns,
+            &[],
+            &crate::affix::Affixes::default()
+        ));
     }
 
     #[test]
@@ -485,7 +510,13 @@ mod tests {
             },
             "2026-01-01",
         );
-        assert!(!super::verify("ab", &bad, &patterns, &[]));
+        assert!(!super::verify(
+            "ab",
+            &bad,
+            &patterns,
+            &[],
+            &crate::affix::Affixes::default()
+        ));
     }
 
     #[test]
@@ -514,7 +545,13 @@ mod tests {
             "2026-01-01",
         );
         for d in [&harvested, &ran, &supplied] {
-            assert!(!super::verify("anything", d, &[], &[]));
+            assert!(!super::verify(
+                "anything",
+                d,
+                &[],
+                &[],
+                &crate::affix::Affixes::default()
+            ));
             assert!(!d.method.is_mechanically_checkable());
         }
 

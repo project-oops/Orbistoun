@@ -15,6 +15,10 @@ orbistoun-env = { workspace = true }
 # The crate that owns the knowledge format, so the merge rule and the provenance rules are
 # the ones `learn` uses rather than a second copy of them here (D291, D292).
 orbistoun-hle = { workspace = true }
+# The crate that owns the probe's record format, so a `measure` record is read by the
+# reader that defines it rather than by a second field-split living one directory away
+# (D605).
+orbistoun-probe = { workspace = true }
 # For the date a derived entry is stamped with, from the same clock `learn` stamps with.
 orbistoun-nid = { workspace = true }
 anyhow = { workspace = true }

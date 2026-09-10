@@ -16965,6 +16965,8 @@
     "_ZNSt14_Num_ldbl_base9is_iec559E",
     "_ZNSt14_Num_ldbl_base9is_moduloE",
     "_ZNSt14_Num_ldbl_base9is_signedE",
+    "_ZNSt14error_categoryD0Ev",
+    "_ZNSt14error_categoryD1Ev",
     "_ZNSt14error_categoryD2Ev",
     "_ZNSt14numeric_limitsIDiE6digitsE",
     "_ZNSt14numeric_limitsIDiE8digits10E",
@@ -18576,6 +18578,7 @@
     "_close",
     "_connect",
     "_dup2",
+    "_err",
     "_execve",
     "_execvpe",
     "_exit",
@@ -18718,6 +18721,7 @@
     "_writev",
     "abort",
     "abort_handler_s",
+    "abs",
     "accept",
     "access",
     "acos",
@@ -18726,6 +18730,7 @@
     "acoshf",
     "acoshl",
     "acosl",
+    "adjtime",
     "aio_cancel",
     "aio_error",
     "aio_fsync",
@@ -18760,6 +18765,9 @@
     "atanl",
     "atexit",
     "atof",
+    "atoi",
+    "atol",
+    "atoll",
     "audiodeccpuinternal_core_ops_alac2",
     "audiodeccpuinternal_core_ops_ddp",
     "audiodeccpuinternal_core_ops_dts",
@@ -18992,6 +19000,7 @@
     "cff_cmap_encoding_class_rec",
     "cff_cmap_unicode_class_rec",
     "cff_driver_class",
+    "cfsetspeed",
     "chdir",
     "chflags",
     "chmod",
@@ -19125,6 +19134,7 @@
     "d2i_X509",
     "d2i_X509_bio",
     "daemon",
+    "daylight",
     "debug_init",
     "deflate",
     "deflateBound",
@@ -19206,6 +19216,7 @@
     "expm1",
     "expm1f",
     "expm1l",
+    "fabs",
     "fabsl",
     "fchdir",
     "fchflags",
@@ -19854,9 +19865,15 @@
     "ioctl",
     "ipmimgr_call",
     "is_in_sandbox",
+    "isalnum",
+    "isalpha",
     "isatty",
     "isblank",
+    "iscntrl",
+    "isdigit",
+    "isgraph",
     "isinf",
+    "islower",
     "isnan",
     "isnanf",
     "isobmf_box_getchildbox",
@@ -19877,7 +19894,11 @@
     "isobmf_decoder_next_disk_offset",
     "isobmf_decoder_query",
     "isobmf_memmanager_set",
+    "isprint",
+    "ispunct",
     "issetugid",
+    "isspace",
+    "isupper",
     "iswalnum",
     "iswalpha",
     "iswblank",
@@ -19891,6 +19912,7 @@
     "iswspace",
     "iswupper",
     "iswxdigit",
+    "isxdigit",
     "j0",
     "j0f",
     "j1",
@@ -20102,6 +20124,7 @@
     "ktimer_gettime",
     "ktimer_settime",
     "ktrace",
+    "labs",
     "lchflags",
     "lchmod",
     "lchown",
@@ -20118,6 +20141,7 @@
     "link",
     "linkat",
     "listen",
+    "llabs",
     "lldiv",
     "llrint",
     "llrintf",
@@ -20198,6 +20222,7 @@
     "mlock",
     "mlockall",
     "mmap",
+    "mmap2",
     "mmap_np",
     "modf",
     "modff",
@@ -20713,6 +20738,7 @@
     "rename",
     "renameat",
     "revoke",
+    "rewind",
     "rewinddir",
     "rfork_thread",
     "rindex",
@@ -23819,7 +23845,10 @@
     "sceKernelAioSubmitWriteCommandsMultiple",
     "sceKernelAioWaitRequest",
     "sceKernelAioWaitRequests",
+    "sceKernelAllocateDirectMemory",
+    "sceKernelAllocateDirectMemory2",
     "sceKernelAllocateDirectMemoryForMiniApp",
+    "sceKernelAllocateMainDirectMemory",
     "sceKernelAllocateTraceDirectMemory",
     "sceKernelAprGetFileSize",
     "sceKernelAprGetFileStat",
@@ -23837,11 +23866,13 @@
     "sceKernelAprSubmitCommandBufferAndGetResult_TEST",
     "sceKernelAprSubmitCommandBuffer_TEST",
     "sceKernelAvailableDirectMemorySize",
+    "sceKernelAvailableFlexibleMemorySize",
     "sceKernelBacktraceSelf",
     "sceKernelBatchMap",
     "sceKernelBatchMap2",
     "sceKernelCallIndirectBuffer",
     "sceKernelCallIndirectBuffer2",
+    "sceKernelCallIndirectBuffer3",
     "sceKernelCancelAIO",
     "sceKernelCancelEventFlag",
     "sceKernelCancelSema",
@@ -23855,6 +23886,7 @@
     "sceKernelClearVirtualRangeName",
     "sceKernelClockGetres",
     "sceKernelClockGettime",
+    "sceKernelClose",
     "sceKernelCloseEport",
     "sceKernelCloseEventFlag",
     "sceKernelCloseSema",
@@ -23866,6 +23898,7 @@
     "sceKernelCreateEqueue",
     "sceKernelCreateEventFlag",
     "sceKernelCreateSblock",
+    "sceKernelCreateSema",
     "sceKernelDebugAcquireAndUpdateDebugRegister",
     "sceKernelDebugGetAppStatus",
     "sceKernelDebugGetPauseCount",
@@ -23897,12 +23930,14 @@
     "sceKernelDeleteTimerEvent",
     "sceKernelDeleteUserEvent",
     "sceKernelDeleteWriteEvent",
+    "sceKernelDirectMemoryQuery",
     "sceKernelDirectMemoryQueryForId",
     "sceKernelDlsym",
     "sceKernelDup",
     "sceKernelDup2",
     "sceKernelEnableDmemAliasing",
     "sceKernelEnableDmemAliasing2",
+    "sceKernelEnableDmemAliasing3",
     "sceKernelEnablePthreadObjectCheck",
     "sceKernelEnterSblock",
     "sceKernelError",
@@ -23926,6 +23961,7 @@
     "sceKernelGetAIOData",
     "sceKernelGetAllowedSdkVersionOnSystem",
     "sceKernelGetAppInfo",
+    "sceKernelGetAppInfo2",
     "sceKernelGetAslrStatus",
     "sceKernelGetBackupRestoreMode",
     "sceKernelGetBackupRestoreModeOfNextBoot",
@@ -23954,6 +23990,7 @@
     "sceKernelGetDebugMenuMiniModeForRcmgr",
     "sceKernelGetDebugMenuModeForPsmForRcmgr",
     "sceKernelGetDebugMenuModeForRcmgr",
+    "sceKernelGetDirectMemorySize",
     "sceKernelGetDirectMemoryType",
     "sceKernelGetEmergencyErrorLog",
     "sceKernelGetEventData",
@@ -23986,6 +24023,7 @@
     "sceKernelGetModuleInfoForUnwind",
     "sceKernelGetModuleInfoFromAddr",
     "sceKernelGetModuleInfoInternal",
+    "sceKernelGetModuleList",
     "sceKernelGetModuleList2",
     "sceKernelGetModuleListInternal",
     "sceKernelGetOpenPsId",
@@ -23995,6 +24033,7 @@
     "sceKernelGetPagingStatsOfAllThreads",
     "sceKernelGetPhysPageSize",
     "sceKernelGetProcParam",
+    "sceKernelGetProcessId",
     "sceKernelGetProcessName",
     "sceKernelGetProcessTime",
     "sceKernelGetProcessTimeCounter",
@@ -24013,6 +24052,7 @@
     "sceKernelGetRenderingMode",
     "sceKernelGetResidentCount",
     "sceKernelGetResidentFmemCount",
+    "sceKernelGetResidentFmemCount2",
     "sceKernelGetResource",
     "sceKernelGetResourceLimit",
     "sceKernelGetResourceOne",
@@ -24032,6 +24072,7 @@
     "sceKernelGetSystemSwVersion2",
     "sceKernelGetThreadName",
     "sceKernelGetTraceMemoryStats",
+    "sceKernelGetTscFrequency",
     "sceKernelGetUtokenDataExecutionForRcmgr",
     "sceKernelGetUtokenExpirationTimeNotafterForRcmgr",
     "sceKernelGetUtokenExpirationTimeNotbeforeForRcmgr",
@@ -24116,26 +24157,39 @@
     "sceKernelIsModuleLoaded",
     "sceKernelIsNeoMode",
     "sceKernelIsProspero",
+    "sceKernelIsStack",
+    "sceKernelIsTestKit",
     "sceKernelJitCreateAliasOfSharedMemory",
     "sceKernelJitCreateSharedMemory",
     "sceKernelJitGetSharedMemoryInfo",
     "sceKernelJitMapSharedMemory",
     "sceKernelKernelHeapUsage",
+    "sceKernelKernelHeapUsage2",
     "sceKernelLoadStartModule",
     "sceKernelLoadStartModuleForSysmodule",
     "sceKernelLoadStartModuleInternalForMono",
+    "sceKernelLseek",
     "sceKernelLwfsAllocateBlock",
     "sceKernelLwfsLseek",
     "sceKernelLwfsSetAttribute",
     "sceKernelLwfsTrimBlock",
     "sceKernelLwfsWrite",
+    "sceKernelMapDirectMemory",
     "sceKernelMapDirectMemory2",
     "sceKernelMapFlexibleMemory",
+    "sceKernelMapFlexibleMemoryInternal",
+    "sceKernelMapFlexibleMemoryInternal2",
+    "sceKernelMapNamedDirectMemory",
     "sceKernelMapNamedFlexibleMemory",
     "sceKernelMapNamedFlexibleMemoryInternal",
+    "sceKernelMapNamedFlexibleMemoryInternal2",
     "sceKernelMapNamedSystemFlexibleMemory",
+    "sceKernelMapNamedSystemFlexibleMemory2",
     "sceKernelMapSanitizerShadowMemory",
     "sceKernelMapTraceMemory",
+    "sceKernelMapperGetParam",
+    "sceKernelMapperGetUsageStatsData",
+    "sceKernelMapperSetPageTablePoolOccupancyNotificationThreshold",
     "sceKernelMemoryPoolBatch",
     "sceKernelMemoryPoolCommit",
     "sceKernelMemoryPoolDecommit",
@@ -24147,6 +24201,7 @@
     "sceKernelMlock",
     "sceKernelMlockall",
     "sceKernelMmap",
+    "sceKernelMprotect",
     "sceKernelMsync",
     "sceKernelMtypeprotect",
     "sceKernelMunlock",
@@ -24157,8 +24212,10 @@
     "sceKernelNotifyAppStateChanged",
     "sceKernelNotifySystemSuspendResumeProgress",
     "sceKernelNotifySystemSuspendStart",
+    "sceKernelOpen",
     "sceKernelOpenEport",
     "sceKernelOpenEventFlag",
+    "sceKernelOpenInternal",
     "sceKernelOpenSema",
     "sceKernelOpenat",
     "sceKernelPoll",
@@ -24179,10 +24236,13 @@
     "sceKernelRaiseException",
     "sceKernelRandomizedPath",
     "sceKernelRdup",
+    "sceKernelRead",
     "sceKernelReadDipswData",
+    "sceKernelReadProcessMemory",
     "sceKernelReadTsc",
     "sceKernelReadv",
     "sceKernelReboot",
+    "sceKernelReleaseDirectMemory",
     "sceKernelReleaseFlexibleMemory",
     "sceKernelReleaseTraceDirectMemory",
     "sceKernelRemoveExceptionHandler",
@@ -24237,6 +24297,7 @@
     "sceKernelSleep",
     "sceKernelSlvNotifyError",
     "sceKernelSpawn",
+    "sceKernelStat",
     "sceKernelStopUnloadModule",
     "sceKernelSubmitAIO",
     "sceKernelSuspendDirectMemoryRelease",
@@ -24245,9 +24306,16 @@
     "sceKernelSwitchToBaseMode",
     "sceKernelSwitchToNeoMode",
     "sceKernelSync",
+    "sceKernelSyncOnAddressWait",
+    "sceKernelSyncOnAddressWait16",
+    "sceKernelSyncOnAddressWait32",
+    "sceKernelSyncOnAddressWait64",
+    "sceKernelSyncOnAddressWait8",
+    "sceKernelSyncOnAddressWake",
     "sceKernelTerminateProcess",
     "sceKernelTerminateSysCore",
     "sceKernelTitleWorkaroundIsEnabled",
+    "sceKernelTitleWorkaroundIsEnabled2",
     "sceKernelTitleWorkdaroundIsEnabled",
     "sceKernelTraceMemoryTypeProtect",
     "sceKernelTriggerEport",
@@ -24267,6 +24335,7 @@
     "sceKernelWaitEqueue",
     "sceKernelWaitEventFlag",
     "sceKernelWaitSema",
+    "sceKernelWrite",
     "sceKernelWriteDipswData",
     "sceKernelWriteMapCommand",
     "sceKernelWriteMapCommand2",
@@ -24279,11 +24348,13 @@
     "sceKernelWriteModifyProtectWithGpuMaskIdCommand",
     "sceKernelWriteMultiMapCommand",
     "sceKernelWriteMultiMapWithGpuMaskIdCommand",
+    "sceKernelWriteProcessMemory",
     "sceKernelWriteRemapCommand",
     "sceKernelWriteRemapIntoPrtCommand",
     "sceKernelWriteRemapWithGpuMaskIdCommand",
     "sceKernelWriteSdkEventLog",
     "sceKernelWriteUnmapCommand",
+    "sceKernelWriteUnmapToPrtCommand",
     "sceKernelWritev",
     "sceKernelXenterSblock",
     "sceKernelXexitSblock",
@@ -25073,6 +25144,7 @@
     "sceNetSyncSignal",
     "sceNetSyncWait",
     "sceNetSysctl",
+    "sceNetTerm",
     "sceNetThreadCreate",
     "sceNetThreadExit",
     "sceNetThreadJoin",
@@ -26971,12 +27043,16 @@
     "scePthreadAttrSetdetachstate",
     "scePthreadAttrSetguardsize",
     "scePthreadAttrSetinheritsched",
+    "scePthreadAttrSetprio",
     "scePthreadAttrSetschedparam",
     "scePthreadAttrSetschedpolicy",
     "scePthreadAttrSetscope",
     "scePthreadAttrSetstack",
     "scePthreadAttrSetstackaddr",
     "scePthreadAttrSetstacksize",
+    "scePthreadBarrierDestroy",
+    "scePthreadBarrierInit",
+    "scePthreadBarrierWait",
     "scePthreadBarrierattrDestroy",
     "scePthreadBarrierattrGetpshared",
     "scePthreadBarrierattrInit",
@@ -26995,6 +27071,7 @@
     "scePthreadCondattrInit",
     "scePthreadCondattrSetclock",
     "scePthreadCondattrSetpshared",
+    "scePthreadCreate",
     "scePthreadDetach",
     "scePthreadEqual",
     "scePthreadExit",
@@ -27006,6 +27083,7 @@
     "scePthreadGetschedparam",
     "scePthreadGetspecific",
     "scePthreadGetthreadid",
+    "scePthreadJoin",
     "scePthreadKeyCreate",
     "scePthreadKeyDelete",
     "scePthreadMain",
@@ -27014,20 +27092,29 @@
     "scePthreadMutexGetprioceiling",
     "scePthreadMutexGetspinloops",
     "scePthreadMutexGetyieldloops",
+    "scePthreadMutexInit",
     "scePthreadMutexInitForInternalLibc",
     "scePthreadMutexIsowned",
+    "scePthreadMutexLock",
     "scePthreadMutexSetprioceiling",
     "scePthreadMutexSetspinloops",
     "scePthreadMutexSetyieldloops",
     "scePthreadMutexTimedlock",
     "scePthreadMutexTrylock",
+    "scePthreadMutexUnlock",
+    "scePthreadMutexattrDestroy",
     "scePthreadMutexattrGetkind",
     "scePthreadMutexattrGetprioceiling",
+    "scePthreadMutexattrGetprotocol",
     "scePthreadMutexattrGetpshared",
+    "scePthreadMutexattrGettype",
+    "scePthreadMutexattrInit",
     "scePthreadMutexattrInitForInternalLibc",
     "scePthreadMutexattrSetkind",
     "scePthreadMutexattrSetprioceiling",
+    "scePthreadMutexattrSetprotocol",
     "scePthreadMutexattrSetpshared",
+    "scePthreadMutexattrSettype",
     "scePthreadOnce",
     "scePthreadRename",
     "scePthreadResume",
@@ -27047,6 +27134,7 @@
     "scePthreadRwlockattrInit",
     "scePthreadRwlockattrSetpshared",
     "scePthreadRwlockattrSettype",
+    "scePthreadSelf",
     "scePthreadSemDestroy",
     "scePthreadSemGetvalue",
     "scePthreadSemInit",
@@ -29111,6 +29199,7 @@
     "sceVideoOutSetToneMap_",
     "sceVideoOutSetWindowModeMargins",
     "sceVideoOutSubmitChangeBufferAttribute",
+    "sceVideoOutSubmitChangeBufferAttribute2",
     "sceVideoOutSubmitEopFlip",
     "sceVideoOutSysAddSetModeEvent",
     "sceVideoOutSysAddVblankEvent",
@@ -29570,6 +29659,7 @@
     "sk_value",
     "sleep",
     "snprintf",
+    "snprintf_s",
     "snwprintf_s",
     "socket",
     "socketpair",
@@ -29644,6 +29734,7 @@
     "stat",
     "statfs",
     "statvfs",
+    "stdout",
     "stpcpy",
     "strcasecmp",
     "strcasestr",
@@ -29673,6 +29764,7 @@
     "strnlen",
     "strnlen_s",
     "strnstr",
+    "strpbrk",
     "strrchr",
     "strsep",
     "strspn",
@@ -29686,6 +29778,7 @@
     "strtol",
     "strtold",
     "strtoll",
+    "strtoul",
     "strtoull",
     "strtoumax",
     "strtouq",
@@ -29764,6 +29857,8 @@
     "tgammaf",
     "tgammal",
     "time",
+    "timespec_get",
+    "timezone",
     "tls_client",
     "tls_close",
     "tls_config_free",
@@ -29776,6 +29871,8 @@
     "tls_read",
     "tls_term",
     "tls_write",
+    "tolower",
+    "toupper",
     "towctrans",
     "towlower",
     "towupper",
@@ -29791,6 +29888,7 @@
     "tt_cmap6_class_rec",
     "tt_cmap8_class_rec",
     "tt_driver_class",
+    "tzname",
     "tzset",
     "u_charDirection_59",
     "u_charMirror_59",
@@ -131873,6 +131971,18 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "_ZNSt14error_categoryD0Ev": {
+      "found": "affixed",
+      "seed": "_ZNSt14error_categoryD2Ev",
+      "rule": "D2E>D0E",
+      "on": "2026-09-08"
+    },
+    "_ZNSt14error_categoryD1Ev": {
+      "found": "affixed",
+      "seed": "_ZNSt14error_categoryD2Ev",
+      "rule": "D2E>D1E",
+      "on": "2026-09-08"
+    },
     "_ZNSt14error_categoryD2Ev": {
       "found": "static",
       "by": "module-strings",
@@ -141526,6 +141636,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "_err": {
+      "found": "affixed",
+      "seed": "err",
+      "rule": "_*",
+      "on": "2026-09-08"
+    },
     "_execve": {
       "found": "static",
       "by": "module-strings",
@@ -142376,6 +142492,11 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "abs": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "accept": {
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
@@ -142420,6 +142541,11 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "adjtime": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "aio_cancel": {
       "found": "static",
@@ -142614,6 +142740,21 @@
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-20"
+    },
+    "atoi": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "atol": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "atoll": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "audiodeccpuinternal_core_ops_alac2": {
       "found": "static",
@@ -144001,6 +144142,11 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "cfsetspeed": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "chdir": {
       "found": "static",
       "by": "module-strings",
@@ -144790,6 +144936,11 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "daylight": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "debug_init": {
       "found": "static",
       "by": "module-strings",
@@ -145257,6 +145408,11 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "fabs": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "fabsl": {
       "found": "static",
@@ -149102,6 +149258,16 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "isalnum": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "isalpha": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "isatty": {
       "found": "static",
       "by": "module-strings",
@@ -149114,11 +149280,31 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "iscntrl": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "isdigit": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "isgraph": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "isinf": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "islower": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "isnan": {
       "found": "static",
@@ -149240,11 +149426,31 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "isprint": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "ispunct": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "issetugid": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "isspace": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "isupper": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "iswalnum": {
       "found": "static",
@@ -149323,6 +149529,11 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "isxdigit": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "j0": {
       "found": "published-standard",
@@ -150582,6 +150793,11 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "labs": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "lchflags": {
       "found": "static",
       "by": "module-strings",
@@ -150672,6 +150888,11 @@
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-24"
+    },
+    "llabs": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "lldiv": {
       "found": "static",
@@ -151127,6 +151348,12 @@
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-25"
+    },
+    "mmap2": {
+      "found": "affixed",
+      "seed": "mmap",
+      "rule": "*2",
+      "on": "2026-09-08"
     },
     "mmap_np": {
       "found": "static",
@@ -154151,6 +154378,11 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "rewind": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "rewinddir": {
       "found": "static",
       "by": "module-strings",
@@ -155169,7 +155401,7 @@
     "sceAjmBatchCancel": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 407415,
+      "index": 439170,
       "on": "2026-08-24"
     },
     "sceAjmBatchErrorDump": {
@@ -155181,7 +155413,7 @@
     "sceAjmBatchInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 407760,
+      "index": 439515,
       "on": "2026-08-24"
     },
     "sceAjmBatchJobClearContext": {
@@ -155259,7 +155491,7 @@
     "sceAjmBatchStart": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 408165,
+      "index": 439920,
       "on": "2026-08-24"
     },
     "sceAjmBatchStartBuffer": {
@@ -155271,7 +155503,7 @@
     "sceAjmBatchWait": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 408390,
+      "index": 440145,
       "on": "2026-08-24"
     },
     "sceAjmDecAt9ParseConfigData": {
@@ -155307,13 +155539,13 @@
     "sceAjmInstanceCreate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 472110,
+      "index": 506055,
       "on": "2026-08-24"
     },
     "sceAjmInstanceDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 472140,
+      "index": 506085,
       "on": "2026-08-24"
     },
     "sceAjmInstanceExtend": {
@@ -157407,7 +157639,7 @@
     "sceAudioOut2Initialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 1089945,
+      "index": 1174260,
       "on": "2026-08-24"
     },
     "sceAudioOut2LoContextGetQueueLevel": {
@@ -170523,7 +170755,7 @@
     "sceHttp2CreateTemplate": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4343910,
+      "index": 4683630,
       "on": "2026-08-24"
     },
     "sceHttp2DeleteCookieBox": {
@@ -170541,7 +170773,7 @@
     "sceHttp2DeleteTemplate": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4346595,
+      "index": 4686525,
       "on": "2026-08-24"
     },
     "sceHttp2GetAllResponseHeaders": {
@@ -171009,7 +171241,7 @@
     "sceHttpCreateEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4146285,
+      "index": 4470555,
       "on": "2026-08-24"
     },
     "sceHttpCreateRequest": {
@@ -171111,7 +171343,7 @@
     "sceHttpDestroyEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4151655,
+      "index": 4476345,
       "on": "2026-08-24"
     },
     "sceHttpGetAcceptEncodingGZIPEnabled": {
@@ -171477,7 +171709,7 @@
     "sceHttpUnsetEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4296645,
+      "index": 4632675,
       "on": "2026-08-25"
     },
     "sceHttpUriBuild": {
@@ -172782,11 +173014,29 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelAllocateDirectMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 587962680,
+      "on": "2026-09-08"
+    },
+    "sceKernelAllocateDirectMemory2": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 587962681,
+      "on": "2026-09-08"
+    },
     "sceKernelAllocateDirectMemoryForMiniApp": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelAllocateMainDirectMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 588036615,
+      "on": "2026-09-08"
     },
     "sceKernelAllocateTraceDirectMemory": {
       "found": "static",
@@ -172890,6 +173140,12 @@
       "from": "titles/PPSA03416-app0/fakelib/libSceAmpr.sprx",
       "on": "2026-08-24"
     },
+    "sceKernelAvailableFlexibleMemorySize": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene/eboot.bin",
+      "on": "2026-09-08"
+    },
     "sceKernelBacktraceSelf": {
       "found": "static",
       "by": "module-strings",
@@ -172919,6 +173175,12 @@
       "by": "module-strings",
       "from": "titles/PPSA04263-app0/fakelib/libSceAmpr.sprx",
       "on": "2026-08-24"
+    },
+    "sceKernelCallIndirectBuffer3": {
+      "found": "affixed",
+      "seed": "sceKernelCallIndirectBuffer",
+      "rule": "*3",
+      "on": "2026-09-08"
     },
     "sceKernelCancelAIO": {
       "found": "static",
@@ -172998,6 +173260,12 @@
       "index": 1661565,
       "on": "2026-08-25"
     },
+    "sceKernelClose": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb-object",
+      "index": 587505720,
+      "on": "2026-09-08"
+    },
     "sceKernelCloseEport": {
       "found": "static",
       "by": "module-strings",
@@ -173063,6 +173331,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelCreateSema": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-learned",
+      "index": 6162630,
+      "on": "2026-09-08"
     },
     "sceKernelDebugAcquireAndUpdateDebugRegister": {
       "found": "static",
@@ -173250,6 +173524,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelDirectMemoryQuery": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb",
+      "index": 4355430,
+      "on": "2026-09-08"
+    },
     "sceKernelDirectMemoryQueryForId": {
       "found": "static",
       "by": "module-strings",
@@ -173285,6 +173565,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelEnableDmemAliasing3": {
+      "found": "affixed",
+      "seed": "sceKernelEnableDmemAliasing",
+      "rule": "*3",
+      "on": "2026-09-08"
     },
     "sceKernelEnablePthreadObjectCheck": {
       "found": "static",
@@ -173423,6 +173709,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelGetAppInfo2": {
+      "found": "affixed",
+      "seed": "sceKernelGetAppInfo",
+      "rule": "*2",
+      "on": "2026-09-08"
     },
     "sceKernelGetAslrStatus": {
       "found": "static",
@@ -173591,6 +173883,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelGetDirectMemorySize": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 594622875,
+      "on": "2026-09-08"
     },
     "sceKernelGetDirectMemoryType": {
       "found": "static",
@@ -173784,6 +174082,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelGetModuleList": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene/eboot.bin",
+      "on": "2026-09-08"
+    },
     "sceKernelGetModuleList2": {
       "found": "static",
       "by": "module-strings",
@@ -173837,6 +174141,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelGetProcessId": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 594734355,
+      "on": "2026-09-08"
     },
     "sceKernelGetProcessName": {
       "found": "static",
@@ -173945,6 +174255,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelGetResidentFmemCount2": {
+      "found": "affixed",
+      "seed": "sceKernelGetResidentFmemCount",
+      "rule": "*2",
+      "on": "2026-09-08"
     },
     "sceKernelGetResource": {
       "found": "static",
@@ -174059,6 +174375,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelGetTscFrequency": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene/eboot.bin",
+      "on": "2026-09-08"
     },
     "sceKernelGetUtokenDataExecutionForRcmgr": {
       "found": "static",
@@ -174564,6 +174886,18 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelIsStack": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene/eboot.bin",
+      "on": "2026-09-08"
+    },
+    "sceKernelIsTestKit": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene/eboot.bin",
+      "on": "2026-09-08"
+    },
     "sceKernelJitCreateAliasOfSharedMemory": {
       "found": "static",
       "by": "module-strings",
@@ -174594,6 +174928,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelKernelHeapUsage2": {
+      "found": "affixed",
+      "seed": "sceKernelKernelHeapUsage",
+      "rule": "*2",
+      "on": "2026-09-08"
+    },
     "sceKernelLoadStartModule": {
       "found": "generated",
       "pattern": "prefix-module-verb-verb-object",
@@ -174611,6 +174951,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelLseek": {
+      "found": "generated",
+      "pattern": "prefix-module-posix",
+      "index": 1681365,
+      "on": "2026-09-08"
     },
     "sceKernelLwfsAllocateBlock": {
       "found": "static",
@@ -174642,6 +174988,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelMapDirectMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb-object",
+      "index": 587408295,
+      "on": "2026-09-08"
+    },
     "sceKernelMapDirectMemory2": {
       "found": "generated",
       "pattern": "prefix-module-verb-object",
@@ -174653,6 +175005,24 @@
       "pattern": "prefix-module-verb-object",
       "index": 4386750,
       "on": "2026-08-20"
+    },
+    "sceKernelMapFlexibleMemoryInternal": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 596598004,
+      "on": "2026-09-08"
+    },
+    "sceKernelMapFlexibleMemoryInternal2": {
+      "found": "affixed",
+      "seed": "sceKernelMapFlexibleMemoryInternal",
+      "rule": "*2",
+      "on": "2026-09-08"
+    },
+    "sceKernelMapNamedDirectMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 596641335,
+      "on": "2026-09-08"
     },
     "sceKernelMapNamedFlexibleMemory": {
       "found": "generated",
@@ -174666,11 +175036,23 @@
       "index": 596641594,
       "on": "2026-08-24"
     },
+    "sceKernelMapNamedFlexibleMemoryInternal2": {
+      "found": "affixed",
+      "seed": "sceKernelMapNamedFlexibleMemoryInternal",
+      "rule": "*2",
+      "on": "2026-09-08"
+    },
     "sceKernelMapNamedSystemFlexibleMemory": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelMapNamedSystemFlexibleMemory2": {
+      "found": "affixed",
+      "seed": "sceKernelMapNamedSystemFlexibleMemory",
+      "rule": "*2",
+      "on": "2026-09-08"
     },
     "sceKernelMapSanitizerShadowMemory": {
       "found": "static",
@@ -174683,6 +175065,24 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelMapperGetParam": {
+      "found": "static",
+      "by": "firmware-layout",
+      "from": "crates/orbistoun-firmware/data/libkernel-vaddrs.txt",
+      "on": "2026-09-09"
+    },
+    "sceKernelMapperGetUsageStatsData": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/PPSA03416-app0/fakelib/libSceAmpr.sprx",
+      "on": "2026-09-08"
+    },
+    "sceKernelMapperSetPageTablePoolOccupancyNotificationThreshold": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/PPSA03416-app0/fakelib/libSceAmpr.sprx",
+      "on": "2026-09-08"
     },
     "sceKernelMemoryPoolBatch": {
       "found": "static",
@@ -174750,6 +175150,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelMprotect": {
+      "found": "generated",
+      "pattern": "prefix-module-posix",
+      "index": 1683780,
+      "on": "2026-09-08"
+    },
     "sceKernelMsync": {
       "found": "static",
       "by": "module-strings",
@@ -174810,6 +175216,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelOpen": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 597050880,
+      "on": "2026-09-08"
+    },
     "sceKernelOpenEport": {
       "found": "static",
       "by": "module-strings",
@@ -174821,6 +175233,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelOpenInternal": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 597050884,
+      "on": "2026-09-08"
     },
     "sceKernelOpenSema": {
       "found": "static",
@@ -174849,7 +175267,7 @@
     "sceKernelPollSema": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 5782740,
+      "index": 6235005,
       "on": "2026-08-24"
     },
     "sceKernelPread": {
@@ -174942,11 +175360,23 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelRead": {
+      "found": "generated",
+      "pattern": "prefix-module-posix",
+      "index": 1692180,
+      "on": "2026-09-08"
+    },
     "sceKernelReadDipswData": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelReadProcessMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 599173530,
+      "on": "2026-09-08"
     },
     "sceKernelReadTsc": {
       "found": "generated",
@@ -174965,6 +175395,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelReleaseDirectMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 600105255,
+      "on": "2026-09-08"
     },
     "sceKernelReleaseFlexibleMemory": {
       "found": "generated",
@@ -175290,6 +175726,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelStat": {
+      "found": "generated",
+      "pattern": "prefix-module-posix",
+      "index": 1699905,
+      "on": "2026-09-08"
+    },
     "sceKernelStopUnloadModule": {
       "found": "static",
       "by": "module-strings",
@@ -175338,6 +175780,42 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceKernelSyncOnAddressWait": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb",
+      "index": 4447845,
+      "on": "2026-09-08"
+    },
+    "sceKernelSyncOnAddressWait16": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene-payload/eboot.bin",
+      "on": "2026-09-08"
+    },
+    "sceKernelSyncOnAddressWait32": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene-payload/eboot.bin",
+      "on": "2026-09-08"
+    },
+    "sceKernelSyncOnAddressWait64": {
+      "found": "affixed",
+      "seed": "sceKernelSyncOnAddressWait",
+      "rule": "*64",
+      "on": "2026-09-08"
+    },
+    "sceKernelSyncOnAddressWait8": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/obscene-payload/eboot.bin",
+      "on": "2026-09-08"
+    },
+    "sceKernelSyncOnAddressWake": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb",
+      "index": 4447860,
+      "on": "2026-09-08"
+    },
     "sceKernelTerminateProcess": {
       "found": "static",
       "by": "module-strings",
@@ -175355,6 +175833,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceKernelTitleWorkaroundIsEnabled2": {
+      "found": "affixed",
+      "seed": "sceKernelTitleWorkaroundIsEnabled",
+      "rule": "*2",
+      "on": "2026-09-08"
     },
     "sceKernelTitleWorkdaroundIsEnabled": {
       "found": "static",
@@ -175455,7 +175939,7 @@
     "sceKernelWaitEqueue": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 5872770,
+      "index": 6332070,
       "on": "2026-08-24"
     },
     "sceKernelWaitEventFlag": {
@@ -175469,6 +175953,12 @@
       "by": "module-strings",
       "from": "titles/PPSA21564-app0/eboot.bin",
       "on": "2026-08-23"
+    },
+    "sceKernelWrite": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb-object",
+      "index": 587636280,
+      "on": "2026-09-08"
     },
     "sceKernelWriteDipswData": {
       "found": "static",
@@ -175542,6 +176032,12 @@
       "from": "titles/PPSA03416-app0/fakelib/libSceAmpr.sprx",
       "on": "2026-08-24"
     },
+    "sceKernelWriteProcessMemory": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 607496730,
+      "on": "2026-09-08"
+    },
     "sceKernelWriteRemapCommand": {
       "found": "static",
       "by": "module-strings",
@@ -175571,6 +176067,12 @@
       "by": "module-strings",
       "from": "titles/PPSA04263-app0/fakelib/libSceAmpr.sprx",
       "on": "2026-08-24"
+    },
+    "sceKernelWriteUnmapToPrtCommand": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/PPSA03416-app0/fakelib/libSceAmpr.sprx",
+      "on": "2026-09-08"
     },
     "sceKernelWritev": {
       "found": "static",
@@ -175827,7 +176329,7 @@
     "sceLibcMspaceCreate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 5981055,
+      "index": 6445335,
       "on": "2026-08-24"
     },
     "sceLibcMspaceCreateForMonoMutex": {
@@ -175839,13 +176341,13 @@
     "sceLibcMspaceDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 5981085,
+      "index": 6445365,
       "on": "2026-08-24"
     },
     "sceLibcMspaceFree": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 5981265,
+      "index": 6445545,
       "on": "2026-08-24"
     },
     "sceLibcMspaceGetAddressRanges": {
@@ -179685,13 +180187,13 @@
     "sceNetEpollDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6907455,
+      "index": 7446195,
       "on": "2026-08-24"
     },
     "sceNetEpollWait": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6908310,
+      "index": 7447050,
       "on": "2026-08-24"
     },
     "sceNetErrnoLoc": {
@@ -180305,6 +180807,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceNetTerm": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 725783040,
+      "on": "2026-09-08"
     },
     "sceNetThreadCreate": {
       "found": "static",
@@ -181563,7 +182071,7 @@
     "sceNpCommerceDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7486935,
+      "index": 8071665,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogInitializeInternal": {
@@ -181575,13 +182083,13 @@
     "sceNpCommerceDialogOpen": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7487040,
+      "index": 8071770,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7487445,
+      "index": 8072175,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogUpdateStatus": {
@@ -181971,7 +182479,7 @@
     "sceNpGameIntentReceiveIntent": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 8152770,
+      "index": 8790375,
       "on": "2026-08-24"
     },
     "sceNpGameIntentTerminate": {
@@ -191694,6 +192202,12 @@
       "index": 33750,
       "on": "2026-08-22"
     },
+    "scePthreadAttrSetprio": {
+      "found": "static",
+      "by": "module-strings",
+      "from": "titles/obscene-payload/eboot.bin",
+      "on": "2026-09-08"
+    },
     "scePthreadAttrSetschedparam": {
       "found": "generated",
       "pattern": "prefix-posix",
@@ -191729,6 +192243,24 @@
       "pattern": "prefix-posix",
       "index": 33840,
       "on": "2026-08-22"
+    },
+    "scePthreadBarrierDestroy": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 33855,
+      "on": "2026-09-08"
+    },
+    "scePthreadBarrierInit": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 33870,
+      "on": "2026-09-08"
+    },
+    "scePthreadBarrierWait": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 33885,
+      "on": "2026-09-08"
     },
     "scePthreadBarrierattrDestroy": {
       "found": "static",
@@ -191838,6 +192370,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "scePthreadCreate": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34230,
+      "on": "2026-09-08"
+    },
     "scePthreadDetach": {
       "found": "generated",
       "pattern": "prefix-posix",
@@ -191904,6 +192442,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "scePthreadJoin": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34425,
+      "on": "2026-09-08"
+    },
     "scePthreadKeyCreate": {
       "found": "generated",
       "pattern": "prefix-posix",
@@ -191952,6 +192496,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "scePthreadMutexInit": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34590,
+      "on": "2026-09-08"
+    },
     "scePthreadMutexInitForInternalLibc": {
       "found": "static",
       "by": "module-strings",
@@ -191963,6 +192513,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "scePthreadMutexLock": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34620,
+      "on": "2026-09-08"
     },
     "scePthreadMutexSetprioceiling": {
       "found": "static",
@@ -191994,6 +192550,18 @@
       "index": 34695,
       "on": "2026-08-22"
     },
+    "scePthreadMutexUnlock": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34710,
+      "on": "2026-09-08"
+    },
+    "scePthreadMutexattrDestroy": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34725,
+      "on": "2026-09-08"
+    },
     "scePthreadMutexattrGetkind": {
       "found": "static",
       "by": "module-strings",
@@ -192006,11 +192574,29 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "scePthreadMutexattrGetprotocol": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34770,
+      "on": "2026-09-08"
+    },
     "scePthreadMutexattrGetpshared": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "scePthreadMutexattrGettype": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34815,
+      "on": "2026-09-08"
+    },
+    "scePthreadMutexattrInit": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34830,
+      "on": "2026-09-08"
     },
     "scePthreadMutexattrInitForInternalLibc": {
       "found": "static",
@@ -192030,11 +192616,23 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "scePthreadMutexattrSetprotocol": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34875,
+      "on": "2026-09-08"
+    },
     "scePthreadMutexattrSetpshared": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "scePthreadMutexattrSettype": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 34920,
+      "on": "2026-09-08"
     },
     "scePthreadOnce": {
       "found": "generated",
@@ -192149,6 +192747,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "scePthreadSelf": {
+      "found": "generated",
+      "pattern": "prefix-posix",
+      "index": 35190,
+      "on": "2026-09-08"
     },
     "scePthreadSemDestroy": {
       "found": "static",
@@ -193797,7 +194401,7 @@
     "sceRudpRead": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 8875,
+      "index": 9532,
       "on": "2026-08-25"
     },
     "sceRudpSetEventHandler": {
@@ -193821,13 +194425,13 @@
     "sceRudpTerminate": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 8895,
+      "index": 9552,
       "on": "2026-08-25"
     },
     "sceRudpWrite": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 8905,
+      "index": 9562,
       "on": "2026-08-25"
     },
     "sceS3dConversionClose": {
@@ -194073,7 +194677,7 @@
     "sceSaveDataDialogClose": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 11210730,
+      "index": 12086730,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogGetResult": {
@@ -194091,7 +194695,7 @@
     "sceSaveDataDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 11211030,
+      "index": 12087030,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogIsReadyToDisplay": {
@@ -194103,7 +194707,7 @@
     "sceSaveDataDialogOpen": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 11211135,
+      "index": 12087135,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogProgressBarInc": {
@@ -194121,7 +194725,7 @@
     "sceSaveDataDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 11211540,
+      "index": 12087540,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogUpdateStatus": {
@@ -204534,6 +205138,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceVideoOutSubmitChangeBufferAttribute2": {
+      "found": "affixed",
+      "seed": "sceVideoOutSubmitChangeBufferAttribute",
+      "rule": "*2",
+      "on": "2026-09-08"
+    },
     "sceVideoOutSubmitEopFlip": {
       "found": "static",
       "by": "module-strings",
@@ -205641,7 +206251,7 @@
     "sceVoiceChatTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 14135190,
+      "index": 15241140,
       "on": "2026-08-24"
     },
     "sceVoiceConnectIPortToOPort": {
@@ -207263,6 +207873,12 @@
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-20"
     },
+    "snprintf_s": {
+      "found": "affixed",
+      "seed": "snprintf",
+      "rule": "*_s",
+      "on": "2026-09-08"
+    },
     "snwprintf_s": {
       "found": "static",
       "by": "cross-module",
@@ -207701,6 +208317,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "stdout": {
+      "found": "static",
+      "by": "cross-module",
+      "from": "titles/PPSA02664-app0/Media/Modules/Il2CppUserAssemblies.prx",
+      "on": "2026-09-08"
+    },
     "stpcpy": {
       "found": "static",
       "by": "module-strings",
@@ -207857,6 +208479,11 @@
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-23"
     },
+    "strpbrk": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "strrchr": {
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
@@ -207925,6 +208552,11 @@
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-20"
+    },
+    "strtoul": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "strtoull": {
       "found": "published-standard",
@@ -208385,6 +209017,16 @@
       "list": "crates/orbistoun-names/data/standard.txt",
       "on": "2026-08-20"
     },
+    "timespec_get": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "timezone": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
     "tls_client": {
       "found": "static",
       "by": "module-strings",
@@ -208456,6 +209098,16 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "tolower": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
+    },
+    "toupper": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "towctrans": {
       "found": "static",
@@ -208546,6 +209198,11 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "tzname": {
+      "found": "published-standard",
+      "list": "crates/orbistoun-names/data/standard.txt",
+      "on": "2026-09-08"
     },
     "tzset": {
       "found": "static",

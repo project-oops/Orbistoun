@@ -25,6 +25,7 @@
 //! lawful source. Reading a field gives zero rather than something invented.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -141,7 +142,15 @@ fn wait_while<'a, T>(
                 // Timed out *and still blocked*: a wake that arrives with the deadline is
                 // honoured if it brought what was wanted, which costs nothing and spares a
                 // caller a spurious failure at the boundary.
-                if outcome.timed_out() && blocked(&guard) {
+                //
+                // **And the clock is asked rather than the flag.** `wait_timeout` reports a
+                // timeout from the platform's own timer, which on this host is coarser than
+                // `Instant` and can say so a fraction of a millisecond before the deadline
+                // `Instant` measures - eighty milliseconds asked for, 79.88 waited. Believing
+                // the flag gives a guest back a timeout it did not ask for yet, which is a
+                // small wrong answer that a caller computing from it accumulates. Under load it
+                // is also what made three timing tests flake all session (D614).
+                if outcome.timed_out() && blocked(&guard) && Instant::now() >= deadline {
                     return None;
                 }
             }
@@ -259,14 +268,23 @@ impl GuestSemaphore {
     }
 
     /// Takes one, waiting as long as `until` allows.
-    fn take(&self, until: Blocking) -> bool {
+    /// Takes `need` at once, or none at all.
+    ///
+    /// **`need` used to be ignored and one was always taken.** A console measured all four
+    /// interesting cases and disagreed on two of them: asking for two where one is left
+    /// answers `BUSY` there and answered `OK` here, taking the one and leaving the caller
+    /// believing it held two (D610).
+    ///
+    /// All-or-nothing, which is what makes it a counting semaphore rather than a queue: a
+    /// caller that asked for two and got one has no way to say so and no way to give it back.
+    fn take(&self, need: u32, until: Blocking) -> bool {
         let Ok(count) = self.state.lock() else {
             return false;
         };
-        let Some(mut count) = wait_while(&self.available, count, until, |c| *c == 0) else {
+        let Some(mut count) = wait_while(&self.available, count, until, |c| *c < need) else {
             return false;
         };
-        *count -= 1;
+        *count -= need;
         true
     }
 
@@ -311,7 +329,7 @@ impl GuestSemaphore {
 /// Starts at one, so zero keeps meaning "nothing here" for a field a guest zeroed.
 fn next_semaphore_handle() -> SemaphoreHandle {
     static NEXT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn semaphores() -> &'static Mutex<BTreeMap<SemaphoreHandle, Arc<GuestSemaphore>>> {
@@ -341,8 +359,8 @@ fn with_semaphore<R>(handle: SemaphoreHandle, f: impl FnOnce(&GuestSemaphore) ->
 }
 
 /// Takes one, waiting as long as `until` allows. `None` when the handle names nothing.
-pub fn semaphore_wait(handle: SemaphoreHandle, until: Blocking) -> Option<bool> {
-    with_semaphore(handle, |s| s.take(until))
+pub fn semaphore_wait(handle: SemaphoreHandle, need: u32, until: Blocking) -> Option<bool> {
+    with_semaphore(handle, |s| s.take(need, until))
 }
 
 /// How many the semaphore has free. `None` when the handle names nothing.
@@ -379,9 +397,7 @@ fn table() -> &'static Mutex<BTreeMap<MutexHandle, Arc<GuestMutex>>> {
 
 /// Hands out lock handles: the address of a fresh zeroed block, never freed.
 fn next_handle() -> MutexHandle {
-    let block: Box<[u64; crate::thread::CONTROL_BLOCK_WORDS]> =
-        Box::new([0; crate::thread::CONTROL_BLOCK_WORDS]);
-    std::ptr::from_mut(Box::leak(block)) as usize as u64
+    orbistoun_mem::blocks::block(crate::thread::CONTROL_BLOCK_WORDS)
 }
 
 /// Creates a lock and returns the handle the guest should hold.
@@ -463,8 +479,7 @@ fn conds() -> &'static Mutex<BTreeMap<CondHandle, Arc<GuestCond>>> {
 /// The same shape as a mutex handle and for the same reason: a small integer would be
 /// cheaper and would fault the moment a guest read a field through it.
 fn new_handle() -> u64 {
-    let block: Box<[u64; 4]> = Box::new([0; 4]);
-    std::ptr::from_mut(Box::leak(block)) as usize as u64
+    orbistoun_mem::blocks::block(4)
 }
 
 /// Creates a condition variable, answering the handle the guest holds.
@@ -800,6 +815,20 @@ struct GuestEqueue {
     registered: Mutex<Vec<(u64, u64)>>,
     /// Events posted and not yet collected, oldest first.
     pending: Mutex<VecDeque<PendingEvent>>,
+    /// Waits begun against this queue, and events delivered out of it.
+    ///
+    /// **Counted because starvation is invisible without it.** A queue that is waited on and
+    /// never posted to reads, in every other record, exactly like a queue nobody uses - and it
+    /// is the difference between a guest that is idle and a guest that is stuck (D615).
+    waited: AtomicU64,
+    /// Events actually handed to a caller.
+    delivered: AtomicU64,
+    /// Signalled when something is posted, so a wait can be a wait.
+    ///
+    /// Without this `sceKernelWaitEqueue` returned success the instant it was asked, having
+    /// delivered nothing - so a guest looping until an event arrives spun instead of blocking:
+    /// 3,853 waits against 44 flips in one run (D613).
+    arrived: Condvar,
 }
 
 /// One event, in the fields a guest reads back out of a delivered one.
@@ -877,6 +906,9 @@ pub fn create_equeue(name: &str) -> EqueueHandle {
                 name: name.to_owned(),
                 registered: Mutex::new(Vec::new()),
                 pending: Mutex::new(VecDeque::new()),
+                waited: AtomicU64::new(0),
+                delivered: AtomicU64::new(0),
+                arrived: Condvar::new(),
             }),
         );
     }
@@ -936,6 +968,43 @@ pub fn post_event(ident: u64, event: PendingEvent) -> usize {
             // a delivered event this project is not guessing at.
             pending.push_back(PendingEvent { udata, ..event });
             posted += 1;
+            drop(pending);
+            // **Woken after the push and outside the lock.** A waiter that wakes to an empty
+            // queue goes straight back to sleep, which is correct and wasteful; one that is
+            // never woken waits for ever.
+            queue.arrived.notify_all();
+        }
+    }
+    posted
+}
+
+/// Posts an event to **every** queue, ignoring what is registered.
+///
+/// For one diagnostic and nothing else - `ORBISTOUN_FLIP_TO_ALL`, which asks what a guest blocked
+/// on a queue nothing feeds would do if that wait completed. It is not a delivery rule; it is a
+/// way of putting a question to the guest (D620).
+///
+/// Returns how many queues it reached, like [`post_event`], so the caller can say what it did.
+pub fn post_event_everywhere(event: PendingEvent) -> usize {
+    let Ok(table) = equeues().lock() else {
+        return 0;
+    };
+    let mut posted = 0;
+    for queue in table.values() {
+        // The registration's `udata` where there is one, so a queue that *was* registered still
+        // gets the word it asked for. A queue with none gets the event as given, zero included -
+        // which is the honest answer to "nobody said what this should carry".
+        let udata = queue
+            .registered
+            .lock()
+            .ok()
+            .and_then(|ids| ids.first().map(|(_, u)| *u))
+            .unwrap_or(event.udata);
+        if let Ok(mut pending) = queue.pending.lock() {
+            pending.push_back(PendingEvent { udata, ..event });
+            posted += 1;
+            drop(pending);
+            queue.arrived.notify_all();
         }
     }
     posted
@@ -948,18 +1017,36 @@ pub fn post_event(ident: u64, event: PendingEvent) -> usize {
 /// handed a fabricated event. What this deliberately does *not* do is block - see
 /// `sceKernelWaitEqueue`, where the reasoning belongs (D560).
 pub fn take_events(handle: EqueueHandle, wanted: usize) -> Vec<PendingEvent> {
-    let found = equeues()
-        .lock()
-        .ok()
-        .and_then(|t| t.get(&handle).map(Arc::clone));
-    let Some(queue) = found else {
-        return Vec::new();
-    };
-    let Ok(mut pending) = queue.pending.lock() else {
-        return Vec::new();
-    };
+    wait_events(handle, wanted, Blocking::Never).unwrap_or_default()
+}
+
+/// Collects up to `wanted` events, waiting for the first one if the caller asked to.
+///
+/// # Why waiting is the whole point
+///
+/// `sceKernelWaitEqueue` is `kevent(2)`, which blocks until at least one event is ready or the
+/// timeout elapses. Orbistoun collected whatever happened to be there and answered success
+/// either way, so a guest looping *until an event arrives* never blocked - it spun, and every
+/// iteration read an event array nothing had written. One run: 3,853 waits against 44 flips,
+/// and an out-parameter left exactly as the caller set it, which is the D171 shape (D613).
+///
+/// `None` means nothing arrived within the caller's patience - which is a different answer from
+/// an empty vector, and the difference is what lets the call refuse rather than claim success.
+/// A handle naming no queue is also `None`; the caller checks that first.
+pub fn wait_events(
+    handle: EqueueHandle,
+    wanted: usize,
+    until: Blocking,
+) -> Option<Vec<PendingEvent>> {
+    let queue = equeues().lock().ok()?.get(&handle).map(Arc::clone)?;
+    // Counted before the wait, not after, so a wait that never returns is still counted as
+    // having happened - which is the case this exists to make visible.
+    queue.waited.fetch_add(1, Ordering::Relaxed);
+    let pending = queue.pending.lock().ok()?;
+    let mut pending = wait_while(&queue.arrived, pending, until, VecDeque::is_empty)?;
     let take = wanted.min(pending.len());
-    pending.drain(..take).collect()
+    queue.delivered.fetch_add(take as u64, Ordering::Relaxed);
+    Some(pending.drain(..take).collect())
 }
 
 /// Whether a queue exists at all, so a wait on a handle nobody was given can be refused.
@@ -970,17 +1057,43 @@ pub fn equeue_exists(handle: EqueueHandle) -> bool {
 
 /// What a queue is called and what has been registered against it, for a run report.
 #[must_use]
-pub fn equeue_summary() -> Vec<(String, usize)> {
+pub fn equeue_summary() -> Vec<EqueueTraffic> {
     let Ok(table) = equeues().lock() else {
         return Vec::new();
     };
     table
-        .values()
-        .map(|q| {
-            let count = q.registered.lock().map_or(0, |ids| ids.len());
-            (q.name.clone(), count)
+        .iter()
+        .map(|(handle, q)| EqueueTraffic {
+            handle: *handle,
+            name: q.name.clone(),
+            registered: q.registered.lock().map_or(0, |ids| ids.len()),
+            waited: q.waited.load(Ordering::Relaxed),
+            delivered: q.delivered.load(Ordering::Relaxed),
         })
         .collect()
+}
+
+/// What one event queue was used for, for a run report.
+///
+/// The three numbers together answer a question none of them answers alone: a queue with
+/// registrations and no waits is set up and unused, a queue with waits and no deliveries is a
+/// thread that is stuck, and one with both is working (D615).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EqueueTraffic {
+    /// The handle the guest holds, which is what every argument dump shows.
+    ///
+    /// **Carried so the two records join.** Working out which named queue a dumped handle
+    /// belonged to meant inferring it from the wait counts, and an inference is exactly what a
+    /// report should be saving a reader (D615).
+    pub handle: EqueueHandle,
+    /// What the guest called it.
+    pub name: String,
+    /// Events registered against it.
+    pub registered: usize,
+    /// Waits begun on it.
+    pub waited: u64,
+    /// Events handed to a caller out of it.
+    pub delivered: u64,
 }
 
 // --- libSceUlt runtimes and resource pools --------------------------------------------
@@ -1103,6 +1216,16 @@ pub fn event_flag_poll(handle: EventFlagHandle, wanted: u64, all: bool) -> Optio
     })
 }
 
+/// Whether the handle names an event flag at all.
+///
+/// **Separate from polling it, because the order the checks happen in is measured.** A console
+/// answers `0x80020003` to a poll on a handle it never issued *even when the mode is also
+/// invalid*, and `0x80020016` to a bad mode on a handle it did - so the handle is looked at
+/// first, and a caller that validated the mode before the handle would answer the wrong one of
+/// two codes it otherwise gets right (D610).
+pub fn event_flag_exists(handle: EventFlagHandle) -> bool {
+    with_event_flag(handle, |_| ()).is_some()
+}
 /// Sets bits and wakes anybody waiting.
 pub fn event_flag_set(handle: EventFlagHandle, pattern: u64) -> Option<bool> {
     with_event_flag(handle, |e| {
@@ -1248,6 +1371,70 @@ fn address_waiters() -> &'static Mutex<BTreeMap<u64, Arc<AddressWaiters>>> {
     TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// How a wait finds out about, and runs, a signal raised on the sleeping thread.
+///
+/// # Why hooks rather than a call into the crate root
+///
+/// This module deliberately knows nothing about guest memory or guest threads - `wait_on_address`
+/// takes its word-read as a closure precisely so the module can be tested against a word it owns
+/// (principle 8). Running a guest signal handler is further outside that boundary again: it needs
+/// the handler table and a way to call guest code, both of which live above here. Inverted down
+/// as function pointers, the same shape as the thread-start hook.
+///
+/// Absent - a unit test, a run with no signals - a wait behaves exactly as it did.
+#[derive(Debug, Clone, Copy)]
+pub struct SignalDelivery {
+    /// Whether the calling thread has a signal waiting. Must be lock-free: it is called from
+    /// inside a condition-variable predicate, under the queue's own lock.
+    pub pending: fn() -> bool,
+    /// Runs whatever is waiting on the calling thread. Called with **no lock held**, because it
+    /// runs guest code and that code may take any lock in here.
+    pub deliver: fn(),
+}
+
+/// The installed delivery, if a run wired one up.
+static DELIVERY: OnceLock<SignalDelivery> = OnceLock::new();
+
+/// Installs signal delivery for waits. Called once, by whoever owns the run.
+pub fn install_signal_delivery(delivery: SignalDelivery) {
+    let _ = DELIVERY.set(delivery);
+}
+
+/// Whether the calling thread has a signal waiting, or `false` when nothing is installed.
+fn signal_pending() -> bool {
+    DELIVERY.get().is_some_and(|d| (d.pending)())
+}
+
+/// Runs a signal waiting on the calling thread, if delivery is installed.
+fn deliver_signal() {
+    if let Some(delivery) = DELIVERY.get() {
+        (delivery.deliver)();
+    }
+}
+
+/// Nudges every address queue, so a thread with a signal pending re-tests its predicate.
+///
+/// **Every queue, not the target's.** A raise knows which thread it is aimed at and not which
+/// word that thread is asleep on - nothing records the pairing, and recording it would be a
+/// second table to keep true. Waking all of them costs one predicate re-test per sleeper, which
+/// sends every thread but the target straight back to sleep, and it happens once per raise
+/// rather than once per call.
+///
+/// The queue's own lock is taken before notifying so the flag cannot be set in the gap between a
+/// sleeper's last predicate test and its sleep.
+pub fn nudge_address_waiters() {
+    let queues: Vec<Arc<AddressWaiters>> = match address_waiters().lock() {
+        Ok(table) => table.values().cloned().collect(),
+        Err(_) => return,
+    };
+    for queue in queues {
+        if let Ok(state) = queue.state.lock() {
+            drop(state);
+            queue.woken.notify_all();
+        }
+    }
+}
+
 /// The queue for `address`, made if this is the first wait on it.
 fn address_queue(address: u64) -> Option<Arc<AddressWaiters>> {
     let mut table = address_waiters().lock().ok()?;
@@ -1285,7 +1472,29 @@ pub fn wait_on_address(
         return Some(AddressWait::Mismatch);
     }
     state.waiting += 1;
-    let Some(mut state) = wait_while(&queue.woken, state, until, |q| q.tokens == 0) else {
+    // **A loop, because a signal is not a wake.** A thread woken to run a handler has not had
+    // its word written and is still waiting for what it came for, so it runs the handler and
+    // goes back to sleep. Written as a wake it would return `Woken` to a guest whose condition
+    // is still false (D652).
+    let state = loop {
+        let Some(woken) = wait_while(&queue.woken, state, until, |q| {
+            q.tokens == 0 && !signal_pending()
+        }) else {
+            break None;
+        };
+        // **The signal first, even when a wake arrived with it.** Hardware runs the handler
+        // whatever else was happening; breaking out on the token would leave the signal pending
+        // until some later wait, which for a thread that never waits again is never.
+        if !signal_pending() {
+            break Some(woken);
+        }
+        // The lock is dropped first: the handler is guest code and may call anything in this
+        // module, including a wait on this very queue.
+        drop(woken);
+        deliver_signal();
+        state = queue.state.lock().ok()?;
+    };
+    let Some(mut state) = state else {
         // Gave up, and the guard went with it. Re-take the lock to leave the queue - and
         // if a wake landed in that gap it counted this thread, so a token no remaining
         // sleeper can claim is this thread's and is collected rather than left to wake a
@@ -1476,15 +1685,15 @@ mod tests {
     #[test]
     fn a_semaphore_hands_out_its_initial_count_and_then_refuses() {
         let h = super::create_semaphore(2, 4, "startup");
-        assert_eq!(super::semaphore_wait(h, Blocking::Never), Some(true));
-        assert_eq!(super::semaphore_wait(h, Blocking::Never), Some(true));
+        assert_eq!(super::semaphore_wait(h, 1, Blocking::Never), Some(true));
+        assert_eq!(super::semaphore_wait(h, 1, Blocking::Never), Some(true));
         assert_eq!(
-            super::semaphore_wait(h, Blocking::Never),
+            super::semaphore_wait(h, 1, Blocking::Never),
             Some(false),
             "empty, and an impatient take must say so rather than wait"
         );
         assert_eq!(super::semaphore_signal(h, 1), Some(true));
-        assert_eq!(super::semaphore_wait(h, Blocking::Never), Some(true));
+        assert_eq!(super::semaphore_wait(h, 1, Blocking::Never), Some(true));
     }
 
     #[test]
@@ -1500,7 +1709,7 @@ mod tests {
     fn a_handle_that_names_nothing_answers_none_rather_than_a_default() {
         // `Some(false)` would read as "the operation failed"; `None` says the handle was
         // never one of ours, which is a different bug in a different place.
-        assert_eq!(super::semaphore_wait(0x7fff_beef, Blocking::Never), None);
+        assert_eq!(super::semaphore_wait(0x7fff_beef, 1, Blocking::Never), None);
         assert!(!super::semaphore_destroy(0x7fff_beef));
     }
 

@@ -134,6 +134,19 @@ recorded. Only PPSA03416 was re-run.
 forced run agree on this path; another failure reaching the same epilogue would look identical,
 and only one input was varied.
 
+**And the premise of that entry was a rounding error, corrected by D595.** The "one file read of
+zero bytes" this reasoning starts from was four hundred and two bytes of `boot.config`, read
+completely and successfully, printed as `0 KiB` by an integer division. What survives is that the
+guest never reads `globalgamemanagers` through its descriptor - which is now measured per read
+rather than inferred from a summary.
+
+**And one reading here was wrong, corrected by D578.** The four paths this title probes and does
+not find - `data.unity3d` and three `globalgamemanagers.res` variants - were read as evidence
+that it never reached the loose-file layout it actually ships. It reaches it: a record of
+*successful* opens shows it opening `globalgamemanagers`, the IL2CPP metadata and the boot config.
+The four are the archive layout the title does not use, and reasoning from the missing half of
+the evidence is what made them look like a cause.
+
 **Nor what `sceKernelMprotect` should do about module memory.** Refusing it is measured to be
 the wall, which says the current behaviour is wrong for this guest - not what the right
 behaviour is. The range belongs to a placement `orbistoun-kernel` does not own, and the guard

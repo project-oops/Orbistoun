@@ -439,3 +439,67 @@ context cannot re-derive.
 | - | [422. The stack the collector scans](worklog/422-the-stack-the-collector-scans.md) |
 | - | [423. The fault message was guessing, and it cost a finding](worklog/423-the-fault-message-was-guessing.md) |
 | - | [424. The protection call learns about the other half of the map](worklog/424-the-protection-call-learns-the-other-half.md) |
+| - | [425. What the guest opened, and the two devices it wanted](worklog/425-what-the-guest-opened.md) |
+| - | [426. The wall was the crash reporter, and the file path it died on has a name now](worklog/426-the-wall-was-the-crash-reporter.md) |
+| - | [427. Reading the command buffer, and the two tools that had to be fixed to do it](worklog/427-reading-the-command-buffer.md) |
+| - | [428. The determinism bug had two halves and a third that is architecture](worklog/428-the-determinism-bug-had-two-halves.md) |
+| - | [429. Autodebugging starts by not believing the run](worklog/429-autodebugging-starts-by-not-believing-the-run.md) |
+| - | [430. The hardware answered, and the loop reads structures by itself](worklog/430-the-hardware-answered-and-the-loop-reads-structures.md) |
+| - | [431. The path was globalgamemanagers, and yesterday's finding was wrong](worklog/431-the-path-was-globalgamemanagers.md) |
+| - | [432. The bytes were not what it wanted](worklog/432-the-bytes-were-not-what-it-wanted.md) |
+| - | [433. The guest was telling us all along](worklog/433-the-guest-was-telling-us-all-along.md) |
+| - | [434. The answer was in the title directory](worklog/434-the-answer-was-in-the-title-directory.md) |
+| - | [435. The library was guest code all along](worklog/435-the-library-was-guest-code-all-along.md) |
+| - | [436. Stepping through the construction](worklog/436-stepping-through-the-construction.md) |
+| - | [437. Fifty-eight, not three](worklog/437-fifty-eight-not-three.md) |
+| - | [438. Four hundred and two bytes](worklog/438-four-hundred-and-two-bytes.md) |
+| - | [439. Opened, never touched](worklog/439-opened-never-touched.md) |
+| - | [440. Untouched, not zero](worklog/440-untouched-not-zero.md) |
+| - | [441. The other title](worklog/441-the-other-title.md) |
+| - | [442. A different program](worklog/442-a-different-program.md) |
+| - | [443. Re-derived](worklog/443-re-derived.md) |
+| - | [444. One branch](worklog/444-one-branch.md) |
+| - | [445. The head of the sequence](worklog/445-the-head-of-the-sequence.md) |
+| - | [446. A conflict nobody stepped past](worklog/446-a-conflict-nobody-stepped-past.md) |
+| - | [447. The largest record nobody read](worklog/447-the-largest-record-nobody-read.md) |
+| - | [448. Five files of twenty-eight](worklog/448-five-files-of-twenty-eight.md) |
+| - | [449. The probe runs here too](worklog/449-the-probe-runs-here-too.md) |
+| - | [450. The probe was not calling](worklog/450-the-probe-was-not-calling.md) |
+| - | [451. The encoding fell out of a pairing](worklog/451-the-encoding-fell-out-of-a-pairing.md) |
+| - | [452. The generous window was zero](worklog/452-the-generous-window-was-zero.md) |
+| - | [453. The guest was carrying the answer](worklog/453-the-guest-was-carrying-the-answer.md) |
+| - | [454. The handle was never consulted](worklog/454-the-handle-was-never-consulted.md) |
+| - | [455. The biggest number on the board](worklog/455-the-biggest-number-on-the-board.md) |
+| - | [456. Advice that cannot succeed](worklog/456-advice-that-cannot-succeed.md) |
+| - | [457. One function, two answers](worklog/457-one-function-two-answers.md) |
+| - | [458. The ratchet cannot say worse](worklog/458-the-ratchet-cannot-say-worse.md) |
+| - | [459. The branch that printed nothing](worklog/459-the-branch-that-printed-nothing.md) |
+| - | [460. A record older than the repository](worklog/460-a-record-older-than-the-repository.md) |
+| - | [461. A hypothesis tested and rejected](worklog/461-a-hypothesis-tested-and-rejected.md) |
+| - | [462. An answer needs somebody who asked](worklog/462-an-answer-needs-somebody-who-asked.md) |
+| - | [463. The eboot was never stuck](worklog/463-the-eboot-was-never-stuck.md) |
+| - | [464. Twenty blank pages](worklog/464-twenty-blank-pages.md) |
+| - | [465. Every import accounted for](worklog/465-every-import-accounted-for.md) |
+| - | [466. Four numbers](worklog/466-four-numbers.md) |
+| - | [467. Two tables that answer each other](worklog/467-two-tables-that-answer-each-other.md) |
+| - | [468. A third title at the same wall](worklog/468-a-third-title-at-the-same-wall.md) |
+| - | [469. The binding reached the relocation](worklog/469-the-binding-reached-the-relocation.md) |
+| - | [470. The guest signals itself](worklog/470-the-guest-signals-itself.md) |
+| - | [471. The report can see a guest sitting still](worklog/471-the-report-can-see-a-guest-sitting-still.md) |
+| - | [472. The canary had a name](worklog/472-the-canary-had-a-name.md) |
+| - | [473. Every request came back at once](worklog/473-every-request-came-back-at-once.md) |
+| - | [474. The target is not the caller](worklog/474-the-target-is-not-the-caller.md) |
+| - | [475. The report learned to name threads](worklog/475-the-report-learned-to-name-threads.md) |
+| - | [476. The handler ran](worklog/476-the-handler-ran.md) |
+| - | [477. Two readers, one corpus](worklog/477-two-readers-one-corpus.md) |
+| - | [478. The differential was measuring itself](worklog/478-the-differential-was-measuring-itself.md) |
+| - | [479. The symbol level](worklog/479-the-symbol-level.md) |
+| - | [480. FURTHER](worklog/480-further.md) |
+| - | [481. Mirrors, and a new wall](worklog/481-mirrors-and-a-new-wall.md) |
+| - | [482. The guest was talking all along](worklog/482-the-guest-was-talking-all-along.md) |
+| - | [483. The guest is the only oracle left](worklog/483-the-guest-is-the-only-oracle-left.md) |
+| - | [484. The corpus has names](worklog/484-the-corpus-has-names.md) |
+| - | [485. Three roots](worklog/485-three-roots.md) |
+| - | [486. The differential was comparing two sandboxes](worklog/486-the-differential-was-comparing-two-sandboxes.md) |
+| - | [487. Prospero, Trinity, Orbis, Neo](worklog/487-prospero-trinity-orbis-neo.md) |
+| - | [488. An origin list](worklog/488-an-origin-list.md) |

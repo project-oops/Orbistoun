@@ -250,6 +250,11 @@ pub const ARGUMENT_BLOCK_SIZE: usize = 4096;
 pub fn process_argument_block() -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
+    // **Still a host heap address, and still a determinism leak.** Every other guest-visible
+    // block comes from `orbistoun_mem::blocks` now (D601); this crate has *no* orbistoun
+    // dependencies at all - `orbistoun-mem` appears only under `[dev-dependencies]` - and
+    // adding one to reach the allocator is a structural change to a deliberately leaf crate,
+    // not a two-line fix. Recorded rather than made.
     *BLOCK.get_or_init(|| {
         let block: Box<[u64; ARGUMENT_BLOCK_SIZE / 8]> = Box::new([0; ARGUMENT_BLOCK_SIZE / 8]);
         std::ptr::from_mut(Box::leak(block)) as usize as u64

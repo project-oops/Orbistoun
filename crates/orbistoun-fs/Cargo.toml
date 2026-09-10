@@ -18,4 +18,5 @@ orbistoun-core = { workspace = true }
 # and say which crate reads it. `orbistoun-env` takes no orbistoun dependency (D325).
 orbistoun-env = { workspace = true }
 orbistoun-hle = { workspace = true }
+orbistoun-mem = { workspace = true }
 orbistoun-nid = { workspace = true }

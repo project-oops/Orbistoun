@@ -147,9 +147,26 @@ enum Command {
     /// for an assertion to name one and be checked against it. A measurement every run agreed
     /// on is marked constant; one they disagreed on is kept and marked not.
     Measurements {
-        /// The directory of capture files, in the sibling conformance-probe repository.
-        #[arg(long, default_value = "../obscene/data/hardware")]
-        records: PathBuf,
+        /// A directory of capture files, in the sibling conformance-probe repository.
+        ///
+        /// **Repeatable, and every one is read into a single table.** That is not a
+        /// convenience: whether a measurement is `constant` is decided by every run that
+        /// took it agreeing, so a table built from one directory while captures sit in
+        /// another marks values constant that a run elsewhere contradicts. One table, every
+        /// capture (D609).
+        ///
+        /// A directory that does not exist is skipped with a warning rather than refused -
+        /// the defaults name a sibling checkout, and somebody holding one of the two should
+        /// get the table their captures support rather than an error.
+        #[arg(
+            long,
+            default_values = [
+                "../obscene/data/hardware",
+                "../obscene/reports/hardware",
+                "../obscene/reports/archive/hardware",
+            ]
+        )]
+        records: Vec<PathBuf>,
         /// Where the generated table goes.
         #[arg(long, default_value = "crates/orbistoun-hle/data/hardware.toml")]
         out: PathBuf,
@@ -387,21 +404,57 @@ fn run_hardware(records: &std::path::Path, out: &std::path::Path, dry_run: bool)
 }
 
 /// Writes the measurement table, or shows it.
-fn run_measurements(records: &std::path::Path, out: &std::path::Path, dry_run: bool) -> Result<()> {
+fn run_measurements(records: &[PathBuf], out: &std::path::Path, dry_run: bool) -> Result<()> {
     let mut found = Vec::new();
-    for (name, text) in captures(records)? {
-        let rows = hardware::measurements_in(&text, &name);
-        if rows.is_empty() {
+    let mut read = 0_usize;
+    for directory in records {
+        if !directory.is_dir() {
+            eprintln!("  {}: no such directory - skipped", directory.display());
             continue;
         }
-        eprintln!("  {name}: {} measurement(s)", rows.len());
-        found.extend(rows);
+        read += 1;
+        for (name, text) in captures(directory)? {
+            let rows = hardware::measurements_in(&text, &name);
+            if rows.is_empty() {
+                continue;
+            }
+            eprintln!("  {name}: {} measurement(s)", rows.len());
+            found.extend(rows);
+        }
     }
     anyhow::ensure!(
-        !found.is_empty(),
-        "no capture in {} carried a measure record",
-        records.display()
+        read > 0,
+        "none of the {} directory/ies named exist - nothing was read",
+        records.len()
     );
+    anyhow::ensure!(
+        !found.is_empty(),
+        "no capture in the {read} directory/ies read carried a measure record"
+    );
+
+    // **What is already committed is folded in beside what was read.** A report directory is
+    // overwritten - six files become six different files an hour later - so a regeneration that
+    // took only what is on disk would drop the earlier batch entirely, and a measurement that was
+    // non-constant *because* two batches disagreed would become constant again for want of the
+    // evidence against it (D618).
+    let carried = match std::fs::read_to_string(out) {
+        Ok(text) => {
+            let table: orbistoun_hle::hardware::Measurements =
+                toml::from_str(&text).with_context(|| format!("parsing {}", out.display()))?;
+            let rows = hardware::observations_in_table(&table);
+            eprintln!(
+                "  {}: {} measurement(s) already recorded",
+                out.display(),
+                rows.len()
+            );
+            rows
+        }
+        // Absent is the ordinary first run. Any other error is a real problem and must not be
+        // mistaken for it, or a permissions fault silently starts the table from nothing.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", out.display())),
+    };
+    found.extend(carried);
     let table = hardware::table(&hardware::fold(found));
     let constant = table.constants().count();
     eprintln!(
@@ -413,20 +466,44 @@ fn run_measurements(records: &std::path::Path, out: &std::path::Path, dry_run: b
 }
 
 /// Every capture file under a directory, as (name, contents).
+///
+/// # Two extensions, because the probe writes two
+///
+/// A session transcript is `.txt` and a report is `.obs.log`, and this accepted only the
+/// first. Pointed at a directory of reports it therefore found nothing and said "no capture
+/// carried a measure record" - which is true of what it read and false of what is there
+/// (D609).
+///
+/// Anything else is skipped rather than read: a directory of captures holds READMEs, module
+/// dumps and `.sprx` files, and a binary read as a transcript is a parse error at best.
 fn captures(records: &std::path::Path) -> Result<Vec<(String, String)>> {
+    /// What a capture file is called.
+    const CAPTURE_SUFFIXES: &[&str] = &[".txt", ".obs.log"];
+
     let mut out = Vec::new();
     for entry in
         std::fs::read_dir(records).with_context(|| format!("reading {}", records.display()))?
     {
         let path = entry?.path();
-        if path.extension().is_none_or(|e| e != "txt") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
         let name = path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if !CAPTURE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
+            continue;
+        }
+        // **A file that is not text is not a transcript, and is not an error either.** A
+        // capture directory holds raw kernel logs beside session transcripts, and one of
+        // them is not valid UTF-8. Failing the whole run on it means the other forty
+        // captures go unread because of a file nobody was asking about - but skipping it
+        // silently would leave a reader thinking it had been searched, so it is named
+        // (D609).
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("  {name}: not readable as text - skipped ({e})");
+                continue;
+            }
+        };
         out.push((name, text));
     }
     Ok(out)

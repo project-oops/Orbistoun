@@ -43,11 +43,49 @@ pub struct Manifest {
     pub source: Vec<Source>,
 }
 
+/// Which of orbistoun's roots a source's assets belong under.
+///
+/// # Why this is per-source and not one root for everything
+///
+/// Every asset used to land under `titles/`, because that was the only root a corpus knew
+/// about. It put twenty-five one-file homebrew ELFs beside installed titles, where a shell
+/// listing the library showed them as titles - which they are not. A title is a directory with
+/// a `param.json`, an `eboot.bin` and its own filesystem; a payload is one executable somebody
+/// runs; a package is something that has not been installed yet. Three kinds, three roots, and
+/// the manifest says which (D661).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Target {
+    /// Installed titles - a directory each, with their own material.
+    #[default]
+    Titles,
+    /// Raw executables, run directly rather than installed.
+    Payloads,
+    /// Installable packages, before anything installs them.
+    Packages,
+}
+
+impl Target {
+    /// How to name it in a report.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Titles => "titles",
+            Self::Payloads => "payloads",
+            Self::Packages => "packages",
+        }
+    }
+}
 /// One source: where a set of guests comes from, and the terms under which they were obtained.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Source {
-    /// The directory name under `titles/` this source's guests land in.
+    /// The directory name, under whichever root [`Self::target`] names, this source's guests
+    /// land in.
     pub name: String,
+    /// Which root those guests belong under. Defaults to `titles` - what every source was
+    /// before there was anywhere else to put one.
+    #[serde(default)]
+    pub target: Target,
     /// `github-release` or `local`; see the `KIND_*` constants.
     pub kind: String,
     /// `github-release`: `owner/repo`.
@@ -59,6 +97,15 @@ pub struct Source {
     /// `local`: a path to the source's build output, relative to the orbistoun repo root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Origins to try in order, each a local path or a URL, first one that answers wins.
+    ///
+    /// **An alternative to `repo`/`tag`/`path`, not an addition to them.** A sibling checkout is
+    /// the fast path when somebody has one and absent when they do not; a published release is
+    /// slower and always there. Listing both lets one manifest serve both cases without a person
+    /// editing it, and every origin that failed is reported so a broken fast path does not hide
+    /// behind a working slow one (D664).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     /// The licence the assets are obtained under. Recorded per D042; downloading is not
     /// redistributing, so this is a note, not a gate.
     pub licence: String,
@@ -158,14 +205,14 @@ impl Source {
             .map_or_else(|| file.to_owned(), |n| n.to_string_lossy().into_owned())
     }
 
-    /// Where one asset lands under the corpus root: `titles/<source>/<stem>/<file>`.
+    /// Where one asset lands: `<root>/<source>/<stem>/<file>`, with the root chosen by
+    /// [`Self::target`].
     ///
     /// Each guest gets its own directory because `run` keys a compatibility record by the
     /// containing directory's name (a title is a directory holding its material), so a flat
     /// layout would make every guest overwrite one record.
-    pub fn target(&self, titles_root: &Path, file: &str) -> PathBuf {
-        titles_root
-            .join(&self.name)
+    pub fn path_for(&self, root: &Path, file: &str) -> PathBuf {
+        root.join(&self.name)
             .join(Self::stem(file))
             .join(Self::base(file))
     }
@@ -334,12 +381,153 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Where one attempt to obtain an asset points.
+///
+/// **Classified from the string rather than declared**, so a manifest can list a sibling checkout
+/// and a release URL side by side without a person also learning a keyword for each. Bare strings
+/// are what makes the fallback list readable, and reading them is this code's job (D664).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// A path on this machine, resolved relative to the repository root.
+    Path(String),
+    /// Something to fetch over the network.
+    Url(String),
+}
+
+impl Origin {
+    /// Which kind of origin a manifest entry names.
+    ///
+    /// Only `http://` and `https://` are URLs. A Windows path begins `C:\`, which contains a
+    /// colon and is emphatically not a scheme - checking for `://` rather than `:` is the whole
+    /// difference, and it is why this is a function with a test rather than an inline guess.
+    #[must_use]
+    pub fn classify(origin: &str) -> Self {
+        if origin.starts_with("http://") || origin.starts_with("https://") {
+            Self::Url(origin.to_owned())
+        } else {
+            Self::Path(origin.to_owned())
+        }
+    }
+}
+
+/// What happened when a list of origins was walked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt<T> {
+    /// What the origin that answered produced.
+    pub value: T,
+    /// Which origin answered.
+    pub used: String,
+    /// The ones tried before it, and why each did not answer.
+    ///
+    /// **Kept rather than discarded.** A sibling checkout that is absent and a release that
+    /// answers 404 are different problems with different fixes, and a fallback that reports only
+    /// its success hides the fact that the fast path is broken.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Walks `origins` in order and answers from the first that succeeds.
+///
+/// Pure: `attempt` does the fetching, so the ordering, the reporting and the give-up condition are
+/// all testable without a network or a filesystem - the shape principle 8 asks for.
+///
+/// # Errors
+///
+/// When every origin failed, carrying each one and its reason so a caller can say what it tried.
+pub fn first_that_answers<T, E: ToString>(
+    origins: &[String],
+    mut attempt: impl FnMut(&str) -> Result<T, E>,
+) -> Result<Attempt<T>, Vec<(String, String)>> {
+    let mut failed = Vec::new();
+    for origin in origins {
+        match attempt(origin) {
+            Ok(value) => {
+                return Ok(Attempt {
+                    value,
+                    used: origin.clone(),
+                    failed,
+                });
+            }
+            Err(why) => failed.push((origin.clone(), why.to_string())),
+        }
+    }
+    Err(failed)
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// **An origin is a local path or a URL, and nothing has to say which.**
+    ///
+    /// Written first. The manifest lists origins as bare strings so a person can paste a release
+    /// URL beside a sibling checkout without also learning a `kind` keyword - so the classifying
+    /// is this code's job, and getting it wrong means trying to open a URL as a file (D664).
+    #[test]
+    fn an_origin_knows_whether_it_is_a_url_or_a_path() {
+        assert_eq!(
+            Origin::classify("https://github.com/x/y/releases/download/t/a.zip"),
+            Origin::Url("https://github.com/x/y/releases/download/t/a.zip".to_owned())
+        );
+        assert_eq!(
+            Origin::classify("http://example.invalid/a.elf"),
+            Origin::Url("http://example.invalid/a.elf".to_owned())
+        );
+        assert_eq!(
+            Origin::classify("../obscene/build/prospero"),
+            Origin::Path("../obscene/build/prospero".to_owned())
+        );
+        // A Windows path is not a URL, and `C:` is not a scheme. The colon is what makes this
+        // worth a test rather than a one-liner.
+        assert_eq!(
+            Origin::classify(r"D:\builds\probe"),
+            Origin::Path(r"D:\builds\probe".to_owned())
+        );
+    }
+
+    /// The first origin that answers wins, and the ones before it are reported as tried.
+    #[test]
+    fn the_first_origin_that_answers_is_the_one_used() {
+        let tried = first_that_answers(&["a".to_owned(), "b".to_owned(), "c".to_owned()], |o| {
+            if o == "b" {
+                Ok(7)
+            } else {
+                Err("nope".to_owned())
+            }
+        });
+        let attempt = tried.expect("one of them answered");
+        assert_eq!(attempt.value, 7);
+        assert_eq!(attempt.used, "b");
+        assert_eq!(
+            attempt.failed,
+            vec![("a".to_owned(), "nope".to_owned())],
+            "what was tried and why it did not answer is kept, not discarded"
+        );
+    }
+
+    /// **All of them failing is an error naming every attempt**, not a silent skip.
+    ///
+    /// The negative case, and the one the manifest shape exists for: a sibling checkout that is
+    /// not there and a release that 404s should say both, so the next person knows which to fix.
+    #[test]
+    fn every_origin_failing_reports_every_reason() {
+        let tried: Result<Attempt<u8>, Vec<(String, String)>> =
+            first_that_answers(&["a".to_owned(), "b".to_owned()], |o| {
+                Err(format!("{o} was not there"))
+            });
+        let failures = tried.expect_err("none of them answered");
+        assert_eq!(
+            failures.len(),
+            2,
+            "every origin is reported, not just the last"
+        );
+        assert!(failures.iter().any(|(o, _)| o == "a"));
+        assert!(failures.iter().any(|(o, _)| o == "b"));
+    }
     use super::*;
 
     fn source(kind: &str) -> Source {
         Source {
+            target: Target::default(),
+            sources: Vec::new(),
             name: "src".into(),
             kind: kind.into(),
             repo: Some("owner/repo".into()),
@@ -368,7 +556,7 @@ mod tests {
 
     #[test]
     fn the_target_is_one_directory_per_guest() {
-        let t = source(KIND_GITHUB_RELEASE).target(Path::new("titles"), "elfldr_v0.26.elf");
+        let t = source(KIND_GITHUB_RELEASE).path_for(Path::new("titles"), "elfldr_v0.26.elf");
         let got: PathBuf = t.components().collect();
         let want: PathBuf = ["titles", "src", "elfldr_v0.26", "elfldr_v0.26.elf"]
             .iter()

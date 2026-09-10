@@ -1318,7 +1318,14 @@ posix = ["
         // makes that hold (D214).
         let patterns = adopting(WORD).patterns().expect("patterns resolve");
         assert!(
-            orbistoun_names::solve::verify(NAME, &hit.solved[0].derivation, &patterns, &[]),
+            orbistoun_names::solve::verify(
+                NAME,
+                &hit.solved[0].derivation,
+                &patterns,
+                &[],
+                // A generated record, so no affix rule can be consulted.
+                &orbistoun_names::affix::Affixes::default(),
+            ),
             "the audit would refuse {:?}",
             hit.solved[0].derivation
         );
@@ -1560,7 +1567,8 @@ posix = ["
                 NAME,
                 &solved.derivation,
                 &adopted.patterns().expect("patterns resolve"),
-                &[]
+                &[],
+                &orbistoun_names::affix::Affixes::default(),
             ),
             "the index stopped meaning what it meant: {:?}",
             solved.derivation

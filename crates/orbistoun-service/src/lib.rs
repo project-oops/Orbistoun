@@ -796,6 +796,8 @@ pub struct LinkedTitle {
     /// and it keeps the slot. Where it has not, a stub would say "nothing implements this"
     /// about code sitting in the title's own data, so the module wins.
     pub bound: std::collections::BTreeMap<u32, u64>,
+    /// Every import accounted for, bound or not, with a reason for each that is not (D640).
+    pub binding: titleplacement::BindingAccount,
     /// One label per slot of the shared stub table, across every module.
     ///
     /// **Built here because this is where the module bytes are.** A label vector sized to the
@@ -891,6 +893,21 @@ impl Service {
         (default, self.policy.specific(), self.policy.propping())
     }
 
+    /// Every name the loaded database holds.
+    ///
+    /// For a search that derives new names from proved ones: the seeds have to be names,
+    /// not candidates, and this is where the names are (D606).
+    pub fn symbol_names(&self) -> impl Iterator<Item = &str> {
+        self.symbols.iter().flat_map(SymbolDb::names)
+    }
+    /// The name the loaded database gives a hash, if it gives one.
+    ///
+    /// **Asked of the service rather than reached for directly**, so a shim that wants to
+    /// spell a hash does not have to know how a database is loaded or which suffix built
+    /// it. Three shims exist and none of them may hold that (principle 13).
+    pub fn symbol_name(&self, nid: Nid) -> Option<&str> {
+        self.symbols.as_ref().and_then(|db| db.name(nid))
+    }
     /// How many names the loaded symbol database knows, if there is one.
     pub fn symbol_db_len(&self) -> Option<usize> {
         self.symbols.as_ref().map(SymbolDb::len)
@@ -1198,6 +1215,7 @@ impl Service {
         &self,
         bytes: &[u8],
         base: u64,
+        db: Option<&SymbolDb>,
     ) -> Result<orbistoun_thunk::DataBlocks, ServiceError> {
         let container = orbistoun_elf::Container::parse(bytes)?;
         // Names as well as indices: relocation needs the index, and an implementation that
@@ -1206,13 +1224,42 @@ impl Service {
             .raw_imports(bytes, &self.hasher)?
             .into_iter()
             .filter(|import| import.kind == orbistoun_elf::dynamic::Kind::Object)
-            .map(|import| (import.symbol_index as usize, import.name))
+            .map(|import| {
+                (
+                    import.symbol_index as usize,
+                    Self::spell_data_import(db, &import),
+                )
+            })
             .collect();
         Ok(orbistoun_thunk::DataBlocks::build(
             base,
             &imports,
             orbistoun_core::GUEST_PAGE_SIZE,
         )?)
+    }
+
+    /// How a data import should be spelled, given what this run's database knows.
+    ///
+    /// **A vendor module spells every import as an encoded hash**, so the name reaching the data
+    /// block is `f7uOxY9mM1U#r#n` and that is what a run report prints beside a faulting register.
+    /// It is the right storage under an unreadable label: PPSA21564 dies holding a pointer to one
+    /// of these blocks, and the report could say only that the guest was looking at offset zero of
+    /// something spelled in base64 - which cannot tell a reader whether it is a C++ vtable, a
+    /// stdio handle or the stack canary, and those want completely different answers (D647).
+    ///
+    /// **The run's database, not the service's.** A worker process builds its `Service` with no
+    /// symbol database at all - the database is loaded per run, because names belong to the run
+    /// (the same reasoning as `import_labels_with`). Reaching for `self.symbols` here compiled,
+    /// ran, and renamed nothing, which is the failure mode a lookup that cannot fail always has.
+    ///
+    /// Falls back to the encoded spelling when nothing names the hash: that string is still the
+    /// module's own and is still greppable. What it must never do is invent one.
+    fn spell_data_import(
+        db: Option<&SymbolDb>,
+        import: &orbistoun_elf::dynamic::RawImport,
+    ) -> String {
+        db.and_then(|db| db.name(Nid::from_raw(import.nid)))
+            .map_or_else(|| import.name.clone(), ToOwned::to_owned)
     }
 
     /// Storage for every data import across several modules, in one reservation.
@@ -1237,6 +1284,7 @@ impl Service {
         modules: &[(&str, &[u8])],
         slots: &[ModuleSlots],
         base: u64,
+        db: Option<&SymbolDb>,
     ) -> Result<(orbistoun_thunk::DataBlocks, Vec<String>), ServiceError> {
         let mut imports: Vec<(usize, String)> = Vec::new();
         let mut seen: std::collections::BTreeMap<String, String> =
@@ -1248,17 +1296,17 @@ impl Service {
                 if import.kind != orbistoun_elf::dynamic::Kind::Object {
                     continue;
                 }
-                if let Some(first) = seen.get(&import.name) {
+                let spelled = Self::spell_data_import(db, &import);
+                if let Some(first) = seen.get(&spelled) {
                     shared.push(format!(
-                        "{}: imported as data by {first} and by {label} - both have storage, but a lookup by name answers one of them",
-                        import.name
+                        "{spelled}: imported as data by {first} and by {label} - both have storage, but a lookup by name answers one of them"
                     ));
                 } else {
-                    seen.insert(import.name.clone(), (*label).to_owned());
+                    seen.insert(spelled.clone(), (*label).to_owned());
                 }
                 imports.push((
                     slot.offset.saturating_add(import.symbol_index as usize),
-                    import.name,
+                    spelled,
                 ));
             }
         }
@@ -1643,6 +1691,17 @@ impl Service {
             }
         }
         orbistoun_thunk::install_name_thunks(by_name);
+        // **Which of those names libkernel declares**, so `sceKernelDlsym` can narrow an answer
+        // by the module handle it was given rather than ignoring it. Published from here because
+        // the console's libkernel is spread across three of this project's declarations, in three
+        // crates that must not reach sideways for each other (D536, D629).
+        orbistoun_thunk::install_libkernel_names(
+            symbols::modules()
+                .iter()
+                .filter(|m| m.name.starts_with("libkernel"))
+                .flat_map(|m| m.imports.iter().map(|i| i.name.to_owned()))
+                .collect(),
+        );
         // What a guest reaches past every name. Published beside the by-name stubs because it
         // is the same question one level down: which implementation does this ask for (D378).
         orbistoun_thunk::syscall::install_syscalls(symbols::syscalls(), symbols::syscall_refusal());
@@ -1923,15 +1982,33 @@ impl Service {
             .collect();
 
         let (thunks, slots) = self.build_thunks_for(&modules, bases.thunks)?;
-        let (data, shared_data) = self.build_data_blocks_for(&modules, &slots, bases.data)?;
+        // The run's own database, built once here: the data blocks are labelled with it and a
+        // worker's `Service` carries none of its own (D647).
+        let named_by = SymbolDb::from_file(symbols).map(|(db, _)| db);
+        let (data, shared_data) =
+            self.build_data_blocks_for(&modules, &slots, bases.data, named_by.as_ref())?;
         // Published once, across every module - the table is a `OnceLock` and a second install
         // is ignored, so per-module publishing would keep the executable's globals and drop
         // every module's (D484).
         orbistoun_thunk::install_data_symbols(data.named());
+        // The address-keyed twin, published beside it: a name three modules import labels three
+        // pages here and one there, and a fault reporter needs the three (D647).
+        orbistoun_thunk::install_data_labels(data.labels());
+
+        // **Before the modules are relocated, not after.** The binding says which imports must
+        // resolve into a module the title ships rather than into a stub, and a relocation that
+        // has already run cannot be told that. It was computed after this loop, which is why
+        // every module-to-module import landed on a placeholder however correctly the binding
+        // was worked out (D640, D644).
+        let (per_module, kept_by_orbistoun, binding) =
+            self.bind_to_title_modules(&placed, &modules, &slots)?;
+        let bound = per_module.first().cloned().unwrap_or_default();
 
         let mut tallies = Vec::new();
         // `slots[0]` is the executable, which the worker relocates as part of entering it.
-        for ((library, image), slot) in placed.images().iter().zip(slots.iter().skip(1)) {
+        for (index, ((library, image), slot)) in
+            placed.images().iter().zip(slots.iter().skip(1)).enumerate()
+        {
             let bytes = owned
                 .iter()
                 .find(|(label, _)| label == library)
@@ -1944,9 +2021,19 @@ impl Service {
                 data: &data,
                 refuse: None,
             };
-            let resolver = orbistoun_loader::relocate::OffsetResolver {
+            let shifted = orbistoun_loader::relocate::OffsetResolver {
                 offset: slot.offset,
                 inner: &shared,
+            };
+            // **The binding outside, the offsetting inside.** `TitleResolver` looks a symbol
+            // index up in the map it holds, and this map is keyed by *this* module's own symbol
+            // index - so it never sees a shifted index, and `OffsetResolver` shifts only what
+            // falls through to the shared stub table. Composed the other way round the binding
+            // would be asked about a slot number and answer nothing (D644).
+            let nothing = std::collections::BTreeMap::new();
+            let resolver = orbistoun_loader::relocate::TitleResolver {
+                bound: per_module.get(index + 1).unwrap_or(&nothing),
+                inner: &shifted,
             };
             let tally = self.relocate_image(image, bytes, &resolver)?;
             tallies.push((library.clone(), tally));
@@ -1999,7 +2086,6 @@ impl Service {
             .collect();
         orbistoun_kernel::note_guest_exports(self.hasher.suffix_bytes(), &exports);
         let labels = self.import_labels_for(&modules, &slots, symbols)?;
-        let (bound, kept_by_orbistoun) = self.bind_to_title_modules(&placed, &owned)?;
         Ok(LinkedTitle {
             placed,
             slots,
@@ -2008,50 +2094,185 @@ impl Service {
             thunks,
             data,
             bound,
+            binding,
             labels,
             kept_by_orbistoun,
         })
     }
 
-    /// Which of the executable's imports a module the title ships should answer.
+    /// Which of the executable's imports a module the title ships answers, and which it does not.
     ///
-    /// **D483's rule, and the place it is actually applied.** An import binds into the module
-    /// its `library_id` names, and only where orbistoun has no implementation of its own: the
-    /// emulator's `libc` is what every differential case and every hardware claim was measured
-    /// against, so it keeps the slot. A name nothing here implements is the opposite - a stub
-    /// there answers a placeholder for code that is present and relocated, and the guest then
-    /// uses the placeholder as an address (D489).
+    /// **Every import is accounted for, bound or not, with a reason for each that is not.** Six of
+    /// PPSA25872's imports are exported by modules it ships; all six landed on placeholders; and
+    /// the run printed nothing - not a count, not a reason, not even that the question had been
+    /// asked. One of them is then called nineteen million times (D630, D640).
     ///
-    /// `owned[0]` is the executable, which is module 0 at offset 0 - so its symbol index is its
-    /// slot, and the map needs no shifting.
+    /// The reasons are computed here rather than inferred by a reader, because every one of them
+    /// is a different fix: a library id the table does not list is a parsing question, a library
+    /// nothing exports under is a placement question, a hash a placed module does not export is a
+    /// question about that module, and `KeptByOrbistoun` is not a failure at all.
     fn bind_to_title_modules(
         &self,
         placed: &titleplacement::PlacedTitleModules,
-        owned: &[(String, Vec<u8>)],
-    ) -> Result<(std::collections::BTreeMap<u32, u64>, Vec<String>), ServiceError> {
-        let Some((_, bytes)) = owned.first() else {
-            return Ok((std::collections::BTreeMap::new(), Vec::new()));
+        modules: &[(&str, &[u8])],
+        slots: &[ModuleSlots],
+    ) -> Result<TitleBinding, ServiceError> {
+        use titleplacement::Unbound;
+
+        let empty = titleplacement::BindingAccount {
+            imports: 0,
+            bound: 0,
+            unbound: Vec::new(),
+            by_library: Vec::new(),
         };
-        let container = orbistoun_elf::Container::parse(bytes)?;
-        let imports = container.raw_imports(bytes, &self.hasher)?;
-        let libraries = container.import_libraries(bytes)?;
-        let resolution = placed.resolve(&imports, &libraries);
-        let mut bound = std::collections::BTreeMap::new();
-        let mut kept = Vec::new();
-        for import in &imports {
-            let Some(address) = resolution.addresses.get(&import.symbol_index) else {
-                continue;
-            };
-            // Asked of the dispatch tables rather than of a name list, because that is what
-            // actually answers the call - a name this project knows but has not bound is not
-            // implemented, whatever a registry says.
-            if orbistoun_thunk::is_implemented(import.symbol_index as usize) {
-                kept.push(import.name.clone());
-            } else {
-                bound.insert(import.symbol_index, *address);
-            }
+        if modules.is_empty() {
+            return Ok((Vec::new(), Vec::new(), empty));
         }
-        Ok((bound, kept))
+        // **One map per module, keyed by that module's own symbol index.**
+        //
+        // Not one shared map keyed by slot, and the difference is what makes the composition
+        // below unambiguous: `TitleResolver` looks a symbol index up in the map it is given, and
+        // `OffsetResolver` shifts an index into the shared stub table. Wrapping the offsetting
+        // one *inside* the binding one means the binding never sees a shifted index, so neither
+        // resolver has to know what the other does with it (D644).
+        let mut per_module: Vec<std::collections::BTreeMap<u32, u64>> = Vec::new();
+        let mut kept = Vec::new();
+        let mut total = 0_usize;
+        let mut answered: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        // **Keyed by reason *and* library.** Grouping on the reason alone gives one example out
+        // of four hundred, which cannot answer the question a reader actually has - is *my*
+        // module in this bucket? PS5Util being among the hundred and thirty-four orbistoun
+        // claims to implement would be alarming; libc being there is correct; and one example
+        // line said neither (D640).
+        let mut why: Vec<(Unbound, String, usize)> = Vec::new();
+
+        // **Every module the title ships, not only its executable.** This looked at `owned[0]`
+        // alone, so a module importing from a *sibling* module was never a candidate - and that
+        // is PPSA25872's whole wall: `PS5Util.prx` is placed, started, and exports the function
+        // the run calls nineteen million times, but the caller is another of the title's modules
+        // and its imports were never offered the binding (D640).
+        //
+        // The slot offset is still needed to ask whether *this project* implements the import,
+        // because that question is asked of the shared dispatch table.
+        for ((_, bytes), slot) in modules.iter().zip(slots) {
+            let mut bound = std::collections::BTreeMap::new();
+            let container = orbistoun_elf::Container::parse(bytes)?;
+            let imports = container.raw_imports(bytes, &self.hasher)?;
+            let libraries = container.import_libraries(bytes)?;
+            let resolution = placed.resolve(&imports, &libraries);
+            let ambiguous: std::collections::BTreeSet<&str> = resolution
+                .ambiguous
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect();
+            let mismatched: std::collections::BTreeSet<&str> = resolution
+                .mismatches
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect();
+            for (library, count) in resolution.by_library() {
+                *answered.entry(library.to_owned()).or_default() += count;
+            }
+            total += imports.len();
+
+            for import in &imports {
+                let at = slot.offset + import.symbol_index as usize;
+                let library = Self::library_of(&libraries, import);
+                let mut note = |reason: Unbound, library: &str| {
+                    if let Some(entry) = why
+                        .iter_mut()
+                        .find(|(r, l, _)| *r == reason && l == library)
+                    {
+                        entry.2 += 1;
+                    } else {
+                        why.push((reason, library.to_owned(), 1));
+                    }
+                };
+                if let Some(address) = resolution.addresses.get(&import.symbol_index) {
+                    // Asked of the dispatch tables rather than of a name list, because that is
+                    // what actually answers the call - a name this project knows but has not
+                    // bound is not implemented, whatever a registry says.
+                    if orbistoun_thunk::is_implemented(at) {
+                        kept.push(import.name.clone());
+                        // **Named with its library.** "Kept by orbistoun" is correct for libc and
+                        // alarming for a module the game wrote, and the two printed identically.
+                        note(Unbound::KeptByOrbistoun, &library);
+                    } else {
+                        bound.insert(import.symbol_index, *address);
+                    }
+                    continue;
+                }
+                let (reason, detail) =
+                    Self::why_unbound(placed, &libraries, import, &ambiguous, &mismatched);
+                note(reason, &detail);
+            }
+            per_module.push(bound);
+        }
+        why.sort_by_key(|(_, _, count)| std::cmp::Reverse(*count));
+        let mut by_library: Vec<(String, usize)> = answered.into_iter().collect();
+        by_library.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        let account = titleplacement::BindingAccount {
+            imports: total,
+            bound: per_module.iter().map(std::collections::BTreeMap::len).sum(),
+            unbound: why,
+            by_library,
+        };
+        Ok((per_module, kept, account))
+    }
+
+    /// The library name an import names, or a stand-in when it names none.
+    fn library_of(
+        libraries: &std::collections::BTreeMap<u16, String>,
+        import: &orbistoun_elf::dynamic::RawImport,
+    ) -> String {
+        match import.form {
+            orbistoun_elf::dynamic::NameForm::Encoded { library_id, .. } => libraries
+                .get(&library_id)
+                .cloned()
+                .unwrap_or_else(|| format!("library id {library_id}")),
+            orbistoun_elf::dynamic::NameForm::Plain => "no attribution".to_owned(),
+        }
+    }
+
+    /// Which step declined one import, asked in the order `resolve` asks it.
+    ///
+    /// Deliberately re-walks the same tests rather than having `resolve` report them: `resolve`
+    /// answers "where is this", and threading a reason through it would make the common path
+    /// carry the cost of the rare one. The duplication is two lookups on a path that runs once
+    /// per import per launch.
+    fn why_unbound(
+        placed: &titleplacement::PlacedTitleModules,
+        libraries: &std::collections::BTreeMap<u16, String>,
+        import: &orbistoun_elf::dynamic::RawImport,
+        ambiguous: &std::collections::BTreeSet<&str>,
+        mismatched: &std::collections::BTreeSet<&str>,
+    ) -> (titleplacement::Unbound, String) {
+        use orbistoun_elf::dynamic::NameForm;
+        use titleplacement::Unbound;
+
+        if mismatched.contains(import.name.as_str()) {
+            return (Unbound::KindMismatch, Self::library_of(libraries, import));
+        }
+        match import.form {
+            NameForm::Encoded { library_id, .. } => {
+                let Some(library) = libraries.get(&library_id) else {
+                    return (Unbound::NoLibraryName, format!("library id {library_id}"));
+                };
+                // **The library, not the import.** Four hundred and sixty-four of one title's
+                // imports land here, and which *libraries* they name is the fact that says
+                // whether anything is wrong - one encoded hash out of four hundred says nothing
+                // (D640).
+                match placed.exports().get(library) {
+                    None => (Unbound::NoSuchLibrary, library.clone()),
+                    Some(_) => (Unbound::NotExported, library.clone()),
+                }
+            }
+            NameForm::Plain if ambiguous.contains(import.name.as_str()) => {
+                (Unbound::Ambiguous, "no attribution".to_owned())
+            }
+            NameForm::Plain => (Unbound::NotExported, "no attribution".to_owned()),
+        }
     }
 
     /// The hash a guest would import this name by.
@@ -2219,6 +2440,14 @@ fn initialisers_of(bytes: &[u8], base: u64) -> Option<orbistoun_kernel::ModuleIn
         count: if info.init_array == 0 { 0 } else { count },
     })
 }
+
+/// What binding the title's own modules produced: the map the relocator reads, the names
+/// orbistoun kept for itself, and an account of every import either way.
+type TitleBinding = (
+    Vec<std::collections::BTreeMap<u32, u64>>,
+    Vec<String>,
+    titleplacement::BindingAccount,
+);
 
 #[cfg(test)]
 mod tests {

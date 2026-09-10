@@ -18,25 +18,45 @@
 /// in?" - the second is the whole answer, and the first is a more expensive way to reach
 /// it. The watchpoint earns its keep when *when* and *who* matter; this is what to reach
 /// for first (D223).
-static SNAPSHOT: std::sync::OnceLock<(u64, Vec<u8>)> = std::sync::OnceLock::new();
+static SNAPSHOT: std::sync::OnceLock<(u64, Option<Vec<u8>>)> = std::sync::OnceLock::new();
+
+/// How long a watched region is, kept for the case where there was nothing to snapshot.
+///
+/// The length is the caller's question either way, and a region that did not exist at entry
+/// has no captured bytes to take it from.
+static WATCHED_LEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Copies a region of guest memory, to be compared against later.
 ///
-/// Silent when the region cannot be read: a watch is a question somebody asked about an
-/// address they typed, and an address that is not mapped is an ordinary mistake rather
-/// than a reason to end the run. The comparison then reports that nothing was captured.
+/// # A region that is not there yet is a question, not a mistake
+///
+/// This read the address unconditionally, and its own documentation said it did not: *"silent
+/// when the region cannot be read"*, above a raw dereference that faulted. An address the guest
+/// maps at runtime does not exist at entry, so watching the structure a call was handed - the
+/// thing the diagnostic is for - **killed the run before the guest started**, with a fault
+/// report naming the emulator's own read.
+///
+/// A doc promising what the branch below it never did is the same failure as a message naming a
+/// cause nothing measured, one layer down (principle 3, D385). Both halves are fixed rather
+/// than the comment: a region absent at entry is recorded as absent, and [`changes`] reports
+/// what appeared there instead of a diff it cannot make (D580).
 pub fn snapshot(base: u64, len: u64) {
-    let (Ok(at), Ok(len)) = (usize::try_from(base), usize::try_from(len)) else {
+    let (Ok(at), Ok(size)) = (usize::try_from(base), usize::try_from(len)) else {
         return;
     };
-    // SAFETY: the caller supplies an address in the guest's own mapping, which is the
-    // identity mapping this process made, and the region is read before the guest starts -
-    // so nothing else is writing it. An address outside it faults here exactly as it would
-    // have faulted in the guest, and the fault reporter names it.
+    WATCHED_LEN.store(len, std::sync::atomic::Ordering::Relaxed);
+    if !orbistoun_thunk::readable_span(base, len) {
+        // Asked for and not there yet, which is a finding rather than an error.
+        let _ = SNAPSHOT.set((base, None));
+        return;
+    }
+    // SAFETY: `readable_span` has just said the whole of `[base, base + len)` is inside a
+    // span this process mapped, and the region is read before the guest starts - so nothing
+    // else is writing it.
     let bytes = unsafe {
-        std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), len).to_vec()
+        std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), size).to_vec()
     };
-    let _ = SNAPSHOT.set((base, bytes));
+    let _ = SNAPSHOT.set((base, Some(bytes)));
 }
 
 /// What changed in the watched region, as lines a person reads.
@@ -55,10 +75,49 @@ pub fn changes() -> Vec<String> {
     let Ok(at) = usize::try_from(*base) else {
         return Vec::new();
     };
-    // SAFETY: the same region snapshot read, still mapped - the guest has faulted or run
-    // out of time, but its address space is this process's and is intact until it exits.
-    let after = unsafe {
-        std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), before.len())
+    let len = match before {
+        Some(bytes) => bytes.len() as u64,
+        None => WATCHED_LEN.load(std::sync::atomic::Ordering::Relaxed),
+    };
+    // Whether it can be read *now*, which for a region the guest mapped while it ran is a
+    // different answer from the one at entry - and is the answer that decides what can be
+    // said about it.
+    // **"Published as readable", not "mapped", because that is the question that was asked.**
+    // The two came apart for months: every mapping a guest made at runtime was absent from the
+    // published list, so a pointer into an ordinary heap structure read as though the address
+    // were wrong. The tool can establish that nobody told it about the span and cannot
+    // establish that nothing is there (D580).
+    if !orbistoun_thunk::readable_span(*base, len) {
+        return vec![format!(
+            "  {base:#x}+{len:#x} is in no span this run published as readable"
+        )];
+    }
+    let Ok(size) = usize::try_from(len) else {
+        return Vec::new();
+    };
+    // SAFETY: `readable_span` has just said the whole window is inside a span this process
+    // mapped. The guest has faulted or run out of time, but its address space is this
+    // process's and is intact until it exits.
+    let after =
+        unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), size) };
+
+    // **Appeared while the guest ran, so there is no diff to report and the contents are the
+    // finding.** This is the case the structures worth watching are almost always in: a
+    // command buffer, a descriptor, anything an allocator handed the guest is mapped after
+    // entry, and a diagnostic that answered "nothing was captured" for all of them was
+    // answering the wrong question (D580).
+    let Some(before) = before else {
+        let mut lines = vec![format!(
+            "  {base:#x}+{len:#x} did not exist when the guest started"
+        )];
+        lines.extend(after.chunks(8).enumerate().map(|(index, now)| {
+            format!(
+                "  {:#x}  {}",
+                base.saturating_add((index * 8) as u64),
+                word(now)
+            )
+        }));
+        return lines;
     };
 
     let mut lines = Vec::new();
@@ -77,11 +136,23 @@ pub fn changes() -> Vec<String> {
         ));
     }
     if lines.is_empty() {
+        // **And what it holds, because "nothing changed" is only half an answer.** A region that
+        // existed at entry got a diff and nothing else, so a watch could say a structure was
+        // untouched and not what was in it - and for anything the loader placed, which is every
+        // module the title ships, the contents are the question. Reading guest material at rest
+        // is `static` evidence and always was; the tool simply would not show it (D593).
         lines.push(format!(
-            "  nothing in {:#x}+{:#x} changed while the guest ran",
+            "  nothing in {:#x}+{:#x} changed while the guest ran; it holds",
             base,
             before.len()
         ));
+        lines.extend(after.chunks(8).enumerate().map(|(index, now)| {
+            format!(
+                "  {:#x}  {}",
+                base.saturating_add((index * 8) as u64),
+                word(now)
+            )
+        }));
     } else {
         lines.push(format!("  ({unchanged} word(s) unchanged)"));
     }
@@ -100,4 +171,36 @@ fn word(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    /// **A region that is not there yet must not be dereferenced.**
+    ///
+    /// This is the failure the module documented and did not have: the doc said *"silent when
+    /// the region cannot be read"* above a raw dereference, so watching the structure a call
+    /// was handed killed the run before the guest started. Asserted against the filter rather
+    /// than by faulting, because a test that reproduced the bug would take the suite with it.
+    #[test]
+    fn an_address_nothing_published_is_refused_rather_than_read() {
+        // Nothing has published anything in this process, which is the state `snapshot` runs
+        // in for an address the guest has not mapped yet.
+        assert!(
+            !orbistoun_thunk::readable_span(0x7400_0089_D210, 0x40),
+            "an unpublished address must not be readable, or `snapshot` dereferences it"
+        );
+        assert!(
+            !orbistoun_thunk::readable_span(u64::MAX, 8),
+            "a window that overflows is not inside anything"
+        );
+    }
+
+    /// A watch nobody asked for says nothing, rather than reporting an empty region.
+    #[test]
+    fn no_watch_is_no_output() {
+        assert!(
+            super::changes().is_empty(),
+            "a run with no watch must not print a region"
+        );
+    }
 }

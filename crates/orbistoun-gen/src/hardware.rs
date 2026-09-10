@@ -223,29 +223,39 @@ const JOIN: char = '\u{1f}';
 pub(crate) fn measurements_in(capture: &str, source: &str) -> Vec<Observation> {
     let mut out = Vec::new();
     for line in capture.lines() {
-        let fields: Vec<&str> = line.split('|').collect();
-        let [
-            "OBS",
-            "measure",
-            check,
+        // **Read through the crate that owns the record format, not by splitting on a pipe
+        // here.** This used to do its own field match, which was a second copy of the
+        // protocol living one directory away from the first - the shape D291 and D292 gave
+        // this crate its `orbistoun-hle` dependency to avoid. `orbistoun-probe` grew a
+        // `Measure` variant in D605; the copy went with it.
+        let Ok(orbistoun_probe::Line::Record(orbistoun_probe::Record::Measure {
+            section,
             subject,
-            condition,
-            observation,
-            kind,
-            ..,
-        ] = fields.as_slice()
+            field,
+            value,
+            unit,
+        })) = orbistoun_probe::parse_line(line)
         else {
             continue;
         };
+        // **The export census is not an observation of a condition.** Its subject is a hash
+        // rather than a named thing and its "value" is where the kernel happens to have
+        // placed it, so folding 2,443 of them in here would make a table of checkable claims
+        // four fifths symbol table - and every entry would read as a platform constant when
+        // an address is the least constant thing a report carries. It is consumed by the name
+        // search instead, which is what a hash and an address are for (D605, D609).
+        if section == orbistoun_probe::KEXPORT_SECTION {
+            continue;
+        }
         out.push(Observation {
             // The condition rides in the check field so `fold` groups by the full triple: two
             // conditions of one check are different measurements and must not be folded
             // together as though the runs had disagreed.
-            check: format!("{check}{JOIN}{condition}{JOIN}{kind}"),
-            symbol: (*subject).to_owned(),
+            check: format!("{section}{JOIN}{field}{JOIN}{unit}"),
+            symbol: subject,
             outcomes: vec![Outcome {
                 verdict: String::new(),
-                value: (*observation).to_owned(),
+                value,
                 note: String::new(),
                 sources: vec![source.to_owned()],
             }],
@@ -254,6 +264,61 @@ pub(crate) fn measurements_in(capture: &str, source: &str) -> Vec<Observation> {
     out
 }
 
+/// Turns a committed table back into observations, so a regeneration adds rather than replaces.
+///
+/// # Why this exists
+///
+/// A report directory is **overwritten**. The sibling project's probe writes into one place, and
+/// an hour later the six files there are six different files - so a regeneration that read only
+/// what is on disk silently dropped everything the previous batch had said.
+///
+/// That is not merely a lost record. A measurement marked `constant = false` *because two batches
+/// disagreed* becomes constant again the moment one of them is deleted, and something may then
+/// assert it. Evidence going missing would make a claim **stronger**, which is the one direction
+/// nothing should ever move on its own (D618).
+///
+/// So the committed table is folded in beside the captures, exactly as `write_symbol_db`
+/// accumulates names and `write_wanted` accumulates hashes (D074). What a run cannot see, it
+/// keeps.
+///
+/// The `disagreed` field is parsed back into the outcomes it was rendered from - `value in
+/// source and source` - which is why [`table`] writes it in that shape rather than as a bare
+/// list of values.
+pub(crate) fn observations_in_table(
+    table: &orbistoun_hle::hardware::Measurements,
+) -> Vec<Observation> {
+    let mut out = Vec::new();
+    for m in &table.measurements {
+        let mut outcomes = vec![Outcome {
+            verdict: String::new(),
+            value: m.observation.clone(),
+            note: String::new(),
+            sources: m.sources.clone(),
+        }];
+        for rendered in &m.disagreed {
+            // `value in a.txt and b.txt`. A line that does not split that way is kept whole as
+            // the value with no source, which loses the provenance and never the disagreement -
+            // the disagreement is the part that must not be dropped.
+            let (value, sources) = rendered
+                .split_once(" in ")
+                .map_or((rendered.as_str(), Vec::new()), |(v, s)| {
+                    (v, s.split(" and ").map(str::to_owned).collect())
+                });
+            outcomes.push(Outcome {
+                verdict: String::new(),
+                value: value.to_owned(),
+                note: String::new(),
+                sources,
+            });
+        }
+        out.push(Observation {
+            check: format!("{}{JOIN}{}{JOIN}{}", m.check, m.condition, m.kind),
+            symbol: m.subject.clone(),
+            outcomes,
+        });
+    }
+    out
+}
 /// Turns folded observations into the committed table.
 ///
 /// **A measurement is constant when every run that took it agreed**, which is decided by the
@@ -343,6 +408,78 @@ pub(crate) fn ingest(
 #[cfg(test)]
 mod tests {
     use super::{edge_case, fold, ingest, observation_of, observations_in};
+
+    /// A committed table survives a regeneration that cannot see the captures it came from.
+    ///
+    /// **The failure this guards is silent and makes a claim stronger.** A report directory is
+    /// overwritten, so a measurement marked non-constant *because two batches disagreed* would
+    /// become constant again the moment one batch is deleted - and something may then assert it.
+    /// Dropping the table from 429 rows to 38 is what actually happened when the fold was
+    /// removed to check (D618).
+    #[test]
+    fn a_committed_table_is_carried_through_a_regeneration_that_cannot_see_its_captures() {
+        use super::{observations_in_table, table};
+        use orbistoun_hle::hardware::{Measurement, Measurements};
+
+        let committed = Measurements {
+            measurements: vec![
+                Measurement {
+                    id: "015-sync/x:sceKernelFoo:only".to_owned(),
+                    check: "015-sync/x".to_owned(),
+                    subject: "sceKernelFoo".to_owned(),
+                    condition: "only".to_owned(),
+                    kind: "code".to_owned(),
+                    observation: "0x0".to_owned(),
+                    sources: vec!["gone.txt".to_owned()],
+                    constant: true,
+                    disagreed: Vec::new(),
+                },
+                Measurement {
+                    id: "015-sync/y:sceKernelBar:both".to_owned(),
+                    check: "015-sync/y".to_owned(),
+                    subject: "sceKernelBar".to_owned(),
+                    condition: "both".to_owned(),
+                    kind: "code".to_owned(),
+                    observation: "0x1".to_owned(),
+                    sources: vec!["one.txt".to_owned()],
+                    constant: false,
+                    disagreed: vec!["0x2 in two.txt and three.txt".to_owned()],
+                },
+            ],
+        };
+
+        // Read back and written out again with no captures at all: the round trip is the whole
+        // contract, because a regeneration that saw nothing new does exactly this.
+        let again = table(&fold(observations_in_table(&committed)));
+        assert_eq!(again.measurements.len(), 2, "nothing may be dropped");
+
+        let kept = again
+            .get("015-sync/y:sceKernelBar:both")
+            .expect("still there");
+        assert!(
+            !kept.constant,
+            "a disagreement must survive: losing it is how a deleted capture makes a claim stronger"
+        );
+        assert_eq!(
+            kept.disagreed,
+            vec!["0x2 in two.txt and three.txt".to_owned()]
+        );
+        assert_eq!(
+            kept.values(),
+            vec![1, 2],
+            "and both values are still readable"
+        );
+
+        let alone = again
+            .get("015-sync/x:sceKernelFoo:only")
+            .expect("still there");
+        assert!(alone.constant);
+        assert_eq!(
+            alone.sources,
+            vec!["gone.txt".to_owned()],
+            "including where it came from"
+        );
+    }
 
     const CAPTURE: &str = "OBS|try|015-sync/mutex-unlock-unheld|libkernel|scePthreadMutexUnlock\n\
          OBS|res|015-sync/mutex-unlock-unheld|pass|0xffffffff80020001||derived\n\

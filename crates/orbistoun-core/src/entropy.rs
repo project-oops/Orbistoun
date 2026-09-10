@@ -55,7 +55,9 @@ pub const fn mix(state: u64) -> u64 {
 /// The thin effectful half: it advances the shared state and mixes it.
 #[must_use]
 pub fn next_word() -> u64 {
-    mix(STATE.fetch_add(GAMMA, Ordering::Relaxed).wrapping_add(GAMMA))
+    mix(STATE
+        .fetch_add(GAMMA, Ordering::Relaxed)
+        .wrapping_add(GAMMA))
 }
 
 /// Fills `into` from the stream.
@@ -78,7 +80,11 @@ mod tests {
     #[test]
     fn the_mixer_is_deterministic_and_spreads_its_input() {
         assert_eq!(super::mix(1), super::mix(1), "same state, same word");
-        assert_ne!(super::mix(1), super::mix(2), "adjacent states must not collide");
+        assert_ne!(
+            super::mix(1),
+            super::mix(2),
+            "adjacent states must not collide"
+        );
 
         // **`mix(0)` is 0, and that is the published finaliser rather than a defect here.**
         // Asserted so nobody "fixes" it: every step is a multiply or a shift-xor of zero, so
@@ -86,7 +92,11 @@ mod tests {
         // walks every value - and one zero word in that many is a property of the generator
         // this project chose, not a hole in it. Stated because the first version of this test
         // asserted the opposite and was wrong.
-        assert_eq!(super::mix(0), 0, "the finaliser's fixed point, by construction");
+        assert_eq!(
+            super::mix(0),
+            0,
+            "the finaliser's fixed point, by construction"
+        );
     }
 
     /// Every byte is written, including a tail that does not fill a word.

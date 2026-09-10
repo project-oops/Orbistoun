@@ -25,7 +25,9 @@
 //! commercial executables `sceKernelDirectMemoryQuery` is 99.9% of every call a guest
 //! makes. Everything else here still reports honestly that it is not written.
 
+pub mod apr;
 pub mod direct;
+pub mod mapped;
 pub mod sync;
 pub mod thread;
 
@@ -121,6 +123,11 @@ guest_module! {
         "sceKernelReserveVirtualRange" => 4,
         "sceKernelVirtualQuery" => 4,
         "sceKernelMprotect" => 3,
+        // Two: the signal number and the handler. Both measured - an inverted call answers
+        // EINVAL on hardware, and the guest's own handler compares its first argument to 30.
+        "sceKernelInstallExceptionHandler" => 2,
+        "sceKernelRemoveExceptionHandler" => 1,
+        "sceKernelRaiseException" => 2,
         "sceKernelSetVirtualRangeName" => 3,
         "sceKernelAllocateMainDirectMemory" => 4,
         "sceKernelGetDirectMemorySize" => 0,
@@ -212,9 +219,32 @@ guest_module! {
         "scePthreadSetaffinity" => 2,
         "scePthreadAttrSetschedpolicy" => 2, "scePthreadAttrSetinheritsched" => 2,
         "scePthreadAttrSetaffinity" => 2, "scePthreadAttrSetguardsize" => 2,
+        // The platform's asynchronous file path, and the wall PPSA03416 dies behind. Unity's
+        // `LocalFileSystemPS5` resolves paths to ids and sizes, builds a command buffer of
+        // reads, submits it and waits - so a title opens the files it wants and reads nothing
+        // through the descriptors, which is the "five opens, one read of zero bytes" D578 could
+        // not explain (worklog 426).
+        //
+        // **Declared so the calls can be seen, not because they are implemented.** Each answers
+        // the placeholder and says what it was asked; a stub the guest cannot tell from a
+        // working implementation is what principle 3 forbids, and reporting is not answering.
+        //
+        // `sceKernelAprWaitCommandBuffer` was a bare hash - `0x23020f8e2805acae`, on
+        // `symbols/wanted.txt` with 8,328 others. The guest's own wrapper prints
+        // `waitCommandBufferCompletion`, its sibling wrapper `submitCommandBufferAndGetResult` is
+        // the platform name with `sceKernelApr` prefixed and nothing else changed, and the same
+        // transformation plus the obvious truncation hashes to the import exactly. Confirmed by
+        // the hash agreeing and nothing else, which is the only confirmation there is (D587).
+        //
+        // Arity six throughout: the trampoline's full capture, which is not a claim about how
+        // many arguments these take. The reasoning is `orbistoun-gpu`'s `agc` module in full
+        // (D504) - a wrong arity degrades a trace, a wrong name is a shim nothing can reach.
+        "sceKernelAprResolveFilepathsToIdsAndFileSizes" => 6,
+        "sceKernelAprSubmitCommandBufferAndGetResult" => 6,
+        "sceKernelAprWaitCommandBuffer" => 6,
         "sceKernelReadTsc" => 0,
         "sceKernelGetTscFrequency" => 0,
-        "sceKernelIsStack" => 1,
+        "sceKernelIsStack" => 3,
         "sceKernelGetModuleList" => 3,
         "sceKernelLoadStartModule" => 6,
         // Refused rather than answered, because the structure it fills is not derivable -
@@ -1099,6 +1129,14 @@ fn allocate_main_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// How many times a placement steps past a conflict before giving up.
+///
+/// The arena counter steps an address rather than the map, so a base it hands back can already
+/// be held - by a range the guest reserved at a hint inside the arena. Sixteen is what
+/// `sceKernelReserveVirtualRange` has always used, and naming it once stops the two paths
+/// drifting apart again (D604).
+const CONFLICT_RETRIES: usize = 16;
+
 /// Where guest-requested mappings are placed when the guest expresses no preference.
 ///
 /// Clear of the image, the stacks, the thunk table **and the thunk data blocks**, so a stray
@@ -1279,6 +1317,29 @@ fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, u64>> {
 }
 
 fn map_named_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // **Every way out that is not success is recorded, from one place.** The refusal note started
+    // on the one failure path anybody had looked at, and this function has a dozen - so a map the
+    // guest asked for and did not get still looked identical to one it never asked for, which is
+    // the exact question the record was extended to answer (D602, D603).
+    // **The address the guest asked for, not the argument that points at it.** `args[0]` is the
+    // `void **` the answer is written back through - a stack address - and recording it as a base
+    // put a guest stack pointer in a list of mappings. Read through it for what the guest
+    // actually requested, which is zero when it expressed no preference (D604).
+    let requested = read_word(args[0]).unwrap_or(0);
+    let outcome = map_named_direct_memory_inner(args);
+    if outcome != OK {
+        mapped::note_failed(
+            requested,
+            args[1],
+            &format!("answered {outcome:#x}"),
+            requested != 0,
+        );
+    }
+    outcome
+}
+
+/// The body, so the refusal note above has one place to sit.
+fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // On by default. The switch remains because turning a subsystem off is a useful thing
     // to be able to do while bisecting - it was off for one afternoon while a fault inside
     // this function went unexplained, and the cause turned out to be elsewhere (D178).
@@ -1349,16 +1410,42 @@ fn map_named_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // through the null pointer it kept (the `image+0xafcc08` wall, made legible by the return
     // a call now records - D459, D460). An address the guest did *not* pre-reserve is a fresh
     // mapping and still reserved.
-    let placed = if space.owns(base, len) {
+    let mut base = base;
+    let mut placed = if space.owns(base, len) {
         space.protect(base, len, protection)
     } else {
         space.reserve(base, len, protection).map(|_| ())
     };
+    // **Retried past a conflict, but only when the guest expressed no preference.**
+    // `sceKernelReserveVirtualRange` has done this since it was written, for the reason its own
+    // comment gives: *the counter steps an address, not the map, so a base it hands back can
+    // already be held*. This call had the identical hazard and no mitigation - it took one
+    // address and answered `NoMemory`, and a guest asking for thirty-two mebibytes *anywhere*
+    // was told there was none (D604).
+    //
+    // A guest that named an address is refused as before. It asked for somewhere specific, and
+    // quietly moving it is the corruption the paragraph above refuses.
+    if placed.is_err() && requested == 0 {
+        for _ in 0..CONFLICT_RETRIES {
+            let Some(next) = checked_next_multiple_of(next_mapping_base(len), align) else {
+                break;
+            };
+            base = next;
+            placed = space.reserve(base, len, protection).map(|_| ());
+            if placed.is_ok() {
+                break;
+            }
+        }
+    }
     if placed.is_err() {
+        // **Not recorded here.** The wrapper above records every way out that is not success,
+        // and a note at both levels put one refusal in the list twice - visible only because the
+        // list showed two entries sharing a call ordinal. One place, which is the rule the
+        // successful side already follows (D604).
         return u64::from(GuestError::NoMemory.as_raw());
     }
     drop(space);
-    fill_mapping(base, len, protection);
+    mapping_placed(base, len, protection, requested != 0);
 
     if !write_word(out, base) {
         return u64::from(GuestError::InvalidArgument.as_raw());
@@ -1554,7 +1641,7 @@ fn started(path: &str, handle: u64, ran: u64) {
     }
 }
 
-/// One line for a run report: the event queues a guest made, and what it registered on each.
+/// One line for a run report: the event queues a guest made, and what each was used for.
 ///
 /// [`None`] when none was created, so a quiet run stays quiet.
 ///
@@ -1562,6 +1649,12 @@ fn started(path: &str, handle: u64, ran: u64) {
 /// refuses a handle no queue answers, and a run where every registration was refused looks
 /// exactly like a run that made none - which is the ambiguity that makes a check worse than no
 /// check (D325, D524).
+///
+/// **And so is a queue that is waited on and never delivers.** Registrations alone cannot tell a
+/// queue nobody uses from a thread that is stuck on one: both read as a name and a count. The
+/// waits and the deliveries beside them make the difference visible in every run, of every
+/// title, without anybody dumping an argument - which is how this was found the first time
+/// (D615).
 #[must_use]
 pub fn equeue_summary() -> Option<String> {
     let queues = sync::equeue_summary();
@@ -1570,7 +1663,19 @@ pub fn equeue_summary() -> Option<String> {
     }
     let named = queues
         .iter()
-        .map(|(name, count)| format!("{name:?} ({count} event(s))"))
+        .map(|q| {
+            // The starvation case is called out rather than left to arithmetic. A reader
+            // scanning a report should not have to notice that two numbers differ.
+            let verdict = if q.waited > 0 && q.delivered == 0 {
+                "  <- waited on, never delivered"
+            } else {
+                ""
+            };
+            format!(
+                "{:?} {:#x} ({} registered, {} waits, {} delivered){verdict}",
+                q.name, q.handle, q.registered, q.waited, q.delivered
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!("{} event queue(s): {named}", queues.len()))
@@ -1704,6 +1809,98 @@ fn direct_fill() -> Option<u8> {
     })
 }
 
+/// Everything that has to happen once a mapping exists, in the one place it can be seen.
+///
+/// # Why this is a function and not two calls at each site
+///
+/// Three paths place guest mappings - direct memory, `mmap`, and a reserved virtual range -
+/// and each ended in a bare `fill_mapping`. Adding a second obligation to "a mapping now
+/// exists" as three more call sites is the hazard that has already been paid for twice in
+/// this project: a reporter wired into the fault path and not the clean-exit path worked for
+/// a title that crashed and not for one that stopped (worklog 425). One function means the
+/// fourth mapping path has one thing to call rather than a list to remember.
+fn mapping_placed(base: u64, len: u64, protection: orbistoun_mem::Protection, hinted: bool) {
+    // **The sequence, when a run asked for it.** A bump-allocated address is a function of
+    // everything placed before it, so a run whose addresses differ from another's can only be
+    // diffed by the order - and the failures were the only half ever reported (D581).
+    mapped::note(base, len, protection.read, hinted);
+    // **Published as guest memory the diagnostics may read, because that is what it is.**
+    // The readable ranges are installed before the guest is entered - the image and the main
+    // stack - so a pointer into anything the guest mapped *afterwards* dumped as `no region
+    // this run mapped, and address-shaped`, which reads as a wild pointer and is an ordinary
+    // heap address. Thread stacks had exactly this blind spot and were fixed the same way
+    // (D387); guest mappings are the other half of it, and they are where an allocator puts
+    // the structures a call is handed (D579).
+    //
+    // **Readable mappings only, and that is the safety precondition rather than a filter.**
+    // A guest may ask for write-only or execute-only memory; publishing it would let a dump
+    // read a page the host refuses, turning a diagnostic into a fault inside the emulator
+    // with no relation to the guest.
+    if protection.read {
+        orbistoun_thunk::note_readable_range(base, len);
+    }
+    // The arena's extent, so a fault or a dump can say *guest mappings+0x…* rather than
+    // print a bare address that looks the same as a count.
+    note_arena_extent(base, len);
+    fill_mapping(base, len, protection);
+}
+
+/// How far the mapping arena has been used, as an address one past the last byte placed.
+///
+/// Zero until the guest maps something, which is why [`arena_extent`] answers `None` for it:
+/// *nothing was mapped* and *the arena starts at zero* are different findings.
+static ARENA_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Records that `[base, base + len)` was placed, if it is inside the arena.
+///
+/// A guest that asks for a specific address is honoured wherever it points (D459), and those
+/// mappings are deliberately *not* counted: stretching the arena to cover a hint at
+/// `0x5000…` would name every address between the two as arena, which is a span nothing
+/// placed anything in.
+fn note_arena_extent(base: u64, len: u64) {
+    if let Some(end) = arena_end_of(base, len) {
+        ARENA_END.fetch_max(end, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// How far the arena reaches once `[base, base + len)` is placed, or `None` if it is not in it.
+///
+/// The decision, with the shared counter left outside it - a test that had to bump the global
+/// would change what a guest running beside it sees, and the suite runs on parallel threads
+/// (principle 8). Saturating, because a guest is free to ask for a length that overflows and a
+/// wrapped end would shrink the arena rather than grow it.
+const fn arena_end_of(base: u64, len: u64) -> Option<u64> {
+    if base < MAPPING_BASE {
+        return None;
+    }
+    Some(base.saturating_add(len))
+}
+
+/// The span guest mappings have been placed in, or `None` if the guest mapped nothing.
+///
+/// The **arena**, not the set of mappings: it spans the gaps between them and the padding
+/// unit `next_mapping_base` leaves, so an address inside it was not necessarily mapped. That
+/// is what the name says - *where guest mappings go* - and a fault report states separately
+/// whether the address was mapped, so the two together do not overstate (the same
+/// concession D489 made for the title's modules, for the same reason).
+#[must_use]
+pub fn arena_extent() -> Option<(u64, u64)> {
+    arena_span(ARENA_END.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The arena span implied by an end address, or `None` for an arena nothing has used.
+///
+/// **`None` rather than a zero-length span.** *Nothing was mapped* and *a region exists and is
+/// empty* are different findings, and a zero length is already how the reporter spells an
+/// unused region slot - so returning one would register the region and leave it unnamed
+/// anyway, with nothing saying which of the two had happened.
+const fn arena_span(end: u64) -> Option<(u64, u64)> {
+    if end <= MAPPING_BASE {
+        return None;
+    }
+    Some((MAPPING_BASE, end - MAPPING_BASE))
+}
+
 /// Fills a fresh mapping, so reading it back is distinguishable from reading a zero.
 ///
 /// # The question this answers
@@ -1767,7 +1964,20 @@ fn protection_from_guest(prot: u64) -> orbistoun_mem::Protection {
     let (read, write, execute) = (prot & READ != 0, prot & WRITE != 0, prot & EXEC != 0);
     orbistoun_mem::Protection {
         // Readable if asked, and also when nothing was asked at all.
-        read: read || !(write || execute),
+        //
+        // **And when writing was asked for, because this architecture has no other option.**
+        // An x86-64 page table entry has a write bit and a no-execute bit and no read bit at
+        // all: a writable page is readable, and there is no encoding that is not. POSIX
+        // anticipates exactly this - `mmap(2)` says an implementation may permit accesses
+        // other than those requested - and FreeBSD on amd64 grants read with write for the
+        // same reason.
+        //
+        // Recording it as unreadable made orbistoun stricter than the machine it presents,
+        // and the cost was not theoretical: PPSA03416 maps its asynchronous-file destination
+        // buffer with write alone, so the mapping was never published as readable, so the
+        // argument dump could not show what the guest had put in it - and the buffer was read
+        // as one the guest had never been given at all (D580's error, corrected in D588).
+        read: read || write || !execute,
         write,
         execute,
     }
@@ -2294,13 +2504,15 @@ fn pthread_mutex_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// reproducible; this one is a value the guest reads and branches on, and pinning it would
 /// stop any title that waits for time to pass (D256).
 fn kernel_get_process_time(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    use std::sync::OnceLock;
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    let start = START.get_or_init(std::time::Instant::now);
+    // **Read through `clocks`, not from an `Instant` of its own.** This kept a second origin
+    // and a second source, so the platform's process time and POSIX's monotonic time were two
+    // different clocks - and under `ORBISTOUN_CLOCK=logical` only one of them would have
+    // repeated, which is the half-fix that looks like a fix (D582).
+    //
     // Microseconds: the unit every `GetProcessTime` in this family reports, and the one the
     // probe's own check compares two readings in. Saturating, so a run long enough to
     // overflow reports a stuck clock rather than a wrapped one.
-    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+    u64::try_from(orbistoun_hle::clocks::since_start_nanos() / 1_000).unwrap_or(u64::MAX)
 }
 
 /// `sceKernelGetProcessTimeCounter()` - the same elapsed time, counted in ticks.
@@ -2315,7 +2527,7 @@ fn kernel_get_process_time(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Measured from process start for the same reason its microsecond twin is (D256, D398).
 fn kernel_get_process_time_counter(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    ticks_since(tsc_origin())
+    ticks_since()
 }
 
 /// `sceKernelGetProcessTimeCounterFrequency()` - ticks per second for the counter above.
@@ -2404,9 +2616,25 @@ fn system_version_block(version: u16) -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
     *BLOCK.get_or_init(|| {
-        let mut bytes = Box::new([SYSTEM_VERSION_FILL; SYSTEM_VERSION_BYTES]);
-        bytes[SYSTEM_VERSION_AT..SYSTEM_VERSION_AT + 2].copy_from_slice(&version.to_le_bytes());
-        std::ptr::from_mut(Box::leak(bytes)).cast::<u8>() as usize as u64
+        // From the shared region, so the address the guest is handed repeats (D584). Filled
+        // rather than zeroed, so a field nobody has established is recognisable as unset
+        // rather than reading as a valid zero.
+        let at = orbistoun_mem::blocks::block(SYSTEM_VERSION_BYTES.div_ceil(8));
+        let Ok(base) = usize::try_from(at) else {
+            return 0;
+        };
+        let bytes = std::ptr::with_exposed_provenance_mut::<u8>(base);
+        // SAFETY: `blocks::block` just handed this address out for at least
+        // `SYSTEM_VERSION_BYTES`, and nothing else holds it yet.
+        unsafe { std::ptr::write_bytes(bytes, SYSTEM_VERSION_FILL, SYSTEM_VERSION_BYTES) };
+        // SAFETY: `SYSTEM_VERSION_AT + 2` is inside the same block, whose length the
+        // constants above are declared against.
+        let field = unsafe { bytes.add(SYSTEM_VERSION_AT) };
+        let value = version.to_le_bytes();
+        // SAFETY: two bytes into the block above, from a two-byte array on this frame; the
+        // block came from `blocks::block` and overlaps nothing.
+        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), field, 2) };
+        at
     })
 }
 
@@ -2486,7 +2714,14 @@ fn getpagesize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// spin instead - which is the same class of wrong as a stub reporting success it did not
 /// achieve.
 fn usleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    std::thread::sleep(std::time::Duration::from_micros(args[0]));
+    let how_long = std::time::Duration::from_micros(args[0]);
+    std::thread::sleep(how_long);
+    // **And the clock has to agree that it happened.** `orbistoun-libc`'s three sleeps were
+    // taught this and this one was not, which is the same wiring hazard as a reporter installed
+    // on some of the ways a run can end: a guest polling with a short sleep between attempts
+    // reads a clock that barely moved and polls again, a different number of times each run
+    // (D582).
+    orbistoun_hle::clocks::advance(how_long.as_nanos());
     OK
 }
 
@@ -3108,6 +3343,12 @@ fn posix_pthread_setcancelstate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// FreeBSD `ETIMEDOUT`, under the measured `0x8002_0000` vendor mapping.
+///
+/// Shared by the two calls that can run out of patience - the event queue and the event flag -
+/// because a timeout is one condition and two constants for it would drift. The value is the
+/// published errno, not a measured one: no capture has caught either call timing out (D613).
+const ETIMEDOUT: u32 = 60;
 /// `sceKernelWaitEqueue(equeue, events, wanted, delivered, timeout)`.
 ///
 /// # The shape came from the run, and the layout from FreeBSD
@@ -3144,7 +3385,27 @@ fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
 
-    let events = sync::take_events(args[0], wanted);
+    // **It waits now.** `arg4` is a pointer to a microsecond timeout, and null means wait
+    // indefinitely - the shape `kevent(2)` has. This collected whatever happened to be pending
+    // and answered success either way, so a guest looping until an event arrives never blocked:
+    // 3,853 waits against 44 flips in one run, every one of them reading an event array nothing
+    // had written. An out-parameter left as the caller set it, under a success code (D613).
+    let until = if args[4] == 0 {
+        sync::Blocking::Forever
+    } else {
+        match read_word(args[4]) {
+            Some(micros) => sync::Blocking::Until(
+                std::time::Instant::now() + std::time::Duration::from_micros(micros),
+            ),
+            // A timeout pointer that does not read is not a zero timeout. Refusing says so.
+            None => return u64::from(GuestError::InvalidArgument.as_raw()),
+        }
+    };
+    let Some(events) = sync::wait_events(args[0], wanted, until) else {
+        // Nothing arrived within the caller's patience. **Not success with nothing written** -
+        // that is the answer this call used to give, and it is the reason a guest spun.
+        return u64::from(GuestError::vendor(ETIMEDOUT).as_raw());
+    };
     for (index, event) in events.iter().enumerate() {
         let at = args[1].saturating_add((index * sync::EVENT_BYTES) as u64);
         if !write_block(at, &event.to_bytes()) {
@@ -3160,16 +3421,50 @@ fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Whether a wait mode asks for every bit of the pattern, or refuses to say.
+///
+/// `Some(true)` for `and`, `Some(false)` for `or`, `None` for a mode naming neither - which a
+/// console answers `0x80020016` to rather than picking one (D610).
+///
+/// The higher bits are the clear-on-match behaviour and are not read here: nothing has
+/// measured what they do, and a poll that did not match clears nothing under any of them.
+const fn wait_mode(mode: u64) -> Option<bool> {
+    /// Every bit of the pattern must be present.
+    const WAIT_AND: u64 = 0x01;
+    /// Any bit of the pattern will do.
+    const WAIT_OR: u64 = 0x02;
+
+    match mode & (WAIT_AND | WAIT_OR) {
+        WAIT_AND => Some(true),
+        WAIT_OR => Some(false),
+        // Zero names neither. `0x03` names both, which nothing has measured - refusing it is
+        // the honest answer rather than choosing whichever this file happens to test first.
+        _ => None,
+    }
+}
 /// `sceKernelPollEventFlag(flag, pattern, mode, result, timeout)`.
 ///
 /// **A miss is not an error.** Polling asks whether the pattern is set right now, and
 /// answering an argument error when it is not would make a guest read an ordinary poll as
 /// a broken handle.
 fn kernel_poll_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    /// Bit in the mode meaning every bit of the pattern must be present.
-    const WAIT_AND: u64 = 0x01;
-
-    let Some(outcome) = sync::event_flag_poll(args[0], args[1], args[2] & WAIT_AND != 0) else {
+    // **A mode naming neither is an argument error, and this used to read it as `or`.**
+    // `016-syncbounds/event-flag-waitmode` polled one bit of a two-bit pattern under four
+    // modes: `0x00` answered `0x80020016`, `0x01` and `0x11` answered busy, `0x02` answered
+    // ok. Every one but the first already matched; the first matched because `mode & 0x01`
+    // is zero for `0x00` as well as for `0x02`, so "no mode at all" and "either will do"
+    // were the same branch (D610).
+    // **The handle first, then the mode**, because two measurements together fix the order: a
+    // poll on a handle the console never issued answers `0x80020003` with the mode invalid as
+    // well, and a bad mode on a real handle answers `0x80020016`. Checking the mode first is
+    // right in isolation and wrong for exactly one of the two cases (D610).
+    if !sync::event_flag_exists(args[0]) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+    }
+    let Some(all) = wait_mode(args[2]) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
+    let Some(outcome) = sync::event_flag_poll(args[0], args[1], all) else {
         // ESRCH, the vendor code obSCEne's `015-sync/event-flag-rejects-bad-handle` measured
         // (`0x80020003`), not the `0x7fff…` placeholder a guest would fail to recognise (D125).
         return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
@@ -3197,17 +3492,10 @@ fn kernel_poll_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// spun against: unimplemented, the guest called it 304,583 times against a placeholder instead of
 /// parking on the event another thread would set (worklog 288).
 fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    /// Mode bit: every bit of the pattern must be present (AND); its absence means any (OR).
-    const WAIT_AND: u64 = 0x01;
     /// Mode bit: clear every bit of the flag on a successful wait.
     const WAIT_CLEAR_ALL: u64 = 0x10;
     /// Mode bit: clear just the matched pattern on a successful wait.
     const WAIT_CLEAR_PAT: u64 = 0x20;
-    /// FreeBSD `ETIMEDOUT`, under the measured `0x8002_0000` vendor mapping. The observed guest
-    /// waits indefinitely, so this path is unexercised; the value is the published errno, not a
-    /// measured one.
-    const ETIMEDOUT: u32 = 60;
-
     let (flag, pattern, mode, result, timeout_ptr) = (args[0], args[1], args[2], args[3], args[4]);
     // NULL waits forever; otherwise the pointer holds a microsecond count.
     let timeout = if timeout_ptr == 0 {
@@ -3215,10 +3503,19 @@ fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     } else {
         read_word(timeout_ptr).map(std::time::Duration::from_micros)
     };
+    // The same refusal its polling twin makes, for the same reason: the two differ in whether
+    // they wait and in nothing else, so a mode one refuses and the other reads as `or` would be
+    // a distinction the platform does not make (D610).
+    if !sync::event_flag_exists(flag) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+    }
+    let Some(all) = wait_mode(mode) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
     let Some(outcome) = sync::event_flag_wait(
         flag,
         pattern,
-        mode & WAIT_AND != 0,
+        all,
         mode & WAIT_CLEAR_ALL != 0,
         mode & WAIT_CLEAR_PAT != 0,
         timeout,
@@ -3273,9 +3570,37 @@ fn sema_at(raw: u64) -> Option<sync::SemaphoreHandle> {
         .filter(|h| *h != sync::NO_SEMAPHORE)
 }
 
-/// `sceKernelPollSema(semaphore, need)` - takes without waiting.
+/// `sceKernelPollSema(semaphore, need)` - takes `need` without waiting, or none at all.
+///
+/// # What the console answered, and what this used to
+///
+/// `016-syncbounds/sema-count` measured all four interesting cases, and this ignored `need`
+/// entirely - it took one whatever was asked for. Two of the four were wrong (D610):
+///
+/// | asked | available | console | this, before |
+/// |---|---|---|---|
+/// | 0 | 0 | `0x80020016` invalid | `0x80020010` busy |
+/// | 1 | 1 | ok | ok |
+/// | 2 | 1 | `0x80020010` busy | **ok**, having taken one |
+/// | 2 | 3 | ok | ok, having taken one |
+///
+/// The third row is the one that matters: a caller told it holds two when it holds one goes on
+/// to release two, and the count runs away upward from there.
 fn kernel_poll_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Never)) {
+    // **The handle first**, matching the one ordering the platform has actually shown: a poll
+    // on an event flag the console never issued answers the bad-handle code even when the mode
+    // is also wrong. Nothing measures a bad handle *and* a count of zero together, so this is
+    // consistency with the measured case rather than a measurement of its own (D610).
+    let Some(handle) = sema_at(args[0]) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    // **Zero is an argument error, not a trivially satisfied request.** The console answers
+    // `0x80020016` to it, which is the only way a caller finds out it asked for nothing - and
+    // `wait_while` would treat `*c < 0` as already satisfied and answer success.
+    let Some(need) = u32::try_from(args[1]).ok().filter(|n| *n > 0) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
+    match sync::semaphore_wait(handle, need, sync::Blocking::Never) {
         Some(true) => OK,
         Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw()),
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -3293,8 +3618,19 @@ fn kernel_signal_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 }
 
 /// `sceKernelWaitSema(semaphore, need, timeout)`.
+///
+/// **The same `need` its polling twin takes.** Nothing measured this one - a check that blocks
+/// forever is not something a conformance probe can run - but the two calls differ in whether
+/// they wait and in nothing else, so a count honoured by one and ignored by the other would be
+/// a distinction neither the platform nor the name makes (D610).
 fn kernel_wait_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Forever)) {
+    let Some(handle) = sema_at(args[0]) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    let Some(need) = u32::try_from(args[1]).ok().filter(|n| *n > 0) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
+    match sync::semaphore_wait(handle, need, sync::Blocking::Forever) {
         Some(true) => OK,
         Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw()),
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -3339,12 +3675,18 @@ fn sync_on_address_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if third != 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
-    match sync::wait_on_address(
+    // **Reachable while it sleeps here.** A signal raised on a thread parked in this wait runs
+    // its handler and the thread goes back to sleep; raised on a thread that is anywhere else it
+    // is refused rather than lost, so the flag has to be set exactly around the sleep (D652).
+    let was = thread::set_parked(true);
+    let outcome = sync::wait_on_address(
         address,
         expected,
         || read_word(address),
         sync::Blocking::Forever,
-    ) {
+    );
+    thread::set_parked(was);
+    match outcome {
         Some(sync::AddressWait::Woken | sync::AddressWait::Mismatch) => OK,
         // Unreachable under `Forever`, and kept so the match stays total for the day a timeout
         // is modelled: the published errno under the measured vendor base.
@@ -3418,7 +3760,7 @@ fn sem_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sem_wait(sem)` - take one, waiting for it.
 fn sem_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Forever)) {
+    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, sync::Blocking::Forever)) {
         Some(true) => OK,
         _ => u64::from(GuestError::InvalidHandle.as_raw()),
     }
@@ -3426,7 +3768,7 @@ fn sem_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sem_trywait(sem)` - take one only if it is available.
 fn sem_trywait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, sync::Blocking::Never)) {
+    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, sync::Blocking::Never)) {
         Some(true) => OK,
         // Available-but-empty and bad-handle are both non-zero, which is what a caller that
         // tests the result against zero needs; POSIX distinguishes them by `errno`, which
@@ -3492,8 +3834,8 @@ fn pthread_condattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let block: Box<[u64; 4]> = Box::new([0; 4]);
-    let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    // From the one region every guest-visible handle comes from, so it repeats (D584).
+    let handle = orbistoun_mem::blocks::block(4);
     if !write_word(args[0], handle) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
@@ -3511,8 +3853,8 @@ fn pthread_mutexattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let block: Box<[u64; 4]> = Box::new([0; 4]);
-    let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    // From the one region every guest-visible handle comes from, so it repeats (D584).
+    let handle = orbistoun_mem::blocks::block(4);
     // **Not zero, which is what an empty block would have said.** A conformance run read the
     // type back out of a freshly initialised attribute on a target console and got 1, so a
     // guest that initialises an attribute and asks what it holds was being told the wrong
@@ -3708,7 +4050,7 @@ pub fn mmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return !0;
     }
     drop(space);
-    fill_mapping(base, len, protection);
+    mapping_placed(base, len, protection, addr != 0);
     base
 }
 
@@ -3760,7 +4102,7 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             reserved = Some(base);
         }
     }
-    for _ in 0..16 {
+    for _ in 0..CONFLICT_RETRIES {
         if reserved.is_some() {
             break;
         }
@@ -3774,7 +4116,12 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(base) = reserved else {
         return vendor(orbistoun_core::errno::DENIED);
     };
-    fill_mapping(base, len, protection);
+    mapping_placed(
+        base,
+        len,
+        protection,
+        hint != 0 && Some(base) == checked_next_multiple_of(hint, align),
+    );
     // The reserved base, written back through the `void **` the guest passed - the documented shape,
     // status returned separately as success.
     if write_word(addr_out, base) {
@@ -4033,13 +4380,31 @@ fn pthread_attr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // Sixteen words rather than eight: the attribute set grew past the original six fields
     // and this crate owns the layout (see the field constants below), so widening it costs
     // nothing and leaves room for the ones still unwritten.
-    let block: Box<[u64; 16]> = Box::new([0; 16]);
-    let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    let handle = orbistoun_mem::blocks::block(16);
+    // **A fresh attribute set is not entirely zero, and that is measured.** obSCEne's
+    // `031-stackattr/fresh-attr-names-no-stack` ran on the console and read a stack *address*
+    // of `0x0` and a stack *size* of `0x10000` off a set nothing had touched. Zeroing both
+    // made a guest that sizes an allocation from the default get nothing, and a guest that
+    // checks the size before creating a thread take a failure path the console never gives it.
+    //
+    // The address stays zero, which the same run also measured: the two fields have different
+    // defaults and answering one for both is how a plausible value gets invented (D585).
+    if !write_word(handle + ATTR_STACK_SIZE, DEFAULT_ATTR_STACK_SIZE) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
     if !write_word(args[0], handle) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
 }
+
+/// What a thread attribute set reports as its stack size before anybody sets one.
+///
+/// Sixty-four kibibytes, read off the console by `031-stackattr/fresh-attr-names-no-stack`.
+/// **Not a guess and not FreeBSD's**, whose default is a great deal larger - this is what the
+/// target answered, which is the only thing that makes a guest reading it behave the same here
+/// as there (D585).
+const DEFAULT_ATTR_STACK_SIZE: u64 = 0x1_0000;
 
 /// `pthread_attr_getguardsize(attr, out)` - POSIX.1-2008.
 fn pthread_attr_getguardsize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -4152,8 +4517,8 @@ fn lockattr_init(pointer: u64) -> u64 {
     if pointer == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let block: Box<[u64; 4]> = Box::new([0; 4]);
-    let handle = std::ptr::from_mut(Box::leak(block)) as usize as u64;
+    // From the one region every guest-visible handle comes from, so it repeats (D584).
+    let handle = orbistoun_mem::blocks::block(4);
     if !write_word(pointer, handle) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
@@ -4445,7 +4810,7 @@ fn sem_timedwait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(until) = deadline_at(args[1]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, until)))
+    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, until)))
 }
 
 /// `sem_reltimedwait_np(sem, reltime)` - the same wait, given a span instead.
@@ -4453,7 +4818,7 @@ fn sem_reltimedwait_np(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(until) = deadline_after(args[1]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, until)))
+    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, until)))
 }
 
 /// `sem_getvalue(sem, sval)` - how many the semaphore has free.
@@ -4734,16 +5099,19 @@ fn pthread_attr_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// So the assumption D275 recorded for the trip is retired: this is no longer a convenient
 /// round figure but the rate the machine runs at, and a title deriving a frame budget from
 /// it now gets the budget the console would have given it (D398).
+///
+/// **A second run, on a different day, answered `0x5f25_9b93`** - five ticks per second
+/// higher, which is 0.0000003% and is the measurement's own jitter rather than a different
+/// machine. It cross-checked itself the same way: `0x4e8e` microseconds against `0x1e9d6e6`
+/// ticks across a sleep, giving 1.593 GHz.
+///
+/// The constant is left at the first reading deliberately. Two measurements four ticks apart
+/// do not tell you which is nearer the truth, and moving it would change every derived frame
+/// budget for no reason anyone could state (D605).
 const TSC_HZ: u64 = 0x5f25_9b8e;
 
 /// Nanoseconds in a second, for converting the host's clock to the target's rate.
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
-
-/// When the counter started, so a guest sees it advance from a small value.
-fn tsc_origin() -> std::time::Instant {
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    *START.get_or_init(std::time::Instant::now)
-}
 
 /// `sceKernelReadTsc()` - the time stamp counter.
 ///
@@ -4751,7 +5119,7 @@ fn tsc_origin() -> std::time::Instant {
 /// zero, which reads as a sleep that returned instantly - and that is precisely what the
 /// conformance probe reported before this existed (D275).
 fn read_tsc(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    ticks_since(tsc_origin())
+    ticks_since()
 }
 
 /// Host time since `origin`, expressed in the target's own ticks.
@@ -4766,8 +5134,10 @@ fn read_tsc(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Done in `u128` because nanoseconds times the frequency overflows sixty-four bits in about
 /// eleven seconds, and saturating at the end so a run long enough to overflow reports a stuck
 /// clock rather than a wrapped one.
-fn ticks_since(origin: std::time::Instant) -> u64 {
-    let nanos = origin.elapsed().as_nanos();
+fn ticks_since() -> u64 {
+    // The same source every other clock here reads, so a guest converting between them lands
+    // where it expects - and so one setting decides whether all of them repeat (D582).
+    let nanos = orbistoun_hle::clocks::since_start_nanos();
     u64::try_from(nanos * u128::from(TSC_HZ) / NANOS_PER_SECOND).unwrap_or(u64::MAX)
 }
 
@@ -4788,11 +5158,25 @@ pub fn note_stack_span(base: u64, len: u64) {
     let _ = STACK_SPAN.set((base, len));
 }
 
-/// `sceKernelIsStack(address)` - whether an address is in the calling thread's stack.
+/// `sceKernelIsStack(address, low, high)` - where the calling thread's stack is.
 ///
-/// **Answers false when nothing told it where the stack is**, rather than guessing. A
-/// wrong yes and a wrong no are both wrong, and only one of them is silent about it: a
-/// guest told a static is stack memory may free it.
+/// # It is not the predicate its name suggests, and this answered as though it were
+///
+/// This took one argument and answered `1` for an address in the stack and `0` for one
+/// outside. Every part of that is contradicted by the console (D612):
+///
+/// - **It takes three.** The probe declares `int sceKernelIsStack(void *, void **, void **)`
+///   and calls it that way, so the two words after the address are where the bounds go.
+/// - **It returns a status, not a verdict.** Twenty-three runs of `010-kernel/is-stack` all
+///   fail with *a stack address and a static one were reported alike*, value `0x0` - the
+///   console answers `0` to a local **and** to a static. A check written for a predicate
+///   reads that as a broken function; it is a successful call whose answer is elsewhere.
+/// - **The answer is elsewhere.** `031-stackattr/address-is-the-base` records `low` and
+///   `high` two mebibytes apart, which is exactly the stack size the same run read off the
+///   thread's own attribute. The bounds are the output.
+///
+/// So a guest asking this where its stack is got an inverted flag and two words of its own
+/// uninitialised memory back.
 ///
 /// # The calling thread's, which used to mean the first thread's
 ///
@@ -4804,16 +5188,29 @@ pub fn note_stack_span(base: u64, len: u64) {
 ///
 /// So a thread records its own span when it gets one, and that is consulted first. The main
 /// stack remains the answer for the thread the guest was entered on.
+///
+/// # What is not measured
+///
+/// Whether the console writes the bounds when the address is **not** in a stack. It answers
+/// `0` either way, and no capture records the two words for the static case. The bounds are
+/// written here regardless, because they describe the calling thread's stack rather than the
+/// address - a caller that asked about a static still learns where its own stack is, and
+/// refusing to say would be inventing a distinction nothing has measured.
 fn is_stack(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let address = args[0];
-    let within = |(base, len): (u64, u64)| address >= base && address < base.saturating_add(len);
-    if thread::this_stack().is_some_and(within) {
-        return 1;
+    let span = thread::this_stack().or_else(|| STACK_SPAN.get().copied());
+    if let Some((base, len)) = span {
+        // Null is how a caller says it does not want one, which the probe's own second
+        // witness relies on - it passes both and reads neither when the call is absent.
+        if args[1] != 0 {
+            write_word(args[1], base);
+        }
+        if args[2] != 0 {
+            write_word(args[2], base.saturating_add(len));
+        }
     }
-    let Some(&span) = STACK_SPAN.get() else {
-        return 0;
-    };
-    u64::from(within(span))
+    // **Zero whether or not the address is in it**, which is what twenty-three runs measured
+    // and is the whole of what the return value says.
+    OK
 }
 
 /// The modules this process has loaded, as the guest should see them.
@@ -5173,6 +5570,17 @@ fn guest_export(name: &str) -> Option<u64> {
         .map(|&(_, address)| address)
 }
 
+/// Whether libkernel is where this run says a name lives - or whether it does not say.
+///
+/// **Three answers collapsed into two, deliberately.** A name libkernel declares is `true`; a
+/// name declared somewhere else is `false`; and a name nothing has published a verdict on is
+/// also `true`, because "nobody said" must never become "this module does not export it". The
+/// refusal built on this is only ever allowed to correct a measured wrong success, never to
+/// invent a failure (D629).
+fn libkernel_exports(name: &str) -> bool {
+    orbistoun_thunk::name_is_libkernel(name).unwrap_or(true)
+}
+
 fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (module, name, out) = (args[0], args[1], args[2]);
     // A module handle is checked before the name. It is a 32-bit `SceKernelModule`, so only its low
@@ -5196,7 +5604,35 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // been seen where both do. A guest asking for a symbol its own binary exports plainly wants
     // its own code; a guest asking for a platform function wants orbistoun's. Ordering it the
     // other way would change what already-working names answer, on no evidence (D517).
-    let address = orbistoun_thunk::name_thunk(&name).or_else(|| guest_export(&name));
+    // **Resolved from the stub table first, and separately**, because the narrowing below applies
+    // only to those. A name the *guest's own binary* exports is a different question: PPSA02664
+    // asks for its own `scriptingGetMem` through this call (D517), and refusing that because
+    // libkernel does not export it would break a working path to fix a different one.
+    let from_stubs = orbistoun_thunk::name_thunk(&name);
+
+    // **A module handle now narrows the answer, for the one handle that has been measured.**
+    //
+    // obSCEne's `110-modules/symbol` asks libkernel - handle `0x2001`, three measurements
+    // agreeing - for `memcpy`, and the console answers `0x80020003`: libkernel does not export
+    // it. This table is flat, so `dlsym` answered an address and success, which is plausible
+    // output in exactly the sense principle 3 means it: a guest asking *whether* a symbol
+    // exists is told yes, and cannot tell that nothing consulted the module it named (D629).
+    //
+    // **Narrowed only downward.** It fires where a name is declared here *and* declared
+    // somewhere that is not libkernel. A name nothing has a library for still resolves, a name
+    // only the guest exports still resolves, and every handle but libkernel's still resolves
+    // anything - so this can turn a wrong success into the measured refusal and cannot turn a
+    // working resolution into a failure on a guess.
+    if module == LIBKERNEL_MODULE_HANDLE && from_stubs.is_some() && !libkernel_exports(&name) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+    }
+    // **And, only when a run asked for it, a stub for a name this project declares and does not
+    // implement.** Empty in an ordinary run, so this line changes nothing unless
+    // `ORBISTOUN_DLSYM_STUBS` installed a table - which is what makes the two runs comparable
+    // (D632). Last, so it can never shadow an implementation or the guest's own export.
+    let address = from_stubs
+        .or_else(|| guest_export(&name))
+        .or_else(|| orbistoun_thunk::declared_thunk(&name));
 
     // **Every distinct name, once, answered or not.** A payload's resolution pass is the
     // clearest statement it ever makes of what it needs, and it makes it before doing
@@ -5352,6 +5788,259 @@ fn pthread_exit(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         loop {
             std::thread::park();
         }
+    }
+}
+
+/// Handlers a guest has installed, by signal number.
+///
+/// A `BTreeMap` behind a mutex rather than an array indexed by signal, because nothing
+/// measured says what the valid range is - see [`raise_exception`] - and an array would have to
+/// pick one.
+fn installed_handlers() -> &'static Mutex<std::collections::BTreeMap<u64, u64>> {
+    static HANDLERS: OnceLock<Mutex<std::collections::BTreeMap<u64, u64>>> = OnceLock::new();
+    HANDLERS.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// `sceKernelInstallExceptionHandler(signum, handler)` - register a function to run on a signal.
+///
+/// # What was measured, and where
+///
+/// obSCEne's `030-thread/exception-handler`, sweep 20260909-140114, payload leg, against the
+/// console's own `libkernel` export at `0x800028660`:
+///
+/// | call | return |
+/// |---|---|
+/// | `install(30, handler)` | `0x0` |
+/// | `install(30, other)` a second time | `0x80020023` - errno 35 |
+/// | `install(30, NULL)` while 30 is installed | `0x80020023` - errno 35 |
+///
+/// The third row is the one worth having: passing null is **not** an uninstall, because the
+/// duplicate check happens first. `sceKernelRemoveExceptionHandler` is the way back out.
+///
+/// **This is PPSA25872's wall, and the placeholder was the wrong shape.** The title installs a
+/// handler for signal 30 and then raises it on its own main thread; orbistoun answered
+/// `0x7fff0001`, which is not zero, so as far as the guest could tell the registration failed.
+///
+/// Argument order is measured rather than assumed: an inverted call answers `EINVAL`, and the
+/// guest's own handler begins `cmp edi, 0x1e` - it expects to be handed 30 (D645, D648).
+fn install_exception_handler(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // Installed here rather than during setup: delivery matters only once a guest has a handler,
+    // and a `OnceLock` makes the repeat calls free. It has to be wired before the first raise,
+    // and nothing can raise before something installs.
+    sync::install_signal_delivery(sync::SignalDelivery {
+        pending: signal_is_pending,
+        deliver: deliver_pending_signal,
+    });
+    let (signum, handler) = (args[0], args[1]);
+    let Ok(mut handlers) = installed_handlers().lock() else {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    if handlers.contains_key(&signum) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::AGAIN).as_raw());
+    }
+    handlers.insert(signum, handler);
+    0
+}
+
+/// `sceKernelRemoveExceptionHandler(signum)` - undo an install.
+///
+/// Measured as `0x0` for a signal that has a handler. **The other case is not measured**: nothing
+/// was asked to remove a handler that was never installed, so that branch answers the loud
+/// placeholder rather than guessing between `EINVAL`, `ESRCH` and success.
+fn remove_exception_handler(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let signum = args[0];
+    let Ok(mut handlers) = installed_handlers().lock() else {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    if handlers.remove(&signum).is_some() {
+        return 0;
+    }
+    u64::from(GuestError::Unimplemented.as_raw())
+}
+
+/// Runs whatever signal is waiting on the calling thread.
+///
+/// Installed into [`sync`] as the delivery half of its hook pair, so a thread asleep in a wait
+/// can run a handler raised on it from elsewhere. A plain `fn` because that is how it is stored -
+/// the same reason the call-budget callback is one.
+///
+/// Silent when nothing is pending, which is the ordinary case: every wait consults this, and
+/// almost none of them find anything.
+fn deliver_pending_signal() {
+    let Some(signum) = thread::take_pending() else {
+        return;
+    };
+    let installed = match installed_handlers().lock() {
+        Ok(handlers) => handlers.get(&signum).copied(),
+        Err(_) => None,
+    };
+    let Some(handler) = installed else {
+        // The handler was removed between the raise and the wake. Hardware would take the
+        // signal's default action here; this thread is mid-wait inside an emulator, and ending
+        // the process for a race is worse than dropping a signal nothing was listening for.
+        return;
+    };
+    // **The same value in both, as measured.** `rsi` and `rdx` carried the identical pointer on
+    // hardware, and a handler that compares them would notice if they did not here.
+    // SAFETY: `handler` is a guest function pointer the guest passed to
+    // `sceKernelInstallExceptionHandler`; `call_guest_placing` reserves and guards its own stack,
+    // and the context is written into the low end of that same stack - inside the span it is
+    // given, and released with it.
+    let _ = unsafe {
+        thread::call_guest_placing(handler, |low, _len| {
+            let context = exception_context(signum, low);
+            [signum, context, context]
+        })
+    };
+}
+
+/// How far into the interrupted thread's stack the context is placed.
+///
+/// **Its own stack, because that is where the console puts it**, and because an invented region
+/// is unbounded to whatever walks it. Pointed at a reserved block of orbistoun's own, PPSA25872
+/// walks forward from the context until it leaves the region - `0x368` past the end, at 4 KiB and
+/// again at 2 MiB. It is scanning, not reading a struct, and a scan is bounded by the allocation
+/// it is in. On the thread's own stack it is bounded by memory the guest already owns (D656).
+///
+/// The low end, because a guest stack grows down: the frames in use are at the top, and the
+/// bottom is the furthest thing from them this crate can choose without knowing the parked
+/// thread's guest stack pointer - which it does not record.
+const CONTEXT_INTO_STACK: u64 = 0x1000;
+
+/// Offset of the signal number within the context.
+///
+/// Measured: `1e00000000000000` at +0x48 while delivering signal 30
+/// (obSCEne `030-thread/exception-handler`, sweep 20260909-175052).
+const CONTEXT_SIGNAL: u64 = 0x48;
+
+/// Offset of the pointer PPSA25872's handler reads.
+///
+/// Measured as an address on the interrupted thread's own 2 MiB stack, `0x7e8` past the context
+/// itself, confirmed mapped by `sceKernelVirtualQuery`. What it *holds* is whatever that thread
+/// had there; only the pointer's existence and reachability are facts.
+const CONTEXT_INNER: u64 = 0xf8;
+
+/// How far past the context the measured inner pointer pointed.
+const CONTEXT_INNER_DELTA: u64 = 0x7e8;
+
+/// How much of the context is written.
+///
+/// obSCEne dumped `0x180` bytes from the pointer a real handler was given. The structure may be
+/// larger; nothing measured says so, and the stack beyond it is already zero.
+const CONTEXT_WRITTEN: u64 = 0x180;
+
+/// Builds the block a handler is handed in `rsi` and `rdx`, and answers its address.
+///
+/// # What is measured, and what is deliberately zero
+///
+/// The console hands a handler a pointer to a structure on the interrupted thread's own stack.
+/// Four things about it were measured and are reproduced: it lives on that thread's stack, the
+/// signal number sits at `+0x48`, a pointer at `+0xf8` refers to another address on the same
+/// stack, and `rsi` and `rdx` carry the identical value.
+///
+/// **Everything else is zero, including what the inner pointer points at.** The register frame at
+/// `+0x100..+0x170` is real state on the console and orbistoun has none to put there - the
+/// handler ran because a *different* thread raised the signal, and the interrupted thread's
+/// registers are not this process's to read. Plausible values would let a guest resume onto them;
+/// zero makes it read a null and check, the same trade the zeroed data blocks make (D323, D656).
+///
+/// [`None`] when the calling thread has no recorded guest stack, in which case the handler is
+/// handed zero and faults at a named address rather than reading somewhere arbitrary.
+fn exception_context(signum: u64, low: u64) -> u64 {
+    let base = low.saturating_add(CONTEXT_INTO_STACK);
+    for offset in (0..CONTEXT_WRITTEN).step_by(8) {
+        write_word(base + offset, 0);
+    }
+    write_word(base + CONTEXT_SIGNAL, signum);
+    write_word(base + CONTEXT_INNER, base + CONTEXT_INNER_DELTA);
+    base
+}
+
+/// Whether the calling thread has a signal waiting - the cheap half of the hook pair.
+fn signal_is_pending() -> bool {
+    thread::signal_pending()
+}
+
+/// `sceKernelRaiseException(thread, signum)` - run a thread's handler for a signal.
+///
+/// # The whole contract, measured
+///
+/// obSCEne's `030-thread/exception-handler`, sweep 20260909-151910, calling with the leg's own
+/// `scePthreadSelf()` handle - which is what the previous sweep could not do, and why this was
+/// left unimplemented until now (D648):
+///
+/// | call | return |
+/// |---|---|
+/// | `raise(self, 30)`, handler installed | `0x0` |
+/// | `raise(self, 31)` | `0x8002_0016` - `EINVAL` |
+/// | `raise(1, 30)` | `0x8002_0003` - `ESRCH` |
+/// | `raise(self, 30)`, no handler | no return - the process takes the signal and dies |
+///
+/// **Delivery is synchronous on the calling thread.** The probe's handler sets a flag, and the
+/// flag reads `1` on the line after `raise` returns. That single bit decided the implementation:
+/// the handler is called here and now, nested on this thread, and `raise` answers `0` afterwards.
+/// An asynchronous model - queue it, deliver at some later point - was the other candidate and is
+/// ruled out rather than merely unchosen.
+///
+/// The handler receives the signal number in `rdi` (measured as `0x1e`, matching the `cmp edi,
+/// 0x1e` PPSA25872's own handler opens with) and a context pointer in both `rsi` and `rdx`.
+///
+/// # What is passed for the context, and why it is null
+///
+/// On the console those two registers carry a pointer to the interrupted thread's exception
+/// context - a structure whose layout is not published and which orbistoun does not build. Null is
+/// passed rather than a plausible block: a handler that only reads its signal number is unaffected,
+/// and one that walks the context faults immediately at a named address instead of reading
+/// invented fields and continuing. That is the same trade the zeroed data blocks make (D323).
+///
+/// # The signal number
+///
+/// 30 is accepted and 31 is refused, both measured with a valid handle. Nothing says where the
+/// boundary is, so nothing generalises: an unmeasured number answers the loud placeholder rather
+/// than being folded into either case.
+fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// The signal PPSA25872 raises, and the only one measured as accepted.
+    const DELIVERABLE: u64 = 30;
+    /// Measured as refused, with a valid thread handle, in the same sweep.
+    const REFUSED: u64 = 31;
+    let (thread, signum) = (args[0], args[1]);
+    let vendor = |errno| u64::from(GuestError::vendor(errno).as_raw());
+    if signum == REFUSED {
+        return vendor(orbistoun_core::errno::INVALID);
+    }
+    if signum != DELIVERABLE {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    if !thread::is_issued(thread) {
+        return vendor(orbistoun_core::errno::NO_SUCH);
+    }
+    let installed = match installed_handlers().lock() {
+        Ok(handlers) => handlers.get(&signum).copied(),
+        Err(_) => return u64::from(GuestError::Unimplemented.as_raw()),
+    };
+    let Some(handler) = installed else {
+        // Measured: the process takes the signal and dies. Stopping the guest is the honest
+        // emulation of that - and saying which signal did it is the half a raw exit could not.
+        orbistoun_core::stop(orbistoun_core::StopReason::Signalled, signum);
+    };
+    // **Cross-thread, which is what PPSA25872 actually does**: it raises on `main` from a
+    // collector thread. Hardware delivers that whatever the target is doing. Orbistoun can only
+    // reach a target parked in a wait it owns, so `raise_pending` answers whether this one is -
+    // and a target anywhere else is refused rather than told a handler ran (D652).
+    if thread != thread::current() {
+        if !thread::raise_pending(thread, signum) {
+            return u64::from(GuestError::Unimplemented.as_raw());
+        }
+        sync::nudge_address_waiters();
+        return 0;
+    }
+    // SAFETY: `handler` is a guest function pointer the guest itself passed to
+    // `sceKernelInstallExceptionHandler`; `call_guest` reserves and guards its own stack. The
+    // context arguments are null, which the handler may test but must not dereference.
+    let ran = unsafe { thread::call_guest(handler, [signum, 0, 0]) };
+    match ran {
+        Some(_) => 0,
+        None => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
 
@@ -5556,6 +6245,12 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelReserveVirtualRange", reserve_virtual_range),
     ("sceKernelVirtualQuery", virtual_query),
     ("sceKernelMprotect", mprotect),
+    (
+        "sceKernelInstallExceptionHandler",
+        install_exception_handler,
+    ),
+    ("sceKernelRemoveExceptionHandler", remove_exception_handler),
+    ("sceKernelRaiseException", raise_exception),
     ("sceKernelSetVirtualRangeName", set_virtual_range_name),
     ("mmap", mmap),
     ("sceKernelMmap", mmap),
@@ -5629,6 +6324,16 @@ const TABLE: &[(&str, GuestFn)] = &[
     ),
     ("scePthreadAttrSetaffinity", pthread_attr_setaffinity),
     ("scePthreadAttrSetguardsize", pthread_attr_setguardsize),
+    // Reported rather than answered - see each handler for what is established and what is not.
+    (
+        "sceKernelAprResolveFilepathsToIdsAndFileSizes",
+        apr_resolve_filepaths,
+    ),
+    (
+        "sceKernelAprSubmitCommandBufferAndGetResult",
+        apr_submit_command_buffer,
+    ),
+    ("sceKernelAprWaitCommandBuffer", apr_wait_command_buffer),
     ("sceKernelReadTsc", read_tsc),
     ("sceKernelGetTscFrequency", get_tsc_frequency),
     ("sceKernelIsStack", is_stack),
@@ -5651,6 +6356,296 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("posix_sigismember", sigismember),
 ];
 
+/// How much of a command buffer's storage to scan for content.
+///
+/// Eight kibibytes of words. The header claims twenty bytes of command, so anything at all
+/// should be near the front - and every reading before this one looked at thirty-two bytes and
+/// concluded the storage was empty, which is the same shape of mistake as reading a struct
+/// field by assumption (D594).
+const STORAGE_SCAN_WORDS: u64 = 1024;
+
+/// How many non-zero words to name.
+///
+/// Enough to see a twenty-byte command whole, and few enough that a buffer full of asset data
+/// reports a sample rather than eight kibibytes on the guest's own stack (principle 9).
+const MOST_STORAGE_REPORTED: usize = 16;
+
+/// How far a guest path is followed when reporting one.
+///
+/// Longer than [`read_name`]'s window, because a title's asset paths are longer than a thread
+/// name and truncating one here would hide the part that says which file it is.
+const MAX_PATH: usize = 256;
+
+/// A NUL-terminated guest string, bounded.
+///
+/// Bounded for the reason `read_name` gives: an unterminated string would walk until it hit an
+/// unmapped page, and a fault raised while fetching a name is a fault attributed to the wrong
+/// thing entirely.
+fn read_path(address: u64) -> String {
+    let Ok(at) = usize::try_from(address) else {
+        return String::new();
+    };
+    if at == 0 {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    for offset in 0..MAX_PATH {
+        // SAFETY: a guest-supplied string under the identity mapping (D014), read one byte at a
+        // time so the scan cannot straddle the end of a mapping by more than it reads.
+        let byte = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u8>(at + offset)) };
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `sceKernelAprResolveFilepathsToIdsAndFileSizes(paths, count, ...)` - reported, not answered.
+///
+/// # What is established and what is not
+///
+/// **Established**: the guest passes an array of pointers and a count, and this is the first
+/// call of the platform's asynchronous file path. The array's first entry is a path string a
+/// `memcpy` put there a few calls earlier.
+///
+/// **Not established**: which of the remaining arguments receives the ids, which the sizes, and
+/// what an id is. Three of them are adjacent four-byte stack slots, which says they are
+/// out-parameters and says nothing about their order - and filling the wrong one would hand the
+/// guest a size where it expects an identifier, which is the plausible answer principle 3
+/// exists to refuse.
+///
+/// So it answers the placeholder and prints what it was given. A wall this project can see the
+/// inputs of is worth more than one it has guessed the outputs of (D587).
+fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (array, count) = (args[0], args[1]);
+    let paths: Vec<String> = (0..count.min(MOST_PATHS_REPORTED))
+        .filter_map(|i| read_word(array + i * 8))
+        .map(read_path)
+        .filter(|p| !p.is_empty())
+        .collect();
+    apr::note_resolved(paths.clone());
+    // **The index the title ships is the source of truth, and it is consulted here.** Three
+    // sessions of planting markers in these out-parameters were asking the guest a question the
+    // title had already answered on disk (D591). What is still unmeasured is which argument
+    // takes the identifier and which the size, so the answers are reported and the placeholder
+    // is still returned - writing one into a slot picked by guesswork is the plausible answer
+    // this project refuses (D592).
+    let mut answered = false;
+    for path in &paths {
+        match apr::look_up(path) {
+            Some((id, size)) => {
+                eprintln!("orbistoun:   the index has {path} as entry {id}, {size} byte(s)");
+                answered |= answer_resolve(args, id, size);
+            }
+            None => eprintln!("orbistoun:   the index does not name {path}"),
+        }
+    }
+    if answered {
+        return OK;
+    }
+    if paths.is_empty() {
+        eprintln!(
+            "orbistoun: the guest asked the asynchronous file path to resolve {count} path(s), and none could be read"
+        );
+    } else {
+        eprintln!(
+            "orbistoun: the guest asked the asynchronous file path to resolve {count} path(s): {}",
+            paths.join(", ")
+        );
+    }
+    u64::from(GuestError::Unimplemented.as_raw())
+}
+
+/// How many paths one call reports.
+///
+/// A bound rather than none: a title resolving a manifest could pass thousands, and a diagnostic
+/// that prints all of them on the guest's own stack is an observation heavy enough to change
+/// what it observes (principle 9).
+const MOST_PATHS_REPORTED: u64 = 16;
+
+/// `sceKernelAprSubmitCommandBufferAndGetResult(buffer, ...)` - reported, not answered.
+///
+/// Prints the command buffer's header, which `libSceAmpr`'s own accessors name: the console
+/// exports `sceAmprCommandBufferGetSize`, `GetNumCommands` and `GetCurrentOffset`, so the three
+/// words at the front are a size, a count and an offset in some order (obSCEne's hardware
+/// census). **Which order is not established**, so they are printed as three numbers rather
+/// than labelled - a label is a claim, and this has measured none of them (D587).
+fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let buffer = args[0];
+    let words: Vec<String> = (0..8)
+        .filter_map(|i| read_word(buffer + i * 8))
+        .map(|w| format!("{w:#x}"))
+        .collect();
+    eprintln!(
+        "orbistoun: the guest submitted an asynchronous file command buffer at {buffer:#x} - first words {}",
+        words.join(" ")
+    );
+    // **Where the non-zero bytes actually are.** The header claims one command of twenty bytes
+    // and the storage it names is empty, so the commands are somewhere this has not looked.
+    // Scanning reports offsets rather than assuming a layout, which is what every reading of
+    // these fields has done so far - and each of those readings has had to be corrected (D591).
+    let mut nonzero = Vec::new();
+    for word in -8_i64..64 {
+        let at = buffer.wrapping_add_signed(word * 8);
+        if let Some(value) = read_word(at) {
+            if value != 0 {
+                nonzero.push(format!("{:+#x}:{value:#x}", word * 8));
+            }
+        }
+    }
+    if !nonzero.is_empty() {
+        eprintln!(
+            "orbistoun:   non-zero words around it: {}",
+            nonzero.join(" ")
+        );
+    }
+    // **The pointer at `+0x10`, checked in the run that produced it.** It was read as unmapped
+    // once, from an address typed in out of a *previous* run - and the arena moves between runs
+    // (D582), so that pairing was never sound. Asked here, where the two cannot disagree.
+    //
+    // Guarded by the same test the argument dump uses, because an unpublished address
+    // dereferenced from a guest call faults inside the emulator and reports as the guest's
+    // fault (D580).
+    // **The experiment, off unless asked for.** What the buffer means is not established, so
+    // delivering the resolved file into it is a guess the guest grades - and one that changes
+    // the program, which is why it is declared as intervening (D589).
+    if orbistoun_env::APR_DELIVER.is_set() {
+        deliver_resolved_file(buffer);
+    }
+    if let Some(inner) = read_word(buffer + 0x10) {
+        if orbistoun_thunk::readable_span(inner, 32) {
+            let head: Vec<String> = (0..8)
+                .filter_map(|i| read_word(inner + i * 8))
+                .map(|w| format!("{w:#x}"))
+                .collect();
+            eprintln!(
+                "orbistoun:   what it points at, {inner:#x}: {}",
+                head.join(" ")
+            );
+            // **The whole storage, not its first eight words.** Every reading so far has looked
+            // at the front and concluded it was empty; a command written at an offset would
+            // have been invisible to all of them. Scanning says where the bytes are rather
+            // than assuming where they should be, which is the lesson D591 already paid for
+            // once (D594).
+            let mut found = Vec::new();
+            for word in 0..(STORAGE_SCAN_WORDS) {
+                let Some(value) = read_word(inner + word * 8) else {
+                    break;
+                };
+                if value != 0 {
+                    found.push(format!("{:+#x}:{value:#x}", word * 8));
+                    if found.len() >= MOST_STORAGE_REPORTED {
+                        break;
+                    }
+                }
+            }
+            if found.is_empty() {
+                eprintln!(
+                    "orbistoun:   and the first {STORAGE_SCAN_WORDS} words of it are all zero"
+                );
+            } else {
+                eprintln!("orbistoun:   non-zero in it: {}", found.join(" "));
+            }
+        } else if let Some((start, end)) = region_containing(inner) {
+            // **Mapped, and merely not published to the dump.** Two different findings, and
+            // this crate is the one that can tell them apart: `region_containing` consults the
+            // live map rather than the list something published for diagnostics (D580).
+            eprintln!(
+                "orbistoun:   it points at {inner:#x}, inside a mapping of {start:#x}..{end:#x} that nothing published for reading"
+            );
+        } else {
+            eprintln!(
+                "orbistoun:   it points at {inner:#x}, which this run never mapped - the guest is holding a buffer it was not given"
+            );
+        }
+    }
+    u64::from(GuestError::Unimplemented.as_raw())
+}
+
+/// `sceKernelAprWaitCommandBuffer(...)` - reported, not answered.
+///
+/// The guest's own wrapper prints `waitCommandBufferCompletion error=%d` with whatever this
+/// returns, which is how the name was found: forcing three unnamed imports to distinct values
+/// in one run made the printed number name which of them the wrapper was reporting (D587).
+fn apr_wait_command_buffer(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    eprintln!("orbistoun: the guest waited on an asynchronous file command buffer");
+    u64::from(GuestError::Unimplemented.as_raw())
+}
+/// Reads the last resolved file into the buffer a command header names.
+///
+/// # What is guessed here, stated once
+///
+/// The header's third and fourth words are a length and an address matching a guest mapping
+/// exactly, so they are taken as a buffer and its size (D587). **Which file** is taken from the
+/// last resolve call, because the buffer's own command storage is empty and says nothing. Both
+/// are guesses; the run report carries the caveat.
+///
+/// Split out of the submit handler because that function reports and this one changes the
+/// program, and mixing the two would put an intervention inside something named for observing.
+fn deliver_resolved_file(buffer: u64) {
+    let Some(path) = apr::last_resolved() else {
+        eprintln!("orbistoun: asked to deliver a file, and no resolve named one");
+        return;
+    };
+    let (Some(most), Some(into)) = (read_word(buffer + 0x0c), read_word(buffer + 0x10)) else {
+        eprintln!("orbistoun: asked to deliver {path}, and the command header could not be read");
+        return;
+    };
+    // The length shares a word with the count above it, so only the low half is the size.
+    let most = most & 0xFFFF_FFFF;
+    match apr::deliver(&path, into, most) {
+        Some(got) => eprintln!(
+            "orbistoun: delivered {got} byte(s) of {path} into {into:#x} (up to {most:#x})"
+        ),
+        None => {
+            eprintln!("orbistoun: asked to deliver {path}, and nothing installed a reader for it");
+        }
+    }
+}
+
+/// Writes the identifier and size the index gave into the arguments a run names.
+///
+/// # Why this is an experiment rather than an implementation
+///
+/// The index says **what** the answers are (D591) and nothing says **where** they go. Three
+/// arguments point at adjacent four-byte slots on the guest's stack, which establishes that they
+/// are out-parameters and establishes nothing about their order - and writing a size where the
+/// guest expects an identifier is the plausible answer principle 3 exists to refuse.
+///
+/// So the assignment is named by `ORBISTOUN_APR_ANSWER`, as two digits: the argument that takes
+/// the identifier, then the one that takes the size. `24` writes the identifier through `arg2`
+/// and the size through `arg4`. Six permutations, one boot each, against an oracle sharper than
+/// any this wall has had: the title stops saying *"Unknown error occurred while loading"* when
+/// it is right (D592).
+///
+/// Answers whether anything was written, because a run that named a slot the guest did not pass
+/// has planted nothing and must not report success.
+fn answer_resolve(args: &[u64; GUEST_ARG_REGISTERS], id: u64, size: u64) -> bool {
+    let Some(spec) = orbistoun_env::APR_ANSWER.get() else {
+        return false;
+    };
+    let mut digits = spec.chars().filter_map(|c| c.to_digit(10));
+    let (Some(for_id), Some(for_size)) = (digits.next(), digits.next()) else {
+        eprintln!("orbistoun: ORBISTOUN_APR_ANSWER wants two argument numbers, like 23");
+        return false;
+    };
+    let mut wrote = false;
+    for (slot, value) in [(for_id, id), (for_size, size)] {
+        let Some(at) = args.get(slot as usize).copied() else {
+            continue;
+        };
+        // Four bytes, because the slots are four apart: an eight-byte write would take the
+        // neighbouring out-parameter with it, which is the mistake D210 and D272 both record.
+        if at != 0 && write_int(at, value as u32) {
+            wrote = true;
+        }
+    }
+    if wrote {
+        eprintln!("orbistoun:   answered id through arg{for_id} and size through arg{for_size}");
+    }
+    wrote
+}
 #[cfg(test)]
 mod tests {
 
@@ -5723,7 +6718,7 @@ mod tests {
     fn constructing_an_ult_object_leaves_a_real_handle_in_it() {
         let mut object: u64 = 0;
         let at = std::ptr::from_mut(&mut object) as usize as u64;
-        let name = b"waiting queue ";
+        let name = b"waiting queue\0";
         let name_at = name.as_ptr() as usize as u64;
 
         assert_eq!(
@@ -6754,5 +7749,56 @@ mod tests {
             "a range running off the end of the region is not covered by it"
         );
         super::clear_noted_regions();
+    }
+
+    /// **A mapping the guest was given at its own address is not the arena.**
+    ///
+    /// The failure this catches is the one that would make the name a lie: a guest that asks
+    /// for `0x5000_0000_0000` is honoured there (D459), and folding that into the arena's
+    /// extent would stretch it across nineteen terabytes nothing placed anything in - so
+    /// every stray pointer between the two would be named as a guest mapping.
+    #[test]
+    fn only_a_mapping_inside_the_arena_stretches_it() {
+        assert_eq!(
+            super::arena_end_of(super::MAPPING_BASE, 0x1000),
+            Some(super::MAPPING_BASE + 0x1000),
+            "the first arena mapping sets the extent"
+        );
+        assert_eq!(
+            super::arena_end_of(0x5000_0000_0000, 0x1000),
+            None,
+            "an address the guest named for itself is outside the arena"
+        );
+        assert_eq!(
+            super::arena_end_of(super::MAPPING_BASE - 1, 0x1000),
+            None,
+            "one byte below the base is below it"
+        );
+        assert_eq!(
+            super::arena_end_of(super::MAPPING_BASE, u64::MAX),
+            Some(u64::MAX),
+            "a length that would overflow saturates rather than wrapping to a shorter arena"
+        );
+    }
+
+    /// An arena nothing has used answers nothing, rather than a span of length zero.
+    ///
+    /// Watched failing: written as `end < MAPPING_BASE` the second assertion returns
+    /// `Some((base, 0))`, which registers the region and leaves every address in it unnamed
+    /// anyway - the reporter spells an unused slot with a zero length too, so the two states
+    /// would have become indistinguishable at the one place they differ.
+    #[test]
+    fn an_unused_arena_is_nothing_rather_than_an_empty_span() {
+        assert_eq!(super::arena_span(0), None, "nothing mapped");
+        assert_eq!(
+            super::arena_span(super::MAPPING_BASE),
+            None,
+            "the base alone is not a span"
+        );
+        assert_eq!(
+            super::arena_span(super::MAPPING_BASE + 0x2_0000),
+            Some((super::MAPPING_BASE, 0x2_0000)),
+            "the span runs from the base to how far the guest reached"
+        );
     }
 }

@@ -1,3 +1,9 @@
+[title]
+id = "PPSA28061"
+name = "Earthion"
+content_version = "01.006.000"
+master_version = "01.00"
+
 [compat]
 
 [settings]

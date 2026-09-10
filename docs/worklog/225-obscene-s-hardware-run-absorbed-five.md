@@ -11,7 +11,7 @@ address. Removed a duplicate `getpid 0x5b0 confirmed` line.
 
 Retried payload support against `prosperous/klog.elf`, which exercised the whole path end to end.
 Plain `run` enters with argc in rdi (elfldr's "call address 1") and dies at `0x1`. Under
-`--profile ps5-cex-12.40` (firmware skeleton maps at `0xf000000000`, base handed at `0xf040000000`)
+`--profile prospero-cex-12.40` (firmware skeleton maps at `0xf000000000`, base handed at `0xf040000000`)
 plus `ORBISTOUN_ENTRY_ARGUMENT=handoff`, the payload reads `payload_args[0]=getpid`, computes its
 base, and issues seven syscalls - getpid (20) and vendor_system_version (649) through the getpid+10
 gadget - before hitting a new wall: an illegal instruction at `image+0x2708`, a computed jump from

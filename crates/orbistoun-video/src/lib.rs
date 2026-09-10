@@ -180,12 +180,26 @@ mod port {
 /// opens the main output a second time while the display path still holds it, is refused on
 /// hardware and now here too (D169).
 fn video_out_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // **Before the port table is touched.** A category denied the scanout never opens one on the
+    // console, so opening here and refusing later would leave a port a guest could still use
+    // (D662).
+    if let Some(refused) = refuse_scanout(orbistoun_core::category::presented()) {
+        return refused;
+    }
     let (bus, index) = (args[1], args[2]);
     match port::open(bus, index) {
         Ok(handle) => handle,
         Err(port::OpenFailure::AlreadyOpen) => video_error::ALREADY_OPEN,
         Err(port::OpenFailure::Unavailable) => u64::from(GuestError::Unimplemented.as_raw()),
     }
+}
+
+/// What a category is refused the scanout with, or [`None`] where it may open one.
+///
+/// A separate function from the call so the decision is testable without a port table, which is
+/// the shape principle 8 asks for: a pure decision plus a thin effectful wrapper.
+fn refuse_scanout(category: orbistoun_core::category::Category) -> Option<u64> {
+    orbistoun_core::category::scanout_refusal(category).map(u64::from)
 }
 
 /// `sceVideoOutClose(handle)`.
@@ -247,28 +261,34 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // queue nothing ever delivered to: it registered a flip event, submitted, and waited on a
     // completion this crate had already performed and never announced (D560).
     //
+    // **The diagnostic goes first, and it is the whole of what it does.** `ORBISTOUN_FLIP_TO_ALL`
+    // posts to every queue rather than the registered ones, which asks a guest blocked on a queue
+    // nothing feeds what it would do if that wait completed. Off by default and recorded as an
+    // intervention, so a verdict taken under it is not a measurement of the emulator (D620).
+    let completion = orbistoun_kernel::sync::PendingEvent {
+        ident: handle,
+        // **Unestablished, and left at zero rather than invented.** A real flip event
+        // carries a filter identifying it as a video-out completion, and no lawful source
+        // here gives that value. A guest that branches on it will take the wrong branch and
+        // say so by where it stops, which is a better outcome than a fabricated constant
+        // that looks right (principle 3).
+        filter: 0,
+        flags: 0,
+        fflags: 0,
+        // The flip argument the caller supplied. It is the only per-flip value the guest
+        // provided and `data` is the only field shaped to carry it - an assumption, not a
+        // reading, and the first thing to change if the guest disagrees.
+        data: i64::from_ne_bytes(flip_arg.to_ne_bytes()),
+        // Replaced by the registration's own word on delivery.
+        udata: 0,
+    };
+    if std::env::var_os(orbistoun_env::FLIP_TO_ALL.name).is_some() {
+        orbistoun_kernel::sync::post_event_everywhere(completion);
+        return OK;
+    }
     // Routed by the port handle, because that is what `sceVideoOutAddFlipEvent` registered.
     // Nothing here knows which queue asked - that is the registration's business.
-    orbistoun_kernel::sync::post_event(
-        handle,
-        orbistoun_kernel::sync::PendingEvent {
-            ident: handle,
-            // **Unestablished, and left at zero rather than invented.** A real flip event
-            // carries a filter identifying it as a video-out completion, and no lawful source
-            // here gives that value. A guest that branches on it will take the wrong branch and
-            // say so by where it stops, which is a better outcome than a fabricated constant
-            // that looks right (principle 3).
-            filter: 0,
-            flags: 0,
-            fflags: 0,
-            // The flip argument the caller supplied. It is the only per-flip value the guest
-            // provided and `data` is the only field shaped to carry it - an assumption, not a
-            // reading, and the first thing to change if the guest disagrees.
-            data: i64::from_ne_bytes(flip_arg.to_ne_bytes()),
-            // Replaced by the registration's own word on delivery.
-            udata: 0,
-        },
-    );
+    orbistoun_kernel::sync::post_event(handle, completion);
     OK
 }
 
@@ -468,7 +488,7 @@ fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// **It is not a count of frames displayed.** Nothing scans a buffer out here, and a flip
 /// completes the instant it is accepted because there is no vertical blank to wait for - the
-/// model [`video_out_submit_flip`] already documents. A guest that reaches this has got a frame
+/// model `video_out_submit_flip` already documents. A guest that reaches this has got a frame
 /// to the layer that would present it, which is a distance, not a picture.
 #[must_use]
 pub fn frames_presented() -> u64 {
@@ -500,6 +520,32 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A category denied the scanout is refused before a port is ever opened.**
+    ///
+    /// Written first, and it is the branch no title in the corpus reaches: everything with a
+    /// `param.json` declares a big app. A guard nothing exercises is a guard nobody knows
+    /// anything about, so the test constructs the case rather than waiting for a title to
+    /// (D662).
+    ///
+    /// Asserted on the refusal and on its exact code, because the code is what a guest branches
+    /// on - "it failed" and "it failed with `0x80290001`" are different facts to whoever is
+    /// reading the guest's next move.
+    #[test]
+    fn a_category_without_the_scanout_cannot_open_a_port() {
+        use orbistoun_core::category::Category;
+
+        assert_eq!(
+            super::refuse_scanout(Category::SystemApp),
+            Some(u64::from(orbistoun_core::category::SCANOUT_DENIED)),
+            "a system app is refused, with the documented code"
+        );
+        assert_eq!(
+            super::refuse_scanout(Category::BigApp),
+            None,
+            "a big app is not refused, so the open proceeds"
+        );
+    }
     use super::{
         GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
         video_out_get_flip_status, video_out_get_resolution_status, video_out_is_flip_pending,

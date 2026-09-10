@@ -229,12 +229,28 @@ static RING_SEQ: [AtomicU64; MAX_RECORDED_CALLS] =
 /// How many of a run's *first* calls are kept whatever else happens.
 ///
 /// The circular ring answers "what did it call last"; this answers "what did it call first", and
-/// they are different questions with different readers. Small because its one consumer - the halt
-/// summary - quotes eight (D571).
-pub const OPENING_CALLS: usize = 8;
+/// they are different questions with different readers. The halt summary quotes eight (D571).
+///
+/// **Two thousand and forty-eight rather than eight**, because a second reader arrived with a
+/// different question: *what did the guest do differently between call 219 and call 226?* One
+/// mapping appears in some runs of PPSA03416 and not others, and that single branch accounts for
+/// the whole 192-against-193 drift (D602) - so the calls around it are the evidence, and eight
+/// could not reach them.
+///
+/// The cost is what it always was: a store per call while the count is below this, and a load
+/// afterwards. Two thousand stores in a run of four hundred and sixty-seven thousand calls is
+/// not a sink that changes what it observes; keeping *every* call would be (D603).
+pub const OPENING_CALLS: usize = 2048;
 
 /// The opening of the run: `index + 1` for the first [`OPENING_CALLS`] calls, never overwritten.
 static RING_OPENING: [AtomicU64; OPENING_CALLS] = [const { AtomicU64::new(0) }; OPENING_CALLS];
+
+/// Where each opening call came from, parallel to [`RING_OPENING`].
+///
+/// **A name says what ran; an address says which code ran it.** The same argument D596 makes for
+/// a formatted message: a title calls `memcpy` from four hundred places, and knowing which one is
+/// the difference between a list and a lead.
+static RING_OPENING_FROM: [AtomicU64; OPENING_CALLS] = [const { AtomicU64::new(0) }; OPENING_CALLS];
 
 /// The opening record must be the cheap one, or keeping it separately buys nothing.
 ///
@@ -270,6 +286,18 @@ static RING_ARGS: [AtomicU64; MAX_RECORDED_CALLS * SAVED_ARGUMENT_REGISTERS] =
 ///
 /// Free to capture. The trampoline already carries the stack pointer as the guest's `call`
 /// left it, and the return address is the word sitting at exactly that address.
+/// Which host thread made each call, as its own identifier.
+///
+/// **So a reader can tell which of the recent calls happened on the thread that faulted.** The
+/// tail is every thread's, and a fault is one thread's; pairing them by eye is guesswork, and it
+/// produced four decisions treating a wait blocked on one thread as the cause of a fault on
+/// another (D621).
+///
+/// The host thread rather than the guest handle, because this crate is below the one that issues
+/// guest handles and must not reach up for it. The report joins the two.
+static RING_THREAD: [AtomicU64; MAX_RECORDED_CALLS] =
+    [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS];
+
 static RING_FROM: [AtomicU64; MAX_RECORDED_CALLS] =
     [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS];
 
@@ -522,10 +550,16 @@ pub fn install_readable_ranges(ranges: Vec<(u64, u64)>) {
 
 /// How many ranges a run can add after the first are published.
 ///
-/// One per guest thread, and then some. A run with more threads than this loses only the
-/// ability to *dump* their arguments, which is why it is a fixed ceiling rather than a
-/// growable list: this is read from the guest's own stack (D381).
-const MOST_EXTRA_RANGES: usize = 64;
+/// Fixed rather than growable because this is read from the guest's own stack, where allocating
+/// is what D381 forbids. **Five hundred and twelve rather than sixty-four**, and the difference
+/// was measured: sixty-four was sized for "one per guest thread, and then some", and then guest
+/// *mappings* began publishing here too (D579). PPSA03416 reached about a hundred and twenty, so
+/// every range past the sixty-fourth was dropped - including the asynchronous-file buffer whose
+/// contents are the whole question, which then reported as an address in no published span.
+///
+/// Eight kibibytes of statics, against a blind spot that reads exactly like a wild pointer
+/// (D588).
+const MOST_EXTRA_RANGES: usize = 512;
 
 /// Ranges published after the run started, as `(base, len)` pairs.
 ///
@@ -537,6 +571,18 @@ static EXTRA_RANGES: [(AtomicU64, AtomicU64); MOST_EXTRA_RANGES] =
 
 /// How many extra ranges have been published.
 static EXTRA_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// How many ranges were published after the table was full.
+static DROPPED_RANGES: AtomicU64 = AtomicU64::new(0);
+
+/// How many readable ranges this run could not remember.
+///
+/// Non-zero means the argument dump has a blind spot whose size is known, which is a different
+/// finding from a pointer that is wrong - and the two print identically without this.
+#[must_use]
+pub fn dropped_ranges() -> u64 {
+    DROPPED_RANGES.load(Ordering::Relaxed)
+}
 
 /// Publishes a span of guest memory that appeared after the run started.
 ///
@@ -563,6 +609,11 @@ pub fn note_readable_range(base: u64, len: u64) {
         return;
     };
     let Some((held_base, held_len)) = EXTRA_RANGES.get(slot) else {
+        // **Counted, because a dropped range is indistinguishable from a wrong address.** A
+        // pointer into a span that overflowed this table reports as "in no span this run
+        // published as readable", which is what a wild pointer reports - and the run then has
+        // no way to say the difference was capacity (D588).
+        DROPPED_RANGES.fetch_add(1, Ordering::Relaxed);
         return;
     };
     held_base.store(base, Ordering::Relaxed);
@@ -692,16 +743,28 @@ pub fn ranges_known() -> bool {
 
 /// Whether `DUMP_BYTES` from `address` are inside something this process mapped.
 fn is_readable(address: u64) -> bool {
-    let Some(end) = address.checked_add(DUMP_BYTES as u64) else {
+    readable_span(address, DUMP_BYTES as u64)
+}
+
+/// Whether `[address, address + len)` is inside something this process mapped.
+///
+/// **The one answer to "may I dereference this?", so there is one place it can be wrong.**
+/// The dump asks it about its own fixed window; anything else reading guest memory from
+/// outside the guest - a watch, a snapshot - is asking the same question about a length
+/// somebody typed, and a second implementation of it is a second chance to fault inside the
+/// emulator on an address the guest never touched (D580).
+#[must_use]
+pub fn readable_span(address: u64, len: u64) -> bool {
+    let Some(end) = address.checked_add(len) else {
         return false;
     };
     let published = READABLE.get().is_some_and(|ranges| {
         ranges
             .iter()
-            .any(|&(base, len)| address >= base && end <= base.saturating_add(len))
+            .any(|&(base, range)| address >= base && end <= base.saturating_add(range))
     });
     // The whole window has to be inside one range, published or added later, because the
-    // dump reads all of it (D387).
+    // reader reads all of it (D387).
     published || in_extra_range(address) && in_extra_range(end.saturating_sub(1))
 }
 
@@ -725,6 +788,20 @@ pub fn install_forced_dumps(forced: Vec<bool>) {
     let _ = FORCED.set(forced.into_boxed_slice());
 }
 
+/// Whether any import was named for a forced dump.
+///
+/// When one was, the default set is suppressed: a caller who named an import is asking about that
+/// import, and the buffer is small enough that the two compete (D623).
+fn anything_forced() -> bool {
+    FORCED.get().is_some_and(|f| f.iter().any(|forced| *forced))
+}
+
+/// How many dumps were wanted after the buffer was full.
+#[must_use]
+pub fn dumps_dropped() -> u64 {
+    DUMPS_DROPPED.load(Ordering::Relaxed)
+}
+
 /// Whether this import is dumped even though it is implemented.
 fn is_forced(index: usize) -> bool {
     FORCED
@@ -734,6 +811,12 @@ fn is_forced(index: usize) -> bool {
 
 /// How many dumps have been taken.
 static DUMPS_TAKEN: AtomicU64 = AtomicU64::new(0);
+/// How many were wanted after the buffer was full.
+///
+/// The buffer holds [`MAX_DUMPS`] and a guest that calls many unimplemented functions fills it
+/// long before an interesting one is reached. Reporting the number is what turns "the tool showed
+/// me nothing" into "the tool ran out of room, here is by how much" (D623).
+static DUMPS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Which import each dump belongs to, plus one so zero means empty.
 static DUMP_IMPORT: [AtomicU64; MAX_DUMPS] = [const { AtomicU64::new(0) }; MAX_DUMPS];
 /// Which argument position was dumped.
@@ -1040,6 +1123,11 @@ fn dump_arguments(index: u64, args: *const u64) {
             return;
         };
         if at >= MAX_DUMPS {
+            // **Counted, not merely refused.** A dump nobody took is indistinguishable from a
+            // call that was never made, and the report said nothing - so asking for one import
+            // and getting a list without it read as *that import passed no arguments worth
+            // showing* (D623).
+            DUMPS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let from: &[u8] = if readable {
@@ -1103,9 +1191,14 @@ pub struct RecordedCall {
     pub index: u32,
     /// The call's integer arguments, in register order - `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`.
     ///
-    /// **All six, because a size is rarely the first one.** See [`RING_ARGS`] for what recording
+    /// **All six, because a size is rarely the first one.** See `RING_ARGS` for what recording
     /// only the first cost.
     pub args: [u64; SAVED_ARGUMENT_REGISTERS],
+    /// Which host thread made it, or zero when nothing recorded one.
+    ///
+    /// Only ever compared for equality - two calls with the same value happened on the same
+    /// thread, and that is the whole question it answers.
+    pub thread: u64,
     /// The guest address this call returns to - one instruction past the call site.
     ///
     /// Zero when it could not be read. Matches the addresses a fault's frame walk reports,
@@ -1170,10 +1263,70 @@ pub fn last_call() -> Option<RecordedCall> {
             RING_ARGS[newest * SAVED_ARGUMENT_REGISTERS + r].load(Ordering::Relaxed)
         }),
         from: RING_FROM[newest].load(Ordering::Relaxed),
+        thread: RING_THREAD[newest].load(Ordering::Relaxed),
         ret: recorded_return(newest),
     })
 }
 
+/// Which import **this thread** is currently inside, if any.
+///
+/// # Why [`last_call`] is the wrong question for a caller inside a call
+///
+/// `last_call` reads the whole ring and answers with the newest call *any* thread made. That is
+/// right for a fault handler asking "what was this process doing", and wrong for an
+/// implementation asking "what am I inside" - which is what the mapping record and the format
+/// trace both ask.
+///
+/// The consequence was visible and read as ordinary: the mapping list attributed reservations to
+/// `libc::memcpy`, which maps nothing. A guest thread reserving memory was labelled with whatever
+/// another thread had most recently entered, and the two are indistinguishable in the output
+/// (D616).
+///
+/// Zero means *not inside one*, so the slot needs no initialiser beyond zero and a thread that
+/// never entered a call answers honestly rather than naming somebody else's.
+///
+/// **A stack, because calls nest.** A guest call can re-enter through a callback, and restoring
+/// the previous value on the way out is what keeps the outer call's identity for the rest of its
+/// body. One `u32` in thread-local storage, written twice per call, which is the whole cost.
+pub fn current_call() -> Option<u32> {
+    INSIDE.with(|inside| inside.get().checked_sub(1))
+}
+
+/// This host thread's own identifier, as the recorded calls carry it.
+///
+/// Exposed so a fault can be paired with the calls that happened on the same thread - the fault
+/// handler runs on the faulting thread, so it reads its own (D621).
+#[must_use]
+pub fn current_thread() -> u64 {
+    host_thread()
+}
+
+/// This host thread's own identifier, cheap and stable for the thread's life.
+///
+/// The address of a thread-local byte: distinct per thread, constant within one, and costing a
+/// load rather than a system call - which matters because this runs on every guest call and
+/// recording must not change what it observes (principle 9).
+/// A stable identifier for the calling host thread.
+///
+/// The address of a thread-local marker: unique per thread, free to read, and never zero.
+/// Public so the thread registry can record which host thread a guest handle is running on -
+/// without it the recorded calls and the thread table cannot be joined, and a report can say
+/// which threads exist or what was called last but never both (D651).
+#[must_use]
+pub fn host_thread() -> u64 {
+    thread_local! {
+        static MARK: u8 = const { 0 };
+    }
+    MARK.with(|m| std::ptr::from_ref(m) as u64)
+}
+
+thread_local! {
+    /// The import this thread is inside, plus one. Zero means none.
+    ///
+    /// Thread-local rather than an array indexed by thread handle: a guest thread has no small
+    /// dense identifier here, and recording must not allocate (principle 9).
+    static INSIDE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 /// The most recent calls, in the order the guest made them.
 ///
 /// At most [`MAX_RECORDED_CALLS`] of them; [`total_calls`] says how many there were altogether.
@@ -1195,6 +1348,7 @@ pub fn recorded_calls() -> Vec<RecordedCall> {
                     RING_ARGS[i * SAVED_ARGUMENT_REGISTERS + r].load(Ordering::Relaxed)
                 }),
                 from: RING_FROM[i].load(Ordering::Relaxed),
+                thread: RING_THREAD[i].load(Ordering::Relaxed),
                 ret: recorded_return(i),
             })
         })
@@ -1212,6 +1366,27 @@ pub fn opening_calls() -> Vec<u32> {
         .iter()
         .filter_map(|slot| slot.load(Ordering::Relaxed).checked_sub(1))
         .map(|index| index as u32)
+        .collect()
+}
+
+/// The run's first calls with the address each was made from, in order.
+///
+/// **The sequence number is the position**, so the caller gets *call 219 was this* for free -
+/// which is what makes the record diffable against the mapping record, whose entries are indexed
+/// by call ordinal (D581, D603).
+///
+/// Stops at the first empty slot rather than filtering, because a gap would shift every later
+/// call's number and the numbers are the whole point.
+#[must_use]
+pub fn opening_sequence() -> Vec<(u64, u32, u64)> {
+    RING_OPENING
+        .iter()
+        .zip(RING_OPENING_FROM.iter())
+        .enumerate()
+        .map_while(|(position, (slot, from))| {
+            let index = slot.load(Ordering::Relaxed).checked_sub(1)?;
+            Some((position as u64, index as u32, from.load(Ordering::Relaxed)))
+        })
         .collect()
 }
 
@@ -1267,6 +1442,11 @@ unsafe extern "sysv64" fn on_guest_call(
         // The opening, kept whole and never overwritten - a separate, tiny record so that making
         // the main ring circular did not cost the other question (D571).
         if let Some(opening) = RING_OPENING.get(position) {
+            // The call site first, so a reader that sees a populated index never finds a stale
+            // address beside it - the same ordering the main ring uses three lines below.
+            if let Some(from) = RING_OPENING_FROM.get(position) {
+                from.store(call_site(entry_rsp), Ordering::Relaxed);
+            }
             opening.store(index + 1, Ordering::Relaxed);
         }
         {
@@ -1283,6 +1463,20 @@ unsafe extern "sysv64" fn on_guest_call(
                     .store(value, Ordering::Relaxed);
             }
             RING_FROM[slot].store(call_site(entry_rsp), Ordering::Relaxed);
+            RING_THREAD[slot].store(host_thread(), Ordering::Relaxed);
+            // **The previous occupant's answer is retired before this call claims the slot.**
+            // Nothing cleared it, so a call still running in a recycled slot reported the answer
+            // of whichever call held it last - and `recorded_return`'s whole contract is that a
+            // call which has not returned reads as unknown.
+            //
+            // Invisible while every call returned promptly, because the window was a few
+            // instructions wide. `sceKernelWaitEqueue` learning to block held one slot open for
+            // the length of a wait, and the trace tail started reporting a mapping address as
+            // the answer to an event-queue wait (D613).
+            //
+            // Ordered before the sequence with `Release`, so a reader that sees this call's
+            // number can never still see the last call's flag.
+            RING_RETURNED[slot].store(0, Ordering::Release);
             RING_SEQ[slot].store(sequence.wrapping_add(1), Ordering::Relaxed);
             // Written after the argument and the sequence, so a reader never sees a populated
             // index pointing at a stale argument or at the wrong call's number.
@@ -1305,7 +1499,12 @@ unsafe extern "sysv64" fn on_guest_call(
 
     // Only for calls nothing implements: an implemented function's arguments are not a
     // mystery, and skipping them is what keeps this off the hot path entirely (D194).
-    if handler.is_none() || is_forced(index as usize) {
+    //
+    // **A forced list narrows the dump to itself.** It used to add to the default set, and on a
+    // guest that calls hundreds of unimplemented functions the buffer filled with those before
+    // the forced one was reached - so asking a specific question returned an answer to a
+    // different one. Somebody who names an import is asking about that import (D623).
+    if is_forced(index as usize) || (handler.is_none() && !anything_forced()) {
         dump_arguments(index, args);
     }
 
@@ -1318,9 +1517,14 @@ unsafe extern "sysv64" fn on_guest_call(
     // which is where the return below is recorded. `handler` is handed over rather than
     // looked up again, keeping the "looked up once" guarantee above.
     //
+    // **Set around the call, restored after.** An implementation asking what it is inside gets
+    // its own thread's answer rather than the newest call any thread made (D616). It brackets
+    // exactly the handler, which is the span the question is about.
+    let outer = INSIDE.with(|inside| inside.replace((index as u32).wrapping_add(1)));
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
+    INSIDE.with(|inside| inside.set(outer));
 
     // The other half of the record, and the half nothing captured until now: what the call
     // answered. Written *after* the handler ran, so a slot read before then reads as

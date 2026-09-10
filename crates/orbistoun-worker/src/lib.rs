@@ -501,11 +501,31 @@ fn describe_title_modules(title: &orbistoun_service::LinkedTitle) {
     };
     let base = first.span().0;
     let (end_base, end_len) = last.span();
-    report::describe_region(
-        report::Region::TitleModules,
-        base,
-        end_base.saturating_add(end_len).saturating_sub(base),
-    );
+    let len = end_base.saturating_add(end_len).saturating_sub(base);
+    report::describe_region(report::Region::TitleModules, base, len);
+    // **Which library names are the title's own**, so an unnamed hash from one is not sent to a
+    // vendor word list that cannot contain it (D631).
+    report::name_title_modules(title.placed.exports().keys().cloned().collect());
+    // **Every import accounted for, bound or not, and printed whether or not anything went
+    // wrong.** Six of PPSA25872's are answered by modules it ships, all six landed on
+    // placeholders, and the run said nothing - so the largest wall in the corpus looked like a
+    // missing implementation for a month. "Six of six bound" and silence are different
+    // statements and only one of them is evidence (D640).
+    for line in title.binding.lines() {
+        eprintln!("{line}");
+        orbistoun_core::klog::note(&line);
+    }
+    report::name_bound_imports(title.bound.keys().map(|i| *i as usize).collect());
+    // **Named to the reporter and never published to the readers.** The modules a title ships
+    // were mapped, and the fault reporter could name an address in them - and no diagnostic
+    // could read one, because the readable spans are the image and the main stack. So a watch
+    // on a module this title ships answered *"in no span this run published as readable"*,
+    // which is what an unmapped address answers, for memory the loader had placed itself.
+    //
+    // These are guest material at rest, which `docs/PROVENANCE.md` calls `static` evidence -
+    // the same category as a module's import table, which this project has read since its
+    // first week (D593).
+    orbistoun_thunk::note_readable_range(base, len);
 }
 
 fn place_and_relocate<W: Write>(
@@ -622,6 +642,8 @@ fn place_and_relocate<W: Write>(
         thunks.base(),
         orbistoun_thunk::implemented_count_within(thunks.len())
     );
+
+    name_guest_functions_from(bytes);
 
     prepare_diagnostics(service, module, &image, thunks, limits, &title.labels);
 
@@ -766,16 +788,8 @@ fn prepare_diagnostics(
     let (span_base, span_len) = image.span();
     // Imports named for a dump are dumped even though something implements them, because
     // the case that matters is when the implementation is yours and you suspect it (D198).
-    if !experiments.dump.is_empty() {
-        let mut forced = vec![false; thunks.total()];
-        for (index, slot) in forced.iter_mut().enumerate() {
-            let Some(label) = report::label_of(index) else {
-                continue;
-            };
-            *slot = experiments.dump.iter().any(|t| t.matches(label));
-        }
-        orbistoun_thunk::install_forced_dumps(forced);
-    }
+    declare_by_name(thunks, labels);
+    arm_dumps(&experiments.dump, thunks.total());
 
     // After the labels exist, because it resolves an import by name where there is one and
     // by hash where there is not - which is the whole point for a function nobody has
@@ -1246,12 +1260,6 @@ fn apply_memory_diagnostics(
             eprintln!("orbistoun: {at:#x} is not inside a writable segment - nothing poked");
         }
     }
-
-    // Copied before the guest can change it, so what it did is a comparison rather than a
-    // guess. Cheaper than a watchpoint and answering a different question - see `watch`.
-    if let Some((base, len)) = experiments.watch {
-        watch::snapshot(base, len);
-    }
 }
 
 /// Everything that has to be watching before the guest starts, in the order it has to be.
@@ -1284,6 +1292,11 @@ fn install_reporting(
     );
     let reporting = report::install();
     report::install_stop_handler();
+    // **The filesystem, handed to the crate that declares `libkernel`.** The asynchronous file
+    // path is file I/O under a kernel name, and those two are sibling subsystems - so the reader
+    // is installed from here, which owns both, rather than one reaching across (D589).
+    orbistoun_kernel::apr::on_file_read(read_guest_file);
+    orbistoun_kernel::apr::on_index_lookup(look_up_in_index);
 
     let armed = experiments
         .watchpoints()
@@ -2311,6 +2324,14 @@ fn arm_diagnostics(
     describe_environment(stack, module);
     // And where the image is: it lives in the loader's address space, which the kernel's runtime
     // map never sees, so without this `sceKernelVirtualQuery` refuses the guest's own code (D446).
+    // **After the readable ranges, not before them.** This ran during loading, where the only
+    // published span was nothing at all - so a watch on an image address, which is mapped and
+    // has been since the module was placed, reported "did not exist when the guest started".
+    // Copied before the guest can change it, so what it did is a comparison rather than a
+    // guess; cheaper than a watchpoint and answering a different question - see `watch` (D586).
+    if let Some((base, len)) = experiments.watch {
+        watch::snapshot(base, len);
+    }
     let (image_span_base, image_span_len) = image.span();
     orbistoun_kernel::note_region(image_span_base, image_span_len);
     Ok(experiments)
@@ -2481,8 +2502,7 @@ fn enter<W: Write>(
 
     // Persisted on the ordinary path as well, so a guest that stops by itself is
     // recorded exactly as fully as one that had to be stopped.
-    report::syscalls_asked_for();
-    report::paths_wanted();
+    report::what_the_guest_asked_for();
     let trace = report::collect_calls(module, "Entered");
     report::persist(&trace);
 
@@ -2833,6 +2853,170 @@ fn with_shape_diagnostic(
         ),
     }
     settings
+}
+
+/// What the title's own index says about a guest path.
+///
+/// **Read once and kept.** The index is a file, so this is installed from here for the reason
+/// `read_guest_file` is - and parsed on first use rather than at load, because a title without
+/// one is the ordinary case and paying for it at every launch would be a cost for nothing.
+fn look_up_in_index(guest_path: &str) -> Option<(u64, u64)> {
+    use std::sync::OnceLock;
+
+    /// Where a dumped title puts it.
+    const INDEX: &str = "/app0/ampr_emu.index";
+
+    static ENTRIES: OnceLock<Vec<orbistoun_fs::amprindex::Entry>> = OnceLock::new();
+    let entries = ENTRIES.get_or_init(|| {
+        // **Through the mount table to a host path, not through the guest's filesystem.** This
+        // is orbistoun reading a file, not the guest reading one, and going through
+        // `open`/`read` put it in the descriptor table and in the statistics the guest is
+        // measured by - a run reported a cut-short read that was entirely orbistoun's own. A
+        // diagnostic that changes what it observes is what principle 9 forbids, and this one
+        // was changing the filesystem report (D595).
+        let Some(host) = orbistoun_fs::mount::resolve(INDEX) else {
+            return Vec::new();
+        };
+        let bytes = std::fs::read(host).unwrap_or_default();
+        orbistoun_fs::amprindex::parse(&bytes).unwrap_or_default()
+    });
+    entries
+        .iter()
+        .find(|e| e.path == guest_path)
+        .map(|e| (e.id, e.size))
+}
+
+/// Reads a guest path into guest memory, for the asynchronous file path's experiment.
+///
+/// **Bounded by what the caller says it has room for**, and by what the file holds. A read that
+/// filled more than the guest's buffer would corrupt whatever it neighbours, which is a fault
+/// with no relation to the question being asked.
+fn read_guest_file(guest_path: &str, address: u64, most: u64) -> Option<usize> {
+    let handle = orbistoun_fs::open::open(guest_path)?;
+    let at = usize::try_from(address).ok()?;
+    let room = usize::try_from(most).ok()?;
+    if at == 0 || room == 0 {
+        return None;
+    }
+    // SAFETY: the guest supplied this address in a structure it built, and the caller has
+    // checked it against the length in the same structure. The mapping is identity (D014), and
+    // the guest is inside this call so nothing else is writing the range.
+    let into = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(at), room)
+    };
+    let got = orbistoun_fs::open::read(handle, into);
+    orbistoun_fs::open::close(handle);
+    got
+}
+
+/// Publishes by-name stubs for declared imports, when a run asks for them.
+///
+/// **Only under `ORBISTOUN_DLSYM_STUBS`**, so a run that did not ask behaves exactly as it always
+/// has and the difference between two runs is the whole measurement. The map is built from the
+/// import labels, which are `library::name`, and keyed by the bare name because that is what a
+/// guest passes to `sceKernelDlsym` (D632).
+///
+/// Implemented names are left out: they are already reachable by name, and adding them here would
+/// mean two entries for one function with nothing saying which won.
+fn declare_by_name(thunks: &orbistoun_thunk::ThunkTable, labels: &[String]) {
+    if !orbistoun_env::DLSYM_STUBS.is_set() {
+        return;
+    }
+    let mut named = std::collections::BTreeMap::new();
+    for (index, label) in labels.iter().enumerate() {
+        let Some((_, name)) = label.split_once("::") else {
+            continue;
+        };
+        if name.is_empty() || name.starts_with("0x") || orbistoun_thunk::name_thunk(name).is_some()
+        {
+            continue;
+        }
+        if let Some(at) = thunks.address_of(index) {
+            named.insert(name.to_owned(), at);
+        }
+    }
+    eprintln!(
+        "orbistoun: {} declared name(s) are resolvable by name under ORBISTOUN_DLSYM_STUBS",
+        named.len()
+    );
+    orbistoun_thunk::install_declared_thunks(named);
+}
+
+/// Arms the imports a run named with `ORBISTOUN_DUMP`, and says what it armed.
+///
+/// **Counted per clause, exactly as the writes are.** A clause naming an import that is not
+/// there dumped nothing and said nothing, so a run with no captured arguments read as "the guest
+/// never called it" when it meant "nothing here is called that" - and the arming count is said
+/// out loud because a list that matched and a list that did not otherwise produce identical
+/// silence (D625).
+///
+/// matters is when the implementation is yours and you suspect it (D198).
+fn arm_dumps(targets: &[experiment::Target], total: usize) {
+    if targets.is_empty() {
+        return;
+    }
+    let mut forced = vec![false; total];
+    let mut unmatched: Vec<&str> = Vec::new();
+    for target in targets {
+        let mut hits = 0_usize;
+        for (index, slot) in forced.iter_mut().enumerate() {
+            let Some(label) = report::label_of(index) else {
+                continue;
+            };
+            if target.matches(label) {
+                *slot = true;
+                hits += 1;
+            }
+        }
+        if hits == 0 {
+            unmatched.push(target.as_str());
+        }
+    }
+    for name in &unmatched {
+        eprintln!("orbistoun: ORBISTOUN_DUMP matched no import called {name:?}");
+    }
+    let slots = forced.iter().filter(|f| **f).count();
+    eprintln!("orbistoun: ORBISTOUN_DUMP armed {slots} of {total} stub slot(s)");
+    // **Which labels, not just how many.** A `Gap::Captured` finding answers a question somebody
+    // asked, so the reporter has to know which imports were asked about - otherwise it answers
+    // for every import that happened to be dumped (D637).
+    report::name_forced_dumps(
+        forced
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .filter_map(|(index, _)| report::label_of(index).map(str::to_owned))
+            .collect(),
+    );
+    orbistoun_thunk::install_forced_dumps(forced);
+}
+/// Tells the reporter what a guest module calls its own functions, where it says.
+///
+/// **Every commercial title is stripped and this does nothing for one.** The open-toolchain
+/// guests are not, and they are the ones this project runs most and reads least well at a fault:
+/// `image+0x28a163` names a byte where the file could have named `obs_sink_open+0x73` (D628).
+///
+/// Read before entry, because the fault handler must neither allocate nor parse (principle 9).
+fn name_guest_functions_from(bytes: &[u8]) {
+    let Ok(container) = orbistoun_elf::Container::parse(bytes) else {
+        return;
+    };
+    let Ok(functions) = container.function_symbols(bytes) else {
+        return;
+    };
+    if functions.is_empty() {
+        return;
+    }
+    eprintln!(
+        "orbistoun: the module names {} of its own functions, so a fault in it can say which",
+        functions.len()
+    );
+    report::name_guest_functions(
+        functions
+            .into_iter()
+            .map(|s| (s.value, s.size, s.name))
+            .collect(),
+    );
 }
 
 #[cfg(test)]

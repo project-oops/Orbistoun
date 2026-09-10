@@ -108,6 +108,122 @@ pub struct CallTrace {
     /// run reports that as directly (D080).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<FaultSite>,
+    /// Imports a run **named** with `ORBISTOUN_DUMP`, by label.
+    ///
+    /// **Empty in an ordinary run, and that is the whole of it.** A `Gap::Captured` finding is an
+    /// answer to a question somebody asked, so it must fire only for the imports they asked
+    /// about - never for whatever happened to be dumped. Without this it fired for every
+    /// float-only implementation, because the default dump condition tests the *integer* handler
+    /// and a function answering in `xmm0` has none: two noise findings printed ahead of the
+    /// actual wall (D637).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forced_dumps: Vec<String>,
+    /// How long the guest went without asking the host for anything, when the clock ended it.
+    ///
+    /// **"Ran to the time limit" cannot tell working from stuck**, and it reports them the same
+    /// way. PPSA25872 makes 310,987 calls and then nothing: the same 310,987 at a twenty-second
+    /// limit and at a ninety-second one, so it was blocked - and the only thing that separated
+    /// those was running it twice and comparing by hand (D645, and the same shape as D177).
+    ///
+    /// `None` for a run that faulted, stopped itself, or spent its call budget - in all three the
+    /// guest was going when it ended, so there is no silence to report and a zero would read as
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<Quiet>,
+    /// What the guest put into words, oldest first.
+    ///
+    /// **The only signal in a run that arrives already interpreted.** A fault address, an import
+    /// count and a silent thread all have to be reasoned back to a cause; this *is* the cause,
+    /// written by the guest, in English. D186 named four functions by reading two titles'
+    /// diagnostics by hand - this is that, systematically, for every run.
+    ///
+    /// Captured at the platform ABI - the C library's format family, the console's log call, and
+    /// writes to the standard descriptors - so nothing about it is specific to one engine. A
+    /// homebrew payload using `printf` and a commercial engine's own logger land in the same
+    /// place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub said: Vec<String>,
+    /// Every guest thread, and the last call each one made.
+    ///
+    /// **A run that goes quiet has a thread doing something, and the report could not say which.**
+    /// PPSA25872 stops with eleven threads alive: one of them raises a signal on `main` and then
+    /// waits on a semaphore for an acknowledgement, and `main` never makes another call. Reaching
+    /// that took three rounds of hand instrumentation - a print of the thread table, a print of
+    /// the call index, and a hand-join of the recorded calls against it - all of which this field
+    /// answers directly (D651).
+    ///
+    /// Empty for a run with no thread registry, which is every unit test.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub threads: Vec<ThreadNote>,
+    /// Modules the **title itself ships**, by the library name its imports carry.
+    ///
+    /// **A symbol from one of these is the game's own, and no vendor vocabulary will ever hold
+    /// it.** `PS5Util` and `Il2cppUserAssemblies` are files in the title's own directory; their
+    /// exports were written by whoever wrote the game. Telling a reader to extend a vendor word
+    /// list to name one is advice that cannot succeed, and it was the advice given for six of
+    /// the seven unnamed imports in the corpus - including the single busiest call this project
+    /// has ever recorded (D630, D631).
+    ///
+    /// Empty for a guest that ships no modules of its own, and empty for any run whose loader
+    /// did not report - in both cases the advice falls back to what it always said, because
+    /// "nobody told me" must not become "this is the game's".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub title_modules: Vec<String>,
+}
+
+/// The silence at the end of a run the clock stopped.
+///
+/// # What it measures, and what it does not
+///
+/// "Activity" is one number: import calls plus system calls, both monotonic, both already
+/// counted. A guest that stops moving that number has stopped asking the host for anything -
+/// which is what a thread waiting on something that will never arrive looks like.
+///
+/// **It is not proof the guest is blocked**, and the wording everywhere it is printed says only
+/// what was counted. A guest spinning in its own code, computing, calls nothing either. The
+/// difference is that this measurement is free and available from a *single* run, where the
+/// alternative was running twice at different limits and comparing by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Quiet {
+    /// Milliseconds between the last counted activity and the clock expiring.
+    pub silent_ms: u64,
+    /// Milliseconds from the start of the run to the last counted activity.
+    pub last_activity_ms: u64,
+    /// How long the run actually lasted, which is not always the limit it was given.
+    pub run_ms: u64,
+    /// How often the counters were read.
+    ///
+    /// **Recorded because it bounds the claim.** A silence measured at quarter-second
+    /// resolution is not known to a millisecond, and a field that printed one without the other
+    /// would be reporting more than the measurement supports (principle 3).
+    pub sample_ms: u64,
+}
+
+impl Quiet {
+    /// Whether the silence is worth a reader's attention.
+    ///
+    /// Half the run, and at least a second. Both halves earn their place: the fraction is what
+    /// makes it interesting rather than the absolute, and the floor keeps a 2-second run from
+    /// reporting a 1.1-second silence as though it meant something.
+    #[must_use]
+    pub fn is_notable(&self) -> bool {
+        self.silent_ms >= 1_000 && self.silent_ms.saturating_mul(2) >= self.run_ms
+    }
+
+    /// The silence as a sentence, in the terms it was measured in.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "made no call in its last {}.{}s of {}.{}s - the last import or system call was at {}.{}s, sampled every {}ms",
+            self.silent_ms / 1000,
+            (self.silent_ms % 1000) / 100,
+            self.run_ms / 1000,
+            (self.run_ms % 1000) / 100,
+            self.last_activity_ms / 1000,
+            (self.last_activity_ms % 1000) / 100,
+            self.sample_ms,
+        )
+    }
 }
 
 /// How many calls of context to keep before the end.
@@ -115,6 +231,27 @@ pub struct CallTrace {
 /// Enough to see past a burst of one repeated function - a guest clearing memory calls
 /// `memset` hundreds of times in a row, and a shorter tail would show nothing but that.
 pub const TAIL_CALLS: usize = 48;
+
+/// One guest thread, as it was when the run ended.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadNote {
+    /// The handle the guest holds, which is what it passes to calls naming a thread.
+    pub handle: u64,
+    /// The name the guest gave it. Unity names its threads, and the names are the whole story.
+    pub name: String,
+    /// Whether it has ended.
+    pub finished: bool,
+    /// The last call this thread made, if one is still in the recorded window.
+    ///
+    /// [`None`] means **not seen recently**, not "made no calls": the window holds the last
+    /// forty-eight calls of the whole run, so a thread that went quiet early falls out of it. The
+    /// distinction matters - a thread with no recent call is the interesting one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_call: Option<String>,
+    /// Where that call sits in the run's order, for reading against the tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sequence: Option<u64>,
+}
 
 /// What the guest's calls looked like against the System V convention.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -152,6 +289,13 @@ pub struct TracedCall {
     /// observation in four runs, entirely because of this (D570).
     #[serde(default)]
     pub args: [u64; 6],
+    /// Which host thread made it, matching `FaultSite::host_thread`.
+    ///
+    /// Only ever compared for equality, and only to answer one question: was this call on the
+    /// thread that faulted? A tail that could not say pairs a fault with a call from somewhere
+    /// else, which is exactly what happened for four decisions (D621).
+    #[serde(default)]
+    pub thread: u64,
     /// The guest address this call returns to - one instruction past the call site.
     ///
     /// **The same address space a fault's frame walk reports**, which is the point: a
@@ -222,6 +366,23 @@ pub struct FaultSite {
     /// code that omits the frame pointer - not a failure (D172).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames: Vec<Frame>,
+    /// The host thread the fault happened on, as the recorded calls carry it.
+    ///
+    /// Compared for equality against `TracedCall::thread`, which is the only thing either is
+    /// for: it says which of the recent calls were on the thread that died (D621).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_thread: Option<u64>,
+    /// Which guest thread faulted, as the guest's own handle for it.
+    ///
+    /// **Because the report shows one fault and the call tail shows every thread.** A reader
+    /// looking at a fault beside a list of recent calls has no way to tell which of them
+    /// happened on the thread that died - and four decisions were written treating a blocked
+    /// wait on one thread as the cause of a fault that may have been on another (D621).
+    ///
+    /// `None` when nothing claimed this host thread as a guest one, which is the main thread
+    /// before the loader hands over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<u64>,
     /// The registers as they were at the fault.
     ///
     /// Captured because the handler has always had them - a vectored handler is passed the
@@ -1085,6 +1246,7 @@ mod tail_return_tests {
     fn a_zero_answer_survives_and_is_not_absence() {
         let mut trace = base();
         trace.tail = vec![TracedCall {
+            thread: 0,
             sequence: 3,
             label: "libkernel::sceKernelMapDirectMemory".to_owned(),
             args: [0x6000_0080_0d28, 0, 0, 0, 0, 0],
@@ -1102,6 +1264,7 @@ mod tail_return_tests {
     fn an_unknown_answer_is_absent_rather_than_zero() {
         let mut trace = base();
         trace.tail = vec![TracedCall {
+            thread: 0,
             sequence: 1,
             label: "libc::strlen".to_owned(),
             args: [0x10, 0, 0, 0, 0, 0],
@@ -1133,6 +1296,56 @@ mod tail_return_tests {
 #[cfg(test)]
 mod tests {
     use super::{CallTrace, CalledImport, Conditions, FaultSite, Verdict, compare};
+
+    /// A guest still calling when the clock stopped it is not quiet.
+    ///
+    /// **The negative case first**, because it is the one that costs something to get wrong: a
+    /// notable verdict on an ordinary run puts a warning and a suggested rerun on every report
+    /// that hits the limit, and a reader learns to skip the line (principle 3).
+    #[test]
+    fn a_run_that_called_something_at_the_end_is_not_notable() {
+        let busy = super::Quiet {
+            silent_ms: 240,
+            last_activity_ms: 19_760,
+            run_ms: 20_000,
+            sample_ms: 250,
+        };
+        assert!(!busy.is_notable());
+    }
+
+    /// A silence under a second is not notable however large a share of the run it is.
+    ///
+    /// The floor exists for short runs: an 1,800ms run that went quiet at 900ms is exactly half
+    /// silent and says nothing - that is the sample interval and startup, not a wall.
+    #[test]
+    fn a_brief_silence_in_a_brief_run_is_not_notable() {
+        let brief = super::Quiet {
+            silent_ms: 900,
+            last_activity_ms: 900,
+            run_ms: 1_800,
+            sample_ms: 250,
+        };
+        assert!(brief.silent_ms.saturating_mul(2) >= brief.run_ms);
+        assert!(!brief.is_notable());
+    }
+
+    /// The measured case: PPSA25872's own numbers, rounded to what a sampler would see.
+    #[test]
+    fn a_guest_that_stopped_calling_is_notable_and_says_when() {
+        let stuck = super::Quiet {
+            silent_ms: 17_250,
+            last_activity_ms: 2_750,
+            run_ms: 20_000,
+            sample_ms: 250,
+        };
+        assert!(stuck.is_notable());
+        // Tenths, and the tenth is truncated rather than rounded - the sample interval is a
+        // quarter second, so a rounded tenth would claim precision the measurement lacks.
+        assert_eq!(
+            stuck.describe(),
+            "made no call in its last 17.2s of 20.0s - the last import or system call was at 2.7s, sampled every 250ms"
+        );
+    }
 
     /// **The unanswered count is of functions, not of calls.**
     ///
@@ -1231,6 +1444,11 @@ mod tests {
 
     fn trace(distinct: usize, calls: u64, region: Option<&str>, offset: Option<u64>) -> CallTrace {
         CallTrace {
+            forced_dumps: Vec::new(),
+            threads: Vec::new(),
+            said: Vec::new(),
+            quiet: None,
+            title_modules: Vec::new(),
             module: "m".to_owned(),
             reached: "Entered".to_owned(),
             total_calls: calls,
@@ -1246,6 +1464,8 @@ mod tests {
             formats: super::FormatReport::default(),
             stopped: None,
             fault: region.map(|region| FaultSite {
+                thread: None,
+                host_thread: None,
                 pointees: Vec::new(),
                 kind: "read of".to_owned(),
                 address: 0,

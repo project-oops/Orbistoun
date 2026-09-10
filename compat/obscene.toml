@@ -6,14 +6,14 @@
 reach = "flipped"
 outcome = "ran to the time limit"
 imports = 193
-calls = 278722
+calls = 280274
 standing = 100
 default_return = "unimplemented"
 frames = 42
 unanswered = 13
 limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-04"
+measured_on = "2026-09-09"
 
 [experiment]
 reach = "entered"

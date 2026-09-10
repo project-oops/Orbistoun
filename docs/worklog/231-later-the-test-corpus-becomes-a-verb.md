@@ -13,7 +13,7 @@ reports are tracked, and `git check-ignore` confirms the bytes are not.
 
 End to end it works: `corpus sync` fetched all 25 from the release, pinned every hash into the
 manifest, and snapshotted obscene.elf; a re-sync showed `cached` (idempotent); `corpus run
---profile ps5-cex-12.40` ran all 26 guests and wrote 25 new `compat/*.toml` reports. Crate is
+--profile prospero-cex-12.40` ran all 26 guests and wrote 25 new `compat/*.toml` reports. Crate is
 clippy-clean at `-D warnings` and its four tests pass.
 
 Two surprises. First, `toml::to_string_pretty` on the pin-writing save drops the manifest's header

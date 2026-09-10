@@ -1,0 +1,62 @@
+running 1 test
+obscene\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 35517 import(s) match only byte-reversed selfish the same hashes, read the other way
+obscene-payload\eboot.bin: agrees
+PPSA02664-app0\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 583 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA02664-app0\sce_module\libc.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 102 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA02664-app0\sce_module\libSceFace.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 20 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA02664-app0\sce_module\libSceFaceTracker.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 27 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA02664-app0\sce_module\libSceJobManager.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 135 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA02664-app0\sce_module\libSceNpCppWebApi.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 93 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA02664-app0\sce_module\libScePfs.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 15 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 583 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\sce_module\libc.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 102 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\sce_module\libSceFace.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 20 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\sce_module\libSceFaceTracker.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 27 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\sce_module\libSceJobManager.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 135 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\sce_module\libSceNpCppWebApi.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 93 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA03416-app0\sce_module\libScePfs.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 15 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA04263-app0\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 1410 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA04263-app0\sce_module\libc.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 117 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA04263-app0\sce_module\libSceJobManager.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 159 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA04263-app0\sce_module\libSceNpCppWebApi.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 95 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA21564-app0\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 1733 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA21564-app0\sce_module\libc.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 117 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA21564-app0\sce_module\libSceNpCppWebApi.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 95 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA25872-app0\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 662 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA25872-app0\sce_module\libc.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 119 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA25872-app0\sce_module\libSceNpCppWebApi.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 95 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA28061-app0\eboot.bin: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 733 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA28061-app0\sce_module\libc.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 119 import(s) match only byte-reversed selfish the same hashes, read the other way
+PPSA28061-app0\sce_module\libSceNpCppWebApi.prx: 0 field(s) differ, 1 unit difference(s)
+    NID byte order             orbistoun 95 import(s) match only byte-reversed selfish the same hashes, read the other way
+differential: 29 module(s), 0 with a disagreement, 28 differing only in units
+test both_readers_agree_on_every_module_in_the_corpus ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s

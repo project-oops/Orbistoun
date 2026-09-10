@@ -108,10 +108,10 @@ pub struct SoftwareVersion {
 #[serde(rename_all = "kebab-case")]
 pub enum Generation {
     /// The earlier generation.
-    Ps4,
+    Orbis,
     /// The later one, and the default - it is what this project is for.
     #[default]
-    Ps5,
+    Prospero,
 }
 
 /// Retail, development or test hardware.
@@ -142,6 +142,42 @@ pub enum Revision {
     Base,
     /// The faster revision - a PS4 Pro, or a PS5 Pro.
     Pro,
+}
+
+/// Which machine a generation and a revision together name.
+///
+/// # Why this is derived rather than a third field
+///
+/// The two axes already carry the information: a generation and a revision pick exactly one of
+/// four machines. A third field would let a `Machine` say it is a base Prospero *and* a Trinity,
+/// which describes nothing - the same reasoning [`Kind`] is an enum rather than three booleans.
+///
+/// The codenames are this project's vocabulary because they are **not trademarks**, which is what
+/// §2 of the build principles asks for. `describe` used to answer `ps5/cex/base`; a codename says
+/// the same thing without putting a vendor's mark in orbistoun's own output (D663).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Platform {
+    /// The earlier generation's base machine.
+    Orbis,
+    /// The earlier generation's faster revision.
+    Neo,
+    /// The later generation's base machine, and what this project is for.
+    Prospero,
+    /// The later generation's faster revision.
+    Trinity,
+}
+
+impl Platform {
+    /// How to name it, in a report or a setting.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Orbis => "orbis",
+            Self::Neo => "neo",
+            Self::Prospero => "prospero",
+            Self::Trinity => "trinity",
+        }
+    }
 }
 
 impl Machine {
@@ -183,8 +219,8 @@ impl Machine {
     #[must_use]
     pub fn describe(&self) -> String {
         let generation = match self.generation {
-            Generation::Ps4 => "ps4",
-            Generation::Ps5 => "ps5",
+            Generation::Orbis => "orbis",
+            Generation::Prospero => "prospero",
         };
         let kind = match self.kind {
             Kind::Cex => "cex",
@@ -196,6 +232,17 @@ impl Machine {
             Revision::Pro => "pro",
         };
         format!("{generation}/{kind}/{revision}")
+    }
+
+    /// Which of the four machines this is.
+    #[must_use]
+    pub const fn platform(&self) -> Platform {
+        match (self.generation, self.revision) {
+            (Generation::Orbis, Revision::Base) => Platform::Orbis,
+            (Generation::Orbis, Revision::Pro) => Platform::Neo,
+            (Generation::Prospero, Revision::Base) => Platform::Prospero,
+            (Generation::Prospero, Revision::Pro) => Platform::Trinity,
+        }
     }
 }
 
@@ -229,7 +276,57 @@ pub fn presented() -> &'static Machine {
 
 #[cfg(test)]
 mod tests {
-    use super::{Generation, Kind, Machine, Revision};
+
+    /// **Every generation-and-revision pair names a platform**, and each names a different one.
+    ///
+    /// Written first, and exhaustively: the four combinations already existed as two enums, and
+    /// the failure this guards against is two of them collapsing onto one name - which would
+    /// make a report say `prospero` for a machine that is not one, and nothing would catch it
+    /// (D663).
+    #[test]
+    fn each_generation_and_revision_names_its_own_platform() {
+        let cases = [
+            (Generation::Prospero, Revision::Base, Platform::Prospero),
+            (Generation::Prospero, Revision::Pro, Platform::Trinity),
+            (Generation::Orbis, Revision::Base, Platform::Orbis),
+            (Generation::Orbis, Revision::Pro, Platform::Neo),
+        ];
+        let mut seen = Vec::new();
+        for (generation, revision, expected) in cases {
+            let machine = Machine {
+                generation,
+                revision,
+                ..Machine::default()
+            };
+            assert_eq!(machine.platform(), expected);
+            seen.push(machine.platform());
+        }
+        seen.sort_by_key(|p| p.label());
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "four machines, four names, none shared");
+    }
+
+    /// The codenames are what a report says, and the trademarks are gone from it.
+    ///
+    /// The negative half is the point: `describe` said `ps5/cex/base`, and §2 keeps vendor
+    /// trademarks out of this project's own prose and API. A codename is not a trademark, which
+    /// is why it satisfies the rule the previous wording strained (D663).
+    #[test]
+    fn a_machine_describes_itself_by_codename() {
+        let base = Machine::default();
+        assert_eq!(base.describe(), "prospero/cex/base");
+        assert!(
+            !base.describe().contains("ps5") && !base.describe().contains("ps4"),
+            "a trademark must not appear in what a run reports"
+        );
+
+        let pro = Machine {
+            revision: Revision::Pro,
+            ..Machine::default()
+        };
+        assert_eq!(pro.platform().label(), "trinity");
+    }
+    use super::{Generation, Kind, Machine, Platform, Revision};
 
     /// **Exactly one kind is true**, which is the property three booleans could not hold.
     ///
@@ -276,12 +373,12 @@ mod tests {
         let pro_devkit = Machine {
             kind: Kind::Dex,
             revision: Revision::Pro,
-            generation: Generation::Ps5,
+            generation: Generation::Prospero,
             ..Machine::default()
         };
         assert!(pro_devkit.is_development_kit());
         assert!(pro_devkit.is_faster_revision());
-        assert_eq!(pro_devkit.describe(), "ps5/dex/pro");
+        assert_eq!(pro_devkit.describe(), "prospero/dex/pro");
     }
 
     /// **The kernel release is empty until somebody measures one.**
@@ -318,6 +415,6 @@ mod tests {
     /// The default is a retail base PS5, which is what every recorded measurement assumed.
     #[test]
     fn the_default_is_what_every_measurement_was_taken_against() {
-        assert_eq!(Machine::default().describe(), "ps5/cex/base");
+        assert_eq!(Machine::default().describe(), "prospero/cex/base");
     }
 }

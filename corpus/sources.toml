@@ -1,5 +1,6 @@
 [[source]]
-name = "ps5-payloads-mirror"
+name = "payloads-mirror"
+target = "payloads"
 kind = "github-release"
 repo = "itsPLK/ps5-payloads-mirror"
 tag = "payloads-mirror"
@@ -117,3 +118,52 @@ todo = "sibling checkout for now - migrate to a github-release once obSCEne publ
 [[source.asset]]
 file = "obscene.elf"
 sha256 = "2a433097e6b0b6b7490428b05539d575d8522e7fcbab53c4011de2600f052998"
+
+# The probe, four ways. Each entry lists a sibling checkout first and a published release second:
+# the checkout is the fast path when somebody has one and absent when they do not, the release is
+# slower and always there. `sync` tries them in order and reports every one that did not answer,
+# so a broken fast path cannot hide behind a working slow one (D664).
+
+[[source]]
+name = "obscene-probe-prospero-native"
+target = "titles"
+kind = "local"
+sources = [
+  "../obscene/build/prospero",
+  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.zip",
+]
+licence = "same suite (D043); our own accuracy probe, not third-party"
+cite = "https://github.com/project-oops/obSCEne"
+
+[[source]]
+name = "obscene-probe-prospero-payload"
+target = "payloads"
+kind = "local"
+sources = [
+  "../obscene/build/obscene-probe-prospero.elf",
+  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.elf",
+]
+licence = "same suite (D043); our own accuracy probe, not third-party"
+cite = "https://github.com/project-oops/obSCEne"
+
+[[source]]
+name = "obscene-probe-neo-native"
+target = "titles"
+kind = "local"
+sources = [
+  "../obscene/build/neo",
+  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-neo.zip",
+]
+licence = "same suite (D043); our own accuracy probe, not third-party"
+cite = "https://github.com/project-oops/obSCEne"
+
+[[source]]
+name = "obscene-probe-neo-pkg"
+target = "packages"
+kind = "local"
+sources = [
+  "../obscene/build/obscene-probe-neo.pkg",
+  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-neo.pkg",
+]
+licence = "same suite (D043); our own accuracy probe, not third-party"
+cite = "https://github.com/project-oops/obSCEne"

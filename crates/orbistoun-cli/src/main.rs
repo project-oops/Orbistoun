@@ -117,7 +117,7 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_GUEST_CALL_BUDGET)]
         calls: u64,
         /// Present a named console profile for this run instead of the configured machine -
-        /// e.g. `ps5-cex-12.40`, the measured reference target. Omit to use `shell.toml`.
+        /// e.g. `prospero-cex-12.40`, the measured reference target. Omit to use `shell.toml`.
         #[arg(long)]
         profile: Option<String>,
     },
@@ -231,6 +231,17 @@ enum Command {
         /// and a source that silently contributes nothing is worse than one you asked for.
         #[arg(long)]
         from_trace: bool,
+        /// Also look for names for hashes a conformance probe reported the platform exports.
+        ///
+        /// A hash from an import table is one a title asked for. A hash from a console's own
+        /// export table is one the platform *offers*, whether or not anything has ever
+        /// imported it - a census a collision search cannot reach by any other route (D245).
+        ///
+        /// **Grading does not enter into it.** These hashes are targets, not facts: the name
+        /// that comes back is proved by the hash agreeing, and would be equally proved if the
+        /// report were fabricated. What a report cannot do here is put a name in.
+        #[arg(long, value_name = "REPORT")]
+        from_report: Vec<std::path::PathBuf>,
     },
     /// Record something learned about a guest function.
     ///
@@ -596,6 +607,18 @@ enum Command {
         /// as evidence being believed.
         #[arg(long)]
         as_knowledge: bool,
+        /// Compare against another transcript and report the checks that disagree.
+        ///
+        /// **The strongest tool this project has, and it needed one command.** The conformance
+        /// probe is the only guest whose source is available, it passes on a console, and it
+        /// runs under orbistoun - so the same binary runs in both places and its own verdicts
+        /// can be compared. A check that passes in the reference and fails here is a named,
+        /// sourced defect with the probe's own sentence attached (D622).
+        ///
+        /// Give the **hardware** transcript here and the local one as `path`: the reference is
+        /// what a console did, the subject is what orbistoun did.
+        #[arg(long, value_name = "REFERENCE")]
+        against: Option<std::path::PathBuf>,
     },
     /// Analyse a directory of shader binaries and rank what blocks translation.
     ///
@@ -773,7 +796,7 @@ enum CorpusAction {
         /// Imports each guest may call before it is stopped and reported.
         #[arg(long, default_value_t = DEFAULT_GUEST_CALL_BUDGET)]
         calls: u64,
-        /// Present a named console profile for the runs, e.g. `ps5-cex-12.40`.
+        /// Present a named console profile for the runs, e.g. `prospero-cex-12.40`.
         #[arg(long)]
         profile: Option<String>,
     },
@@ -1497,6 +1520,8 @@ struct NameSearch<'a> {
     wanted: Option<&'a std::path::Path>,
     /// Also harvest candidates out of what a previous run captured from guest memory.
     from_trace: bool,
+    /// Probe reports whose kernel export tables contribute hashes to look for.
+    from_report: &'a [std::path::PathBuf],
 }
 
 /// Merges the names found into a database, never losing what was already there.
@@ -1559,6 +1584,74 @@ fn write_symbol_db(
     Ok(())
 }
 
+/// Writes the platform exports nothing can name, accumulating across runs.
+///
+/// # Why this is a second file and not more of `wanted.txt`
+///
+/// `wanted.txt` means *imports orbistoun cannot name*, and a kernel export nothing has ever
+/// imported is not one - folding them together would change what that file means and move the
+/// number every report quotes (D605). They are a work list of their own, on the same terms.
+///
+/// # Why it is written down at all
+///
+/// The report directory is **overwritten**. A batch of captures lives for about an hour, and the
+/// 215 hashes it says the platform exports and this project cannot name exist, today, only while
+/// those files are on disk. That is the same disappearance D618 found in the measurement table,
+/// one file along: what a run learned is lost because the thing it read was replaced.
+///
+/// Accumulated, never truncated, and a hash leaves only when something names it - the rule
+/// `write_wanted` follows for the same reason (D074, D619).
+fn write_exported(
+    service: &Service,
+    path: &std::path::Path,
+    exported: &[orbistoun_nid::Nid],
+    found: &[orbistoun_names::solve::Solved],
+) -> Result<()> {
+    use std::fmt::Write as _;
+
+    const HEADER: &[&str] = &[
+        "# Platform export hashes orbistoun cannot yet name - the other work list.",
+        "#",
+        "# What a console's own kernel export table offers, whether or not any title has ever",
+        "# imported it. A collision search cannot reach these from a corpus of guests, which is",
+        "# the whole reason they are worth keeping (D245, D605).",
+        "#",
+        "# Separate from wanted.txt, which means *imports* nothing can name. Merging them would",
+        "# change what that file counts.",
+        "#",
+        "# Generated - never hand-edited. Refresh with:",
+        "#     ORBISTOUN_PROBE_REPORTS=<a directory of reports> ./bin/orbistoun names",
+    ];
+
+    let carried: std::collections::BTreeSet<u64> = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix("0x"))
+            .filter_map(|l| u64::from_str_radix(l, 16).ok())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::collections::BTreeSet::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    // The same three rules `wanted_now` applies, and the same function, so the two lists cannot
+    // drift about what "still unnamed" means.
+    let still = wanted_now(carried, exported, found, |nid| service.is_named(nid));
+
+    let mut text = String::new();
+    for line in HEADER {
+        let _ = writeln!(text, "{line}");
+    }
+    for nid in &still {
+        let _ = writeln!(text, "{}", orbistoun_nid::Nid::from_raw(*nid));
+    }
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "{}: {} platform export(s) still unnamed",
+        path.display(),
+        still.len()
+    );
+    Ok(())
+}
 /// Writes the hashes still unnamed, as the work list for the next round.
 ///
 /// Persisted rather than left in a terminal. Without this every run rediscovers the
@@ -2135,6 +2228,136 @@ fn decode_hex_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Derives candidates from names this project already holds, and keeps the ones that hash.
+///
+/// # Why this runs last, and what it stands on
+///
+/// Every other source in the sweep proposes a name out of raw material - words, module
+/// strings, an argument dump. This one proposes a name out of *a name already proved*, so
+/// what it can reach depends entirely on what the run has established by the time it runs.
+/// Putting it earlier would cost it the whole of this run's findings as seeds.
+///
+/// # Where the seeds come from
+///
+/// Three places, all of them names and none of them guesses: the harvested standard list,
+/// the loaded symbol database, and whatever the rest of this sweep has just proved. A
+/// candidate is never a seed - a derivation claiming a proved name was built from an
+/// unproved one is a lie no audit could catch afterwards (D606).
+///
+/// # One pass, and it says so
+///
+/// A variant of a variant is out of reach: `snprintf_s` becomes a seed only on the *next*
+/// run, once it is in the database. That is a real limit and it is cheap to live with,
+/// because the alternative - iterating to a fixed point - multiplies the candidate count by
+/// the depth and buys names nobody has evidence exist.
+fn search_affixes(
+    hasher: &orbistoun_nid::NidHasher,
+    targets: &orbistoun_names::solve::Targets,
+    service: &Service,
+    already: &[orbistoun_names::solve::Solved],
+) -> Result<Vec<orbistoun_names::solve::Solved>> {
+    let affixes = orbistoun_names::affix::Affixes::builtin()?;
+    let mut seeds: Vec<String> = orbistoun_names::standard_names();
+    seeds.extend(service.symbol_names().map(str::to_owned));
+    seeds.extend(already.iter().map(|solved| solved.name.clone()));
+    seeds.sort();
+    seeds.dedup();
+
+    let started = std::time::Instant::now();
+    let (solved, stats) =
+        orbistoun_names::affix::solve_affixed(hasher, targets, &affixes, seeds.iter());
+    println!(
+        "affixed names: {} tried from {} held name(s) in {:.1}s, {} named",
+        stats.tried,
+        seeds.len(),
+        started.elapsed().as_secs_f64(),
+        stats.found
+    );
+    // Named, and how. The rule is the whole of the claim, so printing the name alone
+    // would hide the only part a reader can check by eye.
+    for name in &solved {
+        if let orbistoun_nid::Method::Affixed { seed, rule } = &name.derivation.method {
+            println!("  {} = {rule} applied to {seed}", name.name);
+        }
+    }
+    Ok(solved)
+}
+
+/// Every hash this sweep will look for: the corpus's unnamed imports, plus any a report says
+/// the platform exports.
+///
+/// **Unioned into the search, kept out of the work list.** `symbols/wanted.txt` is defined as
+/// the imports this project cannot name, and a kernel export nothing has ever imported is not
+/// one. Folding them together would change what that file means and quietly move the number
+/// every report quotes, so the union lives here and `wanted` is still written from `unnamed`
+/// alone (D605).
+fn everything_to_look_for(
+    unnamed: &[orbistoun_nid::Nid],
+    exported: &[orbistoun_nid::Nid],
+    from_report: &[std::path::PathBuf],
+) -> orbistoun_names::solve::Targets {
+    if !exported.is_empty() {
+        println!(
+            "{} platform export(s) have no name yet, from {} report(s) - searched for, not counted as wanted",
+            exported.len(),
+            from_report.len()
+        );
+    }
+    let mut hunting: Vec<orbistoun_nid::Nid> = unnamed.to_vec();
+    hunting.extend(exported.iter().copied());
+    hunting.sort_by_key(|nid| nid.as_raw());
+    hunting.dedup();
+    orbistoun_names::solve::Targets::new(hunting)
+}
+/// Every hash a probe report says the platform exports and this project cannot name.
+///
+/// # Why the origin is not asked for
+///
+/// Everywhere else a probe report is read, the operator has to say what it ran on, because a
+/// measurement taken on a stand-in describes the stand-in (D246). Here the report contributes
+/// **which hashes to look for** and nothing else. The name that comes back is proved by the
+/// hash agreeing with a candidate this project spelled out of its own vocabulary, and it would
+/// be equally proved if the report had been invented - a fabricated hash simply names nothing.
+///
+/// So the grading question does not arise, and pretending it did would be worse than useless:
+/// it would make an unasserted report look like a source of names rather than a source of
+/// questions.
+fn exported_hashes(
+    service: &Service,
+    reports: &[std::path::PathBuf],
+) -> Result<Vec<orbistoun_nid::Nid>> {
+    // Unasserted on purpose - see above. Every export comes back `Oracle::Assumed` and the
+    // grade is not read, because nothing here turns on it.
+    let origin = orbistoun_probe::Origin::unasserted();
+    let mut found = Vec::new();
+    for path in reports {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading probe report {}", path.display()))?;
+        let transcript = orbistoun_probe::Transcript::read(&text)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        let exports = transcript.kernel_exports(&origin);
+        let before = found.len();
+        found.extend(
+            exports
+                .iter()
+                .filter(|export| service.symbol_name(export.nid).is_none())
+                .map(|export| export.nid),
+        );
+        // Said per report, because a report that carried no export table at all and one whose
+        // exports this project already names are different situations reading the same as
+        // each other in a total (principle 3).
+        println!(
+            "{}: {} export(s), {} not named here",
+            path.display(),
+            exports.len(),
+            found.len() - before
+        );
+    }
+    found.sort_by_key(|nid| nid.as_raw());
+    found.dedup();
+    Ok(found)
+}
+
 fn search_word_lists(
     hasher: &orbistoun_nid::NidHasher,
     targets: &orbistoun_names::solve::Targets,
@@ -2203,6 +2426,31 @@ fn search_word_lists(
 
     Ok(found)
 }
+
+/// Every module a search should read: a directory walked, or one file taken as given.
+///
+/// A directory is one search, not many - the imports of every module under it are unioned
+/// before the expensive sweep, so it runs once (D213). Split out of [`cmd_names`] for
+/// length rather than for meaning.
+fn modules_to_search(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut modules = Vec::new();
+    collect_modules(path, &mut modules);
+    anyhow::ensure!(
+        !modules.is_empty(),
+        concat!(
+            "no guest modules under {} - nothing to search against. The generator ",
+            "proposes candidates; confirming one needs a real import table to collide ",
+            "with. See docs/PROVENANCE.md"
+        ),
+        path.display()
+    );
+    println!("{} modules under {}", modules.len(), path.display());
+    Ok(modules)
+}
+
 /// `names` - search for names that hash to what a module, or a whole corpus, imports.
 ///
 /// # Why a directory is one search rather than many
@@ -2226,33 +2474,21 @@ fn cmd_names(service: &Service, cli: &Cli, search: &NameSearch<'_>) -> Result<()
         out,
         wanted,
         from_trace,
+        from_report,
     } = *search;
     let hasher = orbistoun_nid::NidHasher::new(suffix_for(cli)?);
 
-    let mut modules = Vec::new();
-    if path.is_dir() {
-        collect_modules(path, &mut modules);
-        anyhow::ensure!(
-            !modules.is_empty(),
-            concat!(
-                "no guest modules under {} - nothing to search against. The generator ",
-                "proposes candidates; confirming one needs a real import table to collide ",
-                "with. See docs/PROVENANCE.md"
-            ),
-            path.display()
-        );
-        println!("{} modules under {}", modules.len(), path.display());
-    } else {
-        modules.push(path.to_path_buf());
-    }
+    let modules = modules_to_search(path)?;
 
     let (corpus, unnamed) = read_corpus(service, &modules)?;
-    let targets = orbistoun_names::solve::Targets::new(unnamed.iter().copied());
     println!(
         "{} distinct imports have no name yet, across {} readable module(s)",
-        targets.len(),
+        unnamed.len(),
         corpus.len()
     );
+
+    let exported = exported_hashes(service, from_report)?;
+    let targets = everything_to_look_for(&unnamed, &exported, from_report);
     if targets.is_empty() {
         return Ok(());
     }
@@ -2309,10 +2545,30 @@ fn cmd_names(service: &Service, cli: &Cli, search: &NameSearch<'_>) -> Result<()
     );
     found.extend(solved);
 
+    // **Last, because it stands on everything before it.** Every other source proposes a
+    // name out of raw material; this one proposes a name out of a name already proved, so
+    // it can only be as good as what the run has established by the time it runs.
+    found.extend(search_affixes(&hasher, &targets, service, &found)?);
+
     // A hash can be settled by more than one source in a single run - a string in one
-    // module and a generated candidate both produce the same name. Keep the first, which
-    // is the cheapest to reproduce, because sources run in that order deliberately.
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    // module and a published C name both produce `atoll`. Keep the one a reader needs least
+    // to check, which is **not** the one that ran first.
+    //
+    // This used to keep the first, on the stated reasoning that sources run cheapest-first.
+    // They do not: strings run before the published list, so every published name that also
+    // appears in a module's bytes was recorded as a static harvest - a true record of a
+    // weaker claim than the run actually had, and one CI can never recheck. Fourteen names
+    // landed that way the first time the console export table made them targets, and the
+    // knowledge base caught it by disagreeing (D607).
+    found.sort_by(|a, b| {
+        a.name.cmp(&b.name).then(
+            a.derivation
+                .method
+                .reproducible()
+                .rank()
+                .cmp(&b.derivation.method.reproducible().rank()),
+        )
+    });
     found.dedup_by(|a, b| a.name == b.name);
     print_names_found(&found);
     println!(
@@ -2328,6 +2584,16 @@ fn cmd_names(service: &Service, cli: &Cli, search: &NameSearch<'_>) -> Result<()
 
     if let Some(path) = wanted {
         write_wanted(service, path, &unnamed, &found)?;
+        // Beside it, never inside it. The two lists count different things and the file name
+        // says which (D619).
+        if !exported.is_empty() {
+            write_exported(
+                service,
+                &path.with_file_name("exported-unnamed.txt"),
+                &exported,
+                &found,
+            )?;
+        }
     }
     Ok(())
 }
@@ -2369,7 +2635,9 @@ fn report_progress(
             after.distinct, progress.fault
         );
         print_standing(after);
+        print_quiet(after);
         print_abi(after);
+        print_said(after);
         print_wall(after);
         return;
     }
@@ -2379,6 +2647,8 @@ fn report_progress(
         after.distinct, progress.distinct_delta, after.total_calls, progress.calls_delta
     );
     print_standing(after);
+    print_quiet(after);
+    print_threads(after);
     println!(
         "  fault {}{}",
         progress.fault,
@@ -2415,6 +2685,7 @@ fn report_progress(
     print_formats(after);
     print_fault_detail(after);
     print_unattached_dumps(after);
+    print_said(after);
     print_findings(after);
     print_wall(after);
 }
@@ -2540,9 +2811,18 @@ fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
     // and wrong for working one: a finding past the sixth keeps its arguments, and those
     // arguments are what name a call. This has now hidden the one that mattered twice - once
     // read as "three stubs left", once blocking a wall investigation outright (D527).
-    for finding in findings
+    // **What was asked for is never one of the six.** A `Gap::Captured` finding exists only
+    // because somebody named an import with `ORBISTOUN_DUMP`, so ranking it against findings
+    // the tool volunteered - and cutting it at six - answers a different question from the one
+    // that was put (D625).
+    let (asked, volunteered): (Vec<_>, Vec<_>) = findings
         .iter()
-        .take(findings_to_show(orbistoun_env::FINDINGS.get()))
+        .partition(|f| f.gap == orbistoun_report::diagnose::Gap::Captured);
+    let shown = findings_to_show(orbistoun_env::FINDINGS.get());
+    for finding in asked
+        .iter()
+        .copied()
+        .chain(volunteered.iter().copied().take(shown))
     {
         let mark = match finding.confidence {
             Confidence::Certain => "!",
@@ -2567,8 +2847,8 @@ fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
             println!("    -> {action}");
         }
     }
-    if findings.len() > 6 {
-        println!("  ... and {} more", findings.len() - 6);
+    if volunteered.len() > shown {
+        println!("  ... and {} more", volunteered.len() - shown);
     }
 }
 
@@ -2612,10 +2892,15 @@ fn print_standing(trace: &orbistoun_report::trace::CallTrace) {
         return;
     }
     let stubbed = trace.stubbed_calls();
+    // **The count, not only the share.** Twelve stubbed calls out of four hundred and sixty-seven
+    // thousand is `0%`, and `0% on stubs` reads as *nothing is stubbed* - while those twelve are
+    // the only calls in the run worth looking at. The same shape as `0 KiB` for four hundred and
+    // two bytes, found by auditing for it after that one cost four days (D595, D597).
     println!(
-        "  standing {} of {} calls answered by an implementation ({}% on stubs)",
+        "  standing {} of {} calls answered by an implementation ({} on stubs, {}%)",
         trace.total_calls - stubbed,
         trace.total_calls,
+        stubbed,
         trace.stubbed_share()
     );
     if trace.conditions.answers_blindly() {
@@ -2629,6 +2914,147 @@ fn print_standing(trace: &orbistoun_report::trace::CallTrace) {
     }
 }
 
+/// When the guest last asked the host for anything, for a run the clock ended.
+///
+/// **The line that separates stuck from slow**, and it did not exist. A run that hit the limit
+/// printed `ran to the time limit` and nothing else, which reads as "it was still working" - and
+/// for the title that gets furthest in this project it was the opposite: 310,987 calls, then
+/// nothing, for seventeen of twenty seconds. Establishing that took two runs at different limits
+/// and a hand comparison; this is the same fact from one run (D645).
+///
+/// Silent when nothing measured it - a fault, a self-stop, or a spent call budget all end a run
+/// with the guest still going, and a `0.0s` there would be a measurement nobody made.
+fn print_quiet(trace: &orbistoun_report::trace::CallTrace) {
+    let Some(quiet) = trace.quiet else {
+        return;
+    };
+    println!("  quiet    it {}", quiet.describe());
+    if quiet.is_notable() {
+        // **What was counted, then what it could mean, in that order.** No call crossing into
+        // the host is the measurement; blocked is one reading of it and busy guest code is
+        // another, and this branch cannot tell them apart - so it names both and says what
+        // would (principle 3).
+        println!(concat!(
+            "           ! it stopped asking the host for anything well before the clock ran ",
+            "out - either it is waiting on something that has not arrived, or it is working ",
+            "inside its own code"
+        ));
+        println!(
+            "           try ORBISTOUN_LIMIT={} - an identical call count there means it is blocked",
+            (quiet.run_ms / 1000).saturating_mul(4).max(2)
+        );
+    }
+}
+
+/// Which guest threads exist, and what each last did.
+///
+/// **Printed only when the guest went quiet**, because that is the question it answers. A run that
+/// faulted has a fault site and a tail; a run that stopped calling has neither, and until this
+/// existed the report could say only *that* it stopped. Reaching "an asset collector raised a
+/// signal on main and then waited on a semaphore" took three rounds of hand instrumentation, and
+/// every round re-derived what these two tables already held (D651).
+///
+/// # Grouped by name, and that is the whole of its usefulness
+///
+/// Unity spawns eleven identically-named helpers. Listed one per line they fill the report and
+/// push `main` - the thread the signal was aimed at - off the end of it, which the first version
+/// of this function did. Grouped, the same run says it in three lines: eleven helpers of which
+/// one is still calling, and a `main` that is not.
+fn print_threads(trace: &orbistoun_report::trace::CallTrace) {
+    if trace.quiet.is_none() || trace.threads.is_empty() {
+        return;
+    }
+    let mut groups: Vec<(&str, Vec<&orbistoun_report::trace::ThreadNote>)> = Vec::new();
+    for note in &trace.threads {
+        if let Some(group) = groups.iter_mut().find(|(name, _)| *name == note.name) {
+            group.1.push(note);
+        } else {
+            groups.push((note.name.as_str(), vec![note]));
+        }
+    }
+    // **The busiest group last.** A reader scanning down ends on the thread that was still
+    // working, which is where the story of a hang continues.
+    groups.sort_by_key(|(_, notes)| notes.iter().filter_map(|n| n.last_sequence).max());
+    let silent = trace
+        .threads
+        .iter()
+        .filter(|t| t.last_call.is_none())
+        .count();
+    println!(
+        "  threads  {} guest thread(s), {silent} with no call in the recorded window",
+        trace.threads.len()
+    );
+    for (name, notes) in &groups {
+        // A thread the guest never named still needs a column: blank reads as a continuation of
+        // the line above it, which is how the collector first looked like part of `main`.
+        let name = if name.is_empty() { "(unnamed)" } else { *name };
+        let newest = notes
+            .iter()
+            .filter(|n| n.last_call.is_some())
+            .max_by_key(|n| n.last_sequence);
+        let ended = notes.iter().filter(|n| n.finished).count();
+        let count = if notes.len() == 1 {
+            format!("{:#x}", notes[0].handle)
+        } else {
+            format!("x{}", notes.len())
+        };
+        let tail = match newest {
+            Some(note) => format!(
+                "last called {} at {}",
+                note.last_call.as_deref().unwrap_or("?"),
+                note.last_sequence.unwrap_or(0)
+            ),
+            None => format!(
+                "no call in the last {} of the run",
+                orbistoun_report::trace::TAIL_CALLS
+            ),
+        };
+        let ended = if ended == 0 {
+            String::new()
+        } else {
+            format!(", {ended} ended")
+        };
+        println!("           {name:<30} {count:<16} {tail}{ended}");
+    }
+}
+
+/// What the guest said, ending with the last thing it said.
+///
+/// **The tail, because a guest describes its problem immediately before it stops.** The first
+/// lines of a boot log are the same every run and the last one is the finding, so a head would
+/// show the part nobody needs and cut the part everybody does.
+///
+/// Printed verbatim and **not classified**. It would be easy to hunt the word "error" and put
+/// those lines first; that is a heuristic dressed as a diagnosis, and this project's rule is that
+/// a message naming a cause comes from the branch that determined it. Nothing here determined
+/// anything - the guest did, and its own words are shown in its own order (D658).
+fn print_said(trace: &orbistoun_report::trace::CallTrace) {
+    if trace.said.is_empty() {
+        return;
+    }
+    let shown = trace.said.len().min(SAID_LINES);
+    println!(
+        "\nwhat the guest said  ({} line(s), last {shown})",
+        trace.said.len()
+    );
+    for line in trace.said.iter().skip(trace.said.len() - shown) {
+        // Truncated per line rather than wrapped: a log line is one thing the guest said, and a
+        // wrapped one reads as two.
+        let trimmed: String = line.chars().take(SAID_WIDTH).collect();
+        let cut = if line.chars().count() > SAID_WIDTH {
+            " …"
+        } else {
+            ""
+        };
+        println!("  {trimmed}{cut}");
+    }
+}
+
+/// How many of the guest's own lines a report ends with.
+const SAID_LINES: usize = 24;
+
+/// How much of one line is shown before it is cut.
+const SAID_WIDTH: usize = 160;
 /// Whether the guest received every byte it asked for.
 ///
 /// Printed whenever anything was read, including when it is clean - a line that only
@@ -2640,18 +3066,34 @@ fn print_reads(trace: &orbistoun_report::trace::CallTrace) {
     }
     if reads.short == 0 {
         println!(
-            "  files {} reads, {} KiB, none cut short",
+            "  files {} reads, {}, none cut short",
             reads.reads,
-            reads.bytes / 1024
+            amount(reads.bytes)
         );
     } else {
         println!(
-            "  files {} of {} reads were CUT SHORT ({} KiB delivered)",
+            "  files {} of {} reads were CUT SHORT ({} delivered)",
             reads.short,
             reads.reads,
-            reads.bytes / 1024
+            amount(reads.bytes)
         );
     }
+}
+
+/// How many bytes, in a unit that cannot round a real number down to nothing.
+///
+/// **`0 KiB` is what four hundred and two bytes looked like**, and this line was read as *one
+/// read of zero bytes* for four days - into a decision entry, into three worklogs, and into a
+/// whole line of investigation about a guest that was in fact reading its boot configuration
+/// completely and successfully.
+///
+/// Integer division by 1024 is not wrong, and it is the shape principle 3 warns about: output
+/// that is true and reads as something else. So anything under a mebibyte says bytes (D595).
+fn amount(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        return format!("{bytes} bytes");
+    }
+    format!("{} KiB", bytes / 1024)
 }
 
 /// Whether the guest called us the way the calling convention says it must.
@@ -2877,6 +3319,7 @@ fn cmd_turn(
     record: bool,
     apply: bool,
     verify: Option<&std::path::Path>,
+    symbols_db: Option<&std::path::Path>,
 ) -> Result<()> {
     use orbistoun_turn::{experiment::Finding, trial::GuestTrial, turn};
 
@@ -2906,7 +3349,8 @@ fn cmd_turn(
     // Spawns *this* binary as the guest runner, which is what worker mode already does:
     // the runner is then literally the same build and cannot be a stale copy.
     let binary = std::env::current_exe().context("finding this executable")?;
-    let mut trial = GuestTrial::new(&binary, path, &traces);
+    let mut trial = GuestTrial::new(&binary, path, &traces)
+        .with_symbols(symbols_db.map(std::path::Path::to_path_buf));
     if let Some(dir) = &scratch {
         // The child reads its own learned file too, so the isolation has to reach it.
         trial = trial.with_env(orbistoun_env::DATA_DIR.name, dir.path().to_string_lossy());
@@ -4282,7 +4726,7 @@ fn cmd_corpus_list(manifest: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     for src in &m.source {
-        println!("{} ({})", src.name, src.kind);
+        println!("{} ({}) -> {}", src.name, src.kind, src.target.label());
         println!("  cite {}", src.cite);
         if let Some(todo) = &src.todo {
             println!("  TODO {todo}");
@@ -4315,8 +4759,13 @@ fn cmd_corpus_sync(
         if only.is_some_and(|s| s != src.name) {
             continue;
         }
-        println!("{}:", src.name);
-        for o in src.sync(root, titles, &client)? {
+        // **The root the manifest asked for, not always `titles`.** A payload mirror under
+        // `titles/` made twenty-five one-file ELFs look like installed titles (D661). The
+        // `--titles` argument still names the titles root; the siblings are resolved beside it
+        // so a caller overriding one overrides all three consistently.
+        let into = beside_target(titles, src.target);
+        println!("{}: -> {}", src.name, src.target.label());
+        for o in src.sync(root, &into, &client)? {
             let tag = match &o.state {
                 orbistoun_corpus::State::PinnedNew => "pinned",
                 orbistoun_corpus::State::Verified => "verified",
@@ -4355,6 +4804,29 @@ fn cmd_corpus_sync(
     Ok(())
 }
 
+/// A sibling of the titles root, by name.
+///
+/// **Derived from the titles root rather than resolved separately**, so `--titles` keeps meaning
+/// what it says: point it at a scratch directory and payloads and packages follow it there,
+/// instead of one of the three quietly staying in the real data directory (D661).
+fn beside(titles: &std::path::Path, name: &str) -> std::path::PathBuf {
+    titles
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from(name), |p| p.join(name))
+}
+
+/// The root a source's target names, given the titles root.
+///
+/// The same mapping `cmd_corpus_sync` uses, in one place so `run` cannot look for a guest
+/// somewhere `sync` did not put it.
+fn beside_target(titles: &std::path::Path, target: orbistoun_corpus::Target) -> std::path::PathBuf {
+    match target {
+        orbistoun_corpus::Target::Titles => titles.to_path_buf(),
+        orbistoun_corpus::Target::Payloads => beside(titles, orbistoun_paths::dirs::PAYLOADS),
+        orbistoun_corpus::Target::Packages => beside(titles, orbistoun_paths::dirs::PACKAGES),
+    }
+}
+
 /// Sync, then run every guest and record what it reached to `compat/`.
 fn cmd_corpus_run(
     manifest: &std::path::Path,
@@ -4371,7 +4843,7 @@ fn cmd_corpus_run(
             continue;
         }
         for a in &src.asset {
-            let path = src.target(titles, &a.file);
+            let path = src.path_for(&beside_target(titles, src.target), &a.file);
             println!();
             println!("=== {} / {} ===", src.name, a.file);
             // The ordinary run path, which records to compat/ on its own. Deliberately no
@@ -4469,18 +4941,39 @@ fn cmd_compat_markdown(
                 .to_string_lossy()
                 .replace('\\', "/")
         });
-        rows.push(orbistoun_overrides::Row {
-            title,
-            status,
-            experiment,
-            screenshot,
-        });
+        let notes = status.notes.clone();
+        rows.push((
+            orbistoun_overrides::Row {
+                title,
+                name: file.title.name.clone(),
+                status,
+                experiment,
+                screenshot,
+            },
+            file.title,
+            notes,
+        ));
     }
     if rows.is_empty() {
         println!("no titles recorded yet");
         return Ok(());
     }
     let count = rows.len();
+    // **A page each as well as the table.** The table ranks titles against each other and a page
+    // describes one - a reader wanting to know what `PPSA28061` *is* should not have to find a
+    // row in a list of thirty-four (D660).
+    let pages = out
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("docs")
+        .join("titles");
+    std::fs::create_dir_all(&pages).with_context(|| format!("creating {}", pages.display()))?;
+    for (row, meta, notes) in &rows {
+        let page = pages.join(format!("{}.md", row.title));
+        let text = orbistoun_overrides::render_title_page(row, meta, notes);
+        std::fs::write(&page, text).with_context(|| format!("writing {}", page.display()))?;
+    }
+    let rows: Vec<orbistoun_overrides::Row> = rows.into_iter().map(|(r, _, _)| r).collect();
     let table = orbistoun_overrides::render_markdown(&rows);
     let doc = format!(
         "# Compatibility\n\n\
@@ -4516,7 +5009,7 @@ fn cmd_compat_record(
         note.clone_into(&mut status.notes);
     }
 
-    match keep_status(dir, &title, &status, force)? {
+    match keep_status(dir, &title, &status, &title_metadata(path), force)? {
         Kept::NotBetter { slot, previous } => anyhow::bail!(
             concat!(
                 "{}: not recorded - the {} entry is better or equal ({} {} imports, ",
@@ -4549,6 +5042,53 @@ fn cmd_compat_record(
         }
     }
     Ok(())
+}
+
+/// What a title says about itself, read from the `param.json` it ships.
+///
+/// **Derived rather than typed**, for the same reason the status half of a record is: a display
+/// name written by hand is wrong for a re-release, missing for the next title somebody adds, and
+/// unfalsifiable either way. The file is the title's own statement of what it is (D660).
+///
+/// `None` for anything that ships no such file, which is every homebrew payload in the corpus -
+/// and that is a fact worth keeping rather than papering over.
+fn title_metadata(path: &std::path::Path) -> orbistoun_overrides::Title {
+    let Some(dir) = path.parent() else {
+        return orbistoun_overrides::Title::default();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join("sce_sys").join("param.json")) else {
+        return orbistoun_overrides::Title::default();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return orbistoun_overrides::Title::default();
+    };
+    let string = |key: &str| {
+        json.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    // **The localised name is preferred over the top-level one**, because that is where a title
+    // puts the name a person sees; the top level is the fallback and is sometimes the internal
+    // one. The default language names itself, so nothing here picks a locale.
+    let localised = json
+        .get("localizedParameters")
+        .and_then(|l| {
+            let language = l
+                .get("defaultLanguage")
+                .and_then(serde_json::Value::as_str)?;
+            l.get(language)
+        })
+        .and_then(|entry| entry.get("titleName"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    orbistoun_overrides::Title {
+        id: string("titleId"),
+        name: localised.or_else(|| string("titleName")),
+        content_version: string("contentVersion"),
+        master_version: string("masterVersion"),
+    }
 }
 
 /// What happened to a status offered to the record.
@@ -4585,12 +5125,19 @@ fn keep_status(
     dir: &std::path::Path,
     title: &str,
     status: &orbistoun_overrides::Status,
+    meta: &orbistoun_overrides::Title,
     force: bool,
 ) -> Result<Kept> {
     let propped = status.propped_up();
     let slot = if propped { "experiment" } else { "status" };
 
     let mut file = load_compat(dir, title)?;
+    // **Refreshed whether or not the run is kept.** The metadata describes the title, not the
+    // run, so a record that loses the better-run comparison should still learn the title's name -
+    // and an empty read must not erase what an earlier one found (D660).
+    if !meta.is_empty() {
+        file.title = meta.clone();
+    }
     let previous = if propped {
         file.experiment.as_ref()
     } else {
@@ -4598,10 +5145,16 @@ fn keep_status(
     };
     if let Some(previous) = previous {
         if !force && !status.beats(previous) {
-            return Ok(Kept::NotBetter {
-                slot,
-                previous: previous.clone(),
-            });
+            let previous = previous.clone();
+            // **The metadata is still saved, and that is the whole reason it is refreshed above.**
+            // It describes the *title*, not the run, so a record that loses the better-run
+            // comparison should still learn the title's name - and the first version of this
+            // returned here without writing, so the name it had just read was thrown away every
+            // time except on a title that happened to improve (D660).
+            if !meta.is_empty() {
+                write_compat(dir, title, &file)?;
+            }
+            return Ok(Kept::NotBetter { slot, previous });
         }
     }
     if propped {
@@ -4610,11 +5163,24 @@ fn keep_status(
         file.status = Some(status.clone());
     }
 
+    let path = write_compat(dir, title, &file)?;
+    Ok(Kept::Written { slot, path })
+}
+
+/// Writes a record, answering where it went.
+///
+/// One place rather than two, because the metadata refresh needs the same write as the status one
+/// and a second copy of it would eventually disagree about the directory.
+fn write_compat(
+    dir: &std::path::Path,
+    title: &str,
+    file: &orbistoun_overrides::OverrideFile,
+) -> Result<std::path::PathBuf> {
     let text = file.to_toml().context("rendering the record")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = compat_path(dir, title);
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-    Ok(Kept::Written { slot, path })
+    Ok(path)
 }
 
 /// Keeps what a run achieved, in the slot its policy belongs to.
@@ -4683,7 +5249,7 @@ fn record_compat(path: &std::path::Path, trace: &orbistoun_report::trace::CallTr
     //
     // Safe to do unattended only because of the slot routing: a helped run can no longer
     // overwrite the honest number, and nothing here can move an entry backwards (D312, D323).
-    match keep_status(dir, &title, &status, false) {
+    match keep_status(dir, &title, &status, &title_metadata(path), false) {
         Ok(Kept::Written { slot, path }) => {
             println!();
             println!(
@@ -4695,9 +5261,10 @@ fn record_compat(path: &std::path::Path, trace: &orbistoun_report::trace::CallTr
             );
             println!("  {}", path.display());
         }
-        // Nothing to say. The record already holds something as good, which is the ordinary
-        // outcome of a run that changed nothing.
-        Ok(Kept::NotBetter { .. }) => {}
+        // **Two states, and only one of them is nothing to say.** The record holding something
+        // as good is the ordinary outcome of a run that changed nothing; the record holding
+        // something *better* is a regression, and this printed for neither (D635).
+        Ok(Kept::NotBetter { previous, .. }) => note_if_below_best(&status, &previous),
         // **Reported, not swallowed.** A run that could not write its own result is a run
         // whose finding exists only on this screen, and silence there is how four days of
         // them went missing in the first place.
@@ -4706,6 +5273,74 @@ fn record_compat(path: &std::path::Path, trace: &orbistoun_report::trace::CallTr
             println!("  could not record {title}: {e:#}");
         }
     }
+}
+
+/// Whether a run reached less than the record it is being compared against.
+///
+/// **Fewer imports, or the same imports and fewer calls.** Split out from the printing because
+/// this is the decision and the rest is presentation - and because a rule about what counts as a
+/// regression is worth a test rather than a reading (principle 8).
+///
+/// Standing is deliberately not consulted: implementing a function the guest already called raises
+/// standing while moving no import and no call, so a run can be better on standing and worse on
+/// reach, and reach is what this line is about.
+fn is_below_best(
+    status: &orbistoun_overrides::Status,
+    previous: &orbistoun_overrides::Status,
+) -> bool {
+    status.imports < previous.imports
+        || (status.imports == previous.imports && status.calls < previous.calls)
+}
+/// Says so when a run falls short of the best ever recorded for its title.
+///
+/// # The silence this replaces
+///
+/// `Kept::NotBetter` covered two states and printed for neither: *as good as the record*, which
+/// is the ordinary outcome of a run that changed nothing, and *worse than the record*, which is a
+/// regression. So a title that lost ground kept its old number in the file and said nothing on
+/// screen, and every run afterwards compared itself to the previous run and reported `same`.
+///
+/// **PPSA28061 sat like that.** Its record holds 47 imports from 2026-08-23; the build reaches 26.
+/// Two instruments looked straight at it - a ratchet that only moves up, and a verdict that only
+/// looks back one run - and between them neither could say "below its own best" (D634, D635).
+///
+/// # Why the limits are printed beside the numbers
+///
+/// A shorter run legitimately reaches less. Printing the record's time limit next to this run's is
+/// what lets a reader tell a regression from a shorter measurement without going to look - and
+/// without it this line would cry wolf every time somebody tried a quicker run.
+///
+/// Silent unless the reach is genuinely lower, because a line that fires on equality is a line
+/// people learn to skip.
+fn note_if_below_best(
+    status: &orbistoun_overrides::Status,
+    previous: &orbistoun_overrides::Status,
+) {
+    if !is_below_best(status, previous) {
+        return;
+    }
+    println!();
+    println!(
+        "  below the best ever recorded for this title: {} imports and {} calls, against {} and {} on {}",
+        status.imports, status.calls, previous.imports, previous.calls, previous.measured_on
+    );
+    println!(
+        "  reached {} where the record reached {}",
+        status.reach.label(),
+        previous.reach.label()
+    );
+    match (status.limit_seconds, previous.limit_seconds) {
+        // **The one reading that would make this line wrong**, said before anybody has to ask.
+        (Some(now), Some(then)) if now < then => println!(
+            "  this run had {now}s against the record's {then}s, so a shorter run is the \
+             ordinary explanation"
+        ),
+        (Some(now), Some(then)) => println!(
+            "  this run had {now}s against the record's {then}s, so time is not the explanation"
+        ),
+        _ => {}
+    }
+    println!("  the record is not overwritten - it is a best-ever, and this run is not one");
 }
 
 /// `env` - every variable this build reads, and what is set right now.
@@ -6127,7 +6762,15 @@ fn repair_generated_records(
         .filter(|name| {
             file.derivations.get(*name).is_some_and(|d| {
                 matches!(d.method, orbistoun_nid::Method::Generated { .. })
-                    && !orbistoun_names::solve::verify(name, d, patterns, standard)
+                    && !orbistoun_names::solve::verify(
+                        name,
+                        d,
+                        patterns,
+                        standard,
+                        // This filter has already narrowed to `Generated`, so no affix
+                        // rule can be consulted and none is offered.
+                        &orbistoun_names::affix::Affixes::default(),
+                    )
             })
         })
         .cloned()
@@ -6280,6 +6923,7 @@ fn how_it_was_found(method: &orbistoun_nid::Method) -> String {
             let by = match by {
                 StaticSource::ModuleStrings => "module-strings",
                 StaticSource::CrossModule => "cross-module",
+                StaticSource::FirmwareLayout => "firmware-layout",
             };
             format!("{by}  {from}")
         }
@@ -6294,6 +6938,7 @@ fn how_it_was_found(method: &orbistoun_nid::Method) -> String {
         Method::Supplied { source } => source.clone(),
         Method::PublishedStandard { list } => list.clone(),
         Method::Generated { pattern, index } => format!("{pattern}[{index}]"),
+        Method::Affixed { seed, rule } => format!("{rule}  applied to {seed}"),
     }
 }
 
@@ -6405,6 +7050,10 @@ fn cmd_audit(
     };
     let patterns = grammar.patterns()?;
     let standard = orbistoun_names::standard_names();
+    // The rules an affixed record is rechecked against. Shipped data, like the grammar, so
+    // a record that verified when it was written still verifies unless somebody removed the
+    // rule that made it - which is exactly the staleness this audit exists to surface.
+    let affixes = orbistoun_names::affix::Affixes::builtin()?;
 
     // Before anything is classified, so a repaired record is reported as what it now is
     // rather than as a failure that was quietly fixed on the way past.
@@ -6432,7 +7081,7 @@ fn cmd_audit(
 
     for name in &file.names {
         match file.derivations.get(name) {
-            Some(d) if orbistoun_names::solve::verify(name, d, &patterns, &standard) => {
+            Some(d) if orbistoun_names::solve::verify(name, d, &patterns, &standard, &affixes) => {
                 verified += 1;
             }
             // Recorded, but not from material this repository holds. Split by whether
@@ -6635,7 +7284,16 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             firmware,
             is_target,
             as_knowledge,
-        } => cmd_probe(&path, device, firmware, is_target, as_knowledge)?,
+            against,
+        } => cmd_probe(
+            &path,
+            device,
+            firmware,
+            is_target,
+            as_knowledge,
+            against.as_deref(),
+            service,
+        )?,
         Command::Shaders { path, top } => cmd_shaders(&path, top)?,
         Command::Serve { bind, no_key, once } => cmd_serve(service, &bind, no_key, once)?,
         Command::Verify { path } => cmd_verify(service, &path)?,
@@ -6647,7 +7305,13 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             apply,
             ref verify,
         } => {
-            cmd_turn(path, record, apply, verify.as_deref())?;
+            cmd_turn(
+                path,
+                record,
+                apply,
+                verify.as_deref(),
+                cli.symbols_db.as_deref(),
+            )?;
         }
         Command::Run {
             path,
@@ -6675,6 +7339,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             ref out,
             ref wanted,
             from_trace,
+            ref from_report,
         } => cmd_names(
             service,
             &cli,
@@ -6687,6 +7352,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
                 out: out.as_deref(),
                 wanted: wanted.as_deref(),
                 from_trace,
+                from_report,
             },
         )?,
         Command::Learn(ref learned) => cmd_learn(learned)?,
@@ -7122,6 +7788,8 @@ fn cmd_probe(
     firmware: Option<String>,
     is_target: bool,
     as_knowledge: bool,
+    against: Option<&std::path::Path>,
+    service: &Service,
 ) -> Result<()> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -7195,6 +7863,10 @@ fn cmd_probe(
 
     print_self_report(&transcript);
     print_sections(&transcript);
+    print_measurements(&transcript, &origin, service);
+    if let Some(reference) = against {
+        print_divergences(&transcript, reference)?;
+    }
 
     // Symbols, separately from results, but graded the same way and by the same origin.
     // They used to be printed ungraded on the reasoning that a name resolving on a stand-in
@@ -7248,6 +7920,335 @@ fn cmd_probe(
     Ok(())
 }
 
+/// Prints what the run measured, per section, and decodes the one section this project
+/// can act on directly.
+///
+/// # Why the tally comes before the detail
+///
+/// `measure` is the most numerous record kind in every report this project has been given,
+/// and until D605 none of them were read at all: they parsed into `Record::Other` and were
+/// dropped, while the reader printed a record count that was perfectly correct. Nothing was
+/// wrong except that the largest thing in the file was invisible.
+///
+/// So the tally is the point. It says what a section measured *and* that this reader made
+/// nothing of it, which is the honest report of a consumer that lags its source - and it
+/// names the next thing worth teaching this command to read (principle 3).
+fn print_measurements(
+    transcript: &orbistoun_probe::Transcript,
+    origin: &orbistoun_probe::Origin,
+    service: &Service,
+) {
+    let sections = transcript.measured_sections();
+    if sections.is_empty() {
+        return;
+    }
+    let total: usize = sections.values().sum();
+    println!("\nmeasurements  {total} in {} section(s)", sections.len());
+    for (section, count) in &sections {
+        let read = if section == orbistoun_probe::KEXPORT_SECTION {
+            ""
+        } else {
+            "  - carried, not interpreted"
+        };
+        println!("  {count:>5}  {section}{read}");
+    }
+
+    let exports = transcript.kernel_exports(origin);
+    if exports.is_empty() {
+        return;
+    }
+    print_kernel_exports(&exports, service);
+}
+
+/// Prints the console's own kernel export table against the names this project holds.
+///
+/// # The two things this table says that nothing else does
+///
+/// **Which hashes the platform exports at all.** A hash from an import table is one a title
+/// asked for; a hash from here is one the platform offers whether or not anything has ever
+/// imported it. That is the census a collision search can never reach (D245).
+///
+/// **Which of them are the same function.** Two hashes at one address are one function under
+/// two names, and given a name for either the other is a *variant* of it - which is a
+/// candidate a search can test, where a bare hash is not.
+fn print_kernel_exports(exports: &[orbistoun_probe::KernelExport], service: &Service) {
+    let name_of = |export: &orbistoun_probe::KernelExport| -> Option<&str> {
+        service.symbol_name(export.nid)
+    };
+
+    let named = exports.iter().filter(|e| name_of(e).is_some()).count();
+    let addresses: std::collections::BTreeSet<u64> = exports.iter().map(|e| e.vaddr).collect();
+    // The grade is the same for every entry in the table, so it is said once rather than
+    // repeated on 2,443 lines - but it is said, because a table read off a stand-in and one
+    // read off the target are the same bytes and different evidence (D246).
+    let grade = exports
+        .first()
+        .map_or("?", |export| export.known_by.label());
+    println!(
+        "\nkernel exports  {} at {} address(es), {named} named by this project, {} not [{grade}]",
+        exports.len(),
+        addresses.len(),
+        exports.len() - named,
+    );
+    if service.symbol_db_len().is_none() {
+        println!("  no symbol database loaded, so nothing could be named");
+    }
+
+    // **The naming lead, and the only part of this worth a person's attention.** An alias
+    // group with one side named says the unnamed side is a variant of a name we hold, which
+    // is the difference between a hash to guess at and a hash to derive.
+    let aliases = orbistoun_probe::export_aliases(exports);
+    let leads: Vec<_> = aliases
+        .iter()
+        .filter(|alias| {
+            let named = alias
+                .exports
+                .iter()
+                .filter(|e| name_of(e).is_some())
+                .count();
+            named > 0 && named < alias.exports.len()
+        })
+        .collect();
+    println!(
+        "  {} address(es) export more than one hash; {} of those have a named side",
+        aliases.len(),
+        leads.len(),
+    );
+    for alias in leads {
+        let spelled: Vec<String> = alias
+            .exports
+            .iter()
+            .map(|export| name_of(export).map_or_else(|| format!("{}", export.nid), str::to_owned))
+            .collect();
+        println!("    {:#x}  {}", alias.vaddr, spelled.join("  =  "));
+    }
+    print_wanted_exports(exports, service, &orbistoun_paths::Paths::resolve());
+}
+
+/// Whether the kernel export table answers a hash the corpus could not name.
+///
+/// # Why this is the question, and not "how many are unnamed"
+///
+/// The table carries 2,443 hashes and this project can name 2,231 of them. **The 212 it cannot are
+/// not the interesting set** - they are names orbistoun has no vocabulary for and no guest has
+/// asked about. The interesting set is the intersection: a hash a *running guest* calls, that this
+/// project cannot name, and that the console's own export table holds an address for.
+///
+/// Four such hashes exist in this corpus. One is `libkernel::0x04df812afad225d7`, which PPSA28061
+/// calls and then `abort`s seventy-seven bytes later - a check-and-give-up whose only blocker is
+/// the name (D636). A summary line saying "212 not named" cannot answer whether that hash is one
+/// of them, which is the whole reason the table was asked for (D642).
+///
+/// Silent when the table answers none of them, because that is the ordinary case and a line that
+/// fires every run is one people learn to skip.
+fn print_wanted_exports(
+    exports: &[orbistoun_probe::KernelExport],
+    service: &Service,
+    paths: &orbistoun_paths::Paths,
+) {
+    let wanted = hashes_a_guest_wanted(paths);
+    if wanted.is_empty() {
+        return;
+    }
+    let held: std::collections::BTreeMap<u64, u64> =
+        exports.iter().map(|e| (e.nid.as_raw(), e.vaddr)).collect();
+    let found: Vec<(&str, u64, u64)> = wanted
+        .iter()
+        .filter_map(|(label, nid)| held.get(nid).map(|vaddr| (label.as_str(), *nid, *vaddr)))
+        .collect();
+
+    println!(
+        "\n  of {} hash(es) a guest here calls and nothing can name, this table holds {}",
+        wanted.len(),
+        found.len()
+    );
+    for (label, nid, vaddr) in &found {
+        // **The address, because that is what makes it a lead.** Another hash at the same address
+        // is an alias, and an alias with a named side names this one.
+        let alias = exports
+            .iter()
+            .filter(|e| e.vaddr == *vaddr && e.nid.as_raw() != *nid)
+            .find_map(|e| service.symbol_name(e.nid));
+        match alias {
+            Some(name) => println!("    {label}  is {name}, aliased at {vaddr:#x}"),
+            None => println!(
+                "    {label}  at {vaddr:#x}, with no named hash at that address to derive from"
+            ),
+        }
+    }
+}
+
+/// Hashes a guest here has actually called and nothing can name, from the persisted traces.
+///
+/// **The intersection is the point.** A kernel export table this project cannot fully name is
+/// ordinary; a hash a *running guest* called, that nothing can name, and that the table holds an
+/// address for, is a lead. Read from the same traces `worklist` ranks, so the two agree about
+/// what "unnamed" means (D642).
+fn hashes_a_guest_wanted(paths: &orbistoun_paths::Paths) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(paths.traces_dir()) else {
+        return Vec::new();
+    };
+    let mut out: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(trace) = serde_json::from_str::<orbistoun_report::trace::CallTrace>(&text) else {
+            continue;
+        };
+        for call in &trace.calls {
+            let Some((_, hash)) = call.label.split_once("::0x") else {
+                continue;
+            };
+            if let Ok(nid) = u64::from_str_radix(hash, 16) {
+                out.insert(call.label.clone(), nid);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+/// Prints the checks two transcripts disagree about, worst first.
+///
+/// # What "worst" means here
+///
+/// A check that **passed on the reference and failed here** is a defect with a sentence attached.
+/// One that passed there and merely partially passed here is a lead. One that disagrees in any
+/// other direction is usually a difference in what was reachable, and is listed last.
+///
+/// A check only one side ran is not listed at all: that is a difference in reach, not in
+/// behaviour, and reporting it as a defect buries the ones that are (D622).
+fn print_divergences(
+    subject: &orbistoun_probe::Transcript,
+    reference: &std::path::Path,
+) -> Result<()> {
+    use orbistoun_probe::Status;
+
+    let text = std::fs::read_to_string(reference)
+        .with_context(|| format!("reading {}", reference.display()))?;
+    let other = orbistoun_probe::Transcript::read(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", reference.display()))?;
+
+    let diverged = subject.diverges_from(&other);
+    let both_ran = subject
+        .verdicts()
+        .keys()
+        .filter(|c| other.verdicts().contains_key(*c))
+        .count();
+    println!(
+        "\nagainst {}: {} of {both_ran} check(s) both ran concluded differently",
+        reference.display(),
+        diverged.len()
+    );
+    if diverged.is_empty() {
+        return Ok(());
+    }
+    let groups = group_divergences(&diverged);
+    // The count of the one class that is unambiguously a defect, **and how many distinct
+    // things it is saying**. Ninety-nine of one sweep's hundred and fifteen were the same
+    // sentence about a different absent library, and "115 defects, each with its own words"
+    // was true of sixteen of them. A count of items is not a count of findings (D624).
+    let defects = diverged
+        .iter()
+        .filter(|d| d.reference == Status::Pass && d.subject == Status::Fail)
+        .count();
+    let findings = groups
+        .iter()
+        .filter(|g| *g.reference == Status::Pass && *g.subject == Status::Fail)
+        .count();
+    println!(
+        concat!(
+            "  {} passed there and failed here, saying {} distinct thing(s) - ",
+            "a sentence repeated across a family is one finding"
+        ),
+        defects, findings
+    );
+    for group in &groups {
+        print_divergence_group(group);
+    }
+    Ok(())
+}
+
+/// One transition, one sentence, and every check that concluded it.
+struct DivergenceGroup<'a> {
+    reference: &'a orbistoun_probe::Status,
+    subject: &'a orbistoun_probe::Status,
+    detail: &'a str,
+    checks: Vec<&'a str>,
+}
+
+/// Collects divergences that differ only in which check said them.
+///
+/// **Ordered smallest group first**, inside each transition class in the order the classes
+/// first appear. A finding one check made is the specific one; a finding ninety-nine made is a
+/// census of what this build does not have, and printing it first buries the other sixteen -
+/// which is the same reason a check only one side ran is not listed at all (D622, D624).
+fn group_divergences<'a>(diverged: &'a [orbistoun_probe::Divergence]) -> Vec<DivergenceGroup<'a>> {
+    let mut order: Vec<(&orbistoun_probe::Status, &orbistoun_probe::Status)> = Vec::new();
+    let mut groups: Vec<DivergenceGroup<'a>> = Vec::new();
+    for d in diverged {
+        if !order.contains(&(&d.reference, &d.subject)) {
+            order.push((&d.reference, &d.subject));
+        }
+        if let Some(existing) = groups.iter_mut().find(|g| {
+            *g.reference == d.reference && *g.subject == d.subject && g.detail == d.detail
+        }) {
+            existing.checks.push(&d.check);
+        } else {
+            groups.push(DivergenceGroup {
+                reference: &d.reference,
+                subject: &d.subject,
+                detail: &d.detail,
+                checks: vec![&d.check],
+            });
+        }
+    }
+    groups.sort_by_key(|g| {
+        let class = order
+            .iter()
+            .position(|c| c.0 == g.reference && c.1 == g.subject)
+            .unwrap_or(usize::MAX);
+        (class, g.checks.len())
+    });
+    groups
+}
+
+/// Prints one group: the transition, the sentence, and who said it.
+///
+/// A group of one reads exactly as it always did. A larger one leads with its size, because
+/// the size is the finding - "ninety-nine libraries are absent" is one fact about the build,
+/// not ninety-nine facts about ninety-nine libraries.
+fn print_divergence_group(group: &DivergenceGroup<'_>) {
+    /// How many members of a family to name before summarising the rest.
+    const NAMED: usize = 3;
+
+    let transition = format!(
+        "{:<8} -> {:<8}",
+        format!("{:?}", group.reference).to_lowercase(),
+        format!("{:?}", group.subject).to_lowercase(),
+    );
+    let detail = if group.detail.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", group.detail)
+    };
+    if group.checks.len() == 1 {
+        println!("  {transition} {}{detail}", group.checks[0]);
+        return;
+    }
+    println!("  {transition} x{}{detail}", group.checks.len());
+    let named = group.checks.iter().take(NAMED).copied().collect::<Vec<_>>();
+    let rest = group.checks.len().saturating_sub(named.len());
+    let tail = if rest == 0 {
+        String::new()
+    } else {
+        format!(", and {rest} more")
+    };
+    println!("                        {}{tail}", named.join(", "));
+}
 /// Prints what the target says about itself, marked as self-reported.
 ///
 /// # Why the state is shown and not just the value
@@ -7531,6 +8532,61 @@ fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<()> {
 #[cfg(test)]
 mod tests {
 
+    /// A status carrying only the two fields the rule reads.
+    fn reach(imports: usize, calls: u64) -> orbistoun_overrides::Status {
+        orbistoun_overrides::Status {
+            reach: orbistoun_overrides::Reach::Entered,
+            outcome: String::new(),
+            imports,
+            calls,
+            standing: 0,
+            default_return: "unimplemented".to_owned(),
+            overrides: 0,
+            propping: 0,
+            limit_seconds: None,
+            build: String::new(),
+            measured_on: String::new(),
+            frames: 0,
+            unanswered: None,
+            notes: String::new(),
+        }
+    }
+
+    /// **A regression is fewer imports, or the same imports and fewer calls.**
+    ///
+    /// The rule behind the line that says a run fell below its own record. Written as a test
+    /// because the branch it guards printed nothing for eight months and hid a 44% import loss
+    /// in one title for sixteen days (D634, D635).
+    ///
+    /// All four cases, because a rule that only ever answered `true` would satisfy any one of
+    /// them alone - which is exactly how the silence it replaces went unnoticed.
+    #[test]
+    fn a_run_is_below_its_record_on_reach_and_not_on_anything_else() {
+        let record = reach(47, 933);
+        let fewer_imports = reach(26, 334);
+        let same_imports_fewer_calls = reach(47, 900);
+        let identical = reach(47, 933);
+        let better = reach(48, 100);
+
+        assert!(
+            super::is_below_best(&fewer_imports, &record),
+            "twenty-one imports gone is the case this exists for"
+        );
+        assert!(
+            super::is_below_best(&same_imports_fewer_calls, &record),
+            "the same reach with fewer calls is less of the guest run"
+        );
+        assert!(
+            !super::is_below_best(&identical, &record),
+            "a run equal to the record is the ordinary outcome and must stay silent - a line \
+             that fires on equality is one people learn to skip"
+        );
+        assert!(
+            !super::is_below_best(&better, &record),
+            "and more imports is not a regression even with far fewer calls, because reach is \
+             what this line is about"
+        );
+    }
     /// **A mistyped setting prints the default, not nothing.**
     ///
     /// `take(0)` still prints the "what to do about it" heading and then no findings, which

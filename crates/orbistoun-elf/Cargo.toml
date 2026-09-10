@@ -17,3 +17,8 @@ orbistoun-core = { workspace = true }
 orbistoun-nid = { workspace = true }
 zerocopy = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+selfish-elf = { workspace = true }
+selfish-nid = { workspace = true }
+selfish-container = { workspace = true }

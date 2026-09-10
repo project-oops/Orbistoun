@@ -178,6 +178,22 @@ pub fn render(record: &Record) -> String {
                 &[seq.to_string(), word.to_owned(), value, detail.clone()],
             )
         }
+        Record::Measure {
+            section,
+            subject,
+            field,
+            value,
+            unit,
+        } => join(
+            "measure",
+            &[
+                section.clone(),
+                subject.clone(),
+                field.clone(),
+                value.clone(),
+                unit.clone(),
+            ],
+        ),
         Record::Refused { seq, reason } => {
             join("refused", &[seq.to_string(), reason.token().to_owned()])
         }

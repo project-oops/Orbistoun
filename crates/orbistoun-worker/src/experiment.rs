@@ -166,6 +166,12 @@ pub struct Experiments {
     /// which is how field 1 is known to be the one it walks by - nobody set out to learn
     /// that (D220).
     pub mark_query: bool,
+    /// Whether the asynchronous file path delivers the file it resolved.
+    ///
+    /// **Carried here because it intervenes**, and a diagnostic the conditions record does not
+    /// know about produces a verdict with no caveat beside it - which is the whole thing
+    /// `needs_caveat` exists to prevent (D569, D589).
+    pub apr_deliver: bool,
 }
 
 impl Experiments {
@@ -183,6 +189,7 @@ impl Experiments {
             watch: parse_region(&orbistoun_env::WATCH.get().unwrap_or_default()),
             watchpoint: orbistoun_env::WATCHPOINT.get().unwrap_or_default(),
             mark_query: truthy(&orbistoun_env::MARK_QUERY.get().unwrap_or_default()),
+            apr_deliver: orbistoun_env::APR_DELIVER.is_set(),
             resolve: orbistoun_env::RESOLVE.get(),
             handoff_poison: orbistoun_env::HANDOFF_POISON.get(),
             entry_argument: orbistoun_env::ENTRY_ARGUMENT.get(),
@@ -270,6 +277,9 @@ impl Experiments {
         }
         if self.mark_query {
             parts.push("memory-query fields marked".to_owned());
+        }
+        if self.apr_deliver {
+            parts.push("the asynchronous file path delivering what it resolved".to_owned());
         }
         parts.join("; ")
     }

@@ -2421,7 +2421,7 @@ edge_cases = [
     "Implemented as an integer-only renderer. All seventy-six calls in a boot were honoured, so this title's formats need no floating-point conversion and no more than three variadic arguments - which is the whole capacity of the trampoline.",
     "A format it cannot honour completely empties the destination rather than rendering part of it. A half-rendered string is invented data shaped like a real answer: the guest opens the wrong file and the failure surfaces somewhere unrelated.",
 ]
-found_by = "generated"
+found_by = "affixed"
 known_by = "published"
 cites = "ISO C 7.21.6.5 (snprintf); the bounds-checked variant follows Annex K K.3.5.3.4"
 assumptions = [

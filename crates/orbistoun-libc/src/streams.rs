@@ -28,7 +28,7 @@ const STANDARD: &[(&str, u64)] = &[("_Stdout", 1), ("_Stderr", 2)];
 ///
 /// Called once, after the data imports have been published and before the guest is entered.
 /// A guest that imports neither is left alone: there is nowhere to write and nothing that
-/// would ever read it, which [`crate::write_guest_word`] already treats as the honest answer.
+/// would ever read it, which `write_guest_word` already treats as the honest answer.
 pub fn install() {
     for (name, descriptor) in STANDARD {
         if orbistoun_thunk::data_symbol(name).is_none() {

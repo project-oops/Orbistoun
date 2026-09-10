@@ -26,6 +26,7 @@
 //! across threads by range with no shared state and no coordination - and it makes the
 //! generator testable, since a specific index has a specific answer.
 
+pub mod affix;
 pub mod harvest;
 pub mod solve;
 pub mod strings;

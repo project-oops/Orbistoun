@@ -50,6 +50,8 @@ edge_cases = [
     "**Two fields of the shader object are observed, by reading the guest's code at the fault**: `8b 46 50` reads a dword at +0x50 and `0f b6 d0` keeps only its low byte, which `88 54 24 58` stores as a byte - so +0x50 is read as a dword and used as one byte. The next instruction, `48 8b 46 30`, reads a quadword at +0x30. Nothing here says what either means (D556).",
     "**Extent measured, not inferred.** Planting any readable pointer at `*arg0` - `ORBISTOUN_WRITE=sceAgcCreateShader:0+0:<addr>` - carries the guest past `image+0xf56e09` entirely, to a different fault elsewhere. So the unwritten out-parameter is the whole of what stands at that site, and nothing else about the call is blocking there. The run afterwards is a guest operating on a structure that is not one, so where it then stops says nothing (D227, D556).",
     "**Called on hardware, and it refused.** obSCEne's `166-agc/create-shader` invoked it on firmware 12.40 in a native title with the header shape this project had established - magic `31 32 33 34`, then `0x18`, then a length - at both observed lengths, `0xd8` and `0x118`. It answered **`0x8a6c002f`** and **wrote nothing**: both out-slots came back sixteen zero bytes. So the header shape as recorded here is not sufficient, and `0x8a6c002f` is a fifth measured member of the `0x8a6c` family alongside `0x8a6c000a`, `0x8a6c0002` and the `0x8a6c003d` the guest tests for (D565).",
+    "**A third header length, and PPSA03416's own bytecode.** Dumped from PPSA03416 the header at arg1 reads 31 32 33 34, then 0x18, then 0x108 - a length neither of the two D565 tried on hardware (0xd8, 0x118). Its arg2 begins bf a0 00 01, 7e 00 00 00 three times, 93 eb ff 03, 00 08 00 08, 8f 6a 8c 6b, 87 00 ff 03 as little-endian words, which is RDNA bytecode and is real translation material.",
+    "**Forcing the return to 0x0 changes nothing, measured.** ORBISTOUN_RETURN=sceAgcCreateShader:0x0 was applied (the run reports 1 answered) and PPSA03416 faults at the same image+0x39f7c with the same read of 0xffffffffffffffff, at the same 197 imports. So the return code is not what the caller acts on at this site - the unwritten out-parameter is, which the site had only inferred before. A diagnostic that intervenes and changes nothing is the cheapest evidence there is (D227).",
 ]
 found_by = "generated"
 known_by = "guest-observed"
@@ -63,6 +65,7 @@ found_in = [
     "PPSA04263-app0",
     "PPSA28061-app0",
     "PPSA02664",
+    "PPSA03416-app0",
 ]
 found_on = "2026-08-19"
 
@@ -132,3 +135,18 @@ assumptions = ["The stated purpose is read off the name and nothing else. No ari
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 note = "Nothing beyond the name is established. No guest has reached it."
+
+[[function]]
+name = "sceAgcInit"
+arity = 0
+purpose = "Initialises the current-generation graphics library. Attributed to the identifier three titles import first and stall inside."
+edge_cases = [
+    "**The identifier a real title imports is 0x53bbd82b51d172db (orbistoun spelling), and this name does not hash to it.** The hash of this name is 0x916dc62dbed07cf8. The published tables list BOTH identifiers against this one name, so the second is an alias no derivation can reach - which is why 30,184 names and 3.9 billion generated candidates never explained it.",
+    "**known_by is published, and that is the ceiling on it.** The attribution is external; this project cannot confirm it the way it confirms every other name, because confirmation here means the hash reproducing and this one demonstrably does not. It is recorded so a reader meeting the bare hash knows what it is believed to be and exactly how much that is worth.",
+    "**The systematic shape matters more than the single name.** Of 116 published libSceAgc identifiers, 108 reproduce and 8 do not; five of the 8 are a second identifier on a name whose first one reproduces. So this library carries a class of alias identifiers, and a future unnameable hash here should be checked against that pattern before a word list is extended.",
+    "PPSA02664, PPSA03416 and PPSA28061 all stop inside this library's initialisation, which corroborates the attribution semantically without confirming it.",
+]
+known_by = "published"
+cites = "SELFish REQ-20260909T1250Z-1f74, resolved 2026-09-09: five independent published identifier tables (SharpEMU, SharpEMU-aerolib, aerolib.csv, craziiEmu, fpPS4) carried in obSCEne data/mined-names.txt"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-09"

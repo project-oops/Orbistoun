@@ -108,19 +108,14 @@ pub fn decode_symbol_name(name: &str) -> Option<EncodedImport> {
     let encoded = parts.next()?;
     let library = parts.next()?;
     let module = parts.next()?;
-    if parts.next().is_some() || encoded.len() != ENCODED_NID_LEN {
+    if parts.next().is_some() {
         return None;
     }
 
-    let mut bits: u128 = 0;
-    for c in encoded.bytes() {
-        bits = (bits << 6) | u128::from(b64_value(c)?);
-    }
-    // 11 characters is 66 bits; the low two are padding.
-    let value = (bits >> 2) as u64;
-
     Some(EncodedImport {
-        nid: Nid::from_raw(value.swap_bytes()),
+        // The length check lives in `decode_nid`, so the two decoders cannot disagree
+        // about what an encoded hash is - which is exactly the drift D070 was about.
+        nid: decode_nid(encoded)?,
         library_id: decode_small(library)?,
         module_id: decode_small(module)?,
     })
@@ -169,6 +164,29 @@ pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Decodes the eleven-character form on its own, with no library and module beside it.
+///
+/// The exact inverse of [`encode_nid`], and the form a hash arrives in when it did not
+/// come out of an import table: a conformance probe reading a console's own export table
+/// has a hash and an address and nothing else to say about either.
+///
+/// Returns `None` unless the input is exactly [`ENCODED_NID_LEN`] characters of the
+/// alphabet - the same refusal [`decode_symbol_name`] makes, for the same reason. A
+/// shorter or longer string decodes to a perfectly plausible number, and a plausible
+/// number here is a hash that agrees with nothing (D070).
+#[must_use]
+pub fn decode_nid(encoded: &str) -> Option<Nid> {
+    if encoded.len() != ENCODED_NID_LEN {
+        return None;
+    }
+    let mut bits: u128 = 0;
+    for c in encoded.bytes() {
+        bits = (bits << 6) | u128::from(b64_value(c)?);
+    }
+    // 11 characters is 66 bits; the low two are padding.
+    let value = (bits >> 2) as u64;
+    Some(Nid::from_raw(value.swap_bytes()))
+}
 /// Encodes a NID into the eleven-character form a symbol name carries.
 ///
 /// The exact inverse of [`decode_symbol_name`]'s first field, and it exists mainly so
@@ -246,8 +264,16 @@ impl NidHasher {
 
     /// Hashes `name` to the NID a guest module would import it by.
     ///
-    /// The first eight bytes of the SHA-1 digest, read little-endian - matching
-    /// how the encoded form is unpacked from an import table.
+    /// The first eight bytes of the SHA-1 digest, packed so that **`digest[0]` is the most
+    /// significant byte** - matching how the encoded form is unpacked from an import table, which
+    /// a round-trip test pins ([`encode_nid`]).
+    ///
+    /// **This said "little-endian" and the function below it says "big-endian", one screen
+    /// apart.** The implementation is `hash_bytes` and has always been `from_be_bytes`; the
+    /// wording here was simply wrong. It is stated in terms of which digest byte lands where
+    /// because "little-endian" and "big-endian" describe the *packing*, and two projects reading
+    /// the same eight bytes into a `u64` the two ways each called their own order the natural one
+    /// and the other one incorrect - in mirror-image notes, in two repositories (D657).
     pub fn hash(&self, name: &str) -> Nid {
         self.hash_bytes(name.as_bytes())
     }
@@ -264,12 +290,20 @@ impl NidHasher {
     ///
     /// # Byte order
     ///
-    /// **Big-endian**, and this was wrong for a long time. Reading the digest
-    /// little-endian produces a perfectly plausible hash that agrees with nothing, and
-    /// nothing caught it because every test hashed with an arbitrary suffix and compared
-    /// against its own output - self-consistent and self-consistently wrong. What
-    /// exposed it was hashing published C names against a real import table, where the
-    /// right order matches dozens and the wrong order matches none (D070).
+    /// **Big-endian - `digest[0]` becomes the most significant byte** - and reading it the other
+    /// way round was wrong here for a long time. It produces a perfectly plausible hash that
+    /// agrees with nothing, and nothing caught it because every test hashed with an arbitrary
+    /// suffix and compared against its own output - self-consistent and self-consistently wrong.
+    /// What exposed it was hashing published C names against a real import table, where the right
+    /// order matches dozens and the wrong order matches none (D070).
+    ///
+    /// **"Wrong here", and the qualifier is not modesty.** This paragraph said "wrong" flatly,
+    /// and a sibling project reading the same eight bytes into a `u64` the other way wrote the
+    /// exact mirror of it about this one - two warnings, each true locally and each phrased as
+    /// though it were universal. The `u64` is an internal representation; both projects unpack
+    /// the same digest and arrive at the same eleven characters. What is fixed is the *pairing* -
+    /// this crate hashes and decodes the same way round, which is what `encode_nid`'s round trip
+    /// tests (D657).
     pub fn hash_bytes(&self, name: &[u8]) -> Nid {
         let mut h = Sha1::new();
         h.update(name);
@@ -438,6 +472,32 @@ pub enum Method {
         /// Its index within that pattern.
         index: u64,
     },
+    /// A name derived from a name this project already held, by a stated rule.
+    ///
+    /// # Why this is its own tier and not [`Method::Generated`]
+    ///
+    /// The generator builds a name out of *words*: a prefix, a module, a verb, an object.
+    /// This builds one out of a **whole name already proved correct** - `snprintf` becomes
+    /// `snprintf_s`, `getpeername` becomes `_getpeername`, `sceKernelGetAppInfo` becomes
+    /// `sceKernelGetAppInfo2`. The seed is not a guess and the rule is one line, so what a
+    /// reader has to accept is far smaller than an index into a trillion candidates.
+    ///
+    /// It is also **more** checkable than a generated name, not less. Rechecking a
+    /// `Generated` claim means resolving a grammar and indexing it; rechecking this means
+    /// applying one rule to one string. Both are [`Reproducible::FromRepository`]; only one
+    /// of them is legible.
+    ///
+    /// # What it does not claim
+    ///
+    /// Nothing about *why* the variant exists. That `foo` and `_foo` are both exported is a
+    /// fact about the platform, and this method has no opinion on it - the hash agreeing is
+    /// the whole of the claim, exactly as everywhere else (D606).
+    Affixed {
+        /// The name it was derived from, which must itself be a name this project holds.
+        seed: String,
+        /// The rule applied, as spelled in the affix file.
+        rule: String,
+    },
     /// A name read out of guest material at rest. **Nothing was executed.**
     ///
     /// The candidate was already lying in a file this project parses anyway. That makes
@@ -491,6 +551,18 @@ pub enum StaticSource {
     /// Recorded apart because it answers a question the per-module form cannot: the name
     /// was in material the module needing it does not contain.
     CrossModule,
+    /// The firmware layout, reached through an address the console's own export table gave.
+    ///
+    /// **Two sources meeting, which is why it is its own variant.** A conformance probe
+    /// enumerates the kernel export table and reports hash-to-address for every entry; the
+    /// firmware layout this project holds maps address-to-name. Neither answers "what is this
+    /// hash called" on its own, and together they do - and then the hash confirms it, as every
+    /// name here must be confirmed.
+    ///
+    /// It reaches names the generator cannot: `sceKernelMapperGetParam` survived 3.9 billion
+    /// generated candidates across eleven patterns, and a title calls it and then `abort`s
+    /// (D642).
+    FirmwareLayout,
 }
 
 /// Which runtime harvester proposed a candidate.
@@ -584,13 +656,36 @@ impl Reproducible {
             Self::OnlyFromItsSource => "only from where it came from",
         }
     }
+
+    /// How much this tier is worth, lowest first.
+    ///
+    /// **Ordered by what a reader has to have, not by how the name was found.** Something
+    /// re-derivable from this repository alone is worth more than the same name harvested
+    /// out of a module, because CI can check the first every commit and can never check the
+    /// second - however the search happened to arrive at each.
+    ///
+    /// Exists because a name can be settled by more than one source in a single run, and the
+    /// sweep used to keep whichever came first. Sources run strings-first, so a published C
+    /// name that also appears in a module's bytes was recorded as a static harvest: a true
+    /// record of a weaker claim than the run actually had (D607).
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::FromRepository => 0,
+            Self::FromModule => 1,
+            Self::FromRun => 2,
+            Self::FromHardware => 3,
+            Self::OnlyFromItsSource => 4,
+        }
+    }
 }
 
 impl Method {
     /// What kind of material proposed this candidate.
     pub const fn evidence(&self) -> Evidence {
         match self {
-            Self::PublishedStandard { .. } | Self::Generated { .. } => Evidence::Derived,
+            Self::PublishedStandard { .. } | Self::Generated { .. } | Self::Affixed { .. } => {
+                Evidence::Derived
+            }
             Self::Static { .. } => Evidence::Static,
             Self::Runtime { .. } => Evidence::Runtime,
             Self::Supplied { .. } => Evidence::External,
@@ -600,7 +695,9 @@ impl Method {
     /// What somebody else would need in order to arrive at the same name.
     pub const fn reproducible(&self) -> Reproducible {
         match self {
-            Self::PublishedStandard { .. } | Self::Generated { .. } => Reproducible::FromRepository,
+            Self::PublishedStandard { .. } | Self::Generated { .. } | Self::Affixed { .. } => {
+                Reproducible::FromRepository
+            }
             Self::Static { .. } => Reproducible::FromModule,
             // A probe transcript is the one runtime source that escapes its own tier: the
             // evidence is ours, the console it came off is not something anybody here can
@@ -755,6 +852,14 @@ impl SymbolDb {
         self.by_nid.get(&nid).map(String::as_str)
     }
 
+    /// Every name it holds, in no particular order.
+    ///
+    /// For a search that derives candidates from proved names rather than from words.
+    /// Unordered because the map is: a caller that needs a stable list sorts it, and one
+    /// that does not should not pay for the sort (D606).
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_nid.values().map(String::as_str)
+    }
     /// How many names are known.
     pub fn len(&self) -> usize {
         self.by_nid.len()
@@ -771,8 +876,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ENCODED_NID_LEN, Nid, NidHasher, SymbolDb, SymbolDbFile, decode_hex, decode_symbol_name,
-        default_suffix, encode_nid,
+        ENCODED_NID_LEN, Nid, NidHasher, SymbolDb, SymbolDbFile, decode_hex, decode_nid,
+        decode_symbol_name, default_suffix, encode_nid,
     };
 
     #[test]
@@ -974,6 +1079,57 @@ mod tests {
                 .unwrap_or_else(|| panic!("{encoded} should decode"));
             assert_eq!(decoded.nid, nid, "round trip failed for {name}");
         }
+    }
+
+    #[test]
+    fn a_bare_encoded_hash_decodes_without_a_library_and_module_beside_it() {
+        // The form a console's own export table hands over: eleven characters, an
+        // address, and nothing else. `decode_symbol_name` cannot read it, because there
+        // is no `#B#C` to read (D605).
+        let hasher = NidHasher::default();
+        for name in [
+            "memcpy",
+            "sceKernelAllocateDirectMemory",
+            "_ZNSt6_WinitC1Ev",
+        ] {
+            let nid = hasher.hash(name);
+            let encoded = encode_nid(nid);
+            assert_eq!(
+                decode_nid(&encoded),
+                Some(nid),
+                "bare decode disagreed for {name}"
+            );
+            // And it must agree with the decoder that reads a whole symbol name, or the
+            // two have drifted and only one of them is right.
+            assert_eq!(
+                decode_nid(&encoded),
+                decode_symbol_name(&format!("{encoded}#A#A")).map(|i| i.nid),
+                "the two decoders disagreed for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_hash_of_the_wrong_length_or_alphabet_is_refused() {
+        // Asserting on the refusal rather than on the passes: ten characters decode to a
+        // perfectly plausible number, and a plausible hash agrees with nothing.
+        assert!(
+            decode_nid(&"A".repeat(ENCODED_NID_LEN - 1)).is_none(),
+            "short"
+        );
+        assert!(
+            decode_nid(&"A".repeat(ENCODED_NID_LEN + 1)).is_none(),
+            "long"
+        );
+        assert!(decode_nid("").is_none(), "empty");
+        assert!(
+            decode_nid(&format!("{}#", "A".repeat(ENCODED_NID_LEN - 1))).is_none(),
+            "a separator is not in the alphabet"
+        );
+        assert!(
+            decode_nid(&format!("{}=", "A".repeat(ENCODED_NID_LEN - 1))).is_none(),
+            "base64 padding is not in this alphabet"
+        );
     }
 
     #[test]

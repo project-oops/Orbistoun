@@ -90,6 +90,20 @@ pub mod dirs {
     /// One directory per title, holding its guest filesystem and anything else known about
     /// it. Named as prosperous already named its own, because they are now the same directory.
     pub const TITLES: &str = "titles";
+    /// Raw executables run directly, rather than installed titles.
+    ///
+    /// **Separate from [`TITLES`] because they are a different kind of thing.** A title is a
+    /// directory with a `param.json`, an `eboot.bin` and its own filesystem; a payload is one ELF
+    /// somebody runs. Putting the payload mirror under `titles/` made twenty-five one-file
+    /// entries look like installed titles, and a shell listing the library showed them as such
+    /// (D661).
+    pub const PAYLOADS: &str = "payloads";
+    /// Installable packages, before anything installs them.
+    ///
+    /// The input side of installation: what a package manager would list and offer to install.
+    /// A package that has been installed becomes a directory under [`TITLES`]; this holds the
+    /// ones that have not.
+    pub const PACKAGES: &str = "packages";
 }
 
 /// Filename of the instance-wide settings file under the data root.
@@ -316,6 +330,16 @@ impl Paths {
         self.data_root.join(dirs::TITLES)
     }
 
+    /// Where raw executables live, run directly rather than installed.
+    pub fn payloads_dir(&self) -> PathBuf {
+        self.data_root.join(dirs::PAYLOADS)
+    }
+
+    /// Where installable packages wait, before anything installs them.
+    pub fn packages_dir(&self) -> PathBuf {
+        self.data_root.join(dirs::PACKAGES)
+    }
+
     /// One title's overlay, merged over the base tree while it runs.
     ///
     /// Under the data root rather than beside the module: a title's own directory is the
@@ -382,6 +406,8 @@ impl Paths {
             (dirs::SCREENSHOTS, self.screenshots_dir()),
             (dirs::FILESYSTEM, self.filesystem_dir()),
             (dirs::TITLES, self.titles_dir()),
+            (dirs::PAYLOADS, self.payloads_dir()),
+            (dirs::PACKAGES, self.packages_dir()),
         ]
     }
 
@@ -629,14 +655,31 @@ mod tests {
             p.screenshots_dir(),
             p.filesystem_dir(),
             p.titles_dir(),
+            p.payloads_dir(),
+            p.packages_dir(),
         ] {
             assert!(all.contains(&d), "{d:?} missing from all_dirs()");
         }
         assert_eq!(
             all.len(),
-            7,
+            9,
             "a location was added without updating the test"
         );
+        // **The three library roots are siblings, and separate ones.** They hold different kinds
+        // of thing - a title directory, a bare executable, an uninstalled package - and a corpus
+        // routes to them by name. Nested or equal, a payload would land inside the title library
+        // again, which is the bug this split exists to fix (D661).
+        for (a, b) in [
+            (p.titles_dir(), p.payloads_dir()),
+            (p.titles_dir(), p.packages_dir()),
+            (p.payloads_dir(), p.packages_dir()),
+        ] {
+            assert_ne!(a, b, "the library roots must be distinct");
+            assert!(
+                !a.starts_with(&b) && !b.starts_with(&a),
+                "{a:?} and {b:?} must be siblings"
+            );
+        }
 
         // **A title's data is deliberately in two places now, and D251 said it should be in
         // one.** That rule bought "one title is one directory to move or delete", and it has

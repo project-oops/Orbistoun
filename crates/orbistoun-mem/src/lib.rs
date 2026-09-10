@@ -27,6 +27,7 @@
 //! primitives; [`AddressSpace::validate`] holds the rules, which stay testable
 //! without touching the host address space at all.
 
+pub mod blocks;
 pub mod platform;
 pub mod stack;
 pub mod test_bases;

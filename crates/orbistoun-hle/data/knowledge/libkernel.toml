@@ -280,12 +280,54 @@ kind = "ptr"
 note = "destination for the chosen physical address"
 
 [[function]]
+name = "sceKernelAprResolveFilepathsToIdsAndFileSizes"
+arity = 6
+purpose = "Turns guest paths into whatever identifiers and sizes the asynchronous file path works in."
+returns = "status"
+partial = "Reports and refuses. It reads the path array the guest passed and prints it, then answers the placeholder - nothing is filled in, because which argument receives the identifiers and which the sizes has not been established."
+known_by = "guest-observed"
+assumptions = [
+    "Arity six is the trampoline's full capture rather than a claim: the first two arguments are established as an array of path pointers and a count, and the rest are three adjacent four-byte stack slots that are out-parameters of some order.",
+    "Filling one would hand the guest a size where it expects an identifier, which is the plausible answer principle 3 refuses. Planting distinct markers in all three and forcing success changed nothing the run could see: the guest submits its command buffer either way.",
+]
+found_in = ["PPSA03416-app0"]
+found_on = "2026-09-08"
+
+[[function]]
+name = "sceKernelAprSubmitCommandBufferAndGetResult"
+arity = 6
+purpose = "Submits a command buffer of asynchronous file operations and reports the result."
+returns = "status"
+partial = "Reports and refuses. It prints the command buffer's header and, where the run mapped it, what the header's pointer addresses."
+known_by = "guest-observed"
+assumptions = [
+    "The header's third and fourth words are a length and an address that match a mapping the guest made exactly - 0x100000 against a 0x740009200000..0x740009300000 direct-memory mapping - so they are a buffer and its size. Which of the first two words is the size, the command count and the current offset is not established; libSceAmpr exports GetSize, GetNumCommands and GetCurrentOffset, which says there are three such fields and not what order they sit in.",
+    "The buffer that header points at is entirely zero at the moment of submission, while the header reports one command of twenty bytes. sceAmprAprCommandBufferReadFile is imported by this title and never called, so nothing is established about how a command reaches the buffer.",
+]
+found_in = ["PPSA03416-app0"]
+found_on = "2026-09-08"
+
+[[function]]
+name = "sceKernelAprWaitCommandBuffer"
+arity = 6
+purpose = "Waits for a submitted command buffer to complete."
+returns = "status"
+partial = "Reports and refuses."
+known_by = "guest-observed"
+assumptions = [
+    "The name was a bare hash. The guest's own wrapper prints waitCommandBufferCompletion with whatever this answers, and forcing three unnamed imports to distinct values in one run identified which of them the wrapper reports. The name follows the transformation its sibling wrapper demonstrates and is confirmed by the hash agreeing, which is the only confirmation there is.",
+    "Arity six is the trampoline's full capture. Nothing is established about which argument names the buffer.",
+]
+found_in = ["PPSA03416-app0"]
+found_on = "2026-09-08"
+
+[[function]]
 name = "sceKernelAvailableFlexibleMemorySize"
 arity = 1
 purpose = "How much memory may be mapped without reserving physical pages first."
 returns = "status"
 edge_cases = ["Measured on hardware: obSCEne `020-memory/flexible-available` reported pass, value 0x1b400000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
-found_by = "generated"
+found_by = "static"
 known_by = "assumed"
 assumptions = [
     "Semantics are inferred from the name and its neighbours in the same family; nothing on the target has confirmed them.",
@@ -555,7 +597,7 @@ edge_cases = [
     "Measured on hardware: obSCEne `110-modules/list` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x1f in `data/hardware/ps5-full.txt`; reported pass, value 0x20 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
     "Measured on hardware: obSCEne `110-modules/handles` reported pass, value 0x20. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
-found_by = "generated"
+found_by = "static"
 known_by = "guest-observed"
 cites = "obSCEne hardware run, data/hardware/ps5-imports.txt, PS5 sw 12.400.009, 2026-08-30, section 110-modules"
 assumptions = [
@@ -631,7 +673,7 @@ edge_cases = [
     "Measured on hardware: obSCEne `010-kernel/tsc-frequency` reported pass, value 0x5f259b8e. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
     "Measured on hardware: obSCEne `120-measure/frequencies` reported pass, value 0x2. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
 ]
-found_by = "generated"
+found_by = "static"
 known_by = "measured"
 cites = "obSCEne hardware run, data/hardware/ps5-full.txt, recorded 2026-08-30"
 found_on = "2026-08-25"
@@ -641,6 +683,21 @@ name = "sceKernelGettimeofday"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
 note = "Called 3 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceKernelInstallExceptionHandler"
+arity = 2
+purpose = "Registers a guest function to run when a signal is raised on a thread. Called as (signum, handler)."
+edge_cases = [
+    "**Returns 0x0 on the first install for a signal.** A second install for the same signal answers 0x8002_0023 - errno 35 - and so does install(signum, NULL) while one is registered, so passing null is not an uninstall: the duplicate check happens first and sceKernelRemoveExceptionHandler is the way back out.",
+    "**errno 35 is EAGAIN, not EEXIST.** The sweep glossed it as EEXIST; EEXIST is 17 in this platform's own harvested headers. The number is the measurement and the name that came with it is not (D648).",
+    "**Argument order is measured, not assumed.** An inverted call answers EINVAL on hardware, and PPSA25872's own handler begins cmp edi, 0x1e - it expects to be handed 30.",
+    "The title imports it under the library name libkernel_unity; the console exports it from libkernel.",
+]
+known_by = "measured"
+cites = "obSCEne 030-thread/exception-handler, sweep 20260909-140114, payload leg: resolved at 0x800028660"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-09"
 
 [[function]]
 name = "sceKernelIsCex"
@@ -696,11 +753,14 @@ found_on = "2026-08-30"
 
 [[function]]
 name = "sceKernelIsStack"
-arity = 1
-purpose = "Whether an address lies in the calling thread's stack."
+arity = 3
+purpose = "Reports where the calling thread's stack is, through two out-parameters."
 returns = "status"
-edge_cases = ["Measured on hardware: obSCEne `010-kernel/is-stack` reported fail, value 0x0 - a stack address and a static one were reported alike. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
-found_by = "generated"
+edge_cases = [
+    "Not the predicate its name suggests. Twenty-three runs of obSCEne `010-kernel/is-stack` all fail with `a stack address and a static one were reported alike`, value 0x0 - the console answers 0 to a local and to a static, so the return is a status and the answer is elsewhere. `031-stackattr/address-is-the-base` records the two out-parameters two mebibytes apart, exactly the stack size the same run read off the thread's own attribute: the bounds are the output (D612).",
+    "Whether the bounds are written when the address is outside any stack is not measured - the console answers 0 either way and no capture records the two words for the static case.",
+]
+found_by = "static"
 known_by = "assumed"
 assumptions = ["Answered from the span the worker actually mapped, and false when nothing has told it. A wrong yes is worse than a refusal: a guest told a static is stack memory may free it."]
 found_on = "2026-08-25"
@@ -710,7 +770,7 @@ name = "sceKernelIsTestKit"
 arity = 0
 purpose = "Whether this is a test kit."
 returns = "count"
-found_by = "generated"
+found_by = "static"
 known_by = "assumed"
 assumptions = [
     "Answered false, to match the retail presentation.",
@@ -819,6 +879,19 @@ kind = "usize"
 note = "zero means no preference"
 
 [[function]]
+name = "sceKernelMapperGetParam"
+arity = 1
+purpose = "Fills a caller-provided structure with the mapper's parameters. The name is confirmed by hash, not read off a header: the console's kernel export table places this hash at libkernel+0x31d60 and this project's firmware layout names that offset, and sceKernelMapperGetParam hashes to 0x04df812afad225d7 exactly (D642)."
+edge_cases = [
+    "**One argument, and the structure states its own size.** The dump shows arg0 pointing at a stack local whose first quadword is 0x38 - fifty-six - followed by twenty-four zero bytes. That is the size-prefixed shape sceKernelDirectMemoryQuery uses (D083): the caller writes how large its structure is and the kernel fills the rest. arg1..arg3 are consecutive stack locals eight bytes apart, which is what leftover registers look like rather than arguments.",
+    "**The guest aborts on the return code, and only on it.** PPSA28061 calls this once, is handed 0x7fff0001, and calls libc::abort seventy-seven bytes later from the same function in its own module. Forcing a 0x0 answer carries it from 26 distinct imports to 59 and from 334 calls to 961 - and it then aborts again, further in. So the return is what that first abort tests, and the fifty-six bytes are what the second one needs (D643).",
+    "**NOT implemented, and answering 0x0 would be the plausible-output failure.** Nothing measured says what the structure holds; a success return over a zeroed structure is exactly what principle 3 forbids, and the second abort is the guest saying so. What is needed is the contents, which no capture holds - the console's own 166-agc-style byte dump of a filled structure would settle it.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-09-09"
+
+[[function]]
 name = "sceKernelMmap"
 arity = 6
 purpose = "Maps pages of memory into the guest address space."
@@ -887,6 +960,34 @@ assumptions = [
 found_on = "2026-08-25"
 
 [[function]]
+name = "sceKernelRaiseException"
+arity = 2
+purpose = "Raises a signal on a guest thread, running that thread's installed handler. Called as (thread, signum)."
+edge_cases = [
+    "**Only the refusal is implemented, and deliberately.** A call naming a thread handle this process never issued answers 0x8002_0003 - ESRCH - measured with a handler installed and again with it removed. That is the branch orbistoun answers.",
+    "**The delivering call is NOT implemented and must not be faked.** Nothing measured says what it returns when the thread is real and a handler is registered: the probe passed the literal handle 1 and so never reached that path. The shape of the answer decides the implementation - if it returns only after the handler has run it is synchronous on that thread, if it returns immediately there is a queue and a delivery point - and answering 0 would move PPSA25872's wall today and build the next one on a guess (D648).",
+    "**The sweep's EINVAL for signal 31 is not modelled.** SIGUSR2 is 31 in this platform's headers, so 'not a valid signal' cannot be it; and the same run answers ESRCH for signal 30 with no handler, which the opposite reading would make EINVAL too. Two readings, one observation, so the branch is left out and asked again.",
+    "PPSA25872 installs a handler for 30, raises 30 on its own main thread, and then makes no call for the remaining 19.7 seconds of a 20-second run.",
+    "**Delivery is synchronous: the handler runs before this returns.** The probe's handler sets a flag and the flag reads 1 on the line after the call. raise(self, 30) with a handler installed answers 0x0. The asynchronous model - queue it, deliver later - is ruled out, not merely unchosen.",
+    "**The handler is passed the signal number in rdi** (measured 0x1e) and a context pointer in both rsi and rdx. Orbistoun passes null for the context: the structure's layout is not published, and a handler that walks an invented one would read fabricated fields instead of faulting at a named address.",
+    "**Returns: 0x0 delivered; 0x8002_0016 (EINVAL) for signal 31 even with a valid handle; 0x8002_0003 (ESRCH) for a handle the process never issued. With a valid thread and NO handler it does not return at all** - the process takes the signal and dies, which orbistoun models as a Signalled stop rather than a placeholder that would let the guest run on.",
+    "**Cross-thread delivery is measured and NOT implemented.** A worker raising on another thread answers 0x0 and the handler runs on the target, re-entrantly. PPSA25872 does exactly this - it raises on 0x5e2d00000200 while running on 0x5e2d00001dc0, a collector suspending a mutator - and orbistoun cannot interrupt a thread already running guest code. Answering 0x0 there would tell the collector a thread acknowledged a suspension it never received, so that branch refuses (D650).",
+    "**Delivery is synchronous: the handler runs before this returns.** The probe's handler sets a flag and the flag reads 1 on the line after the call. raise(self, 30) with a handler installed answers 0x0. The asynchronous model is ruled out, not merely unchosen.",
+    "**The handler is passed the signal number in rdi** (measured 0x1e) and a context pointer in both rsi and rdx. Orbistoun passes null for the context, and PPSA25872's handler dereferences it: after cmp edi, 0x1e falls through it runs mov rax, [rsi+0xf8] and faults. That fault is the honest outcome - the layout is unpublished and invented fields would have hidden it - and 0xf8 is now the next thing to measure.",
+    "**Returns: 0x0 delivered; 0x8002_0016 (EINVAL) for signal 31 even with a valid handle; 0x8002_0003 (ESRCH) for a handle the process never issued. With a valid thread and no handler it does not return** - the process takes the signal and dies, modelled as a Signalled stop.",
+    "**Cross-thread delivery works only into a wait orbistoun owns.** PPSA25872 raises on main from a collector thread while main is parked in sceKernelSyncOnAddressWait; orbistoun marks the signal pending on the target, nudges the wait, and the handler runs there before the thread resumes waiting. A target that is anywhere else - spinning in guest code, or in a wait that does not consult the flag - is refused with the placeholder rather than told a handler ran (D652).",
+    "**Delivery is synchronous: the handler runs before this returns**, and raise(self, 30) with a handler installed answers 0x0. Measured by a handler that sets a flag which reads 1 on the next line.",
+    "**The handler gets the signal number in rdi and a pointer to an exception context in BOTH rsi and rdx** - measured identical. The context is 0x180+ bytes on the interrupted thread's own 2 MiB stack: the signal number sits at +0x48, and +0xf8 holds a pointer to another address on that same stack. Offsets 0x100..0x170 hold register state orbistoun has none of and zeroes.",
+    "**The context must live on a real stack, which is a measurement not a preference.** Handed a pointer into a region orbistoun reserved for the purpose, PPSA25872 walks forward from it until it leaves the region - 0x368 past the end at 4 KiB and again at 2 MiB. It is scanning for roots, not reading a struct, and a scan is bounded by the allocation it is in. Built into the low end of the stack the handler itself runs on, the title reaches 151 imports and 321,973 calls where it previously made no call at all for 19.7 of 20 seconds (D656).",
+    "**Returns 0x0 delivered; EINVAL for signal 31 even with a valid handle; ESRCH for a handle the process never issued; and with a valid thread and no handler it does not return** - the process takes the signal and dies.",
+    "**Cross-thread delivery reaches only a thread parked in a wait orbistoun owns.** PPSA25872 raises on main from a collector thread while main is parked in sceKernelSyncOnAddressWait. A target anywhere else is refused rather than told a handler ran.",
+]
+known_by = "measured"
+cites = "obSCEne 030-thread/exception-handler, sweep 20260909-175052"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-09"
+
+[[function]]
 name = "sceKernelReadTsc"
 arity = 0
 purpose = "The time stamp counter."
@@ -923,6 +1024,18 @@ assumptions = [
     "The physical span behind a flexible mapping is not recorded per mapping, so the pool is not told which piece to take back. A title that maps and releases in a loop would exhaust the pool and the trace would not say why.",
 ]
 found_on = "2026-08-25"
+
+[[function]]
+name = "sceKernelRemoveExceptionHandler"
+arity = 1
+purpose = "Removes a handler installed for a signal. Called as (signum)."
+edge_cases = [
+    "**Returns 0x0 for a signal that has a handler.** That is the whole of what was measured.",
+    "**Removing a handler that was never installed is not measured**, so orbistoun answers the loud placeholder there rather than choosing between EINVAL, ESRCH and success.",
+]
+known_by = "measured"
+cites = "obSCEne 030-thread/exception-handler, sweep 20260909-140114, payload leg: resolved at 0x8000287b0"
+found_on = "2026-09-09"
 
 [[function]]
 name = "sceKernelReserveVirtualRange"
