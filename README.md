@@ -96,10 +96,10 @@ holds only what the tool can recompute anywhere.
 
 | | |
 |---|---|
-| Functions declared / implemented | 952 / 683 |
-| Declared in a library that serves nothing | 243 across 29 libraries - names written down, no implementation |
-| Recorded behaviours | 714 - 364 published, 14 measured, 70 guest-observed, 249 assumed |
-| Open questions a hardware probe could settle | 780 |
+| Functions declared / implemented | 953 / 705 |
+| Declared in a library that serves nothing | 219 across 27 libraries - names written down, no implementation |
+| Recorded behaviours | 759 - 365 published, 25 measured, 75 guest-observed, 256 assumed |
+| Open questions a hardware probe could settle | 790 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

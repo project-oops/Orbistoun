@@ -60,7 +60,13 @@ pub const ENV_DATA_DIR: &str = orbistoun_env::DATA_DIR.name;
 /// Directory beside the binary that is both the portable root and its own sentinel.
 pub const PORTABLE_DIR: &str = ".portable";
 /// Explanatory note written inside the portable root so it is not a mystery folder.
-pub const PORTABLE_NOTE: &str = "PORTABLE.txt";
+///
+/// Re-exported rather than declared: `oops-paths` owns the *name* (the note is written under
+/// it by the shared `enable_portable_sentinel`), and two crates each declaring `"PORTABLE.txt"`
+/// is one fact in two places waiting to disagree. The body stays orbistoun's - see
+/// `PORTABLE_NOTE_BODY` - because it names this tool; only the filename is shared
+/// (oops-libs REQ-20260910T0825Z-d31e, closing the half of REQ-20260909T2244Z-5cac this left).
+pub use oops_paths::PORTABLE_NOTE;
 /// Application name used for the OS-standard data directory.
 pub const APP_NAME: &str = "orbistoun";
 

@@ -25,6 +25,7 @@ pub mod entropy;
 pub mod klog;
 pub mod machine;
 pub mod park;
+pub mod route;
 pub mod said;
 pub mod stop;
 

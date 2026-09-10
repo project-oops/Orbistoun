@@ -84,6 +84,30 @@ pub struct Machine {
     /// `kernel_release` keep, rather than inventing a version a guest would read back.
     #[serde(default)]
     pub software_version: Option<SoftwareVersion>,
+    /// What `kern.version` answers: the kernel's build banner, as the console wrote it.
+    ///
+    /// **One machine's string, carried verbatim.** A console measured
+    /// `r226974/releases/12.40 Nov 27 2025 02:23:38` - a revision, a release and a build date,
+    /// and only the release could be composed from [`Self::firmware`]; the other two would be
+    /// invented. So a profile states it whole, and empty means unset, which refuses the knob
+    /// rather than answering a banner nobody read (D675).
+    #[serde(default)]
+    pub kernel_version: String,
+    /// What `kern.sdk_version` answers, as the integer the console wrote.
+    ///
+    /// A console measured `0x1240_0009` - `12.400.009`, the same system software its run header
+    /// names. Kept apart from [`Self::firmware`] for the reason [`Self::software_version`] is:
+    /// the packing relating them is not documented, so neither is derived from the other. Zero
+    /// is unset, and unset refuses (D675).
+    #[serde(default)]
+    pub kernel_sdk_version: u32,
+    /// What `hw.model` answers: the processor's part name, space-padded as the console wrote it.
+    ///
+    /// A console measured `100-000000189` followed by 34 spaces - 47 bytes. The padding is part
+    /// of the answer: a caller comparing the whole string sees a different value if it has been
+    /// trimmed. Empty is unset, and unset refuses (D675).
+    #[serde(default)]
+    pub hardware_model: String,
 }
 
 /// The version `sceKernelGetSystemSwVersion` reports: the display string the guest reads and the
@@ -409,6 +433,26 @@ mod tests {
         assert!(
             Machine::default().software_version.is_none(),
             "an unset software version must refuse the call rather than invent one"
+        );
+    }
+
+    /// And for the three knobs a console fills that nothing here can derive: the kernel's build
+    /// banner, its SDK number and the hardware model. Each is one machine's value, so each stays
+    /// unset until a profile that measured it says otherwise (D675).
+    #[test]
+    fn nothing_pretends_to_know_the_kernel_banner_sdk_or_model() {
+        let machine = Machine::default();
+        assert!(
+            machine.kernel_version.is_empty(),
+            "kern.version is a build banner nobody here has read off this machine"
+        );
+        assert_eq!(
+            machine.kernel_sdk_version, 0,
+            "kern.sdk_version: zero is unset, and unset refuses"
+        );
+        assert!(
+            machine.hardware_model.is_empty(),
+            "hw.model names a part this machine has not been measured to have"
         );
     }
 

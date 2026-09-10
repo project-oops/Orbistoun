@@ -1612,11 +1612,13 @@ impl Service {
     /// for. 116 of 3829 entries were hashes the database could already name.
     #[must_use]
     pub fn is_named(&self, nid: Nid) -> bool {
-        self.registry.resolve(nid).is_some()
-            || self
-                .symbols
-                .as_ref()
-                .is_some_and(|db| db.name(nid).is_some())
+        self.is_named_with(nid, self.symbols.as_ref())
+    }
+
+    /// Whether anything at all can put a name to this hash right now, given a symbol database.
+    #[must_use]
+    pub fn is_named_with(&self, nid: Nid, symbols: Option<&SymbolDb>) -> bool {
+        self.registry.resolve(nid).is_some() || symbols.is_some_and(|db| db.name(nid).is_some())
     }
 
     /// Builds a label per dynamic symbol, for attributing a call trace.
@@ -2020,6 +2022,7 @@ impl Service {
                 thunks: &thunks,
                 data: &data,
                 refuse: None,
+                weak_zero: None,
             };
             let shifted = orbistoun_loader::relocate::OffsetResolver {
                 offset: slot.offset,

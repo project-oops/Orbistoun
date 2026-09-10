@@ -96,12 +96,12 @@ guest code. None produces a pixel, and no guest has yet spawned a thread.
 
 | Title | Reach | Imports | Calls | Standing | Ends |
 |---|---|---|---|---|---|
-| PPSA99980 | flipped | 245 | 448,047 | 100% | `ran to the time limit` |
+| PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` |
 | PPSA02664-app0 | flipped | 199 | 417,670 | 100% | `image+0x39f7c` |
 | PPSA03416-app0 | flipped | 198 | 469,663 | 100% | `image+0x39f7c` |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` |
-| obscene-payload | flipped | 187 | 4,904 | 100% | `0x5e2d` |
-| PPSA25872-app0 | entered | 151 | 321,973 | 100% | `image+0x17554a3` |
+| obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` |
+| PPSA25872-app0 | entered | 151 | 321,976 | 100% | `image+0x17554a3` |
 | PPSA04263-app0 | entered | 70 | 30,261 | 100% | `image+0x196b91a` |
 | PPSA21564-app0 | entered | 57 | 500,260 | 100% | `the title's own modules+0x7af792` |
 | PPSA28061-app0 | entered | 47 | 933 | 94% | `image+0x43c4` |
@@ -171,10 +171,10 @@ So the three current walls are **phase 4 completion problems**, not threading on
 
 | | |
 |---|---|
-| Functions declared / implemented | 952 / 683 |
-| Declared in a library that serves nothing | 243 across 29 libraries - names written down, no implementation |
-| Recorded behaviours | 714 - 364 published, 14 measured, 70 guest-observed, 249 assumed |
-| Open questions a hardware probe could settle | 780 |
+| Functions declared / implemented | 953 / 705 |
+| Declared in a library that serves nothing | 219 across 27 libraries - names written down, no implementation |
+| Recorded behaviours | 759 - 365 published, 25 measured, 75 guest-observed, 256 assumed |
+| Open questions a hardware probe could settle | 790 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

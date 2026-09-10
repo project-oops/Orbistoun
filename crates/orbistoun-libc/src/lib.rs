@@ -3089,7 +3089,13 @@ fn sysctl_by_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answer_string(&text, out, out_len)
 }
 
-/// An integer knob and the byte width the platform answers it in, or nothing.
+/// An integer knob and the byte width the platform answers it in, or nothing, for the machine
+/// this run presents.
+fn answer_integer(name: &str) -> Option<(u64, usize)> {
+    integer_knob(orbistoun_core::machine::presented(), name)
+}
+
+/// An integer knob and the byte width the platform answers it in, for a given machine.
 ///
 /// # Every value here was measured, not chosen
 ///
@@ -3101,8 +3107,25 @@ fn sysctl_by_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The width matters as much as the value: `hw.ncpu` is a four-byte `int` and `tsc_freq` is an
 /// eight-byte `long`, and a caller reading four bytes of an eight-byte answer, or the reverse,
 /// reads a different number than was written.
-fn answer_integer(name: &str) -> Option<(u64, usize)> {
+///
+/// # Whose value each one is
+///
+/// Most are the platform's: the same on any console of this generation, measured once.
+/// `kern.osrevision` is also *published* - FreeBSD's `BSD` macro - and the measurement agrees
+/// with the header. `kern.sdk_version` is one machine's, so it comes from the profile, and a
+/// machine that carries none refuses it rather than answering a number another console wrote
+/// (D675). The machine is an argument so that case is testable without setting the
+/// process-wide slot another test may already hold.
+fn integer_knob(machine: &orbistoun_core::machine::Machine, name: &str) -> Option<(u64, usize)> {
     match name {
+        // `BSD` from `sys/sys/param.h` - `199506` - which is what `KERN_OSREV` returns on
+        // FreeBSD. Hardware wrote `52 0b 03 00`, the same number, so the published header and
+        // the measurement agree (`135-sysctl/names`, D675).
+        "kern.osrevision" => Some((199_506, 4)),
+        // One console's value, from its profile. Zero is unset, and unset refuses.
+        "kern.sdk_version" => {
+            (machine.kernel_sdk_version != 0).then_some((u64::from(machine.kernel_sdk_version), 4))
+        }
         // Sixteen hardware threads, read back as a four-byte int.
         "hw.ncpu" => Some((16, 4)),
         // Sixteen-kibibyte pages - `0x4000` - which is also what the direct-memory layer and
@@ -3169,19 +3192,40 @@ fn sysctl_failed(errno: u32) -> u64 {
     u64::from(orbistoun_core::GuestError::vendor(errno).as_raw())
 }
 
-/// What this machine says about one named MIB, or nothing.
+/// What this run's machine says about one named MIB, or nothing.
+fn answer_for(name: &str) -> Option<String> {
+    text_knob(orbistoun_core::machine::presented(), name)
+}
+
+/// What a given machine says about one named MIB, or nothing.
 ///
 /// Deliberately a short list. Every entry is a claim about the platform, and a name answered
 /// from a guess is worse than one refused - the guest cannot tell them apart, and only one of
 /// them is visible in the report.
-fn answer_for(name: &str) -> Option<String> {
+///
+/// # Two rules for an unset value, and why they differ
+///
+/// `kern.osrelease` answers an empty string when the machine carries none - D447's call, kept.
+/// The knobs added beside it, `kern.version` and `hw.model`, **refuse** instead. Extending D447
+/// to them would have the default machine report "exists, empty" for knobs a console fills, and
+/// `135-sysctl/names` would count each as answered on a machine that knows none of them (D675).
+fn text_knob(machine: &orbistoun_core::machine::Machine, name: &str) -> Option<String> {
     match name {
         // **Answered even when empty**, which is the half D397 got wrong and D447 corrected:
         // the knob exists on the console, so refusing it says "no such name" - false - where
         // an empty NUL-terminated string says "exists, no value", which is exactly true.
         // A console measured `0.0-prototype` here; a machine profile may carry it, and the
         // default still does not invent one.
-        "kern.osrelease" => Some(orbistoun_core::machine::presented().kernel_release.clone()),
+        "kern.osrelease" => Some(machine.kernel_release.clone()),
+        // `MACHINE` from `sys/amd64/include/param.h`, which is what `HW_MACHINE` returns on an
+        // amd64 FreeBSD kernel. Hardware wrote `amd64`, so the published header and the
+        // measurement agree (`135-sysctl/names`, D675).
+        "hw.machine" => Some("amd64".to_owned()),
+        // One console's values, carried by its profile. Empty is unset, and unset refuses.
+        "kern.version" => {
+            (!machine.kernel_version.is_empty()).then(|| machine.kernel_version.clone())
+        }
+        "hw.model" => (!machine.hardware_model.is_empty()).then(|| machine.hardware_model.clone()),
         // **Measured, and firmware-independent.** A conformance run read `FreeBSD` off a target
         // console, and unlike the release it is not a per-machine string - the target kernel is
         // FreeBSD-derived, which the whole project already relies on for the C library's
@@ -4655,16 +4699,72 @@ mod tests {
 
     /// Names orbistoun cannot source honestly are refused rather than answered plausibly.
     ///
-    /// `kern.version` is a build banner and `hw.machine` a model string; neither is carried
-    /// here, and a guess at either is a path chosen by a number nobody measured (principle 3).
+    /// `hw.availpages` is live memory state, not a constant, and `hw.physmem` is refused by the
+    /// console itself with a policy message - so answering either would mean inventing a number
+    /// or overruling a measured refusal. `kern.version` is refused **on a machine that does not
+    /// carry one**, which is the default, and answers from a profile that does (D675). It used
+    /// to share this list with `hw.machine`, which has since turned out to be published.
     /// **`hw.ncpu` is deliberately not in this list** - it is refused by `answer_for` and
     /// answered by `answer_integer`, because it is an `int` rather than text, and a test
     /// asserting the string table refuses it would read as though the call did.
     #[test]
     fn unsourceable_knobs_are_refused_rather_than_invented() {
-        assert_eq!(super::answer_for("kern.version"), None);
-        assert_eq!(super::answer_for("hw.machine"), None);
+        use orbistoun_core::machine::Machine;
+
+        let unset = Machine::default();
+        assert_eq!(super::integer_knob(&unset, "hw.availpages"), None);
+        assert_eq!(super::answer_for("hw.physmem"), None);
+        assert_eq!(super::text_knob(&unset, "kern.version"), None);
         assert_eq!(super::answer_for("kern.nonesuch"), None);
+    }
+
+    /// **Two knobs answer a published value, the same on every machine of this architecture.**
+    ///
+    /// `kern.osrevision` is FreeBSD's `BSD` macro, `199506`, from `sys/sys/param.h`, and
+    /// `hw.machine` is `amd64`, the `MACHINE` string from `sys/amd64/include/param.h`. Neither is
+    /// a per-console value, and hardware read both back exactly (`135-sysctl/names`: `52 0b 03`
+    /// and `amd64`), so the published source and the measurement agree (D675).
+    #[test]
+    fn published_knobs_answer_on_every_machine() {
+        assert_eq!(super::answer_integer("kern.osrevision"), Some((199_506, 4)));
+        assert_eq!(super::answer_for("hw.machine"), Some("amd64".to_owned()));
+    }
+
+    /// **A machine's own knobs answer from its profile, and refuse when it has none.**
+    ///
+    /// `kern.version`, `kern.sdk_version` and `hw.model` are one console's values. The default
+    /// machine carries none of them and refuses all three; a machine that measured them answers
+    /// what it measured. Asserted against constructed machines rather than the presented one,
+    /// because the presented one is a process-wide slot another test may already have set.
+    #[test]
+    fn a_machines_own_knobs_answer_only_when_it_carries_them() {
+        use orbistoun_core::machine::Machine;
+
+        let unset = Machine::default();
+        assert_eq!(super::text_knob(&unset, "kern.version"), None);
+        assert_eq!(super::text_knob(&unset, "hw.model"), None);
+        assert_eq!(super::integer_knob(&unset, "kern.sdk_version"), None);
+
+        let measured = Machine {
+            kernel_version: "r226974/releases/12.40 Nov 27 2025 02:23:38".to_owned(),
+            kernel_sdk_version: 0x1240_0009,
+            hardware_model: format!("{:<47}", "100-000000189"),
+            ..Machine::default()
+        };
+        assert_eq!(
+            super::text_knob(&measured, "kern.version").as_deref(),
+            Some("r226974/releases/12.40 Nov 27 2025 02:23:38")
+        );
+        assert_eq!(
+            super::integer_knob(&measured, "kern.sdk_version"),
+            Some((0x1240_0009, 4)),
+            "a four-byte int, the width hardware wrote"
+        );
+        assert_eq!(
+            super::text_knob(&measured, "hw.model").map(|model| model.len()),
+            Some(47),
+            "trailing spaces kept - the console wrote 47 bytes"
+        );
     }
 
     /// A knob that does not exist is told apart from a buffer too small for one that does.

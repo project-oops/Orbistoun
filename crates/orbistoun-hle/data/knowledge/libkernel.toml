@@ -886,8 +886,12 @@ edge_cases = [
     "**One argument, and the structure states its own size.** The dump shows arg0 pointing at a stack local whose first quadword is 0x38 - fifty-six - followed by twenty-four zero bytes. That is the size-prefixed shape sceKernelDirectMemoryQuery uses (D083): the caller writes how large its structure is and the kernel fills the rest. arg1..arg3 are consecutive stack locals eight bytes apart, which is what leftover registers look like rather than arguments.",
     "**The guest aborts on the return code, and only on it.** PPSA28061 calls this once, is handed 0x7fff0001, and calls libc::abort seventy-seven bytes later from the same function in its own module. Forcing a 0x0 answer carries it from 26 distinct imports to 59 and from 334 calls to 961 - and it then aborts again, further in. So the return is what that first abort tests, and the fifty-six bytes are what the second one needs (D643).",
     "**NOT implemented, and answering 0x0 would be the plausible-output failure.** Nothing measured says what the structure holds; a success return over a zeroed structure is exactly what principle 3 forbids, and the second abort is the guest saying so. What is needed is the contents, which no capture holds - the console's own 166-agc-style byte dump of a filled structure would settle it.",
+    "MEASURED COLD-CALL: called with a bare 0x38 size-prefixed 56-byte buffer on firmware 12.40 it answers 0x80020006 (kernel error family 0x8002, errno 6 / ENXIO-shape 'not set up') and fills NOTHING - the buffer comes back 38 00..00, only the caller's size-prefix. So a bare call does not reproduce whatever the title sets up first.",
+    "RETURNING THE MEASURED CODE DOES NOT MOVE THE WALL. ORBISTOUN_RETURN=sceKernelMapperGetParam:0x80020006 aborts PPSA28061 at 334 calls identically to the 0xf7ff0001 placeholder (verdict BACK against the 0x0 prop's 961). So the guest does not handle 0x80020006 - it requires a SUCCESS with a filled struct, which the title gets on hardware and a cold call does not. The fill, not the code, is the lever (as with sceAgcCreateShader, D556).",
 ]
-known_by = "guest-observed"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20260910-154133-payload.obs.log, section 137-kernelcall/mapper-param (filed as REQ-...1332Z-b7e2)"
+assumptions = ["What 'the mapper' is and what sets it up before GetParam succeeds is unknown - it may be a kernel memory mapper obSCEne can warm, or the GPU/AGC mapper the adjacent sceAgcDriverRegisterDefaultOwner establishes (in which case a successful fill needs libSceAgc loaded, the same block as the shader)."]
 found_in = ["PPSA28061-app0"]
 found_on = "2026-09-09"
 
@@ -2036,6 +2040,10 @@ edge_cases = [
     "MEASURED: kern.osrelease is the string 0.0-prototype on a 12.40 console - a development tag, not a version, which is why a guest parsing it as a version reports detection failed",
     "MEASURED: kern.ostype is FreeBSD; kern.version carries r226974/releases/12.40; hw.ncpu is 16; hw.pagesize is 0x4000; machdep.tsc_freq is 0x5f259b8e",
     "MEASURED: hw.physmem is refused with a policy message (not approved), so some knobs are gatekept rather than absent",
+    "MEASURED (obSCEne 135-sysctl/names, sweep 20260909-110725, title/unknown-gpu eboot leg): the console answers 12 of the 19 names that check asks and refuses hw.byteorder, hw.physmem, hw.realmem, hw.usermem, machdep.sse, machdep.avx and security.jail.jailed. The check reads partial on hardware too, so partial is the conformant result, not a gap.",
+    "PUBLISHED and MEASURED, answered on every machine: kern.osrevision is 199506, FreeBSD's BSD macro from sys/sys/param.h, and the console wrote 52 0b 03 00; hw.machine is amd64, the MACHINE string from sys/amd64/include/param.h, and the console wrote amd64 (D675).",
+    "ONE CONSOLE'S VALUES, carried by the machine profile and refused when unset: kern.version is the 43-byte banner r226974/releases/12.40 Nov 27 2025 02:23:38; kern.sdk_version is the four-byte int 0x12400009, i.e. 12.400.009; hw.model is 100-000000189 padded with 34 spaces to 47 bytes. These refuse rather than answer empty when unset, deliberately unlike kern.osrelease, so the default machine does not count as answering knobs it knows nothing about (D675).",
+    "NOT ANSWERED: hw.availpages (the console wrote 0x222270) is live memory state rather than a constant, and orbistoun's memory model is not the console's, so it stays refused rather than transcribed.",
 ]
 known_by = "measured"
 cites = "obSCEne hardware run, data/hardware/ps5-imports.txt, PS5 sw 12.400.009 CFI-1116A, 2026-08-30, section 135-sysctl"

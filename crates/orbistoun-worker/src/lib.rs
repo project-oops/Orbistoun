@@ -260,6 +260,15 @@ fn run_guest<W: Write>(
     // Refused here rather than at the transfer, where it is `unimplemented!()` and would
     // reach the user as a child-process panic - which reads as a bug in the tool rather
     // than as a build that was never able to do this (D208).
+    // **How this process was delivered, decided from what sits beside the module and declared
+    // before anything can ask.** The platform behaves differently either side of it - a title
+    // does not resolve platform symbols by name and a payload does, and has to - so a run that
+    // never said would answer one of them wrongly for the whole of its length (D669).
+    //
+    // Before the execution guard rather than after: the guard is about this *build*, and the
+    // route is a property of the run whether or not the run gets to execute anything.
+    orbistoun_core::route::present(orbistoun_core::route::route_for(path, Path::exists));
+
     if !orbistoun_abi::enter::can_execute_guests() {
         return halt(
             output,
@@ -458,18 +467,47 @@ fn symbol_database(symbols_db: Option<&Path>) -> orbistoun_nid::SymbolDbFile {
 ///
 /// The resolvers are built here rather than by the caller because they borrow the tables, and
 /// the borrow has to end before the run report starts moving things about.
+/// Weak imports that nothing answers, which bind to zero under the ELF gABI (D676).
+///
+/// An import binds to zero when:
+/// 1. Its binding is weak ([`orbistoun_elf::dynamic::Binding::Weak`]);
+/// 2. It is not answered by any module the title ships (`!title.bound.contains_key(&sym_index)`);
+/// 3. It is not answered by the platform (host implementation or symbol database: `!service.is_named_with(...)`).
+fn unanswered_weak_imports(
+    service: &Service,
+    bytes: &[u8],
+    title: &orbistoun_service::LinkedTitle,
+    symbols: &orbistoun_nid::SymbolDbFile,
+) -> std::collections::BTreeSet<usize> {
+    let Ok(imports) = service.raw_imports_of(bytes) else {
+        return std::collections::BTreeSet::new();
+    };
+    let db = orbistoun_nid::SymbolDb::from_file(symbols).map(|(db, _)| db);
+    imports
+        .into_iter()
+        .filter(|imp| {
+            imp.binding == orbistoun_elf::dynamic::Binding::Weak
+                && !title.bound.contains_key(&imp.symbol_index)
+                && !service.is_named_with(orbistoun_nid::Nid::from_raw(imp.nid), db.as_ref())
+        })
+        .map(|imp| imp.symbol_index as usize)
+        .collect()
+}
+
 fn relocate_the_executable(
     service: &Service,
     image: &Image,
     bytes: &[u8],
     title: &orbistoun_service::LinkedTitle,
     refuse: Option<&std::collections::BTreeSet<usize>>,
+    weak_zero: Option<&std::collections::BTreeSet<usize>>,
 ) -> Result<orbistoun_elf::reloc::RelocationTally, orbistoun_service::ServiceError> {
     // No offset: the executable is module 0, so its symbol index *is* its slot (D484).
     let stubs = orbistoun_loader::relocate::ImportResolver {
         thunks: &title.thunks,
         data: &title.data,
         refuse,
+        weak_zero,
     };
     let resolver = orbistoun_loader::relocate::TitleResolver {
         bound: &title.bound,
@@ -528,6 +566,7 @@ fn describe_title_modules(title: &orbistoun_service::LinkedTitle) {
     orbistoun_thunk::note_readable_range(base, len);
 }
 
+#[allow(clippy::too_many_lines)]
 fn place_and_relocate<W: Write>(
     output: &mut W,
     service: &Service,
@@ -573,9 +612,21 @@ fn place_and_relocate<W: Write>(
     // install here would be ignored, and writing one would read as though it were doing
     // something (D344, D484).
     publish_what_the_guest_reads(service);
+    // Weak imports that are unanswered bind to zero under the ELF gABI (D676).
+    let weak_zero = unanswered_weak_imports(service, bytes, &title, &database);
     // Which imports this run will refuse, if it was asked to refuse any (D392).
-    let unnameable = unnameable_imports(service, bytes, symbols_db);
-    let tally = match relocate_the_executable(service, &image, bytes, &title, unnameable.as_ref()) {
+    let mut unnameable = unnameable_imports(service, bytes, symbols_db);
+    if let Some(refused) = unnameable.as_mut() {
+        refused.retain(|idx| !weak_zero.contains(idx));
+    }
+    let tally = match relocate_the_executable(
+        service,
+        &image,
+        bytes,
+        &title,
+        unnameable.as_ref(),
+        Some(&weak_zero),
+    ) {
         Ok(t) => t,
         Err(e) => {
             return halt(
@@ -1052,11 +1103,12 @@ fn describe_relocations(
 ) -> String {
     format!(
         concat!(
-            "relocations {}/{} applied ({} TLS-deferred, {} unsupported, {} unresolved); ",
+            "relocations {}/{} applied ({} weak-zero, {} TLS-deferred, {} unsupported, {} unresolved); ",
             "{} imports name data and were given storage rather than a stub"
         ),
         tally.applied,
         tally.total(),
+        tally.weak_zero,
         tally.tls_deferred,
         tally.unsupported,
         tally.unresolved,

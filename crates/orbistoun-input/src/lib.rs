@@ -95,6 +95,18 @@ static HANDLES: std::sync::Mutex<HandleAllocator> = std::sync::Mutex::new(Handle
 /// the same question and adds state that can be forgotten.
 static ISSUED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Records that a handle was issued, so [`ours`] recognises it later.
+///
+/// **`fetch_max`, not `store`.** A plain store lets the mark move *backwards*: two guest
+/// threads opening at once can have the second allocate the higher number and the first write
+/// its lower one afterwards, leaving a live handle above the mark and refused by every call
+/// that takes it. The allocator is behind a lock and the mark was not, so the two could
+/// disagree - which is a race a sequential test can never show, and which turned up as an
+/// intermittent `cargo test --workspace` failure inside the gate that passed on every direct
+/// re-run (D674).
+fn remember(handle: Handle) {
+    ISSUED.fetch_max(handle.as_raw(), std::sync::atomic::Ordering::Relaxed);
+}
 /// Whether a raw value is a handle this shim gave out.
 fn ours(raw: u64) -> Option<Handle> {
     let raw = u32::try_from(raw).ok()?;
@@ -131,7 +143,7 @@ fn pad_open(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Nothing here knows what the real function answers when it runs out.
         return u64::from(GuestError::NoMemory.as_raw());
     };
-    ISSUED.store(handle.as_raw(), std::sync::atomic::Ordering::Relaxed);
+    remember(handle);
     u64::from(handle.as_raw())
 }
 
@@ -171,16 +183,84 @@ fn pad_discard(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `scePadReadState(handle, into)` - what the pad is doing now.
+///
+/// # Why this could be written at last
+///
+/// D345 left it unimplemented, and was right to: the transport carrying pad state between the
+/// window and the guest was ours and testable, but the *structure a guest reads* was "a size
+/// and layout nobody here has measured", and building a shim around a guessed encoding is how
+/// a confident wrong answer gets made.
+///
+/// It has been measured since. obSCEne fills a buffer with a sentinel, calls this, and reports
+/// how far the change reached: 120 bytes, all 120 written, with the full contents at rest
+/// (`100-input/read-extent`, title leg of sweep 20260909-110725). So the bytes are transcribed
+/// from that run - see [`pad::AT_REST`] for why they are bytes rather than a structure (D671).
+///
+/// **The whole extent, every call.** The measurement says `changed 120`, so a shim writing
+/// only the fields it thought it understood would leave the guest's buffer holding whatever
+/// was there before in the rest - which is the failure `100-input/read-extent` exists to catch.
+fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, into) = (args[0], args[1]);
+    if ours(handle).is_none() {
+        return u64::from(
+            GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
+        );
+    }
+    if into == 0 {
+        return u64::from(
+            GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::FAULT).as_raw(),
+        );
+    }
+    // SAFETY: a guest-supplied destination under the identity mapping (D014), written for
+    // exactly the extent the console was measured writing and no further. The source is a
+    // `'static` array of that length, and the two cannot overlap - one is guest memory and the
+    // other is this binary's own read-only data.
+    unsafe {
+        std::ptr::copy_nonoverlapping(pad::AT_REST.as_ptr(), into as *mut u8, pad::STATE_BYTES);
+    }
+    OK
+}
+
+/// `scePadRead(handle, into, count)` - the same structure, asked for in a batch.
+///
+/// A separate import, and obSCEne measures it separately: `100-input/batched-read` reports the
+/// identical extent and the identical contents. So it answers what [`pad_read_state`] answers,
+/// and the test says so rather than leaving two implementations free to drift apart.
+///
+/// **The count is not honoured, and that is stated rather than silent.** The real call reads up
+/// to `count` samples and answers how many it got; nothing has measured what a console returns
+/// for more than one, and writing `count` copies of one sample would be inventing a history the
+/// pad does not have. One sample, and the caller is told one.
+fn pad_read(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let wrote = pad_read_state(args);
+    if wrote != OK {
+        return wrote;
+    }
+    1
+}
+
 /// Implementations this crate provides, by symbol name.
 ///
-/// The four reading functions are absent on purpose. Every one writes a structure
-/// whose size and layout nothing here has measured, so the choice is between leaving them
-/// unimplemented - where the guest gets a placeholder error it can act on - and writing
-/// invented bytes into guest memory, which is principle 3's forbidden case with a title
-/// reading the result (D326).
+/// **The reading functions are here now.** They were absent on purpose: each writes a
+/// structure whose size and layout nothing here had measured, so the choice was between a
+/// placeholder the guest can act on and invented bytes in guest memory, which is principle 3's
+/// forbidden case with a title reading the result (D326, D345).
+///
+/// obSCEne measured it - 120 bytes, all of them written, and the image at rest - so the third
+/// option exists at last: the bytes a console produced, transcribed (D671).
+///
+/// `scePadReadExt` stays out. It is declared, nothing has measured it, and binding it to the
+/// same body on the strength of the name alone is the guess the pair above did not have to
+/// make.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("scePadInit", pad_init),
+        // Both spellings again, and for the same reason as `scePadOpen`: the library exports
+        // both and nothing distinguishes them from here.
+        ("scePadReadState", pad_read_state),
+        ("scePadReadStateExt", pad_read_state),
+        ("scePadRead", pad_read),
         // Both spellings, served by one function. The library exports both and the module
         // here imports both; deciding which a title "really" uses is a guess with no upside.
         ("scePadOpen", pad_open),
@@ -196,6 +276,27 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Recording a handle never lowers the mark.**
+    ///
+    /// The bug this pins is a race and a sequential test cannot show it: two guest threads
+    /// opening at once can have the second allocate the higher number and the first store its
+    /// lower one afterwards, leaving a live handle above the mark and refused by every call
+    /// that takes it. `ISSUED.store` did exactly that.
+    ///
+    /// So the *property* is tested instead of the interleaving - remember out of order, and the
+    /// mark must still be the highest. Deterministic, and it fails on the old code (D674).
+    #[test]
+    fn remembering_a_handle_out_of_order_never_lowers_the_mark() {
+        let high = orbistoun_core::Handle::from_raw(4096).expect("a handle");
+        let low = orbistoun_core::Handle::from_raw(4095).expect("a handle");
+        super::remember(high);
+        super::remember(low);
+        assert!(
+            super::ours(4096).is_some(),
+            "a live handle stayed recognised after a lower one was recorded"
+        );
+    }
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
     fn args(first: u64) -> [u64; GUEST_ARG_REGISTERS] {
@@ -266,5 +367,104 @@ mod tests {
         let second = super::pad_open(&args(0));
 
         assert_ne!(first, second);
+    }
+
+    /// **The pad state a guest reads is 120 bytes, and these are the bytes.**
+    ///
+    /// D345 left `scePadReadState` unimplemented on the grounds that its structure was "a
+    /// size and layout nobody here has measured", and building the transport without the
+    /// encoding was the right call. It has been measured since: obSCEne's
+    /// `100-input/read-extent` on a title leg reports `extent 120`, `changed 120`, and the
+    /// full contents at rest.
+    ///
+    /// Transcribed rather than modelled. What is measured is *the bytes a console produced
+    /// for a pad at rest*, and that is what this writes; which offset is a button and which
+    /// is a stick is an inference, and nothing here needs it to answer this call correctly.
+    #[test]
+    fn a_pad_read_writes_the_bytes_the_console_wrote() {
+        let handle = call("scePadOpen", &args3(1, 0, 0));
+        assert!((handle as i64) > 0, "a handle");
+
+        let mut into = [0xAA_u8; 200];
+        let rc = call(
+            "scePadReadState",
+            &args3(handle, into.as_mut_ptr().expose_provenance() as u64, 0),
+        );
+        assert_eq!(rc, 0, "the console answers 0x0 (100-input/oops-sdk-poll)");
+        assert_eq!(
+            &into[..super::pad::STATE_BYTES],
+            super::pad::AT_REST,
+            "the 120 bytes obSCEne read back off a console"
+        );
+        assert!(
+            into[super::pad::STATE_BYTES..].iter().all(|b| *b == 0xAA),
+            "and not one byte past the extent that was measured"
+        );
+    }
+
+    /// **A batched read answers the same structure**, which is the half a guess would differ on.
+    ///
+    /// `scePadRead` and `scePadReadState` are separate imports and obSCEne measures both:
+    /// `100-input/batched-read` reports the identical `extent 120` and the identical contents.
+    /// So they write the same thing here, and the test says that rather than leaving two
+    /// implementations free to drift.
+    #[test]
+    fn a_batched_read_writes_what_a_state_read_writes() {
+        let handle = call("scePadOpen", &args3(1, 0, 0));
+        let mut state = [0_u8; super::pad::STATE_BYTES];
+        let mut batched = [0_u8; super::pad::STATE_BYTES];
+        call(
+            "scePadReadState",
+            &args3(handle, state.as_mut_ptr().expose_provenance() as u64, 0),
+        );
+        // The third argument is a count of entries; one, which is what the check asks for.
+        call(
+            "scePadRead",
+            &args3(handle, batched.as_mut_ptr().expose_provenance() as u64, 1),
+        );
+        assert_eq!(state, batched, "one structure, two spellings");
+    }
+
+    /// A read through a handle nobody opened is refused, and nothing is written.
+    ///
+    /// The negative case. A shim that wrote the neutral state for any handle would pass both
+    /// tests above and tell a guest a pad it never opened is sitting there at rest.
+    #[test]
+    fn a_read_on_a_handle_nobody_opened_writes_nothing() {
+        let mut into = [0xAA_u8; super::pad::STATE_BYTES];
+        let rc = call(
+            "scePadReadState",
+            &args3(0x7FFF, into.as_mut_ptr().expose_provenance() as u64, 0),
+        );
+        assert_ne!(rc, 0, "a handle this never handed out is not readable");
+        assert!(
+            into.iter().all(|b| *b == 0xAA),
+            "and the guest's buffer is untouched"
+        );
+    }
+
+    /// A null destination is refused rather than written through.
+    #[test]
+    fn a_read_into_nothing_is_refused() {
+        let handle = call("scePadOpen", &args3(1, 0, 0));
+        assert_ne!(call("scePadReadState", &args3(handle, 0, 0)), 0);
+    }
+
+    /// Three arguments, for the calls that take them.
+    fn args3(a: u64, b: u64, c: u64) -> [u64; GUEST_ARG_REGISTERS] {
+        let mut args = [0; GUEST_ARG_REGISTERS];
+        args[0] = a;
+        args[1] = b;
+        args[2] = c;
+        args
+    }
+
+    /// An implementation by name, so a test cannot reach one the guest cannot.
+    fn call(name: &str, args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+        let (_, function) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("{name} is not served, so no guest can reach it"));
+        function(args)
     }
 }

@@ -104,6 +104,14 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
          different reason entirely, which is why claiming the measurement through this path \
          would be green and meaningless"
     );
+    // **The payload route, declared before anything asks.** What follows is about the *module
+    // handle* narrowing a resolution that happens, and on a title's route no resolution
+    // happens at all - the console does not hand out platform symbols by name to a launched
+    // title, so orbistoun does not either (D669). The narrowing is a payload-route mechanism
+    // now, and this file says which route it is exercising rather than relying on a default
+    // that has since changed underneath it.
+    orbistoun_core::route::present(orbistoun_core::route::Route::Payload);
+
     // (3) The divergence, as it stands now. One entry stands in for the table a load installs.
     let mut named = std::collections::BTreeMap::new();
     named.insert("memcpy".to_owned(), PRETEND_ADDRESS);
@@ -154,7 +162,8 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
         [0x2001, keeper.as_ptr() as u64, out_at, 0, 0, 0],
     );
     assert_eq!(
-        still as u32, 0x7fff_0001,
+        still as u32,
+        orbistoun_core::GuestError::Unimplemented.as_raw(),
         "it is declared in libkernel, so the narrowing lets it through to the ordinary answer - \
          which here is 'nothing implements it', because this test installed no thunk for it"
     );

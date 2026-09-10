@@ -160,3 +160,57 @@ fn the_no_op_is_the_one_that_does_not_close() {
          and this disagreement was the reason the rule was believed for the other three"
     );
 }
+
+/// **A header from live GPU memory, decoded the same by two independent readers.**
+///
+/// The four captures above are `libSceAgc` *command builders* - an API call, and the bytes it
+/// appended. This is a different provenance and a stronger cross-check: obSCEne's `170-gpu-capture`
+/// walked the **running compositor's** submitted command stream in kernel memory and decoded a
+/// live PM4 header with its own C reader, reporting `it_op 0x93`, `payload_dwords 0x59`. The header
+/// dword it captured is `0xc059_9328`.
+///
+/// So this is orbistoun's transcribed field layout (`TYPE_SHIFT`, `OPCODE_SHIFT`, `COUNT_SHIFT` and
+/// their masks) held against a *second implementation* that read the same bytes off hardware - the
+/// kind of agreement `packet.rs` was transcribed-but-unverified about, now reached from live memory
+/// rather than an API capture.
+///
+/// The body is ninety zero dwords: a padding, not a measurement. Only the header's field extraction
+/// is under test, because only the header was independently decoded - the window obSCEne captured is
+/// four dwords of a ninety-dword packet, so the body is not available to walk.
+///
+/// Reference: obSCEne `reports/hardware/payload-klog.obs.log`, section `170-gpu-capture/command-stream`
+/// (`AgcCompositor.elf`, pid 0x39), records `pm4-header 0xc0599328`, `pm4-opcode 0x93`,
+/// `pm4-count 0x59`.
+#[test]
+fn a_live_memory_pm4_header_decodes_as_obscenes_own_reader_did() {
+    // The captured header, then a body of the length its count field declares (90 dwords), zeroed.
+    const CAPTURED_HEADER: u32 = 0xc059_9328;
+    let mut bytes = CAPTURED_HEADER.to_le_bytes().to_vec();
+    bytes.extend(std::iter::repeat_n(0u8, 90 * 4));
+
+    let walk = walk(&bytes);
+    assert!(
+        walk.is_trustworthy(),
+        "desynchronised={} overran={} trailing={}",
+        walk.desynchronised,
+        walk.overran,
+        walk.trailing_bytes
+    );
+
+    let first = walk.packets.first().expect("one packet");
+    assert_eq!(
+        first.kind,
+        PacketKind::Command { opcode: 0x93 },
+        "obSCEne's reader called it a type-3 command with opcode 0x93"
+    );
+    assert_eq!(
+        first.length,
+        4 + 90 * 4,
+        "count 0x59 means 90 body dwords, so 4 + 360 bytes - the length obSCEne's count implies"
+    );
+    assert_eq!(
+        walk.packets.len(),
+        1,
+        "the header plus its declared body is exactly one packet"
+    );
+}

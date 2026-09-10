@@ -36,6 +36,17 @@ pub mod npwebapi2;
 pub mod socket;
 pub mod ssl;
 
+/// The vendor spellings this crate serves, by symbol name.
+///
+/// Only `socket` has any - the rest of the libraries here are declarations, and say so in
+/// their own module notes. Gathered at the crate root because that is the shape
+/// `orbistoun-service` collects: one call per crate, so a new module cannot be added and
+/// silently left unregistered.
+#[must_use]
+pub fn implementations() -> &'static [(&'static str, orbistoun_core::GuestFn)] {
+    socket::implementations()
+}
+
 /// The base libSceNet numbers its errors from: `0x8041_0100`, **not** `0x8041_0000`.
 ///
 /// # Two spellings of one condition, in one sweep

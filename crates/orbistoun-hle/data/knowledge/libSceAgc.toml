@@ -52,14 +52,18 @@ edge_cases = [
     "**Called on hardware, and it refused.** obSCEne's `166-agc/create-shader` invoked it on firmware 12.40 in a native title with the header shape this project had established - magic `31 32 33 34`, then `0x18`, then a length - at both observed lengths, `0xd8` and `0x118`. It answered **`0x8a6c002f`** and **wrote nothing**: both out-slots came back sixteen zero bytes. So the header shape as recorded here is not sufficient, and `0x8a6c002f` is a fifth measured member of the `0x8a6c` family alongside `0x8a6c000a`, `0x8a6c0002` and the `0x8a6c003d` the guest tests for (D565).",
     "**A third header length, and PPSA03416's own bytecode.** Dumped from PPSA03416 the header at arg1 reads 31 32 33 34, then 0x18, then 0x108 - a length neither of the two D565 tried on hardware (0xd8, 0x118). Its arg2 begins bf a0 00 01, 7e 00 00 00 three times, 93 eb ff 03, 00 08 00 08, 8f 6a 8c 6b, 87 00 ff 03 as little-endian words, which is RDNA bytecode and is real translation material.",
     "**Forcing the return to 0x0 changes nothing, measured.** ORBISTOUN_RETURN=sceAgcCreateShader:0x0 was applied (the run reports 1 answered) and PPSA03416 faults at the same image+0x39f7c with the same read of 0xffffffffffffffff, at the same 197 imports. So the return code is not what the caller acts on at this site - the unwritten out-parameter is, which the site had only inferred before. A diagnostic that intervenes and changes nothing is the cheapest evidence there is (D227).",
+    "SENTINEL-VERIFIED no-write, three lengths. On the eboot leg obSCEne pre-filled the out-slots with 0xc7 and called well-formed at payload lengths 0xd8, 0x118 and PPSA03416's 0x108: rc 0x8a6c002f every time, and out-before == out-after == c7..c7 (16 bytes) unchanged - the call wrote nothing at any length. A null payload faults (sig 0xb). This hardens D565 from one length to three and from 'came back zero' to 'sentinel untouched'.",
+    "RETURNING THE MEASURED CODE MOVES NOTHING, and for a second reason in PPSA28061: both 0x8a6c002f (measured) and 0x8a6c003d (the code the guest's wrapper tests for) leave Earthion at the same 334-call abort, because Earthion's abort is driven by the LATER sceKernelMapperGetParam call, not by create-shader - the shader return is irrelevant to this title. For the titles that do gate on the shader (PPSA02664/03416) the out-param write is the lever (D556), not the return.",
 ]
 found_by = "generated"
-known_by = "guest-observed"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20260910-170907-eboot.obs.log, section 166-agc/create-shader"
 assumptions = [
     "The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry.",
     "The 0x18 following the magic is assumed to be the header's own size, by analogy with the structure-size argument sceKernelDirectMemoryQuery passes (D083). Unverified - no guest has been observed reacting to it being wrong.",
     "Whether arg3 is a length, a flags word or something else is unestablished; it was not a pointer into mapped memory, so no dump was taken of it.",
     "**What the object arg0 receives a pointer to contains.** Two of its fields are observed from the guest reading them - a dword at +0x50 whose low byte is used, and a quadword at +0x30 - and nothing says what either holds, nor how large the object is. obSCEne cannot answer it as it runs today: 472 libSceAgc symbols are recorded **absent** across four captures, and its own sysinfo says no GPU library is mapped in that process. The ask is therefore not for another capture of the same kind but for one taken where libSceAgc is loaded (D556).",
+    "0x8a6c002f may be a 'GPU not initialised' refusal rather than a 'bad shader header' one: the same eboot leg reports 'no GPU library is mapped (neither libSceAgc nor libSceGnm)', and the adjacent dcb-* builders all crashed (SIGBUS) for want of the library. A leg where libSceAgc is actually mapped (REQ-...1621Z-7a5d) is needed to tell a header refusal from an uninitialised-driver refusal.",
 ]
 found_in = [
     "PPSA04263-app0",
@@ -89,6 +93,17 @@ known_by = "assumed"
 assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbResetQueue"
+edge_cases = [
+    "MEASURED: 32 bytes, written as a 'writer-struct' (obSCEne's own label, not a pure PM4 stream). Layout: dword0 = 0010ffff - the same NOP filler sceAgcCbNop emits, an init/empty slot whose count field (0x3fff) is not a body length; then a type-3 opcode-0x79 packet (header 0xc0027904, count 2, 4 dwords); then a second opcode-0x79 packet (header 0xc0017904, count 1, 3 dwords). Full bytes: 0010ffff 047902c0 42030000 000020ce 00000000 047901c0 42030000 0000a0ce.",
+    "Confirms 0010ffff is a filler/uninitialised-slot marker, not a packet: it leads this writer struct exactly as it is the whole of sceAgcCbNop's output. A PM4 walk that treats it as a header desynchronises (count 0x3fff), which is why orbistoun's decoder records it as the one capture that does not close (measured_packets.rs).",
+    "The builders run and emit real PM4 on a leg reporting 'no GPU library among loaded modules' (title/unknown-gpu), because they are pure encoders into a caller buffer - no driver init. This is why the builder channel yields data where sceAgcCreateShader refuses with 0x8a6c002f (that one needs the driver). rc across all builders this leg was 0x200030078.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20260910-174437-eboot.obs.log, section 166-agc/dcb-reset-queue"
+found_on = "2026-09-10"
 
 [[function]]
 name = "sceAgcDcbSetIndexBuffer"

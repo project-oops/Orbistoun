@@ -95,6 +95,17 @@ pub mod errno {
     /// on trust would have put a wrong constant in this module for every later call to reuse
     /// (D648).
     pub const AGAIN: u32 = 35;
+    /// The socket has no peer. Observed from a `recv` on a **listening** socket, which
+    /// `libSceNet` answered `0x8041_0139` (obSCEne `102-net/recv-would-block`, package leg of
+    /// sweep 20260909-234847).
+    ///
+    /// **Measured through the vendor encoding rather than through `errno`**, which is a weaker
+    /// reading than the entries above and worth saying: the console handed back a code, and 57
+    /// is the low byte of it under a base established by a *different* pair whose `errno` was
+    /// read independently. What makes it a measurement rather than a name for a number is that
+    /// `ENOTCONN` is 57 in this platform's own harvested headers and the condition provoked was
+    /// exactly "no peer".
+    pub const NOT_CONNECTED: u32 = 57;
 
     // --- published, not measured ------------------------------------------------------
     //
@@ -171,13 +182,13 @@ impl GuestError {
     /// The raw 32-bit value a guest observes for this error.
     pub const fn as_raw(self) -> u32 {
         match self {
-            // Placeholder bit patterns in a range no real SCE code occupies, so a
-            // stub leaking into guest-visible behaviour is obvious in a trace
-            // rather than plausible.
-            Self::Unimplemented => 0x7FFF_0001,
-            Self::InvalidArgument => 0x7FFF_0002,
-            Self::InvalidHandle => 0x7FFF_0003,
-            Self::NoMemory => 0x7FFF_0004,
+            // Placeholder bit patterns in a range no real SCE code occupies, so a stub
+            // leaking into guest-visible behaviour is obvious in a trace rather than
+            // plausible - **and negative, so the guest's own check catches it** (D670).
+            Self::Unimplemented => PLACEHOLDER_BASE | 0x1,
+            Self::InvalidArgument => PLACEHOLDER_BASE | 0x2,
+            Self::InvalidHandle => PLACEHOLDER_BASE | 0x3,
+            Self::NoMemory => PLACEHOLDER_BASE | 0x4,
             Self::Raw(v) => v,
         }
     }
@@ -187,7 +198,21 @@ impl GuestError {
 ///
 /// Public because a *reader* of a fault needs it as much as a writer of a stub: an address
 /// in this block is not memory, it is one of these codes being used as a pointer.
-pub const PLACEHOLDER_BASE: u32 = 0x7FFF_0000;
+///
+/// # Why the high bit is set
+///
+/// It used to be `0x7FFF_0000`, chosen to sit outside the range real codes occupy so a stub
+/// leaking into guest-visible behaviour was obvious in a trace (D009). It was obvious to a
+/// **reader** and invisible to the **guest**: every error this platform has been measured
+/// returning sets the high bit, so a guest checks `rc < 0`, and `0x7FFF_0001` is positive. A
+/// refusal read as success is exactly what principle 3 exists to stop, and every one of them
+/// was doing it.
+///
+/// `0xF7FF_0000` keeps both properties. The low half is unchanged, so a reader who knows
+/// `0x7FFF_0001` recognises `0xF7FF_0001` on sight; the high bit is set, so a guest's own
+/// check catches it; and `0xF7` is not `0x80`, which every measured vendor code begins with,
+/// so it still cannot be mistaken for firmware behaviour (D670).
+pub const PLACEHOLDER_BASE: u32 = 0xF7FF_0000;
 
 /// Names the placeholder an address is, when it is one of orbistoun's own.
 ///
@@ -207,17 +232,24 @@ pub const PLACEHOLDER_BASE: u32 = 0x7FFF_0000;
 /// claim and is labelled as one.
 #[must_use]
 pub const fn placeholder_named(address: u64) -> Option<(&'static str, bool)> {
-    // Above 32 bits it cannot be one of these: they are `u32` codes, and a guest that
-    // sign-extended one would land somewhere else entirely.
+    // **A sign-extended code is still one of ours**, which it could not be while these were
+    // positive: `int` to `long` on a value with the high bit set produces
+    // `0xFFFF_FFFF_F7FF_0001`, and a guest that widened a refusal before using it as a pointer
+    // faults there. Anything else above 32 bits is not one of these (D670).
+    let address = if address >> 32 == 0xFFFF_FFFF {
+        address & 0xFFFF_FFFF
+    } else {
+        address
+    };
     if address > u32::MAX as u64 {
         return None;
     }
     let value = address as u32;
     let exact = match value {
-        0x7FFF_0001 => Some("unimplemented"),
-        0x7FFF_0002 => Some("invalid argument"),
-        0x7FFF_0003 => Some("invalid handle"),
-        0x7FFF_0004 => Some("out of memory"),
+        v if v == PLACEHOLDER_BASE | 0x1 => Some("unimplemented"),
+        v if v == PLACEHOLDER_BASE | 0x2 => Some("invalid argument"),
+        v if v == PLACEHOLDER_BASE | 0x3 => Some("invalid handle"),
+        v if v == PLACEHOLDER_BASE | 0x4 => Some("out of memory"),
         _ => None,
     };
     if let Some(name) = exact {
@@ -278,7 +310,7 @@ mod tests {
     #[test]
     fn an_offset_from_a_placeholder_is_reported_as_the_weaker_claim() {
         assert_eq!(
-            super::placeholder_named(0x7FFF_0001 + 0x18),
+            super::placeholder_named(u64::from(GuestError::Unimplemented.as_raw()) + 0x18),
             Some(("a placeholder answer", false))
         );
     }
@@ -360,30 +392,99 @@ mod tests {
     }
 
     /// A measured code is not a placeholder, and must never be mistaken for one.
+    ///
+    /// **Both are negative now**, so the sign no longer separates them and the facility byte
+    /// has to. Every measured code begins `0x80`; the placeholders begin `0xF7` (D670).
     #[test]
     fn vendor_codes_are_outside_the_placeholder_range() {
+        let measured = GuestError::vendor(super::errno::BUSY).as_raw();
         assert_ne!(
-            GuestError::vendor(super::errno::BUSY).as_raw() & 0x8000_0000,
+            measured & 0x8000_0000,
             0,
-            "a code the console returned has the high bit the placeholders avoid"
+            "a code the console returned has the high bit"
+        );
+        assert_eq!(
+            super::placeholder_named(u64::from(measured)),
+            None,
+            "and is not claimed as one of ours"
         );
     }
 
+    /// **A refusal a guest tests with `rc < 0` must be negative.**
+    ///
+    /// The property D009 traded away without noticing. Every error this platform has been
+    /// measured returning sets the high bit - the kernel's `0x8002_xxxx`, audio's `0x8026`,
+    /// videoout's `0x8029`, net's `0x8041_01xx`, the pad's `0x8092` - so a guest checks the
+    /// sign, and `0x7FFF_0001` is **positive**. Every guest that checked correctly read a
+    /// refusal as success and carried on.
+    ///
+    /// Measured rather than reasoned. PPSA02664 answered `0x7FFF_0001` said nothing and
+    /// faulted eleven megabytes away at `image+0x39f7c`, on a pointer it had built out of a
+    /// call that failed; the same guest answered the same code with the high bit set printed
+    /// `sceCommonDialogInitialize() failed 0xf7ff0001` and exited (D670).
     #[test]
-    fn placeholders_are_distinguishable_from_real_codes() {
-        // Real SCE error codes have the high bit set. Ours deliberately do not,
-        // so an unimplemented stub can never be misread as firmware behaviour.
-        for e in [
+    fn a_placeholder_is_negative_to_a_guest_that_tests_the_sign() {
+        for error in [
             GuestError::Unimplemented,
             GuestError::InvalidArgument,
             GuestError::InvalidHandle,
             GuestError::NoMemory,
         ] {
-            assert_eq!(
-                e.as_raw() & 0x8000_0000,
-                0,
-                "{e:?} collides with real codes"
+            assert!(
+                (error.as_raw() as i32) < 0,
+                "{error:?} answers {:#x}, which a guest testing `rc < 0` reads as success",
+                error.as_raw()
             );
         }
+    }
+
+    /// **And still not mistakable for a code the console answers.**
+    ///
+    /// The half D009 was right about, kept. Every measured vendor code begins `0x80`; these
+    /// begin `0xF7`, which no measurement has seen. The low half is unchanged, so
+    /// `0x7FFF_0001` and `0xF7FF_0001` read as the same answer to anyone who knew the first.
+    #[test]
+    fn a_placeholder_is_still_not_mistakable_for_a_measured_code() {
+        for error in [
+            GuestError::Unimplemented,
+            GuestError::InvalidArgument,
+            GuestError::InvalidHandle,
+            GuestError::NoMemory,
+        ] {
+            assert_ne!(
+                error.as_raw() & 0xFF00_0000,
+                0x8000_0000,
+                "{error:?} is shaped like a vendor code"
+            );
+        }
+        // Named rather than derived: a guest branching on either of these is branching on a
+        // measurement, and no stub may ever answer one.
+        for measured in [
+            GuestError::vendor(super::errno::NO_SUCH).as_raw(),
+            0x8041_0123,
+        ] {
+            assert_eq!(
+                super::placeholder_named(u64::from(measured)),
+                None,
+                "{measured:#x} is a value a console answered"
+            );
+        }
+    }
+
+    /// **A sign-extended placeholder is still named.**
+    ///
+    /// New with the high bit, and required by it. A guest that widened the code to sixty-four
+    /// bits used to get the same positive number back; now it gets `0xFFFF_FFFF_F7FF_0001`,
+    /// and a fault reporter that did not know that would call orbistoun's own refusal an
+    /// unrecognised address - sending a reader to debug this codebase rather than to implement
+    /// the function the guest asked for, which is the one distinction this lookup exists for.
+    #[test]
+    fn a_sign_extended_placeholder_is_named_as_one() {
+        let widened = u64::from(GuestError::Unimplemented.as_raw()) | 0xFFFF_FFFF_0000_0000;
+        assert_eq!(
+            super::placeholder_named(widened),
+            Some(("unimplemented", true)),
+            "a guest that sign-extended the refusal is still holding ours"
+        );
     }
 }

@@ -688,6 +688,16 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D664 | [An origin list, with every failure named](decisions/D664-an-origin-list-with-every-failure-named.md) | measured | 2026-09-10 |
 | 🟢 | D665 | [The index reads the entry, not its title](decisions/D665-the-index-reads-the-entry-not-its.md) | measured | 2026-09-10 |
 | 🟢 | D666 | [Orbis is the machine, neo is the refresh](decisions/D666-orbis-is-the-machine-neo-is-the.md) | decided | 2026-09-10 |
+| 🟢 | D667 | [The vendor spelling of a socket call, and the errno that travels with it](decisions/D667-the-vendor-spelling-of-a-socket-call.md) | decided | 2026-09-10 |
+| 🟢 | D668 | [Twelve knowledge files nothing loaded](decisions/D668-twelve-knowledge-files-nothing.md) | decided | 2026-09-10 |
+| 🟢 | D669 | [A title does not resolve by name, and orbistoun was calling itself a payload](decisions/D669-a-title-does-not-resolve-by-name-and.md) | decided | 2026-09-10 |
+| 🟢 | D670 | [The refusal a guest cannot see is a success](decisions/D670-the-refusal-a-guest-cannot-see-is-a.md) | decided | 2026-09-10 |
+| 🟢 | D671 | [The pad structure was measured, so the shim D345 deferred could be written](decisions/D671-the-pad-structure-was-measured-so-the.md) | decided | 2026-09-10 |
+| 🟢 | D672 | [The audio drain was measurable without a device](decisions/D672-the-audio-drain-was-measurable-without.md) | decided | 2026-09-10 |
+| 🟢 | D673 | [An empty queue is a report, not a refusal](decisions/D673-an-empty-queue-is-a-report-not-a.md) | decided | 2026-09-10 |
+| 🟢 | D674 | [A high-water mark that could move backwards](decisions/D674-a-high-water-mark-that-could-move.md) | decided | 2026-09-10 |
+| 🟢 | D675 | [A console's own sysctl knobs belong to its profile, and two belong to the platform](decisions/D675-a-console-s-own-sysctl-knobs-belong-to.md) | decided | 2026-09-10 |
+| 🟢 | D676 | [Weak undefined symbols bind to zero when unanswered](decisions/D676-weak-undefined-symbols-bind-to-zero.md) | decided | 2026-09-10 |
 
 | | meaning |
 |---|---|

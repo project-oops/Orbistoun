@@ -21,6 +21,12 @@ kind = "cex"
 revision = "base"
 firmware = 4672            # 0x1240 = 12.40
 kernel-release = "0.0-prototype"
+# kern.version, kern.sdk_version and hw.model, read off the same console by obSCEne's
+# 135-sysctl/names (sweep 20260909-110725, eboot leg). Each is this machine's own value, carried
+# verbatim. hw.model keeps the 34 trailing spaces the console wrote - 47 bytes in all (D675).
+kernel-version = "r226974/releases/12.40 Nov 27 2025 02:23:38"
+kernel-sdk-version = 306184201   # 0x12400009 = 12.400.009
+hardware-model = "100-000000189                                  "
 
 ["prospero-cex-12.40".software-version]
 display = "13.090.001"

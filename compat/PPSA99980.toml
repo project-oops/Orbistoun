@@ -9,12 +9,12 @@ name = "obSCEne"
 [status]
 reach = "flipped"
 outcome = "ran to the time limit"
-imports = 245
-calls = 448047
+imports = 246
+calls = 444296
 standing = 100
 default_return = "unimplemented"
 frames = 53
-unanswered = 42
-limit_seconds = 20
+unanswered = 34
+limit_seconds = 25
 build = "0.1.0"
-measured_on = "2026-09-09"
+measured_on = "2026-09-10"

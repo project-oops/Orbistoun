@@ -98,6 +98,8 @@ pub fn parse_table(bytes: &[u8]) -> Vec<Elf64Rela> {
 pub struct RelocationTally {
     /// Entries applied.
     pub applied: usize,
+    /// Entries bound to zero because the symbol was weak and unanswered.
+    pub weak_zero: usize,
     /// Entries needing thread-local storage, which does not exist yet.
     pub tls_deferred: usize,
     /// Entries of a type this loader does not implement.
@@ -109,7 +111,7 @@ pub struct RelocationTally {
 impl RelocationTally {
     /// Total entries seen.
     pub const fn total(&self) -> usize {
-        self.applied + self.tls_deferred + self.unsupported + self.unresolved
+        self.applied + self.weak_zero + self.tls_deferred + self.unsupported + self.unresolved
     }
 
     /// Whether every entry was applied.
@@ -193,10 +195,11 @@ mod tests {
     fn a_tally_reports_completeness_honestly() {
         let complete = RelocationTally {
             applied: 10,
+            weak_zero: 2,
             ..RelocationTally::default()
         };
         assert!(complete.complete());
-        assert_eq!(complete.total(), 10);
+        assert_eq!(complete.total(), 12);
 
         // One deferred entry means the image is not ready, even though nothing failed.
         // A pointer left unrelocated looks valid and is not.

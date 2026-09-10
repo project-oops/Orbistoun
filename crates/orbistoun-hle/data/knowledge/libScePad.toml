@@ -161,9 +161,19 @@ note = "not read"
 
 [[function]]
 name = "scePadReadState"
+arity = 2
+purpose = "Writes the current pad state into the caller's buffer."
+edge_cases = [
+    "MEASURED: the structure is 120 bytes and the call writes all 120. obSCEne fills the destination with a sentinel and reports how far the change reached - extent 120, changed 120. A shim writing only the fields it believes it understands leaves the rest of the guest's buffer holding whatever was there before, which is what that check exists to catch.",
+    "MEASURED at rest: 00000000 80808080 00000000 00000000 | 00000000 00000000 0000803f 00000000 | 0000803f 00000000 00000000 00000000 | then zero to the end. 0x0000803f is 1.0f little-endian.",
+    "orbistoun TRANSCRIBES those bytes rather than laying out a structure. Which offset carries the buttons and which the sticks is an inference from them - a mask in the first four bytes, four axes at 0x80 centre in the next four - and nothing needs the inference to answer this call correctly. Publishing it as a struct would put the inference where the measurement belongs (D671).",
+    "So orbistoun cannot report input through this yet. Mapping live pad state onto these bytes needs the field offsets, which are exactly the inferred part, so the transport D345 built stays unconsumed until a run with a button held settles where the bits go.",
+    "D345 left this unimplemented because the layout was unmeasured. That was right at the time and is what made the measurement worth asking for.",
+]
+known_by = "measured"
+cites = "obSCEne 100-input/read-extent, title leg of sweep 20260909-110725 (title/unknown-gpu), on a target console."
 found_in = ["PPSA02664-app0"]
-found_on = "2026-09-03"
-note = "Called 519 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+found_on = "2026-09-10"
 
 [[function]]
 name = "scePadSetLightBar"
@@ -236,3 +246,33 @@ note = "refused if this shim did not issue it"
 name = "param"
 kind = "ptr"
 note = "not read - its layout is not known from any lawful source"
+
+[[function]]
+name = "scePadRead"
+arity = 3
+purpose = "Writes the current pad state into the caller's buffer, asked for as a batch."
+edge_cases = [
+    "MEASURED: the structure is 120 bytes and the call writes all 120. obSCEne fills the destination with a sentinel and reports how far the change reached - extent 120, changed 120. A shim writing only the fields it believes it understands leaves the rest of the guest's buffer holding whatever was there before, which is what that check exists to catch.",
+    "MEASURED at rest: 00000000 80808080 00000000 00000000 | 00000000 00000000 0000803f 00000000 | 0000803f 00000000 00000000 00000000 | then zero to the end. 0x0000803f is 1.0f little-endian.",
+    "Identical to scePadReadState in both extent and contents - obSCEne measures the two separately and they agree, which is why orbistoun answers both from one body rather than leaving two implementations free to drift.",
+    "The count argument is NOT honoured. The real call reads up to that many samples and answers how many it got; nothing has measured what a console returns for more than one, and writing that many copies of a single sample would be inventing a history the pad does not have. One sample, and the caller is told one (D671).",
+]
+known_by = "measured"
+cites = "obSCEne 100-input/batched-read, title leg of sweep 20260909-110725 (title/unknown-gpu), on a target console."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "scePadReadStateExt"
+arity = 2
+purpose = "Writes the current pad state into the caller's buffer."
+edge_cases = [
+    "Served by the same body as scePadReadState, for the reason scePadOpenExt is served by the same body as scePadOpen: the library exports both, a real module imports both, and nothing measured distinguishes them.",
+    "See scePadReadState for the measured extent and the at-rest image.",
+]
+known_by = "assumed"
+assumptions = [
+    "That it writes the same structure as scePadReadState. obSCEne measures the plain spelling; this one is bound to the same body on the strength of the naming pair alone.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"

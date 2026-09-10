@@ -12,13 +12,13 @@ master_version = "01.00"
 reach = "entered"
 outcome = "image+0x17554a3"
 imports = 151
-calls = 321973
+calls = 321976
 standing = 100
 default_return = "unimplemented"
 unanswered = 6
 limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-09"
+measured_on = "2026-09-10"
 
 [experiment]
 reach = "entered"

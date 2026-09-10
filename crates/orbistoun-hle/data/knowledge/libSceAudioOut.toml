@@ -18,3 +18,61 @@ purpose = "Initialises the audio-output subsystem before any port is opened."
 returns = "status"
 known_by = "assumed"
 found_on = "2026-09-01"
+
+[[function]]
+name = "sceAudioOutOpen"
+arity = 6
+purpose = "Opens an audio output port. sceAudioOutOpen(user, portType, index, length, frequency, param)."
+edge_cases = [
+    "MEASURED: the console splits formats on the FREQUENCY alone. 48000 Hz was accepted at chunk 0x100, 0x200, 0x400 and 0x800; 44100 Hz was refused at all four. Chunk size decided no measured case, so orbistoun decides on nothing but the frequency - refusing an unmeasured chunk would be inventing a rule the data does not contain.",
+    "MEASURED: a refused format answers 0x80260008 - the audio subsystem's own base, code 8. What the 8 means is not established; that this is the refusal is.",
+    "The signature is obSCEne's, which calls it as sceAudioOutOpen(user, 0, 0, length, frequency, param) and falls back to user 0xFF when the initial user does not resolve. length is frames per chunk and param is the format selector.",
+    "orbistoun held this back until now on the D171 reasoning: no audio backend, and a port that opens but never drains hangs a title blocking on buffer completion. What changed is that 090-audio/blocking measured the drain, so it can be modelled from the sample rate rather than from a device (D672).",
+]
+known_by = "measured"
+cites = "obSCEne 090-audio/open-shapes, title leg of sweep 20260909-110725 (title/unknown-gpu), on a target console."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceAudioOutOutput"
+arity = 2
+purpose = "Hands a chunk of samples to an open port. Blocks until they have played."
+edge_cases = [
+    "MEASURED: it blocks. 090-audio/blocking sends eight 512-frame buffers at 48 kHz and times them - 0xdedc microseconds, 57 ms - and treats anything under 40 ms as not having blocked, because the interface promises it does.",
+    "Eight 512-frame buffers at 48 kHz is 85 ms of audio, and the console returned in 57. That gap is a queue a few buffers deep absorbing the first calls. HOW deep is not measured, so orbistoun has no queue and every call waits its full duration - landing above the 40 ms floor rather than near it. Picking a depth would be inventing the one thing this could get wrong.",
+    "The return value is ASSUMED to be the frame count. obSCEne discards it, so nothing has seen what a console answers; a guest testing rc < 0 reads it as success either way.",
+]
+known_by = "measured"
+cites = "obSCEne 090-audio/blocking, title leg of sweep 20260909-110725."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceAudioOutGetPortState"
+arity = 2
+purpose = "Writes a port's current state into the caller's buffer."
+edge_cases = [
+    "MEASURED: 16 bytes, and the three format selectors differ in exactly one of them. Selector 0: 81 00 01 c7 ff ff 05 00 then zero. Selectors 1 and 2: the same with 02 at offset two.",
+    "Offset two is the channel count - obSCEne reads it as one, which is what lets 090-audio/format-selector settle whether selector 0 is mono objectively rather than from a header. Selector 0 is MONO on this console.",
+    "orbistoun transcribes the bytes rather than laying out a structure. What 0x81, 0xc7, 0xffff and 0x05 mean is not claimed; they were the same for every port measured and are written back the same way (D672).",
+    "Declared here because obSCEne imports it by name, which is the provenance every other name in this library has.",
+]
+known_by = "measured"
+cites = "obSCEne 090-audio/format-selector, title leg of sweep 20260909-110725."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceAudioOutSetVolume"
+arity = 3
+purpose = "Sets a port's volume. Accepted; there is nothing here to make quieter."
+edge_cases = [
+    "MEASURED: 090-audio/volume-flag sets flags 1, 2 and 3 and the console answers 0x0 to each.",
+    "orbistoun accepts and discards, which is the pad's vibration reasoning: refusing would stop a title that sets a volume while opening a port, and the call succeeding while nothing gets quieter is what a device with no volume control does.",
+    "A handle nothing opened is refused with 0x80260003 rather than accepted, so a guest cannot set the volume on a port it never had.",
+]
+known_by = "measured"
+cites = "obSCEne 090-audio/volume-flag, title leg of sweep 20260909-110725."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"

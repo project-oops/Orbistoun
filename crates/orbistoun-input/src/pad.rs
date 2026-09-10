@@ -214,6 +214,51 @@ impl PadState {
     }
 }
 
+/// How many bytes a pad read writes.
+///
+/// **Measured.** obSCEne's `100-input/read-extent` fills a buffer with a sentinel, calls
+/// `scePadReadState`, and reports how far the change reached: `extent 120`, `changed 120`.
+/// `100-input/batched-read` reports the same for `scePadRead`. So the structure is 120 bytes
+/// and the call writes all of them (D671).
+pub const STATE_BYTES: usize = 120;
+
+/// The 120 bytes a console wrote for a pad at rest.
+///
+/// # Transcribed, not modelled
+///
+/// This is not a `struct` with named fields, and deliberately. What was measured is the byte
+/// image a console produced; which offset carries the buttons and which the sticks is an
+/// *inference* from it, and a shim that laid out fields would be publishing that inference as
+/// though it were the measurement. The obvious reading - a button mask in the first four
+/// bytes, four axes at `0x80` (centre) in the next four, and `1.0f` at 24 and 32 - is written
+/// here as a comment because a comment is what it is worth.
+///
+/// Nothing needs the reading to answer the call correctly, which is the whole argument for
+/// not committing to one: a guest asking what the pad is doing when nothing is touching it
+/// gets exactly what a console gives it.
+///
+/// **What this cannot do is report input**, and that is the limit to say out loud rather than
+/// paper over. Mapping orbistoun's live pad state onto these bytes needs the field offsets,
+/// and those are the part that is inferred - so `latest` stays unread and the transport D345
+/// built stays unconsumed until a run with a button held settles where the bits go. Filed as
+/// obscene REQ-20260910T0650Z-d1c4.
+///
+/// Reference: obSCEne `100-input/read-extent` and `100-input/batched-read`, title leg of
+/// sweep 20260909-110725, `title/unknown-gpu`.
+pub const AT_REST: &[u8; STATE_BYTES] = &[
+    // 0: 00000000 80808080 00000000 00000000
+    0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 16: 00000000 00000000 0000803f 00000000   - 0x3f800000 is 1.0f little-endian
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00,
+    // 32: 0000803f 00000000 00000000 00000000
+    0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 48..120: zero, every row
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 #[cfg(test)]
 mod tests {
     use super::{Button, PadState, TRIGGER_THRESHOLD};

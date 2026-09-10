@@ -220,7 +220,9 @@ pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
             // that reads a request with `read` and one that reads it with `recv` are the same
             // program to everything below this line.
             Target::Socket(socket) => match socket {
-                crate::socket::Socket::Stream(stream) => Some(stream.read(into).unwrap_or(0)),
+                crate::socket::Socket::Stream { stream, .. } => {
+                    Some(stream.read(into).unwrap_or(0))
+                }
                 // Reading a listener is a guest's mistake, reported rather than answered with
                 // an empty read that looks like a closed connection.
                 _ => None,
@@ -232,6 +234,122 @@ pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
         return Some(crate::escape::read_kernel_pipe(into));
     }
     None
+}
+
+/// Whether a socket call is allowed to wait for what it asked for.
+///
+/// # Why the flag is not just passed through
+///
+/// `MSG_DONTWAIT` is a property of **one call**, not of the socket, and honouring it means
+/// making the host socket non-blocking for the length of that call and then putting it back.
+/// Getting the second half wrong is invisible where it happens and turns a guest's later
+/// blocking `recv` into a busy loop somewhere else - so the two halves are one type rather
+/// than two statements a reader has to notice are paired (D667).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// The socket's own mode decides, which is the ordinary case.
+    AsTheSocketIs,
+    /// The call carried `MSG_DONTWAIT`: answer now, whatever the socket's mode.
+    Never,
+}
+
+/// Whether a call changed the socket's mode and therefore owes it a restore.
+#[derive(Debug, Clone, Copy)]
+#[must_use = "a forced mode has to be put back, or it outlives the call that forced it"]
+pub struct Restore(bool);
+
+impl Wait {
+    /// Forces non-blocking for one call where the flag asks for it, saying what is owed back.
+    fn forced_on(self, stream: &std::net::TcpStream, nonblocking: bool) -> Restore {
+        // Already non-blocking, so the flag asks for nothing and nothing is owed.
+        if self == Self::AsTheSocketIs || nonblocking {
+            return Restore(false);
+        }
+        Restore(stream.set_nonblocking(true).is_ok())
+    }
+}
+
+impl Restore {
+    /// Puts the socket back the way the guest left it.
+    fn put_back(self, stream: &std::net::TcpStream, nonblocking: bool) {
+        if self.0 {
+            let _ = stream.set_nonblocking(nonblocking);
+        }
+    }
+}
+
+/// Reads into `into` for a socket call, naming the errno when it could not.
+///
+/// # Why this is not [`read`]
+///
+/// [`read`] answers `Option<usize>`, and both of the conditions obSCEne measured collapse
+/// inside it: a would-block became `Some(0)`, which a guest reads as the peer hanging up, and
+/// a read of a listener became `None`, which says nothing about why. Hardware answers those
+/// two differently - `0x8041_0123` and `0x8041_0139`, `EAGAIN` and `ENOTCONN` - so the vendor
+/// spelling needs the number and not just the failure (D667).
+///
+/// **Anything that is not a socket is still [`read`]**, unchanged: a guest calling `recv` on a
+/// file is unusual, and this is not the place to start refusing it.
+pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
+    use std::io::Read as _;
+    let mut table = table().lock().map_err(|_| crate::socket::UNNAMED)?;
+    match table.get_mut(&fd) {
+        Some(Target::Socket(crate::socket::Socket::Stream {
+            stream,
+            nonblocking,
+        })) => {
+            let restore = wait.forced_on(stream, *nonblocking);
+            let answered = match stream.read(into) {
+                Ok(n) => Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(orbistoun_core::errno::AGAIN)
+                }
+                Err(_) => Err(crate::socket::UNNAMED),
+            };
+            restore.put_back(stream, *nonblocking);
+            answered
+        }
+        // A listener has no peer to read from, which is the condition the console answered
+        // `ENOTCONN` (obSCEne `102-net/recv-would-block`).
+        Some(Target::Socket(_)) => Err(orbistoun_core::errno::NOT_CONNECTED),
+        _ => {
+            drop(table);
+            read(fd, into).ok_or(crate::socket::UNNAMED)
+        }
+    }
+}
+
+/// Writes `bytes` for a socket call, naming the errno when it could not.
+///
+/// The counterpart to [`socket_read`], and it exists for one of the same two conditions: a
+/// send on a saturated socket is a would-block, which hardware answers `0x8041_0123`
+/// (obSCEne `102-net/accept-inherits`), and [`write()`] reports it as `None` alongside every
+/// other reason a write can fail.
+pub fn socket_write(fd: u64, bytes: &[u8], wait: Wait) -> Result<usize, u32> {
+    use std::io::Write as _;
+    let mut table = table().lock().map_err(|_| crate::socket::UNNAMED)?;
+    match table.get_mut(&fd) {
+        Some(Target::Socket(crate::socket::Socket::Stream {
+            stream,
+            nonblocking,
+        })) => {
+            let restore = wait.forced_on(stream, *nonblocking);
+            let answered = match stream.write(bytes) {
+                Ok(n) => Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(orbistoun_core::errno::AGAIN)
+                }
+                Err(_) => Err(crate::socket::UNNAMED),
+            };
+            restore.put_back(stream, *nonblocking);
+            answered
+        }
+        Some(Target::Socket(_)) => Err(orbistoun_core::errno::NOT_CONNECTED),
+        _ => {
+            drop(table);
+            write(fd, bytes).ok_or(crate::socket::UNNAMED)
+        }
+    }
 }
 
 /// Writes `bytes`, answering how many were taken.
@@ -259,7 +377,9 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
         // A device that refuses writes says so rather than discarding them.
         Some(Target::Device(device)) => device.writable().then_some(bytes.len()),
         Some(Target::File(file)) => file.write(bytes).ok(),
-        Some(Target::Socket(crate::socket::Socket::Stream(stream))) => stream.write(bytes).ok(),
+        Some(Target::Socket(crate::socket::Socket::Stream { stream, .. })) => {
+            stream.write(bytes).ok()
+        }
         // Not an open descriptor. FD 4 is the kernel R/W escape pipe write end (`rwpipe[1]`) when the
         // escape address is set, and its writes are swallowed as the pipe would. Checked *after* the
         // table, not before, so a real file that happens to land at descriptor 4 is written rather
@@ -444,14 +564,25 @@ pub fn duplicate_into(from: u64, to: u64) -> bool {
 /// A second handle onto the same socket, where the kind allows one.
 fn duplicate_socket(socket: &crate::socket::Socket) -> Option<Target> {
     let copy = match socket {
-        crate::socket::Socket::Stream(stream) => {
-            crate::socket::Socket::Stream(stream.try_clone().ok()?)
-        }
-        crate::socket::Socket::Listener { listener, .. } => crate::socket::Socket::Listener {
+        crate::socket::Socket::Stream {
+            stream,
+            nonblocking,
+        } => crate::socket::Socket::Stream {
+            stream: stream.try_clone().ok()?,
+            nonblocking: *nonblocking,
+        },
+        crate::socket::Socket::Listener {
+            listener,
+            nonblocking,
+            ..
+        } => crate::socket::Socket::Listener {
             listener: listener.try_clone().ok()?,
             // A connection `select` left on the original stays there: it is one connection
             // and only one descriptor can be given it.
             pending: None,
+            // The mode travels with the copy, because a duplicated descriptor is the same
+            // socket and `accept` reads this rather than the host.
+            nonblocking: *nonblocking,
         },
         // Nothing to duplicate yet, and inventing a second pending socket would give the
         // guest two descriptors that would later bind the same address.
@@ -501,7 +632,9 @@ pub fn readable(fd: u64) -> bool {
     match table.get_mut(&fd) {
         Some(Target::File(_)) => true,
         Some(Target::Socket(socket)) => match socket {
-            crate::socket::Socket::Listener { listener, pending } => {
+            crate::socket::Socket::Listener {
+                listener, pending, ..
+            } => {
                 if pending.is_some() {
                     return true;
                 }
@@ -518,7 +651,10 @@ pub fn readable(fd: u64) -> bool {
                     Err(_) => false,
                 }
             }
-            crate::socket::Socket::Stream(stream) => {
+            crate::socket::Socket::Stream {
+                stream,
+                nonblocking,
+            } => {
                 if stream.set_nonblocking(true).is_err() {
                     return false;
                 }
@@ -529,7 +665,11 @@ pub fn readable(fd: u64) -> bool {
                     Ok(_) => true,
                     Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
                 };
-                let _ = stream.set_nonblocking(false);
+                // **Back to what the guest asked for, not to blocking.** This restored `false`
+                // unconditionally, so a `select` on a socket the guest had made non-blocking
+                // handed it back blocking - the same defect `MSG_DONTWAIT` has, found while
+                // fixing that one (D667).
+                let _ = stream.set_nonblocking(*nonblocking);
                 ready
             }
             // A socket with nothing behind it yet cannot be read from at all.
@@ -557,7 +697,7 @@ pub fn writable(fd: u64) -> bool {
     match table.get(&fd) {
         Some(Target::File(_)) => true,
         Some(Target::Socket(socket)) => {
-            matches!(socket, crate::socket::Socket::Stream(_))
+            matches!(socket, crate::socket::Socket::Stream { .. })
         }
         Some(Target::Device(device)) => device.writable(),
         // Nothing is written to a queue.
@@ -594,13 +734,31 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
     };
     match table.get_mut(&fd) {
         Some(Target::Socket(socket)) => match socket {
-            crate::socket::Socket::Listener { listener, .. } => {
+            crate::socket::Socket::Listener {
+                listener,
+                nonblocking,
+                ..
+            } => {
+                // Remembered as well as applied, because `accept` needs the answer and the
+                // host listener has a setter with no getter.
+                *nonblocking = wanted;
                 listener.set_nonblocking(wanted).is_ok()
             }
-            crate::socket::Socket::Stream(stream) => stream.set_nonblocking(wanted).is_ok(),
-            // Nothing exists behind it yet, so there is nothing to set it on. Accepted,
-            // because `bind` has not been called and the guest has said nothing wrong.
-            crate::socket::Socket::Pending { .. } => true,
+            crate::socket::Socket::Stream {
+                stream,
+                nonblocking,
+            } => {
+                // Remembered as well as applied, so a `MSG_DONTWAIT` call can put it back.
+                *nonblocking = wanted;
+                stream.set_nonblocking(wanted).is_ok()
+            }
+            // Nothing exists behind it yet, so the flag is **kept** until `listen` or
+            // `connect` makes something to put it on. Accepting it and forgetting it is what
+            // left a guest believing a socket was non-blocking when it was not (D667).
+            crate::socket::Socket::Pending { nonblocking, .. } => {
+                *nonblocking = wanted;
+                true
+            }
         },
         // A device answers immediately or not at all; there is no blocking read to turn
         // off, so the setting is accepted and changes nothing - which is true rather than

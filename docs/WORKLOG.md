@@ -505,3 +505,12 @@ context cannot re-derive.
 | - | [488. An origin list](worklog/488-an-origin-list.md) |
 | - | [489. The index was never mine to edit](worklog/489-the-index-was-never-mine-to-edit.md) |
 | - | [490. Orbis, not neo](worklog/490-orbis-not-neo.md) |
+| - | [491. The vendor spelling of a socket, and the flag that hung the guest](worklog/491-the-vendor-spelling-of-a-socket.md) |
+| - | [492. orbistoun was calling itself a payload](worklog/492-orbistoun-was-calling-itself-a-payload.md) |
+| - | [493. The refusal a guest could not see](worklog/493-the-refusal-a-guest-could-not-see.md) |
+| - | [494. The pad structure had been measured](worklog/494-the-pad-structure-had-been-measured.md) |
+| - | [495. The audio drain was arithmetic](worklog/495-the-audio-drain-was-arithmetic.md) |
+| - | [496. A weak symbol orbistoun says exists](worklog/496-a-weak-symbol-orbistoun-says-exists.md) |
+| - | [497. The comparison ran on the wrong machine](worklog/497-the-comparison-ran-on-the-wrong-machine.md) |
+| - | [498. Weak undefined symbols bind to zero](worklog/498-weak-undefined-symbols-bind-to-zero.md) |
+| - | [499. The corpus is GPU-bound, and a real header agreed](worklog/499-the-corpus-is-gpu-bound-and-a-real-header.md) |

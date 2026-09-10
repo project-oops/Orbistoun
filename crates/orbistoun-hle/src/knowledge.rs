@@ -85,6 +85,62 @@ const EMBEDDED: &[(&str, &str)] = &[
         "libSceUlt",
         include_str!("../data/knowledge/libSceUlt.toml"),
     ),
+    // The rest, in the order the directory holds them. **Registered by the guard below rather
+    // than by hand**: twelve of these were written into the repository and no build loaded
+    // one of them, so `orbistoun-cli learn` was recording behaviour the emulator could not
+    // see, and the accounting reported it as recorded (D668).
+    (
+        "libSceAgcDriver",
+        include_str!("../data/knowledge/libSceAgcDriver.toml"),
+    ),
+    (
+        "libSceCommonDialog",
+        include_str!("../data/knowledge/libSceCommonDialog.toml"),
+    ),
+    (
+        "libSceCoredump",
+        include_str!("../data/knowledge/libSceCoredump.toml"),
+    ),
+    (
+        "libSceErrorDialog",
+        include_str!("../data/knowledge/libSceErrorDialog.toml"),
+    ),
+    (
+        "libSceJson2",
+        include_str!("../data/knowledge/libSceJson2.toml"),
+    ),
+    (
+        "libSceKeyboard",
+        include_str!("../data/knowledge/libSceKeyboard.toml"),
+    ),
+    (
+        "libSceMouse",
+        include_str!("../data/knowledge/libSceMouse.toml"),
+    ),
+    (
+        "libSceNet",
+        include_str!("../data/knowledge/libSceNet.toml"),
+    ),
+    (
+        "libSceNetCtl",
+        include_str!("../data/knowledge/libSceNetCtl.toml"),
+    ),
+    (
+        "libSceSaveData_native",
+        include_str!("../data/knowledge/libSceSaveData_native.toml"),
+    ),
+    (
+        "libSceUserService",
+        include_str!("../data/knowledge/libSceUserService.toml"),
+    ),
+    (
+        "libSceVideoRecording",
+        include_str!("../data/knowledge/libSceVideoRecording.toml"),
+    ),
+    (
+        "libkernel_unity",
+        include_str!("../data/knowledge/libkernel_unity.toml"),
+    ),
 ];
 
 /// One argument, as far as it is understood.
@@ -967,6 +1023,52 @@ impl Knowledge {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Every knowledge file in the directory is embedded**, or it is written and never read.
+    ///
+    /// [`EMBEDDED`] is a hand-kept list and `include_str!` takes a literal path, so nothing made
+    /// the list and the directory agree - and twelve files had accumulated on disk that no build
+    /// ever loaded. That is worse than not writing them down: the accounting reports a behaviour
+    /// as recorded, `orbistoun-cli learn` writes to a file that ships in the repository, and the
+    /// emulator answers as though nothing were known.
+    ///
+    /// Read at test time from `CARGO_MANIFEST_DIR`, which is the same directory the `include_str!`
+    /// paths are relative to, so the two cannot be pointed at different places.
+    #[test]
+    fn every_knowledge_file_on_disk_is_embedded() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/knowledge");
+        let mut orphaned: Vec<String> = std::fs::read_dir(&directory)
+            .expect("the knowledge directory")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                (path.extension()? == "toml")
+                    .then(|| path.file_stem()?.to_str().map(str::to_owned))?
+            })
+            .filter(|stem| !super::EMBEDDED.iter().any(|(library, _)| library == stem))
+            .collect();
+        orphaned.sort();
+        assert!(
+            orphaned.is_empty(),
+            "these knowledge files ship in the repository and no build loads them: {orphaned:?}"
+        );
+    }
+
+    /// The other direction: nothing is embedded under a name its own file disagrees with.
+    ///
+    /// The list pairs a library name with a path, and the pairing is what `absorb` falls back on
+    /// when a file carries no `library =` line. A file registered under the wrong name would put
+    /// its functions in another library's namespace, which reads as a working entry.
+    #[test]
+    fn every_embedded_file_names_the_library_it_is_registered_as() {
+        for (library, text) in super::EMBEDDED {
+            let file = KnowledgeFile::parse(text).expect("a shipped file parses");
+            assert!(
+                file.library.is_empty() || file.library == *library,
+                "{library} is registered under that name and calls itself {}",
+                file.library
+            );
+        }
+    }
     use super::{DELEGATION_ASSUMPTION, Knowledge, KnowledgeFile, Oracle, Record};
 
     /// Recording one thing does not erase what was recorded before it.

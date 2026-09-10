@@ -7,16 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Networking HLE: declarations for the libraries a title imports."
+description = "Networking HLE: sockets over the filesystem shim's, and declarations for the rest."
 
 [lints]
 workspace = true
 
 [dependencies]
+orbistoun-core = { workspace = true }
+# The socket bodies. This crate declares `libSceNet` and knows how it numbers an error;
+# `orbistoun-fs` owns the sockets themselves and answers a POSIX errno, which is the one
+# thing the two spellings disagree about (D667).
+orbistoun-fs = { workspace = true }
 orbistoun-hle = { workspace = true }
 
 [dev-dependencies]
-# Only the test needs it: the base itself is a plain `u32`, and the assertion that it
-# reconstructs the measured codes goes through `GuestError::vendor_in` because that is the
-# function a shim will actually call (D627).
-orbistoun-core = { workspace = true }

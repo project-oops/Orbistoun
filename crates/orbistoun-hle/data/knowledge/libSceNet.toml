@@ -12,3 +12,133 @@ edge_cases = [
 known_by = "guest-observed"
 cites = "obSCEne 102-net/recv-would-block, on a target console"
 found_on = "2026-09-08"
+
+[[function]]
+name = "sceNetSocket"
+arity = 4
+purpose = "Opens a socket, taking a name for it before the address family."
+edge_cases = [
+    "**The first argument is a name, which POSIX socket does not take.** obSCEne types the import as int (*)(const char *, int, int, int) and calls it with a string and then with NULL; hardware answered the same descriptor, 0x13, to both. So the family is the SECOND argument, and every other socket call in this library sits at the POSIX positions - this is the only one that shifts.",
+    "The name changes nothing observable through this interface, so orbistoun reads and discards it. What it is for on the console is not established.",
+    "The descriptor 0x13 is the console's own numbering rather than a constant: orbistoun answers from its own descriptor table, which starts at 3.",
+]
+known_by = "measured"
+cites = "obSCEne 102-net/listener and 102-net/resolve, package leg of sweep 20260909-234847, on a target console."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetBind"
+arity = 3
+purpose = "Names the address a socket is to listen on."
+edge_cases = [
+    "MEASURED: the platform does not validate sin_len. 102-net/sockaddr-bind bound the same address twice, once with sin_len 16 and once with it zeroed, and hardware answered 0x0 to both. A reimplementation that checked the field would refuse a call the console accepts.",
+    "A refusal is 0x8041_0100 | errno, not -1. The one seen was 0x80410130 - 0x30 is 48, EADDRINUSE, and the POSIX bind in the same check had already taken the address. Corroborating rather than measured: that errno was not read independently.",
+]
+known_by = "measured"
+cites = "obSCEne 102-net/sockaddr-bind, package leg of sweep 20260909-234847."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetListen"
+arity = 2
+purpose = "Makes a bound socket visible to connections."
+edge_cases = [
+    "MEASURED: answers 0x0 (102-net/listener, 102-net/socket-listen). Nothing has measured what it answers for a socket nobody bound.",
+    "orbistoun does not honour the backlog: the host listener chooses its own, and passing a guest's number through would report a queue depth nothing here can promise.",
+]
+known_by = "measured"
+cites = "obSCEne 102-net/listener, package leg of sweep 20260909-234847."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetAccept"
+arity = 3
+purpose = "Takes the next connection off a listening socket."
+edge_cases = [
+    "MEASURED, indirectly: 102-net/accept-inherits sends on an accepted socket until it saturates and reads 0x80410123 - EAGAIN - which a blocking socket cannot produce. So an accepted socket carries the listener's non-blocking mode. orbistoun sets it explicitly rather than relying on the host, because whether an accepted socket inherits it is a per-platform difference.",
+    "Nothing has measured what it answers when a non-blocking listener has no connection waiting. orbistoun answers EAGAIN, which is the code the same condition produces for a read on the same sweep - an inference from an adjacent measurement, not a measurement.",
+]
+known_by = "guest-observed"
+cites = "obSCEne 102-net/accept-inherits, package leg of sweep 20260909-234847."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetConnect"
+arity = 3
+purpose = "Connects a socket to an address."
+edge_cases = [
+    "Nothing has measured this. orbistoun connects with the host blocking and then applies the flag the guest asked for, because a non-blocking connect answers EINPROGRESS and finishes later - a second state this does not model. The difference a guest could see is the return of this call, and no sweep has looked at it.",
+]
+known_by = "assumed"
+assumptions = ["That the argument positions match POSIX connect. obSCEne types the import that way and the call has not been exercised on hardware."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetSetsockopt"
+arity = 5
+purpose = "Sets a socket option. Option 0x1200 at level 0xffff is how this platform turns non-blocking on."
+edge_cases = [
+    "MEASURED: setsockopt(0xffff, 0x1200, &1, 4) answers 0x0, and fcntl(F_SETFL, O_NONBLOCK) answers -1 on the same machine - so the option is how non-blocking is set here and fcntl is not. The check tries 0x1100 as a fallback and the console refused it, so 0x1200 is settled rather than one of two.",
+    "0x1200 is not the FreeBSD SO_* numbering and no harvested header names it. The value comes from the measurement alone.",
+    "That the option is APPLIED and not merely accepted is established by a second measurement: a recv on the socket it was set on answers 0x80410123, EAGAIN, which a blocking socket cannot produce.",
+    "Every other option is accepted and not applied, and the reason is in the shim: a per-option mapping nothing here can verify is a socket behaving differently from what the guest asked for with nothing saying so. SO_REUSEADDR in particular is what the host's listener does by default, so honouring it changes nothing.",
+]
+known_by = "measured"
+cites = "obSCEne 102-net/nonblocking-option and 102-net/recv-would-block, package leg of sweep 20260909-234847."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetGetsockname"
+arity = 3
+purpose = "Answers the address a socket actually ended up on."
+edge_cases = [
+    "Not exercised on hardware. Served rather than stubbed because a server that binds to port zero asks this and prints the answer - a made-up number there is a wrong port in front of whoever is trying to connect.",
+]
+known_by = "assumed"
+assumptions = ["That the argument positions match POSIX getsockname, by analogy with the calls in this library that obSCEne did type and measure."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetSend"
+arity = 4
+purpose = "Writes to a connected socket."
+edge_cases = [
+    "MEASURED: on a saturated non-blocking socket it answers 0x80410123 - EAGAIN - after 0xbf88 bytes across two sends. The would-block code is the same one recv answers, which is what makes the pair readable as base | errno rather than as two unrelated constants.",
+    "The flags are ignored, and that is stated rather than silent: MSG_OOB and MSG_DONTROUTE are not things this can promise. Every payload measured passes zero.",
+]
+known_by = "measured"
+cites = "obSCEne 102-net/accept-inherits, package leg of sweep 20260909-234847."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetSocketClose"
+arity = 1
+purpose = "Closes a socket."
+edge_cases = [
+    "A separate name from the kernel's close, and orbistoun keeps it separate for one reason: the failure. sceKernelClose is measured answering 0x8002_0009 for a descriptor that is not open, so EBADF is the number, and each library numbers it in its own base - this one would be 0x8041_0109. Nothing has measured that value.",
+    "The success path is one table lookup and is shared with close.",
+]
+known_by = "assumed"
+assumptions = ["That it answers 0x0 on success. obSCEne closes with it throughout and never reports the return, so the value is inferred from the checks that go on to pass rather than read."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetHtons"
+arity = 1
+purpose = "Host to network byte order, sixteen bits."
+edge_cases = [
+    "A byte swap: total ground truth, no oracle problem, and no failure path to encode - which is why this one name is served by the POSIX body directly rather than through a wrapper.",
+]
+known_by = "published"
+cites = "POSIX.1-2008 htons(3); the platform's FreeBSD ancestor, sys/sys/endian.h."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"

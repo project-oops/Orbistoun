@@ -5608,7 +5608,24 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // only to those. A name the *guest's own binary* exports is a different question: PPSA02664
     // asks for its own `scriptingGetMem` through this call (D517), and refusing that because
     // libkernel does not export it would break a working path to fix a different one.
-    let from_stubs = orbistoun_thunk::name_thunk(&name);
+    //
+    // **And on a title's route the stub table is not consulted at all.** The console does not
+    // resolve platform names by name from a launched title: obSCEne's
+    // `060-module/dlsym-resolves-known-symbol` fails `0x8002_0003` for a known symbol from a
+    // valid handle, and every `dlsym` measurement in that leg reads `0x0`. A payload's does
+    // resolve and has to (D365), so the refusal is the route's rather than the function's
+    // (D669).
+    //
+    // Scoped to the stub table on purpose. What was measured is the platform refusing to hand
+    // out *its own* functions; nothing has asked a title for a symbol its own binary exports,
+    // so that path is left alone rather than refused on the strength of an adjacent finding.
+    let resolves_by_name =
+        orbistoun_core::route::resolves_by_name(orbistoun_core::route::presented());
+    let from_stubs = if resolves_by_name {
+        orbistoun_thunk::name_thunk(&name)
+    } else {
+        None
+    };
 
     // **A module handle now narrows the answer, for the one handle that has been measured.**
     //
@@ -5640,10 +5657,17 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // away the half that says what the runtime is built out of. The same shape as the
     // `sysctl` report, for the same reason (D366).
     if first_time_asked(&name) {
-        let verdict = address.map_or_else(
-            || "which nothing here implements".to_owned(),
-            |at| format!("answered {at:#x}"),
-        );
+        // **Three verdicts, not two.** A title's refusal is not "nothing here implements it" -
+        // the function is implemented and reachable by import, and the platform simply does not
+        // hand it out by name. Reporting the two the same way would put every platform name a
+        // title asks for onto a work list that has already been done (D669).
+        let verdict = match address {
+            Some(at) => format!("answered {at:#x}"),
+            None if !resolves_by_name => {
+                "which a title's route does not resolve by name, as the console does not".to_owned()
+            }
+            None => "which nothing here implements".to_owned(),
+        };
         let line = format!("orbistoun: the guest asked for the address of {name} - {verdict}");
         eprintln!("{line}");
         // **And to the kernel log**, which is what `klogsrv` forwards. A name the guest could
@@ -5653,7 +5677,17 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 
     let Some(address) = address else {
-        return u64::from(GuestError::Unimplemented.as_raw());
+        // **The measured refusal where the route explains it, the placeholder where it does
+        // not.** `0x7FFF_0001` says "nothing here implements this", which is orbistoun talking
+        // about itself and is deliberately a value no firmware answers. A title asking for a
+        // platform name is a different case: the console answers `0x8002_0003`, the function
+        // exists, and handing back a placeholder would be reporting an emulator gap where the
+        // platform has a rule (D669).
+        return u64::from(if resolves_by_name {
+            GuestError::Unimplemented.as_raw()
+        } else {
+            orbistoun_core::route::NAME_NOT_RESOLVED
+        });
     };
     if !write_word(out, address) {
         return u64::from(GuestError::InvalidArgument.as_raw());

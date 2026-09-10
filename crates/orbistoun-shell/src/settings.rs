@@ -332,6 +332,10 @@ mod tests {
                     display: "1.02.003".to_owned(),
                     packed: 0x0102_0003,
                 }),
+                // Non-default too, so the round trip covers the three sysctl knobs' keys (D675).
+                kernel_version: "a banner somebody read".to_owned(),
+                kernel_sdk_version: 0x0102_0003,
+                hardware_model: "a padded model   ".to_owned(),
             },
             users: vec![
                 super::User {

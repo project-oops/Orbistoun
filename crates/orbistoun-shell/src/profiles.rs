@@ -66,6 +66,31 @@ mod tests {
             "what sceKernelGetSystemSwVersion reports"
         );
         assert_eq!(sw.packed, 0x1309_0001, "and its packed integer");
+        // The three knobs `135-sysctl/names` read back that belong to a machine rather than to
+        // the platform: the kernel's build banner, its SDK number and the hardware model (D675).
+        assert_eq!(
+            m.kernel_version, "r226974/releases/12.40 Nov 27 2025 02:23:38",
+            "kern.version, as the console wrote it"
+        );
+        assert_eq!(
+            m.kernel_version.len(),
+            43,
+            "the measured extent, one short of the 0x2c length that counts the terminator"
+        );
+        assert_eq!(
+            m.kernel_sdk_version, 0x1240_0009,
+            "kern.sdk_version - 12.400.009, the system software the run header names"
+        );
+        assert_eq!(
+            m.hardware_model.trim_end(),
+            "100-000000189",
+            "hw.model's text"
+        );
+        assert_eq!(
+            m.hardware_model.len(),
+            47,
+            "trailing spaces kept: the console wrote 47 bytes, and a trimmed string is a different answer"
+        );
         assert_ne!(
             u32::from(m.firmware) << 16,
             sw.packed,

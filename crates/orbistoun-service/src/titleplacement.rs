@@ -366,7 +366,7 @@ pub(crate) fn place_all(
 mod tests {
     use std::collections::BTreeMap;
 
-    use orbistoun_elf::dynamic::{Kind, NameForm, RawImport};
+    use orbistoun_elf::dynamic::{Binding, Kind, NameForm, RawImport};
 
     use super::{PlacedTitleModules, TitleExport, kinds_disagree};
 
@@ -426,6 +426,7 @@ mod tests {
                 module_id: 0,
             },
             kind: Kind::Function,
+            binding: Binding::Global,
             name: format!("import{nid:#x}"),
         }
     }
@@ -436,6 +437,7 @@ mod tests {
             nid,
             form: NameForm::Plain,
             kind: Kind::Function,
+            binding: Binding::Global,
             name: format!("import{nid:#x}"),
         }
     }

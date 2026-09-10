@@ -23,6 +23,17 @@ use orbistoun_elf::{Container, dynamic::DynamicInfo};
 use crate::tls::{self, TlsLayout};
 use crate::{Image, LoadError};
 
+/// The outcome of resolving a dynamic symbol index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// Resolved to an address.
+    Address(u64),
+    /// The symbol is weak and unanswered, binding to zero under the ELF gABI.
+    WeakZero,
+    /// The symbol could not be resolved.
+    Unresolved,
+}
+
 /// Resolves a dynamic symbol index to the address the guest should see.
 ///
 /// Returning `None` means the symbol is unresolved - the relocation is then counted
@@ -30,6 +41,16 @@ use crate::{Image, LoadError};
 pub trait SymbolResolver {
     /// The address for a symbol index, or `None` if it cannot be resolved.
     fn resolve(&self, symbol_index: u32) -> Option<u64>;
+
+    /// Resolves a symbol index to a [`Resolution`].
+    ///
+    /// The default implementation delegates to [`Self::resolve`].
+    fn resolve_symbol(&self, symbol_index: u32) -> Resolution {
+        match self.resolve(symbol_index) {
+            Some(addr) => Resolution::Address(addr),
+            None => Resolution::Unresolved,
+        }
+    }
 }
 
 impl<F: Fn(u32) -> Option<u64>> SymbolResolver for F {
@@ -82,19 +103,36 @@ pub struct ImportResolver<'a> {
     /// [`None`] refuses nothing, which is the default and the behaviour every recorded
     /// measurement was taken under.
     pub refuse: Option<&'a std::collections::BTreeSet<usize>>,
+    /// Weak imports that are unanswered and should bind to zero, by index (D676).
+    pub weak_zero: Option<&'a std::collections::BTreeSet<usize>>,
 }
 
 impl SymbolResolver for ImportResolver<'_> {
     fn resolve(&self, symbol_index: u32) -> Option<u64> {
+        match self.resolve_symbol(symbol_index) {
+            Resolution::Address(addr) => Some(addr),
+            Resolution::WeakZero | Resolution::Unresolved => None,
+        }
+    }
+
+    fn resolve_symbol(&self, symbol_index: u32) -> Resolution {
         let index = symbol_index as usize;
         if self.refuse.is_some_and(|refuse| refuse.contains(&index)) {
             // Unresolved, which the relocation tally already counts and reports - refusing
             // is not a new outcome here, it is one that had no way of being chosen.
-            return None;
+            return Resolution::Unresolved;
         }
-        self.data
+        if self.weak_zero.is_some_and(|wz| wz.contains(&index)) {
+            return Resolution::WeakZero;
+        }
+        match self
+            .data
             .address_of(index)
             .or_else(|| self.thunks.address_of(index))
+        {
+            Some(addr) => Resolution::Address(addr),
+            None => Resolution::Unresolved,
+        }
     }
 }
 
@@ -130,6 +168,14 @@ impl<R: SymbolResolver> SymbolResolver for TitleResolver<'_, R> {
             .copied()
             .or_else(|| self.inner.resolve(symbol_index))
     }
+
+    fn resolve_symbol(&self, symbol_index: u32) -> Resolution {
+        if let Some(&addr) = self.bound.get(&symbol_index) {
+            Resolution::Address(addr)
+        } else {
+            self.inner.resolve_symbol(symbol_index)
+        }
+    }
 }
 
 /// Shifts a module's symbol indices into the shared table's index space.
@@ -160,6 +206,16 @@ impl<R: SymbolResolver> SymbolResolver for OffsetResolver<'_, R> {
         let shifted = u32::try_from(self.offset).ok()?.checked_add(symbol_index)?;
         self.inner.resolve(shifted)
     }
+
+    fn resolve_symbol(&self, symbol_index: u32) -> Resolution {
+        let Some(shifted) = u32::try_from(self.offset)
+            .ok()
+            .and_then(|off| off.checked_add(symbol_index))
+        else {
+            return Resolution::Unresolved;
+        };
+        self.inner.resolve_symbol(shifted)
+    }
 }
 
 /// A resolver that answers every symbol with one address.
@@ -180,6 +236,25 @@ impl SymbolResolver for SingleTargetResolver {
     }
 }
 
+/// The computed value to write for a relocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocValue {
+    /// Resolved to an address.
+    Address(u64),
+    /// Bound to zero because the symbol is weak and unanswered under the ELF gABI (D676).
+    WeakZero(u64),
+}
+
+impl RelocValue {
+    /// The numeric value to write into the relocation slot.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        match self {
+            Self::Address(addr) | Self::WeakZero(addr) => addr,
+        }
+    }
+}
+
 /// Computes the value one relocation should write, or why it cannot.
 ///
 /// Split out from the writing so the arithmetic is testable without mapping anything -
@@ -193,18 +268,21 @@ pub fn value_for(
     base: u64,
     resolver: &impl SymbolResolver,
     tls: Option<&TlsLayout>,
-) -> Result<u64, Outcome> {
+) -> Result<RelocValue, Outcome> {
     let addend = entry.addend.get();
     match entry.kind() {
-        kind::RELATIVE => Ok(base.wrapping_add(addend as u64)),
-        kind::ABS64 => resolver
-            .resolve(entry.symbol_index())
-            .map(|s| s.wrapping_add(addend as u64))
-            .ok_or(Outcome::Unresolved),
-        kind::GLOB_DAT | kind::JUMP_SLOT => resolver
-            .resolve(entry.symbol_index())
-            .ok_or(Outcome::Unresolved),
-        _ if entry.is_tls() => tls_value_for(entry, addend, tls),
+        kind::RELATIVE => Ok(RelocValue::Address(base.wrapping_add(addend as u64))),
+        kind::ABS64 => match resolver.resolve_symbol(entry.symbol_index()) {
+            Resolution::Address(s) => Ok(RelocValue::Address(s.wrapping_add(addend as u64))),
+            Resolution::WeakZero => Ok(RelocValue::WeakZero(addend as u64)),
+            Resolution::Unresolved => Err(Outcome::Unresolved),
+        },
+        kind::GLOB_DAT | kind::JUMP_SLOT => match resolver.resolve_symbol(entry.symbol_index()) {
+            Resolution::Address(s) => Ok(RelocValue::Address(s)),
+            Resolution::WeakZero => Ok(RelocValue::WeakZero(0)),
+            Resolution::Unresolved => Err(Outcome::Unresolved),
+        },
+        _ if entry.is_tls() => tls_value_for(entry, addend, tls).map(RelocValue::Address),
         _ => Err(Outcome::Unsupported),
     }
 }
@@ -329,9 +407,12 @@ fn apply_table(
         // which the image holds a live reservation for and exclusively owns. The write
         // is unaligned-safe by construction.
         unsafe {
-            std::ptr::with_exposed_provenance_mut::<u64>(ptr).write_unaligned(value);
+            std::ptr::with_exposed_provenance_mut::<u64>(ptr).write_unaligned(value.value());
         }
-        tally.applied += 1;
+        match value {
+            RelocValue::Address(_) => tally.applied += 1,
+            RelocValue::WeakZero(_) => tally.weak_zero += 1,
+        }
     }
     Ok(())
 }
@@ -467,6 +548,7 @@ mod tests {
             thunks: &thunks,
             data: &data,
             refuse: None,
+            weak_zero: None,
         };
 
         assert_eq!(
@@ -504,6 +586,7 @@ mod tests {
             thunks: &thunks,
             data: &data,
             refuse: Some(&refuse),
+            weak_zero: None,
         };
         assert_eq!(refusing.resolve(3), None, "the refused one");
         assert!(refusing.resolve(4).is_some(), "and only that one");
@@ -512,6 +595,7 @@ mod tests {
             thunks: &thunks,
             data: &data,
             refuse: None,
+            weak_zero: None,
         };
         assert!(
             permissive.resolve(3).is_some(),
@@ -519,7 +603,7 @@ mod tests {
         );
     }
 
-    use super::{Outcome, SingleTargetResolver, SymbolResolver, value_for};
+    use super::{Outcome, RelocValue, SingleTargetResolver, SymbolResolver, value_for};
     use crate::tls::{MAIN_MODULE_ID, TlsLayout};
     use orbistoun_elf::reloc::{kind, parse_table};
 
@@ -555,7 +639,7 @@ mod tests {
             None,
         )
         .expect("relative needs no symbol");
-        assert_eq!(got, 0x4000_2000);
+        assert_eq!(got, RelocValue::Address(0x4000_2000));
     }
 
     #[test]
@@ -564,7 +648,7 @@ mod tests {
         // into an address near the top of the address space.
         let got = value_for(&entry(kind::RELATIVE, 0, -8), 0x4000_0000, &Nothing, None)
             .expect("relative");
-        assert_eq!(got, 0x3FFF_FFF8);
+        assert_eq!(got, RelocValue::Address(0x3FFF_FFF8));
     }
 
     #[test]
@@ -576,7 +660,8 @@ mod tests {
         let got = value_for(&entry(kind::JUMP_SLOT, 7, 0x1234), 0x1000, &resolver, None)
             .expect("resolved");
         assert_eq!(
-            got, 0xDEAD_BEEF,
+            got,
+            RelocValue::Address(0xDEAD_BEEF),
             "a PLT slot is the address, not address+addend"
         );
     }
@@ -585,7 +670,11 @@ mod tests {
     fn an_absolute_relocation_adds_the_addend_to_the_symbol() {
         let resolver = SingleTargetResolver { target: 0x1_0000 };
         let got = value_for(&entry(kind::ABS64, 7, 0x40), 0, &resolver, None).expect("resolved");
-        assert_eq!(got, 0x1_0040, "ABS64 does use the addend");
+        assert_eq!(
+            got,
+            RelocValue::Address(0x1_0040),
+            "ABS64 does use the addend"
+        );
     }
 
     #[test]
@@ -596,6 +685,54 @@ mod tests {
             value_for(&entry(kind::JUMP_SLOT, 3, 0), 0, &Nothing, None),
             Err(Outcome::Unresolved)
         );
+    }
+
+    #[test]
+    fn a_weak_unanswered_symbol_binds_to_zero_and_is_distinguished() {
+        struct WeakUnanswered;
+        impl SymbolResolver for WeakUnanswered {
+            fn resolve(&self, _: u32) -> Option<u64> {
+                None
+            }
+            fn resolve_symbol(&self, _: u32) -> super::Resolution {
+                super::Resolution::WeakZero
+            }
+        }
+
+        let got_glob = value_for(&entry(kind::GLOB_DAT, 3, 0), 0, &WeakUnanswered, None)
+            .expect("weak unanswered binds to zero");
+        assert_eq!(got_glob, RelocValue::WeakZero(0));
+
+        let got_jump = value_for(&entry(kind::JUMP_SLOT, 3, 0), 0, &WeakUnanswered, None)
+            .expect("weak unanswered binds to zero");
+        assert_eq!(got_jump, RelocValue::WeakZero(0));
+
+        let got_abs = value_for(&entry(kind::ABS64, 3, 0x20), 0, &WeakUnanswered, None)
+            .expect("weak unanswered binds to zero with addend");
+        assert_eq!(got_abs, RelocValue::WeakZero(0x20));
+    }
+
+    #[test]
+    fn an_import_resolver_distinguishes_weak_zero_from_refused() {
+        use super::{ImportResolver, Resolution, SymbolResolver};
+
+        let thunks = orbistoun_thunk::ThunkTable::build(RANGE.take(), 8, 0x1000).expect("stubs");
+        let data = orbistoun_thunk::DataBlocks::build(RANGE.take(), &[], 0x1000).expect("storage");
+        let refuse: std::collections::BTreeSet<usize> = [3].into_iter().collect();
+        let weak_zero: std::collections::BTreeSet<usize> = [5].into_iter().collect();
+
+        let resolver = ImportResolver {
+            thunks: &thunks,
+            data: &data,
+            refuse: Some(&refuse),
+            weak_zero: Some(&weak_zero),
+        };
+        assert_eq!(resolver.resolve_symbol(3), Resolution::Unresolved);
+        assert_eq!(resolver.resolve(3), None);
+        assert_eq!(resolver.resolve_symbol(5), Resolution::WeakZero);
+        assert_eq!(resolver.resolve(5), None);
+        assert!(matches!(resolver.resolve_symbol(1), Resolution::Address(_)));
+        assert!(resolver.resolve(1).is_some());
     }
 
     #[test]
@@ -631,13 +768,14 @@ mod tests {
         let resolver = |index: u32| if index == 5 { Some(0x999) } else { None };
         assert_eq!(
             value_for(&entry(kind::GLOB_DAT, 5, 0), 0, &resolver, None),
-            Ok(0x999)
+            Ok(RelocValue::Address(0x999))
         );
         assert_eq!(
             value_for(&entry(kind::GLOB_DAT, 6, 0), 0, &resolver, None),
             Err(Outcome::Unresolved)
         );
     }
+
     #[test]
     fn a_thread_local_offset_is_measured_downwards_from_the_thread_pointer() {
         // Variant II: the block sits below the pointer, so the offset is negative.
@@ -646,7 +784,7 @@ mod tests {
         let layout = TlsLayout::new(16, 64, 8);
         let got = value_for(&entry(kind::TPOFF64, 0, 8), 0, &Nothing, Some(&layout))
             .expect("a local thread-local needs no symbol");
-        assert_eq!(got as i64, 8 - 64);
+        assert_eq!(got.value() as i64, 8 - 64);
     }
 
     #[test]
@@ -654,7 +792,7 @@ mod tests {
         let layout = TlsLayout::new(0, 32, 8);
         assert_eq!(
             value_for(&entry(kind::DTPMOD64, 0, 0), 0, &Nothing, Some(&layout)),
-            Ok(MAIN_MODULE_ID)
+            Ok(RelocValue::Address(MAIN_MODULE_ID))
         );
     }
 
@@ -665,7 +803,7 @@ mod tests {
         let layout = TlsLayout::new(0, 64, 8);
         assert_eq!(
             value_for(&entry(kind::DTPOFF64, 0, 24), 0, &Nothing, Some(&layout)),
-            Ok(24)
+            Ok(RelocValue::Address(24))
         );
     }
 

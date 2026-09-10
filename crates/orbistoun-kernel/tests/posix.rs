@@ -31,9 +31,13 @@ use orbistoun_core::GuestFn;
 /// Success, as a guest reads it.
 const OK: u64 = 0;
 /// The caller passed something this could not use.
-const INVALID_ARGUMENT: u64 = 0x7FFF_0002;
+///
+/// **Derived, not written out.** These were literals, and when the placeholders gained the
+/// high bit six tests failed on a number rather than on a behaviour - two copies of one
+/// constant, which is the thing this project keeps finding disagreeing with itself (D670).
+const INVALID_ARGUMENT: u64 = orbistoun_core::GuestError::InvalidArgument.as_raw() as u64;
 /// The handle names nothing.
-const INVALID_HANDLE: u64 = 0x7FFF_0003;
+const INVALID_HANDLE: u64 = orbistoun_core::GuestError::InvalidHandle.as_raw() as u64;
 /// Releasing something this thread does not hold.
 ///
 /// Measured on a target console, which distinguishes it from a bad argument (D398).

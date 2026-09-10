@@ -126,7 +126,14 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_video::implementations());
     all.extend_from_slice(orbistoun_gpu::implementations());
     all.extend_from_slice(orbistoun_fs::implementations());
+    // The socket calls in their vendor spelling. The bodies are `orbistoun-fs`'s; this crate
+    // declares `libSceNet` and encodes a failure the way that library numbers one (D667).
+    all.extend_from_slice(orbistoun_net::implementations());
     all.extend_from_slice(orbistoun_input::implementations());
+    // The mouse, registered beside the pad rather than folded into it: the crate root answers a
+    // `&'static` slice, so gathering two modules there would mean allocating, and one explicit
+    // line is cheaper than that and easier to notice when a third arrives (D673).
+    all.extend_from_slice(orbistoun_input::mouse::implementations());
     all.extend_from_slice(orbistoun_audio::implementations());
     all.extend_from_slice(orbistoun_systemservice::implementations());
     all
@@ -494,10 +501,6 @@ mod knowledge_tests {
             "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
-            "libSceMouse",
-            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
             "libSceHttp",
             "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
@@ -516,10 +519,6 @@ mod knowledge_tests {
         (
             "libSceNpWebApi2",
             "declared as 8 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceNet",
-            "declared as 20 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceSsl",

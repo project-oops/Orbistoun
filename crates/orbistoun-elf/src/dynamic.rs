@@ -318,6 +318,38 @@ impl Kind {
     }
 }
 
+/// The binding attribute of an import, read from the high nibble of `st_info`.
+///
+/// # Why the loader has to care
+///
+/// Under the ELF gABI, a weak undefined symbol that cannot be resolved binds to zero
+/// and linking succeeds. A global undefined symbol that cannot be resolved is an error.
+/// Reading the binding distinguishes a symbol the guest declared optional from one it
+/// requires (D676).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// Local symbol.
+    Local,
+    /// Global symbol; must be answered.
+    Global,
+    /// Weak symbol; binds to zero if unanswered.
+    Weak,
+    /// Unknown or unrecognised binding.
+    Unspecified,
+}
+
+impl Binding {
+    /// Decodes the high nibble of `st_info`.
+    pub const fn from_info(info: u8) -> Self {
+        match info >> 4 {
+            0 => Self::Local,
+            1 => Self::Global,
+            2 => Self::Weak,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
 /// How a module spelled an import's name, and what that spelling carried with it.
 ///
 /// # Why this is an enum rather than two optional ids
@@ -365,13 +397,21 @@ pub struct RawImport {
     pub form: NameForm,
     /// Whether the guest wants code or data here.
     pub kind: Kind,
+    /// Whether the symbol is strong or weak.
+    pub binding: Binding,
     /// The symbol name exactly as it appears, encoding included where there is one.
     pub name: String,
 }
 
 impl RawImport {
     /// Builds one from a vendor-encoded name.
-    fn encoded(symbol_index: u32, name: String, decoded: EncodedImport, kind: Kind) -> Self {
+    fn encoded(
+        symbol_index: u32,
+        name: String,
+        decoded: EncodedImport,
+        kind: Kind,
+        binding: Binding,
+    ) -> Self {
         Self {
             symbol_index,
             nid: decoded.nid.as_raw(),
@@ -380,17 +420,25 @@ impl RawImport {
                 module_id: decoded.module_id,
             },
             kind,
+            binding,
             name,
         }
     }
 
     /// Builds one from a plain name, hashing it to the NID its exporter publishes.
-    fn plain(symbol_index: u32, name: String, hasher: &NidHasher, kind: Kind) -> Self {
+    fn plain(
+        symbol_index: u32,
+        name: String,
+        hasher: &NidHasher,
+        kind: Kind,
+        binding: Binding,
+    ) -> Self {
         Self {
             nid: hasher.hash(&name).as_raw(),
             symbol_index,
             form: NameForm::Plain,
             kind,
+            binding,
             name,
         }
     }
@@ -583,6 +631,7 @@ pub fn imports_from_symbols(
         };
         let name_off = u32::from_le_bytes(entry[..4].try_into().unwrap_or_default()) as usize;
         let kind = Kind::from_info(entry[4]);
+        let binding = Binding::from_info(entry[4]);
         let shndx = u16::from_le_bytes(entry[6..8].try_into().unwrap_or_default());
         // shndx == 0 is SHN_UNDEF: the module needs this and does not provide it.
         if shndx != 0 || name_off == 0 {
@@ -597,8 +646,8 @@ pub fn imports_from_symbols(
         // report needing none - which reads as "needs nothing", the exact claim principle
         // 3 forbids an import list from making (D305).
         out.push(match decode_symbol_name(name) {
-            Some(decoded) => RawImport::encoded(at_index, name.to_owned(), decoded, kind),
-            None => RawImport::plain(at_index, name.to_owned(), hasher, kind),
+            Some(decoded) => RawImport::encoded(at_index, name.to_owned(), decoded, kind, binding),
+            None => RawImport::plain(at_index, name.to_owned(), hasher, kind, binding),
         });
     }
     Ok(out)
@@ -937,6 +986,36 @@ mod tests {
             imports_from_symbols(&symtab, &strtab, 2, SYMBOL_SIZE, &hasher()).expect("walk");
         assert_eq!(imports[0].kind, super::Kind::Object, "__stderrp is data");
         assert_eq!(imports[1].kind, super::Kind::Function, "puts is code");
+    }
+
+    /// **An import's binding is read from the high nibble of `st_info`.**
+    ///
+    /// Weak symbols bind to zero when unanswered under the ELF gABI, whereas global
+    /// symbols are required (D676).
+    #[test]
+    fn an_import_binding_is_read_from_st_info() {
+        /// One symbol entry with an explicit `st_info` byte.
+        fn typed(name_off: u32, info: u8) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(&name_off.to_le_bytes());
+            v.push(info);
+            v.push(0); // other
+            v.extend_from_slice(&0_u16.to_le_bytes()); // SHN_UNDEF - an import
+            v.extend_from_slice(&0_u64.to_le_bytes()); // value
+            v.extend_from_slice(&0_u64.to_le_bytes()); // size
+            v
+        }
+
+        let (strtab, offs) = strings(&["weak_sym", "global_sym", "local_sym"]);
+        let mut symtab = typed(offs[0], 0x22); // STB_WEAK | STT_FUNC
+        symtab.extend(typed(offs[1], 0x12)); // STB_GLOBAL | STT_FUNC
+        symtab.extend(typed(offs[2], 0x01)); // STB_LOCAL | STT_OBJECT
+
+        let imports =
+            imports_from_symbols(&symtab, &strtab, 3, SYMBOL_SIZE, &hasher()).expect("walk");
+        assert_eq!(imports[0].binding, super::Binding::Weak);
+        assert_eq!(imports[1].binding, super::Binding::Global);
+        assert_eq!(imports[2].binding, super::Binding::Local);
     }
 
     /// The count `DT_GNU_HASH` does not state, walked out of its chain.

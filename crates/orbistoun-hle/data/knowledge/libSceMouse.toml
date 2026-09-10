@@ -1,0 +1,60 @@
+library = "libSceMouse"
+
+[[function]]
+name = "sceMouseInit"
+arity = 0
+purpose = "Starts the mouse service."
+edge_cases = [
+    "obSCEne calls it before opening and the open then succeeds, so it does not refuse. What it returns is not recorded - the probe discards it.",
+]
+known_by = "assumed"
+assumptions = [
+    "That it answers 0. Nothing read the return; success is inferred from the open that follows working.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceMouseOpen"
+arity = 4
+purpose = "Opens a mouse and answers a handle. sceMouseOpen(user, type, index, param)."
+edge_cases = [
+    "MEASURED: it opens with NO MOUSE ATTACHED. obSCEne asked on a console with none plugged in and got 0xc70700 back. A shim that refused would look stricter and be wrong - the platform hands out a handle and the queue behind it is simply empty.",
+    "The handle is a large value on hardware; orbistoun answers from its own allocator, which is a different number space and deliberately so. Nothing measured what the number means.",
+    "The signature is obSCEne's, which types it int (*)(int32_t, int, int, void *) and calls it as fn_open(user, 0, 0, NULL).",
+]
+known_by = "measured"
+cites = "obSCEne 101-input-ext/mouse-read, title leg of sweep 20260909-110725 (title/unknown-gpu), on a target console."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceMouseRead"
+arity = 3
+purpose = "Takes queued mouse events. sceMouseRead(handle, into, count)."
+edge_cases = [
+    "MEASURED: with no mouse attached it answers 0x0 and writes ZERO bytes. obSCEne fills the destination with a sentinel and reports the extent that changed - extent 0, changed 0.",
+    "So an empty read is a REPORT, not an error: zero is the number of events read, and a guest polling in a loop gets 'nothing happened' rather than a code it has to interpret. That is the state orbistoun is in permanently, so the shim answers it permanently.",
+    "Nothing is written to the destination at all - not zeroed, not touched. A shim that cleared the buffer would be doing something the console was measured not doing, and a guest holding a previous sample there would find it wiped.",
+]
+known_by = "measured"
+cites = "obSCEne 101-input-ext/mouse-read, title leg of sweep 20260909-110725."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
+
+[[function]]
+name = "sceMouseClose"
+arity = 1
+purpose = "Closes a mouse."
+edge_cases = [
+    "obSCEne closes with it and does not report the return, so success is inferred rather than read.",
+    "orbistoun does not hand the handle number back to its allocator: reuse is what turns a stale handle into a silent read of another device.",
+    "A handle nothing opened earns GuestError::InvalidHandle, a PLACEHOLDER rather than a libSceMouse error code. Every other input subsystem here carries a measured base - the pad's 0x8092_0000, audio's 0x8026_0000 - because obSCEne provoked a failure and read one back. Nothing has provoked one from this library, and inventing a 0x80xx_xxxx to match the others would be the one thing this entry must not do (D673).",
+]
+known_by = "assumed"
+assumptions = [
+    "That it answers 0 on success. Not read.",
+    "That this library numbers its errors from a base of its own, like every other one measured. Nothing has seen one.",
+]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-10"
