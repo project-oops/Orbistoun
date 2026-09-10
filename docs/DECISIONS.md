@@ -687,6 +687,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D663 | [The codenames are the vocabulary](decisions/D663-the-codenames-are-the-vocabulary.md) | measured | 2026-09-10 |
 | 🟢 | D664 | [An origin list, with every failure named](decisions/D664-an-origin-list-with-every-failure-named.md) | measured | 2026-09-10 |
 | 🟢 | D665 | [The index reads the entry, not its title](decisions/D665-the-index-reads-the-entry-not-its.md) | measured | 2026-09-10 |
+| 🟢 | D666 | [Orbis is the machine, neo is the refresh](decisions/D666-orbis-is-the-machine-neo-is-the.md) | decided | 2026-09-10 |
 
 | | meaning |
 |---|---|

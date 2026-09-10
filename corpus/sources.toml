@@ -123,6 +123,16 @@ sha256 = "2a433097e6b0b6b7490428b05539d575d8522e7fcbab53c4011de2600f052998"
 # the checkout is the fast path when somebody has one and absent when they do not, the release is
 # slower and always there. `sync` tries them in order and reports every one that did not answer,
 # so a broken fast path cannot hide behind a working slow one (D664).
+#
+# `target` here is the **install target** - which of orbistoun's roots an artifact lands in. Two
+# other senses of the word are live in this collection: Prosperous's *registered target* (a machine
+# it can reach) and SELFish's *build target* (the machine an artifact is built for). A manifest
+# entry has two of the three in play at once, because the file it fetches is named for a build
+# target while this field says where it lands (OOPS conventions section 2).
+#
+# `orbis`, not `neo`: the axis has four values and they are not interchangeable - `orbis` and
+# `prospero` are the base machines, `neo` and `trinity` the mid-generation refreshes. The probe is
+# not Pro-specific, so any previous-generation artifact of it is `orbis`.
 
 [[source]]
 name = "obscene-probe-prospero-native"
@@ -147,23 +157,23 @@ licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
 
 [[source]]
-name = "obscene-probe-neo-native"
+name = "obscene-probe-orbis-native"
 target = "titles"
 kind = "local"
 sources = [
-  "../obscene/build/neo",
-  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-neo.zip",
+  "../obscene/build/orbis",
+  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.zip",
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
 
 [[source]]
-name = "obscene-probe-neo-pkg"
+name = "obscene-probe-orbis-pkg"
 target = "packages"
 kind = "local"
 sources = [
-  "../obscene/build/obscene-probe-neo.pkg",
-  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-neo.pkg",
+  "../obscene/build/obscene-probe-orbis.pkg",
+  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.pkg",
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"

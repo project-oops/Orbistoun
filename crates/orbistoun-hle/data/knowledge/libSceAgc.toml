@@ -19,7 +19,7 @@ edge_cases = [
     "The field split used to read it is **derived, not cited**: it is the only reading under which the measured lengths of the other three builders close exactly, which is evidence and is not a document. No further hardware run settles it - it is a question about how these bytes are read, not about what the console did (D565).",
 ]
 known_by = "measured"
-cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/cb-nop, firmware 12.40, native title, generation 5 (agc)."
+cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/cb-nop, firmware 12.40, native title, prospero (agc)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
 

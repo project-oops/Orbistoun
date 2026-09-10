@@ -429,32 +429,29 @@ impl Paths {
 
 /// Makes portable mode sticky for the binary in `binary_dir`.
 ///
-/// Materialises the `.portable` **directory** with an explanatory note inside. If a
-/// stale `.portable` *file* is present from an older scheme it is removed first -
-/// otherwise `create_dir_all` fails over it, which is the exact first-run crash this
-/// design exists to avoid.
+/// Delegates to `oops-paths`, which owns the sentinel for the whole collection: it materialises
+/// the `.portable` **directory** and heals a stale `.portable` *file* left by an older scheme -
+/// `create_dir_all` fails over one, which is the exact first-run crash the design exists to
+/// avoid, and a bug this repository had fixed and the shared crate had not.
+///
+/// The note is orbistoun's, passed in rather than held there. Its words name this tool, so a
+/// shared function that hardcoded them would be wrong for every other caller; `None` writes no
+/// note at all rather than an empty file, which reads as a failed write (oops-libs
+/// `REQ-20260909T2244Z-5cac`, D666).
 pub fn enable_portable_sentinel(binary_dir: &Path) -> io::Result<()> {
-    let sentinel = binary_dir.join(PORTABLE_DIR);
-    if sentinel.is_file() {
-        fs::remove_file(&sentinel)?;
-    }
-    fs::create_dir_all(&sentinel)?;
-    fs::write(
-        sentinel.join(PORTABLE_NOTE),
-        concat!(
-            "This directory makes orbistoun run in portable mode.
-
-",
-            "Everything orbistoun writes - logs, traces, run reports, settings, per-title
-",
-            "overrides - stays beneath this directory. Nothing is written anywhere else.
-
-",
-            "Delete this directory to return to the OS-standard data location.
-"
-        ),
-    )
+    oops_paths::enable_portable_sentinel(binary_dir, Some(PORTABLE_NOTE_BODY))
 }
+
+/// What the note beside the sentinel says.
+///
+/// Here rather than in the shared crate because it names orbistoun, and because a caller that
+/// wants different words should not have to edit a sibling repository to get them.
+const PORTABLE_NOTE_BODY: &str = concat!(
+    "This directory makes orbistoun run in portable mode.\n\n",
+    "Everything orbistoun writes - logs, traces, run reports, settings, per-title\n",
+    "overrides - stays beneath this directory. Nothing is written anywhere else.\n\n",
+    "Delete this directory to return to the OS-standard data location.\n"
+);
 
 #[cfg(test)]
 mod tests {

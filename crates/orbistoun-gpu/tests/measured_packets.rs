@@ -10,7 +10,7 @@
 //! > mistake here announces itself.
 //!
 //! There were no real command buffers. There are now: obSCEne called four `libSceAgc` command
-//! builders on hardware - firmware 12.40, generation 5, in a native title - and captured exactly
+//! builders on hardware - firmware 12.40, prospero, in a native title - and captured exactly
 //! what each wrote into a caller-supplied buffer (D565). This is that prescription, filled.
 //!
 //! # What makes it evidence rather than a fixture

@@ -414,7 +414,7 @@ output**. All five symbols the Agc section exercised are recorded absent.
 
 The cause looks like `900-surface/agc`, which **skipped** with *"belongs to the other console
 generation, so absence is expected rather than a gap"* - on hardware `005-generation` had just
-identified as generation 5 with `gpu = agc`. The gate appears inverted for this library.
+identified as prospero with `gpu = agc`. The gate appears inverted for this library.
 
 **This matters to orbistoun specifically**: the first handover was built on *"472 libSceAgc symbols
 recorded absent"* and treated that as the blocker on the whole Agc axis. It was not measuring what
