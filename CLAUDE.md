@@ -280,20 +280,29 @@ the principles; those two hold the history and the state.
 
 **While working:**
 
-- Every non-obvious choice gets a numbered entry in `DECISIONS.md` **as it is made**,
-  not retrospectively. Include the reasoning, not just the choice - the reasoning is
-  what stops it being re-litigated.
-- A choice made without input is status **`assumed`**, and its number goes in that
-  file's *Needs review* index. Assume freely and keep moving; do not stall an
-  unattended run waiting for input that cannot arrive. Just record it.
+- Every non-obvious choice gets its own file under `docs/decisions/`, written **as the
+  choice is made** rather than retrospectively. Reserve the number first - it is atomic,
+  so two sessions cannot collide on one:
+  ```bash
+  ./bin/orbistoun decide "the title of the decision"
+  ```
+  Include the reasoning, not just the choice - the reasoning is what stops it being
+  re-litigated. **Never hand-edit `docs/DECISIONS.md`**: its table is generated from the
+  files by `tools/split-decisions.sh`, so an entry typed into the index is lost on the
+  next run and `tools/check-decisions.sh` reds the gate on a `## Dnnn` heading there.
+- A choice made without input is status **`assumed`**, which the generated table renders
+  🟡. There is no separate "needs review" list to add it to - the status column is the
+  index. Assume freely and keep moving; do not stall an unattended run waiting for input
+  that cannot arrive. Just record it.
 - **Assume freely on implementation; flag a new concept.** New crates, splitting
   things up, file layout, naming, structure - all expected, no need to ask. What
   warrants stopping is a *concept* not already in the decision log: a mechanism, a
   user-visible behaviour, or a subsystem nobody agreed to. Adding a crate is not a
   new concept; adding a plugin system is.
-- Append to `WORKLOG.md` at the end of every **completed unit of work**, not at the
-  end of a session - a session may not end cleanly. Record surprises especially:
-  they are what a fresh context cannot re-derive.
+- Write a file under `docs/worklog/` at the end of every **completed unit of work**, not
+  at the end of a session - a session may not end cleanly. Record surprises especially:
+  they are what a fresh context cannot re-derive. **`docs/WORKLOG.md` is generated too**,
+  from those files; hand-editing its table loses the row on the next build.
 - Run `./bin/orbistoun check` before logging a unit as done.
 
 **When in doubt about whether something is worth writing down: write it down.** The

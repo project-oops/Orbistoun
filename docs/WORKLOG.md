@@ -503,3 +503,4 @@ context cannot re-derive.
 | - | [486. The differential was comparing two sandboxes](worklog/486-the-differential-was-comparing-two-sandboxes.md) |
 | - | [487. Prospero, Trinity, Orbis, Neo](worklog/487-prospero-trinity-orbis-neo.md) |
 | - | [488. An origin list](worklog/488-an-origin-list.md) |
+| - | [489. The index was never mine to edit](worklog/489-the-index-was-never-mine-to-edit.md) |

@@ -18,7 +18,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D004 | [Fourteen crates arranged as a dependency spine](decisions/D004-fourteen-crates-arranged-as-a.md) | decided | 2026-08-19 |
 | 🟢 | D005 | [Interception is linking, not hooking](decisions/D005-interception-is-linking-not-hooking.md) | decided | 2026-08-19 |
 | 🟢 | D006 | [The NID hash suffix is runtime data, not a source constant](decisions/D006-the-nid-hash-suffix-is-runtime-data-not.md) | decided | 2026-08-19 |
-| 🟢 | D007 | [Symbol databases store names; NIDs are derived](decisions/D007-symbol-databases-store-names-nids-are.md) | derived | 2026-08-19 |
+| 🟢 | D007 | [Symbol databases store names; NIDs are derived](decisions/D007-symbol-databases-store-names-nids-are.md) | decided | 2026-08-19 |
 | 🟢 | D008 | [Stub policy defaults to `Unimplemented`, never `Ok`](decisions/D008-stub-policy-defaults-to-unimplemented.md) | decided | 2026-08-19 |
 | 🟢 | D009 | [Placeholder error codes avoid the high bit](decisions/D009-placeholder-error-codes-avoid-the-high.md) | decided | 2026-08-19 |
 | 🟢 | D010 | [Honest failure over plausible output](decisions/D010-honest-failure-over-plausible-output.md) | decided | 2026-08-19 |
@@ -69,7 +69,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D054 | [Distribution formats stop at the door; mounts are ordered](decisions/D054-distribution-formats-stop-at-the-door.md) | decided | 2026-08-19 |
 | 🟢 | D055 | [The Linux path was broken, and only running it showed that](decisions/D055-the-linux-path-was-broken-and-only.md) | decided | 2026-08-19 |
 | 🟢 | D055 | [Title metadata is cheap, not a second container format](decisions/D055-title-metadata-is-cheap-not-a-second.md) | decided | 2026-08-19 |
-| 🟢 | D056 | [A remote hardware probe is the top-value future capability](decisions/D056-a-remote-hardware-probe-is-the-top.md) | hardware | 2026-08-19 |
+| 🟢 | D056 | [A remote hardware probe is the top-value future capability](decisions/D056-a-remote-hardware-probe-is-the-top.md) | decided | 2026-08-19 |
 | 🟢 | D056 | [The guest-to-host call boundary works, and needs `extern "sysv64"`](decisions/D056-the-guest-to-host-call-boundary-works.md) | decided | 2026-08-19 |
 | 🟢 | D057 | [Worker mode is implemented, and both shims go through it](decisions/D057-worker-mode-is-implemented-and-both.md) | decided | 2026-08-19 |
 | 🟢 | D058 | [Image placement, and the host allocation granularity](decisions/D058-image-placement-and-the-host-allocation.md) | decided | 2026-08-19 |
@@ -102,7 +102,7 @@ the project; the conversation that produced these decisions is not.
 | 🟡 | D084 | [Instrument the GPU before translating any of it](decisions/D084-instrument-the-gpu-before-translating.md) | assumed | 2026-08-19 |
 | 🟢 | D085 | [The hash suffix is `supplied`, and the file now says so](decisions/D085-the-hash-suffix-is-supplied-and-the.md) | decided | 2026-08-19 |
 | 🟡 | D085 | [The instruction encoding table is data, and says it is unverified](decisions/D085-the-instruction-encoding-table-is-data.md) | assumed | 2026-08-19 |
-| 🔴 | D086 | [Rank blockers by shaders blocked, within an effort tier](decisions/D086-rank-blockers-by-shaders-blocked-within.md) | blocked | 2026-08-19 |
+| 🟢 | D086 | [Rank blockers by shaders blocked, within an effort tier](decisions/D086-rank-blockers-by-shaders-blocked-within.md) | decided | 2026-08-19 |
 | 🟡 | D087 | [Decoding never fails; it reports](decisions/D087-decoding-never-fails-it-reports.md) | assumed | 2026-08-19 |
 | 🟡 | D088 | [The shader corpus is content-addressed, and is the regression suite](decisions/D088-the-shader-corpus-is-content-addressed.md) | assumed | 2026-08-19 |
 | 🟢 | D089 | [Verify the encoding table against a reference disassembler](decisions/D089-verify-the-encoding-table-against-a.md) | decided | 2026-08-19 |
@@ -120,7 +120,7 @@ the project; the conversation that produced these decisions is not.
 | 🟡 | D101 | [Guest memory is a second binding, never a second half of the first](decisions/D101-guest-memory-is-a-second-binding-never.md) | assumed | ~2026-08-20..08-21 |
 | 🟢 | D102 | [The SPIR-V builder holds the section layout, not its callers](decisions/D102-the-spir-v-builder-holds-the-section.md) | decided | 2026-08-21 |
 | 🟢 | D103 | [The builder checks that its identifiers resolve](decisions/D103-the-builder-checks-that-its-identifiers.md) | decided | 2026-08-21 |
-| 🔴 | D104 | [A blocked instruction names its dependency; an unwritten one does not](decisions/D104-a-blocked-instruction-names-its.md) | blocked | 2026-08-20 |
+| 🟢 | D104 | [A blocked instruction names its dependency; an unwritten one does not](decisions/D104-a-blocked-instruction-names-its.md) | decided | 2026-08-20 |
 | 🟢 | D105 | [Hand-written assembly is a fixture source, and it caught a wrong row](decisions/D105-hand-written-assembly-is-a-fixture.md) | decided | 2026-08-21 |
 | 🟢 | D106 | [The lane model refuses a mask write; Auto reads the shader to choose, and says so](decisions/D106-the-lane-model-refuses-a-mask-write.md) | decided | 2026-08-20 |
 | 🟡 | D107 | [The operand solver checks that a family agrees with itself](decisions/D107-the-operand-solver-checks-that-a-family.md) | assumed | ~2026-08-20..08-21 |
@@ -154,10 +154,10 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D129 | [Side effects on hidden state are part of an instruction, not an extra](decisions/D129-side-effects-on-hidden-state-are-part.md) | decided | 2026-08-21 |
 | 🟢 | D129 | [Two progress signals, and the verdict says which moved](decisions/D129-two-progress-signals-and-the-verdict.md) | decided | 2026-08-20 |
 | 🟡 | D130 | [The GPU-address assumption is a named function, not a silence](decisions/D130-the-gpu-address-assumption-is-a-named.md) | assumed | ~2026-08-20 |
-| 🟡 | D130 | [The thread pointer installs, and it is checked rather than assumed](decisions/D130-the-thread-pointer-installs-and-it-is.md) | assumed | 2026-08-20 |
+| 🟢 | D130 | [The thread pointer installs, and it is checked rather than assumed](decisions/D130-the-thread-pointer-installs-and-it-is.md) | decided | 2026-08-20 |
 | 🟡 | D131 | [A capture is a pair: what the call asked for, and the bytes it appended](decisions/D131-a-capture-is-a-pair-what-the-call-asked.md) | assumed | ~2026-08-20 |
 | 🟡 | D132 | [Generated fixtures and dumped shaders do not share an extension](decisions/D132-generated-fixtures-and-dumped-shaders.md) | assumed | ~2026-08-20 |
-| 🔴 | D133 | [The subgroup level is blocked on hardware, not on effort](decisions/D133-the-subgroup-level-is-blocked-on.md) | blocked | ~2026-08-20 |
+| 🟡 | D133 | [The subgroup level is blocked on hardware, not on effort](decisions/D133-the-subgroup-level-is-blocked-on.md) | assumed | ~2026-08-20 |
 | 🟡 | D134 | [A named immediate the reference appends without a comma is still an operand](decisions/D134-a-named-immediate-the-reference-appends.md) | assumed | ~2026-08-20 |
 | 🟡 | D135 | [The local data share is workgroup storage, and the lane model refuses it](decisions/D135-the-local-data-share-is-workgroup.md) | assumed | ~2026-08-20 |
 | 🟡 | D136 | [The differential oracle is a property, tested by generation](decisions/D136-the-differential-oracle-is-a-property.md) | assumed | ~2026-08-20 |
@@ -179,7 +179,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D152 | [The entry point was reading a stray host pointer, and it looked like progress](decisions/D152-the-entry-point-was-reading-a-stray.md) | decided | 2026-08-20 |
 | 🟢 | D153 | [The process entry image, and a matrix that ruled out three hypotheses at once](decisions/D153-the-process-entry-image-and-a-matrix.md) | decided | 2026-08-20 |
 | 🟢 | D154 | [The ranked list is the wrong view at a wall; the ordered tail is the right one](decisions/D154-the-ranked-list-is-the-wrong-view-at-a.md) | decided | 2026-08-20 |
-| 🟢 | D155 | [Two names confirmed by hash, and the vocabulary extended to derive them](decisions/D155-two-names-confirmed-by-hash-and-the.md) | confirmed | 2026-08-20 |
+| 🟢 | D155 | [Two names confirmed by hash, and the vocabulary extended to derive them](decisions/D155-two-names-confirmed-by-hash-and-the.md) | decided | 2026-08-20 |
 | 🟢 | D156 | [Nothing reachable from a guest call may panic](decisions/D156-nothing-reachable-from-a-guest-call-may.md) | decided | 2026-08-20 |
 | 🟡 | D157 | [The mapping is parked behind a switch, not deleted and not shipped](decisions/D157-the-mapping-is-parked-behind-a-switch.md) | assumed | 2026-08-20 |
 | 🟢 | D158 | [The fault handler always had the registers; it printed two addresses](decisions/D158-the-fault-handler-always-had-the.md) | decided | 2026-08-20 |
@@ -187,7 +187,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D160 | [A second shim found the logic the first one had absorbed](decisions/D160-a-second-shim-found-the-logic-the-first.md) | decided | 2026-08-20 |
 | 🟢 | D161 | [egui, chosen for the shape of what it has to draw](decisions/D161-egui-chosen-for-the-shape-of-what-it.md) | decided | 2026-08-20 |
 | 🟢 | D162 | [A settings pane for a subsystem that does not exist is a dead control](decisions/D162-a-settings-pane-for-a-subsystem-that.md) | decided | 2026-08-20 |
-| 🟢 | D163 | [Homebrew pkgs are encrypted, measured; pkg support deferred](decisions/D163-homebrew-pkgs-are-encrypted-measured.md) | measured | 2026-08-20 |
+| 🟢 | D163 | [Homebrew pkgs are encrypted, measured; pkg support deferred](decisions/D163-homebrew-pkgs-are-encrypted-measured.md) | decided | 2026-08-20 |
 | 🟢 | D164 | [The library list was doing file I/O every frame](decisions/D164-the-library-list-was-doing-file-i-o.md) | decided | 2026-08-20 |
 | 🟢 | D165 | [The files were always there; there was nothing to hand them over](decisions/D165-the-files-were-always-there-there-was.md) | decided | 2026-08-20 |
 | 🟢 | D166 | [The main bisection lever was wired to nothing](decisions/D166-the-main-bisection-lever-was-wired-to.md) | decided | 2026-08-20 |
@@ -209,7 +209,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D182 | [The compatibility record is the other half of the title file](decisions/D182-the-compatibility-record-is-the-other.md) | decided | 2026-08-21 |
 | 🟢 | D183 | [snprintf_s refuses rather than renders what it can](decisions/D183-snprintf-s-refuses-rather-than-renders.md) | decided | 2026-08-21 |
 | 🟢 | D184 | [Guards for the instrumentation, because the tests were faithful to the mistake](decisions/D184-guards-for-the-instrumentation-because.md) | decided | 2026-08-21 |
-| 🟢 | D185 | [A poisoned stack, so "nobody wrote this" can be measured](decisions/D185-a-poisoned-stack-so-nobody-wrote-this.md) | measured | 2026-08-21 |
+| 🟢 | D185 | [A poisoned stack, so "nobody wrote this" can be measured](decisions/D185-a-poisoned-stack-so-nobody-wrote-this.md) | decided | 2026-08-21 |
 | 🟢 | D186 | [printf, because the guest was explaining itself into a void](decisions/D186-printf-because-the-guest-was-explaining.md) | decided | 2026-08-21 |
 | 🟢 | D187 | [The stub policy reached only declared imports, and a conclusion rested on it](decisions/D187-the-stub-policy-reached-only-declared.md) | decided | 2026-08-21 |
 | 🟢 | D188 | [The shipped symbol database is loaded unless told otherwise](decisions/D188-the-shipped-symbol-database-is-loaded.md) | decided | 2026-08-21 |
@@ -227,9 +227,9 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D200 | [The submission entry point takes an address, because a guest has one](decisions/D200-the-submission-entry-point-takes-an.md) | decided | ~2026-08-24..08-21 |
 | 🟢 | D201 | [Decision numbers are checked, because more than one session assigns them](decisions/D201-decision-numbers-are-checked-because.md) | decided | 2026-08-21 |
 | 🟢 | D202 | [A candidate operand field may not overlap anything the encoding table already reads](decisions/D202-a-candidate-operand-field-may-not.md) | decided | 2026-08-21 |
-| 🟢 | D203 | [The typed-buffer format table is measured from the assembler, both directions](decisions/D203-the-typed-buffer-format-table-is.md) | measured | 2026-08-21 |
-| 🟢 | D204 | [Typed and untyped buffer accesses share one body, and unmeasured formats are refused](decisions/D204-typed-and-untyped-buffer-accesses-share.md) | measured | 2026-08-21 |
-| 🟢 | D205 | [Operands spelled as names have their codes measured, not written down](decisions/D205-operands-spelled-as-names-have-their.md) | measured | 2026-08-21 |
+| 🟢 | D203 | [The typed-buffer format table is measured from the assembler, both directions](decisions/D203-the-typed-buffer-format-table-is.md) | decided | 2026-08-21 |
+| 🟢 | D204 | [Typed and untyped buffer accesses share one body, and unmeasured formats are refused](decisions/D204-typed-and-untyped-buffer-accesses-share.md) | decided | 2026-08-21 |
+| 🟢 | D205 | [Operands spelled as names have their codes measured, not written down](decisions/D205-operands-spelled-as-names-have-their.md) | decided | 2026-08-21 |
 | 🟢 | D206 | [Vendor documentation is consumed freely; the LLVM restriction is about oracles, not licences](decisions/D206-vendor-documentation-is-consumed-freely.md) | decided | 2026-08-21 |
 | 🟢 | D207 | [orbistoun implements obSCEne's protocol; it does not shape it](decisions/D207-orbistoun-implements-obscene-s-protocol.md) | decided | 2026-08-21 |
 | 🟢 | D208 | [The repository's own layout, audited once the tree stopped being small](decisions/D208-the-repository-s-own-layout-audited.md) | decided | 2026-08-24 |
@@ -242,7 +242,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D215 | [The toolbar captures the window, and says that is what it captures](decisions/D215-the-toolbar-captures-the-window-and.md) | decided | 2026-08-24 |
 | 🟢 | D216 | [A pattern's size is computed once, not per candidate](decisions/D216-a-pattern-s-size-is-computed-once-not.md) | decided | 2026-08-24 |
 | 🟢 | D217 | [The readable window was a page low, and the wall had been unreadable because of it](decisions/D217-the-readable-window-was-a-page-low-and.md) | decided | 2026-08-24 |
-| 🟢 | D218 | [Two experiments that eliminated four things and confirmed nothing](decisions/D218-two-experiments-that-eliminated-four.md) | confirmed | 2026-08-24 |
+| 🟢 | D218 | [Two experiments that eliminated four things and confirmed nothing](decisions/D218-two-experiments-that-eliminated-four.md) | decided | 2026-08-24 |
 | 🟢 | D219 | [The inference runtime is downloaded, not compiled in; and a proposer samples](decisions/D219-the-inference-runtime-is-downloaded-not.md) | decided | 2026-08-24 |
 | 🟢 | D220 | [The diagnostics share plumbing, and one of them is dyed banknotes](decisions/D220-the-diagnostics-share-plumbing-and-one.md) | decided | 2026-08-24 |
 | 🟢 | D221 | [Every environment variable is declared in one crate](decisions/D221-every-environment-variable-is-declared.md) | decided | 2026-08-24 |
@@ -254,7 +254,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D227 | [Principle 3 applies to the tools, and an intervention says so on the line](decisions/D227-principle-3-applies-to-the-tools-and-an.md) | decided | 2026-08-25 |
 | ⚪ | D228 | [The library folder was resolved against the launch directory, which is not a setting](decisions/D228-the-library-folder-was-resolved-against.md) | unrecorded | ~2026-08-25 |
 | 🟢 | D229 | [A plant could reach only offset zero, and a fill silently erased it](decisions/D229-a-plant-could-reach-only-offset-zero.md) | decided | 2026-08-25 |
-| 🟢 | D230 | [Nothing could change what an unnamed function answers, so an elimination had never been measured](decisions/D230-nothing-could-change-what-an-unnamed.md) | measured | 2026-08-25 |
+| 🟢 | D230 | [Nothing could change what an unnamed function answers, so an elimination had never been measured](decisions/D230-nothing-could-change-what-an-unnamed.md) | decided | 2026-08-25 |
 | 🟢 | D231 | [A chooser is slower than running everything it would choose between](decisions/D231-a-chooser-is-slower-than-running.md) | decided | 2026-08-25 |
 | 🟢 | D232 | [A fault that moves and a guest broken earlier are the same address and opposite results](decisions/D232-a-fault-that-moves-and-a-guest-broken.md) | decided | 2026-08-25 |
 | 🟢 | D233 | [The subject of a fault is where the guest died, not what it called](decisions/D233-the-subject-of-a-fault-is-where-the.md) | decided | 2026-08-25 |
@@ -265,7 +265,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D238 | [The limit that decides a verdict is a call budget; the clock stays as a backstop](decisions/D238-the-limit-that-decides-a-verdict-is-a.md) | decided | 2026-08-25 |
 | 🟢 | D239 | [Two counters, one quantity, and the number a person read was wrong by ten](decisions/D239-two-counters-one-quantity-and-the.md) | decided | 2026-08-25 |
 | 🟢 | D240 | [The numbers in the documentation are generated, and a check fails when they drift](decisions/D240-the-numbers-in-the-documentation-are.md) | decided | 2026-08-25 |
-| 🟢 | D241 | [One lock per module for one process-wide table, and the run that measured nothing](decisions/D241-one-lock-per-module-for-one-process.md) | measured | 2026-08-25 |
+| 🟢 | D241 | [One lock per module for one process-wide table, and the run that measured nothing](decisions/D241-one-lock-per-module-for-one-process.md) | decided | 2026-08-25 |
 | 🟢 | D242 | [A name enters the database only if this repository can re-derive it](decisions/D242-a-name-enters-the-database-only-if-this.md) | decided | 2026-08-25 |
 | 🟢 | D243 | [The work list removed what a run solved, not what anything could name](decisions/D243-the-work-list-removed-what-a-run-solved.md) | decided | 2026-08-25 |
 | 🟢 | D244 | [An illegal instruction has an address, and it is not one the guest asked for](decisions/D244-an-illegal-instruction-has-an-address.md) | decided | 2026-08-25 |
@@ -279,11 +279,11 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D252 | [A failed open must not look like a descriptor](decisions/D252-a-failed-open-must-not-look-like-a.md) | decided | 2026-08-25 |
 | 🟢 | D253 | [The model was told the wrong libraries, and earned names from ones it was never shown](decisions/D253-the-model-was-told-the-wrong-libraries.md) | decided | 2026-08-25 |
 | 🟢 | D254 | [A wrong proposal is free on disk and expensive in the loop](decisions/D254-a-wrong-proposal-is-free-on-disk-and.md) | decided | 2026-08-25 |
-| 🟡 | D255 | [Thirty-five per cent of what the model proposed was already in the shipped word list](decisions/D255-thirty-five-per-cent-of-what-the-model.md) | proposed | 2026-08-25 |
+| 🟢 | D255 | [Thirty-five per cent of what the model proposed was already in the shipped word list](decisions/D255-thirty-five-per-cent-of-what-the-model.md) | decided | 2026-08-25 |
 | 🟢 | D256 | [The probe's worklist, taken from the top](decisions/D256-the-probe-s-worklist-taken-from-the-top.md) | decided | 2026-08-25 |
 | 🟢 | D257 | [A name that does not say how it was found cannot be used](decisions/D257-a-name-that-does-not-say-how-it-was.md) | decided | 2026-08-25 |
 | 🟢 | D258 | [The vocabulary was never the gap; the shapes were](decisions/D258-the-vocabulary-was-never-the-gap-the.md) | decided | 2026-08-25 |
-| 🟢 | D259 | [Two missing words made seven confirmed names unreproducible](decisions/D259-two-missing-words-made-seven-confirmed.md) | confirmed | 2026-08-25 |
+| 🟢 | D259 | [Two missing words made seven confirmed names unreproducible](decisions/D259-two-missing-words-made-seven-confirmed.md) | decided | 2026-08-25 |
 | 🟢 | D260 | [The audit reads the grammar the binary was built with, not the one on disk](decisions/D260-the-audit-reads-the-grammar-the-binary.md) | decided | 2026-08-25 |
 | 🟢 | D261 | [Shapes are the binding constraint, not vocabulary, by three to one](decisions/D261-shapes-are-the-binding-constraint-not.md) | decided | 2026-08-25 |
 | 🟢 | D262 | [Repeated `learned` became affordable when the list shrank, and nobody noticed](decisions/D262-repeated-learned-became-affordable-when.md) | decided | 2026-08-25 |
@@ -308,17 +308,17 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D281 | [Five crates export a registration nothing calls](decisions/D281-five-crates-export-a-registration.md) | decided | 2026-08-26 |
 | 🟢 | D282 | [One body for two arities read an argument it was never passed](decisions/D282-one-body-for-two-arities-read-an.md) | decided | 2026-08-26 |
 | 🟢 | D283 | [The wall needed two things right at once, and the sweep varied one at a time](decisions/D283-the-wall-needed-two-things-right-at.md) | decided | 2026-08-26 |
-| 🟢 | D284 | [A contract can be measured without knowing what the function means](decisions/D284-a-contract-can-be-measured-without.md) | measured | 2026-08-26 |
+| 🟢 | D284 | [A contract can be measured without knowing what the function means](decisions/D284-a-contract-can-be-measured-without.md) | decided | 2026-08-26 |
 | 🟢 | D285 | [The shape that spells a verb over two learned nouns](decisions/D285-the-shape-that-spells-a-verb-over-two.md) | decided | 2026-08-26 |
 | 🟢 | D286 | [The sweep gains a second dimension, and it is a condition rather than a sentinel](decisions/D286-the-sweep-gains-a-second-dimension-and.md) | decided | 2026-08-26 |
 | 🟢 | D287 | [Naming a function silently breaks every experiment aimed at its hash](decisions/D287-naming-a-function-silently-breaks-every.md) | decided | 2026-08-26 |
 | 🟢 | D288 | [The sweep kept its own list of diagnostics, and it was already wrong](decisions/D288-the-sweep-kept-its-own-list-of.md) | decided | 2026-08-26 |
 | 🟢 | D289 | [The plan gets a runner, and an out-parameter finding follows itself through](decisions/D289-the-plan-gets-a-runner-and-an-out.md) | decided | 2026-08-26 |
 | 🟢 | D290 | [Every floating-point function works and every one is reported as missing](decisions/D290-every-floating-point-function-works-and.md) | decided | 2026-08-26 |
-| 🟢 | D291 | [What the sweep measured becomes a knowledge entry, and what it did not becomes an assumption](decisions/D291-what-the-sweep-measured-becomes-a.md) | measured | 2026-08-26 |
+| 🟢 | D291 | [What the sweep measured becomes a knowledge entry, and what it did not becomes an assumption](decisions/D291-what-the-sweep-measured-becomes-a.md) | decided | 2026-08-26 |
 | 🟢 | D292 | [The merge rule moves to the crate that owns the format](decisions/D292-the-merge-rule-moves-to-the-crate-that.md) | decided | 2026-08-26 |
 | 🟢 | D293 | [The dispatcher and the naming loop become two crates](decisions/D293-the-dispatcher-and-the-naming-loop.md) | decided | 2026-08-26 |
-| 🟢 | D294 | [The first function implemented from a contract the loop measured](decisions/D294-the-first-function-implemented-from-a.md) | measured | 2026-08-26 |
+| 🟢 | D294 | [The first function implemented from a contract the loop measured](decisions/D294-the-first-function-implemented-from-a.md) | decided | 2026-08-26 |
 | 🟢 | D295 | [A stub policy that can write, so the loop stops needing a person to type Rust](decisions/D295-a-stub-policy-that-can-write-so-the.md) | decided | 2026-08-26 |
 | 🟢 | D296 | [Three tiers of automatic fix, and why the third is the smallest](decisions/D296-three-tiers-of-automatic-fix-and-why.md) | decided | 2026-08-26 |
 | 🟢 | D297 | [The learned file becomes a record of measurements, so it can be sent to somebody](decisions/D297-the-learned-file-becomes-a-record-of.md) | decided | 2026-08-26 |
@@ -342,8 +342,8 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D315 | [A submission is a bundle of claims, and the receiver counts them itself](decisions/D315-a-submission-is-a-bundle-of-claims-and.md) | decided | 2026-08-27 |
 | 🟢 | D316 | [The decision number was allocated by a convention that races](decisions/D316-the-decision-number-was-allocated-by-a.md) | decided | 2026-08-27 |
 | 🟢 | D317 | ["Both sides are Vulkan" was an assumption, and it happened to be true](decisions/D317-both-sides-are-vulkan-was-an-assumption.md) | decided | 2026-08-27 |
-| 🔴 | D318 | [The overlay is blocked earlier than "cross-process presentation"](decisions/D318-the-overlay-is-blocked-earlier-than.md) | blocked | 2026-08-27 |
-| 🟡 | D319 | [A gate that cannot be scoped cannot be run in a shared tree](decisions/D319-a-gate-that-cannot-be-scoped-cannot-be.md) | scoped | 2026-08-27 |
+| 🟢 | D318 | [The overlay is blocked earlier than "cross-process presentation"](decisions/D318-the-overlay-is-blocked-earlier-than.md) | decided | 2026-08-27 |
+| 🟢 | D319 | [A gate that cannot be scoped cannot be run in a shared tree](decisions/D319-a-gate-that-cannot-be-scoped-cannot-be.md) | decided | 2026-08-27 |
 | 🟢 | D320 | [A curated list regrew to sixty-seven times its size, and only the clock noticed](decisions/D320-a-curated-list-regrew-to-sixty-seven.md) | decided | 2026-08-26 |
 | 🟢 | D321 | [Three things were built and inert, and one of them could not be built at all](decisions/D321-three-things-were-built-and-inert-and.md) | decided | 2026-08-27 |
 | 🟢 | D322 | [A generated patch is safe because promotion is the verification step](decisions/D322-a-generated-patch-is-safe-because.md) | decided | 2026-08-27 |
@@ -376,7 +376,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D352 | [The harvest took names because the work was naming](decisions/D352-the-harvest-took-names-because-the-work.md) | decided | 2026-08-27 |
 | 🟢 | D353 | [The harvest is a command, and writing it twice found a bug](decisions/D353-the-harvest-is-a-command-and-writing-it.md) | decided | 2026-08-27 |
 | 🟢 | D354 | [A revision the file states is a claim; a revision the checkout states is a fact](decisions/D354-a-revision-the-file-states-is-a-claim-a.md) | decided | 2026-08-27 |
-| 🟢 | D355 | [A turn that measured a contract and wrote nothing](decisions/D355-a-turn-that-measured-a-contract-and.md) | measured | 2026-08-27 |
+| 🟢 | D355 | [A turn that measured a contract and wrote nothing](decisions/D355-a-turn-that-measured-a-contract-and.md) | decided | 2026-08-27 |
 | 🟢 | D356 | [The dispatcher read what crashed and never what we had written down as unknown](decisions/D356-the-dispatcher-read-what-crashed-and.md) | decided | 2026-08-27 |
 | 🟢 | D357 | [The loop can close a question when the discriminator is arithmetic](decisions/D357-the-loop-can-close-a-question-when-the.md) | decided | 2026-08-28 |
 | 🟢 | D358 | [The loop writes down what it worked out](decisions/D358-the-loop-writes-down-what-it-worked-out.md) | decided | 2026-08-29 |
@@ -412,40 +412,40 @@ the project; the conversation that produced these decisions is not.
 | 🟡 | D388 | [A set says which and never when, and *when* was the whole question](decisions/D388-a-set-says-which-and-never-when-and.md) | assumed | 2026-08-30 |
 | 🟡 | D389 | [`/dev/klog` has something true in it, and the accuracy caveat that comes with it](decisions/D389-dev-klog-has-something-true-in-it-and.md) | assumed | 2026-08-30 |
 | 🟡 | D390 | [Ask the guest which fields it uses, one poisoned field per run](decisions/D390-ask-the-guest-which-fields-it-uses-one.md) | assumed | 2026-08-30 |
-| 🟢 | D391 | [What real hardware said, and which of it orbistoun had wrong](decisions/D391-what-real-hardware-said-and-which-of-it.md) | hardware | 2026-08-30 |
+| 🟡 | D391 | [What real hardware said, and which of it orbistoun had wrong](decisions/D391-what-real-hardware-said-and-which-of-it.md) | assumed | 2026-08-30 |
 | 🟡 | D392 | [A stub for every import makes "does this symbol exist" unanswerable](decisions/D392-a-stub-for-every-import-makes-does-this.md) | assumed | 2026-08-30 |
 | 🟡 | D393 | [A capital letter is a different symbol](decisions/D393-a-capital-letter-is-a-different-symbol.md) | assumed | 2026-08-30 |
 | 🟡 | D394 | [The machine is one setting, not five constants](decisions/D394-the-machine-is-one-setting-not-five.md) | assumed | 2026-08-30 |
 | 🟡 | D395 | [Not derivable is not the same as not measurable](decisions/D395-not-derivable-is-not-the-same-as-not.md) | assumed | 2026-08-30 |
 | 🟡 | D396 | [A log written after the guest stops is a log no guest can read](decisions/D396-a-log-written-after-the-guest-stops-is.md) | assumed | 2026-08-30 |
 | 🟡 | D397 | [The kernel's own version is a setting with no default](decisions/D397-the-kernel-s-own-version-is-a-setting.md) | assumed | 2026-08-30 |
-| 🟢 | D398 | [The hardware trip happened, and it moved seven placeholders](decisions/D398-the-hardware-trip-happened-and-it-moved.md) | hardware | 2026-08-30 |
+| 🟢 | D398 | [The hardware trip happened, and it moved seven placeholders](decisions/D398-the-hardware-trip-happened-and-it-moved.md) | measured | 2026-08-30 |
 | 🟢 | D399 | [The payloads were never handed what they read, and the instrument could not see it](decisions/D399-the-payloads-were-never-handed-what.md) | measured | 2026-08-30 |
 | 🟢 | D400 | [The payload builds its own syscall entry, and this hands it something with no inside](decisions/D400-the-payload-builds-its-own-syscall.md) | measured | 2026-08-30 |
 | 🟢 | D401 | [A guest that talks to the kernel directly left no trace on the work list](decisions/D401-a-guest-that-talks-to-the-kernel.md) | measured | 2026-08-30 |
 | 🟢 | D402 | [A stub that returns from `exit` turns a clean shutdown into a crash](decisions/D402-a-stub-that-returns-from-exit-turns-a.md) | measured | 2026-08-30 |
 | 🟢 | D403 | [The call that was blocking every payload, and what it says the machine is](decisions/D403-the-call-that-was-blocking-every.md) | measured | 2026-08-30 |
-| ⚪ | D404 | [The wall behind 649: firmware-specific address arithmetic](decisions/D404-the-wall-behind-649-firmware-specific.md) | unrecorded | 2026-08-30 |
+| 🟢 | D404 | [The wall behind 649: firmware-specific address arithmetic](decisions/D404-the-wall-behind-649-firmware-specific.md) | guest-observed | 2026-08-30 |
 | 🟢 | D405 | [The console answered the sysctl probe, and it says 12.40](decisions/D405-the-console-answered-the-sysctl-probe.md) | measured | 2026-08-30 |
 | 🟡 | D406 | [A firmware skeleton crate, for guests that reach past the interface](decisions/D406-a-firmware-skeleton-crate-for-guests.md) | assumed | 2026-08-30 |
-| 🟢 | D407 | [Word zero is getpid, and libkernel is laid out by measured vaddr](decisions/D407-word-zero-is-getpid-and-libkernel-is.md) | measured | 2026-08-30 |
+| 🟢 | D407 | [Word zero is getpid, and libkernel is laid out by measured vaddr](decisions/D407-word-zero-is-getpid-and-libkernel-is.md) | guest-observed | 2026-08-30 |
 | 🟢 | D408 | [The handoff, measured whole on a console, and made faithful here](decisions/D408-the-handoff-measured-whole-on-a-console.md) | measured | 2026-08-31 |
 | 🟡 | D409 | [Layout as a testable plan, console profiles, port reporting, and vaddr provenance](decisions/D409-layout-as-a-testable-plan-console.md) | assumed | 2026-08-31 |
-| 🟢 | D410 | [The console confirmed five more export vaddrs, and validated the whole base+vaddr model](decisions/D410-the-console-confirmed-five-more-export.md) | confirmed | ~2026-08-31 |
+| 🟢 | D410 | [The console confirmed five more export vaddrs, and validated the whole base+vaddr model](decisions/D410-the-console-confirmed-five-more-export.md) | measured | ~2026-08-31 |
 | 🟢 | D411 | [Diagnosis of the `image+0x2708` wall in `klog.elf`: kernel_copyout, setsockopt, and high-half kpipe_addr](decisions/D411-diagnosis-of-the-image-0x2708-wall-in.md) | measured | 2026-08-31 |
-| ⚪ | D412 | [Syscall 477 (`mmap`) implemented and wired to the syscall table](decisions/D412-syscall-477-mmap-implemented-and-wired.md) | unrecorded | 2026-08-31 |
+| 🟢 | D412 | [Syscall 477 (`mmap`) implemented and wired to the syscall table](decisions/D412-syscall-477-mmap-implemented-and-wired.md) | published | 2026-08-31 |
 | 🟢 | D413 | [Emulation of the kernel escape R/W pipe and dynamic symbol resolution](decisions/D413-emulation-of-the-kernel-escape-r-w-pipe.md) | measured | 2026-08-31 |
 | 🟡 | D414 | [The test corpus, made a verb: a manifest of sources, fetched and recorded on demand](decisions/D414-the-test-corpus-made-a-verb-a-manifest.md) | assumed | 2026-08-31 |
 | 🟡 | D415 | [The compatibility table as a tracked markdown file, generated from the records](decisions/D415-the-compatibility-table-as-a-tracked.md) | assumed | 2026-08-31 |
-| 🟢 | D416 | [Four HLE fixes from the hardware-vs-orbistoun obSCEne diff](decisions/D416-four-hle-fixes-from-the-hardware-vs.md) | hardware | 2026-08-31 |
+| 🟢 | D416 | [Four HLE fixes from the hardware-vs-orbistoun obSCEne diff](decisions/D416-four-hle-fixes-from-the-hardware-vs.md) | measured | 2026-08-31 |
 | 🟢 | D417 | [Three more HLE fixes from the same diff: thread join, mutex type, audio init](decisions/D417-three-more-hle-fixes-from-the-same-diff.md) | measured | 2026-08-31 |
 | 🟢 | D418 | [The census control failed because obSCEne's canary leaked into our symbol database](decisions/D418-the-census-control-failed-because.md) | measured | 2026-08-31 |
-| 🟢 | D419 | [Five more libkernel vaddrs behaviourally confirmed from the second payload run](decisions/D419-five-more-libkernel-vaddrs.md) | confirmed | 2026-08-31 |
+| 🟢 | D419 | [Five more libkernel vaddrs behaviourally confirmed from the second payload run](decisions/D419-five-more-libkernel-vaddrs.md) | measured | 2026-08-31 |
 | 🟢 | D420 | [sceKernelGetSystemSwVersion answers 13.09, which is not the 12.40 firmware](decisions/D420-scekernelgetsystemswversion-answers-13.md) | measured | 2026-08-31 |
 | 🟡 | D421 | [The software version is a profile setting, like the firmware, not a kernel constant](decisions/D421-the-software-version-is-a-profile.md) | assumed | 2026-08-31 |
 | 🟢 | D422 | [The console's writable device paths are a per-title sandbox, in the overlay already built](decisions/D422-the-console-s-writable-device-paths-are.md) | decided | 2026-08-31 |
 | 🟢 | D423 | [The sandbox is one entry point in orbistoun-fs, not orchestration in a consumer](decisions/D423-the-sandbox-is-one-entry-point-in.md) | decided | 2026-08-31 |
-| 🔴 | D424 | [The flip queue is a counter that completes on submit, and it unblocked the whole suite](decisions/D424-the-flip-queue-is-a-counter-that.md) | blocked | 2026-08-31 |
+| 🟢 | D424 | [The flip queue is a counter that completes on submit, and it unblocked the whole suite](decisions/D424-the-flip-queue-is-a-counter-that.md) | measured | 2026-08-31 |
 | 🟡 | D425 | [sceVideoOutGetResolutionStatus presents 1080p; the skip is a held output, not a headless one](decisions/D425-scevideooutgetresolutionstatus-presents.md) | assumed | 2026-08-31 |
 | 🟢 | D426 | [Video-out refuses with its own error family, and refuses a second open of a held output](decisions/D426-video-out-refuses-with-its-own-error.md) | measured | 2026-09-01 |
 | 🟢 | D427 | [The GPU subsystem starts at the command builders: a PM4 writer, and the two dispatch calls](decisions/D427-the-gpu-subsystem-starts-at-the-command.md) | measured | 2026-09-01 |
@@ -457,11 +457,11 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D433 | [Guest thread-local storage: the block is built, and Windows will not keep the base](decisions/D433-guest-thread-local-storage-the-block-is.md) | measured | 2026-09-01 |
 | 🟢 | D434 | [The Windows thread-pointer backstop, and PPSA28061 past its TLS wall](decisions/D434-the-windows-thread-pointer-backstop-and.md) | measured | 2026-09-01 |
 | 🟢 | D435 | [libSceUlt mutexes and condition variables, and the wall that turned out to be online](decisions/D435-libsceult-mutexes-and-condition.md) | measured | 2026-09-01 |
-| 🟢 | D436 | [The remaining title walls are one class: a guest allocation returning null, and it needs hardware](decisions/D436-the-remaining-title-walls-are-one-class.md) | hardware | 2026-09-01 |
-| 🟢 | D437 | [The hardware memory data was already captured; the map does not start at zero](decisions/D437-the-hardware-memory-data-was-already.md) | hardware | 2026-09-01 |
-| 🟢 | D438 | [Cross-section diff against hardware: placeholder error codes replaced with the measured ones](decisions/D438-cross-section-diff-against-hardware.md) | hardware | 2026-09-01 |
-| 🟢 | D439 | [Cross-section hardware diff: the system-wide divergences worth fixing](decisions/D439-cross-section-hardware-diff-the-system.md) | hardware | 2026-09-01 |
-| 🟢 | D440 | [The hardware cross-section diff is mined out for clean fixes](decisions/D440-the-hardware-cross-section-diff-is.md) | hardware | 2026-09-01 |
+| 🟢 | D436 | [The remaining title walls are one class: a guest allocation returning null, and it needs hardware](decisions/D436-the-remaining-title-walls-are-one-class.md) | measured | 2026-09-01 |
+| 🟢 | D437 | [The hardware memory data was already captured; the map does not start at zero](decisions/D437-the-hardware-memory-data-was-already.md) | measured | 2026-09-01 |
+| 🟢 | D438 | [Cross-section diff against hardware: placeholder error codes replaced with the measured ones](decisions/D438-cross-section-diff-against-hardware.md) | measured | 2026-09-01 |
+| 🟢 | D439 | [Cross-section hardware diff: the system-wide divergences worth fixing](decisions/D439-cross-section-hardware-diff-the-system.md) | measured | 2026-09-01 |
+| 🟢 | D440 | [The hardware cross-section diff is mined out for clean fixes](decisions/D440-the-hardware-cross-section-diff-is.md) | measured | 2026-09-01 |
 | 🟢 | D441 | [dlsym handle validation and sysmodule id-0, from user direction on the D440 tail](decisions/D441-dlsym-handle-validation-and-sysmodule.md) | measured | 2026-09-01 |
 | 🟢 | D442 | [The flexible-memory "shared allocator" theory was aimed at the wrong titles](decisions/D442-the-flexible-memory-shared-allocator.md) | measured | 2026-09-01 |
 | 🟢 | D443 | [PPSA02664's allocator wall was orbistoun's policy region sitting on the guest's heap](decisions/D443-ppsa02664-s-allocator-wall-was.md) | measured | 2026-09-01 |
@@ -501,7 +501,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D477 | [One `sysctlbyname`, merged from the two that were both live](decisions/D477-one-sysctlbyname-merged-from-two.md) | measured | 2026-09-02 |
 | 🟡 | D478 | [A differential result gets its own tier, because it is not a measurement](decisions/D478-a-differential-result-is-its-own-tier.md) | assumed | 2026-09-02 |
 | 🟢 | D479 | [The differential runs against whatever published implementation is reachable, and names it](decisions/D479-the-differential-runs-against-whatever-is-reachable.md) | measured | 2026-09-02 |
-| 🔴 | D480 | [The sign-extension divergence is withdrawn: it was the probe's cast, not the console's](decisions/D480-the-sign-extension-claim-is-withdrawn.md) | withdrawn | 2026-09-02 |
+| 🟢 | D480 | [The sign-extension divergence is withdrawn: it was the probe's cast, not the console's](decisions/D480-the-sign-extension-claim-is-withdrawn.md) | measured | 2026-09-02 |
 | 🟢 | D481 | [A measured value that is not a property of the interface gets its own list](decisions/D481-a-measured-value-that-is-not-a-property-cannot-be-claimed.md) | measured | 2026-09-02 |
 | 🟢 | D482 | [A title's own module is found by the name that imports it, not by a path](decisions/D482-a-title-module-is-found-by-the-name-that-imports-it.md) | measured | 2026-09-03 |
 | 🟢 | D483 | [Attribution is half of what identifies an import, and `libc` is the title's](decisions/D483-attribution-is-half-of-what-identifies-an-import.md) | measured | 2026-09-03 |
@@ -524,7 +524,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D500 | [Every A/V/input subsystem implements the lifecycle and not the data path](decisions/D500-the-lifecycle-is-implemented-and-the-data-path-is-not.md) | measured | 2026-09-03 |
 | 🟢 | D501 | [The citations were already here, in the wrong field](decisions/D501-the-citations-were-already-here-in-the-wrong-field.md) | measured | 2026-09-03 |
 | 🟢 | D502 | [Ten outstanding measurements were never going to be claimed](decisions/D502-ten-outstanding-measurements-were-never-going-to-be-claimed.md) | decided | 2026-09-03 |
-| 🟢 | D503 | [Seven hardware claims from data already in hand, and nine more non-claims](decisions/D503-seven-hardware-claims-from-data-already-in-hand.md) | hardware | 2026-09-03 |
+| 🟢 | D503 | [Seven hardware claims from data already in hand, and nine more non-claims](decisions/D503-seven-hardware-claims-from-data-already-in-hand.md) | measured | 2026-09-03 |
 | 🟢 | D504 | [The current generation's graphics API, declared as names and nothing else](decisions/D504-the-current-generations-graphics-api-declared-as-names.md) | decided | 2026-09-03 |
 | 🟢 | D505 | [The declared surface now matches what guests ask for, and the coverage figure got worse](decisions/D505-the-declared-surface-now-matches-what-guests-ask-for.md) | decided | 2026-09-03 |
 | 🟢 | D506 | [The encoder measurements record a non-resolution, and thirty names had no provenance](decisions/D506-the-encoder-measurements-record-a-non-resolution.md) | measured | 2026-09-03 |
@@ -537,18 +537,18 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D513 | [The oscillation was the guest's own allocator, and the deciding input was ordering](decisions/D513-the-oscillation-was-the-guests-own-allocator.md) | measured | 2026-09-03 |
 | 🟢 | D514 | [The wall is a module that was loaded, placed, and never started](decisions/D514-the-wall-is-a-module-that-was-never-started.md) | measured | 2026-09-03 |
 | 🟢 | D515 | [Starting the modules took the wall down, and the guest reached its frame loop](decisions/D515-starting-a-module-took-the-wall-down.md) | measured | 2026-09-03 |
-| ⚪ | D516 | [Nothing is ever pending, and the guest left its frame loop](decisions/D516-nothing-is-ever-pending.md) | unrecorded | 2026-09-03 |
+| 🟢 | D516 | [Nothing is ever pending, and the guest left its frame loop](decisions/D516-nothing-is-ever-pending.md) | guest-observed | 2026-09-03 |
 | 🟢 | D517 | [`dlsym` never knew the guest's own exports, and the wall did not move anyway](decisions/D517-dlsym-never-knew-the-guests-own-exports.md) | measured | 2026-09-03 |
 | 🟢 | D518 | [The null global has exactly one writer (and the guard I blamed is never reached)](decisions/D518-the-null-global-has-exactly-one-writer.md) | measured | 2026-09-03 |
 | 🟢 | D519 | [The guest calls into its module before the memory manager exists, and D518 blamed the wrong guard](decisions/D519-the-guest-calls-its-module-before-the-memory-manager-exists.md) | measured | 2026-09-03 |
 | 🟢 | D520 | [Starting every placed module before entry is not the missing ordering](decisions/D520-starting-every-module-early-is-not-the-missing-ordering.md) | measured | 2026-09-03 |
 | 🟢 | D521 | [The callback has no branch that avoids the read, so one of D519's two readings is dead](decisions/D521-the-callback-has-no-branch-that-avoids-the-read.md) | measured | 2026-09-03 |
 | 🟢 | D522 | [A fault now says what its registers point at, and the label is "None"](decisions/D522-a-fault-now-says-what-its-registers-point-at.md) | measured | 2026-09-03 |
-| ⚪ | D523 | [The thread affinity setter, and the one beside it that stays unimplemented](decisions/D523-the-thread-affinity-setter-and-the-one-beside-it-that-stays-unimplemented.md) | unrecorded | 2026-09-03 |
-| ⚪ | D524 | [The event queue exists so a handle means something, not so events can be delivered](decisions/D524-the-event-queue-exists-because-a-handle-has-to-mean-something.md) | unrecorded | 2026-09-03 |
-| ⚪ | D525 | [The vendor `stat` is not the POSIX one under another name, and it opened eight functions](decisions/D525-the-vendor-stat-is-not-the-posix-one-under-another-name.md) | unrecorded | 2026-09-03 |
-| ⚪ | D526 | [A positioned read took the guest into the GPU, and the wall finally moved](decisions/D526-a-positioned-read-took-the-guest-into-the-gpu.md) | unrecorded | 2026-09-03 |
-| ⚪ | D527 | [The wall is `sceAgcCreateShader`, and a hardcoded cap was hiding it](decisions/D527-the-wall-is-a-shader-and-the-cap-was-hiding-it.md) | unrecorded | 2026-09-03 |
+| 🟢 | D523 | [The thread affinity setter, and the one beside it that stays unimplemented](decisions/D523-the-thread-affinity-setter-and-the-one-beside-it-that-stays-unimplemented.md) | guest-observed | 2026-09-03 |
+| 🟢 | D524 | [The event queue exists so a handle means something, not so events can be delivered](decisions/D524-the-event-queue-exists-because-a-handle-has-to-mean-something.md) | guest-observed | 2026-09-03 |
+| 🟢 | D525 | [The vendor `stat` is not the POSIX one under another name, and it opened eight functions](decisions/D525-the-vendor-stat-is-not-the-posix-one-under-another-name.md) | guest-observed | 2026-09-03 |
+| 🟢 | D526 | [A positioned read took the guest into the GPU, and the wall finally moved](decisions/D526-a-positioned-read-took-the-guest-into-the-gpu.md) | guest-observed | 2026-09-03 |
+| 🟢 | D527 | [The wall is `sceAgcCreateShader`, and a hardcoded cap was hiding it](decisions/D527-the-wall-is-a-shader-and-the-cap-was-hiding-it.md) | guest-observed | 2026-09-03 |
 | 🟢 | D528 | [Two walls that need a measurement, and the mechanism that asks for one](decisions/D528-two-walls-that-need-a-measurement-and-the-mechanism-that-asks-for-it.md) | decided | 2026-09-03 |
 | 🟢 | D529 | [The record format already carried what D512 said it lacked](decisions/D529-the-record-format-already-carried-what-it-was-said-to-lack.md) | decided | 2026-09-04 |
 | 🟢 | D530 | [The wide family is verified, and one case is the reason it was worth doing](decisions/D530-the-wide-family-verified-and-the-case-that-bites.md) | measured | 2026-09-04 |
@@ -557,7 +557,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D533 | [libm splits in two, and only half of it belongs in a differential](decisions/D533-libm-splits-in-two-and-only-half-belongs-here.md) | measured | 2026-09-04 |
 | 🟢 | D534 | [Two rounding rules that pin each other](decisions/D534-two-rounding-rules-that-pin-each-other.md) | measured | 2026-09-04 |
 | 🟢 | D535 | [`strdup` covered, and a missing terminator is only caught by luck](decisions/D535-a-missing-terminator-is-only-caught-by-luck.md) | measured | 2026-09-04 |
-| ⚪ | D536 | [One clock, two names, and one origin](decisions/D536-one-clock-two-names-and-one-origin.md) | unrecorded | 2026-09-04 |
+| 🟢 | D536 | [One clock, two names, and one origin](decisions/D536-one-clock-two-names-and-one-origin.md) | guest-observed | 2026-09-04 |
 | 🟢 | D537 | [The reasoning was in the code, and the record said nothing](decisions/D537-the-reasoning-was-in-the-code-and-the-record-said-nothing.md) | decided | 2026-09-04 |
 | 🟢 | D538 | [Two thirds of the ask list is forty sentences](decisions/D538-two-thirds-of-the-ask-list-is-forty-sentences.md) | decided | 2026-09-04 |
 | 🟢 | D539 | [One question, written a hundred and forty-nine ways](decisions/D539-one-question-written-a-hundred-and-forty-nine-ways.md) | decided | 2026-09-04 |
@@ -565,7 +565,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D541 | [A measurement was sitting in the list of things nobody knows](decisions/D541-a-measurement-was-sitting-in-the-list-of-things-nobody-knows.md) | decided | 2026-09-04 |
 | 🟢 | D542 | [Six records said nothing was known while holding a measurement, and the axis closes](decisions/D542-six-records-said-nothing-was-known-while-holding-a-measurement.md) | decided | 2026-09-04 |
 | 🟢 | D543 | [`dlsym` succeeds where the console refuses, and the reason written down was not the reason](decisions/D543-dlsym-succeeds-where-the-console-refuses.md) | decided | 2026-09-04 |
-| 🟢 | D544 | [Forty-seven measured values that no test looked at](decisions/D544-forty-seven-measured-values-that-no-test-looked-at.md) | measured | 2026-09-04 |
+| 🟢 | D544 | [Forty-seven measured values that no test looked at](decisions/D544-forty-seven-measured-values-that-no-test-looked-at.md) | decided | 2026-09-04 |
 | 🟢 | D545 | [The relations are testable where the numbers are not](decisions/D545-the-relations-are-testable-where-the-numbers-are-not.md) | decided | 2026-09-04 |
 | 🟢 | D546 | [A permanent resident of the work queue](decisions/D546-a-permanent-resident-of-the-work-queue.md) | decided | 2026-09-04 |
 | 🟢 | D547 | [The relation needed a mount, not a guest](decisions/D547-the-relation-needed-a-mount-not-a-guest.md) | decided | 2026-09-04 |
@@ -578,14 +578,14 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D554 | [The oracle carries a varying, before anything interpolates](decisions/D554-the-oracle-carries-a-varying.md) | decided | 2026-09-04 |
 | 🟢 | D555 | [The wall was real, the record was twelve days stale, and the library was never empty](decisions/D555-the-wall-was-real-and-the-record-was-twelve-days-stale.md) | decided | 2026-09-04 |
 | 🟢 | D556 | [The out-parameter is the whole of the wall, and the capture that could answer it does not exist yet](decisions/D556-the-out-parameter-is-the-whole-wall.md) | measured | 2026-09-04 |
-| 🟢 | D557 | [A measured answer is not a prop, and a region always was one](decisions/D557-a-measured-answer-is-not-a-prop.md) | measured | 2026-09-04 |
+| 🟡 | D557 | [A measured answer is not a prop, and a region always was one](decisions/D557-a-measured-answer-is-not-a-prop.md) | assumed | 2026-09-04 |
 | 🟢 | D558 | [A rung for the first frame, and where frames may not rank](decisions/D558-a-rung-for-the-first-frame.md) | measured | 2026-09-04 |
 | 🟢 | D559 | [The Agc argument classes, and how to get past the arity gate without guessing](decisions/D559-the-agc-argument-classes-and-the-arity-gate.md) | measured | 2026-09-04 |
-| ⚪ | D560 | [Events are delivered, from a published layout, and the wait does not block](decisions/D560-events-are-delivered-from-a-published-layout.md) | unrecorded | 2026-09-04 |
-| ⚪ | D561 | [The per-thread scheduling record D523 said would be needed](decisions/D561-the-per-thread-scheduling-record-d523-predicted.md) | unrecorded | 2026-09-04 |
-| ⚪ | D562 | [The tail, worked in order of what a placeholder does](decisions/D562-the-tail-worked-by-what-a-placeholder-does.md) | unrecorded | 2026-09-04 |
+| 🟢 | D560 | [Events are delivered, from a published layout, and the wait does not block](decisions/D560-events-are-delivered-from-a-published-layout.md) | guest-observed | 2026-09-04 |
+| 🟢 | D561 | [The per-thread scheduling record D523 said would be needed](decisions/D561-the-per-thread-scheduling-record-d523-predicted.md) | guest-observed | 2026-09-04 |
+| 🟢 | D562 | [The tail, worked in order of what a placeholder does](decisions/D562-the-tail-worked-by-what-a-placeholder-does.md) | guest-observed | 2026-09-04 |
 | 🟢 | D563 | [The record could not see the work, and three copies of the ordering had drifted](decisions/D563-the-record-could-not-see-the-work.md) | measured | 2026-09-04 |
-| ⚪ | D564 | [A placeholder answered as a *size* is a very quiet four gigabytes](decisions/D564-a-placeholder-as-a-size-is-a-quiet-four-gigabytes.md) | unrecorded | 2026-09-04 |
+| 🟢 | D564 | [A placeholder answered as a *size* is a very quiet four gigabytes](decisions/D564-a-placeholder-as-a-size-is-a-quiet-four-gigabytes.md) | guest-observed | 2026-09-04 |
 | 🟢 | D565 | [The first measured command packets, and a census that contradicts its own report](decisions/D565-the-first-measured-command-packets.md) | measured | 2026-09-04 |
 | 🟢 | D566 | [The biggest item in the work list has no name, and no return value fixes it](decisions/D566-the-biggest-item-in-the-work-list-has-no-name.md) | measured | 2026-09-04 |
 | 🟢 | D567 | [A placeholder that names its own source](decisions/D567-a-placeholder-that-names-its-own-source.md) | measured | 2026-09-04 |
@@ -623,7 +623,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D599 | [The dispatcher was measuring a different program](decisions/D599-the-dispatcher-was-measuring-a.md) | measured | 2026-09-08 |
 | 🟢 | D600 | [A bogus finding disappears, and the check passes on a run that still varies](decisions/D600-a-bogus-finding-disappears-and-the.md) | measured | 2026-09-08 |
 | 🟢 | D601 | [Guest-visible blocks belong in the memory crate](decisions/D601-guest-visible-blocks-belong-in-the.md) | decided | 2026-09-08 |
-| 🟢 | D602 | [The drift is a guest branch, not a mapping we refused](decisions/D602-the-drift-is-a-guest-branch-not-a.md) | measured | 2026-09-08 |
+| 🟢 | D602 | [The drift is a guest branch, not a mapping we refused - NO, it is a refusal](decisions/D602-the-drift-is-a-guest-branch-not-a.md) | measured | 2026-09-08 |
 | 🟢 | D603 | [The head of the call sequence, and a redirection that measured nothing](decisions/D603-the-head-of-the-call-sequence-and-a.md) | measured | 2026-09-08 |
 | 🟢 | D604 | [A placement that would not step past a conflict](decisions/D604-a-placement-that-would-not-step-past-a.md) | measured | 2026-09-08 |
 | 🟢 | D605 | [The largest record kind in every report, read by nothing](decisions/D605-the-largest-record-kind-in-every.md) | measured | 2026-09-08 |
@@ -683,9 +683,10 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D659 | [Two walls that hardware cannot reach](decisions/D659-two-walls-that-hardware-cannot-reach.md) | measured | 2026-09-09 |
 | 🟡 | D660 | [A page per title](decisions/D660-a-page-per-title.md) | assumed | 2026-09-09 |
 | 🟢 | D661 | [Three roots, not one](decisions/D661-three-roots-not-one.md) | measured | 2026-09-09 |
-| 🟡 | D662 | [Category is a permission, not a label](decisions/D662-category-is-a-permission-not-a-label.md) | published | 2026-09-10 |
+| 🟢 | D662 | [Category is a permission, not a label](decisions/D662-category-is-a-permission-not-a-label.md) | published | 2026-09-10 |
 | 🟢 | D663 | [The codenames are the vocabulary](decisions/D663-the-codenames-are-the-vocabulary.md) | measured | 2026-09-10 |
 | 🟢 | D664 | [An origin list, with every failure named](decisions/D664-an-origin-list-with-every-failure-named.md) | measured | 2026-09-10 |
+| 🟢 | D665 | [The index reads the entry, not its title](decisions/D665-the-index-reads-the-entry-not-its.md) | measured | 2026-09-10 |
 
 | | meaning |
 |---|---|
