@@ -110,7 +110,7 @@ name = "RELEASE_MEM"
 
 [[opcode]]
 value = 0x68
-name = "SET_PREDICATION"
+name = "SET_CONFIG_REG"
 
 [[opcode]]
 value = 0x69
