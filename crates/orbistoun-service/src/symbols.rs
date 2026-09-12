@@ -126,8 +126,11 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_video::implementations());
     all.extend_from_slice(orbistoun_gpu::implementations());
     // libSceAgc's own implementations, declared beside the Gnm builders rather than folded in:
-    // `sceAgcCreateShader` fills a guest-adjacent shader object from the measured 3c5e model (D556).
+    // `sceAgcCreateShader` fills a guest-adjacent shader object from the measured 3c5e model (D556),
+    // and the shader-linkage calls (interpolant mapping, prim state, link shaders) from 9a41.
     all.extend_from_slice(orbistoun_gpu::agc::implementations());
+    // libSceAgcDriver: `sceAgcDriverCreateQueue` accepts the Type 0/3 queue and returns success (9a41).
+    all.extend_from_slice(orbistoun_gpu::agc_driver::implementations());
     all.extend_from_slice(orbistoun_fs::implementations());
     // The socket calls in their vendor spelling. The bodies are `orbistoun-fs`'s; this crate
     // declares `libSceNet` and encodes a failure the way that library numbers one (D667).

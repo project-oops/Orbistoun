@@ -172,15 +172,163 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Reads a little-endian dword from guest memory at `at`, under the identity mapping (D014).
+///
+/// # Safety
+///
+/// `at` must address four bytes of readable guest memory.
+unsafe fn peek_u32(at: u64) -> u32 {
+    let Ok(at) = usize::try_from(at) else {
+        return 0;
+    };
+    // SAFETY: the caller guarantees four readable guest bytes at `at`; unaligned for the field's sake.
+    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(at)) }
+}
+
+/// The PS-input interpolant table is thirty-two quadwords.
+const INTERPOLANT_ENTRIES: u64 = 32;
+
+/// Writes the default PS-input interpolant table at `at`: entry `i` is `(i << 32) | (0x191 + i)`.
+///
+/// **Measured (obSCEne `166-agc/link-shaders`, sweep `20260912-003916`).** It is both
+/// `sceAgcCreateInterpolantMapping`'s default output and the interpolant half of
+/// `sceAgcLinkShaders`' link state - the first two entries came back `0x191` and `0x1_0000_0192`,
+/// which is exactly this rule. `0x191` is `SPI_PS_INPUT_CNTL_0`, so the default routes input `i`
+/// from attribute slot `i`.
+///
+/// # Safety
+///
+/// `at` must address `INTERPOLANT_ENTRIES * 8` (256) bytes of guest-owned, writable memory.
+unsafe fn write_default_interpolants(at: u64) {
+    for i in 0..INTERPOLANT_ENTRIES {
+        let entry = (i << 32) | (0x191 + i);
+        // SAFETY: the caller guarantees 256 writable bytes at `at`; `i * 8 < 256` by construction.
+        unsafe { poke_u64(at.wrapping_add(i * 8), entry) };
+    }
+}
+
+/// Writes the low five bits of the dword at `sec_state + 0x14` to `topology`, preserving the rest.
+///
+/// **Measured (obSCEne `166-agc/update-prim-state`).** The probe reads
+/// `*(uint32_t *)(sec_state + 0x14) & 0x1f` back after both create and update, so the primitive
+/// topology lives in those five bits. Read-modify-write rather than a bare store, because the guest
+/// owns the other twenty-seven bits.
+///
+/// # Safety
+///
+/// `sec_state` must address a readable, writable guest buffer of at least `0x18` bytes.
+unsafe fn set_topology(sec_state: u64, topology: u32) {
+    let field = sec_state.wrapping_add(0x14);
+    // SAFETY: the caller guarantees `sec_state + 0x14` is a readable guest dword.
+    let prev = unsafe { peek_u32(field) };
+    // SAFETY: same field, writable by the same guarantee.
+    unsafe { poke_u32(field, (prev & !0x1f) | (topology & 0x1f)) };
+}
+
+/// `sceAgcCreateInterpolantMapping(mapping, vs, ps)`.
+///
+/// Fills `mapping` (arg0) with the 32-quadword PS-input table and returns `0`. With `vs`/`ps` both
+/// null the table is the default `(i << 32) | (0x191 + i)` (measured). obSCEne's non-null case
+/// "maps VS exports (`vs+0x38`) to PS inputs (`ps+0x30`)", but the *only* table hardware was
+/// measured writing is this default (the link-shaders capture), so the vs/ps-specific remap is not
+/// modelled - writing the default there rather than an invented remap keeps to principle 3.
+fn create_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mapping = args[0];
+    if mapping == 0 {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: `mapping` is the guest-owned 256-byte out-buffer the call fills (obSCEne agc.c).
+    unsafe { write_default_interpolants(mapping) };
+    OK
+}
+
+/// `sceAgcUpdateInterpolantMapping(mapping, vs, ps)`.
+///
+/// Rewrites the active mapping table in place and returns `0` (obSCEne `166-agc/update-interpolant`).
+/// Modelled as the same default fill: an update with no measured remap re-establishes the default
+/// table rather than inventing a change.
+fn update_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mapping = args[0];
+    if mapping == 0 {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: `mapping` is the guest-owned 256-byte table being updated in place.
+    unsafe { write_default_interpolants(mapping) };
+    OK
+}
+
+/// `sceAgcCreatePrimState(prim_state, sec_state, null, vs, topology)`.
+///
+/// Records the primitive topology (arg4) in the low five bits of `sec_state + 0x14` and returns `0`
+/// (obSCEne `166-agc/update-prim-state`, which reads it back there). The `prim_state` buffer's own
+/// contents are not written: nothing measured says what the routing block holds, so it is left as
+/// the guest prepared it rather than filled with an invented layout.
+fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (prim_state, sec_state, topology) = (args[0], args[1], args[4] as u32);
+    if prim_state == 0 || sec_state == 0 {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: `sec_state` is the guest-owned 64-byte secondary-state buffer; `+0x14` is a dword.
+    unsafe { set_topology(sec_state, topology) };
+    OK
+}
+
+/// `sceAgcUpdatePrimState(prim_state, sec_state, topology)`.
+///
+/// Updates the topology (arg2) in the low five bits of `sec_state + 0x14` and returns `0` - the
+/// measured behaviour (`topo-orig` 4 becomes `topo-updated` 1 in `166-agc/update-prim-state`). The
+/// routing word at `prim_state + 0xc` that obSCEne notes is also touched is not written, its value
+/// being unmeasured.
+fn update_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (prim_state, sec_state, topology) = (args[0], args[1], args[2] as u32);
+    if prim_state == 0 || sec_state == 0 {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: `sec_state` is the guest-owned buffer; `+0x14` is a readable, writable dword.
+    unsafe { set_topology(sec_state, topology) };
+    OK
+}
+
+/// The stage-routing quadword `sceAgcLinkShaders` writes at `link_state + 0x108`.
+///
+/// Measured `0x0000_0002_0000_029b` (obSCEne `166-agc/link-shaders`, and stated in e4f1).
+const LINK_STAGE_ROUTING: u64 = 0x0000_0002_0000_029b;
+
+/// `sceAgcLinkShaders(link_state, sec_state, null, vs, ps, ...)`.
+///
+/// Fills `link_state` (arg0): the 256-byte interpolant table at `+0x0` (the same default the mapping
+/// calls write) and the stage-routing quadword `0x0000_0002_0000_029b` at `+0x108`, then returns
+/// `0`. **Measured** in `166-agc/link-shaders` (sweep `20260912-003916`): `link-state-interp`
+/// began `0x191`, `0x1_0000_0192`, and `link-state-routing` carried `0x0000_0002_0000_029b` eight
+/// bytes past the interpolants. The rest of the 32-byte routing block is unmeasured and left as the
+/// guest prepared it.
+fn link_shaders(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let link_state = args[0];
+    if link_state == 0 {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: `link_state` is the guest-owned out-buffer (>= 0x110 bytes) the call fills.
+    unsafe { write_default_interpolants(link_state) };
+    // SAFETY: same buffer; `+0x108` is the measured routing quadword's slot.
+    unsafe { poke_u64(link_state.wrapping_add(0x108), LINK_STAGE_ROUTING) };
+    OK
+}
+
 /// Implementations this crate provides for `libSceAgc`.
 ///
-/// Only `sceAgcCreateShader` so far - the one call whose object model obSCEne measured end to end
-/// (3c5e). The command **builders** (`sceAgcDcb*`) stay declared-only until a capture grounds each
-/// one's encoding, and the shader-linkage calls (`sceAgcCreateInterpolantMapping`,
-/// `sceAgcLinkShaders`, the prim-state pair) are implemented as the guest reaches them, so each is
-/// built against its observed call rather than blind (e4f1 gives their behaviours to build to).
+/// `sceAgcCreateShader` (object model, 3c5e) and the five shader-linkage calls e4f1 asked for, whose
+/// behaviours obSCEne measured once the 3D-draw sweeps settled (9a41, sweep `20260912-003916`): the
+/// interpolant mapping pair, the primitive-state pair, and the shader linker. The command
+/// **builders** (`sceAgcDcb*`) stay declared-only until a capture grounds each one's encoding.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[("sceAgcCreateShader", create_shader)]
+    &[
+        ("sceAgcCreateShader", create_shader),
+        ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
+        ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
+        ("sceAgcCreatePrimState", create_prim_state),
+        ("sceAgcUpdatePrimState", update_prim_state),
+        ("sceAgcLinkShaders", link_shaders),
+    ]
 }
 
 #[cfg(test)]
@@ -226,5 +374,68 @@ mod tests {
     fn create_shader_refuses_a_null_out_parameter() {
         let args = [0u64; GUEST_ARG_REGISTERS];
         assert_eq!(create_shader(&args), BAD_ARGUMENT, "null out is the wrapper's bad-argument code");
+    }
+
+    fn read_le_u64(buf: &[u8], off: usize) -> u64 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&buf[off..off + 8]);
+        u64::from_le_bytes(b)
+    }
+
+    /// **The interpolant table is the measured `(i << 32) | (0x191 + i)`.** The first two entries
+    /// are what obSCEne read back from hardware (`0x191`, `0x1_0000_0192`), so a guest reading the
+    /// mapping sees the same routing the console wrote.
+    #[test]
+    fn interpolant_mapping_writes_the_measured_default_table() {
+        let mut table = [0xffu8; 256];
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = table.as_mut_ptr() as u64;
+
+        assert_eq!(create_interpolant_mapping(&args), OK);
+        assert_eq!(read_le_u64(&table, 0), 0x191, "entry 0 is SPI_PS_INPUT_CNTL_0");
+        assert_eq!(read_le_u64(&table, 8), 0x1_0000_0192, "entry 1 is (1<<32)|0x192");
+        assert_eq!(read_le_u64(&table, 31 * 8), (31u64 << 32) | (0x191 + 31), "entry 31");
+    }
+
+    /// **LinkShaders writes the interpolant table plus the routing quadword at +0x108.** Both halves
+    /// are measured (`166-agc/link-shaders`): the interpolants at the front, `0x0000_0002_0000_029b`
+    /// eight bytes past them.
+    #[test]
+    fn link_shaders_writes_interpolants_and_routing() {
+        let mut link = [0u8; 0x120];
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = link.as_mut_ptr() as u64;
+
+        assert_eq!(link_shaders(&args), OK);
+        assert_eq!(read_le_u64(&link, 0), 0x191, "interpolant table at the front");
+        assert_eq!(read_le_u64(&link, 8), 0x1_0000_0192, "second interpolant");
+        assert_eq!(read_le_u64(&link, 0x108), LINK_STAGE_ROUTING, "stage routing at +0x108");
+    }
+
+    /// **Primitive topology lands in the low five bits of `sec_state + 0x14`, create then update.**
+    /// A create with `DI_PT_TRILIST` (4) then an update to `DI_PT_POINTLIST` (1) reproduces the
+    /// measured `topo-orig` 4 -> `topo-updated` 1, and the surrounding bits are preserved.
+    #[test]
+    fn prim_state_records_topology_in_sec_state() {
+        let mut prim = [0u8; 64];
+        let mut sec = [0u8; 64];
+        // Poison the high bits of the topology dword to prove read-modify-write preserves them.
+        sec[0x14..0x18].copy_from_slice(&0xabcd_ffe0u32.to_le_bytes());
+
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = prim.as_mut_ptr() as u64;
+        args[1] = sec.as_mut_ptr() as u64;
+        args[4] = 4; // DI_PT_TRILIST
+
+        assert_eq!(create_prim_state(&args), OK);
+        let after_create = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
+        assert_eq!(after_create & 0x1f, 4, "topology is DI_PT_TRILIST");
+        assert_eq!(after_create & !0x1f, 0xabcd_ffe0, "the other bits are preserved");
+
+        args[2] = 1; // DI_PT_POINTLIST, arg2 for the update
+        assert_eq!(update_prim_state(&args), OK);
+        let after_update = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
+        assert_eq!(after_update & 0x1f, 1, "topology updated to DI_PT_POINTLIST");
+        assert_eq!(after_update & !0x1f, 0xabcd_ffe0, "the other bits still preserved");
     }
 }
