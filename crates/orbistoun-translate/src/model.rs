@@ -117,8 +117,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_div_fmas_f32",
     "v_fma_f32",
     "v_lshlrev_b32_e32",
+    "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
     "v_mbcnt_lo_u32_b32",
+    "v_min_f32_e32",
     "v_mov_b32_e32",
     "v_mul_f32_e32",
     "v_mul_f32_e64",
@@ -463,6 +465,15 @@ pub trait Model {
 
     /// The 32-bit float type, for arithmetic.
     fn f32_type(&self) -> Id;
+
+    /// The id of the imported `GLSL.std.450` extended instruction set, importing it on first
+    /// use and caching it thereafter.
+    ///
+    /// Lazy rather than imported at module setup so a shader that uses no extended instruction
+    /// still emits no import - keeping every such module's word stream exactly as it was before
+    /// the set existed. Importing twice would declare two sets as far as the validator is
+    /// concerned, which is why the id is cached.
+    fn glsl_set(&mut self) -> Id;
 
     /// The 16-bit float type, the intermediate a packed half is read as before it is widened
     /// to a [`f32_type`](Self::f32_type) by the driver's own conversion.
@@ -816,6 +827,30 @@ pub trait Model {
 
         let result_f = b.id();
         b.function(operation, &[f32_type.0, result_f.0, lhs_f.0, rhs_f.0]);
+
+        let result = b.id();
+        b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
+        result
+    }
+
+    /// Applies a `GLSL.std.450` extended float operation (by instruction number) to two register
+    /// values, returning the result's bits.
+    ///
+    /// The bitcast bracketing is [`f32_binary`](Self::f32_binary)'s exactly, and for the same
+    /// reason: a register holds thirty-two bits with no type, so it is reinterpreted as a float
+    /// (`OpBitcast`) rather than converted. What differs is the operation - an `OpExtInst` into the
+    /// imported set - which is how the min, max and transcendentals the core opcode set has none of
+    /// are spelled.
+    fn f32_ext_binary(&mut self, instruction: u32, lhs: Id, rhs: Id) -> Id {
+        let (u32_type, f32_type, set) = (self.u32_type(), self.f32_type(), self.glsl_set());
+        let b = self.builder();
+
+        let lhs_f = b.id();
+        b.function(op::BITCAST, &[f32_type.0, lhs_f.0, lhs.0]);
+        let rhs_f = b.id();
+        b.function(op::BITCAST, &[f32_type.0, rhs_f.0, rhs.0]);
+
+        let result_f = b.ext_inst(f32_type, set, instruction, &[lhs_f, rhs_f]);
 
         let result = b.id();
         b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
@@ -1252,6 +1287,12 @@ pub fn instruction<M: Model + ?Sized>(
             short_form_arithmetic(model, instruction, name)
         }
 
+        // Float minimum and maximum, which the core opcode set has no instruction for: emitted
+        // as GLSL.std.450 FMax/FMin extended instructions (worklog 523). They appear in nearly
+        // every real shader - clamp and saturate are a min of a max - so they are the first
+        // extended pair wired up now that the emitter can import the set.
+        "v_max_f32_e32" | "v_min_f32_e32" => float_min_max(model, instruction, name),
+
         // Anything that reaches guest memory. Split out because the two halves ask
         // different questions - one is about registers and arithmetic, the other about
         // addresses - and because the combined match outgrew what fits on a screen.
@@ -1407,6 +1448,41 @@ fn short_form_arithmetic<M: Model + ?Sized>(
                 });
             }
         };
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// GLSL.std.450 instruction number for `FMin` - the smaller of two floats.
+const GLSL_FMIN: u32 = 37;
+/// GLSL.std.450 instruction number for `FMax` - the larger of two floats.
+const GLSL_FMAX: u32 = 40;
+
+/// `v_max_f32` / `v_min_f32`: the per-lane float maximum/minimum, emitted as the GLSL.std.450
+/// extended instructions the core opcode set has no equivalent for.
+fn float_min_max<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let (destination, first, second) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a min/max destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let extended = if name == "v_max_f32_e32" {
+        GLSL_FMAX
+    } else {
+        GLSL_FMIN
+    };
+    for lane in 0..model.lanes() {
+        let lhs = model.read_source(instruction, first, lane)?;
+        let rhs = model.read_source(instruction, second, lane)?;
+        let value = model.f32_ext_binary(extended, lhs, rhs);
         model.write_vector_lane(register, lane, value);
     }
     model.count();

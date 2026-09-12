@@ -239,6 +239,16 @@ name = "v_mul_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 15
+name = "v_min_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 16
+name = "v_max_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 26
 name = "v_lshlrev_b32_e32"
 

@@ -376,6 +376,8 @@ pub struct Wavefront<'a> {
     /// How many lanes this shader's wavefront has, and therefore how wide its masks are.
     width: Width,
     constants: BTreeMap<u32, Id>,
+    /// The imported `GLSL.std.450` set id, cached after the first extended instruction imports it.
+    glsl_set: Option<Id>,
     u32_type: Id,
     f32_type: Id,
     f16_type: Id,
@@ -519,6 +521,7 @@ impl<'a> Wavefront<'a> {
             memory_words: MEMORY_WORDS,
             width,
             constants: BTreeMap::new(),
+            glsl_set: None,
             u32_type,
             f32_type,
             f16_type,
@@ -824,6 +827,15 @@ impl Model for Wavefront<'_> {
 
     fn f32_type(&self) -> Id {
         self.f32_type
+    }
+
+    fn glsl_set(&mut self) -> Id {
+        if let Some(set) = self.glsl_set {
+            return set;
+        }
+        let set = self.builder.ext_inst_import("GLSL.std.450");
+        self.glsl_set = Some(set);
+        set
     }
 
     fn f16_type(&self) -> Id {

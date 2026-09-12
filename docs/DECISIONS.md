@@ -698,6 +698,11 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D674 | [A high-water mark that could move backwards](decisions/D674-a-high-water-mark-that-could-move.md) | decided | 2026-09-10 |
 | 🟢 | D675 | [A console's own sysctl knobs belong to its profile, and two belong to the platform](decisions/D675-a-console-s-own-sysctl-knobs-belong-to.md) | decided | 2026-09-10 |
 | 🟢 | D676 | [Weak undefined symbols bind to zero when unanswered](decisions/D676-weak-undefined-symbols-bind-to-zero.md) | decided | 2026-09-10 |
+| 🟢 | D677 | [the measured mapper abort is a guest-engine branch, not a call to fake](decisions/D677-the-measured-mapper-abort-is-a-guest.md) | decided | 2026-09-12 |
+| 🟢 | D678 | [common-dialog answers the guest-observed 0 once measurement is proven impossible](decisions/D678-common-dialog-answers-the-guest.md) | decided | 2026-09-12 |
+| 🟢 | D679 | [an on-disk fallback for the APR index: tried, and not shipped](decisions/D679-an-on-disk-fallback-for-the-apr-index.md) | decided | 2026-09-12 |
+| 🟢 | D680 | [the app-content init sequence, and that it is not Terminator's wall](decisions/D680-the-app-content-init-sequence-and-that.md) | decided | 2026-09-12 |
+| 🟢 | D681 | [the shader-fixture reference toolchain is LLVM 18, reachable in a container](decisions/D681-the-shader-fixture-reference-toolchain.md) | decided | 2026-09-12 |
 
 | | meaning |
 |---|---|

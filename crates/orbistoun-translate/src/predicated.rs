@@ -114,6 +114,8 @@ pub struct Predicated<'a> {
     /// Deduplicated unsigned constants. SPIR-V wants one declaration per value, and a
     /// second identical constant is at best noise in the module.
     constants: BTreeMap<u32, Id>,
+    /// The imported `GLSL.std.450` set id, cached after the first extended instruction imports it.
+    glsl_set: Option<Id>,
     u32_type: Id,
     f32_type: Id,
     f16_type: Id,
@@ -229,7 +231,6 @@ impl<'a> Predicated<'a> {
 
     /// Prepares a module: types, the register file, and the observation buffer.
     fn build(encodings: &'a EncodingTable, lanes: Option<u32>) -> Self {
-        let with_mask = lanes.is_some();
         let mut builder = Builder::new().with_version(orbistoun_spirv::VERSION_1_3);
 
         let void = builder.id();
@@ -258,7 +259,7 @@ impl<'a> Predicated<'a> {
         // Reserved before the entry point is written, because at this version an input
         // variable has to be named in the entry point's interface and the entry point is
         // emitted before the variable is declared.
-        let lane_input = with_mask.then(|| builder.id());
+        let lane_input = lanes.is_some().then(|| builder.id());
         declare_entry_point(&mut builder, main, lane_input, lanes.unwrap_or(1));
 
         builder.declare(op::TYPE_VOID, &[void.0]);
@@ -334,6 +335,7 @@ impl<'a> Predicated<'a> {
             memory_words: MEMORY_WORDS,
             mask,
             constants: BTreeMap::new(),
+            glsl_set: None,
             u32_type,
             f32_type,
             f16_type,
@@ -664,6 +666,15 @@ impl Model for Predicated<'_> {
 
     fn f32_type(&self) -> Id {
         self.f32_type
+    }
+
+    fn glsl_set(&mut self) -> Id {
+        if let Some(set) = self.glsl_set {
+            return set;
+        }
+        let set = self.builder.ext_inst_import("GLSL.std.450");
+        self.glsl_set = Some(set);
+        set
     }
 
     fn f16_type(&self) -> Id {

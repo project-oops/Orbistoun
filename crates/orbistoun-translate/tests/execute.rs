@@ -491,6 +491,39 @@ fn float_multiplication_produces_the_right_bits() {
 }
 
 #[test]
+fn float_min_and_max_produce_the_right_bits() {
+    // v_max_f32/v_min_f32 have no core SPIR-V opcode - they translate to the GLSL.std.450
+    // extended instructions FMax/FMin, reached through an OpExtInst into an imported set.
+    // This exercises that whole path end to end: the max of 1.0 and 2.0 is 2.0 and the min
+    // is 1.0. A translator that dropped the set import, named the wrong instruction number,
+    // or converted instead of bitcasting around the ext-inst would fail here rather than
+    // silently forty thousand frames later.
+    if !device_or_skip("float_min_and_max_produce_the_right_bits") {
+        return;
+    }
+
+    let registers = run(&[
+        v_mov_code(0, INLINE_ONE),
+        v_mov_code(1, INLINE_TWO),
+        vop2_vv("v_max_f32_e32", 2, 0, 1),
+        vop2_vv("v_min_f32_e32", 3, 0, 1),
+        s_endpgm(),
+    ]);
+    assert_eq!(
+        vector(&registers, 2),
+        2.0_f32.to_bits(),
+        "max(1.0, 2.0); got bits {:#x}",
+        vector(&registers, 2)
+    );
+    assert_eq!(
+        vector(&registers, 3),
+        1.0_f32.to_bits(),
+        "min(1.0, 2.0); got bits {:#x}",
+        vector(&registers, 3)
+    );
+}
+
+#[test]
 fn an_inline_float_constant_reaches_a_register_unconverted() {
     // The constant 1.0 has to arrive as its bit pattern. A translator treating the
     // operand code as a number would store 242, and a translator converting rather than

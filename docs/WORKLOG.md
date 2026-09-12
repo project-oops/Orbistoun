@@ -514,3 +514,28 @@ context cannot re-derive.
 | - | [497. The comparison ran on the wrong machine](worklog/497-the-comparison-ran-on-the-wrong-machine.md) |
 | - | [498. Weak undefined symbols bind to zero](worklog/498-weak-undefined-symbols-bind-to-zero.md) |
 | - | [499. The corpus is GPU-bound, and a real header agreed](worklog/499-the-corpus-is-gpu-bound-and-a-real-header.md) |
+| - | [500. The frontier, fully mapped, and the two things that block it](worklog/500-the-frontier-fully-mapped-and-what-blocks-it.md) |
+| - | [501. The naming avenue is closed, not untried - and obSCEne's AGC names are already ours](worklog/501-the-naming-avenue-is-closed-not-untried.md) |
+| - | [502. The memory-read capture is hardened shut, and obSCEne pivoted to calling the builders](worklog/502-the-memory-read-capture-is-hardened-shut-and-obscene-pivoted.md) |
+| - | [503. The wall moves mechanically — and the next one is a kernel struct, not GPU-blocked](worklog/503-the-wall-moves-mechanically-and-the-next-one-is-not-gpu-blocked.md) |
+| - | [504. The mapper refuses cold, and the guest wants the fill not the code](worklog/504-the-mapper-refuses-cold-and-the-guest-wants-the-fill.md) |
+| - | [505. Measured refusals do not move out-parameter walls — and Earthion gates on the mapper](worklog/505-measured-refusals-dont-move-out-parameter-walls.md) |
+| - | [506. The AGC builders run as pure encoders, the decoder holds, and one builder is new](worklog/506-the-agc-builders-run-as-pure-encoders-and-the-decoder-holds.md) |
+| - | [507. create-shader succeeded on hardware, and the fill is held for the object model](worklog/507-create-shader-succeeded-on-hardware-and-the-fill-is-held-for-the-object-model.md) |
+| - | [508. 3c5e answered: the shader object is guest-adjacent - the cheap case, held ready](worklog/508-3c5e-answered-shader-object-is-guest-adjacent-the-cheap-case.md) |
+| - | [509. b7e2 = case (b): the mapper is AGC-linked, and Earthion's chain is one context](worklog/509-the-mapper-is-agc-linked-earthions-chain-is-one-context.md) |
+| - | [510. Actioned 4b1a: obSCEne's compute-dispatch stream decodes whole; execution is the gap](worklog/510-actioned-4b1a-the-compute-dispatch-stream-decodes-whole.md) |
+| - | [511. e4f1: fixed a transcribed opcode name obSCEne's disassembly caught; linkage HLE held](worklog/511-e4f1-fixed-a-transcribed-opcode-name-linkage-functions-held.md) |
+| - | [512. sceAgcCreateShader implemented from the measured model - Earthion moved, for real](worklog/512-sceagccreateshader-implemented-earthion-moved-on-measured-data.md) |
+| - | [513. Diagnostic scope: Earthion registers 62 shaders; the mapper is the real gate](worklog/513-diagnostic-scope-earthion-registers-62-shaders-mapper-is-the-real-gate.md) |
+| - | [514. 9a41: the shader-linkage functions, Type 0 queue accept, and draw-stream decode](worklog/514-9a41-linkage-functions-queue-accept-and-type0-draw-decode.md) |
+| - | [515. 7b3c actioned faithfully; Earthion's abort is a game-engine branch, not a firmware gap](worklog/515-7b3c-actioned-earthion-abort-is-a-game-engine-branch.md) |
+| - | [516. The mapper abort branch, disassembled: a hard must-succeed gate reading four filled qwords](worklog/516-the-mapper-abort-branch-disassembled-a-hard-must-succeed-gate.md) |
+| - | [517. PPSA02664 past common-dialog to the AGC render-state wall; and the AGC-wiring debt cleared](worklog/517-ppsa02664-past-common-dialog-to-the-agc-render-state-wall.md) |
+| - | [518. Testing titles: GTA V's direct-memory anomaly and ASTRO BOT's bundled-module fault](worklog/518-testing-titles-gta-memory-anomaly-and-astro-bot.md) |
+| - | [519. The APR slot-layout experiment, and Terminator's real wall (int 0x41, not APR)](worklog/519-the-apr-slot-experiment-and-terminators-real-wall.md) |
+| - | [520. GTA V's direct-memory refusal: no allocator bug - a budget gap](worklog/520-gta-direct-memory-no-allocator-bug-a-budget-gap.md) |
+| - | [521. The retail frontier is characterized; what remains is deep, not loop-tick work](worklog/521-the-retail-frontier-is-exhausted-at-the-loop-cadence.md) |
+| - | [522. Terminator's int 0x41, precisely: a Unity TempOverflow OOM on a stack address used as a size](worklog/522-terminators-int-0x41-is-a-tempoverflow-oom-on-a-garbage-size.md) |
+| - | [523. SPIR-V extended-instruction support: the unlock for min/max and the transcendentals](worklog/523-spirv-extended-instruction-support-the-unlock-for-min-max-transcendentals.md) |
+| - | [524. v_min_f32/v_max_f32 wired through the extended set, and the fixture toolchain pinned](worklog/524-v-min-max-wired-through-ext-inst-and-the-fixture-toolchain.md) |

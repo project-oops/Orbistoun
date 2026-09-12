@@ -552,13 +552,7 @@ impl Builder {
     ///
     /// The word order is the format's: result type, result, set, the instruction number as a
     /// literal, then the operand ids (SPIR-V 3.42.1, OpExtInst).
-    pub fn ext_inst(
-        &mut self,
-        result_type: Id,
-        set: Id,
-        instruction: u32,
-        operands: &[Id],
-    ) -> Id {
+    pub fn ext_inst(&mut self, result_type: Id, set: Id, instruction: u32, operands: &[Id]) -> Id {
         let result = self.id();
         let mut words = vec![result_type.0, result.0, set.0, instruction];
         words.extend(operands.iter().map(|id| id.0));
@@ -1847,7 +1841,10 @@ mod tests {
 
         let words = b.finish();
         let at = instruction_index(&words, op::EXT_INST).expect("the ext-inst is emitted");
-        assert_eq!(&words[at + 1..at + 6], &[float.0, result.0, set.0, 31, value.0]);
+        assert_eq!(
+            &words[at + 1..at + 6],
+            &[float.0, result.0, set.0, 31, value.0]
+        );
     }
 
     #[test]
