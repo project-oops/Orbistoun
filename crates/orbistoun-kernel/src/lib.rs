@@ -118,6 +118,9 @@ guest_module! {
         // Seven arguments in truth; the seventh is a name this trampoline cannot reach,
         // which costs a label in a trace and nothing else.
         "sceKernelMapNamedDirectMemory" => 6,
+        // One: a size-prefixed out-structure. It refuses on retail (`0x8002_0006`) because the AGC
+        // resource-registration subsystem it depends on is stubbed there (obSCEne 7b3c, D642/D643).
+        "sceKernelMapperGetParam" => 1,
         // Four, for the four arguments the implementation reads. A dump shows six registers
         // because that is how many System V passes, not because the function takes six (D294).
         "sceKernelReserveVirtualRange" => 4,
@@ -6078,6 +6081,26 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceKernelMapperGetParam(out)`.
+///
+/// Returns `0x8002_0006` - the code obSCEne measured on retail hardware (REQ-...0925Z-7b3c). The
+/// mapper's parameters are gated on the AGC driver resource-registration subsystem, which is a stub
+/// on retail (`sceAgcDriverRegisterOwner` and friends return `0x8a6c9018`), so `GetParam` cannot
+/// answer and refuses rather than filling the caller's size-prefixed struct - it writes nothing, as
+/// the cold-call measurement in b7e2 also showed. This is the measured value and orbistoun returns it
+/// for fidelity (principle 1).
+///
+/// It does **not** clear PPSA28061's abort, and the honest reason is a divergence worth naming. The
+/// guest branches on this return: `sceKernelMapperGetParam:0x0` reaches 59 imports (D643), while the
+/// measured `0x80020006` aborts seventy-seven bytes after the call, the same as the placeholder did
+/// (worklog 505, 515). `0x0` is a value nothing measured - forbidden by principle 3 - so it is not an
+/// option; but that means the console ships with a return the guest here cannot survive. Either the
+/// in-boot mapper call returns something the cold call did not, or the guest's tolerance depends on
+/// state orbistoun is not reproducing. Faithful return, open divergence (raised to obSCEne, worklog 515).
+fn mapper_get_param(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0x8002_0006
+}
+
 /// Implementations this crate provides, by symbol name.
 ///
 /// Names rather than hashes: the hash is derived, and a table written in hashes could not be
@@ -6140,6 +6163,7 @@ const TABLE: &[(&str, GuestFn)] = &[
         allocate_main_direct_memory,
     ),
     ("sceKernelMapNamedDirectMemory", map_named_direct_memory),
+    ("sceKernelMapperGetParam", mapper_get_param),
     ("scePthreadCreate", pthread_create),
     ("scePthreadJoin", pthread_join),
     ("scePthreadSelf", pthread_self),
