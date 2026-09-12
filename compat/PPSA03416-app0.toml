@@ -10,16 +10,16 @@ master_version = "01.00"
 
 [status]
 reach = "flipped"
-outcome = "image+0x39f7c"
-imports = 198
-calls = 469663
+outcome = "image+0x3f258"
+imports = 216
+calls = 470305
 standing = 100
 default_return = "unimplemented"
 frames = 1
-unanswered = 15
+unanswered = 29
 limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-09"
+measured_on = "2026-09-12"
 
 [experiment]
 reach = "entered"

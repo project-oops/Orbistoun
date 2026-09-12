@@ -142,6 +142,14 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_input::mouse::implementations());
     all.extend_from_slice(orbistoun_audio::implementations());
     all.extend_from_slice(orbistoun_systemservice::implementations());
+    // libSceCommonDialog: `sceCommonDialogInitialize` answers 0, the guest-observed init the three
+    // retail Unity titles need to get past their first wall (D678); registered here beside its
+    // declaration rather than folded into the crate root's slice, as the Agc modules are.
+    all.extend_from_slice(orbistoun_systemservice::common_dialog::implementations());
+    // libSceAppContent: the app-content init sequence a Unity IL2CPP title runs at startup -
+    // `sceAppContentInitialize` (guest-observed 0) and `sceAppContentAppParamGetInt` (placeholder
+    // int, as sceSystemServiceParamGetInt), which PPSA25872's libil2cpp fails on otherwise (D680).
+    all.extend_from_slice(orbistoun_systemservice::app_content::implementations());
     all
 }
 
@@ -467,14 +475,6 @@ mod knowledge_tests {
     // genuinely serves nothing goes back here with its reason.
     const SERVES_NOTHING: &[(&str, &str)] = &[
         (
-            "libSceAgc",
-            "declared as names only, and deliberately. Fifty-one of them are read out of a real              module's import table, so a guest reaching the current generation's graphics              interface is named and counted rather than vanishing into `unknown::` (D500) - but              the first frame is Phase 6, which has not begun, and principle 6 puts a subsystem              after the address space and threads. Implementing one of these to make this list              shorter would be writing the abstraction before its caller.",
-        ),
-        (
-            "libSceAgcDriver",
-            "as `libSceAgc`: the submission half of the same interface, names only.",
-        ),
-        (
             "libSceAjm",
             "declared as 14 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
@@ -529,14 +529,6 @@ mod knowledge_tests {
         (
             "libSceSsl",
             "declared as 10 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceAppContent",
-            "declared as 8 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceCommonDialog",
-            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceCoredump",

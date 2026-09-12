@@ -19,6 +19,38 @@ found_on = "2026-09-08"
 note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What has to be decided first is what completes driver work in an emulator with no GPU execution - the question D560 answered for flips and nobody has answered for this."
 
 [[function]]
+name = "sceAgcDriverCreateQueue"
+purpose = "Creates a submission queue (compute type 3 or the Universal Graphics Queue type 0) for handing command buffers to the driver."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): returns rc-create 0x0 for both type 3 and type 0 (sweeps 20260911-* and 20260912-003916). Real arity is 3 (type, out_queue, flags).",
+    "Does NOT write the queue object into *out_queue: obSCEne measured the object header (38 00 00 00 03 00 00 00 ...) but not where the call places it relative to the arguments, so orbistoun returns the measured 0 and leaves the out-parameter unwritten rather than fabricating a pointer (principle 3, D677). No guest reaches this call yet.",
+]
+known_by = "measured"
+cites = "obSCEne 9a41, sweeps 20260911-* and 20260912-003916, section 166-agc/driver-create-queue."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcDriverRegisterOwner"
+purpose = "Registers a resource-registration owner - part of the AGC toolkit resource-registration subsystem."
+edge_cases = [
+    "MEASURED (obSCEne 7b3c): a pure stub on retail firmware - libSceAgcDriver.sprx disassembles to `mov $0x8a6c9018, %eax; ret`, and hardware confirmed rc 0x8a6c9018 (RESOURCE_REGISTRATION_NOT_SUPPORTED) with zero bytes mutated in the caller buffer. Resource-registration is unsupported on retail; orbistoun returns the measured code for fidelity.",
+    "It does not clear PPSA28061's abort: that is gated on the later sceKernelMapperGetParam, whose engine wrapper aborts on any non-zero return (D677/worklog 516). This return is faithful, not an unblock.",
+]
+known_by = "measured"
+cites = "obSCEne 7b3c, sweep 20260912-080231, libSceAgcDriver.sprx disassembly + section 166-agc/driver-resource-registration."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcDriverRegisterResource"
+purpose = "Registers a named resource (e.g. an Agc toolkit compute shader) - part of the resource-registration subsystem."
+edge_cases = [
+    "MEASURED (obSCEne 7b3c): a pure stub, `mov $0x8a6c9018, %eax; ret`, returning 0x8a6c9018 on hardware. In a diagnostic run with owner+mapper propped to 0, PPSA28061 calls this 62 times to register named Agc::Toolkit compute shaders (arg4 a name string, arg2 the RDNA2 bytecode) - but on retail the whole subsystem is unsupported.",
+]
+known_by = "measured"
+cites = "obSCEne 7b3c, sweep 20260912-080231, libSceAgcDriver.sprx disassembly."
+found_on = "2026-09-12"
+
+[[function]]
 name = "sceAgcDriverGetDefaultOwner"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"

@@ -81,6 +81,11 @@ pub mod op {
     /// the extension is cheaper than raising the version, which would raise the Vulkan
     /// version the host must support along with it.
     pub const EXTENSION: u16 = 10;
+    /// Imports an extended instruction set (e.g. `GLSL.std.450`), binding it to a result id.
+    pub const EXT_INST_IMPORT: u16 = 11;
+    /// Invokes an instruction from an imported extended set - the faithful spelling of the
+    /// transcendentals and min/max/abs the core set has no opcode for.
+    pub const EXT_INST: u16 = 12;
     /// Declares the addressing and memory model.
     pub const MEMORY_MODEL: u16 = 14;
     /// Names a function as an entry point.
@@ -411,7 +416,7 @@ pub mod mode {
 }
 
 /// How many ordered slots the header is kept in.
-const HEADER_SLOTS: usize = 5;
+const HEADER_SLOTS: usize = 6;
 
 /// Which slot a header instruction belongs in.
 ///
@@ -434,10 +439,13 @@ const fn header_slot(opcode: u16) -> usize {
     match opcode {
         op::CAPABILITY => 0,
         op::EXTENSION => 1,
-        op::MEMORY_MODEL => 2,
-        op::ENTRY_POINT => 3,
+        // Extended-instruction imports follow the extensions and precede the memory model,
+        // which is the order the logical layout requires (SPIR-V 2.4).
+        op::EXT_INST_IMPORT => 2,
+        op::MEMORY_MODEL => 3,
+        op::ENTRY_POINT => 4,
         // Execution modes, and anything else that belongs after the entry point.
-        _ => 4,
+        _ => 5,
     }
 }
 
@@ -522,6 +530,40 @@ impl Builder {
     /// Appends an instruction to the function section.
     pub fn function(&mut self, opcode: u16, operands: &[u32]) {
         encode(&mut self.functions, opcode, operands);
+    }
+
+    /// Imports an extended instruction set by name (e.g. `"GLSL.std.450"`), returning the id
+    /// [`Self::ext_inst`] refers to as its set.
+    ///
+    /// Placed in the header at the slot the logical layout requires - after the extensions and
+    /// before the memory model - so a caller cannot put it in the wrong place. Call it once per
+    /// set per module and keep the id; a second import of the same set is a second set as far as
+    /// the validator is concerned.
+    pub fn ext_inst_import(&mut self, name: &str) -> Id {
+        let set = self.id();
+        let mut operands = vec![set.0];
+        operands.extend(Self::literal_string(name));
+        self.header(op::EXT_INST_IMPORT, &operands);
+        set
+    }
+
+    /// Invokes instruction number `instruction` from the imported `set`, over `operands`,
+    /// producing a value of `result_type`. Returns the result id.
+    ///
+    /// The word order is the format's: result type, result, set, the instruction number as a
+    /// literal, then the operand ids (SPIR-V 3.42.1, OpExtInst).
+    pub fn ext_inst(
+        &mut self,
+        result_type: Id,
+        set: Id,
+        instruction: u32,
+        operands: &[Id],
+    ) -> Id {
+        let result = self.id();
+        let mut words = vec![result_type.0, result.0, set.0, instruction];
+        words.extend(operands.iter().map(|id| id.0));
+        self.function(op::EXT_INST, &words);
+        result
     }
 
     /// Encodes a string as the format does: NUL-terminated, packed four bytes to a
@@ -1466,6 +1508,13 @@ static SHAPES: &[ShapeEntry] = &[
     // The component type is an identifier; the count is a literal. The result is
     // named by `Some(0)` and must not also be listed as a use of itself.
     (op::TYPE_VECTOR, Some(0), &[1], None, RestStride::Every),
+    // Imports an extended set: result id first, then a literal name string - no identifiers,
+    // so `rest` is None.
+    (op::EXT_INST_IMPORT, Some(0), &[], None, RestStride::Every),
+    // Result type, result, set, a literal instruction number, then operand identifiers. The
+    // number at index 3 is a literal, so `rest` starts at 4 and index 3 is named by neither
+    // `fixed` nor `rest` - reading it as an identifier would reject a valid module.
+    (op::EXT_INST, Some(1), &[0, 2], Some(4), RestStride::Every),
     (op::CONSTANT_TRUE, Some(1), &[0], None, RestStride::Every),
     // Result type, result, composite, then literal indices.
     (
@@ -1737,6 +1786,68 @@ mod tests {
         let instruction = words[5];
         assert_eq!(instruction >> 16, 2, "one word of header plus one operand");
         assert_eq!(instruction & 0xFFFF, u32::from(op::CAPABILITY));
+    }
+
+    /// The index of the first instruction with `opcode`, walking the word stream past the
+    /// five-word module header. `None` if it is not emitted.
+    fn instruction_index(words: &[u32], opcode: u16) -> Option<usize> {
+        let mut i = 5;
+        while i < words.len() {
+            let count = (words[i] >> 16) as usize;
+            if count == 0 {
+                break;
+            }
+            if (words[i] & 0xFFFF) as u16 == opcode {
+                return Some(i);
+            }
+            i += count;
+        }
+        None
+    }
+
+    #[test]
+    fn an_extended_set_is_imported_before_the_memory_model_whatever_the_call_order() {
+        // OpExtInstImport must precede OpMemoryModel in the logical layout (SPIR-V 2.4). The
+        // builder places it by slot, so the import lands ahead of the memory model even though
+        // this asks for them the other way round - and spirv-val rejects the reverse with a
+        // layout error that names neither instruction.
+        let mut b = Builder::new();
+        b.header(op::CAPABILITY, &[super::capability::SHADER]);
+        b.header(
+            op::MEMORY_MODEL,
+            &[super::addressing::LOGICAL, super::memory::GLSL450],
+        );
+        let set = b.ext_inst_import("GLSL.std.450");
+        assert_eq!(set.0, 1, "the imported set takes the first identifier");
+
+        let words = b.finish();
+        let import_at =
+            instruction_index(&words, op::EXT_INST_IMPORT).expect("the import is emitted");
+        let model_at =
+            instruction_index(&words, op::MEMORY_MODEL).expect("the memory model is emitted");
+        assert!(
+            import_at < model_at,
+            "the extended-set import must precede the memory model"
+        );
+        b.check().expect("identifiers resolve");
+    }
+
+    #[test]
+    fn an_ext_inst_carries_result_type_result_set_instruction_and_operands_in_order() {
+        // The word order OpExtInst requires: result type, result, set, the instruction number
+        // as a literal, then the operand ids. A transposition here validates as a different
+        // instruction or a wrong-typed one, so it is pinned rather than trusted.
+        let mut b = Builder::new();
+        let float = b.id();
+        let value = b.id();
+        let set = b.ext_inst_import("GLSL.std.450");
+        // GLSLstd450 Sqrt is instruction 31.
+        let result = b.ext_inst(float, set, 31, &[value]);
+        assert!(result.0 > set.0, "the result is a fresh identifier");
+
+        let words = b.finish();
+        let at = instruction_index(&words, op::EXT_INST).expect("the ext-inst is emitted");
+        assert_eq!(&words[at + 1..at + 6], &[float.0, result.0, set.0, 31, value.0]);
     }
 
     #[test]

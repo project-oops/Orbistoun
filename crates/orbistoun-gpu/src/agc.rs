@@ -57,6 +57,14 @@ guest_module! {
         // the declaration defers to it. `declared_arity_and_recorded_arity_never_disagree`
         // is the guard that said so, and it was right to - the record is the older claim.
         "sceAgcCreateShader" => 4,
+        // The shader-linkage set e4f1 asked for and 9a41 measured, implemented from those
+        // behaviours below. Arity 6 is the trampoline's full capture, not a claim - the real
+        // arities (mapping/vs/ps, link/sec/null/vs/ps) are recorded in the knowledge file's prose
+        // rather than as a number that would disagree with this one.
+        "sceAgcCreateInterpolantMapping" => 6,
+        "sceAgcUpdateInterpolantMapping" => 6,
+        "sceAgcUpdatePrimState" => 6,
+        "sceAgcLinkShaders" => 6,
         "sceAgcDcbAcquireMem" => 6,
         "sceAgcDcbDispatchIndirect" => 6,
         "sceAgcDcbDmaData" => 6,

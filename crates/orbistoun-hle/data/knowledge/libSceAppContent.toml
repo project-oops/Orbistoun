@@ -1,0 +1,33 @@
+library = "libSceAppContent"
+
+[[function]]
+name = "sceAppContentInitialize"
+purpose = "Starts the app-content (DLC / additional-data) subsystem. A Unity IL2CPP title calls it early."
+edge_cases = [
+    "Answers 0. PPSA25872 (Terminator 2D) is Unity IL2CPP; libil2cpp calls this and, given the unimplemented placeholder, prints '[libil2cpp] sceAppContentInitialize returned 0xf7ff0001'. Answering 0 clears that (verdict FURTHER), the same shape as sceCommonDialogInitialize (D678).",
+    "obSCEne's 130-layout/app-content resolved it to 0x0 on the payload and PKG legs, with 'libSceAppContent symbols not available in this context' - the same context-gated measurement common-dialog hit - so guest-observed is the ceiling of the evidence.",
+    "It does NOT clear Terminator's wall: the int 0x41 assert at image+0x17554a3 fires at the same point regardless, on a fixed path unrelated to app-content - the guest's app-content log lines are warnings it continues past, not the assert cause (D680).",
+]
+known_by = "guest-observed"
+assumptions = [
+    "The boot out-parameter is left unwritten. The oracle shows the guest proceeds without it (no fault reading it), and nothing measured says what it holds, so it is not filled with a guess.",
+    "That the console returns exactly 0 rather than another non-negative value. obSCEne could resolve the symbol but not read the runtime return in a title context.",
+]
+found_in = ["PPSA25872-app0", "PPSA02664-app0"]
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAppContentAppParamGetInt"
+purpose = "Reads an integer app parameter (title metadata) into the caller's out-pointer."
+edge_cases = [
+    "Answers 0 and writes 0 to the out-parameter (arg1), the same documented placeholder as sceSystemServiceParamGetInt: nothing here has measured the app-param identifiers, and 0 is the value least likely to send a guest somewhere surprising (an index reads as the first entry, a flag as off, a count as none).",
+    "libil2cpp calls it right after sceAppContentInitialize and prints 'sceAppContentAppParamGetInt failed 0xf7ff0001' on the placeholder return, so answering it is the next step of the same startup sequence. Like Initialize, it clears the warning but does not move Terminator's int 0x41 wall (D680).",
+    "The out-parameter is written either way (reporting success while writing the value), so a guest that checks the return and one that reads the value are both left in a state they can handle - the failure sceSystemServiceParamGetInt documents.",
+]
+known_by = "assumed"
+assumptions = [
+    "The written value (0) is a placeholder, not a measured app-param. A title that needs a specific parameter would read this wrong, but 0 is the least-surprising default.",
+    "That arg1 is the out-pointer, by analogy with sceSystemServiceParamGetInt(param, out). Unverified; the guest accepted the 0 return without faulting.",
+]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-12"

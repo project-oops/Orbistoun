@@ -60,14 +60,7 @@ edge_cases = [
 found_by = "generated"
 known_by = "measured"
 cites = "obSCEne reports/hardware/20260910-214758-eboot.obs.log, section 166-agc/create-shader (retail call shape)"
-assumptions = [
-    "The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry.",
-    "The 0x18 following the magic is assumed to be the header's own size, by analogy with the structure-size argument sceKernelDirectMemoryQuery passes (D083). Unverified - no guest has been observed reacting to it being wrong.",
-    "Whether arg3 is a length, a flags word or something else is unestablished; it was not a pointer into mapped memory, so no dump was taken of it.",
-    "**What the object arg0 receives a pointer to contains.** Two of its fields are observed from the guest reading them - a dword at +0x50 whose low byte is used, and a quadword at +0x30 - and nothing says what either holds, nor how large the object is. obSCEne cannot answer it as it runs today: 472 libSceAgc symbols are recorded **absent** across four captures, and its own sysinfo says no GPU library is mapped in that process. The ask is therefore not for another capture of the same kind but for one taken where libSceAgc is loaded (D556).",
-    "0x8a6c002f may be a 'GPU not initialised' refusal rather than a 'bad shader header' one: the same eboot leg reports 'no GPU library is mapped (neither libSceAgc nor libSceGnm)', and the adjacent dcb-* builders all crashed (SIGBUS) for want of the library. A leg where libSceAgc is actually mapped (REQ-...1621Z-7a5d) is needed to tell a header refusal from an uninitialised-driver refusal.",
-    "The retail call shape that succeeded is obSCEne's; the exact argument layout it used (vs the well-formed shape that refused) is not transcribed in this line - the success is the datum, the arg shape that produced it should be read from obSCEne's 166-agc source before relying on the header echo in shader-obj bytes.",
-]
+partial = "Measured in its core - success rc 0x0 with the object filled, +0x30 = 0 (quadword) and +0x50 = 0 (dword, low byte used), on obSCEne's retail call shape (D565, D556) - but not complete, and these are the open questions rather than assumptions (a measured entry carries no assumptions). The 0x18 after the magic is taken to be the header's own size by analogy with sceKernelDirectMemoryQuery's size argument (D083) and is unverified - no guest has been seen reacting to it being wrong. Whether arg3 is a length, a flags word or something else is unestablished; it was not a mapped pointer, so no dump was taken. The full size and contents of the object arg0 points to are unknown beyond the two observed fields, and obSCEne cannot capture the rest until a leg has libSceAgc actually mapped - 472 of its symbols are absent across four captures and its sysinfo says no GPU library is mapped in that process (D556). 0x8a6c002f may be a 'GPU not initialised' refusal rather than a bad-header one (the same leg reports no GPU library mapped and the adjacent dcb-* builders crashed SIGBUS for want of it); a leg where libSceAgc is mapped is needed to tell them apart (REQ-...1621Z-7a5d). And the exact argument layout of the retail shape that succeeded should be read from obSCEne's 166-agc source rather than inferred from the header echo in the shader-object bytes."
 found_in = [
     "PPSA04263-app0",
     "PPSA28061-app0",
@@ -75,6 +68,59 @@ found_in = [
     "PPSA03416-app0",
 ]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcCreateInterpolantMapping"
+purpose = "Fills the 32-entry interpolant mapping table that routes vertex-shader exports to pixel-shader inputs (SPI_PS_INPUT_CNTL_0..31)."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): with no vs/ps remap it writes 32 quadwords, entry i = ((i << 32) | (0x191 + i)). The first two came back 0x191 and 0x1_0000_0192, fixing both the base (0x191) and the per-entry stride.",
+    "Real arity is 3 (mapping, vs, ps); the declaration's 6 is the trampoline capture, so no arity is recorded here to disagree with it. When vs/ps are supplied the entries remap vs exports (vs+0x38) to ps inputs (ps+0x30); that remap is only partly specified, so orbistoun writes the measured default and leaves the rest as the guest prepared it (principle 3).",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (interpolant table)."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcUpdateInterpolantMapping"
+purpose = "Rewrites the interpolant mapping table in place, same layout as sceAgcCreateInterpolantMapping."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): writes the same 32-quadword default table, ((i << 32) | (0x191 + i)), into the caller's existing mapping rather than a fresh one.",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcCreatePrimState"
+purpose = "Instantiates the primitive-state routing block and records the primitive topology in it."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14, read-modify-write so the rest of the byte is preserved. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
+    "The routing word at prim_state+0xc is only partly specified in the measurement, so orbistoun writes the measured topology field and leaves the rest as the guest prepared it (principle 3).",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcUpdatePrimState"
+purpose = "Updates the primitive topology in an existing primitive-state block."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): rewrites the low five bits of sec_state+0x14 with the new topology; the sweep recorded topo-orig 4 -> topo-updated 1. Real arity is 3 (prim_state, sec_state, topology); the declaration's 6 is the trampoline capture.",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcLinkShaders"
+purpose = "Composite shader linker: writes the interpolant table and the stage-routing word into a link-state block."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): writes 256 bytes of interpolants at link_state+0x0 (same table as sceAgcCreateInterpolantMapping) and the stage-routing quadword 0x0000_0002_0000_029b at link_state+0x108. Both halves measured.",
+    "Real arity is 5+ (link_state, sec_state, null, vs, ps, ...); the declaration's 6 is the trampoline capture. Where the layout between the two measured regions is unspecified, orbistoun leaves it as the guest prepared it rather than inventing bytes (principle 3).",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (routing quadword)."
+found_on = "2026-09-12"
 
 [[function]]
 name = "sceAgcDcbDmaData"

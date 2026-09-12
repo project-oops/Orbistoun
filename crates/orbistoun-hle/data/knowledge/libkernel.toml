@@ -891,7 +891,7 @@ edge_cases = [
 ]
 known_by = "measured"
 cites = "obSCEne reports/hardware/20260910-154133-payload.obs.log, section 137-kernelcall/mapper-param (filed as REQ-...1332Z-b7e2)"
-assumptions = ["What 'the mapper' is and what sets it up before GetParam succeeds is unknown - it may be a kernel memory mapper obSCEne can warm, or the GPU/AGC mapper the adjacent sceAgcDriverRegisterDefaultOwner establishes (in which case a successful fill needs libSceAgc loaded, the same block as the shader)."]
+partial = "The cold-call is measured (0x80020006, fills nothing); the success path is open. What 'the mapper' is and what sets it up before GetParam succeeds is unknown - it may be a kernel memory mapper obSCEne can warm, or the GPU/AGC mapper a successful RegisterOwner would establish, which retail stubs (7b3c). The engine's call site is now disassembled (worklog 516): a hard must-succeed gate - test eax,eax; jne abort - that on success reads four qwords the mapper fills at struct +0x08/+0x10/+0x18/+0x20 into four caller out-pointers. So a successful fill needs those four qwords, which no capture holds; raised to obSCEne as a2f9."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-09-09"
 
