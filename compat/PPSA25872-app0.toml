@@ -9,16 +9,17 @@ master_version = "01.00"
 [settings]
 
 [status]
-reach = "entered"
-outcome = "image+0x17554a3"
-imports = 153
-calls = 321965
+reach = "flipped"
+outcome = "image+0x3b3310"
+imports = 192
+calls = 339538
 standing = 100
 default_return = "unimplemented"
-unanswered = 3
-limit_seconds = 20
+frames = 1
+unanswered = 14
+limit_seconds = 2
 build = "0.1.0"
-measured_on = "2026-09-12"
+measured_on = "2026-09-13"
 
 [experiment]
 reach = "entered"

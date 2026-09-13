@@ -149,6 +149,20 @@ unsafe fn poke_u32(at: u64, value: u32) {
     }
 }
 
+/// Reads a little-endian quadword from guest memory at `at`, under the identity mapping (D014).
+///
+/// # Safety
+///
+/// `at` must address eight bytes of readable guest memory.
+unsafe fn peek_u64(at: u64) -> u64 {
+    let Ok(at) = usize::try_from(at) else {
+        return 0;
+    };
+    unsafe {
+        std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at))
+    }
+}
+
 /// `sceAgcCreateShader(out, header, bytecode, flags)`.
 ///
 /// **The object model is measured, not invented (obSCEne `166-agc/create-shader`, answering
@@ -157,12 +171,10 @@ unsafe fn poke_u32(at: u64, value: u32) {
 /// distance zero: guest-adjacent, no allocation) - then, within that object, sets `+0x10 = bytecode`
 /// (a pointer to arg2, distance zero from it), `+0x30 = 0`, and `+0x50 = 0`, and returns `0`.
 ///
-/// Those three are the only fields the guest is observed to read at the D556 fault site
-/// (`8b 46 50` reads `+0x50`, `48 8b 46 30` reads `+0x30`), and `+0x10` is the bytecode pointer the
-/// object carries. The object spans `0x130` bytes and hardware changed `0x2c` of them; the bytes
-/// beyond these three stay as the guest prepared them, because nothing measured says what they hold
-/// - writing an invented value there is exactly what principle 3 forbids. A null `out` or `header`
-/// gets the wrapper's own `0x8a6c000a` rather than a fault.
+/// It also converts the relative sub-object offset at `+0x8` (e.g. `0xd8`, observed in retail shader
+/// headers and measured in obSCEne `166-agc/create-shader` where `+0x8` becomes `header + 0xe0`/`0xd8`)
+/// into an absolute pointer within the header object, so render-state marshalling routines can
+/// dereference `[rsi + 0x8]->+0x28`.
 fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, header, bytecode) = (args[0], args[1], args[2]);
     if out == 0 || header == 0 {
@@ -170,13 +182,35 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // SAFETY: `out` is the guest stack slot the call fills with the object pointer (D556).
     unsafe { poke_u64(out, header) };
-    // SAFETY: `header` is the guest-owned object region (>= 0x130 bytes); `+0x10` is the bytecode
-    // pointer the object carries (measured, 3c5e).
+    // SAFETY: `header` is the guest-owned object region (>= 0x130 bytes).
+    // obSCEne measured that hardware changes exactly 0x2c (44) bytes within the header
+    // (obSCEne 166-agc/create-shader):
+    // - +0x08: pointer to sub-table at header + off_8 + 8 (measured 0x7eeffb5a0 with off_8=0xd8)
+    // - +0x10: bytecode pointer (arg2)
+    // - +0x20, +0x28, +0x30: relative sub-object offsets relocated to header pointers
+    // - Sub-table entries at sub_table[0..5]: relative offsets relocated to header pointers
+    // Note: +0x50 and other fields are asset metadata (e.g. counts) and are not touched.
     unsafe { poke_u64(header.wrapping_add(0x10), bytecode) };
-    // SAFETY: same region; `+0x30` is the measured quadword the guest reads (0).
-    unsafe { poke_u64(header.wrapping_add(0x30), 0) };
-    // SAFETY: same region; `+0x50` is the measured dword the guest reads the low byte of (0).
-    unsafe { poke_u32(header.wrapping_add(0x50), 0) };
+
+    let off_8 = unsafe { peek_u64(header.wrapping_add(0x8)) };
+    if off_8 != 0 && off_8 < 0x1000 {
+        let sub_table = header.wrapping_add(off_8).wrapping_add(8);
+        unsafe { poke_u64(header.wrapping_add(0x8), sub_table) };
+        for i in 0..5 {
+            let entry_addr = sub_table.wrapping_add(i * 8);
+            let rel = unsafe { peek_u64(entry_addr) };
+            if rel != 0 && rel < 0x1000 {
+                unsafe { poke_u64(entry_addr, header.wrapping_add(rel)) };
+            }
+        }
+    }
+
+    for &offset in &[0x20, 0x28, 0x30] {
+        let rel = unsafe { peek_u64(header.wrapping_add(offset)) };
+        if rel != 0 && rel < 0x1000 {
+            unsafe { poke_u64(header.wrapping_add(offset), header.wrapping_add(rel)) };
+        }
+    }
     OK
 }
 
@@ -344,14 +378,25 @@ mod tests {
     use super::*;
 
     /// **The measured object model is what the handler writes.** A guest hands `out` (a slot) and
-    /// `header` (its object buffer); after the call, `*out` is the header address and the object's
-    /// three measured fields are set, so a guest reading `+0x30`/`+0x50` sees the zeros hardware
-    /// wrote rather than the garbage an unwritten out-parameter left (worklog 503/D556).
+    /// `header` (its object buffer); after the call, `*out` is the header address, `+0x10` is the
+    /// bytecode pointer, and relative offsets (`+0x08`, `+0x20`, `+0x28`, `+0x30`, and sub-table
+    /// entries) are relocated to pointers within the header object (measured in obSCEne 166-agc/create-shader
+    /// and verified against retail Unity pipelines).
     #[test]
     fn create_shader_fills_the_object_as_hardware_did() {
-        // A slot for the object pointer, and a 0x130-byte object buffer pre-poisoned with 0xff.
+        // A slot for the object pointer, and a 0x130-byte object buffer with retail-like offsets.
         let mut slot: u64 = 0;
-        let mut object = [0xffu8; 0x130];
+        let mut object = [0u8; 0x130];
+        // Set up relative offsets as found in retail shader headers:
+        // +0x08: offset 0xd8 (points to sub-table at +0xe0)
+        object[0x8..0x10].copy_from_slice(&0xd8u64.to_le_bytes());
+        object[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
+        object[0x28..0x30].copy_from_slice(&0x38u64.to_le_bytes());
+        object[0x30..0x38].copy_from_slice(&0x60u64.to_le_bytes());
+        // Sub-table entries at 0xe0..0x108
+        object[0xe0..0xe8].copy_from_slice(&0x38u64.to_le_bytes());
+        object[0xe8..0xf0].copy_from_slice(&0x48u64.to_le_bytes());
+
         let out = std::ptr::addr_of_mut!(slot) as u64;
         let header = object.as_mut_ptr() as u64;
         let bytecode = 0x4000_0000_1234u64;
@@ -369,11 +414,13 @@ mod tests {
             b.copy_from_slice(&object[off..off + 8]);
             u64::from_le_bytes(b)
         };
+        assert_eq!(read_u64(0x08), header + 0xe0, "+0x08 is the sub-table pointer");
         assert_eq!(read_u64(0x10), bytecode, "+0x10 is the bytecode pointer");
-        assert_eq!(read_u64(0x30), 0, "+0x30 is the measured zero");
-        let mut d = [0u8; 4];
-        d.copy_from_slice(&object[0x50..0x54]);
-        assert_eq!(u32::from_le_bytes(d), 0, "+0x50 is the measured zero dword");
+        assert_eq!(read_u64(0x20), header + 0x70, "+0x20 is relocated");
+        assert_eq!(read_u64(0x28), header + 0x38, "+0x28 is relocated");
+        assert_eq!(read_u64(0x30), header + 0x60, "+0x30 is relocated");
+        assert_eq!(read_u64(0xe0), header + 0x38, "sub-table[0] is relocated");
+        assert_eq!(read_u64(0xe8), header + 0x48, "sub-table[1] is relocated");
     }
 
     /// **A null out-parameter is refused, not dereferenced.** The guest's own wrapper answers
