@@ -438,6 +438,12 @@ fn vop2_vv(name: &str, dst: u32, src0: u32, src1: u32) -> u32 {
     head(name) | (dst << 17) | (src1 << 9) | (256 + src0)
 }
 
+/// `v_op_f32_e32 vD, vS`, by VOP1 opcode name.
+fn vop1_vv(name: &str, dst: u32, src0: u32) -> u32 {
+    // src0 uses the shared operand numbering, where vector registers start at 256.
+    head(name) | (dst << 17) | (256 + src0)
+}
+
 /// Operand codes for the inline floats, from `data/operands.toml`.
 const INLINE_ONE: u32 = 242;
 const INLINE_TWO: u32 = 244;
@@ -520,6 +526,101 @@ fn float_min_and_max_produce_the_right_bits() {
         1.0_f32.to_bits(),
         "min(1.0, 2.0); got bits {:#x}",
         vector(&registers, 3)
+    );
+}
+
+#[test]
+fn float_unary_sqrt_and_rsq_produce_the_right_bits() {
+    if !device_or_skip("float_unary_sqrt_and_rsq_produce_the_right_bits") {
+        return;
+    }
+
+    // sqrt(4.0) == 2.0, rsq(4.0) == 0.5
+    let mut words = Vec::new();
+    words.extend_from_slice(&v_mov_literal(0, 4.0_f32.to_bits()));
+    words.push(vop1_vv("v_sqrt_f32_e32", 1, 0));
+    words.push(vop1_vv("v_rsq_f32_e32", 2, 0));
+    words.push(s_endpgm());
+
+    let registers = run(&words);
+    assert_eq!(
+        vector(&registers, 1),
+        2.0_f32.to_bits(),
+        "sqrt(4.0); got bits {:#x} ({})",
+        vector(&registers, 1),
+        f32::from_bits(vector(&registers, 1))
+    );
+    assert_eq!(
+        vector(&registers, 2),
+        0.5_f32.to_bits(),
+        "rsq(4.0); got bits {:#x} ({})",
+        vector(&registers, 2),
+        f32::from_bits(vector(&registers, 2))
+    );
+}
+
+#[test]
+fn float_unary_transcendentals_produce_the_right_bits() {
+    if !device_or_skip("float_unary_transcendentals_produce_the_right_bits") {
+        return;
+    }
+
+    // exp2(3.0) == 8.0, log2(8.0) == 3.0
+    let mut words = Vec::new();
+    words.extend_from_slice(&v_mov_literal(0, 3.0_f32.to_bits()));
+    words.extend_from_slice(&v_mov_literal(1, 8.0_f32.to_bits()));
+    words.push(vop1_vv("v_exp_f32_e32", 2, 0));
+    words.push(vop1_vv("v_log_f32_e32", 3, 1));
+    words.push(s_endpgm());
+
+    let registers = run(&words);
+    assert_eq!(
+        vector(&registers, 2),
+        8.0_f32.to_bits(),
+        "exp2(3.0); got bits {:#x} ({})",
+        vector(&registers, 2),
+        f32::from_bits(vector(&registers, 2))
+    );
+    assert_eq!(
+        vector(&registers, 3),
+        3.0_f32.to_bits(),
+        "log2(8.0); got bits {:#x} ({})",
+        vector(&registers, 3),
+        f32::from_bits(vector(&registers, 3))
+    );
+}
+
+#[test]
+fn float_unary_trig_produces_the_right_bits() {
+    if !device_or_skip("float_unary_trig_produces_the_right_bits") {
+        return;
+    }
+
+    // The angle is in *revolutions*: v_sin_f32/v_cos_f32 compute sin/cos of 2*pi*x. A
+    // quarter turn is a right angle - sin(2*pi*0.25) = sin(pi/2) = 1.0, cos(pi/2) = 0.0.
+    // Chosen deliberately over 0.0: a translator that dropped the revolutions-to-radians
+    // scale would compute sin(0.25 rad) = 0.247 and cos(0.25 rad) = 0.969, which this
+    // separates from the truth, where sin(0)/cos(0) agree under both conventions and prove
+    // nothing. Compared approximately because 2*pi is not exactly representable and the
+    // extended sin/cos are not required to be correctly rounded.
+    let mut words = Vec::new();
+    words.extend_from_slice(&v_mov_literal(0, 0.25_f32.to_bits()));
+    words.push(vop1_vv("v_sin_f32_e32", 1, 0));
+    words.push(vop1_vv("v_cos_f32_e32", 2, 0));
+    words.push(s_endpgm());
+
+    let registers = run(&words);
+    let sin = f32::from_bits(vector(&registers, 1));
+    let cos = f32::from_bits(vector(&registers, 2));
+    assert!(
+        (sin - 1.0).abs() < 1e-3,
+        "sin(2*pi*0.25) should be 1.0; got {sin} (bits {:#x})",
+        vector(&registers, 1)
+    );
+    assert!(
+        cos.abs() < 1e-3,
+        "cos(2*pi*0.25) should be 0.0; got {cos} (bits {:#x})",
+        vector(&registers, 2)
     );
 }
 

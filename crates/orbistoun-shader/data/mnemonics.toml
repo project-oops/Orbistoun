@@ -219,8 +219,38 @@ name = "v_mov_b32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 37
+name = "v_exp_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 39
+name = "v_log_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 42
 name = "v_rcp_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 46
+name = "v_rsq_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 51
+name = "v_sqrt_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 53
+name = "v_sin_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 54
+name = "v_cos_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"

@@ -134,6 +134,7 @@ fn permitted_families(mnemonic: &str) -> &'static [&'static str] {
 const FIXTURES: &[(&str, &str)] = &[
     ("arith", "vector ALU, the bulk of any real shader"),
     ("minmax", "v_min_f32/v_max_f32, the saturating VOP2 pair"),
+    ("unary", "unary vector float ALU and transcendentals"),
     (
         "literal",
         "trailing 32-bit literals, the highest-risk length rule",

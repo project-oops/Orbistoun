@@ -111,11 +111,14 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_lt_f32_e32",
     "v_cmp_lt_u32_e32",
     "v_cndmask_b32_e64",
+    "v_cos_f32_e32",
     "v_div_fixup_f32",
     "v_fmac_f32_e32",
     "v_div_scale_f32",
     "v_div_fmas_f32",
+    "v_exp_f32_e32",
     "v_fma_f32",
+    "v_log_f32_e32",
     "v_lshlrev_b32_e32",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
@@ -125,6 +128,9 @@ pub const SUPPORTED: &[&str] = &[
     "v_mul_f32_e32",
     "v_mul_f32_e64",
     "v_rcp_f32_e32",
+    "v_rsq_f32_e32",
+    "v_sin_f32_e32",
+    "v_sqrt_f32_e32",
     "v_sub_co_u32",
     "v_sub_f32_e32",
     "v_sub_f32_e64",
@@ -857,6 +863,26 @@ pub trait Model {
         result
     }
 
+    /// Applies a `GLSL.std.450` extended float operation (by instruction number) to one register
+    /// value, returning the result's bits.
+    ///
+    /// The bitcast bracketing is [`f32_ext_binary`](Self::f32_ext_binary)'s exactly: a register
+    /// holds thirty-two bits with no type, so it is reinterpreted as a float (`OpBitcast`),
+    /// transformed via `OpExtInst` in `GLSL.std.450`, and reinterpreted back.
+    fn f32_ext_unary(&mut self, instruction: u32, operand: Id) -> Id {
+        let (u32_type, f32_type, set) = (self.u32_type(), self.f32_type(), self.glsl_set());
+        let b = self.builder();
+
+        let operand_f = b.id();
+        b.function(op::BITCAST, &[f32_type.0, operand_f.0, operand.0]);
+
+        let result_f = b.ext_inst(f32_type, set, instruction, &[operand_f]);
+
+        let result = b.id();
+        b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
+        result
+    }
+
     /// Converts a register's value, read as an unsigned integer, to the equal float, and returns
     /// that float's bits.
     ///
@@ -1293,6 +1319,11 @@ pub fn instruction<M: Model + ?Sized>(
         // extended pair wired up now that the emitter can import the set.
         "v_max_f32_e32" | "v_min_f32_e32" => float_min_max(model, instruction, name),
 
+        // Unary vector float ALU and transcendentals: square root, reciprocal square root,
+        // sin, cos, base-2 exp, and base-2 log (worklog 525).
+        "v_sqrt_f32_e32" | "v_rsq_f32_e32" | "v_sin_f32_e32" | "v_cos_f32_e32"
+        | "v_exp_f32_e32" | "v_log_f32_e32" => float_unary(model, instruction, name),
+
         // Anything that reaches guest memory. Split out because the two halves ask
         // different questions - one is about registers and arithmetic, the other about
         // addresses - and because the combined match outgrew what fits on a screen.
@@ -1489,8 +1520,78 @@ fn float_min_max<M: Model + ?Sized>(
     Ok(())
 }
 
+/// GLSL.std.450 instruction number for `Sin`.
+const GLSL_SIN: u32 = 13;
+/// GLSL.std.450 instruction number for `Cos`.
+const GLSL_COS: u32 = 14;
+/// GLSL.std.450 instruction number for `Exp2` (2^x).
+const GLSL_EXP2: u32 = 29;
+/// GLSL.std.450 instruction number for `Log2` (log2(x)).
+const GLSL_LOG2: u32 = 30;
+/// GLSL.std.450 instruction number for `Sqrt`.
+const GLSL_SQRT: u32 = 31;
+/// GLSL.std.450 instruction number for `InverseSqrt` (1 / sqrt(x)).
+const GLSL_INVERSE_SQRT: u32 = 32;
+
+/// Unary vector float ALU and transcendental operations: emitted as GLSL.std.450 extended
+/// instructions reached through `OpExtInst`.
+fn float_unary<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a unary float destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    // The extended instruction, and whether the source is an angle in *revolutions*.
+    // v_sin_f32/v_cos_f32 are the hardware's turn-based trig: the instruction computes the
+    // sine or cosine of `2*pi * x`, which is why a shader divides a radian angle by 2*pi
+    // before calling one. GLSL.std.450 Sin/Cos take radians, so the argument has to be scaled
+    // back up by 2*pi to reproduce what the instruction means - a plain Sin(x) is wrong by
+    // that factor, and wrong in a way sin(0)/cos(0) cannot see.
+    let (extended, revolutions) = match name {
+        "v_sqrt_f32_e32" => (GLSL_SQRT, false),
+        "v_rsq_f32_e32" => (GLSL_INVERSE_SQRT, false),
+        "v_sin_f32_e32" => (GLSL_SIN, true),
+        "v_cos_f32_e32" => (GLSL_COS, true),
+        "v_exp_f32_e32" => (GLSL_EXP2, false),
+        "v_log_f32_e32" => (GLSL_LOG2, false),
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "unknown unary float instruction",
+            });
+        }
+    };
+    for lane in 0..model.lanes() {
+        let operand = model.read_source(instruction, source, lane)?;
+        let argument = if revolutions {
+            let turn = model.constant(TWO_PI_F32);
+            model.f32_binary(op::FMUL, operand, turn)
+        } else {
+            operand
+        };
+        let value = model.f32_ext_unary(extended, argument);
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
 /// The bit pattern of 1.0f.
 const ONE_F32: u32 = 0x3F80_0000;
+
+/// The bit pattern of `2*pi` as an f32 (`6.2831855`).
+///
+/// The scale from a turn-based angle to radians: v_sin_f32/v_cos_f32 read revolutions and
+/// compute the trig of `2*pi * x`, so translating them onto the radian-based GLSL.std.450
+/// Sin/Cos means multiplying the argument by this first.
+const TWO_PI_F32: u32 = 0x40C9_0FDB;
 
 /// `v_subrev_f32_e64`, which takes its operands the other way round.
 const REVERSE_SUBTRACT: &str = "v_subrev_f32_e64";
