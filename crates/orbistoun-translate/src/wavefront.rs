@@ -48,11 +48,12 @@
 //! seam is observable. Four instructions is a cheap price for finding out, and the
 //! factoring is on the list.
 
+use std::collections::BTreeMap;
+
 use orbistoun_shader::{Decode, EncodingTable, Instruction, Operand};
 use orbistoun_spirv::{
-    Builder, Id, addressing, capability, decoration, execution, memory, mode, op,
+    Builder, Id, addressing, built_in, capability, decoration, execution, memory, mode, op,
 };
-use std::collections::BTreeMap;
 
 use crate::buffer;
 use crate::model::{self, Model};
@@ -200,6 +201,40 @@ pub enum Stage {
     Compute,
     /// A fragment shader with a colour output at location zero.
     Fragment,
+    /// A mesh shader: one workgroup declares how many vertices and primitives it will emit,
+    /// writes the primitive's indices, and writes the vertices' positions and parameters.
+    ///
+    /// What a guest's NGG primitive shader is (D688). Its `MSG_GS_ALLOC_REQ` is the
+    /// declaration, its `exp prim` the indices, and its `exp pos`/`exp param` the per-vertex
+    /// outputs - one lane per vertex, which is how the guest's wave is arranged too.
+    Mesh,
+}
+
+/// How many vertices and primitives a mesh module declares room for.
+///
+/// One per lane, because that is how the guest arranges a primitive shader's wave: a lane is a
+/// vertex. It is a *maximum* - what the shader emits is the runtime pair it declares with
+/// `MSG_GS_ALLOC_REQ`, which is never more than this and is usually three.
+const MESH_SLOTS: u32 = 64;
+
+/// The outputs a mesh module writes, which exist only at that stage.
+///
+/// Held together because they are declared together and are meaningless apart: a position
+/// array a primitive's indices do not point into is not a triangle.
+#[derive(Debug, Clone)]
+struct MeshOutputs {
+    /// The per-vertex block array; member zero of each element carries `Position`.
+    vertices: Id,
+    /// The triangle index array: one `uvec3` per primitive.
+    indices: Id,
+    /// One output array per parameter location the shader exports, by location.
+    parameters: BTreeMap<u32, Id>,
+    /// Pointer to one `vec4` in an output array.
+    vec4_ptr: Id,
+    /// Pointer to one `uvec3` in an output array.
+    uvec3_ptr: Id,
+    /// The `uvec3` type itself, for composing an index triple.
+    uvec3: Id,
 }
 
 /// How a fragment input is read.
@@ -222,20 +257,19 @@ pub enum Interpolation {
 ///
 /// Split out of the constructor for length, and it groups cleanly: everything here is a
 /// statement about the module as a whole rather than about anything inside it.
-fn emit_header(b: &mut Builder, stage: Stage, main: Id, output: Option<Id>, inputs: &[u32]) {
-    b.header(op::CAPABILITY, &[capability::SHADER]);
+fn emit_header(b: &mut Builder, stage: Stage, main: Id, output: Option<Id>) {
+    if stage == Stage::Mesh {
+        // `MeshShadingEXT` implies `Shader`, and the extension must be declared with it.
+        b.header(op::CAPABILITY, &[capability::MESH_SHADING_EXT]);
+        let mut extension = Vec::new();
+        extension.extend(Builder::literal_string("SPV_EXT_mesh_shader"));
+        b.header(op::EXTENSION, &extension);
+    } else {
+        b.header(op::CAPABILITY, &[capability::SHADER]);
+    }
 
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
-    let model = match stage {
-        Stage::Compute => execution::GL_COMPUTE,
-        Stage::Fragment => execution::FRAGMENT,
-    };
-    let mut entry = vec![model, main.0];
-    entry.extend(Builder::literal_string("main"));
-    entry.extend(output.map(|id| id.0));
-    entry.extend_from_slice(inputs);
-    b.header(op::ENTRY_POINT, &entry);
     match stage {
         Stage::Compute => {
             b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
@@ -245,12 +279,51 @@ fn emit_header(b: &mut Builder, stage: Stage, main: Id, output: Option<Id>, inpu
         Stage::Fragment => {
             b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
         }
+        // One invocation, which stands in for the guest's whole wave, and the most it may
+        // emit. The maximum is the lane count because the guest arranges one vertex per lane;
+        // what it *actually* emits is a runtime value it declares with `MSG_GS_ALLOC_REQ`,
+        // which is the instruction this stage exists to have somewhere to put.
+        Stage::Mesh => {
+            b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
+            b.header(
+                op::EXECUTION_MODE,
+                &[main.0, mode::OUTPUT_VERTICES, MESH_SLOTS],
+            );
+            b.header(
+                op::EXECUTION_MODE,
+                &[main.0, mode::OUTPUT_PRIMITIVES_EXT, MESH_SLOTS],
+            );
+            b.header(op::EXECUTION_MODE, &[main.0, mode::OUTPUT_TRIANGLES_EXT]);
+        }
     }
     if let Some(colour) = output {
         // Location zero is colour attachment zero, which is the attachment a render pass
         // lists first.
         b.annotate(op::DECORATE, &[colour.0, decoration::LOCATION, 0]);
     }
+}
+
+/// Writes the entry point, which names every variable the stage requires it to.
+///
+/// **Last, not with the rest of the header.** The builder keeps header instructions in ordered
+/// slots by opcode, so an entry point written after the declarations still lands ahead of the
+/// execution modes - and it has to be written late, because from SPIR-V 1.4 the interface must
+/// list *every* global variable rather than only the inputs and outputs, and the register
+/// files and buffers do not exist until they are declared (worklog 558).
+///
+/// Below 1.4 the list is inputs and outputs only. Adding the rest there is not merely
+/// unnecessary, it is wrong: that version's interface is defined to hold those two storage
+/// classes.
+fn emit_entry_point(b: &mut Builder, stage: Stage, main: Id, interface: &[u32]) {
+    let model = match stage {
+        Stage::Compute => execution::GL_COMPUTE,
+        Stage::Fragment => execution::FRAGMENT,
+        Stage::Mesh => execution::MESH_EXT,
+    };
+    let mut entry = vec![model, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.extend_from_slice(interface);
+    b.header(op::ENTRY_POINT, &entry);
 }
 
 /// Declares the four size constants the module's arrays and buffers are built from.
@@ -352,6 +425,147 @@ fn declare_colour_output(
     Some((vec4, colour))
 }
 
+/// Declares everything a mesh module writes: the vertices, the indices, and one array per
+/// exported parameter.
+///
+/// [`None`] for any other stage, so the caller's `Option` is the stage decision already made -
+/// the same shape `declare_colour_output` has.
+///
+/// The per-vertex outputs are an array of a `Block` struct whose member zero carries
+/// `Position`. That is what the stage requires: a bare array of `vec4` decorated `Position` is
+/// what a vertex shader has, and a mesh module written that way is refused (worklog 557).
+fn declare_mesh_outputs(
+    b: &mut Builder,
+    f32_type: Id,
+    u32_type: Id,
+    vec4: Id,
+    stage: Stage,
+    reserved: &MeshReserved,
+) -> Option<MeshOutputs> {
+    if stage != Stage::Mesh {
+        return None;
+    }
+    let slots = b.id();
+    b.declare(op::CONSTANT, &[u32_type.0, slots.0, MESH_SLOTS]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+    let uvec3 = b.id();
+    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, 3]);
+
+    let per_vertex = b.id();
+    b.annotate(op::DECORATE, &[per_vertex.0, decoration::BLOCK]);
+    b.annotate(
+        op::MEMBER_DECORATE,
+        &[per_vertex.0, 0, decoration::BUILT_IN, built_in::POSITION],
+    );
+    b.annotate(
+        op::DECORATE,
+        &[
+            reserved.indices.0,
+            decoration::BUILT_IN,
+            built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+        ],
+    );
+    for (location, id) in &reserved.parameters {
+        b.annotate(op::DECORATE, &[id.0, decoration::LOCATION, *location]);
+    }
+
+    b.declare(op::TYPE_STRUCT, &[per_vertex.0, vec4.0]);
+    let vertex_array = b.id();
+    let vertex_array_ptr = b.id();
+    b.declare(op::TYPE_ARRAY, &[vertex_array.0, per_vertex.0, slots.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[vertex_array_ptr.0, OUTPUT, vertex_array.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[vertex_array_ptr.0, reserved.vertices.0, OUTPUT],
+    );
+
+    let index_array = b.id();
+    let index_array_ptr = b.id();
+    b.declare(op::TYPE_ARRAY, &[index_array.0, uvec3.0, slots.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[index_array_ptr.0, OUTPUT, index_array.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[index_array_ptr.0, reserved.indices.0, OUTPUT],
+    );
+
+    let parameter_array = b.id();
+    let parameter_array_ptr = b.id();
+    b.declare(op::TYPE_ARRAY, &[parameter_array.0, vec4.0, slots.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[parameter_array_ptr.0, OUTPUT, parameter_array.0],
+    );
+    let mut parameters = BTreeMap::new();
+    for (location, id) in &reserved.parameters {
+        b.declare(op::VARIABLE, &[parameter_array_ptr.0, id.0, OUTPUT]);
+        parameters.insert(*location, *id);
+    }
+
+    let vec4_ptr = b.id();
+    let uvec3_ptr = b.id();
+    b.declare(op::TYPE_POINTER, &[vec4_ptr.0, OUTPUT, vec4.0]);
+    b.declare(op::TYPE_POINTER, &[uvec3_ptr.0, OUTPUT, uvec3.0]);
+
+    Some(MeshOutputs {
+        vertices: reserved.vertices,
+        indices: reserved.indices,
+        parameters,
+        vec4_ptr,
+        uvec3_ptr,
+        uvec3,
+    })
+}
+
+/// The identifiers a mesh module's outputs need before the entry point is written.
+///
+/// Reserved ahead of the header for the reason every other output here is: from SPIR-V 1.4 -
+/// which the mesh extension requires - an entry point must list every global variable, and a
+/// module that omits one is rejected with a message about interfaces rather than about the
+/// variable.
+#[derive(Debug, Clone)]
+struct MeshReserved {
+    vertices: Id,
+    indices: Id,
+    parameters: BTreeMap<u32, Id>,
+}
+
+impl MeshReserved {
+    /// Reserves ids for a mesh module's outputs, or nothing at another stage.
+    fn new(b: &mut Builder, stage: Stage, locations: &[u32]) -> Self {
+        if stage != Stage::Mesh {
+            return Self {
+                vertices: Id(0),
+                indices: Id(0),
+                parameters: BTreeMap::new(),
+            };
+        }
+        Self {
+            vertices: b.id(),
+            indices: b.id(),
+            parameters: locations
+                .iter()
+                .map(|location| (*location, b.id()))
+                .collect(),
+        }
+    }
+
+    /// Every variable the entry point must list.
+    fn interface(&self, stage: Stage) -> Vec<u32> {
+        if stage != Stage::Mesh {
+            return Vec::new();
+        }
+        let mut ids = vec![self.vertices.0, self.indices.0];
+        ids.extend(self.parameters.values().map(|id| id.0));
+        ids
+    }
+}
+
 /// Declares the local data share: workgroup storage the lanes of a wavefront exchange values
 /// through.
 ///
@@ -391,6 +605,10 @@ pub struct Wavefront<'a> {
     /// Declared in the header, so which attributes exist is decided from a pass over the
     /// decode before any instruction is translated (D555).
     inputs: BTreeMap<u32, Id>,
+    /// What a mesh module writes, or [`None`] at any other stage.
+    mesh: Option<MeshOutputs>,
+    /// The four-component float vector, which the stages that have one share.
+    vec4: Id,
     /// How many words of guest memory this module addresses.
     ///
     /// Carried rather than read from a constant so a test can widen the window and reach
@@ -441,7 +659,7 @@ pub struct Wavefront<'a> {
 impl<'a> Wavefront<'a> {
     /// Prepares the module and sets every lane active.
     pub fn new(encodings: &'a EncodingTable, width: Width) -> Self {
-        Self::for_stage(encodings, width, Stage::Compute, &[])
+        Self::for_stage(encodings, width, Stage::Compute, &[], &[])
     }
 
     /// Prepares the module for a named stage.
@@ -456,8 +674,16 @@ impl<'a> Wavefront<'a> {
         width: Width,
         stage: Stage,
         attributes: &[(u32, Interpolation)],
+        parameters: &[u32],
     ) -> Self {
-        let mut b = Builder::new().with_version(orbistoun_spirv::VERSION_1_3);
+        // A mesh module declares 1.4, which its extension requires; everything else stays at
+        // 1.3, where an entry point lists only its inputs and outputs (worklog 557).
+        let version = if stage == Stage::Mesh {
+            orbistoun_spirv::VERSION_1_4
+        } else {
+            orbistoun_spirv::VERSION_1_3
+        };
+        let mut b = Builder::new().with_version(version);
 
         let void = b.id();
         let fn_type = b.id();
@@ -486,7 +712,7 @@ impl<'a> Wavefront<'a> {
         // an output variable must be named in the entry point's interface, and a module that
         // omits one is rejected by a driver rather than misbehaving.
         let output = match stage {
-            Stage::Compute => None,
+            Stage::Compute | Stage::Mesh => None,
             Stage::Fragment => Some(b.id()),
         };
         let vec4 = b.id();
@@ -496,8 +722,8 @@ impl<'a> Wavefront<'a> {
         // **not** reliably rejected - this driver answered zeros instead, which is the failure
         // that costs an afternoon (D555).
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
-        let interface: Vec<u32> = input_ids.iter().map(|(_, _, id)| id.0).collect();
-        emit_header(&mut b, stage, main, output, &interface);
+        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
+        emit_header(&mut b, stage, main, output);
 
         b.declare(op::TYPE_VOID, &[void.0]);
         b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
@@ -507,6 +733,7 @@ impl<'a> Wavefront<'a> {
         b.declare(op::TYPE_BOOL, &[bool_type.0]);
         let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
+        let mesh = declare_mesh_outputs(&mut b, f32_type, u32_type, vec4, stage, &mesh_reserved);
         // The program counter, the scalar condition code and m0: one private word each,
         // sharing a pointer type and a zero initialiser. Zero so the shader starts at its
         // first block rather than at whatever the driver left in the variable.
@@ -539,6 +766,26 @@ impl<'a> Wavefront<'a> {
         let (observation, guest_memory) =
             declare_buffers(&mut b, u32_type, observed_count, memory_count);
 
+        // Every variable this module has, now that every one of them exists. What the entry
+        // point is allowed to name depends on the version: 1.4 and above want all of them,
+        // and below that only the inputs and outputs.
+        let mut interface: Vec<u32> = input_ids.iter().map(|(_, _, id)| id.0).collect();
+        interface.extend(output.map(|(_, colour)| colour.0));
+        interface.extend(mesh_reserved.interface(stage));
+        if stage == Stage::Mesh {
+            interface.extend([
+                counter.0,
+                scc.0,
+                m0.0,
+                local.0,
+                files.vectors.0,
+                files.scalars.0,
+                observation.buffer.0,
+                guest_memory.buffer.0,
+            ]);
+        }
+        emit_entry_point(&mut b, stage, main, &interface);
+
         b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
         b.function(op::LABEL, &[entry_block.0]);
 
@@ -546,6 +793,8 @@ impl<'a> Wavefront<'a> {
             stage,
             output,
             inputs,
+            mesh,
+            vec4,
             builder: b,
             encodings,
             memory_words: MEMORY_WORDS,
@@ -694,6 +943,41 @@ impl<'a> Wavefront<'a> {
     ///
     /// A select rather than a branch: the old value is kept where the mask says the
     /// lane is inactive. No merge blocks, and the same result.
+    /// Stores four components as a `vec4` through a pointer.
+    ///
+    /// # Why this is not masked, and what that assumes
+    ///
+    /// Every other write in this model keeps what was there where the lane is inactive, by
+    /// loading the old value and selecting against it. **A mesh module may not do that**: its
+    /// output storage must not be read, which `spirv-val` says plainly and which this found by
+    /// being told (worklog 558). Selecting needs the old value, so the write is unconditional.
+    ///
+    /// That is safe exactly when the vertices a guest emits are its **low lanes**, which is how
+    /// a primitive shader is arranged: it narrows the mask to `(1 << n) - 1` and each of those
+    /// lanes is a vertex, so an inactive lane's slot is past the count the shader declared and
+    /// nothing reads it. A shader with a *sparse* vertex mask would write a vertex it did not
+    /// mean to emit.
+    ///
+    /// Recorded as an assumption rather than asserted, because nothing here can check it: the
+    /// mask is a runtime value. It is the one place this translation can be wrong about a
+    /// shader it accepts (D688).
+    fn store_vec4(&mut self, pointer: Id, components: [Id; 4]) {
+        let vec4 = self.vec4;
+        let value = self.builder.id();
+        self.builder.function(
+            op::COMPOSITE_CONSTRUCT,
+            &[
+                vec4.0,
+                value.0,
+                components[0].0,
+                components[1].0,
+                components[2].0,
+                components[3].0,
+            ],
+        );
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
+    }
+
     fn store_lane_masked(&mut self, register: u32, lane: u32, value: Id) {
         let active = self.lane_active(lane);
         let old = self.load_lane(register, lane);
@@ -711,12 +995,13 @@ impl<'a> Wavefront<'a> {
     /// Lane zero of each vector register, then the scalar registers - the same layout
     /// the lane model reports, which is what lets the two be diffed at all.
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
-        // **A fragment module publishes nothing.** The epilogue's storage-buffer writes are
-        // the compute harness's oracle, and a fragment shader may write a storage buffer only
-        // where `fragmentStoresAndAtomics` is enabled - which this project's device does not
-        // request (D552). Skipping it also removes the only static use of the observation
-        // buffer, so a fragment pipeline needs no descriptor for it. A fragment module's
-        // oracle is the attachment (D553).
+        // **Only a compute module publishes its registers.** The epilogue exists to be the
+        // compute harness's oracle; a graphics module's oracle is the attachment (D553), and
+        // writing the observation window from one would be a storage write nothing reads.
+        //
+        // The device does now enable the stores that would permit it (D689) - it has to, since
+        // a guest's own shaders write memory - so this is a statement about what the epilogue
+        // is *for* rather than about what a stage is allowed to do.
         if self.stage == Stage::Compute {
             let member = self.constant(0);
             for register in 0..OBSERVED_REGISTERS {
@@ -758,6 +1043,76 @@ impl Model for Wavefront<'_> {
 
     fn colour_output(&self) -> Option<(Id, Id)> {
         self.output
+    }
+
+    fn set_mesh_outputs(&mut self, vertices: Id, primitives: Id) -> Option<()> {
+        self.mesh.as_ref()?;
+        self.builder
+            .function(op::SET_MESH_OUTPUTS_EXT, &[vertices.0, primitives.0]);
+        Some(())
+    }
+
+    fn write_mesh_position(&mut self, lane: u32, components: [Id; 4]) -> Option<()> {
+        let mesh = self.mesh.clone()?;
+        let slot = Self::constant(self, lane);
+        let member = Self::constant(self, 0);
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[
+                mesh.vec4_ptr.0,
+                pointer.0,
+                mesh.vertices.0,
+                slot.0,
+                member.0,
+            ],
+        );
+        self.store_vec4(pointer, components);
+        Some(())
+    }
+
+    fn write_mesh_parameter(
+        &mut self,
+        location: u32,
+        lane: u32,
+        components: [Id; 4],
+    ) -> Option<()> {
+        let mesh = self.mesh.clone()?;
+        let variable = *mesh.parameters.get(&location)?;
+        let slot = Self::constant(self, lane);
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[mesh.vec4_ptr.0, pointer.0, variable.0, slot.0],
+        );
+        self.store_vec4(pointer, components);
+        Some(())
+    }
+
+    fn write_mesh_indices(&mut self, lane: u32, indices: [Id; 3]) -> Option<()> {
+        let mesh = self.mesh.clone()?;
+        let slot = Self::constant(self, lane);
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[mesh.uvec3_ptr.0, pointer.0, mesh.indices.0, slot.0],
+        );
+
+        let triple = self.builder.id();
+        self.builder.function(
+            op::COMPOSITE_CONSTRUCT,
+            &[
+                mesh.uvec3.0,
+                triple.0,
+                indices[0].0,
+                indices[1].0,
+                indices[2].0,
+            ],
+        );
+        // Unmasked, for the reason `store_vec4` gives: a mesh module's outputs cannot be read,
+        // so there is no old value to select against.
+        self.builder.function(op::STORE, &[pointer.0, triple.0]);
+        Some(())
     }
 
     fn attribute_input(&self, attribute: u32) -> Option<(Id, Id)> {
@@ -1089,6 +1444,36 @@ fn interpolated_attributes(
     Ok(attributes)
 }
 
+/// Which parameter locations a shader exports, in the order a mesh module declares them.
+///
+/// The mesh twin of `interpolated_attributes`, and it exists for the same reason: an output
+/// variable is declared in the header, so which ones exist has to be known before any
+/// instruction is translated. A guest's `exp param3` becomes location 3.
+///
+/// Targets that are not parameters - the position, the primitive indices, a colour attachment -
+/// are not locations and are skipped here; they have their own variables.
+fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
+    let mut locations: Vec<u32> = Vec::new();
+    for instruction in &decode.instructions {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        if named != Some("exp") {
+            continue;
+        }
+        let Some(Operand::Immediate(target)) = instruction.operands.first() else {
+            continue;
+        };
+        if let Some(location) = model::export_parameter_location(*target)
+            && !locations.contains(&location)
+        {
+            locations.push(location);
+        }
+    }
+    locations
+}
+
 /// Translates a whole decoded shader at wavefront fidelity, for a named stage.
 ///
 /// # Errors
@@ -1101,7 +1486,8 @@ pub fn translate_for(
     stage: Stage,
 ) -> Result<(Vec<u32>, usize), TranslateError> {
     let attributes = interpolated_attributes(decode, encodings)?;
-    let mut module = Wavefront::for_stage(encodings, width, stage, &attributes);
+    let parameters = exported_parameters(decode, encodings);
+    let mut module = Wavefront::for_stage(encodings, width, stage, &attributes, &parameters);
     crate::control::emit(&mut module, decode, encodings)?;
     module.finish()
 }

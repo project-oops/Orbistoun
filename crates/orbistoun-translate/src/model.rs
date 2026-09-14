@@ -94,6 +94,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_load_dwordx8",
     "s_mov_b32",
     "s_nop",
+    "s_sendmsg",
     "s_mov_b64",
     "s_movk_i32",
     "s_inst_prefetch",
@@ -421,16 +422,10 @@ pub fn supports(mnemonic: &str) -> bool {
 /// The distinction it draws, between "nobody has looked at this" and "this is waiting on
 /// something that is not encoding work", is what stops a worklist sending effort at
 /// whichever refusal is most frequent.
-pub const BLOCKED: &[(&str, &str)] = &[
-    (
-        "image_sample_lz",
-        "it samples a texture, and everything hard about that is on the other side of the instruction: its resource operand names eight consecutive scalar registers holding an image descriptor, and its sampler operand four more. The decoder now reads both, because the fields name where each group starts (worklog 549). What they point *at* is a descriptor this translator has no model for and a host image view nothing here declares - the SPIR-V emitter has no image type, no sampled-image type and no sampling instruction. That is a subsystem, not an encoding gap, and it is the last thing between the GL cube's textured pixel shader and a translation",
-    ),
-    (
-        "s_sendmsg",
-        "it sends a message to a fixed-function unit outside the shader core, and what the message means is the whole content: the console-run vertex program uses MSG_GS_ALLOC_REQ to tell the geometry engine how many vertices and primitives the wave is about to export, and the export is only legal because the allocation was granted. A host vertex shader makes no such request - the driver sized the output before the shader ran - so there is nothing to translate it into, and translating it as nothing would drop the one instruction the exports after it depend on. The decision is made and it is a mesh shader, where the allocation request is the host call that declares how many vertices and primitives the workgroup will emit: D688. What is missing is the mesh stage itself - the emitter has no such execution model - so this stays refused until that exists, with a destination rather than an open question",
-    ),
-];
+pub const BLOCKED: &[(&str, &str)] = &[(
+    "image_sample_lz",
+    "it samples a texture, and everything hard about that is on the other side of the instruction: its resource operand names eight consecutive scalar registers holding an image descriptor, and its sampler operand four more. The decoder now reads both, because the fields name where each group starts (worklog 549). What they point *at* is a descriptor this translator has no model for and a host image view nothing here declares - the SPIR-V emitter has no image type, no sampled-image type and no sampling instruction. That is a subsystem, not an encoding gap, and it is the last thing between the GL cube's textured pixel shader and a translation",
+)];
 
 /// Why an instruction is blocked, if it is one this translator recognises.
 ///
@@ -466,6 +461,38 @@ pub trait Model {
     /// every module until D553. An export into a compute dispatch has nowhere to go, and
     /// answering `None` is what makes that a refusal rather than a store somewhere arbitrary.
     fn colour_output(&self) -> Option<(Id, Id)> {
+        None
+    }
+
+    /// Declares how many vertices and primitives this workgroup will emit.
+    ///
+    /// [`None`] at any stage but the mesh one, where there is nothing to declare it to - the
+    /// same shape [`colour_output`](Self::colour_output) has, and the caller turns it into a
+    /// refusal that names the instruction's offset.
+    ///
+    /// Both counts are values rather than literals, because the guest's are: it writes them
+    /// into `m0` and the shader may compute them.
+    fn set_mesh_outputs(&mut self, _vertices: Id, _primitives: Id) -> Option<()> {
+        None
+    }
+
+    /// Writes one vertex's clip-space position, for the lane that is that vertex.
+    fn write_mesh_position(&mut self, _lane: u32, _components: [Id; 4]) -> Option<()> {
+        None
+    }
+
+    /// Writes one vertex's parameter at a location, for the lane that is that vertex.
+    fn write_mesh_parameter(
+        &mut self,
+        _location: u32,
+        _lane: u32,
+        _components: [Id; 4],
+    ) -> Option<()> {
+        None
+    }
+
+    /// Writes one primitive's three vertex indices, for the lane that is that primitive.
+    fn write_mesh_indices(&mut self, _lane: u32, _indices: [Id; 3]) -> Option<()> {
         None
     }
 
@@ -1198,6 +1225,171 @@ fn parameter_move<M: Model + ?Sized>(
     interpolate(model, instruction)
 }
 
+/// The export targets, as the field encodes them.
+///
+/// **Measured.** `orbistoun-gen`'s symbolic-code solver assembles the same export with each
+/// spelling and reads the bits that moved: colour attachments from 0, `pos0` at 12, `param0` at
+/// 32, and the primitive export at 20. The same mapping the differential test carries.
+const EXPORT_POSITION: i64 = 12;
+/// The first parameter target; `param<n>` is this plus n.
+const EXPORT_PARAMETER: i64 = 32;
+/// How many parameter targets there are, so a code past them is not read as one.
+const EXPORT_PARAMETERS: i64 = 32;
+/// The primitive export: the triangle's vertex indices, packed into one register.
+const EXPORT_PRIMITIVE: i64 = 20;
+
+/// Which parameter location an export target names, if it names one.
+///
+/// Public because the declaration pass needs it before any instruction is translated: an
+/// output variable is declared in the module header, so which locations exist has to be known
+/// first.
+#[must_use]
+pub fn export_parameter_location(target: i64) -> Option<u32> {
+    let location = target.checked_sub(EXPORT_PARAMETER)?;
+    (0..EXPORT_PARAMETERS)
+        .contains(&location)
+        .then(|| u32::try_from(location).unwrap_or(0))
+}
+
+/// The message that asks the geometry engine for room to export.
+///
+/// Measured: the reference assembler encodes `s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)` as
+/// `0xbf900009`, and the console-run vertex program carries that exact word (worklog 548).
+const MSG_GS_ALLOC_REQ: i64 = 9;
+
+/// Where the vertex and primitive counts sit in `m0`, for the allocation request.
+///
+/// **`assumed`, and the only assumption in this translation** - D688 says so and
+/// `REQ-20260914T1720Z-9c4a` asks the console to settle it. One sample supports it: oops-sdk's
+/// vertex program writes `0x1003` for one primitive of three vertices, which fits a vertex
+/// count in the low twelve bits and a primitive count in the next twelve, and fits several
+/// other splits equally well. For that shader every candidate split gives the same answer,
+/// which is why this is usable now and still worth measuring.
+const MESH_COUNT_BITS: u32 = 12;
+
+/// `s_sendmsg` - a message to a fixed-function unit outside the shader core.
+///
+/// Only the allocation request is translated, and only at the mesh stage, where the host has
+/// the same idea: declare how much this workgroup will emit before emitting any of it. Every
+/// other message is refused by name rather than ignored - a message this translator does not
+/// understand is a thing the guest asked the hardware to do, and doing nothing is an answer
+/// only if somebody has checked.
+fn send_message<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let Some(Operand::Immediate(message)) = instruction.operands.first() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a message's payload did not decode, so which message it is is unknown",
+        });
+    };
+    if *message != MSG_GS_ALLOC_REQ {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "only the geometry allocation request is translated; every other message 
+                     asks a fixed-function unit for something this translator has no host 
+                     counterpart for, and dropping one silently is not an answer",
+        });
+    }
+
+    // The counts the guest wrote into `m0`, read back as values - the host's declaration takes
+    // ids, so a shader that computed its counts translates as readily as one that wrote a
+    // literal.
+    let counts = model.read_m0();
+    let width = model.constant((1 << MESH_COUNT_BITS) - 1);
+    let vertices = model.binary(op::BITWISE_AND, counts, width);
+    let shift = model.constant(MESH_COUNT_BITS);
+    let high = model.binary(op::SHIFT_RIGHT_LOGICAL, counts, shift);
+    let primitives = model.binary(op::BITWISE_AND, high, width);
+
+    if model.set_mesh_outputs(vertices, primitives).is_none() {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "the geometry allocation request declares how much a workgroup will emit, 
+                     and only a mesh module has somewhere to declare it - translate at the mesh 
+                     stage, which is what a primitive shader is (D688)",
+        });
+    }
+    Ok(())
+}
+
+/// `exp pos0` and `exp param<n>` - one vertex's position or one of its parameters.
+///
+/// # One lane, one vertex
+///
+/// The guest narrows its execution mask to the lanes that are vertices and exports once; each
+/// active lane is a vertex of the primitive. A mesh shader writes an array indexed the same
+/// way, so the translation is the same loop the rest of this model uses, and the store keeps
+/// what was there for an inactive lane exactly as a register write does.
+fn mesh_vertex_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    sources: [&Operand; 4],
+    location: Option<u32>,
+) -> Result<(), TranslateError> {
+    for lane in 0..model.lanes() {
+        let mut components = [Id(0); 4];
+        for (slot, source) in sources.into_iter().enumerate() {
+            let bits = model.read_source(instruction, source, lane)?;
+            components[slot] = model.as_float(bits);
+        }
+        let written = match location {
+            Some(location) => model.write_mesh_parameter(location, lane, components),
+            None => model.write_mesh_position(lane, components),
+        };
+        if written.is_none() {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a position or parameter export needs the vertex outputs a mesh module 
+                         declares, and this module is not one - translate at the mesh stage, 
+                         which is what a primitive shader is (D688)",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `exp prim` - the triangle's three vertex indices, packed into one register.
+///
+/// # The packing, which is our own shader's
+///
+/// oops-sdk's vertex program writes `0x20280600` for "vertices 0, 1, 2 with edge flags", and
+/// the console drew the frame that word produced (oracle record A). That value is exactly
+/// `0 | 1 << 10 | 2 << 20` with bits 9, 19 and 29 set, which is where the three nine-bit
+/// indices and their edge flags sit. The edge flags are not translated: they select which
+/// edges a wireframe draws, the host decides that from its own state, and reading them into
+/// an index would be a number rather than a flag.
+fn mesh_primitive_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    packed: &Operand,
+) -> Result<(), TranslateError> {
+    /// Bits per index, and the gap between them - the tenth bit of each is an edge flag.
+    const INDEX_BITS: u32 = 9;
+    /// Where each index starts.
+    const INDEX_SHIFTS: [u32; 3] = [0, 10, 20];
+
+    for lane in 0..model.lanes() {
+        let word = model.read_source(instruction, packed, lane)?;
+        let mask = model.constant((1 << INDEX_BITS) - 1);
+        let mut indices = [Id(0); 3];
+        for (slot, shift) in INDEX_SHIFTS.into_iter().enumerate() {
+            let amount = model.constant(shift);
+            let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, amount);
+            indices[slot] = model.binary(op::BITWISE_AND, shifted, mask);
+        }
+        if model.write_mesh_indices(lane, indices).is_none() {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a primitive export needs the index array a mesh module declares, and 
+                         this module is not one - translate at the mesh stage (D688)",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The only export target this translates, and what it is.
 ///
 /// `mrt0` - colour attachment zero. Which attachment any *other* target index selects is
@@ -1228,33 +1420,53 @@ fn export<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
-    let Some((vec4, colour)) = model.colour_output() else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "an export needs a colour attachment to export to, and this module is a \
-                     compute dispatch - translate at the fragment stage for one that has one",
-        });
-    };
     let [target, sources @ ..] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "an export decodes to a target and four sources; this one did not",
         });
     };
-    if *target != Operand::Immediate(MRT0) {
+    let Operand::Immediate(target) = target else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "only mrt0 is translated - which attachment another target selects is \
-                     register state a guest writes, and inventing it would render a frame that \
-                     looks right and is not (D104)",
+            detail: "an export's target is not an immediate, so which one it names is unknown",
         });
-    }
+    };
     let [a, b, c, d] = sources else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "an export takes four sources, and this one decoded a different number",
         });
     };
+
+    // A geometry stage's exports: the vertices' positions and parameters, and the primitive
+    // that joins them. One lane is one vertex, which is how the guest arranges the wave (D688).
+    if *target == EXPORT_POSITION {
+        return mesh_vertex_export(model, instruction, [a, b, c, d], None);
+    }
+    if let Some(location) = export_parameter_location(*target) {
+        return mesh_vertex_export(model, instruction, [a, b, c, d], Some(location));
+    }
+    if *target == EXPORT_PRIMITIVE {
+        return mesh_primitive_export(model, instruction, a);
+    }
+
+    let Some((vec4, colour)) = model.colour_output() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an export needs somewhere to go: a colour attachment at the fragment 
+                     stage, or the vertex and primitive outputs at the mesh one. This module 
+                     is a compute dispatch and has neither",
+        });
+    };
+    if *target != MRT0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "only mrt0 is translated - which attachment another target selects is 
+                     register state a guest writes, and inventing it would render a frame that 
+                     looks right and is not (D104)",
+        });
+    }
 
     let mut components = Vec::with_capacity(4);
     for source in [a, b, c, d] {
@@ -1329,6 +1541,9 @@ pub fn instruction<M: Model + ?Sized>(
 
         // The same read, from an input the declaration pass decorated `Flat`.
         "v_interp_mov_f32_e32" => parameter_move(model, instruction),
+
+        // The message a primitive shader opens with, which is a mesh module's first act too.
+        "s_sendmsg" => send_message(model, instruction),
 
         // s_mov_b32: once for the whole wavefront, since scalar registers are uniform.
         // The scalar moves. Split out for the same reason the memory instructions

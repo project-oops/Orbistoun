@@ -156,6 +156,54 @@ fn create_render_pass(device: &ash::Device) -> Result<vk::RenderPass, DispatchEr
 }
 
 /// A host-visible buffer big enough to receive the image, and its mapped-readable memory.
+/// Reads a host-visible allocation back as words.
+fn read_words(
+    device: &ash::Device,
+    allocation: vk::DeviceMemory,
+    words: usize,
+) -> Result<Vec<u32>, DispatchError> {
+    let size = words_to_bytes(words);
+    // SAFETY: the allocation backs a host-visible, coherent buffer of at least this size and
+    // nothing else holds a mapping of it.
+    let mapped = unsafe { device.map_memory(allocation, 0, size, vk::MemoryMapFlags::empty()) }
+        .map_err(|e| DispatchError::Vulkan("map_memory", e))?
+        .cast::<u32>();
+    let mut out = vec![0u32; words];
+    // SAFETY: the mapping covers `words` words and the destination is exactly that long.
+    unsafe { std::ptr::copy_nonoverlapping(mapped, out.as_mut_ptr(), words) };
+    // SAFETY: mapped immediately above and not used after unmapping.
+    unsafe { device.unmap_memory(allocation) };
+    Ok(out)
+}
+
+/// Writes `memory` into the guest-memory window a pipeline bound.
+///
+/// Nothing when there is nothing to write, which is every draw that does not fetch. The buffer
+/// is host-visible for exactly this - these are small and a test may want to read one back.
+fn seed_memory(
+    device: &ash::Device,
+    built: &Pipeline,
+    memory: &[u32],
+) -> Result<(), DispatchError> {
+    if memory.is_empty() {
+        return Ok(());
+    }
+    let (_, allocation) = built.buffers[1];
+    let size = words_to_bytes(memory.len());
+    // SAFETY: the allocation backs a host-visible buffer of at least this size, nothing else
+    // holds a mapping of it, and the pointer is used only until it is unmapped below.
+    let mapped = unsafe { device.map_memory(allocation, 0, size, vk::MemoryMapFlags::empty()) }
+        .map_err(|e| DispatchError::Vulkan("map_memory", e))?
+        .cast::<u32>();
+    // SAFETY: `mapped` points at `size` bytes, which is `memory.len()` words, and the source
+    // and destination cannot overlap - one is host memory this process owns and the other is
+    // a fresh mapping.
+    unsafe { std::ptr::copy_nonoverlapping(memory.as_ptr(), mapped, memory.len()) };
+    // SAFETY: the memory is mapped and no pointer into it is used after this.
+    unsafe { device.unmap_memory(allocation) };
+    Ok(())
+}
+
 /// Bytes for a window measured in words, as Vulkan wants it.
 ///
 /// At least one word: a zero-sized buffer is not a legal binding, and a module that declares a
@@ -253,6 +301,7 @@ pub fn clear_to(colour: [f32; 4], width: u32, height: u32) -> Result<Pixels, Dis
         None,
         DEFAULT_WINDOWS,
         Geometry::Vertex,
+        &[],
     )
 }
 
@@ -267,7 +316,24 @@ fn render(
     shaders: Option<(&[u32], &[u32])>,
     windows: [usize; 2],
     geometry: Geometry,
+    memory: &[u32],
 ) -> Result<Pixels, DispatchError> {
+    render_over(colour, width, height, shaders, windows, geometry, memory).map(|(pixels, _)| pixels)
+}
+
+/// The shared body, which also hands back the guest-memory window the draw left behind.
+///
+/// Reading it is how a shader that writes memory is observed at a graphics stage: the
+/// attachment shows what it drew and this shows what it stored, and a guest's shaders do both.
+fn render_over(
+    colour: [f32; 4],
+    width: u32,
+    height: u32,
+    shaders: Option<(&[u32], &[u32])>,
+    windows: [usize; 2],
+    geometry: Geometry,
+    memory: &[u32],
+) -> Result<(Pixels, Vec<u32>), DispatchError> {
     let session = crate::compute::session()?;
     let session = session
         .lock()
@@ -322,6 +388,10 @@ fn render(
                 windows,
                 geometry,
             )
+            .and_then(|built| {
+                seed_memory(device, &built, memory)?;
+                Ok(built)
+            })
         })
         .transpose()?;
 
@@ -354,17 +424,26 @@ fn render(
     // SAFETY: mapped immediately above and not used after unmapping.
     unsafe { device.unmap_memory(buffer_memory) };
 
+    // The guest-memory window as the draw left it, read before the pipeline is released.
+    let left_behind = match pipeline.as_ref() {
+        Some(built) => read_words(device, built.buffers[1].1, windows[1])?,
+        None => Vec::new(),
+    };
+
     release(device, command.pool, &target, view, pipeline.as_ref());
     // SAFETY: nothing is bound to either allocation any longer and the buffer is unmapped.
     unsafe { device.free_memory(image_memory, None) };
     // SAFETY: as above.
     unsafe { device.free_memory(buffer_memory, None) };
 
-    Ok(Pixels {
-        width,
-        height,
-        bytes,
-    })
+    Ok((
+        Pixels {
+            width,
+            height,
+            bytes,
+        },
+        left_behind,
+    ))
 }
 
 /// Destroys everything one render created, on the successful path only.
@@ -664,17 +743,20 @@ fn build_pipeline(
         )?,
     ];
 
+    // Both stages, because either may use a binding: a guest's pixel shader writes its canary
+    // and so does its primitive shader. Declaring only the fragment stage made a mesh pipeline
+    // invalid, which the layer said and the picture did not (worklog 559).
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT),
         vk::DescriptorSetLayoutBinding::default()
             .binding(1)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT),
     ];
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     // SAFETY: the create info outlives the call.
@@ -859,6 +941,35 @@ pub fn draw_mesh_with(
         Some((mesh_words, fragment_words)),
         DEFAULT_WINDOWS,
         Geometry::Mesh,
+        &[],
+    )
+}
+
+/// Draws with a mesh stage over guest memory seeded with `memory`.
+///
+/// The words are written into the guest-memory window before the draw, so a translated shader
+/// that fetches its vertices finds something there. A window is addressed by the module's own
+/// mask, so where a guest address lands in it is arithmetic the caller can do and this cannot.
+///
+/// # Errors
+///
+/// When no device is available, when it has no mesh stage, or when any Vulkan call fails.
+pub fn draw_mesh_over(
+    mesh_words: &[u32],
+    fragment_words: &[u32],
+    clear: [f32; 4],
+    width: u32,
+    height: u32,
+    memory: &[u32],
+) -> Result<(Pixels, Vec<u32>), DispatchError> {
+    render_over(
+        clear,
+        width,
+        height,
+        Some((mesh_words, fragment_words)),
+        [DEFAULT_WINDOWS[0], memory.len().max(1)],
+        Geometry::Mesh,
+        memory,
     )
 }
 
@@ -899,5 +1010,6 @@ pub fn draw_with_windows(
         Some((vertex_words, fragment_words)),
         windows,
         Geometry::Vertex,
+        &[],
     )
 }

@@ -8433,8 +8433,11 @@ fn print_knowledge(
 /// stage is not cosmetic: an export has nowhere to go in a compute dispatch and is refused,
 /// so judging a pixel shader as compute would report it untranslatable for a reason that is
 /// about the question rather than the shader. Asking "is there a stage this translates at"
-/// is the honest form of the question a corpus can answer, and it is cheap - the stages are
-/// two, and only shaders that fail everywhere pay for both.
+/// is the honest form of the question a corpus can answer, and it is cheap - only shaders that
+/// fail everywhere pay for every stage.
+///
+/// The mesh stage joined the sweep when it was built (worklog 558): a guest vertex program is a
+/// primitive shader, and judging one as compute refuses it at the message it opens with.
 ///
 /// Wavefront fidelity, because it is the one that is correct unconditionally: a refusal here
 /// is about the shader rather than about a model that cannot represent a lane mask.
@@ -8445,7 +8448,7 @@ fn translates(
     use orbistoun_translate::Width;
     use orbistoun_translate::wavefront::{Stage, translate_for};
 
-    [Stage::Compute, Stage::Fragment]
+    [Stage::Compute, Stage::Fragment, Stage::Mesh]
         .into_iter()
         .any(|stage| translate_for(decoded, encodings, Width::Wave64, stage).is_ok())
 }

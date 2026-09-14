@@ -1619,6 +1619,15 @@ static SHAPES: &[ShapeEntry] = &[
         None,
         RestStride::Every,
     ),
+    // Declares a mesh workgroup's output counts: two identifiers, no result. The whole
+    // instruction is operands, so `rest` starts at zero.
+    (
+        op::SET_MESH_OUTPUTS_EXT,
+        None,
+        &[],
+        Some(0),
+        RestStride::Every,
+    ),
     (op::UCONVERT, Some(1), &[0, 2], None, RestStride::Every),
     (op::FCONVERT, Some(1), &[0, 2], None, RestStride::Every),
     (op::IADD, Some(1), &[0, 2, 3], None, RestStride::Every),

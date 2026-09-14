@@ -498,6 +498,10 @@ impl Session {
         //     compute dispatch the suite has ever run; the models now declare the types on
         //     first use (worklog 556), so these two are needed by the few modules that read
         //     halves and by nothing else.
+        //   `vertex_pipeline_stores_and_atomics` - the same permission for every stage before
+        //     the fragment one, which includes the mesh stage a guest's primitive shader
+        //     becomes. The GL cube's vertex program writes a canary word, so it needs this for
+        //     the same reason its pixel shader needs the next one.
         //   `fragment_stores_and_atomics` - a fragment shader that writes a storage buffer
         //     needs it, and the guest's pixel shaders do exactly that: the GL cube's writes a
         //     canary word every frame. D552 recorded that the fragment path was *designed*
@@ -510,7 +514,10 @@ impl Session {
         let available = unsafe { instance.get_physical_device_features(physical) };
         let wanted_features = vk::PhysicalDeviceFeatures::default()
             .shader_int16(available.shader_int16 == vk::TRUE)
-            .fragment_stores_and_atomics(available.fragment_stores_and_atomics == vk::TRUE);
+            .fragment_stores_and_atomics(available.fragment_stores_and_atomics == vk::TRUE)
+            .vertex_pipeline_stores_and_atomics(
+                available.vertex_pipeline_stores_and_atomics == vk::TRUE,
+            );
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();

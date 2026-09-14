@@ -122,14 +122,13 @@ impl Queue {
 
 /// The host stage a shader named by the register vocabulary is translated for.
 ///
-/// # Vertex is attempted as a compute dispatch, deliberately
+/// # Vertex is the mesh stage
 ///
-/// There is no host vertex stage here: an NGG primitive shader is a mesh shader (D688) and the
-/// emitter has no mesh execution model yet. Refusing on that basis would replace the report's
-/// *instruction-level* answer - which is the measurement the shader worklist is built from -
-/// with a policy, so a vertex shader is still attempted and still reports the first instruction
-/// it cannot translate. Every one of them reaches the geometry-engine message first, which is
-/// blocked and points at the same decision, so nothing is hidden by this.
+/// There is no host vertex stage for what the guest calls one: a shader bound to the vertex
+/// slot on this hardware is an NGG primitive shader, which declares how much it will emit and
+/// emits both the primitive and its vertices - a mesh shader (D688, worklog 558). It was
+/// attempted as a compute dispatch until the mesh stage existed, which reported the first
+/// instruction it could not translate rather than a policy.
 ///
 /// The stage itself is the typed one the submission reconciled, not the vocabulary's string:
 /// the table's spelling is data and this is a dispatch, and the two should not be the same
@@ -137,7 +136,8 @@ impl Queue {
 const fn host_stage(stage: ShaderStage) -> Stage {
     match stage {
         ShaderStage::Fragment => Stage::Fragment,
-        ShaderStage::Vertex | ShaderStage::Compute => Stage::Compute,
+        ShaderStage::Vertex => Stage::Mesh,
+        ShaderStage::Compute => Stage::Compute,
     }
 }
 
@@ -150,6 +150,7 @@ const fn stage_salt(stage: Stage) -> u64 {
     match stage {
         Stage::Compute => 0,
         Stage::Fragment => 0x5352_4746_0000_0001,
+        Stage::Mesh => 0x4d45_5348_0000_0001,
     }
 }
 

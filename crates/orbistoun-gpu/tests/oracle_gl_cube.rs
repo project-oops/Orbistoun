@@ -41,9 +41,9 @@ struct Record {
     hash: u32,
     /// Whether that pixel shader translates today, and what it is waiting for if not.
     ///
-    /// Pinned rather than printed. Record A's translates whole - the first shader a console
-    /// ran that this project has turned into a module - and a change that stopped it would
-    /// otherwise show up as one fewer line of output nobody was watching.
+    /// Pinned rather than printed. Record A's translates whole, as does the vertex program
+    /// both records share, and a change that stopped either would otherwise show up as one
+    /// fewer line of output nobody was watching.
     fragment_translates: bool,
 }
 
@@ -250,30 +250,35 @@ fn the_gl_cube_streams_resolve_their_shaders_from_the_payload() {
                 .map(|f| format!("{} at {:#x}", f.stage, f.address))
                 .collect::<Vec<_>>()
         );
-        if record.fragment_translates {
-            assert_eq!(
-                submission.modules.len(),
-                1,
-                "{}: one module, for the one shader that translated",
-                record.stem
-            );
-            assert!(
-                submission.modules.values().all(|module| module.len() > 100),
-                "{}: a module that short is an empty one",
-                record.stem
-            );
-        }
-
-        // The vertex program is the other one, and it stops at the geometry-engine message
-        // its stage has no host counterpart for (D688). Asserted so that becoming
-        // translatable is a test failure rather than a silent improvement nobody records.
+        // **The vertex program translates too**, into a mesh module - the stage a primitive
+        // shader corresponds to (D688), which is now built. The last time this test was
+        // updated it asserted the opposite and named the condition under which it would want
+        // changing; this is that change (worklog 558).
+        let vertex_failed = report
+            .failures
+            .iter()
+            .any(|failure| failure.address == VERTEX);
         assert!(
+            !vertex_failed,
+            "{}: the vertex program did not translate: {:?}",
+            record.stem,
             report
                 .failures
                 .iter()
-                .any(|failure| failure.address == VERTEX),
-            "{}: the vertex program translated - if the mesh stage landed, this test is the 
-             record of it and wants updating",
+                .map(|failure| failure.reason.clone())
+                .collect::<Vec<_>>()
+        );
+
+        let expected_modules = usize::from(record.fragment_translates) + 1;
+        assert_eq!(
+            submission.modules.len(),
+            expected_modules,
+            "{}: a module for each shader that translated",
+            record.stem
+        );
+        assert!(
+            submission.modules.values().all(|module| module.len() > 100),
+            "{}: a module that short is an empty one",
             record.stem
         );
 

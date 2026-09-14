@@ -572,3 +572,7 @@ context cannot re-derive.
 | - | [555. Terminator recorded flip does not reproduce](worklog/555-terminator-s-recorded-flip-does-not.md) |
 | - | [556. Modules declare the sixteen-bit capabilities only where they use them](worklog/556-modules-declare-the-sixteen-bit.md) |
 | - | [557. A mesh stage stands up, hand-assembled, before anything is translated into it](worklog/557-a-mesh-stage-stands-up-hand-assembled.md) |
+| - | [558. The console's primitive shader translates into a mesh module](worklog/558-the-console-s-primitive-shader.md) |
+| - | [559. The translated mesh module validates, draws nothing, and the window says why not](worklog/559-the-translated-mesh-module-validates.md) |
+| - | [560. A minimal translated primitive shader draws, so the fault is the console's own](worklog/560-a-minimal-translated-primitive-shader.md) |
+| - | [561. The window has no base, so a guest address reads nothing](worklog/561-the-window-has-no-base-so-a-guest.md) |
