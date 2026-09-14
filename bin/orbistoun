@@ -33,6 +33,7 @@
 #   ./bin/orbistoun constants     # the harvested ABI constants still match their headers
 #   ./bin/orbistoun tables         # the shader tables still match what generates them
 #   ./bin/orbistoun decide "<title>" # reserve the next decision number, atomically
+#   ./bin/orbistoun worklog "<title>" # reserve the next worklog number, atomically
 #   ./bin/orbistoun hooks          # install the pre-push hook + the tools it needs
 #
 # Every verb here is a thin wrapper over the EXACT command
@@ -141,6 +142,110 @@ decide() {
     } > "$file"
 
     printf '%s\n' "$file"
+}
+
+# Reserves the next worklog number, atomically - the same gap `decide` closed for decisions.
+#
+# **This race was not theoretical.** On 2026-09-14 two sessions working the same afternoon both
+# created `docs/worklog/535-*.md`, twenty-five minutes apart. Nothing refused the second, and the
+# collision surfaced only because somebody happened to list the directory. Decision numbers have
+# been claimed under a lock since D316; worklog numbers were still read-the-directory-and-add-one,
+# which is a race whose window is as wide as writing the entry - and entries here take a while,
+# because the useful ones are long.
+#
+# Same mechanism as `decide`, deliberately rather than cleverly: `mkdir` is the lock because it is
+# atomic everywhere this runs, the number is claimed before a word of the body exists, and the lock
+# is released however this exits.
+#
+# The index row is NOT written here. It is the author's, added when the entry is finished - a
+# RESERVED stub listed in `docs/WORKLOG.md` would advertise work that does not exist yet.
+worklog() {
+    local title="$1"
+    [ -n "$title" ] || die "worklog needs a title: ./bin/orbistoun worklog \"What was done\""
+
+    local lock=docs/.worklog-number.lock
+    # Waits rather than fails, for the reason `decide` gives: the other holder is about to
+    # finish, and telling a person to retry is asking them to be the lock.
+    local waited=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        waited=$((waited + 1))
+        [ "$waited" -lt 50 ] || die "$lock held for five seconds - remove it if no session is writing"
+        sleep 0.1
+    done
+    trap 'rmdir "$lock" 2>/dev/null || true' RETURN
+
+    local next
+    # From the files, not the index: the index is hand-maintained and lags, so counting it
+    # would hand out a number somebody is already writing under.
+    next=$(ls docs/worklog | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1)
+    next=$((10#$next + 1))
+
+    # The same slug rule as `decide`, so the two directories read alike.
+    local slug file
+    slug="$(printf '%s' "$title" | tr 'A-Z' 'a-z' | tr -d '`' \
+        | sed 's/[^a-z0-9]\+/-/g; s/^-\+//; s/-\+$//' | cut -c1-40 | sed 's/-[^-]*$//')"
+    file="docs/worklog/$next-$slug.md"
+    {
+        printf '# %s. %s\n\n' "$next" "$title"
+        printf '**RESERVED** - being written. A number claimed and never spent reads like work\n'
+        printf 'that was done, so the gate refuses one.\n'
+    } > "$file"
+
+    printf '%s\n' "$file"
+}
+
+# The gate that makes the reservation worth having.
+#
+# Two failures and one note. The failures are the numbering itself: a duplicate number makes
+# every citation of it ambiguous, and a reservation nobody filled in reads in the directory as
+# though work were recorded. Both are the reasons `decisions` gives, one directory over.
+#
+# The note is **coverage** - a worklog file with no row in `docs/WORKLOG.md` is invisible to
+# anyone reading the index. That is a real defect and it is deliberately not a failure: the index
+# row is added when an entry is finished, so a file being written right now by another session is
+# *expected* to be missing one, and a gate that reds the tree for somebody else's work in progress
+# is the scope problem `--only` exists to avoid.
+worklogs() {
+    step "worklog numbers are unique"
+    local numbers duplicates reserved unindexed file base dup failed=0
+
+    numbers=$(ls docs/worklog | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p' | sort)
+    if [ -z "$numbers" ]; then
+        bad "no numbered worklog entries found - this guard is reading the wrong shape"
+        return 1
+    fi
+
+    duplicates=$(printf '%s\n' "$numbers" | uniq -d || true)
+    if [ -n "$duplicates" ]; then
+        bad "these worklog numbers are used twice - a citation of them is ambiguous:" || failed=1
+        printf '%s\n' "$duplicates" | while read -r n; do
+            [ -n "$n" ] || continue
+            for dup in docs/worklog/"$n"-*.md; do echo "    ${dup#docs/worklog/}"; done
+        done
+        failed=1
+    fi
+
+    reserved=$(grep -l '^\*\*RESERVED\*\*' docs/worklog/*.md 2>/dev/null || true)
+    if [ -n "$reserved" ]; then
+        bad "these worklog numbers were reserved and never written - finish them or remove them:" || failed=1
+        printf '%s\n' "$reserved" | sed 's/^/    /'
+        failed=1
+    fi
+
+    unindexed=""
+    for file in docs/worklog/*.md; do
+        base=$(basename "$file")
+        # `_preamble.md` and friends are structure, not entries - no number, no index row.
+        case "$base" in _*) continue ;; esac
+        grep -q "worklog/$base" docs/WORKLOG.md || unindexed="$unindexed    $base
+"
+    done
+    if [ -n "$unindexed" ]; then
+        warn "not listed in docs/WORKLOG.md (expected while an entry is still being written):"
+        printf '%s' "$unindexed"
+    fi
+
+    [ "$failed" -eq 0 ]
 }
 
 decisions() {
@@ -440,7 +545,7 @@ constants() {
 # which meant passing locally and failing in CI, on the gate least suited to surprises.
 provenance() {
     step "provenance guard"
-    local files banned large keys fail=0
+    local files banned large_binary large_text keys fail=0
 
     files=$(git ls-files --cached --others --exclude-standard)
 
@@ -608,6 +713,7 @@ check() {
     also provenance
     also constants
     also decisions
+    also worklogs
     also prose
     also generated_numbers
     also symbols_audit
@@ -1332,6 +1438,8 @@ case "$cmd" in
     prose)      prose ;;
     decide)     decide "$@" ;;
     decisions)  decisions ;;
+    worklog)    worklog "$@" ;;
+    worklogs)   worklogs ;;
     names)      names ;;
     suggest)    suggest "$@" ;;
     sweep)      sweep ;;

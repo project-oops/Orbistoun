@@ -18,28 +18,29 @@ use orbistoun_gpu_vulkan::compute::{Availability, probe};
 ///
 /// # What this asserts
 ///
-/// That `Properties::fragment_stores` is false while the session enables no features, *and*
-/// that this is not vacuous - the same physical device is asked directly, and the test only
-/// means something when the hardware says yes and the report says no. On a machine whose GPU
-/// genuinely lacks the feature the two agree for an uninteresting reason, and that is said
-/// aloud rather than passed over.
+/// That `Properties::fragment_stores` says what the session actually enabled - no more and no
+/// less - checked against the same physical device asked directly.
 ///
 /// It fails if somebody reports the physical device's capability instead of the enabled set,
 /// which is the mistake it exists to prevent and the easier of the two to write.
 ///
+/// # This used to assert the opposite, and the change is the point
+///
+/// The session requested nothing at all, on the reasoning that the fragment path was designed
+/// not to need `fragmentStoresAndAtomics` (D552): a translated module keeps its registers in
+/// `Private` storage, so the only storage-buffer writes were the observation window - which a
+/// fragment module skips - and a guest-memory store, which nothing emitted.
+///
+/// A guest's pixel shader emits one. The GL cube's writes a canary word every frame, and when
+/// that shader was first offered to a driver the validation layer named this feature among
+/// five errors the tests could not see (worklog 554). So the session asks for it where the
+/// device offers it, and this asserts the report tracks that rather than a fixed answer.
+///
 /// # What it cannot assert
 ///
-/// That the feature is *unnecessary*. The fragment path is designed not to need it - registers
-/// are already `Private`, so the only storage-buffer writes are the observation window and a
-/// guest-memory store - but nothing here checks that design, because no fragment module is
-/// emitted yet.
-///
-/// It catches **over**-reporting only. A report claiming less than was enabled would make code
-/// refuse something that would have worked - a waste rather than a fault, and invisible here.
-/// The dangerous direction is the one asserted.
-///
-/// Nor does it check any other feature. One is enough to pin the rule; a list would be a list
-/// to maintain.
+/// That the feature is *sufficient*, or that any module needs no others. One feature is enough
+/// to pin the rule that a report describes the enabled set; a list would be a list to maintain,
+/// and `tools/validate-device.sh` asks a validator about all of them at once.
 #[test]
 fn the_capability_report_describes_what_was_enabled() {
     let Availability::Available { properties } = probe() else {
@@ -65,21 +66,23 @@ fn the_capability_report_describes_what_was_enabled() {
     // SAFETY: nothing created from this instance outlives it - the loop above copied values.
     unsafe { instance.destroy_instance(None) };
 
-    assert!(
-        !properties.fragment_stores,
-        "the report claims a fragment shader may store, and the device was created requesting \
-         no features - so a module built on that claim would be invalid at pipeline creation"
+    assert_eq!(
+        properties.fragment_stores, offered,
+        "the report and the device disagree about fragmentStoresAndAtomics. The session asks 
+         for it exactly where the hardware offers it, so a report saying otherwise is either 
+         reading the physical device's capabilities instead of the enabled set, or claiming 
+         something a module would be refused for relying on"
     );
     if offered {
         println!(
-            "[the_capability_report_describes_what_was_enabled] the hardware offers \
-             fragmentStoresAndAtomics and the report correctly does not"
+            "[the_capability_report_describes_what_was_enabled] the hardware offers 
+             fragmentStoresAndAtomics, the session enabled it, and the report says so"
         );
     } else {
         println!(
-            "[the_capability_report_describes_what_was_enabled] this GPU does not offer \
-             fragmentStoresAndAtomics either, so the two agree for an uninteresting reason \
-             and this run proves less than it does on a device that offers it"
+            "[the_capability_report_describes_what_was_enabled] this GPU does not offer 
+             fragmentStoresAndAtomics, so the session did not enable it and the report says 
+             so - a guest pixel shader that writes memory cannot run here at all"
         );
     }
 }

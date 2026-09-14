@@ -31,6 +31,19 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// How the worker words a guest's deliberate exit, and the one string that identifies it.
+///
+/// **A coupling, named once and guarded elsewhere.** `orbistoun-core::StopReason::Exited` produces
+/// this text. Neither this crate nor `orbistoun-report` can depend on that one, so the value is
+/// repeated here rather than referenced, and a test in `orbistoun-worker` - the one crate that sees
+/// both - asserts they are the same string. A silent drift would not break anything loudly: the
+/// rung would stop being awarded and every run would fall back to `Entered`, which is precisely the
+/// quiet mis-measurement principle 3 refuses.
+///
+/// It lives here rather than beside the ladder because [`Status`] has to recognise it too - a run
+/// that flipped *and* exited is recorded as `Flipped`, so the rung alone cannot say how it ended.
+pub const DELIBERATE_EXIT: &str = "the guest called exit";
+
 /// A setting value.
 ///
 /// Typed rather than boolean-only: booleans multiply (`tolerate_unaligned_alloc`,
@@ -122,6 +135,28 @@ pub enum Reach {
     /// Not dying is an *outcome*, not a distance. It is recorded in [`Status::outcome`],
     /// and distance within this rung is measured by imports and then calls.
     Entered,
+    /// The guest ran its program to the end and left by calling `exit`.
+    ///
+    /// # Why this earns a rung where surviving did not
+    ///
+    /// D182 refused a rung for reaching the time limit because *not dying is an outcome, not a
+    /// distance*. This is the other shape, and it is the same test [`Self::Flipped`] passes: a
+    /// guest reaches this by **a call it made**, with a status it chose, at the end of the work
+    /// it set out to do. There is no way to spin into it. It is a specific thing done, not a
+    /// thing not happening.
+    ///
+    /// # Why it sits below a flip rather than above it
+    ///
+    /// Finishing is trivially reachable in a way that presenting a frame is not - a program
+    /// whose first instruction is `exit(0)` reaches this rung having learned nothing. Ranked
+    /// above [`Self::Flipped`] it would sort exactly that run above a title rendering frames,
+    /// which is D558's failure repeated: on this corpus it put the conformance probe at the head
+    /// of the frontier, above every game. A frame is the harder thing and stays the higher rung.
+    ///
+    /// **A guest that flips and then exits is recorded as `Flipped`**, for the same reason: the
+    /// frame is the stronger claim, and the deliberate stop is still carried in
+    /// [`Status::outcome`].
+    Exited,
     /// The guest got a frame to the output layer: it submitted a flip and a real port took it.
     ///
     /// # Why this one earns a rung where surviving did not
@@ -150,6 +185,7 @@ impl Reach {
             Self::Parsed => "parsed",
             Self::Linked => "linked",
             Self::Entered => "entered",
+            Self::Exited => "exited",
             Self::Flipped => "flipped",
         }
     }
@@ -316,6 +352,16 @@ impl Status {
             .map_or(0, |missing| self.imports.saturating_sub(missing))
     }
 
+    /// Whether the guest left by calling `exit` rather than dying.
+    ///
+    /// Read off [`Self::outcome`] rather than [`Self::reach`], because the rung cannot say it: a
+    /// run that flipped *and* exited is recorded as `Flipped`, since a frame is the stronger claim
+    /// (D685).
+    #[must_use]
+    pub fn exited_deliberately(&self) -> bool {
+        self.outcome == DELIBERATE_EXIT
+    }
+
     /// The order results are ranked in, in **one** place.
     ///
     /// # Three copies of this had already drifted
@@ -330,15 +376,26 @@ impl Status {
     /// and the wrong one*. It was right, and the fix is one function rather than three careful
     /// edits (D563).
     ///
-    /// **Order, and why:** the rung first; then how much of the interface was reached; then how
-    /// much of that was answered by something real; then the share of calls that were; then
-    /// frames; then calls. Everything after `imports` is a quality measure and must stay below
-    /// it - a guest that gets further calls more, and some of what it calls will be
-    /// unimplemented, so any of these ranked higher would report going further as going
-    /// backwards (D182, D558).
-    fn ranking_key(&self) -> (Reach, usize, usize, u32, u64, u64) {
+    /// **Order, and why:** the rung first; then whether the guest left deliberately; then how much
+    /// of the interface was reached; then how much of that was answered by something real; then the
+    /// share of calls that were; then frames; then calls. Everything after `imports` is a quality
+    /// measure and must stay below it - a guest that gets further calls more, and some of what it
+    /// calls will be unimplemented, so any of these ranked higher would report going further as
+    /// going backwards (D182, D558).
+    ///
+    /// **The exception is the ending, and it is deliberate (D686).** It sits *above* `imports`,
+    /// which the paragraph above otherwise forbids, because the case it exists for is a run whose
+    /// import count fell *because* it stopped correctly: the conformance payload stopped making six
+    /// calls it had only been making by running past its own refused `exit`. Below `imports` the
+    /// tiebreaker could never fire for that case, which is the only case it was asked for.
+    ///
+    /// The cost is stated rather than hidden: on this corpus every game faults and both of our own
+    /// guests do not, so an ending ranked above `imports` sorts the probes above the titles. See
+    /// D686 for the frontier this produces and why it was accepted anyway.
+    fn ranking_key(&self) -> (Reach, bool, usize, usize, u32, u64, u64) {
         (
             self.reach,
+            self.exited_deliberately(),
             self.imports,
             self.answered(),
             self.standing,
@@ -386,6 +443,30 @@ impl Status {
     /// frames above imports would sort that run above one that presented three times and then
     /// got twice as far into the engine - the exact failure that cost `Entered` its rung above
     /// "survived". The rung says it presented; the imports still say how far it got (D558).
+    /// Whether this result should replace `previous`: **not worse, and not the same run again**.
+    ///
+    /// [`Self::beats`] answers "is this an improvement", which is the right question for a verdict
+    /// and the wrong one for a record. A run can be *equal* on every ranked field and still carry
+    /// something the record should hold - most obviously how it ended. A guest that stopped
+    /// deliberately where it used to fault reaches exactly as far, so `beats` is false, and the
+    /// record then keeps saying the guest died for as long as nothing else changes (D687).
+    ///
+    /// So: comparable, **not below** the record on the ranked key, and differing from it in the
+    /// key or in the outcome. An identical rerun changes neither and is not written - the record
+    /// would gain nothing but a new date, and a file that churns on every run is one nobody reads
+    /// diffs of.
+    ///
+    /// **`measured_on` is deliberately not part of "different".** It differs on every run by
+    /// construction, so counting it would make every rerun worth recording and delete the rule.
+    #[must_use]
+    pub fn worth_recording(&self, previous: &Self) -> bool {
+        if !self.comparable_with(previous) {
+            return false;
+        }
+        let (mine, theirs) = (self.ranking_key(), previous.ranking_key());
+        mine >= theirs && (mine != theirs || self.outcome != previous.outcome)
+    }
+
     pub fn beats(&self, previous: &Self) -> bool {
         if !self.comparable_with(previous) {
             return false;
@@ -941,8 +1022,8 @@ impl Resolved {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompatEntry, CompatKind, Layer, OverrideFile, Reach, Resolved, Row, Status, Value,
-        frontier, render_markdown,
+        CompatEntry, CompatKind, DELIBERATE_EXIT, Layer, OverrideFile, Reach, Resolved, Row,
+        Status, Value, frontier, render_markdown,
     };
     use std::collections::BTreeMap;
 
@@ -1343,6 +1424,45 @@ reason = "..."
         // and the file's history stops meaning anything.
         let now = status(Reach::Entered, 47, 933);
         assert!(!now.beats(&status(Reach::Entered, 47, 933)));
+    }
+
+    /// A run that reaches exactly as far but **ended somewhere else** is worth recording.
+    ///
+    /// The guest dies at a different address having got precisely as far. Nothing is ranked
+    /// differently, so `beats` is false - and the record would otherwise name a fault site the
+    /// guest no longer reaches, for as long as nothing else changed (D687).
+    #[test]
+    fn an_equal_run_that_ended_somewhere_else_is_recorded() {
+        let mut was = status(Reach::Entered, 187, 4914);
+        was.outcome = "0x5e2d".to_owned();
+        let mut now = was.clone();
+        now.outcome = "image+0x3f258".to_owned();
+
+        assert!(!now.beats(&was), "it did not get further");
+        assert!(
+            now.worth_recording(&was),
+            "but the record should name where it dies now"
+        );
+        assert!(was.worth_recording(&now), "and the same in reverse");
+    }
+
+    /// **The same run again writes nothing.** A record that churns on every rerun is one nobody
+    /// reads diffs of, and `measured_on` differs by construction so it cannot count as a change.
+    #[test]
+    fn an_identical_rerun_is_not_worth_recording() {
+        let first = status(Reach::Entered, 187, 4914);
+        let mut again = first.clone();
+        again.measured_on = "2099-01-01".to_owned();
+        assert!(!again.worth_recording(&first));
+    }
+
+    /// A run that reached less does not overwrite one that reached more, however it ended.
+    #[test]
+    fn a_shorter_run_is_not_worth_recording_even_if_it_exited() {
+        let far = status(Reach::Flipped, 223, 432_211);
+        let mut short = status(Reach::Exited, 187, 4914);
+        short.outcome = DELIBERATE_EXIT.to_owned();
+        assert!(!short.worth_recording(&far), "a lower rung is still worse");
     }
 
     #[test]

@@ -1,0 +1,100 @@
+# The GL cube's frame 30, untextured, as submitted to the console's graphics driver.
+#
+# Not a library call's packets: this stream was written by oops-sdk's own GL path, packet
+# by packet, and handed whole to `sceAgcDriverSubmitCommandBuffer` on a retail console on
+# firmware 12.40 on 2026-09-14. The console drew it, the end-of-pipe fence read 0xbeefcafe,
+# the GPU clock read 0x49d0fe7836c, and the frame hashed to 0x9dbfe189 over all 1920 x 1080
+# pixels. The record, with the shader words and every buffer address, is
+# oops-sdk `docs/hardware/agc-gl-cube-oracle-fw1240.md`, record A; orbistoun worklog 539.
+#
+# What "the call said" here is what the writer knew it wrote: every expectation below is a
+# value oops-sdk's `src/gl/gl_draw.c` placed in the stream, named from that source, not
+# read back out of the bytes through the table under test. Nothing inferred is listed.
+#
+# Buffers the stream refers to (guest virtual addresses, all in the 0x2_xxxx_xxxx pool the
+# GPU mapped): shader payload 0x2008f0000 (vertex shader at +0x000, textured pixel shader
+# at +0x200, untextured pixel shader at +0x300, T#/S# table at +0x900); vertex buffer
+# 0x200900000; fence 0x200910000; colour target 0x4001400000; depth target 0x200080000.
+
+call  = "sceAgcDriverSubmitCommandBuffer"
+queue = "draw"
+note  = "oops-sdk oracle record A: FW 12.40, 2026-09-14, twelve DRAW_INDEX_AUTO draws, depth on, cull on, hash 0x9dbfe189"
+
+# SPI_SHADER_PGM_LO_PS / HI: the untextured pixel shader at payload + 0x300, in 256-byte units.
+[[register]]
+register = 0x2C08
+value    = 0x02008f03
+
+[[register]]
+register = 0x2C09
+value    = 0x00000000
+
+# SPI_SHADER_PGM_RSRC2_PS: no user SGPRs for the untextured shader.
+[[register]]
+register = 0x2C0B
+value    = 0x00000000
+
+# SPI_SHADER_PGM_LO_GS: the NGG primitive shader (the vertex program) at payload + 0x000.
+[[register]]
+register = 0x2C88
+value    = 0x02008f00
+
+# SPI_SHADER_PGM_LO_VS: the same address, written into the legacy vertex slot as well.
+[[register]]
+register = 0x2C48
+value    = 0x02008f00
+
+# CB_COLOR0_BASE: the colour target, in 256-byte units.
+[[register]]
+register = 0xA318
+value    = 0x40014000
+
+# CB_COLOR0_INFO: COLOR_8_8_8_8, LINEAR_GENERAL, UNORM, COMP_SWAP=ALT.
+[[register]]
+register = 0xA31C
+value    = 0x000188a8
+
+# CB_COLOR0_ATTRIB2: width - 1 in bits 27:14, height - 1 in bits 13:0, for 1920 x 1080.
+[[register]]
+register = 0xA3B0
+value    = 0x01dfc437
+
+# VGT_GS_OUT_PRIM_TYPE: TRISTRIP.
+[[register]]
+register = 0xA29B
+value    = 0x00000002
+
+# VGT_SHADER_STAGES_EN: ES real, PRIMGEN, MAX_PRIMGRP_IN_WAVE 2, GS and VS wave32.
+[[register]]
+register = 0xA2D5
+value    = 0x00c12010
+
+# SPI_PS_INPUT_ENA: PERSP_CENTER.
+[[register]]
+register = 0xA1B3
+value    = 0x00000002
+
+# DB_Z_INFO: Z_32_FLOAT, 64KB_Z_X, ZRANGE_PRECISION.
+[[register]]
+register = 0xA010
+value    = 0x80000183
+
+# GE_CNTL: PRIM_GRP_SIZE 128, VERT_GRP_SIZE 256.
+[[register]]
+register = 0xC25B
+value    = 0x00020080
+
+# VGT_PRIMITIVE_TYPE, TRILIST, written through SET_UCONFIG_REG_INDEX (opcode 0x7a) with index 1.
+[[register]]
+register = 0xC242
+value    = 0x00000004
+
+# The pixel shader the draws ran.
+[[shader]]
+stage   = "fragment"
+address = 0x2008f0300
+
+# The vertex program the NGG stage ran.
+[[shader]]
+stage   = "vertex"
+address = 0x2008f0000

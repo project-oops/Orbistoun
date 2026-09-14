@@ -632,6 +632,18 @@ found_in = ["zftpd"]
 found_on = "2026-08-30"
 
 [[function]]
+name = "_exit"
+arity = 1
+purpose = "Ends the process immediately with a status, running nothing on the way out."
+edge_cases = [
+    "THE RAW SYSCALL, and distinct from exit(3) by definition: _exit runs no atexit handler and flushes no stream. orbistoun answers it with the same body as exit and _Exit because that body already runs nothing on the way out - it stops the guest and records the stop as deliberate rather than as a fault. If atexit handling is ever added to exit(3), this must NOT gain it.",
+    "IT IS WHY SYSCALL NUMBER 1 BINDS. FreeBSD entry 1 is _exit, so the harvested constant is SYS__exit and the name derived from it is _exit. A rename entry reading SYS_exit stood in orbistoun-service and matched no harvested constant, so number 1 reached no implementation at all while one existed - a guest calling it at the end of a clean run got ENOSYS and carried on to the time limit instead (worklog 543).",
+]
+known_by = "published"
+cites = "POSIX.1-2008 _exit(2); FreeBSD syscalls.master entry 1."
+found_on = "2026-09-14"
+
+[[function]]
 name = "_init_env"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"

@@ -78,22 +78,32 @@ fn a_type0_draw_stream_walks_without_warnings() {
         walk.trailing_bytes,
     );
     let consumed: u32 = walk.packets.iter().map(|p| p.length).sum();
-    assert_eq!(consumed as usize, stream.len(), "the walk consumes the whole draw stream");
+    assert_eq!(
+        consumed as usize,
+        stream.len(),
+        "the walk consumes the whole draw stream"
+    );
 
     let opcodes: Vec<u8> = walk
         .packets
         .iter()
         .filter_map(|p| match p.kind {
             PacketKind::Command { opcode } => Some(opcode),
-            PacketKind::RegisterWrite { .. } => None,
-            PacketKind::Filler | PacketKind::Reserved => None,
+            PacketKind::RegisterWrite { .. } | PacketKind::Filler | PacketKind::Reserved => None,
         })
         .collect();
     // SET_CONTEXT_REG (0x69) and SET_UCONFIG_REG (0x79) may classify as RegisterWrite rather than
     // Command depending on the vocabulary, so assert on the two that are always commands here.
-    assert!(opcodes.contains(&0x2d), "the draw is DRAW_INDEX_AUTO (0x2d)");
+    assert!(
+        opcodes.contains(&0x2d),
+        "the draw is DRAW_INDEX_AUTO (0x2d)"
+    );
     assert!(opcodes.contains(&0x2f), "NUM_INSTANCES (0x2f) is present");
-    assert_eq!(walk.packets.len(), 7, "three context, two uconfig, instances, draw");
+    assert_eq!(
+        walk.packets.len(),
+        7,
+        "three context, two uconfig, instances, draw"
+    );
 }
 
 /// **The register-setting packets resolve to real register writes, by value.**
@@ -109,8 +119,21 @@ fn the_draw_registers_are_captured() {
     let writes = register_writes(&walk, &stream, &vocabulary);
 
     let values: Vec<u32> = writes.iter().map(|w| w.value).collect();
-    assert_eq!(writes.len(), 5, "five SET_*_REG packets, five register writes");
-    for expected in [0x0010_0000, 0x000f_c03f, 0x0000_0002, 0x0000_0004, 0x0000_8040] {
-        assert!(values.contains(&expected), "register value {expected:#x} was captured");
+    assert_eq!(
+        writes.len(),
+        5,
+        "five SET_*_REG packets, five register writes"
+    );
+    for expected in [
+        0x0010_0000,
+        0x000f_c03f,
+        0x0000_0002,
+        0x0000_0004,
+        0x0000_8040,
+    ] {
+        assert!(
+            values.contains(&expected),
+            "register value {expected:#x} was captured"
+        );
     }
 }

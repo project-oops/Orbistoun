@@ -82,8 +82,12 @@ fn command_stream(address: u64) -> Vec<u8> {
     // packets so the offsets are obvious rather than as one run.
     let mut words: Vec<u32> = Vec::new();
     for (register, value) in [
-        (low, u32::try_from(address & 0xFFFF_FFFF).expect("low half")),
-        (high, u32::try_from(address >> 32).expect("high half")),
+        // The registers take the address in 256-byte units (see `shader_candidates`).
+        (
+            low,
+            u32::try_from((address >> 8) & 0xFFFF_FFFF).expect("low half"),
+        ),
+        (high, u32::try_from(address >> 40).expect("high half")),
     ] {
         words.push((3 << 30) | ((2 - 1) << 16) | (u32::from(opcode) << 8));
         words.push(register - base);

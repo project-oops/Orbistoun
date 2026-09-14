@@ -32,8 +32,14 @@ use crate::table::Encoding;
 /// `off` says there is no scalar base register; the cache hints say how the access behaves.
 /// None of them is a field, and treating them as one made every flat load and store
 /// unsolvable - the solver looked for bits encoding the word "off".
-const MODIFIERS: [&str; 10] = [
-    "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv",
+///
+/// **They are skipped as operands and still worth setting in a probe.** `unorm` is one bit
+/// immediately above the image family's `dmask`, so probes that left it clear let a five-bit
+/// window explain every sample as well as the four-bit field does - and the solver wrote the
+/// five, which would read `dmask` as sixteen greater on any shader that sets it. Varying it
+/// is what makes the narrower field the only answer.
+const MODIFIERS: [&str; 11] = [
+    "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv", "unorm",
 ];
 
 /// Field shapes worth trying, for register selectors.
@@ -56,9 +62,15 @@ const WIDTHS: std::ops::Range<u32> = 5..10;
 /// interpolation names one of four channels in two bits. Without them the three
 /// interpolation opcodes had no candidate for that operand at all.
 ///
+/// **Four**, because the image family's channel mask is four bits with `unorm` immediately
+/// above it. Without four the only candidate was the five-bit window that swallows `unorm` -
+/// which fitted every sample while that bit stayed clear, and the solver wrote it. Probes
+/// that set it left the mask with no candidate at all, which is the refusal working: the
+/// answer was missing from the search, not wrong in the table.
+///
 /// Widening the search cannot produce a wrong answer, only fewer answers: an extra width
 /// that also fits makes an operand *ambiguous*, and the solver refuses rather than picking.
-const IMMEDIATE_WIDTHS: [u32; 6] = [2, 3, 16, 20, 21, 32];
+const IMMEDIATE_WIDTHS: [u32; 7] = [2, 3, 4, 16, 20, 21, 32];
 
 /// How a field's bits are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -796,6 +808,22 @@ mod tests {
     #[test]
     fn a_symbolic_modifier_is_skipped() {
         assert_eq!(split_operand(" v0 format:[BUF_FMT_32_FLOAT] idxen"), ["v0"]);
+        // The same kind of thing without brackets, which is how the image family prints the
+        // one it has. Unrecognised, every image opcode reported as unsolvable - which looks
+        // like a gap in the probes and was a gap in the token rules.
+        assert_eq!(split_operand(" v[4:7] dim:SQ_RSRC_IMG_2D"), ["v[4:7]"]);
+    }
+
+    /// A named immediate is **not** a symbolic modifier, however much it looks like one.
+    ///
+    /// The first character of the value keeps them apart: a digit makes it a number the
+    /// encoding carries in a field a translator must read. Widening the symbolic pattern to
+    /// reach `dim:` could have swallowed every flat offset instead, and a dropped offset is
+    /// an access somewhere the guest did not mean.
+    #[test]
+    fn a_named_immediate_is_not_a_symbolic_modifier() {
+        assert_eq!(split_operand("v2 offset:16"), ["v2", "16"]);
+        assert_eq!(split_operand("v2 offset:0x20"), ["v2", "0x20"]);
     }
 
     /// A vector register has two readings, and the samples decide between them.

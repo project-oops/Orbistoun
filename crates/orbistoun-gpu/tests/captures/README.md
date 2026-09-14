@@ -36,8 +36,19 @@ call states the answer, the bytes are the question.
 
 Two files per capture, sharing a stem:
 
-    <name>.toml   what the call said
-    <name>.bin    the bytes it appended
+    <name>.toml          what the call said
+    <name>.hex           the bytes it appended: little-endian dwords as eight hex digits,
+                         whitespace-separated, `#` to the end of a line a comment
+    <name>.payload.hex   optional: a guest-memory image the stream refers to, in the same
+                         form, for a test that goes past the register table (the GL cube
+                         oracle carries its shader payload this way); `vocabulary.rs`
+                         ignores it
+
+The words are text, not a `.bin`, for two reasons that point the same way. The provenance
+guard refuses a `.bin` on sight, because that is the shape a console dump takes, and a capture
+should not need an exemption from the guard that protects it. And a capture is the one thing
+in this crate that is neither generated nor derived, so it is the one thing worth reading in
+a diff.
 
 ```toml
 # Which library call this came from, and which queue the buffer belongs to.

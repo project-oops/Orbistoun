@@ -51,6 +51,15 @@ pub const VERSION_1_0: u32 = 0x0001_0000;
 /// confusing message.
 pub const VERSION_1_3: u32 = 0x0001_0300;
 
+/// Version 1.4, which the mesh-shader extension requires.
+///
+/// Declared only by modules that need it, for the reason the note above gives: from 1.4 an
+/// entry point must list **every** global variable in its interface, not only the inputs and
+/// outputs, and getting that wrong fails validation with a message about interfaces that says
+/// nothing about which variable is missing. A mesh module's globals are exactly its three
+/// output arrays, so listing them all is no burden there.
+pub const VERSION_1_4: u32 = 0x0001_0400;
+
 /// Generator identifier. Zero means unregistered, which is honest: the registry exists
 /// for tool vendors and this is not one of them.
 pub const GENERATOR: u32 = 0;
@@ -163,6 +172,11 @@ pub mod op {
     pub const DECORATE: u16 = 71;
     /// Annotates a structure member.
     pub const MEMBER_DECORATE: u16 = 72;
+    /// Declares how many vertices and primitives a mesh workgroup will actually emit.
+    ///
+    /// Two operands, both ids. Everything a mesh shader writes afterwards is within what it
+    /// declared here - which is the instruction a guest's `MSG_GS_ALLOC_REQ` corresponds to.
+    pub const SET_MESH_OUTPUTS_EXT: u16 = 5295;
     /// Reads through a pointer.
     pub const LOAD: u16 = 61;
     /// Reinterprets a value's bits as another type of the same width.
@@ -324,6 +338,12 @@ pub mod decoration {
     /// A fragment shader's colour output needs one: location zero is colour attachment
     /// zero, which is what a render pass's first attachment is.
     pub const LOCATION: u32 = 30;
+    /// No interpolation: every fragment of a primitive reads the provoking vertex's value.
+    ///
+    /// What the guest's parameter-move instruction asks for. Reading the same attribute
+    /// without this decoration interpolates it, which is a different number everywhere except
+    /// at one vertex - so the decoration is the translation rather than a hint about it.
+    pub const FLAT: u32 = 14;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
@@ -334,6 +354,11 @@ pub mod decoration {
 pub mod capability {
     /// Shader stages. The baseline for anything graphics or compute.
     pub const SHADER: u32 = 1;
+    /// Mesh and task stages, from `SPV_EXT_mesh_shader`.
+    ///
+    /// It implies [`SHADER`], so a mesh module declares this alone - which is what the
+    /// reference compiler emits, and what the numbers here were read out of (worklog 557).
+    pub const MESH_SHADING_EXT: u32 = 5283;
     /// Permits a module to require that subnormal results are kept, not flushed.
     ///
     /// From `SPV_KHR_float_controls`. A device that does not offer it cannot run a
@@ -373,6 +398,8 @@ pub mod built_in {
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
+    /// A mesh shader's triangle index array: three vertex indices per primitive.
+    pub const PRIMITIVE_TRIANGLE_INDICES_EXT: u32 = 5296;
     /// Which vertex of the draw this invocation is.
     ///
     /// Signed, in Vulkan's environment - the variable is declared `int`, and declaring it
@@ -400,6 +427,12 @@ pub mod execution {
     pub const FRAGMENT: u32 = 4;
     /// A vertex shader.
     pub const VERTEX: u32 = 0;
+    /// A mesh shader: one workgroup produces a small set of vertices and primitives.
+    ///
+    /// The stage a guest's NGG primitive shader corresponds to (D688) - it declares how much
+    /// it will emit before emitting any of it, which is what the guest's geometry-engine
+    /// allocation request does.
+    pub const MESH_EXT: u32 = 5365;
 }
 
 /// Execution modes.
@@ -413,6 +446,12 @@ pub mod mode {
     /// Takes the bit width as its one literal operand, so a module can ask for it at
     /// 32 bits without committing to 16 or 64.
     pub const DENORM_PRESERVE: u32 = 4459;
+    /// The most vertices a mesh shader's workgroup will emit. One literal operand.
+    pub const OUTPUT_VERTICES: u32 = 26;
+    /// The most primitives a mesh shader's workgroup will emit. One literal operand.
+    pub const OUTPUT_PRIMITIVES_EXT: u32 = 5270;
+    /// A mesh shader's primitives are triangles. No operand.
+    pub const OUTPUT_TRIANGLES_EXT: u32 = 5298;
 }
 
 /// How many ordered slots the header is kept in.
@@ -1740,6 +1779,226 @@ static SHAPES: &[ShapeEntry] = &[
         RestStride::Every,
     ),
 ];
+
+/// A mesh shader that emits one triangle covering the viewport, with a colour per corner.
+///
+/// # Why this exists
+///
+/// The oracle for the stage a guest's NGG primitive shader translates to (D688). Everything
+/// about that correspondence is written down and nothing had been run: a mesh shader declares
+/// how many vertices and primitives its workgroup will emit, writes the primitive's indices,
+/// and writes per-vertex outputs - which is `MSG_GS_ALLOC_REQ`, `exp prim` and
+/// `exp pos`/`exp param`, in that order. This is the host half of it, hand-assembled, so the
+/// translated half has something to be compared against rather than only reasoned about.
+///
+/// # Where the numbers came from
+///
+/// Measured, not transcribed. A reference mesh shader was compiled with the SDK's GLSL
+/// compiler and read back with `spirv-dis`, and every mesh-specific value here - the
+/// capability, the execution model, the three execution modes, the index built-in and the
+/// opcode that declares the counts - was taken out of that module's words (worklog 557). The
+/// structure follows it too: the per-vertex outputs are an array of a `Block` struct whose
+/// first member carries `Position`, because that is what the stage requires and not a choice.
+///
+/// The geometry is the same triangle every other oracle here draws - one that covers the
+/// viewport from three corners - so a frame from this is comparable with a frame from the
+/// vertex-shader path pixel for pixel.
+// A module is a linear sequence of declarations, each needed by the line after it. The same
+// judgement the other builders here record: splitting it moves the length rather than removing
+// it and hides the order, which is the one property a builder has to show.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
+    // 1.4, because `SPV_EXT_mesh_shader` requires it - said by `spirv-val` on the first
+    // attempt, which is the kind of thing this project would rather be told than assume.
+    let mut b = Builder::new().with_version(VERSION_1_4);
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let u32_type = b.id();
+    let vec4 = b.id();
+    let uvec3 = b.id();
+    let per_vertex = b.id();
+    let vertex_array = b.id();
+    let vertex_array_ptr = b.id();
+    let vertices = b.id();
+    let colour_array = b.id();
+    let colour_array_ptr = b.id();
+    let colours = b.id();
+    let index_array = b.id();
+    let index_array_ptr = b.id();
+    let indices = b.id();
+    let output_vec4 = b.id();
+    let output_uvec3 = b.id();
+    let (zero, one, two, three) = (b.id(), b.id(), b.id(), b.id());
+    let triangle = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+
+    // `MeshShadingEXT` implies `Shader`, so it is declared alone - as the reference does.
+    b.header(op::CAPABILITY, &[capability::MESH_SHADING_EXT]);
+    let mut extension = Vec::new();
+    extension.extend(Builder::literal_string("SPV_EXT_mesh_shader"));
+    b.header(op::EXTENSION, &extension);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+
+    let mut entry = vec![execution::MESH_EXT, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.extend([vertices.0, colours.0, indices.0]);
+    b.header(op::ENTRY_POINT, &entry);
+    b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
+    b.header(
+        op::EXECUTION_MODE,
+        &[main.0, mode::OUTPUT_VERTICES, VERTICES],
+    );
+    b.header(
+        op::EXECUTION_MODE,
+        &[main.0, mode::OUTPUT_PRIMITIVES_EXT, 1],
+    );
+    b.header(op::EXECUTION_MODE, &[main.0, mode::OUTPUT_TRIANGLES_EXT]);
+
+    // The per-vertex outputs are a block, and the position is a member of it. A bare array of
+    // `vec4` decorated `Position` is what a vertex shader has and is not what this stage takes.
+    b.annotate(op::DECORATE, &[per_vertex.0, decoration::BLOCK]);
+    b.annotate(
+        op::MEMBER_DECORATE,
+        &[per_vertex.0, 0, decoration::BUILT_IN, built_in::POSITION],
+    );
+    b.annotate(op::DECORATE, &[colours.0, decoration::LOCATION, 0]);
+    b.annotate(
+        op::DECORATE,
+        &[
+            indices.0,
+            decoration::BUILT_IN,
+            built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+        ],
+    );
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, 3]);
+
+    b.declare(op::CONSTANT, &[u32_type.0, zero.0, 0]);
+    b.declare(op::CONSTANT, &[u32_type.0, one.0, 1]);
+    b.declare(op::CONSTANT, &[u32_type.0, two.0, 2]);
+    b.declare(op::CONSTANT, &[u32_type.0, three.0, VERTICES]);
+
+    b.declare(op::TYPE_STRUCT, &[per_vertex.0, vec4.0]);
+    b.declare(op::TYPE_ARRAY, &[vertex_array.0, per_vertex.0, three.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[vertex_array_ptr.0, storage::OUTPUT, vertex_array.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[vertex_array_ptr.0, vertices.0, storage::OUTPUT],
+    );
+
+    b.declare(op::TYPE_ARRAY, &[colour_array.0, vec4.0, three.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[colour_array_ptr.0, storage::OUTPUT, colour_array.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[colour_array_ptr.0, colours.0, storage::OUTPUT],
+    );
+
+    b.declare(op::TYPE_ARRAY, &[index_array.0, uvec3.0, one.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[index_array_ptr.0, storage::OUTPUT, index_array.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[index_array_ptr.0, indices.0, storage::OUTPUT],
+    );
+
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[output_uvec3.0, storage::OUTPUT, uvec3.0],
+    );
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[uvec3.0, triangle.0, zero.0, one.0, two.0],
+    );
+
+    // The corner positions and their colours, as constants, one composite each.
+    let positions = [
+        [-1.0f32, -1.0, 0.0, 1.0],
+        [3.0, -1.0, 0.0, 1.0],
+        [-1.0, 3.0, 0.0, 1.0],
+    ];
+    let mut position_ids = Vec::new();
+    let mut colour_ids = Vec::new();
+    for (place, colour) in positions.into_iter().zip(corners) {
+        position_ids.push(constant_vec4(&mut b, f32_type, vec4, place));
+        colour_ids.push(constant_vec4(&mut b, f32_type, vec4, colour));
+    }
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+
+    // **Before anything is written**: three vertices, one primitive. A mesh shader that wrote
+    // outputs it had not declared would be writing past what the stage allocated for it.
+    b.function(op::SET_MESH_OUTPUTS_EXT, &[three.0, one.0]);
+
+    let slots = [zero, one, two];
+    for (slot, (place, colour)) in slots
+        .into_iter()
+        .zip(position_ids.into_iter().zip(colour_ids))
+    {
+        let position_ptr = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[output_vec4.0, position_ptr.0, vertices.0, slot.0, zero.0],
+        );
+        b.function(op::STORE, &[position_ptr.0, place.0]);
+
+        let colour_ptr = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[output_vec4.0, colour_ptr.0, colours.0, slot.0],
+        );
+        b.function(op::STORE, &[colour_ptr.0, colour.0]);
+    }
+
+    let index_ptr = b.id();
+    b.function(
+        op::ACCESS_CHAIN,
+        &[output_uvec3.0, index_ptr.0, indices.0, zero.0],
+    );
+    b.function(op::STORE, &[index_ptr.0, triangle.0]);
+
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+    b.finish()
+}
+
+/// How many vertices the mesh oracle emits. Three, because it draws one triangle.
+const VERTICES: u32 = 3;
+
+/// One `vec4` constant, from four floats.
+fn constant_vec4(b: &mut Builder, f32_type: Id, vec4: Id, value: [f32; 4]) -> Id {
+    let components: Vec<Id> = value
+        .into_iter()
+        .map(|component| {
+            let id = b.id();
+            b.declare(op::CONSTANT, &[f32_type.0, id.0, component.to_bits()]);
+            id
+        })
+        .collect();
+    let composite = b.id();
+    let mut operands = vec![vec4.0, composite.0];
+    operands.extend(components.iter().map(|id| id.0));
+    b.declare(op::CONSTANT_COMPOSITE, &operands);
+    composite
+}
 
 #[cfg(test)]
 mod tests {

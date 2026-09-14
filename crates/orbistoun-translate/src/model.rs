@@ -48,6 +48,7 @@ use crate::modifiers::Modifiers;
 /// cannot disagree about what an opcode is called.
 pub const SUPPORTED: &[&str] = &[
     "exp",
+    "v_interp_mov_f32_e32",
     "v_interp_p1_f32_e32",
     "v_interp_p2_f32_e32",
     "buffer_load_dword",
@@ -92,8 +93,10 @@ pub const SUPPORTED: &[&str] = &[
     "s_load_dwordx4",
     "s_load_dwordx8",
     "s_mov_b32",
+    "s_nop",
     "s_mov_b64",
     "s_movk_i32",
+    "s_inst_prefetch",
     "s_mulk_i32",
     "s_or_b32",
     "s_or_b64",
@@ -105,6 +108,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_add_f32_e32",
     "v_add_f32_e64",
     "v_add_nc_u32_e32",
+    "v_add_co_ci_u32_e32",
     "v_add_co_ci_u32_e64",
     "v_cmp_eq_f32_e32",
     "v_cmp_gt_f32_e32",
@@ -120,6 +124,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_fma_f32",
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
+    "v_lshrrev_b32_e32",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
     "v_mbcnt_lo_u32_b32",
@@ -165,12 +170,21 @@ pub fn supports_named(encodings: &EncodingTable, family: &str, opcode: u32) -> b
 
 /// The operand code a flat access uses to say it has no scalar base register.
 ///
-/// It is the top of the seven-bit field, which the shared operand numbering also uses
-/// for the high half of the execution mask - so a decoded no-base marker arrives named
-/// `exec_hi`. The same code means different things in different fields, which is a fact
-/// about the encoding rather than a decoding fault, and is why this is matched by name
-/// here rather than fixed in the operand table.
-pub const FLAT_NO_BASE: &str = "exec_hi";
+/// **Measured, after being wrong.** This was the top of the seven-bit field, 0x7f, which the
+/// shared operand numbering names `exec_hi` - a plausible reading of "nothing here" and not
+/// what the hardware uses. The reference assembler encodes `global_store_dword v[8:9], v10,
+/// off offset:4` as `0xdc708004 0x007d0a08`, so the marker is **0x7d**, which the operand
+/// table names `null`; the same bytes are in `primitive.gcn`, and the same bytes again are
+/// what the console ran in both GL cube shaders (worklogs 545 and 552).
+///
+/// Nothing caught it for two phases because the constant and every test that exercised it
+/// were written together: the tests encoded 0x7f, the translator accepted 0x7f, and the pair
+/// agreed with each other and with no shader that exists. The one real stream that reached
+/// this code was refused, and the refusal was read as an open question about the hardware.
+///
+/// It is matched by name rather than fixed in the operand table because the same code means
+/// different things in different fields, which is a fact about the encoding.
+pub const FLAT_NO_BASE: &str = "null";
 
 /// Scalar registers the guest has.
 ///
@@ -193,6 +207,15 @@ pub const EXEC_LOW_HALF: &str = "exec_lo";
 /// Where a comparison puts its answer: one bit per lane, and the operand a shader then
 /// ands into the execution mask to enter a conditional region.
 pub const VCC_LOW_HALF: &str = "vcc_lo";
+
+/// The `m0` register, as the operand table names it.
+///
+/// One thirty-two-bit word of scalar state outside the register file: a pixel shader
+/// hands the interpolator its primitive mask through it, and a primitive shader tells the
+/// geometry engine how much it will emit through it. Held apart from the scalar file
+/// because its operand code (124) sits past the last scalar register, in the range the
+/// wide loads are refused from writing into.
+pub const M0: &str = "m0";
 
 /// A lane mask, by whichever spelling reached the translator.
 ///
@@ -383,15 +406,31 @@ pub fn supports(mnemonic: &str) -> bool {
 
 /// Instructions understood well enough to say what they are waiting on.
 ///
-/// Empty since D553, when the export - its only entry - became translatable at the
-/// fragment stage. Kept rather than deleted: the distinction it draws, between "nobody
-/// has looked at this" and "this is waiting on a subsystem", is what stops a worklist
-/// sending effort at whichever refusal is most frequent, and the next instruction that
-/// needs it will need it for the same reason.
-pub const BLOCKED: &[(&str, &str)] = &[(
-    "v_interp_mov_f32_e32",
-    "its second operand selects between P0, P10 and P20 - a constant term and two deltas - and this repository has no citable encoding for which value names which. Translating it as the attribute's value would be right for the constant and silently wrong for the deltas, which is the shape of error a shader carries into a frame rather than into an exception. Its pair `v_interp_p1_f32` and `v_interp_p2_f32` do translate (D555); this one waits for a source for that field",
-)];
+/// It emptied once, at D553, when the export - its only entry then - became translatable at
+/// the fragment stage, and it was kept rather than deleted precisely so the next instruction
+/// waiting on a decision had somewhere to be recorded. Two are now: the geometry-engine
+/// message the console-run vertex program opens with, and a texture sample. Both wait on a
+/// subsystem that does not exist rather than on anything about their encodings.
+///
+/// A third left it. The parameter move was listed here as waiting on a source for which
+/// operand value names which parameter - and that had been *measured* all along, by the same
+/// solver that measured the export targets. What actually blocked it was the interpolation
+/// mode of the host input, which is a decoration decided when the variable is declared, and
+/// naming the wrong obstacle kept it here for two phases (worklog 551).
+///
+/// The distinction it draws, between "nobody has looked at this" and "this is waiting on
+/// something that is not encoding work", is what stops a worklist sending effort at
+/// whichever refusal is most frequent.
+pub const BLOCKED: &[(&str, &str)] = &[
+    (
+        "image_sample_lz",
+        "it samples a texture, and everything hard about that is on the other side of the instruction: its resource operand names eight consecutive scalar registers holding an image descriptor, and its sampler operand four more. The decoder now reads both, because the fields name where each group starts (worklog 549). What they point *at* is a descriptor this translator has no model for and a host image view nothing here declares - the SPIR-V emitter has no image type, no sampled-image type and no sampling instruction. That is a subsystem, not an encoding gap, and it is the last thing between the GL cube's textured pixel shader and a translation",
+    ),
+    (
+        "s_sendmsg",
+        "it sends a message to a fixed-function unit outside the shader core, and what the message means is the whole content: the console-run vertex program uses MSG_GS_ALLOC_REQ to tell the geometry engine how many vertices and primitives the wave is about to export, and the export is only legal because the allocation was granted. A host vertex shader makes no such request - the driver sized the output before the shader ran - so there is nothing to translate it into, and translating it as nothing would drop the one instruction the exports after it depend on. The decision is made and it is a mesh shader, where the allocation request is the host call that declares how many vertices and primitives the workgroup will emit: D688. What is missing is the mesh stage itself - the emitter has no such execution model - so this stays refused until that exists, with a destination rather than an open question",
+    ),
+];
 
 /// Why an instruction is blocked, if it is one this translator recognises.
 ///
@@ -483,11 +522,22 @@ pub trait Model {
 
     /// The 16-bit float type, the intermediate a packed half is read as before it is widened
     /// to a [`f32_type`](Self::f32_type) by the driver's own conversion.
-    fn f16_type(&self) -> Id;
+    ///
+    /// **Declared on first use, with its capability**, the way the extended instruction set is
+    /// imported. Every module used to declare `Float16` and `Int16` whether or not anything
+    /// sixteen-bit appeared in it, which asks a device for two features most modules do not
+    /// need - and which the validation layer names as an error on a device that was not created
+    /// with them, for every module, including the compute dispatches that had been running for
+    /// months (worklog 556).
+    ///
+    /// Only one path reaches these: a typed buffer load whose format has a half channel.
+    fn f16_type(&mut self) -> Id;
 
     /// The 16-bit unsigned type, which a packed half's field is narrowed to before it is read
     /// as a half - a bitcast needs the two sides the same width.
-    fn u16_type(&self) -> Id;
+    ///
+    /// Declared on first use, like [`f16_type`](Self::f16_type).
+    fn u16_type(&mut self) -> Id;
 
     /// Reads one word of the local data share.
     ///
@@ -659,6 +709,19 @@ pub trait Model {
     /// Both models have one. Unlike a lane mask it is not per-lane - it is a property of
     /// the wavefront as a whole - so the per-lane model can represent it perfectly well.
     fn condition_code(&mut self) -> Id;
+
+    /// The `m0` register: a private word, like the condition code.
+    ///
+    /// Both shaders the GL cube ran on the console write it before their first
+    /// interpolation, and a shader that copies it back into a register must read what it
+    /// wrote. What the hardware goes on to *do* with the value - address the parameter
+    /// cache, size an allocation request - has no host counterpart to translate into: an
+    /// interpolated input already is the interpolated attribute. So both models hold it
+    /// and neither acts on it.
+    fn read_m0(&mut self) -> Id;
+
+    /// Writes the `m0` register. Never masked, like every scalar write.
+    fn write_m0(&mut self, value: Id);
 
     /// The program counter: a private variable holding the index of the block to run.
     ///
@@ -925,12 +988,12 @@ pub trait Model {
     /// edge cases would be wrong silently - the one failure this project has no cheap way to
     /// catch. The caller must have masked the field to its sixteen bits already.
     fn half_to_float_bits(&mut self, field: Id) -> Id {
-        let (u32_type, f32_type, f16_type, u16_type) = (
-            self.u32_type(),
-            self.f32_type(),
-            self.f16_type(),
-            self.u16_type(),
-        );
+        // Fetched one at a time because each may declare a type and its capability, so each
+        // needs the builder to itself.
+        let u32_type = self.u32_type();
+        let f32_type = self.f32_type();
+        let f16_type = self.f16_type();
+        let u16_type = self.u16_type();
         let b = self.builder();
         let narrowed = b.id();
         b.function(op::UCONVERT, &[u16_type.0, narrowed.0, field.0]);
@@ -1083,6 +1146,58 @@ fn interpolate<M: Model + ?Sized>(
     Ok(())
 }
 
+/// The parameter a `v_interp_mov_f32` reads, as the operand field encodes it.
+///
+/// **Measured, not transcribed.** `orbistoun-gen`'s symbolic-code solver assembles the same
+/// instruction with each spelling in turn and reads the bits that moved, which is where the
+/// differential test's mapping comes from too: `p10` is 0, `p20` is 1, `p0` is 2.
+///
+/// What the three *are* follows from the interpolation this translator already implements:
+/// `v_interp_p1_f32` computes `P10 * I + P0` and `v_interp_p2_f32` adds `P20 * J`, so `P0` is
+/// the value where both barycentrics are zero - the first vertex of the primitive - and the
+/// other two are deltas from it. A shader wanting the attribute unchanged across the primitive
+/// asks for `P0`, which is flat shading with a first-vertex provoking convention, and that is
+/// the convention the host uses by default.
+const PARAMETER_CONSTANT_TERM: i64 = 2;
+
+/// `v_interp_mov_f32` - a fragment attribute read without interpolating.
+///
+/// # Why this is the input variable and not an instruction
+///
+/// The move takes a parameter straight out of the cache the hardware filled. SPIR-V has no
+/// parameter cache: an input variable *is* the attribute, and whether reading it interpolates
+/// is a property of the variable rather than of the read. So the whole translation of this
+/// instruction is the `Flat` decoration the declaration pass already put on that input, and
+/// what remains here is the same component read the interpolating pair does (D555).
+///
+/// # The two that are refused
+///
+/// `P10` and `P20` are deltas between vertices. Nothing on the host can read one: the host
+/// interpolates for you and offers the result, never the gradient it used. A shader moving a
+/// delta into a register is doing arithmetic with the primitive's shape, and translating it as
+/// the attribute's value would be a plausible number that is wrong everywhere.
+fn parameter_move<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let Some(Operand::Immediate(parameter)) = instruction.operands.get(1) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a parameter move decodes to a destination, a parameter, an attribute and 
+                     a channel; this one did not",
+        });
+    };
+    if *parameter != PARAMETER_CONSTANT_TERM {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "this moves one of the interpolation deltas, P10 or P20, rather than the 
+                     constant term. The host interpolates with its own barycentrics and offers 
+                     no way to read the gradient it used",
+        });
+    }
+    interpolate(model, instruction)
+}
+
 /// The only export target this translates, and what it is.
 ///
 /// `mrt0` - colour attachment zero. Which attachment any *other* target index selects is
@@ -1186,6 +1301,15 @@ pub fn instruction<M: Model + ?Sized>(
         // nothing to emit. A translation rather than a shortcut, provided
         // memory operations carry the right semantics when they arrive.
         //
+        //   s_nop     - wait states. The hardware needs them between an SALU write and a
+        //               read of the same hidden register; a host with no such hazard needs
+        //               nothing emitted, and emitting anything would be inventing work.
+        //
+        //   s_inst_prefetch - a hint to fetch the next instructions into the instruction
+        //               cache. It has no architectural effect at all: a shader with it and
+        //               the same shader without compute the same thing, which is what makes
+        //               dropping it a translation rather than a shortcut.
+        //
         //   s_clause  - "define a clause of instructions which are executed together"
         // (the instruction-set reference for this generation). It groups
         // the instructions that follow so they are issued without
@@ -1195,13 +1319,16 @@ pub fn instruction<M: Model + ?Sized>(
         //
         // Matched explicitly rather than falling through, because "emits nothing" and
         // "nobody handled it" must never look the same.
-        "s_endpgm" | "s_waitcnt" | "s_clause" => Ok(()),
+        "s_endpgm" | "s_waitcnt" | "s_clause" | "s_nop" | "s_inst_prefetch" => Ok(()),
 
         // The export, which is why a fragment stage exists at all (D553).
         "exp" => export(model, instruction),
 
         // Both halves of the interpolation pair answer the whole value (D555).
         "v_interp_p1_f32_e32" | "v_interp_p2_f32_e32" => interpolate(model, instruction),
+
+        // The same read, from an input the declaration pass decorated `Flat`.
+        "v_interp_mov_f32_e32" => parameter_move(model, instruction),
 
         // s_mov_b32: once for the whole wavefront, since scalar registers are uniform.
         // The scalar moves. Split out for the same reason the memory instructions
@@ -1260,7 +1387,7 @@ pub fn instruction<M: Model + ?Sized>(
         // lane saying whether that lane carried. Sixty-four-bit address arithmetic is
         // built out of these, so they are ordinary rather than exotic.
         "v_div_scale_f32" => division_scale(model, instruction),
-        "v_add_co_u32" | "v_sub_co_u32" | "v_add_co_ci_u32_e64" => {
+        "v_add_co_u32" | "v_sub_co_u32" | "v_add_co_ci_u32_e64" | "v_add_co_ci_u32_e32" => {
             carry_arithmetic(model, instruction, name)
         }
 
@@ -1309,7 +1436,7 @@ pub fn instruction<M: Model + ?Sized>(
         // Split out for the same reason the memory and scalar instructions were - the
         // combined match outgrew a screen.
         "v_add_f32_e32" | "v_sub_f32_e32" | "v_subrev_f32_e32" | "v_mul_f32_e32"
-        | "v_lshlrev_b32_e32" | "v_add_nc_u32_e32" | "v_fmac_f32_e32" => {
+        | "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" | "v_add_nc_u32_e32" | "v_fmac_f32_e32" => {
             short_form_arithmetic(model, instruction, name)
         }
 
@@ -1451,6 +1578,10 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             // was meant, and those agree for lane two and no other.
             "v_add_nc_u32_e32" => model.binary(op::IADD, lhs, rhs),
             "v_lshlrev_b32_e32" => model.binary(op::SHIFT_LEFT_LOGICAL, rhs, lhs),
+            // Logical, not arithmetic: the guest has a separate `v_ashrrev_i32` for the
+            // sign-propagating one, so reading this as arithmetic would be right for every
+            // address and wrong for every negative value.
+            "v_lshrrev_b32_e32" => model.binary(op::SHIFT_RIGHT_LOGICAL, rhs, lhs),
             // Float. `v_subrev_f32` reverses its operands - the name says so and the
             // encoding does not, so the two agree only when the operands are equal.
             // Accumulates *into* its destination, so the destination is a source as
@@ -1701,7 +1832,7 @@ fn carry_arithmetic<M: Model + ?Sized>(
         }
     };
 
-    let carry_in = if name == ADDC {
+    let carry_in = if is_add_with_carry_in(name) {
         Some(operands.get(4).ok_or(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "the carry-in form has no carry-in operand",
@@ -1746,7 +1877,7 @@ fn carry_arithmetic<M: Model + ?Sized>(
                 let borrowed = model.compare(op::ULESS_THAN, left, right);
                 (difference, borrowed)
             }
-            ADDC => {
+            _ if is_add_with_carry_in(name) => {
                 let carry_in = carry_in.ok_or(TranslateError::Unsupported {
                     offset: instruction.offset,
                     detail: "the carry-in form lost its carry-in",
@@ -1800,8 +1931,19 @@ fn add_with_carry<M: Model + ?Sized>(
     (sum, model.either(first_carry, second_carry))
 }
 
-/// `v_addc_co_u32`, which takes a carry in as well as producing one.
-const ADDC: &str = "v_add_co_ci_u32_e64";
+/// The add that takes a carry in as well as producing one, in both its forms.
+///
+/// Two spellings of one instruction: the long form names its carry registers and the short
+/// form leaves them implicit at `vcc`, which the operand table records as implicit operands
+/// in the same positions. So the layout below indexes the same way for both, and the only
+/// thing that had to change to accept the short form was this question - which is the answer
+/// to "is the long form's translation right for the short one", and it is.
+///
+/// The short form is what a real shader contains: it is how the console-run vertex program
+/// forms a 64-bit address, `v_add_co_ci_u32 v19, vcc, s3, v1, vcc` (orbistoun worklog 545).
+fn is_add_with_carry_in(name: &str) -> bool {
+    matches!(name, "v_add_co_ci_u32_e64" | "v_add_co_ci_u32_e32")
+}
 
 /// Translates the long-form vector ALU instructions.
 ///
@@ -2869,6 +3011,17 @@ fn scalar_move<M: Model + ?Sized>(
             // exactly as `s_mov_b64 exec, ...` is for a 64-lane one.
             if let Some(mask) = mask_destination(destination) {
                 write_mask_low(model, mask, value)?;
+                model.count();
+                return Ok(());
+            }
+
+            // `s_mov_b32 m0, sN` is how a pixel shader hands the interpolator its
+            // primitive mask: the first instruction after the wait in both shaders the
+            // GL cube ran on the console (orbistoun-gpu `tests/oracle_gl_cube.rs`).
+            if let Operand::Named(name) = destination
+                && name == M0
+            {
+                model.write_m0(value);
                 model.count();
                 return Ok(());
             }

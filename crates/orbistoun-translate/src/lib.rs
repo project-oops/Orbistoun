@@ -427,24 +427,58 @@ fn resolve(requested: Fidelity, decode: &Decode, encodings: &EncodingTable) -> F
     }
 }
 
-/// Translates a decoded shader.
+/// Translates a decoded shader as a compute dispatch.
 ///
 /// Refuses rather than approximates. Every error here is a case where producing
 /// *something* would mean inventing behaviour the guest did not ask for.
+///
+/// Callers that know which stage bound the shader want [`translate_staged`]: a fragment
+/// shader translated as a compute dispatch is refused at its first interpolation, for a reason
+/// that is about the question rather than about the shader.
 pub fn translate(
     decode: &Decode,
     encodings: &EncodingTable,
     strategy: Strategy,
 ) -> Result<Translated, TranslateError> {
+    translate_staged(decode, encodings, strategy, wavefront::Stage::Compute)
+}
+
+/// Translates a decoded shader for the stage that bound it.
+///
+/// # Why a stage forces the model
+///
+/// Only the wavefront model has fragment inputs and a colour output; the per-lane one has
+/// neither, so a fragment shader translated there is refused for want of an attribute that
+/// its stage was never given. Rather than refuse, this raises the fidelity and **says so** in
+/// the same warning the automatic resolution already uses - the cost is real and a caller
+/// should not have to infer it.
+pub fn translate_staged(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    strategy: Strategy,
+    stage: wavefront::Stage,
+) -> Result<Translated, TranslateError> {
     let Strategy::Predicated { fidelity, width } = strategy else {
         return Err(TranslateError::StrategyNotImplemented(strategy));
     };
     let asked_for = fidelity;
-    let fidelity = resolve(fidelity, decode, encodings);
+    let mut fidelity = resolve(fidelity, decode, encodings);
+    let staged = stage != wavefront::Stage::Compute;
+    if staged {
+        fidelity = Fidelity::Wavefront;
+    }
 
     // Said out loud rather than left in a field. `Auto` reaching the wavefront model is
     // the common case for any shader that masks, and it costs a factor of sixty four.
-    let warnings = if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
+    let warnings = if staged && asked_for != Fidelity::Wavefront {
+        vec![Warning::SlowestFidelity {
+            because: concat!(
+                "the module is for a graphics stage, and the wavefront model is the only one ",
+                "with fragment inputs and a colour output"
+            ),
+            subgroup_would_need: width.lanes(),
+        }]
+    } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
         vec![Warning::SlowestFidelity {
             because: "the shader reads or writes a lane mask, which the per-lane model                       cannot represent",
             subgroup_would_need: width.lanes(),
@@ -485,7 +519,7 @@ pub fn translate(
             })
         }
         Fidelity::Wavefront => {
-            let (module, instructions) = wavefront::translate(decode, encodings, width)?;
+            let (module, instructions) = wavefront::translate_for(decode, encodings, width, stage)?;
             Ok(Translated {
                 module,
                 strategy,

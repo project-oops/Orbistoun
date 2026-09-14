@@ -64,7 +64,7 @@ fn compare_tables(
     note(
         "table values came from vendor tags",
         our_info.vendor_tables.to_string(),
-        matches!(their_info.table, Some(selfish_elf::dynamic::Table::Legacy)).to_string(),
+        matches!(their_info.table, Some(selfish_elf::dynamic::Table::Orbis)).to_string(),
     );
     // Rebased into orbistoun's units before comparing, per the same request: SELFish measures
     // from the slice it returns, orbistoun from the image.

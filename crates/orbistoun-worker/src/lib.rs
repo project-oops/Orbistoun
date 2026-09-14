@@ -3303,3 +3303,22 @@ mod tests {
         assert_eq!(WORKER_FLAG, "--worker");
     }
 }
+
+#[cfg(test)]
+mod stop_wording {
+    /// **The rung depends on two crates agreeing about one string, so this asserts they do.**
+    ///
+    /// `orbistoun-report` awards `Reach::Exited` by matching the worker's wording for a deliberate
+    /// stop, and cannot depend on `orbistoun-core` to reference the enum that produces it. If the
+    /// label is ever reworded on one side only, nothing breaks loudly: the rung simply stops being
+    /// awarded and every run quietly falls back to `Entered`, which is the kind of silent
+    /// mis-measurement principle 3 exists to refuse. This crate sees both, so the guard lives here.
+    #[test]
+    fn the_exit_wording_the_ladder_matches_is_the_wording_core_produces() {
+        assert_eq!(
+            orbistoun_overrides::DELIBERATE_EXIT,
+            orbistoun_core::StopReason::Exited.label(),
+            "the ladder matches a string core no longer produces - Reach::Exited is now unreachable"
+        );
+    }
+}

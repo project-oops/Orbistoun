@@ -156,15 +156,60 @@ fn create_render_pass(device: &ash::Device) -> Result<vk::RenderPass, DispatchEr
 }
 
 /// A host-visible buffer big enough to receive the image, and its mapped-readable memory.
+/// Bytes for a window measured in words, as Vulkan wants it.
+///
+/// At least one word: a zero-sized buffer is not a legal binding, and a module that declares a
+/// window it never touches would otherwise fail to build for a reason about the harness.
+fn words_to_bytes(words: usize) -> vk::DeviceSize {
+    let words = u64::try_from(words.max(1)).unwrap_or(1);
+    words * 4
+}
+
+/// A host-visible storage buffer, for one of the windows a translated module declares.
+///
+/// Host-visible rather than device-local because these are small and a test may want to read
+/// one back; nothing here is a performance path.
+fn create_storage_buffer(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    device: &ash::Device,
+    size: vk::DeviceSize,
+) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
+    create_host_buffer(
+        instance,
+        physical,
+        device,
+        size,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
+    )
+}
+
 fn create_readback_buffer(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     device: &ash::Device,
     size: vk::DeviceSize,
 ) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
+    create_host_buffer(
+        instance,
+        physical,
+        device,
+        size,
+        vk::BufferUsageFlags::TRANSFER_DST,
+    )
+}
+
+/// One host-visible buffer of the given usage, with its memory bound.
+fn create_host_buffer(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    device: &ash::Device,
+    size: vk::DeviceSize,
+    usage: vk::BufferUsageFlags,
+) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
     let info = vk::BufferCreateInfo::default()
         .size(size)
-        .usage(vk::BufferUsageFlags::TRANSFER_DST)
+        .usage(usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     // SAFETY: the device is live and the create info outlives the call.
     let buffer = unsafe { device.create_buffer(&info, None) }
@@ -201,7 +246,14 @@ fn create_readback_buffer(
 /// When no device is available, or any Vulkan call fails. A machine with no device is a skip
 /// for the caller to surface loudly, never a pass.
 pub fn clear_to(colour: [f32; 4], width: u32, height: u32) -> Result<Pixels, DispatchError> {
-    render(colour, width, height, None)
+    render(
+        colour,
+        width,
+        height,
+        None,
+        DEFAULT_WINDOWS,
+        Geometry::Vertex,
+    )
 }
 
 /// The shared body: set the attachment up, record, submit, read back, release.
@@ -213,6 +265,8 @@ fn render(
     width: u32,
     height: u32,
     shaders: Option<(&[u32], &[u32])>,
+    windows: [usize; 2],
+    geometry: Geometry,
 ) -> Result<Pixels, DispatchError> {
     let session = crate::compute::session()?;
     let session = session
@@ -256,7 +310,18 @@ fn render(
 
     let pipeline = shaders
         .map(|(vertex, fragment)| {
-            build_pipeline(device, render_pass, vertex, fragment, width, height)
+            build_pipeline(
+                Devices {
+                    instance,
+                    physical,
+                    device,
+                },
+                render_pass,
+                (vertex, fragment),
+                (width, height),
+                windows,
+                geometry,
+            )
         })
         .transpose()?;
 
@@ -268,7 +333,7 @@ fn render(
         width,
         height,
     };
-    let command = record(device, family, &target, colour, pipeline.as_ref())?;
+    let command = record(instance, device, family, &target, colour, pipeline.as_ref())?;
     let command_buffers = [command.buffer];
     let submits = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
     // SAFETY: recording has ended and the queue belongs to this device.
@@ -325,6 +390,16 @@ fn release(
         unsafe { device.destroy_shader_module(built.vertex, None) };
         // SAFETY: as above.
         unsafe { device.destroy_shader_module(built.fragment, None) };
+        // SAFETY: as above. The pool owns the set, so destroying it frees that too.
+        unsafe { device.destroy_descriptor_pool(built.descriptor_pool, None) };
+        // SAFETY: as above.
+        unsafe { device.destroy_descriptor_set_layout(built.set_layout, None) };
+        for (buffer, memory) in built.buffers {
+            // SAFETY: as above.
+            unsafe { device.destroy_buffer(buffer, None) };
+            // SAFETY: as above, and the buffer that used it is already destroyed.
+            unsafe { device.free_memory(memory, None) };
+        }
     }
     // SAFETY: as above.
     unsafe { device.destroy_framebuffer(target.framebuffer, None) };
@@ -361,6 +436,7 @@ struct Recorded {
 /// barrier is recorded by hand. With one, three vertices are drawn between those two points -
 /// enough for a triangle, and the vertex shader is expected to produce its own positions.
 fn record(
+    instance: &ash::Instance,
     device: &ash::Device,
     family: u32,
     target: &Target,
@@ -408,10 +484,38 @@ fn record(
         unsafe {
             device.cmd_bind_pipeline(command, vk::PipelineBindPoint::GRAPHICS, built.handle);
         }
-        // Three vertices, one instance. The vertex shader indexes its own table by
-        // `gl_VertexIndex`, so there is nothing bound to draw from.
-        // SAFETY: a pipeline is bound inside an open render pass.
-        unsafe { device.cmd_draw(command, 3, 1, 0, 0) };
+        // The set the fragment module's storage buffers live in. Bound whether or not this
+        // particular module writes them: a pipeline that statically uses a set needs one
+        // bound, and which sets a translated module uses is not something this harness reads.
+        let sets = [built.set];
+        // SAFETY: the set was allocated against this pipeline's layout and both are live.
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
+                built.layout,
+                0,
+                &sets,
+                &[],
+            );
+        }
+        match built.geometry {
+            // Three vertices, one instance. The vertex shader indexes its own table by
+            // `gl_VertexIndex`, so there is nothing bound to draw from.
+            // SAFETY: a pipeline is bound inside an open render pass.
+            Geometry::Vertex => unsafe { device.cmd_draw(command, 3, 1, 0, 0) },
+            // **One workgroup**, which is the whole draw: a mesh shader decides for itself how
+            // many vertices and primitives come out of it, so the count here is groups rather
+            // than vertices. One is what a guest's primitive shader is - a single wave that
+            // announces what it will emit and then emits it.
+            Geometry::Mesh => {
+                let mesh = ash::ext::mesh_shader::Device::new(instance, device);
+                // SAFETY: a mesh pipeline is bound inside an open render pass, and a mesh
+                // pipeline exists only where the device was created with the extension this
+                // loader dispatches through.
+                unsafe { mesh.cmd_draw_mesh_tasks(command, 1, 1, 1) };
+            }
+        }
     }
     // SAFETY: a render pass is open.
     unsafe { device.cmd_end_render_pass(command) };
@@ -460,6 +564,21 @@ struct Pipeline {
     fragment: vk::ShaderModule,
     layout: vk::PipelineLayout,
     handle: vk::Pipeline,
+    /// The set layout, pool and set the fragment module's storage buffers are bound through.
+    ///
+    /// Every module this project's translator emits declares two of them - the observation
+    /// window and the guest-memory window - because the models declare both in their headers.
+    /// The draw path used an empty pipeline layout and bound nothing, which the Khronos
+    /// validation layer calls two separate errors: a layout that does not declare what the
+    /// shader uses, and a draw with no set bound (worklog 554). It drew anyway on this
+    /// driver, which is what made it worth measuring rather than assuming.
+    set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    set: vk::DescriptorSet,
+    buffers: [(vk::Buffer, vk::DeviceMemory); 2],
+    /// Which stage feeds the fragment stage: the two are drawn by different calls, and the
+    /// pipeline is the thing that knows which it was built for.
+    geometry: Geometry,
 }
 
 /// An attachment dimension as a float, exactly.
@@ -488,14 +607,35 @@ fn f32_from(pixels: u32) -> f32 {
 /// `gl_VertexIndex` - see `orbistoun_spirv::fullscreen_triangle_vertex_module` - which keeps a
 /// vertex buffer, its memory and its binding description out of a harness whose whole job is to
 /// have as few moving parts as possible.
+/// The device handles the buffer helpers need, passed as one thing.
+///
+/// Three values that always travel together and are never chosen independently. Separately
+/// they were three of nine parameters, which is past the point where a call site tells a
+/// reader anything.
+#[derive(Clone, Copy)]
+struct Devices<'a> {
+    instance: &'a ash::Instance,
+    physical: vk::PhysicalDevice,
+    device: &'a ash::Device,
+}
+
+// A pipeline is a linear sequence of create-infos, each needed by the one after it: the
+// descriptor layout the pipeline layout names, the pool the set comes from, the stages the
+// pipeline is built out of. Extracting halves means helpers passing six handles apiece, which
+// moves the length rather than removing it and hides the order - the one property a builder
+// has to show. The same judgement `Wavefront::for_stage` records for the same reason.
+#[allow(clippy::too_many_lines)]
 fn build_pipeline(
-    device: &ash::Device,
+    devices: Devices<'_>,
     render_pass: vk::RenderPass,
-    vertex_words: &[u32],
-    fragment_words: &[u32],
-    width: u32,
-    height: u32,
+    shaders: (&[u32], &[u32]),
+    size: (u32, u32),
+    windows: [usize; 2],
+    geometry: Geometry,
 ) -> Result<Pipeline, DispatchError> {
+    let device = devices.device;
+    let (vertex_words, fragment_words) = shaders;
+    let (width, height) = size;
     let vertex_info = vk::ShaderModuleCreateInfo::default().code(vertex_words);
     // SAFETY: the words outlive the call and the device is live.
     let vertex = unsafe { device.create_shader_module(&vertex_info, None) }
@@ -505,14 +645,94 @@ fn build_pipeline(
     let fragment = unsafe { device.create_shader_module(&fragment_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module(fragment)", e))?;
 
-    let layout_info = vk::PipelineLayoutCreateInfo::default();
+    // The two storage buffers every translated module declares, at set 0 bindings 0 and 1:
+    // the observation window and the guest-memory window. A fragment module writes neither by
+    // default - its epilogue is skipped (D553) - but a guest's pixel shader writes guest
+    // memory, so the binding is real and has to exist.
+    let buffers = [
+        create_storage_buffer(
+            devices.instance,
+            devices.physical,
+            device,
+            words_to_bytes(windows[0]),
+        )?,
+        create_storage_buffer(
+            devices.instance,
+            devices.physical,
+            device,
+            words_to_bytes(windows[1]),
+        )?,
+    ];
+
+    let bindings = [
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+    ];
+    let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    // SAFETY: the create info outlives the call.
+    let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
+
+    let set_layouts = [set_layout];
+    let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
     // SAFETY: the create info outlives the call and the device is live.
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_pipeline_layout", e))?;
 
+    let pool_sizes = [vk::DescriptorPoolSize::default()
+        .ty(vk::DescriptorType::STORAGE_BUFFER)
+        .descriptor_count(2)];
+    let pool_info = vk::DescriptorPoolCreateInfo::default()
+        .pool_sizes(&pool_sizes)
+        .max_sets(1);
+    // SAFETY: the create info outlives the call.
+    let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_descriptor_pool", e))?;
+    let allocate_sets = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(descriptor_pool)
+        .set_layouts(&set_layouts);
+    // SAFETY: the pool has room for exactly this one set.
+    let sets = unsafe { device.allocate_descriptor_sets(&allocate_sets) }
+        .map_err(|e| DispatchError::Vulkan("allocate_descriptor_sets", e))?;
+    let set = sets[0];
+
+    let observation = [vk::DescriptorBufferInfo::default()
+        .buffer(buffers[0].0)
+        .offset(0)
+        .range(words_to_bytes(windows[0]))];
+    let memory = [vk::DescriptorBufferInfo::default()
+        .buffer(buffers[1].0)
+        .offset(0)
+        .range(words_to_bytes(windows[1]))];
+    let writes = [
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&observation),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&memory),
+    ];
+    // SAFETY: the set came from the pool above and the buffers outlive the call.
+    unsafe { device.update_descriptor_sets(&writes, &[]) };
+
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
+            .stage(match geometry {
+                Geometry::Vertex => vk::ShaderStageFlags::VERTEX,
+                Geometry::Mesh => vk::ShaderStageFlags::MESH_EXT,
+            })
             .module(vertex)
             .name(ENTRY),
         vk::PipelineShaderStageCreateInfo::default()
@@ -575,6 +795,11 @@ fn build_pipeline(
         fragment,
         layout,
         handle: pipelines[0],
+        set_layout,
+        descriptor_pool,
+        set,
+        buffers,
+        geometry,
     })
 }
 
@@ -599,5 +824,80 @@ pub fn draw_with(
     width: u32,
     height: u32,
 ) -> Result<Pixels, DispatchError> {
-    render(clear, width, height, Some((vertex_words, fragment_words)))
+    draw_with_windows(
+        vertex_words,
+        fragment_words,
+        clear,
+        width,
+        height,
+        DEFAULT_WINDOWS,
+    )
+}
+
+/// Draws with a **mesh** stage rather than a vertex stage.
+///
+/// One workgroup, which is what a guest's primitive shader is: a wave that declares how many
+/// vertices and primitives it will emit and then emits them (D688). The fragment module is
+/// whatever should shade them.
+///
+/// # Errors
+///
+/// When no device is available, when the device has no mesh stage - which
+/// [`Properties::mesh_shading`](crate::compute::Properties::mesh_shading) reports before it is
+/// asked for - or when any Vulkan call fails.
+pub fn draw_mesh_with(
+    mesh_words: &[u32],
+    fragment_words: &[u32],
+    clear: [f32; 4],
+    width: u32,
+    height: u32,
+) -> Result<Pixels, DispatchError> {
+    render(
+        clear,
+        width,
+        height,
+        Some((mesh_words, fragment_words)),
+        DEFAULT_WINDOWS,
+        Geometry::Mesh,
+    )
+}
+
+/// Which stage feeds the fragment stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Geometry {
+    /// A vertex shader over three vertices the draw supplies.
+    Vertex,
+    /// A mesh shader, one workgroup, which supplies its own.
+    Mesh,
+}
+
+/// The window sizes a module's two storage buffers get when the caller does not say.
+///
+/// Both are counts of words. They are only ever indexed through a mask the module itself
+/// applies, so a window larger than the module uses is wasted and one smaller is a read past
+/// the end - which is why the caller can say, and why the default is the one the translator's
+/// own models declare.
+pub const DEFAULT_WINDOWS: [usize; 2] = [16, 1024];
+
+/// Draws with explicit window sizes for the two storage buffers a module declares.
+///
+/// # Errors
+///
+/// When no device is available, or any Vulkan call fails.
+pub fn draw_with_windows(
+    vertex_words: &[u32],
+    fragment_words: &[u32],
+    clear: [f32; 4],
+    width: u32,
+    height: u32,
+    windows: [usize; 2],
+) -> Result<Pixels, DispatchError> {
+    render(
+        clear,
+        width,
+        height,
+        Some((vertex_words, fragment_words)),
+        windows,
+        Geometry::Vertex,
+    )
 }

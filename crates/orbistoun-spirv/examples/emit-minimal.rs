@@ -22,4 +22,11 @@ fn main() {
         "storage-write.spv",
         orbistoun_spirv::storage_buffer_write_module(0xABCD_1234, 4),
     );
+    // The mesh oracle, which is the one module here a validator has something new to say
+    // about: its stage, its execution modes and the instruction that declares its output
+    // counts were all read out of a compiled reference rather than known.
+    write(
+        "mesh.spv",
+        orbistoun_spirv::triangle_mesh_module([[0.0, 1.0, 0.0, 1.0]; 3]),
+    );
 }

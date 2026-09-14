@@ -118,8 +118,14 @@ pub struct Predicated<'a> {
     glsl_set: Option<Id>,
     u32_type: Id,
     f32_type: Id,
-    f16_type: Id,
-    u16_type: Id,
+    /// The sixteen-bit types, declared on first use along with their capabilities.
+    ///
+    /// [`None`] until something needs them, which for nearly every module is never: the only
+    /// path that reaches them is a typed buffer load of a half-format channel. Declaring them
+    /// unconditionally asked every device for two features, and told the validation layer that
+    /// every module was relying on capabilities the device had not enabled (worklog 556).
+    f16_type: Option<Id>,
+    u16_type: Option<Id>,
     bool_type: Id,
     register_ptr: Id,
     registers: Id,
@@ -132,6 +138,8 @@ pub struct Predicated<'a> {
     program_counter: Id,
     /// The scalar condition code, as a private variable holding 0 or 1.
     condition_code: Id,
+    /// The `m0` register, as a private word starting at zero.
+    m0: Id,
     /// Instructions emitted into the function body so far.
     translated: usize,
     /// The subgroup width this module needs, when it needs one.
@@ -149,8 +157,7 @@ pub struct Predicated<'a> {
 /// one that misbehaves.
 fn declare_entry_point(builder: &mut Builder, main: Id, lane_input: Option<Id>, group: u32) {
     builder.header(op::CAPABILITY, &[capability::SHADER]);
-    builder.header(op::CAPABILITY, &[capability::FLOAT16]);
-    builder.header(op::CAPABILITY, &[capability::INT16]);
+
     builder.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
     let mut entry = vec![execution::GL_COMPUTE, main.0];
@@ -237,8 +244,7 @@ impl<'a> Predicated<'a> {
         let fn_type = builder.id();
         let u32_type = builder.id();
         let f32_type = builder.id();
-        let f16_type = builder.id();
-        let u16_type = builder.id();
+
         let bool_type = builder.id();
         let register_array = builder.id();
         let register_array_ptr = builder.id();
@@ -255,6 +261,7 @@ impl<'a> Predicated<'a> {
         let counter = builder.id();
         let counter_zero = builder.id();
         let scc = builder.id();
+        let m0 = builder.id();
 
         // Reserved before the entry point is written, because at this version an input
         // variable has to be named in the entry point's interface and the entry point is
@@ -266,8 +273,7 @@ impl<'a> Predicated<'a> {
         builder.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
         builder.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
         builder.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
-        builder.declare(op::TYPE_FLOAT, &[f16_type.0, 16]);
-        builder.declare(op::TYPE_INT, &[u16_type.0, 16, 0]);
+
         builder.declare(op::TYPE_BOOL, &[bool_type.0]);
         builder.declare(
             op::CONSTANT,
@@ -290,20 +296,17 @@ impl<'a> Predicated<'a> {
             &[register_array_ptr.0, PRIVATE, register_array.0],
         );
         builder.declare(op::TYPE_POINTER, &[register_ptr.0, PRIVATE, u32_type.0]);
-        // The program counter. Zero-initialised so the shader starts at its first
-        // block rather than at whatever the driver left in the variable.
+        // The program counter, the scalar condition code and m0: one private word each,
+        // sharing a pointer type and a zero initialiser. Zero so the shader starts at its
+        // first block rather than at whatever the driver left in the variable.
         builder.declare(op::TYPE_POINTER, &[counter_ptr.0, PRIVATE, u32_type.0]);
         builder.declare(op::CONSTANT, &[u32_type.0, counter_zero.0, 0]);
-        builder.declare(
-            op::VARIABLE,
-            &[counter_ptr.0, counter.0, PRIVATE, counter_zero.0],
-        );
-        // The scalar condition code shares the counter's pointer type and initialiser:
-        // both are a private word starting at zero.
-        builder.declare(
-            op::VARIABLE,
-            &[counter_ptr.0, scc.0, PRIVATE, counter_zero.0],
-        );
+        for word in [counter, scc, m0] {
+            builder.declare(
+                op::VARIABLE,
+                &[counter_ptr.0, word.0, PRIVATE, counter_zero.0],
+            );
+        }
         builder.declare(op::CONSTANT_NULL, &[register_array.0, register_zero.0]);
         builder.declare(
             op::VARIABLE,
@@ -338,8 +341,8 @@ impl<'a> Predicated<'a> {
             glsl_set: None,
             u32_type,
             f32_type,
-            f16_type,
-            u16_type,
+            f16_type: None,
+            u16_type: None,
             bool_type,
             register_ptr,
             registers,
@@ -350,6 +353,7 @@ impl<'a> Predicated<'a> {
             memory: guest_memory.buffer,
             program_counter: counter,
             condition_code: scc,
+            m0,
             translated: 0,
             required_subgroup: None,
         }
@@ -542,6 +546,8 @@ impl Model for Predicated<'_> {
                     detail: "this model has no lane mask, so a mask cannot be read as a                              source - translate at wavefront fidelity instead",
                 })
             }
+            // The m0 register read back as a source: whatever the shader last wrote.
+            Operand::Named(name) if name == model::M0 => Ok(self.read_m0()),
             // An inline float, named by the operand table. Its *bits* go into the
             // register, because that is what a register holds - storing the operand
             // code, or the value converted, are both plausible and both wrong.
@@ -677,12 +683,26 @@ impl Model for Predicated<'_> {
         set
     }
 
-    fn f16_type(&self) -> Id {
-        self.f16_type
+    fn f16_type(&mut self) -> Id {
+        if let Some(id) = self.f16_type {
+            return id;
+        }
+        let id = self.builder.id();
+        self.builder.header(op::CAPABILITY, &[capability::FLOAT16]);
+        self.builder.declare(op::TYPE_FLOAT, &[id.0, 16]);
+        self.f16_type = Some(id);
+        id
     }
 
-    fn u16_type(&self) -> Id {
-        self.u16_type
+    fn u16_type(&mut self) -> Id {
+        if let Some(id) = self.u16_type {
+            return id;
+        }
+        let id = self.builder.id();
+        self.builder.header(op::CAPABILITY, &[capability::INT16]);
+        self.builder.declare(op::TYPE_INT, &[id.0, 16, 0]);
+        self.u16_type = Some(id);
+        id
     }
 
     /// Refused. This model has no lane masks.
@@ -783,6 +803,19 @@ impl Model for Predicated<'_> {
 
     fn condition_code(&mut self) -> Id {
         self.condition_code
+    }
+
+    fn read_m0(&mut self) -> Id {
+        let (u32_type, pointer) = (self.u32_type, self.m0);
+        let value = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        value
+    }
+
+    fn write_m0(&mut self, value: Id) {
+        let pointer = self.m0;
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
     }
 
     fn instructions(&self) -> usize {

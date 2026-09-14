@@ -109,6 +109,7 @@ sha256 = "6cf6a738112fc339619ebe772690fa611f60ecdb20164a0e3f49e137277bc42b"
 
 [[source]]
 name = "obscene"
+target = "titles"
 kind = "local"
 path = "../obscene/build"
 licence = "same suite (D043); our own accuracy probe, not third-party"
@@ -119,61 +120,62 @@ todo = "sibling checkout for now - migrate to a github-release once obSCEne publ
 file = "obscene.elf"
 sha256 = "2a433097e6b0b6b7490428b05539d575d8522e7fcbab53c4011de2600f052998"
 
-# The probe, four ways. Each entry lists a sibling checkout first and a published release second:
-# the checkout is the fast path when somebody has one and absent when they do not, the release is
-# slower and always there. `sync` tries them in order and reports every one that did not answer,
-# so a broken fast path cannot hide behind a working slow one (D664).
-#
-# `target` here is the **install target** - which of orbistoun's roots an artifact lands in. Two
-# other senses of the word are live in this collection: Prosperous's *registered target* (a machine
-# it can reach) and SELFish's *build target* (the machine an artifact is built for). A manifest
-# entry has two of the three in play at once, because the file it fetches is named for a build
-# target while this field says where it lands (OOPS conventions section 2).
-#
-# `orbis`, not `neo`: the axis has four values and they are not interchangeable - `orbis` and
-# `prospero` are the base machines, `neo` and `trinity` the mid-generation refreshes. The probe is
-# not Pro-specific, so any previous-generation artifact of it is `orbis`.
-
 [[source]]
 name = "obscene-probe-prospero-native"
 target = "titles"
 kind = "local"
 sources = [
-  "../obscene/build/prospero",
-  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.zip",
+    "../obscene/build/prospero",
+    "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.zip",
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
+asset = []
 
 [[source]]
 name = "obscene-probe-prospero-payload"
 target = "payloads"
 kind = "local"
 sources = [
-  "../obscene/build/obscene-probe-prospero.elf",
-  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.elf",
+    "../obscene/build/obscene-probe-prospero.elf",
+    "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.elf",
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
+asset = []
 
 [[source]]
 name = "obscene-probe-orbis-native"
 target = "titles"
 kind = "local"
 sources = [
-  "../obscene/build/orbis",
-  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.zip",
+    "../obscene/build/orbis",
+    "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.zip",
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
+asset = []
 
 [[source]]
 name = "obscene-probe-orbis-pkg"
 target = "packages"
 kind = "local"
 sources = [
-  "../obscene/build/obscene-probe-orbis.pkg",
-  "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.pkg",
+    "../obscene/build/obscene-probe-orbis.pkg",
+    "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.pkg",
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
+asset = []
+
+[[source]]
+name = "oops-apps-home-shell"
+target = "titles"
+kind = "local"
+path = "../oops-apps/src/home/build/title/PROH00001"
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "eboot.bin"
+sha256 = "cf3715c8554528c78fbd6620d31922f3433fe209cc0d18185a1434c19ba6aaff"

@@ -198,9 +198,13 @@ pub(crate) fn resolvable() -> Vec<(&'static str, Resolvable)> {
 const SPELT_DIFFERENTLY: &[(&str, &str)] = &[
     // FreeBSD's own underscored spelling for the call `sysctl(3)` wraps.
     ("SYS___sysctl", "sysctl"),
-    // The two exits. `SYS_exit` is the process one; the thread one has no implementation
-    // here and is deliberately absent rather than bound to the process exit.
-    ("SYS_exit", "exit"),
+    // **The two exits, and neither needs an entry here.** The process one is spelt `SYS__exit`
+    // in FreeBSD's table - entry 1 is the raw `_exit`, not the `exit(3)` wrapper - so stripping
+    // `SYS_` already yields the name `orbistoun-libc` answers to. An entry reading `SYS_exit`
+    // stood here and matched nothing, because no harvested constant is called that: the mapping
+    // was dead, and with it syscall 1, which a guest asks for at the end of every clean run.
+    // The thread one, `SYS_thr_exit` (431), has no implementation and is deliberately absent
+    // rather than bound to the process exit.
 ];
 
 /// Numbers this must not bind even though the name matches.
@@ -359,11 +363,51 @@ mod tests {
             "a table with almost nothing in it is a bug"
         );
 
-        for (name, number) in [("read", 3), ("write", 4), ("open", 5), ("close", 6)] {
+        for (name, number) in [
+            ("read", 3),
+            ("write", 4),
+            ("open", 5),
+            ("close", 6),
+            // Entry 1 is the raw `_exit`, not the `exit(3)` wrapper. It bound to nothing at all
+            // until worklog 543, which is why it is pinned here beside the others.
+            ("_exit", 1),
+        ] {
             let bound = table
                 .get(&number)
                 .unwrap_or_else(|| panic!("{name} is {number}"));
             assert_eq!(bound.0, name, "{number} must perform {name}");
+        }
+    }
+
+    /// **Every rename names a constant that exists.**
+    ///
+    /// `SPELT_DIFFERENTLY` maps a harvested constant to the name something answers to, and a key
+    /// that matches no constant is silently inert - the entry looks like a binding, reads like one
+    /// in review, and does nothing. One stood here for a long time: `SYS_exit`, which no harvested
+    /// constant is called, because FreeBSD's entry 1 is the raw `_exit`. The result was that
+    /// syscall 1 - what a guest calls at the end of every clean run - reached no implementation,
+    /// while an implementation for it existed the whole time.
+    ///
+    /// This asserts the shape rather than that one case, because the failure is invisible by
+    /// construction: nothing breaks, a number just quietly answers `ENOSYS` forever.
+    #[test]
+    fn every_rename_names_a_constant_that_exists() {
+        let declared: std::collections::BTreeSet<String> =
+            orbistoun_hle::constants::vendor_constants_in("syscall")
+                .into_iter()
+                .chain(orbistoun_hle::constants::abi_constants_in("syscall"))
+                .map(|(name, _)| name)
+                .collect();
+        assert!(
+            !declared.is_empty(),
+            "no syscall constants were read at all"
+        );
+
+        for (constant, _) in super::SPELT_DIFFERENTLY {
+            assert!(
+                declared.contains(*constant),
+                "{constant} is renamed here but no harvested constant is called that - it is dead"
+            );
         }
     }
 

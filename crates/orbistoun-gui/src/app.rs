@@ -1438,6 +1438,12 @@ impl eframe::App for App {
 /// repository, and one of them is most of a megabyte.
 const DOCS: &[oops_docs::Doc] = &[
     oops_docs::Doc::new(
+        "user-guide",
+        "User Guide",
+        "Requirements, compatibility status, and local-first storage",
+        include_str!("../../../docs/features/user-guide.md"),
+    ),
+    oops_docs::Doc::new(
         "library",
         "The library",
         "Finding titles, and what the detail panel is telling you",
@@ -1448,6 +1454,30 @@ const DOCS: &[oops_docs::Doc] = &[
         "Running a title",
         "The report, honest failure, and what a verdict is not",
         include_str!("../../../docs/features/running.md"),
+    ),
+    oops_docs::Doc::new(
+        "inspector",
+        "Execution Inspector",
+        "Live call trace inspection and HLE resolution monitoring",
+        include_str!("../../../docs/features/inspector.md"),
+    ),
+    oops_docs::Doc::new(
+        "memory",
+        "Memory & Registers",
+        "Host register context and guest virtual memory layout",
+        include_str!("../../../docs/features/memory.md"),
+    ),
+    oops_docs::Doc::new(
+        "graphics",
+        "Graphics Settings",
+        "Vulkan 1.3 pipeline, RDNA2 shader lowering, and detiling",
+        include_str!("../../../docs/features/graphics.md"),
+    ),
+    oops_docs::Doc::new(
+        "controllers",
+        "Controller Setup",
+        "DualSense, XInput, and keyboard button mapping",
+        include_str!("../../../docs/features/controllers.md"),
     ),
     oops_docs::Doc::new(
         "naming",

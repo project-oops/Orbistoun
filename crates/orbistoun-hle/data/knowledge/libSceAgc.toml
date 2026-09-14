@@ -1,13 +1,58 @@
 library = "libSceAgc"
 
 [[function]]
+name = "sceAgcAcbAcquireMem"
+purpose = "Writes a cache-acquire packet into an asynchronous-compute command buffer."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/acb-acquire-mem-getsize): sceAgcAcbAcquireMemGetSize answered a reservation of 32 bytes (8 dwords); the builder then advanced the writer by exactly 32 bytes and wrote exactly 32 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
 name = "sceAgcAcbDispatchIndirect"
 purpose = "Records a compute dispatch whose parameters are read from memory rather than given directly."
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcAcbDmaData"
+purpose = "Records a DMA transfer into an asynchronous-compute command buffer."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/acb-dma-data-getsize): sceAgcAcbDmaDataGetSize answered a reservation of 28 bytes (7 dwords); the builder then advanced the writer by exactly 28 bytes and wrote exactly 28 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcAcbJump"
+purpose = "Chains to another command buffer from an asynchronous-compute queue."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/acb-jump-getsize): sceAgcAcbJumpGetSize answered a reservation of 16 bytes (4 dwords); the builder then advanced the writer by exactly 16 bytes and wrote exactly 16 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcCbBranch"
+purpose = "Writes a branch into a command buffer."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-branch-getsize): sceAgcCbBranchGetSize answered a reservation of 56 bytes (14 dwords); the builder then advanced the writer by exactly 56 bytes and wrote exactly 56 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcCbNop"
@@ -17,11 +62,25 @@ edge_cases = [
     "**No arity is claimed.** obSCEne called it with a command-buffer writer in the first argument and the rest zeroed, which establishes that the first argument is that writer and nothing about how many arguments the function takes. The declaration's 6 is the trampoline's full capture, not a claim (D504, D565).",
     "Read as a packet header (type in bits 30-31, opcode in bits 8-15) that is type 3, opcode 0x10. The count field reads 0x3fff, which does NOT describe a 4-byte packet - the one of the four measured builders whose length arithmetic does not close, and consistent with a no-op used as filler where the count is not a body length.",
     "The field split used to read it is **derived, not cited**: it is the only reading under which the measured lengths of the other three builders close exactly, which is evidence and is not a document. No further hardware run settles it - it is a question about how these bytes are read, not about what the console did (D565).",
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-nop-getsize): sceAgcCbNopGetSize answered a reservation of 4 bytes (1 dwords); the builder then advanced the writer by exactly 4 bytes and wrote exactly 4 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    'MEASURED: the size is argument-driven and linear. Sweeping the first argument through 0, 1, 2, 4 and 8 returned reservations of 0, 4, 8, 16 and 32 bytes - exactly four bytes per unit, so this builder emits n dwords where n is that argument. This retires the D565 puzzle that the single captured dword had a count field of 0x3fff which "does not describe a 4-byte packet": the 4-byte capture was simply the n=1 case, and the count field is not a body length for a filler no-op.',
 ]
 known_by = "measured"
-cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/cb-nop, firmware 12.40, native title, prospero (agc)."
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-nop-getsize."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
+
+[[function]]
+name = "sceAgcCbQueueEndOfPipeAction"
+purpose = "Queues an action to run when the pipeline drains."
+edge_cases = [
+    "PARTIALLY MEASURED, and the halves are not equal. sceAgcCbQueueEndOfPipeActionGetSize resolved and answered 32 bytes (8 dwords). The builder itself did NOT resolve on this leg, so nothing here says what it writes - the check reports partial for exactly that reason, and the reservation is the whole of what is known.",
+    "CORROBORATION, arithmetic rather than a single row. prosper audit reconstructed a 16-dword submit epilogue from what one title reserves, and identified its two occupants as AcquireMem plus the end-of-pipe action; that reconstruction is what forced its RELEASE_MEM from 9 dwords down to 8. Measured here independently: sceAgcDcbAcquireMem reserves 8 dwords and this builder reserves 8. 8 + 8 = 16, the epilogue exactly. prosper inferred the pair from guest behaviour and never measured either; both numbers are measured here and the sum matches.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcCbReleaseMem"
@@ -36,9 +95,44 @@ found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
 
 [[function]]
+name = "sceAgcCbSetShRegisterRangeDirect"
+purpose = "Writes a run of consecutive shader registers, the values carried directly in the packet."
+edge_cases = [
+    "MEASURED, complete packet: 16 bytes - header 0xc0027600, register offset 8, then two values 0x12345678 and 0x9abcdef0. Type 3, opcode 0x76, count 2, so four dwords: one header, one selector, and one dword per register written. For n registers that is n + 2 dwords.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "REFUTES a specific claim of prosper. Its table gives n + 4 dwords for this builder and states that it prepends a two-dword NOP marker 0x6875000d, described there as mirroring the real library. The measured packet begins with the register write itself and carries no marker of any kind, so the real library does not prepend one. n + 2 is what it emits.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-sh-reg-direct."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcCreateInterpolantMapping"
+purpose = "Fills the 32-entry interpolant mapping table that routes vertex-shader exports to pixel-shader inputs (SPI_PS_INPUT_CNTL_0..31)."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): with no vs/ps remap it writes 32 quadwords, entry i = ((i << 32) | (0x191 + i)). The first two came back 0x191 and 0x1_0000_0192, fixing both the base (0x191) and the per-entry stride.",
+    "Real arity is 3 (mapping, vs, ps); the declaration's 6 is the trampoline capture, so no arity is recorded here to disagree with it. When vs/ps are supplied the entries remap vs exports (vs+0x38) to ps inputs (ps+0x30); that remap is only partly specified, so orbistoun writes the measured default and leaves the rest as the guest prepared it (principle 3).",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (interpolant table)."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcCreatePrimState"
+purpose = "Instantiates the primitive-state routing block and records the primitive topology in it."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14, read-modify-write so the rest of the byte is preserved. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
+    "The routing word at prim_state+0xc is only partly specified in the measurement, so orbistoun writes the measured topology field and leaves the rest as the guest prepared it (principle 3).",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
+found_on = "2026-09-12"
+
+[[function]]
 name = "sceAgcCreateShader"
 arity = 4
 purpose = "Hands the driver a shader: a destination for the resulting object, a small header describing the payload, and the shader bytecode itself."
+partial = "Measured in its core - success rc 0x0 with the object filled, +0x30 = 0 (quadword) and +0x50 = 0 (dword, low byte used), on obSCEne's retail call shape (D565, D556) - but not complete, and these are the open questions rather than assumptions (a measured entry carries no assumptions). The 0x18 after the magic is taken to be the header's own size by analogy with sceKernelDirectMemoryQuery's size argument (D083) and is unverified - no guest has been seen reacting to it being wrong. Whether arg3 is a length, a flags word or something else is unestablished; it was not a mapped pointer, so no dump was taken. The full size and contents of the object arg0 points to are unknown beyond the two observed fields, and obSCEne cannot capture the rest until a leg has libSceAgc actually mapped - 472 of its symbols are absent across four captures and its sysinfo says no GPU library is mapped in that process (D556). 0x8a6c002f may be a 'GPU not initialised' refusal rather than a bad-header one (the same leg reports no GPU library mapped and the adjacent dcb-* builders crashed SIGBUS for want of it); a leg where libSceAgc is mapped is needed to tell them apart (REQ-...1621Z-7a5d). And the exact argument layout of the retail shape that succeeded should be read from obSCEne's 166-agc source rather than inferred from the header echo in the shader-object bytes."
 edge_cases = [
     "**Argument convention derived from dumps, not disassembly (D194).** arg0 is an out-parameter - thirty-two zero bytes at an image address, untouched before the call. arg1 is a header beginning with the four bytes 31 32 33 34 ('1234'), then 0x18, then a length that differs per call (0xd8 and 0x118 observed). arg2 points at the bytecode itself.",
     "Called eleven times during startup by PPSA28061, which is the furthest-progressing title in the corpus. It is the point at which a guest hands over shader bytecode, so it is the natural capture site for real translation material.",
@@ -60,7 +154,6 @@ edge_cases = [
 found_by = "generated"
 known_by = "measured"
 cites = "obSCEne reports/hardware/20260910-214758-eboot.obs.log, section 166-agc/create-shader (retail call shape)"
-partial = "Measured in its core - success rc 0x0 with the object filled, +0x30 = 0 (quadword) and +0x50 = 0 (dword, low byte used), on obSCEne's retail call shape (D565, D556) - but not complete, and these are the open questions rather than assumptions (a measured entry carries no assumptions). The 0x18 after the magic is taken to be the header's own size by analogy with sceKernelDirectMemoryQuery's size argument (D083) and is unverified - no guest has been seen reacting to it being wrong. Whether arg3 is a length, a flags word or something else is unestablished; it was not a mapped pointer, so no dump was taken. The full size and contents of the object arg0 points to are unknown beyond the two observed fields, and obSCEne cannot capture the rest until a leg has libSceAgc actually mapped - 472 of its symbols are absent across four captures and its sysinfo says no GPU library is mapped in that process (D556). 0x8a6c002f may be a 'GPU not initialised' refusal rather than a bad-header one (the same leg reports no GPU library mapped and the adjacent dcb-* builders crashed SIGBUS for want of it); a leg where libSceAgc is mapped is needed to tell them apart (REQ-...1621Z-7a5d). And the exact argument layout of the retail shape that succeeded should be read from obSCEne's 166-agc source rather than inferred from the header echo in the shader-object bytes."
 found_in = [
     "PPSA04263-app0",
     "PPSA28061-app0",
@@ -70,57 +163,16 @@ found_in = [
 found_on = "2026-08-19"
 
 [[function]]
-name = "sceAgcCreateInterpolantMapping"
-purpose = "Fills the 32-entry interpolant mapping table that routes vertex-shader exports to pixel-shader inputs (SPI_PS_INPUT_CNTL_0..31)."
+name = "sceAgcDcbAcquireMem"
+purpose = "Writes a cache-acquire packet into a command buffer."
 edge_cases = [
-    "MEASURED (obSCEne 9a41): with no vs/ps remap it writes 32 quadwords, entry i = ((i << 32) | (0x191 + i)). The first two came back 0x191 and 0x1_0000_0192, fixing both the base (0x191) and the per-entry stride.",
-    "Real arity is 3 (mapping, vs, ps); the declaration's 6 is the trampoline capture, so no arity is recorded here to disagree with it. When vs/ps are supplied the entries remap vs exports (vs+0x38) to ps inputs (ps+0x30); that remap is only partly specified, so orbistoun writes the measured default and leaves the rest as the guest prepared it (principle 3).",
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-acquire-mem-getsize): sceAgcDcbAcquireMemGetSize answered a reservation of 32 bytes (8 dwords); the builder then advanced the writer by exactly 32 bytes and wrote exactly 32 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
 ]
 known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (interpolant table)."
-found_on = "2026-09-12"
-
-[[function]]
-name = "sceAgcUpdateInterpolantMapping"
-purpose = "Rewrites the interpolant mapping table in place, same layout as sceAgcCreateInterpolantMapping."
-edge_cases = [
-    "MEASURED (obSCEne 9a41): writes the same 32-quadword default table, ((i << 32) | (0x191 + i)), into the caller's existing mapping rather than a fresh one.",
-]
-known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders."
-found_on = "2026-09-12"
-
-[[function]]
-name = "sceAgcCreatePrimState"
-purpose = "Instantiates the primitive-state routing block and records the primitive topology in it."
-edge_cases = [
-    "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14, read-modify-write so the rest of the byte is preserved. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
-    "The routing word at prim_state+0xc is only partly specified in the measurement, so orbistoun writes the measured topology field and leaves the rest as the guest prepared it (principle 3).",
-]
-known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
-found_on = "2026-09-12"
-
-[[function]]
-name = "sceAgcUpdatePrimState"
-purpose = "Updates the primitive topology in an existing primitive-state block."
-edge_cases = [
-    "MEASURED (obSCEne 9a41): rewrites the low five bits of sec_state+0x14 with the new topology; the sweep recorded topo-orig 4 -> topo-updated 1. Real arity is 3 (prim_state, sec_state, topology); the declaration's 6 is the trampoline capture.",
-]
-known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
-found_on = "2026-09-12"
-
-[[function]]
-name = "sceAgcLinkShaders"
-purpose = "Composite shader linker: writes the interpolant table and the stage-routing word into a link-state block."
-edge_cases = [
-    "MEASURED (obSCEne 9a41): writes 256 bytes of interpolants at link_state+0x0 (same table as sceAgcCreateInterpolantMapping) and the stage-routing quadword 0x0000_0002_0000_029b at link_state+0x108. Both halves measured.",
-    "Real arity is 5+ (link_state, sec_state, null, vs, ps, ...); the declaration's 6 is the trampoline capture. Where the layout between the two measured regions is unspecified, orbistoun leaves it as the guest prepared it rather than inventing bytes (principle 3).",
-]
-known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (routing quadword)."
-found_on = "2026-09-12"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcDcbDmaData"
@@ -128,20 +180,101 @@ purpose = "Writes a DMA-data packet into a command buffer."
 edge_cases = [
     "MEASURED: 28 bytes. First dword 0xc0055000 - type 3, opcode 0x50, count 5; (count + 2) dwords is exactly 28 bytes (D565).",
     "Body with zeroed arguments: 00 40 00 00 | b0 bb ff ee | 07 00 00 00 | 00 00 00 00 | 00 00 00 00 | b0 bb ff 82.",
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-dma-data-getsize): sceAgcDcbDmaDataGetSize answered a reservation of 28 bytes (7 dwords); the builder then advanced the writer by exactly 28 bytes and wrote exactly 28 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
 ]
 known_by = "measured"
-cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/dcb-dma-data."
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-dma-data-getsize."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
 
 [[function]]
 name = "sceAgcDcbDrawIndex"
 purpose = "Records an indexed draw into a draw command buffer."
+edge_cases = [
+    "MEASURED: 24 bytes - header 0xc0042700, type 3, opcode 0x27, count 4, so six dwords. Three of the five body dwords were reported: an address low half 0x12345678, its high half 0, and an index count 3. The remaining two body dwords were not dumped by this check, so the body is partially known and the size fully known.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "DIVERGENCE of the private-payload kind. prosper emits 7 dwords against a measured 6, and its table says the extra capacity carries a 64-bit draw modifier of its own - the same shape as its DcbJump row, where a private dword makes the packet one larger than the library. The published PM4 size is 6 and matches the measurement.",
+]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbDrawIndexAuto"
+purpose = "Records a draw whose indices are generated automatically rather than read from a buffer."
+edge_cases = [
+    "MEASURED, complete packet: 12 bytes - header 0xc0012d00, then index count 3 and draw initiator 2. Type 3, opcode 0x2d, count 1, so three dwords. Both body dwords are the arguments the probe supplied, so the argument-to-dword mapping is direct.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "DIVERGENCE, and the largest found so far. prosper emits 7 dwords here against a measured 3, and its own table marks the row LOW confidence with the note that this is not a bare PM4 draw. The measurement says it is exactly a bare PM4 draw: header, count, initiator. The published PM4 size for DRAW_INDEX_AUTO is 3 and agrees with the hardware; prosper is over by four dwords.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-auto."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbDrawIndexIndirect"
+purpose = "Records an indexed draw whose parameters are read from memory rather than given directly."
+edge_cases = [
+    "MEASURED: sceAgcDcbDrawIndexIndirectGetSize answered 20 bytes (5 dwords); the builder advanced the writer by 20 and wrote 20. All three agree.",
+    'THREE-WAY DISAGREEMENT, now settled by measurement. prosper emits 4 dwords for this builder and its audit records the published PM4 DRAW_INDEX_INDIRECT packet as 6, marking its own row LOW confidence and "fewer - safe direction". Neither figure is 5. The library itself reserves 5, so the published packet size is not what this entry point emits and prosper 4 is under it. Emitting fewer than the library is safe for a guest that asks GetSize and wrong for one that inlines the size, so orbistoun encodes 5 - the measured number - rather than either borrowed one.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbDrawIndexIndirectMulti"
+purpose = "Records several indexed draws whose parameters are read from memory."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-multi-getsize): sceAgcDcbDrawIndexIndirectMultiGetSize answered a reservation of 64 bytes (16 dwords); the builder then advanced the writer by exactly 64 bytes and wrote exactly 64 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+    "MEASURED: the builder ran and advanced 64 bytes, matching the 64-byte reservation its GetSize answered. No packet header was captured for this one, so the size is known and the encoding is not.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-multi-getsize."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbEventWrite"
+purpose = "Writes an event marker into a command buffer."
+edge_cases = [
+    "MEASURED, complete packet: called with (62, 0) it wrote 8 bytes - header 0xc0004600, then one body dword 0x3e (the 62 passed in). Type 3, opcode 0x46, count 0, so two dwords. This is the short, non-address form of the event write.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "NOT a contradiction with prosper, despite different numbers. prosper publishes 4 dwords and describes its row as the address-carrying form. The call measured here passed no address, so 2 and 4 are plausibly the two forms of the same packet rather than a disagreement. Which form a title uses is unmeasured; do not encode 2 as though it were the only shape.",
+    "WRITER HANDLE (arg0), shared by every builder: +0x00 begin, +0x08 end, +0x10 write cursor, +0x18 limit, +0x20 overflow callback, +0x28 its context, +0x30 reserved-dword counter. Guest-observed on PPSA02664, then confirmed by the library itself - obSCEne builds a handle to this shape and real builders write correct packets through it and advance +0x10 by exactly what each GetSize answered, across sixteen builders. Poisoning +0x20 with 0xCC makes the library call through that slot and fault at 0xCCCCCCCCCCCCCCCC, which is direct evidence it reads a function pointer there.",
+    "EVERY BUILDER RETURNS A POINTER TO THE PACKET IT WROTE, not an opaque status. obSCEne reports 0x200060078 from every builder in every run, which was first recorded here as a constant on the strength of that stability. That was wrong, and the arithmetic shows it: obSCEne allocates its probe with oops_mem_alloc, base 0x200060000 aligns to 0x200060040, the eight-byte count prefix puts the struct at 0x200060038, and its command buffer sits 0x40 further on - at exactly 0x200060078. Other allocations in the same sweep (0x200080000, 0x200028000) sit in the same region. It is constant only because that allocator is deterministic and every check resets the writer before calling.",
+    "WHICH pointer is derived rather than measured. Every obSCEne check resets the writer first, so cur == begin at the moment of the call and the two readings - the packet address and the buffer start - are indistinguishable in the data. The packet address is the reading orbistoun takes, because it is the one that makes the guest work: PPSA02664 passes a builder return straight into sceAgcSetCxRegIndirectPatchAddRegisters, and a family of about twenty sceAgc*Patch* entry points exists to amend an already-written packet. Returning the buffer start would let only the first packet in a buffer ever be patched. Two builders called without a reset between them would settle it.",
+]
+known_by = "measured"
+cites = "obSCEne obs_agc_cb_probe, sweeps 20260914-000606/-095045/-100833"
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbGetLodStats"
+purpose = "Records a request for level-of-detail statistics."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-get-lod-stats-getsize): sceAgcDcbGetLodStatsGetSize answered a reservation of 20 bytes (5 dwords); the builder then advanced the writer by exactly 20 bytes and wrote exactly 20 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbJump"
+purpose = "Chains from one command buffer to another."
+edge_cases = [
+    "MEASURED: sceAgcDcbJumpGetSize answered 16 bytes (4 dwords); the builder advanced the writer by 16 and wrote 16. All three agree.",
+    'DIVERGENCE from prosper, and it is the load-bearing kind. prosper (an independent PS5 emulator, public audit docs/AGC_PACKET_SIZES.md) emits 5 dwords here and documents the extra one as a predication flag slot that its own sceAgcSetPacketPredication writes into the packet afterwards - private state, not a copy of a hardware field. Its audit lists the row as "oversized by 1, but the extra dword is load-bearing" and open. The measurement here says the real library reserves 4. That matters beyond bookkeeping: prosper own audit explains that a guest which inlines the size at compile time never asks GetSize and cannot be corrected, so emitting more dwords than the library overruns a reservation the guest made in good faith - the exact defect class that cost it a title (a 16-dword submit epilogue overrun). orbistoun should encode 4 and keep any per-packet state of its own outside the packet.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcDcbResetQueue"
@@ -155,13 +288,114 @@ cites = "obSCEne reports/hardware/20260910-174437-eboot.obs.log, section 166-agc
 found_on = "2026-09-10"
 
 [[function]]
+name = "sceAgcDcbRewind"
+purpose = "Rewinds the command-buffer write cursor."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-rewind-getsize): sceAgcDcbRewindGetSize answered a reservation of 8 bytes (2 dwords); the builder then advanced the writer by exactly 8 bytes and wrote exactly 8 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbSetCxRegisterDirect"
+purpose = "Writes one value into one context register, carried directly in the packet."
+edge_cases = [
+    "MEASURED, complete packet: 12 bytes - header 0xc0016900, register offset 0x200, value 0x12345678. Type 3, opcode 0x69, count 1, so three dwords. Both arguments appear in the packet unchanged and in the order given.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "AGREES with prosper (3 dwords) and with the published PM4 size for a single-value context register write. oops-sdk emits the same header by hand, so three implementations agree.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-cx-reg."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbSetCxRegistersIndirect"
+purpose = "Writes a packet whose register values are pointed to rather than carried inline."
+edge_cases = [
+    "THE PRODUCER OF THE PATCH FAMILY, and the wall for the two furthest retail titles. Called once by PPSA02664, whose return is then passed as arg0 to sceAgcSetCxRegIndirectPatchAddRegisters thirty-two times. Unimplemented, it answers the 0xf7ff0001 placeholder, and the guest carries that into every patch call as a packet address.",
+    "NOT IMPLEMENTABLE YET, and the reason is worth stating rather than rediscovering. Its encoding is unmeasured: obSCEne measured sceAgcDcbSetCxRegistersIndirectGetSize but never the packet, and all twenty sceAgc*Patch* symbols are absent from every census it has run. Emitting a packet here would mean inventing both its body and what the patch functions do to it - two guesses stacked, where the second is invisible because it amends the first.",
+]
+known_by = "guest-observed"
+cites = "PPSA02664-app0 run 2026-09-14, call trace; obSCEne sweep 20260914-100833 measured its GetSize only."
+found_on = "2026-09-14"
+
+[[function]]
 name = "sceAgcDcbSetIndexBuffer"
 purpose = "Points a draw command buffer at index data."
+edge_cases = [
+    "MEASURED, complete packet: 12 bytes - header 0xc0012600, then an address low half 0x12345678 and high half 0. Type 3, opcode 0x26, count 1, so three dwords. The address passed in appears split across the two body dwords, so this packet carries a 64-bit buffer base.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "AGREES with prosper (3 dwords) and with the published PM4 size for INDEX_BASE.",
+]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-index-buffer."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
+
+[[function]]
+name = "sceAgcDcbSetIndexCount"
+purpose = "Sets the number of indices a subsequent indexed draw will read."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-index-count-getsize): sceAgcDcbSetIndexCountGetSize answered a reservation of 8 bytes (2 dwords); the builder then advanced the writer by exactly 8 bytes and wrote exactly 8 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+    "MEASURED, complete packet, in addition to the reservation already recorded: 8 bytes - header 0xc0001300, then the count 0x24. Type 3, opcode 0x13, count 0, so two dwords, which matches the 8-byte reservation its GetSize answered in the same sweep. Reservation and emitted packet agree.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-index-count."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbSetIndexSize"
+purpose = "Sets the width of the entries in the index buffer."
+edge_cases = [
+    "MEASURED, complete packet: 12 bytes - header 0xc0017a00, register selector 0x20000243, value 0x400. Type 3, opcode 0x7a, count 1, so three dwords. The selector is notable: its low half 0x243 is an ordinary register offset while the high half 0x20000000 is set, which the sibling sceAgcDcbSetUcRegisterDirect (opcode 0x79, selector 0x242, no high bits) does not carry. So 0x7a is a distinct opcode from 0x79 and the high bits are part of its selector - derived from the pair measured in one run, not cited.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "DIVERGENCE, and this one is prosper being SHORT. It publishes 2 dwords for this builder against a measured 3. Under-emitting is the safe direction for a guest that asks GetSize and still wrong for one that inlined 3, and it is the opposite direction from every other divergence found in this sweep.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-index-size."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbSetNumInstances"
+purpose = "Sets how many instances a subsequent draw will produce."
+edge_cases = [
+    "MEASURED, complete packet: 8 bytes - header 0xc0002f00, then the instance count 1. Type 3, opcode 0x2f, count 0, so two dwords.",
+    "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "AGREES with prosper (2 dwords) and with the published PM4 size for NUM_INSTANCES. Independently, oops-sdk emits this exact header by hand in src/agc/agc_draw.c from the public hardware documentation, so three implementations agree on it.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-num-instances."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbSetUcRegisterDirect"
+purpose = "Writes one value into one register, carried directly in the packet."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-uc-register-direct-getsize): sceAgcDcbSetUcRegisterDirectGetSize answered a reservation of 12 bytes (3 dwords); the builder then advanced the writer by exactly 12 bytes and wrote exactly 12 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+    "MEASURED, complete packet, in addition to the reservation already recorded: 12 bytes - header 0xc0017900, register offset 0x242, value 4. Type 3, opcode 0x79, count 1, so three dwords, matching the 12-byte reservation its GetSize answered. Independently, oops-sdk hand-writes this same header with this same register offset 0x242 in src/agc/agc_draw.c, having derived it from the public hardware documentation rather than from the library.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-uc-reg."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbStallCommandBufferParser"
+purpose = "Stalls the command-buffer parser."
+edge_cases = [
+    'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-stall-cb-parser-getsize): sceAgcDcbStallCommandBufferParserGetSize answered a reservation of 8 bytes (2 dwords); the builder then advanced the writer by exactly 8 bytes and wrote exactly 8 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
+    "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
+    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcDcbWaitRegMem"
@@ -169,9 +403,11 @@ purpose = "Writes a wait-on-register-or-memory sequence into a command buffer."
 edge_cases = [
     "MEASURED: 56 bytes, and it is THREE packets rather than one - 0xc0027904 (opcode 0x79, 16 bytes), then 0xc0053c00 (opcode 0x3c, 28 bytes), then 0xc0017904 (opcode 0x79, 12 bytes). They sum to exactly 56 (D565).",
     "That a single builder emits a multi-packet sequence is the finding: a command-stream parser cannot assume one call is one packet.",
+    'ARGUMENT-SENSITIVE, measured: called twice through the same writer, once with every argument zeroed and once with distinct per-argument sentinels, the builder wrote 56 bytes in the first pass and 0 bytes in the second. What is established is that the two passes differ; 56-versus-0 is a refusal shape, not a length shape, so the honest reading is that the builder declined the sentinel arguments rather than that it encoded them shorter. Nothing here establishes which argument it rejected. (The obSCEne check reports this as "the packet length depends on the argument values", which names a cause its own measurement does not reach - recorded here as what was measured, not as what the message concluded.)',
+    "THE PROSPER CONTRADICTION IS NOT RESOLVED, and is now better bounded. prosper publishes 9 dwords (36 bytes) for this builder with HIGH confidence, having enumerated the fields on both sides after two earlier wrong figures. The zero-argument capture here is 56 bytes as three packets, which is not 9 dwords by any reading. Since the builder is now known to be argument-sensitive, the two are not necessarily in conflict: a 9-dword single WAIT_REG_MEM is plausibly what real arguments produce, and 56 bytes across three packets is what all-zero arguments produce. Settling it needs a capture with plausible arguments, which is a probe request, not a deduction.",
 ]
 known_by = "measured"
-cites = "obSCEne reports/hardware/run-native-title.txt, section 166-agc/dcb-wait-reg-mem."
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-wait-reg-mem-args."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
 
@@ -180,7 +416,6 @@ name = "sceAgcDriverSubmitAcb"
 purpose = "Submits an async compute command buffer. The compute counterpart to the draw path."
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
@@ -195,7 +430,6 @@ addresses its shaders live at - none of which can be obtained any other way.
 """
 found_by = "generated"
 known_by = "assumed"
-assumptions = ["The stated purpose is read off the name and nothing else. No arity, no argument layout, and no behaviour has been established for this entry."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 note = "Nothing beyond the name is established. No guest has reached it."
@@ -214,3 +448,42 @@ known_by = "published"
 cites = "SELFish REQ-20260909T1250Z-1f74, resolved 2026-09-09: five independent published identifier tables (SharpEMU, SharpEMU-aerolib, aerolib.csv, craziiEmu, fpPS4) carried in obSCEne data/mined-names.txt"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-09"
+
+[[function]]
+name = "sceAgcLinkShaders"
+purpose = "Composite shader linker: writes the interpolant table and the stage-routing word into a link-state block."
+edge_cases = [
+    "MEASURED (obSCEne 9a41): writes 256 bytes of interpolants at link_state+0x0 (same table as sceAgcCreateInterpolantMapping) and the stage-routing quadword 0x0000_0002_0000_029b at link_state+0x108. Both halves measured.",
+    "Real arity is 5+ (link_state, sec_state, null, vs, ps, ...); the declaration's 6 is the trampoline capture. Where the layout between the two measured regions is unspecified, orbistoun leaves it as the guest prepared it rather than inventing bytes (principle 3).",
+]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (routing quadword)."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcSetCxRegIndirectPatchAddRegisters"
+purpose = "Amends an already-written indirect register packet to cover another register."
+edge_cases = [
+    "A PATCH, NOT A BUILDER, and the guest's own call pattern is what says so. PPSA02664 calls sceAgcDcbSetCxRegistersIndirect exactly ONCE and this exactly THIRTY-TWO times. The same holds for the Sh and Uc families at 1:1 and 1:3. So one packet is written and then amended repeatedly - which is what the whole sceAgc*Patch* family is for, and why a builder's return value matters: it is the packet's address (D686).",
+    "ARG0 IS THE PACKET, and orbistoun currently hands the guest a placeholder there. Because sceAgcDcbSetCxRegistersIndirect is unimplemented it answers 0xf7ff0001, and the trace shows that value arriving as this function's first argument, unchanged, on all thirty-two calls. The guest is carrying orbistoun's placeholder as a pointer - exactly the leak D670 anticipated - and faults later inside memcpy rather than at the call that failed.",
+    "EIGHT BYTES PER CALL, from the guest. Each patch call is immediately preceded by a memcpy from the same loop body (image+0x42ebd, then image+0x42ecd), with destinations stepping 0x74000238f028, f030, f038, f040 - eight bytes apart. So the guest writes one 8-byte entry and patches once per entry. That constrains the shape without establishing it: nothing here says what the eight bytes are.",
+]
+known_by = "guest-observed"
+cites = "PPSA02664-app0 run 2026-09-14, call trace; obSCEne census sweep 20260914-100833 (symbol absent, never measured)."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcUpdateInterpolantMapping"
+purpose = "Rewrites the interpolant mapping table in place, same layout as sceAgcCreateInterpolantMapping."
+edge_cases = ["MEASURED (obSCEne 9a41): writes the same 32-quadword default table, ((i << 32) | (0x191 + i)), into the caller's existing mapping rather than a fresh one."]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders."
+found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcUpdatePrimState"
+purpose = "Updates the primitive topology in an existing primitive-state block."
+edge_cases = ["MEASURED (obSCEne 9a41): rewrites the low five bits of sec_state+0x14 with the new topology; the sweep recorded topo-orig 4 -> topo-updated 1. Real arity is 3 (prim_state, sec_state, topology); the declaration's 6 is the trampoline capture."]
+known_by = "measured"
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
+found_on = "2026-09-12"

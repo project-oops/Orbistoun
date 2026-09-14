@@ -202,6 +202,21 @@ pub enum Stage {
     Fragment,
 }
 
+/// How a fragment input is read.
+///
+/// The guest decides this per attribute rather than per shader: `v_interp_p1_f32` and its
+/// pair interpolate, and `v_interp_mov_f32` moves a parameter out of the cache without
+/// interpolating. On the host it is a decoration on the input variable, fixed when the
+/// variable is declared - which is before any instruction is translated, and is why it has to
+/// be worked out in the same pass that finds which attributes exist at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpolation {
+    /// Interpolated across the primitive, which is the default and needs no decoration.
+    Smooth,
+    /// The provoking vertex's value, everywhere. `Flat`.
+    Flat,
+}
+
 /// Emits the module header: capabilities, the memory model, the entry point and its
 /// execution mode, and a fragment output's location.
 ///
@@ -209,8 +224,7 @@ pub enum Stage {
 /// statement about the module as a whole rather than about anything inside it.
 fn emit_header(b: &mut Builder, stage: Stage, main: Id, output: Option<Id>, inputs: &[u32]) {
     b.header(op::CAPABILITY, &[capability::SHADER]);
-    b.header(op::CAPABILITY, &[capability::FLOAT16]);
-    b.header(op::CAPABILITY, &[capability::INT16]);
+
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
     let model = match stage {
@@ -272,11 +286,18 @@ fn declare_buffers(
 /// Separate from declaring them because the two happen either side of the entry point: the
 /// interface names identifiers, and the variables are declared after. Getting that order wrong
 /// produced a module this driver ran and answered zeros from (D555).
-fn reserve_attribute_inputs(b: &mut Builder, stage: Stage, attributes: &[u32]) -> Vec<(u32, Id)> {
+fn reserve_attribute_inputs(
+    b: &mut Builder,
+    stage: Stage,
+    attributes: &[(u32, Interpolation)],
+) -> Vec<(u32, Interpolation, Id)> {
     if stage != Stage::Fragment {
         return Vec::new();
     }
-    attributes.iter().map(|attr| (*attr, b.id())).collect()
+    attributes
+        .iter()
+        .map(|(attr, how)| (*attr, *how, b.id()))
+        .collect()
 }
 
 /// Declares one `vec4` fragment input per attribute the shader interpolates.
@@ -289,7 +310,7 @@ fn reserve_attribute_inputs(b: &mut Builder, stage: Stage, attributes: &[u32]) -
 fn declare_attribute_inputs(
     b: &mut Builder,
     vec4: Id,
-    reserved: &[(u32, Id)],
+    reserved: &[(u32, Interpolation, Id)],
 ) -> BTreeMap<u32, Id> {
     let mut inputs = BTreeMap::new();
     if reserved.is_empty() {
@@ -297,11 +318,16 @@ fn declare_attribute_inputs(
     }
     let input_ptr = b.id();
     b.declare(op::TYPE_POINTER, &[input_ptr.0, INPUT, vec4.0]);
-    for (attribute, variable) in reserved {
+    for (attribute, how, variable) in reserved {
         b.annotate(
             op::DECORATE,
             &[variable.0, decoration::LOCATION, *attribute],
         );
+        // Smooth needs nothing: it is what an undecorated input already does, and
+        // decorating it would be stating the default as though it were a choice.
+        if *how == Interpolation::Flat {
+            b.annotate(op::DECORATE, &[variable.0, decoration::FLAT]);
+        }
         b.declare(op::VARIABLE, &[input_ptr.0, variable.0, INPUT]);
         inputs.insert(*attribute, *variable);
     }
@@ -380,8 +406,14 @@ pub struct Wavefront<'a> {
     glsl_set: Option<Id>,
     u32_type: Id,
     f32_type: Id,
-    f16_type: Id,
-    u16_type: Id,
+    /// The sixteen-bit types, declared on first use along with their capabilities.
+    ///
+    /// [`None`] until something needs them, which for nearly every module is never: the only
+    /// path that reaches them is a typed buffer load of a half-format channel. Declaring them
+    /// unconditionally asked every device for two features, and told the validation layer that
+    /// every module was relying on capabilities the device had not enabled (worklog 556).
+    f16_type: Option<Id>,
+    u16_type: Option<Id>,
     bool_type: Id,
     /// Pointer to one lane of one vector register.
     lane_ptr: Id,
@@ -401,6 +433,8 @@ pub struct Wavefront<'a> {
     program_counter: Id,
     /// The scalar condition code, as a private variable holding 0 or 1.
     condition_code: Id,
+    /// The `m0` register, as a private word starting at zero.
+    m0: Id,
     translated: usize,
 }
 
@@ -421,7 +455,7 @@ impl<'a> Wavefront<'a> {
         encodings: &'a EncodingTable,
         width: Width,
         stage: Stage,
-        attributes: &[u32],
+        attributes: &[(u32, Interpolation)],
     ) -> Self {
         let mut b = Builder::new().with_version(orbistoun_spirv::VERSION_1_3);
 
@@ -429,8 +463,7 @@ impl<'a> Wavefront<'a> {
         let fn_type = b.id();
         let u32_type = b.id();
         let f32_type = b.id();
-        let f16_type = b.id();
-        let u16_type = b.id();
+
         let bool_type = b.id();
         let main = b.id();
         let entry_block = b.id();
@@ -442,6 +475,7 @@ impl<'a> Wavefront<'a> {
         let counter = b.id();
         let counter_zero = b.id();
         let scc = b.id();
+        let m0 = b.id();
         let local_count = b.id();
         let local_array = b.id();
         let local_array_ptr = b.id();
@@ -462,32 +496,28 @@ impl<'a> Wavefront<'a> {
         // **not** reliably rejected - this driver answered zeros instead, which is the failure
         // that costs an afternoon (D555).
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
-        let interface: Vec<u32> = input_ids.iter().map(|(_, id)| id.0).collect();
+        let interface: Vec<u32> = input_ids.iter().map(|(_, _, id)| id.0).collect();
         emit_header(&mut b, stage, main, output, &interface);
 
         b.declare(op::TYPE_VOID, &[void.0]);
         b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
         b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
         b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
-        b.declare(op::TYPE_FLOAT, &[f16_type.0, 16]);
-        b.declare(op::TYPE_INT, &[u16_type.0, 16, 0]);
+
         b.declare(op::TYPE_BOOL, &[bool_type.0]);
         let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
-        // The program counter. Zero-initialised so the shader starts at its first block
-        // rather than at whatever the driver left in the variable.
+        // The program counter, the scalar condition code and m0: one private word each,
+        // sharing a pointer type and a zero initialiser. Zero so the shader starts at its
+        // first block rather than at whatever the driver left in the variable.
         b.declare(op::TYPE_POINTER, &[counter_ptr.0, PRIVATE, u32_type.0]);
         b.declare(op::CONSTANT, &[u32_type.0, counter_zero.0, 0]);
-        b.declare(
-            op::VARIABLE,
-            &[counter_ptr.0, counter.0, PRIVATE, counter_zero.0],
-        );
-        // The scalar condition code shares the counter's pointer type and initialiser:
-        // both are a private word starting at zero.
-        b.declare(
-            op::VARIABLE,
-            &[counter_ptr.0, scc.0, PRIVATE, counter_zero.0],
-        );
+        for word in [counter, scc, m0] {
+            b.declare(
+                op::VARIABLE,
+                &[counter_ptr.0, word.0, PRIVATE, counter_zero.0],
+            );
+        }
 
         declare_local_share(
             &mut b,
@@ -524,8 +554,8 @@ impl<'a> Wavefront<'a> {
             glsl_set: None,
             u32_type,
             f32_type,
-            f16_type,
-            u16_type,
+            f16_type: None,
+            u16_type: None,
             bool_type,
             lane_ptr: files.lane_ptr,
             scalar_ptr: files.scalar_ptr,
@@ -539,6 +569,7 @@ impl<'a> Wavefront<'a> {
             local_ptr,
             program_counter: counter,
             condition_code: scc,
+            m0,
             translated: 0,
         };
 
@@ -780,6 +811,9 @@ impl Model for Wavefront<'_> {
                 let (low, _) = self.read_lane_mask(mask)?;
                 Ok(low)
             }
+            // The m0 register read back as a source: whatever the shader last wrote.
+            // Uniform across the wavefront, like every scalar.
+            Operand::Named(name) if name == model::M0 => Ok(self.read_m0()),
             // An inline float, named by the operand table. Its *bits* go into the
             // register, because that is what a register holds - storing the operand
             // code, or the value converted, are both plausible and both wrong.
@@ -838,12 +872,26 @@ impl Model for Wavefront<'_> {
         set
     }
 
-    fn f16_type(&self) -> Id {
-        self.f16_type
+    fn f16_type(&mut self) -> Id {
+        if let Some(id) = self.f16_type {
+            return id;
+        }
+        let id = self.builder.id();
+        self.builder.header(op::CAPABILITY, &[capability::FLOAT16]);
+        self.builder.declare(op::TYPE_FLOAT, &[id.0, 16]);
+        self.f16_type = Some(id);
+        id
     }
 
-    fn u16_type(&self) -> Id {
-        self.u16_type
+    fn u16_type(&mut self) -> Id {
+        if let Some(id) = self.u16_type {
+            return id;
+        }
+        let id = self.builder.id();
+        self.builder.header(op::CAPABILITY, &[capability::INT16]);
+        self.builder.declare(op::TYPE_INT, &[id.0, 16, 0]);
+        self.u16_type = Some(id);
+        id
     }
 
     /// Writes both halves of a lane mask.
@@ -873,6 +921,19 @@ impl Model for Wavefront<'_> {
 
     fn condition_code(&mut self) -> Id {
         self.condition_code
+    }
+
+    fn read_m0(&mut self) -> Id {
+        let (u32_type, pointer) = (self.u32_type, self.m0);
+        let value = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        value
+    }
+
+    fn write_m0(&mut self, value: Id) {
+        let pointer = self.m0;
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
     }
 
     fn instructions(&self) -> usize {
@@ -974,11 +1035,21 @@ impl Model for Wavefront<'_> {
 /// one lazily when an interpolation is reached, would put a `Variable` in the middle of a
 /// function body, which is not where SPIR-V allows one (D555).
 ///
-/// Only `v_interp_p1_f32` and `v_interp_p2_f32` are read. `v_interp_mov_f32` is refused - see
-/// `model::BLOCKED` - so declaring an input for its attribute would reserve a location for a
-/// shader that cannot be translated anyway.
-fn interpolated_attributes(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
-    let mut attributes: Vec<u32> = Vec::new();
+/// # Why the mode is decided here too
+///
+/// `v_interp_p1_f32` and its pair interpolate; `v_interp_mov_f32` reads a parameter without
+/// interpolating, which on the host is the `Flat` decoration - and a decoration belongs to the
+/// variable, so it is fixed here rather than when the instruction is reached.
+///
+/// An attribute a shader reads **both** ways cannot be declared either way, because one
+/// variable carries one decoration. That is refused by the caller rather than resolved by
+/// picking: reading a flat parameter through an interpolated input returns a different number
+/// everywhere except one vertex, and nothing in the output would say so.
+fn interpolated_attributes(
+    decode: &Decode,
+    encodings: &EncodingTable,
+) -> Result<Vec<(u32, Interpolation)>, TranslateError> {
+    let mut attributes: Vec<(u32, Interpolation)> = Vec::new();
     for instruction in &decode.instructions {
         let Some(family) = instruction
             .encoding
@@ -990,19 +1061,32 @@ fn interpolated_attributes(decode: &Decode, encodings: &EncodingTable) -> Vec<u3
         let Some(name) = encodings.mnemonic_for(family, instruction.opcode) else {
             continue;
         };
-        if name != "v_interp_p1_f32_e32" && name != "v_interp_p2_f32_e32" {
-            continue;
-        }
+        let how = match name {
+            "v_interp_p1_f32_e32" | "v_interp_p2_f32_e32" => Interpolation::Smooth,
+            "v_interp_mov_f32_e32" => Interpolation::Flat,
+            _ => continue,
+        };
         // Attribute is the third operand, by the solved layout. A decode that produced fewer is
         // one the translation will refuse anyway, so it contributes no input here.
-        if let Some(Operand::Immediate(attribute)) = instruction.operands.get(2)
-            && let Ok(attribute) = u32::try_from(*attribute)
-            && !attributes.contains(&attribute)
-        {
-            attributes.push(attribute);
+        let Some(Operand::Immediate(attribute)) = instruction.operands.get(2) else {
+            continue;
+        };
+        let Ok(attribute) = u32::try_from(*attribute) else {
+            continue;
+        };
+        match attributes.iter().find(|(seen, _)| *seen == attribute) {
+            Some((_, seen_as)) if *seen_as != how => {
+                return Err(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: "this shader reads one attribute both interpolated and flat, and a 
+                             host input is one or the other; refused rather than picking one",
+                });
+            }
+            Some(_) => {}
+            None => attributes.push((attribute, how)),
         }
     }
-    attributes
+    Ok(attributes)
 }
 
 /// Translates a whole decoded shader at wavefront fidelity, for a named stage.
@@ -1016,19 +1100,8 @@ pub fn translate_for(
     width: Width,
     stage: Stage,
 ) -> Result<(Vec<u32>, usize), TranslateError> {
-    let attributes = interpolated_attributes(decode, encodings);
+    let attributes = interpolated_attributes(decode, encodings)?;
     let mut module = Wavefront::for_stage(encodings, width, stage, &attributes);
-    crate::control::emit(&mut module, decode, encodings)?;
-    module.finish()
-}
-
-/// Translates a whole decoded shader at wavefront fidelity.
-pub fn translate(
-    decode: &Decode,
-    encodings: &EncodingTable,
-    width: Width,
-) -> Result<(Vec<u32>, usize), TranslateError> {
-    let mut module = Wavefront::new(encodings, width);
     crate::control::emit(&mut module, decode, encodings)?;
     module.finish()
 }

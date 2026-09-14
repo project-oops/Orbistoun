@@ -883,6 +883,12 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
         // reaches this rung by a flip a real port accepted rather than by a call it made
         // (D558).
         "Entered" if trace.frames > 0 => Reach::Flipped,
+        // **Checked after the flip, deliberately.** A guest that presented a frame and then
+        // exited is recorded as having flipped: the frame is the stronger claim, and the
+        // deliberate stop is still carried in the outcome.
+        "Entered" if trace.stopped.as_deref() == Some(orbistoun_overrides::DELIBERATE_EXIT) => {
+            Reach::Exited
+        }
         "Entered" => Reach::Entered,
         "Linked" => Reach::Linked,
         "ImportsResolved" | "ContainerParsed" => Reach::Parsed,
@@ -1900,5 +1906,110 @@ mod tests {
         assert_eq!(progress.verdict, Verdict::Further);
         assert_eq!(progress.distinct_delta, 2);
         assert!(progress.ended_without_a_fault);
+    }
+}
+
+#[cfg(test)]
+mod ladder {
+    use super::{CallTrace, status_of};
+    use orbistoun_overrides::DELIBERATE_EXIT;
+    use orbistoun_overrides::Reach;
+
+    /// A trace with the fields this rung turns on, and defaults for the rest.
+    fn ran(frames: u64, stopped: Option<&str>) -> CallTrace {
+        let mut trace: CallTrace = serde_json::from_str(
+            r#"{"module":"x","reached":"Entered","total_calls":9,"distinct":3,"calls":[]}"#,
+        )
+        .expect("parses");
+        trace.frames = frames;
+        trace.stopped = stopped.map(ToOwned::to_owned);
+        trace
+    }
+
+    fn reach_of(frames: u64, stopped: Option<&str>) -> Reach {
+        status_of(&ran(frames, stopped), "2026-09-14".to_owned()).reach
+    }
+
+    /// Leaving by `exit` is further than merely having run.
+    #[test]
+    fn a_deliberate_exit_outranks_having_only_entered() {
+        assert_eq!(reach_of(0, Some(DELIBERATE_EXIT)), Reach::Exited);
+        assert_eq!(reach_of(0, None), Reach::Entered);
+        assert!(Reach::Exited > Reach::Entered);
+    }
+
+    /// **A frame is the harder thing.** A guest that presented and then exited is recorded as
+    /// having flipped; the deliberate stop is still carried in the outcome.
+    #[test]
+    fn a_frame_outranks_a_deliberate_exit() {
+        assert!(Reach::Flipped > Reach::Exited);
+        assert_eq!(reach_of(8, Some(DELIBERATE_EXIT)), Reach::Flipped);
+    }
+
+    /// **Only exiting earns it.** Giving up is not finishing, and a guest that aborted or took a
+    /// signal it could not handle stopped without completing anything.
+    #[test]
+    fn giving_up_does_not_earn_the_rung() {
+        assert_eq!(reach_of(0, Some("the guest called abort")), Reach::Entered);
+        assert_eq!(
+            reach_of(
+                0,
+                Some("the guest raised a signal nothing was installed to handle")
+            ),
+            Reach::Entered
+        );
+        assert_eq!(reach_of(0, Some("ran to the time limit")), Reach::Entered);
+    }
+
+    /// **A deliberate exit beats a fault at equal reach, even on fewer imports** (D686).
+    ///
+    /// This is the case the tiebreaker exists for and the only one it was asked for: the
+    /// conformance payload's import count fell by one *because* it stopped correctly, having
+    /// previously made six further calls only by running past its own refused `exit`. A tiebreaker
+    /// below `imports` could never fire here, which is why this one sits above it.
+    #[test]
+    fn a_deliberate_exit_beats_a_fault_at_equal_reach() {
+        let exited = status_of(&ran(8, Some(DELIBERATE_EXIT)), "2026-09-14".to_owned());
+
+        let mut faulted_trace = ran(8, None);
+        faulted_trace.distinct += 1;
+        faulted_trace.total_calls += 6;
+        // Built from JSON so the test states only the fields it cares about: a fault happened,
+        // at the small address the payload used to die at.
+        faulted_trace.fault = Some(
+            serde_json::from_str(r#"{"kind":"read","address":24109,"instruction_pointer":24109}"#)
+                .expect("a fault site"),
+        );
+        let faulted = status_of(&faulted_trace, "2026-09-14".to_owned());
+
+        assert!(faulted.outcome != DELIBERATE_EXIT, "the other run faulted");
+        assert!(
+            exited.beats(&faulted),
+            "stopping correctly must not read as a regression"
+        );
+        assert!(!faulted.beats(&exited), "and it is not symmetric");
+    }
+
+    /// **The hazard this rung is placed below a flip to avoid.**
+    ///
+    /// `ranking_key` compares the rung before anything else, so a rung above `Flipped` would sort
+    /// a program whose first instruction is `exit(0)` - nothing learned, no imports - above a title
+    /// rendering frames. On this corpus that put the conformance probe at the head of the frontier,
+    /// above every game. This asserts the ordering that prevents it, so moving the variant up in
+    /// the enum fails here rather than quietly reordering the frontier.
+    #[test]
+    fn a_trivial_exit_does_not_outrank_a_title_that_rendered() {
+        let trivial = status_of(&ran(0, Some(DELIBERATE_EXIT)), "2026-09-14".to_owned());
+
+        let mut rendered_trace = ran(9, None);
+        rendered_trace.distinct = 223;
+        rendered_trace.total_calls = 432_211;
+        let rendered = status_of(&rendered_trace, "2026-09-14".to_owned());
+
+        assert!(
+            !trivial.beats(&rendered),
+            "a guest that exited having done nothing must not outrank one that rendered"
+        );
+        assert!(rendered.beats(&trivial), "and the richer run wins");
     }
 }

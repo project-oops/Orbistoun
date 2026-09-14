@@ -331,6 +331,9 @@ guest_module! {
         "sceLibcMspaceFree" => 2,
         "exit" => 1,
         "_Exit" => 1,
+        // The raw syscall's spelling: FreeBSD entry 1 is `_exit`, and the name derived from
+        // `SYS__exit` is what binds number 1 to this implementation (worklog 543).
+        "_exit" => 1,
     }
 }
 
@@ -3644,6 +3647,11 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("_Assert", assert_failed),
         ("exit", exit),
         ("_Exit", exit),
+        // **The raw syscall's own spelling, and the reason number 1 now binds.** FreeBSD's
+        // entry 1 is `_exit`, so the harvested constant is `SYS__exit` and the name derived
+        // from it is `_exit` - which nothing answered to, leaving an implemented function
+        // unreachable by its number (worklog 543).
+        ("_exit", exit),
         ("_Znwm", operator_new),
         ("_Znam", operator_new),
         ("_ZdlPv", operator_delete),

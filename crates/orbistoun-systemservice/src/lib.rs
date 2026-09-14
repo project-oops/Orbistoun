@@ -263,6 +263,59 @@ fn user_service_get_user_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// The identifier of whoever is signed in, as every call that reports it must answer.
+///
+/// **One place, because two calls disagreeing about who is signed in is worse than either
+/// being wrong.** `sceUserServiceGetInitialUser` and `sceUserServiceGetLoginUserIdList` are
+/// asked the same question in different shapes, and a title that got different answers would
+/// key its save data on one and its session on the other.
+fn signed_in_user() -> u32 {
+    // A machine with a deleted signed-in user answers the placeholder, which is the honest
+    // answer to "who is signed in" when nobody is (D346).
+    console::settings()
+        .current()
+        .map_or(INITIAL_USER as u32, |user| user.id)
+}
+
+/// `sceUserServiceGetLoginUserIdList(out)` - which users are signed in.
+///
+/// # One entry, and that is a fact about orbistoun rather than a guess about the structure
+///
+/// **How many identifiers the caller's structure holds is not established.** The symbol has
+/// never resolved on any leg obSCEne has run - `130-layout/user-service-layout` skips with
+/// *libSceUserService symbols not available in this context* - so nothing has measured its
+/// length, and a console is documented nowhere this project may read.
+///
+/// This writes **one** identifier, which needs no such guess: orbistoun signs exactly one user
+/// in ([`orbistoun_shell::settings::Settings::signed_in`] is one identifier, not a set), so the
+/// list of signed-in users has exactly one entry and writing it is a transcription rather than
+/// an assumption.
+///
+/// **What is not written is the honest part.** Anything past the first identifier is left as the
+/// caller had it, because zero-filling a tail would be inventing the length this call does not
+/// know. A caller that does not clear the structure first therefore reads its own stale bytes as
+/// extra users - a wrong answer that is *visible*, where a guessed length is a wrong answer that
+/// is not. If a title is seen doing that, the fix is a measurement, not a longer write.
+fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let Ok(at) = usize::try_from(args[0]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    // Four bytes, for the reason `sceUserServiceGetInitialUser` gives: an identifier is an
+    // `int`, and writing a whole word through an int pointer takes the caller's next variable
+    // with it (D210, D272).
+    // SAFETY: a guest-supplied `int *` under the identity mapping (D014).
+    unsafe {
+        std::ptr::write_unaligned(
+            std::ptr::with_exposed_provenance_mut::<u32>(at),
+            signed_in_user(),
+        );
+    }
+    OK
+}
+
 /// `sceUserServiceGetInitialUser(out)` - the user a title should start as.
 fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
@@ -280,9 +333,7 @@ fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             // The user somebody is actually signed in as, rather than a fixed one. A machine
             // with a deleted signed-in user answers the placeholder, which is the honest
             // answer to "who is signed in" when nobody is (D346).
-            console::settings()
-                .current()
-                .map_or(INITIAL_USER as u32, |user| user.id),
+            signed_in_user(),
         );
     }
     OK
@@ -342,6 +393,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceUserServiceGetInitialUser",
             user_service_get_initial_user,
         ),
+        (
+            "sceUserServiceGetLoginUserIdList",
+            user_service_get_login_user_id_list,
+        ),
         ("sceUserServiceGetUserName", user_service_get_user_name),
         ("sceSystemServiceParamGetInt", param_get_int),
         ("sceSysmoduleLoadModule", sysmodule_load_module),
@@ -362,6 +417,61 @@ mod tests {
         args[1] = buffer.as_mut_ptr() as u64;
         args[2] = size;
         args
+    }
+
+    /// **The two calls that report who is signed in must never disagree.**
+    ///
+    /// A title keys its save data on one answer and its session on the other, so the failure this
+    /// guards is silent and expensive: saves written under an identifier the session does not use.
+    /// Both read one accessor, and this is what says so.
+    #[test]
+    fn the_login_list_names_the_same_user_as_the_initial_user() {
+        let mut list = [0xCCu32; 4];
+        let mut one = [0xCCu32; 4];
+
+        let mut args = [0; GUEST_ARG_REGISTERS];
+        args[0] = list.as_mut_ptr() as u64;
+        assert_eq!(super::user_service_get_login_user_id_list(&args), 0);
+
+        let mut args = [0; GUEST_ARG_REGISTERS];
+        args[0] = one.as_mut_ptr() as u64;
+        assert_eq!(super::user_service_get_initial_user(&args), 0);
+
+        assert_eq!(
+            list[0], one[0],
+            "the list's first entry is the signed-in user"
+        );
+        assert_ne!(list[0], 0xCC, "and something was actually written");
+    }
+
+    /// **Exactly four bytes, and nothing past them.**
+    ///
+    /// Two things at once. An identifier is an `int`, so writing a word would take the caller's
+    /// next variable with it (D210, D272). And the tail is left alone deliberately: how many
+    /// identifiers the structure holds is unmeasured, so zero-filling it would invent a length.
+    #[test]
+    fn only_the_first_identifier_is_written() {
+        let mut list = [0xCCu32; 4];
+        let mut args = [0; GUEST_ARG_REGISTERS];
+        args[0] = list.as_mut_ptr() as u64;
+
+        assert_eq!(super::user_service_get_login_user_id_list(&args), 0);
+        assert_eq!(
+            &list[1..],
+            &[0xCCu32; 3],
+            "the tail is the caller's, because its length is not established"
+        );
+    }
+
+    /// A null structure is refused rather than written through.
+    #[test]
+    fn a_null_login_list_is_refused() {
+        let args = [0; GUEST_ARG_REGISTERS];
+        assert_ne!(
+            super::user_service_get_login_user_id_list(&args),
+            0,
+            "writing through null is not an option"
+        );
     }
 
     /// **A size this shim does not believe is refused, not acted on.**

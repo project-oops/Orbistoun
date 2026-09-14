@@ -168,10 +168,15 @@ fn a_module_that_came_from_a_command_stream_runs() {
         .opcode_for_register(low)
         .expect("an opcode reaching the shader registers");
 
+    // The registers hold the address in 256-byte units, low word then high, as the GL
+    // cube capture measured on the console (orbistoun-gpu `tests/captures/`, worklog 545).
     let mut stream: Vec<u32> = Vec::new();
     for (register, value) in [
-        (low, u32::try_from(ADDRESS & 0xFFFF_FFFF).expect("low")),
-        (high, u32::try_from(ADDRESS >> 32).expect("high")),
+        (
+            low,
+            u32::try_from((ADDRESS >> 8) & 0xFFFF_FFFF).expect("low"),
+        ),
+        (high, u32::try_from(ADDRESS >> 40).expect("high")),
     ] {
         stream.push((3 << 30) | (1 << 16) | (u32::from(opcode) << 8));
         stream.push(register - base);

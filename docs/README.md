@@ -76,18 +76,18 @@ start lying.
 
 **Guide**
 
-Written for somebody using orbistoun rather than changing it. These four were in the tree
-and in nothing's index, so the published docs listed them under Guide and this page did not
-mention they existed.
+Written for somebody using orbistoun rather than changing it. These pages cover both the desktop GUI window and CLI commands:
 
-- [features/running.md](features/running.md) - running a title, and reading the report. The
-  point of a run is not that it worked, but what the guest asked for and what it got.
-- [features/library.md](features/library.md) - what orbistoun has found that it can try to
-  run, and how it decides.
-- [features/naming.md](features/naming.md) - names and hashes: why some library entries show
-  a readable function and others a bare number.
-- [features/paths.md](features/paths.md) - where orbistoun writes, on each platform, and how
-  to move it.
+- [features/README.md](features/README.md) - Features & screens index mapping GUI views to CLI flags.
+- [features/user-guide.md](features/user-guide.md) - System requirements, honest compatibility state, and local-first storage.
+- [features/library.md](features/library.md) - Game library dashboard and title discovery.
+- [features/running.md](features/running.md) - Running a title, honest failure, and verification.
+- [features/inspector.md](features/inspector.md) - Live call trace and HLE resolution inspector.
+- [features/memory.md](features/memory.md) - Virtual memory layout and host register viewer.
+- [features/graphics.md](features/graphics.md) - Vulkan 1.3 settings, RDNA2 shader lowering, and detiling.
+- [features/controllers.md](features/controllers.md) - DualSense, XInput, and keyboard button mapping.
+- [features/naming.md](features/naming.md) - Names and hashes: why imports show as hex, and how that is undone.
+- [features/paths.md](features/paths.md) - Where orbistoun writes, portable mode, and data roots.
 
 **Start here**
 - [THE_LOOP.md](THE_LOOP.md) - what one turn of the work does, start to finish, and

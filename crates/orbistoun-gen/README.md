@@ -39,6 +39,22 @@ sh tools/toolchain/run.sh env CARGO_TARGET_DIR=/tmp/orb-target \
     cargo run --release -p orbistoun-gen -- --record crates/orbistoun-gen/tests/fixtures/transcripts operands
 ```
 
+**Where the VM cannot mount the repository**, which is Multipass's default on Windows
+(`local.privileged-mounts` is off, and turning it on is a privileged machine-wide setting),
+copy the tree in and the generated files back:
+
+```bash
+sh tools/toolchain/sync.sh push
+sh tools/toolchain/run.sh env CARGO_TARGET_DIR=/tmp/orb-target \
+    cargo run --release -p orbistoun-gen -- --record crates/orbistoun-gen/tests/fixtures/transcripts operands
+sh tools/toolchain/sync.sh pull crates/orbistoun-shader/data/opcode-operands.toml \
+    crates/orbistoun-gen/tests/fixtures/transcripts
+```
+
+Pull immediately, and pull by name. A copy is one more step than a mount and a step is
+where a stale table hides; a whole-tree copy back would carry the guest's `Cargo.lock` and
+overwrite whatever else had been edited meanwhile.
+
 A recording carries its own input, and replaying checks it. A solver whose probe list has
 changed since the recording was taken would otherwise be handed the old answers to new
 questions - and that shows up as a wrong table rather than as a stale recording.

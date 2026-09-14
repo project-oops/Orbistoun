@@ -73,10 +73,14 @@ pattern!(
     r"^(?P<name>[a-z_]+[0-9]*):(?P<value>-?(?:0x[0-9a-fA-F]+|\d+))$"
 );
 
-// `format:[BUF_FMT_32_FLOAT]` - a modifier whose value is printed as a symbolic name.
+// A modifier whose value is printed as a symbolic name: `format:[BUF_FMT_32_FLOAT]` with
+// brackets, `dim:SQ_RSRC_IMG_2D` without. Both are fields of the encoding and neither value
+// is a number, which is what separates them from `offset:16` - the value there begins with a
+// digit and this deliberately will not match it, because an offset is an operand a
+// translator has to read and dropping it silently puts an access at the wrong address.
 pattern!(
     symbolic_modifier_re,
-    r"^(?P<name>[a-z_]+[0-9]*):\[[A-Za-z0-9_]+\]$"
+    r"^(?P<name>[a-z_]+[0-9]*):(?:\[[A-Za-z0-9_]+\]|[A-Za-z_][A-Za-z0-9_]*)$"
 );
 
 // `attr3.y` - an attribute number and a channel within it, printed as one token.

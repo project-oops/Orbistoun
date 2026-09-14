@@ -5012,7 +5012,7 @@ fn cmd_compat_record(
     match keep_status(dir, &title, &status, &title_metadata(path), force)? {
         Kept::NotBetter { slot, previous } => anyhow::bail!(
             concat!(
-                "{}: not recorded - the {} entry is better or equal ({} {} imports, ",
+                "{}: not recorded - the {} entry is better, or the same run again ({} {} imports, ",
                 "{} calls).\n\nUse --force to record it anyway."
             ),
             title,
@@ -5100,7 +5100,7 @@ enum Kept {
         /// The file written.
         path: std::path::PathBuf,
     },
-    /// That slot already holds something better or equal.
+    /// That slot already holds something better, or this is the same run again.
     NotBetter {
         /// Which slot was compared against.
         slot: &'static str,
@@ -5144,7 +5144,7 @@ fn keep_status(
         file.status.as_ref()
     };
     if let Some(previous) = previous {
-        if !force && !status.beats(previous) {
+        if !force && !status.worth_recording(previous) {
             let previous = previous.clone();
             // **The metadata is still saved, and that is the whole reason it is refreshed above.**
             // It describes the *title*, not the run, so a record that loses the better-run
@@ -8425,6 +8425,31 @@ fn print_knowledge(
     Ok(())
 }
 
+/// Whether a translator produces a module for this shader, at any stage it could belong to.
+///
+/// # Why every stage is tried rather than one
+///
+/// A corpus is a directory of binaries and nothing in a binary says which stage ran it. The
+/// stage is not cosmetic: an export has nowhere to go in a compute dispatch and is refused,
+/// so judging a pixel shader as compute would report it untranslatable for a reason that is
+/// about the question rather than the shader. Asking "is there a stage this translates at"
+/// is the honest form of the question a corpus can answer, and it is cheap - the stages are
+/// two, and only shaders that fail everywhere pay for both.
+///
+/// Wavefront fidelity, because it is the one that is correct unconditionally: a refusal here
+/// is about the shader rather than about a model that cannot represent a lane mask.
+fn translates(
+    decoded: &orbistoun_shader::Decode,
+    encodings: &orbistoun_shader::EncodingTable,
+) -> bool {
+    use orbistoun_translate::Width;
+    use orbistoun_translate::wavefront::{Stage, translate_for};
+
+    [Stage::Compute, Stage::Fragment]
+        .into_iter()
+        .any(|stage| translate_for(decoded, encodings, Width::Wave64, stage).is_ok())
+}
+
 /// Analyses every shader binary in a directory.
 ///
 /// A thin shim over `orbistoun_shader::report`, per principle 13: what the report says
@@ -8494,7 +8519,13 @@ fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<()> {
                     orbistoun_translate::model::supports_named(&encodings, &e.name, key.opcode)
                 })
         };
-        coverage.observe(name, &decode(&bytes, &encodings, &operands), &supported);
+        let decoded = decode(&bytes, &encodings, &operands);
+        coverage.observe_translated(
+            name,
+            &decoded,
+            &supported,
+            Some(translates(&decoded, &encodings)),
+        );
     }
 
     // The tier comes from the translator, which is the only layer that knows *why* an

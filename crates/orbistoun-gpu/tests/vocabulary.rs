@@ -27,6 +27,8 @@
 //! "nothing to check" and "everything checks out" must never look the same. That is the
 //! same rule the device-dependent tests follow.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use orbistoun_gpu::registers::{Vocabulary, register_writes, shader_candidates};
@@ -75,7 +77,7 @@ fn captures_dir() -> PathBuf {
 
 /// Every capture on disk, as (name, claims, bytes).
 ///
-/// A `.toml` with no `.bin` beside it is an error rather than a skip: it means a capture
+/// A `.toml` with no `.hex` beside it is an error rather than a skip: it means a capture
 /// was added half way, and silently ignoring it would leave somebody believing it was
 /// being checked.
 fn captures() -> Vec<(String, Capture, Vec<u8>)> {
@@ -101,14 +103,16 @@ fn captures() -> Vec<(String, Capture, Vec<u8>)> {
         let capture: Capture =
             toml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 
-        let binary = path.with_extension("bin");
-        let bytes = std::fs::read(&binary).unwrap_or_else(|e| {
-            panic!(
-                "{}: {e} - a capture's .toml needs its .bin beside it, or half of it \
-                 would be checked and nobody would know which half",
-                binary.display()
-            )
-        });
+        let words = path.with_extension("hex");
+        assert!(
+            words.is_file(),
+            concat!(
+                "{}: a capture's .toml needs its .hex beside it, ",
+                "or half of it would be checked and nobody would know which half"
+            ),
+            words.display()
+        );
+        let bytes = common::read_words(&words);
         found.push((stem, capture, bytes));
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));

@@ -113,6 +113,12 @@ pub struct Properties {
     /// memory store - and a fragment variant that omits the first and refuses the second
     /// needs this feature not at all.
     pub fragment_stores: bool,
+    /// Whether a mesh stage may be used.
+    ///
+    /// The stage a guest's NGG primitive shader translates to (D688). A device without it can
+    /// run a frame's pixel shaders and not its geometry, which is worth saying in a report
+    /// rather than discovering at pipeline creation.
+    pub mesh_shading: bool,
 }
 
 /// Whether a device is available to run anything.
@@ -478,15 +484,66 @@ impl Session {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        // **Nothing is requested.** Every feature a Vulkan device offers is off until asked
-        // for, and asking for one this project does not use would be a claim in the
-        // capability report that no code backs. `fragment_stores_and_atomics` is the one
-        // that has come up - the fragment path is designed not to need it (D552) - so it
-        // stays off and the report says so.
-        let wanted_features = vk::PhysicalDeviceFeatures::default();
+        // **Only what the emitted modules actually declare**, and each of these was found by
+        // a validator rather than chosen.
+        //
+        // Nothing was requested here until a module translated from a shader a console ran
+        // was offered to a driver under the Khronos validation layer, which named three
+        // things the modules had been relying on and the device had never been asked for
+        // (worklog 554):
+        //
+        //   `shader_int16` and `shader_float16` - a module that reads a half-format buffer
+        //     channel declares the Int16 and Float16 capabilities. Every module used to
+        //     declare them, used or not, which is how this went unnoticed through every
+        //     compute dispatch the suite has ever run; the models now declare the types on
+        //     first use (worklog 556), so these two are needed by the few modules that read
+        //     halves and by nothing else.
+        //   `fragment_stores_and_atomics` - a fragment shader that writes a storage buffer
+        //     needs it, and the guest's pixel shaders do exactly that: the GL cube's writes a
+        //     canary word every frame. D552 recorded that the fragment path was *designed*
+        //     not to need this, which was true of the hand-written modules and is not true of
+        //     the console's.
+        //
+        // Each is requested only where the device offers it, so a device that cannot is
+        // refused by the code that needs it rather than at creation.
+        // SAFETY: the handle came from enumeration on this live instance.
+        let available = unsafe { instance.get_physical_device_features(physical) };
+        let wanted_features = vk::PhysicalDeviceFeatures::default()
+            .shader_int16(available.shader_int16 == vk::TRUE)
+            .fragment_stores_and_atomics(available.fragment_stores_and_atomics == vk::TRUE);
+
+        // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
+        let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut chained = vk::PhysicalDeviceFeatures2::default().push_next(&mut offered_float16);
+        // SAFETY: the handle came from enumeration on this live instance, and the chained
+        // structure outlives the call.
+        unsafe { instance.get_physical_device_features2(physical, &mut chained) };
+        let mut wanted_float16 = vk::PhysicalDeviceVulkan12Features::default()
+            .shader_float16(offered_float16.shader_float16 == vk::TRUE);
+
+        // `VK_EXT_mesh_shader`, where the device has it. A guest's NGG primitive shader is a
+        // mesh shader (D688), so without this the vertex half of a console frame has no stage
+        // to run in at all - and with it, the modules that do not use it are unaffected.
+        // SAFETY: the handle came from enumeration on this live instance.
+        let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
+            .map_err(|e| ("enumerate_device_extension_properties", e))?;
+        let mesh_offered = extensions.iter().any(|extension| {
+            extension
+                .extension_name_as_c_str()
+                .is_ok_and(|name| name == ash::ext::mesh_shader::NAME)
+        });
+        let mesh_names = [ash::ext::mesh_shader::NAME.as_ptr()];
+        let enabled_extensions: &[*const core::ffi::c_char] =
+            if mesh_offered { &mesh_names } else { &[] };
+        let mut wanted_mesh =
+            vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(mesh_offered);
+
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
-            .enabled_features(&wanted_features);
+            .enabled_features(&wanted_features)
+            .enabled_extension_names(enabled_extensions)
+            .push_next(&mut wanted_float16)
+            .push_next(&mut wanted_mesh);
         // SAFETY: the physical device is valid and the create info outlives the call.
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
@@ -513,6 +570,8 @@ impl Session {
             // note. Written as a comparison against the request rather than as `false` so
             // that enabling it later updates this by construction.
             fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,
+            // Enabled, not merely offered - the same rule every other row here follows.
+            mesh_shading: wanted_mesh.mesh_shader == vk::TRUE,
         };
 
         Ok(Self {

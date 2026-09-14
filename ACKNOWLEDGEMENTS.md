@@ -133,7 +133,26 @@ The specific things learned from watching the field, all of which shaped the roa
   anyone in this space has found. In [docs/BACKLOG.md](docs/BACKLOG.md).
 - Progress is better measured by unresolved-import counts than by screenshots.
 
-*(Named entries to be added as specific references are actually consulted, rather
+Named entries, as they are actually consulted:
+
+- **prosper** - an independent high-level PS5 emulator with the same broad thesis as this
+  one. Its public engineering documentation was read, specifically its AGC packet-size
+  audit, which tabulates how many dwords each `sceAgc*` command builder emits, how each
+  figure was arrived at, and a per-row confidence. Two things were taken from it, both of
+  them *questions* rather than answers: which builders are worth sizing first, and the
+  observation that a builder emitting more dwords than the real library silently overruns
+  the reservation of any guest that inlined the size at compile time.
+
+  **No figure from that table was adopted.** Every size recorded in
+  `crates/orbistoun-hle/data/knowledge/libSceAgc.toml` is measured by obSCEne against the
+  real library and carries `known_by = "measured"`; the table was used afterwards, as a
+  second opinion to agree or disagree with. It agreed on eight builders by a route entirely
+  unlike ours - theirs inferred from what titles reserve, ours read from what the library
+  answers - and disagreed on three, which are recorded as open divergences rather than
+  reconciled in either direction. Its prose is also candid about its own three misreadings,
+  which is more useful than a table that is merely correct.
+
+*(Further named entries to be added as specific references are actually consulted, rather
 than pre-populated with projects nobody here has read.)*
 
 ## Symbol names

@@ -157,12 +157,22 @@ fn s_cmp_i32(t: &EncodingTable, name: &str, first_code: u32, second_code: u32) -
     head(t, name) | (second_code << 8) | first_code
 }
 
+/// The scalar-base field's value for "no base" - `0x7d`, as the reference emits it for `off`
+/// and as the console's own shaders carry it (worklog 552).
+const FLAT_NO_BASE_CODE: u32 = 0x7d;
+
 fn flat_store(t: &EncodingTable, name: &str, vaddr: u32, data: u32) -> [u32; 2] {
-    [head(t, name), vaddr | (data << 8) | (0x7F << 16)]
+    [
+        head(t, name),
+        vaddr | (data << 8) | (FLAT_NO_BASE_CODE << 16),
+    ]
 }
 
 fn flat_load(t: &EncodingTable, name: &str, vaddr: u32, destination: u32) -> [u32; 2] {
-    [head(t, name), vaddr | (0x7F << 16) | (destination << 24)]
+    [
+        head(t, name),
+        vaddr | (FLAT_NO_BASE_CODE << 16) | (destination << 24),
+    ]
 }
 
 /// The code for a vector register in the shared source numbering.

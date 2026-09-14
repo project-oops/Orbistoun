@@ -14,7 +14,7 @@
 //! writes consecutive registers from an index in its first body word. That is correct
 //! regardless of what any particular register means.
 //!
-//! Deciding that register `0x2C0C` holds the low half of a fragment shader's address
+//! Deciding that register `0x2C08` holds the low half of a fragment shader's address
 //! is a **hypothesis**, and unlike the shader encoding table there is no reference
 //! implementation to check it against cheaply. So it lives in
 //! `data/packets.toml`, it is correctable without a rebuild, and what comes out is
@@ -231,10 +231,14 @@ pub fn register_writes(
                 let Some(base) = vocabulary.register_base(opcode) else {
                     continue;
                 };
-                // Body word zero is the index; the rest are values.
+                // Body word zero is the register offset; the rest are values. Only its low
+                // sixteen bits are the offset: the indexed user-config form carries an index in
+                // bits 31:28 (the GL cube capture writes 0x10000242 for VGT_PRIMITIVE_TYPE), and
+                // adding the whole word would name a register that does not exist.
                 let Some((offset, values)) = words.split_first() else {
                     continue;
                 };
+                let offset = &(offset & 0xffff);
                 for (index, value) in values.iter().enumerate() {
                     writes.push(RegisterWrite {
                         packet_offset: packet.offset,
@@ -284,9 +288,12 @@ pub fn shader_candidates(
         .into_iter()
         .filter_map(|(stage, (low, high, offset))| {
             let (low, high) = (low?, high?);
+            // The program registers hold the address in 256-byte units. Measured, not
+            // transcribed: the GL cube capture (tests/captures/agc-gl-cube-fw1240-a) writes
+            // 0x02008f03 for the pixel shader the hardware fetched from 0x2008f0300.
             Some(ShaderCandidate {
                 stage: stage.to_owned(),
-                address: (u64::from(high) << 32) | u64::from(low),
+                address: ((u64::from(high) << 32) | u64::from(low)) << 8,
                 packet_offset: offset,
             })
         })
@@ -428,7 +435,7 @@ mod tests {
         let candidates = shader_candidates(&writes, &vocabulary());
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].stage, "fragment");
-        assert_eq!(candidates[0].address, 0x0000_00FF_8000_0000);
+        assert_eq!(candidates[0].address, 0x0000_FF80_0000_0000); // the halves, in 256-byte units
     }
 
     #[test]
@@ -460,7 +467,7 @@ mod tests {
         let writes = register_writes(&walked, &bytes, &vocabulary());
         let candidates = shader_candidates(&writes, &vocabulary());
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].address, 0x0000_0002_2222_2222);
+        assert_eq!(candidates[0].address, 0x0000_0222_2222_2200);
     }
 
     #[test]

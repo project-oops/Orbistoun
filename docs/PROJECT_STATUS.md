@@ -97,10 +97,10 @@ guest code. None produces a pixel, and no guest has yet spawned a thread.
 | Title | Reach | Imports | Calls | Standing | Ends |
 |---|---|---|---|---|---|
 | PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` |
-| PPSA03416-app0 | flipped | 216 | 470,305 | 100% | `image+0x3f258` |
-| PPSA02664-app0 | flipped | 216 | 418,310 | 100% | `image+0x3f258` |
+| PPSA03416-app0 | flipped | 220 | 470,416 | 100% | `0x7fff13abdc8d` |
+| PPSA02664-app0 | flipped | 220 | 418,419 | 100% | `0x7fff13abdc8d` |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` |
-| PPSA25872-app0 | flipped | 192 | 339,537 | 100% | `image+0x3b32b9` |
+| PPSA25872-app0 | flipped | 192 | 339,539 | 100% | `image+0x3b383b` |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` |
 | PPSA04263-app0 | entered | 70 | 30,261 | 100% | `image+0x196b91a` |
 | PPSA21564-app0 | entered | 57 | 500,260 | 100% | `the title's own modules+0x7af792` |

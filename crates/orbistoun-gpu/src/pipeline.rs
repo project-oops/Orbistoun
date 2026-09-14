@@ -82,8 +82,11 @@
 
 use std::collections::BTreeMap;
 
-use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
-use orbistoun_translate::{Strategy, translate};
+use orbistoun_shader::{
+    Capture, EncodingTable, OperandTable, ShaderCorpus, ShaderError, decode_program,
+};
+use orbistoun_translate::wavefront::Stage;
+use orbistoun_translate::{Strategy, translate_staged};
 
 use crate::backend::{RenderCommand, ResourceId, ShaderStage};
 use crate::packet::walk;
@@ -114,6 +117,39 @@ impl Queue {
             Self::Draw => matches!(stage, ShaderStage::Vertex | ShaderStage::Fragment),
             Self::Compute => matches!(stage, ShaderStage::Compute),
         }
+    }
+}
+
+/// The host stage a shader named by the register vocabulary is translated for.
+///
+/// # Vertex is attempted as a compute dispatch, deliberately
+///
+/// There is no host vertex stage here: an NGG primitive shader is a mesh shader (D688) and the
+/// emitter has no mesh execution model yet. Refusing on that basis would replace the report's
+/// *instruction-level* answer - which is the measurement the shader worklist is built from -
+/// with a policy, so a vertex shader is still attempted and still reports the first instruction
+/// it cannot translate. Every one of them reaches the geometry-engine message first, which is
+/// blocked and points at the same decision, so nothing is hidden by this.
+///
+/// The stage itself is the typed one the submission reconciled, not the vocabulary's string:
+/// the table's spelling is data and this is a dispatch, and the two should not be the same
+/// thing.
+const fn host_stage(stage: ShaderStage) -> Stage {
+    match stage {
+        ShaderStage::Fragment => Stage::Fragment,
+        ShaderStage::Vertex | ShaderStage::Compute => Stage::Compute,
+    }
+}
+
+/// Distinguishes the same shader translated for different stages, in the cache key.
+///
+/// An arbitrary constant per stage, mixed into the content hash. It has to be *stable* across
+/// runs, because a report is diffed, and it has to differ per stage - nothing else about it
+/// matters.
+const fn stage_salt(stage: Stage) -> u64 {
+    match stage {
+        Stage::Compute => 0,
+        Stage::Fragment => 0x5352_4746_0000_0001,
     }
 }
 
@@ -249,6 +285,10 @@ impl SubmissionReport {
     pub fn summary(&self) -> orbistoun_shader::coverage::Summary {
         orbistoun_shader::coverage::Summary {
             complete: self.shaders_translated,
+            // A submission has always counted shaders a translator actually ran over -
+            // that is what `shaders_translated` is - so it is comparable with a corpus run
+            // that does the same and not with one that counted supported opcodes.
+            attempted: true,
             shaders: self.shaders_found,
             translatable: self.shaders_translated,
             instructions: self.shaders_found,
@@ -473,7 +513,7 @@ impl Pipeline {
         submission.report.shaders_found = candidates.len();
 
         for candidate in candidates {
-            match self.prepare(candidate.address, memory) {
+            match self.prepare(candidate.address, candidate.stage, memory) {
                 Ok(prepared) => {
                     // The address resolved, whatever happened to the shader after that.
                     submission.report.addresses_resolved += 1;
@@ -620,6 +660,7 @@ impl Pipeline {
     fn prepare(
         &mut self,
         address: u64,
+        stage: ShaderStage,
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
         // The register named a GPU address; guest memory is indexed by a guest one.
@@ -650,7 +691,12 @@ impl Pipeline {
         }
 
         let shader = &window[..decoded.consumed];
-        let key = content_hash(shader);
+        let host_stage = host_stage(stage);
+        // **Keyed by content and stage, not content alone.** The same instructions translated
+        // for a fragment stage and for a compute dispatch are different modules - one declares
+        // inputs and a colour output and the other publishes its registers - so a cache that
+        // ignored the stage would serve whichever was translated first.
+        let key = content_hash(shader) ^ stage_salt(host_stage);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -670,11 +716,12 @@ impl Pipeline {
             )));
         }
 
-        let translated = translate(&decoded, &self.encodings, self.strategy).map_err(|e| {
-            PrepareFailure::Resolved(format!(
-                "the shader at {address:#x} could not be translated: {e}"
-            ))
-        })?;
+        let translated = translate_staged(&decoded, &self.encodings, self.strategy, host_stage)
+            .map_err(|e| {
+                PrepareFailure::Resolved(format!(
+                    "the shader at {address:#x} could not be translated: {e}"
+                ))
+            })?;
 
         let resource = ResourceId(self.next_resource);
         self.next_resource += 1;
@@ -740,6 +787,110 @@ fn content_hash(bytes: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
+}
+
+/// One shader recovered from a command stream and offered to the corpus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedShader {
+    /// The content id it was stored under - a truncated hash of its bytes.
+    pub id: String,
+    /// The pipeline stage the shader address was attributed to. Reported, never
+    /// dispatched on - the register mapping it rests on is a hypothesis.
+    pub stage: String,
+    /// Whether the corpus had not seen it before. A title rebinds the same shaders
+    /// constantly, so most captures in a real frame are already held.
+    pub fresh: bool,
+    /// Its length in bytes, up to and including the terminator that ended it.
+    pub length: usize,
+}
+
+/// A shader address that yielded no shader, and why. Reported rather than dropped: an
+/// address the register mapping produced but memory could not honour is the strongest
+/// signal available about whether that mapping is right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureMiss {
+    /// The stage the missed address was attributed to.
+    pub stage: String,
+    /// The address that produced nothing.
+    pub address: u64,
+    /// Why nothing came of it.
+    pub reason: String,
+}
+
+/// What one command stream contributed to the shader corpus.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureReport {
+    /// Every shader stored, in the order its address appeared.
+    pub captured: Vec<CapturedShader>,
+    /// Every address that named no readable, terminated shader.
+    pub missed: Vec<CaptureMiss>,
+}
+
+/// Recovers every shader a command stream points at and offers it to the corpus.
+///
+/// This is the census's input, gathered the way a frame gathers it: walk the packets,
+/// read the shader-address registers, fetch each shader out of guest memory, and store it
+/// by content. It is the connective step [`registers`](crate::registers) describes as the
+/// one that lets the packet walker and the shader decoder finally meet.
+///
+/// Unlike [`Pipeline::submit`], it does **not** require a shader to *translate*. A shader
+/// carrying an instruction the translator cannot handle yet is exactly what the census
+/// exists to rank, so it is captured, not refused. The one thing required is a
+/// terminator: without an end-of-program instruction the extent is unknown (D114), and
+/// bytes of unknown length are not a shader but a guess about where one stops.
+///
+/// Storage is by content hash, so a guest that rebinds the same shader every draw
+/// contributes it once. The report says what was stored and what each unresolved address
+/// was, because an address that names nothing is evidence about the register mapping.
+pub fn capture_shaders(
+    stream: &[u8],
+    memory: &impl GuestMemory,
+    vocabulary: &Vocabulary,
+    encodings: &EncodingTable,
+    operands: &OperandTable,
+    corpus: &mut ShaderCorpus,
+) -> Result<CaptureReport, ShaderError> {
+    let walked = walk(stream);
+    let writes = register_writes(&walked, stream, vocabulary);
+    let candidates = shader_candidates(&writes, vocabulary);
+
+    let mut report = CaptureReport::default();
+    for candidate in candidates {
+        let Some(window) = read_window(memory, guest_address_of(candidate.address)) else {
+            report.missed.push(CaptureMiss {
+                stage: candidate.stage,
+                address: candidate.address,
+                reason: "no mapped memory at the address".to_owned(),
+            });
+            continue;
+        };
+
+        // The extent, not trustworthiness, is what gates a capture. A desynchronised
+        // decode still bounds the shader if it reached the terminator, and its blockers
+        // are the whole point of capturing it.
+        let decoded = decode_program(window, encodings, operands);
+        if !decoded.terminated {
+            report.missed.push(CaptureMiss {
+                stage: candidate.stage,
+                address: candidate.address,
+                reason: format!(
+                    "no end-of-program instruction within {} readable bytes",
+                    window.len()
+                ),
+            });
+            continue;
+        }
+
+        let (id, capture) = corpus.capture(&window[..decoded.consumed])?;
+        report.captured.push(CapturedShader {
+            id,
+            stage: candidate.stage,
+            fresh: matches!(capture, Capture::Added),
+            length: decoded.consumed,
+        });
+    }
+
+    Ok(report)
 }
 
 /// Why a pipeline could not be built.

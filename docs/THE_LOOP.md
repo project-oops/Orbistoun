@@ -33,18 +33,24 @@ flowchart TD
     L --> M["the guest faults, gives up,<br/>or hits the time limit"]
     M --> O["write the trace;<br/>compare it with last time"]
     O --> P["print FURTHER / same / BACK,<br/>then the ranked findings"]
-    P --> Q{"read the top finding"}
-    Q -- "enough is known" --> R["implement the function"]
-    Q -- "not enough is known" --> S["leave the stub;<br/>record the open question"]
-    R --> B
-    S --> B
+    P --> Q{"read top finding<br/>(Agent as glue)"}
+    Q -- "escape hatch tripped<br/>(architectural wall / spin / regression)" --> X["HALT & ESCALATE<br/>revert patch, log in worklog.md"]
+    Q -- "enough is known" --> R["synthesize Rust implementation<br/>(known_by: published/spec)"]
+    Q -- "not enough is known" --> S["dispatch probe to obSCEne<br/>on PS5 via pros"]
+    S --> T["capture silicon telemetry<br/>from klog"]
+    T --> R
+    R --> U{"trace verdict"}
+    U -- FURTHER --> B
+    U -- "same / BACK (3x)" --> X
 
     classDef human fill:#7a2f2f,stroke:#d08a8a,color:#fff
-    class Q,R human
+    classDef agent fill:#2f4f7a,stroke:#8aafd0,color:#fff
+    class X human
+    class Q,R,S,T,U agent
 ```
 
-The two highlighted boxes are the only steps a person performs. Everything else runs
-unattended.
+The loop runs unattended through routine OS/HLE gaps. The highlighted red box (**HALT & ESCALATE**) is the only point where a person must intervene: when an Escape Hatch is tripped by an architectural barrier, spinlock deadlock, or regression.
+
 
 ## Step by step
 
@@ -83,16 +89,20 @@ unattended.
     **FURTHER**, **same**, or **BACK**.
 16. It prints the findings - what went wrong, the evidence for it, and what to do about
     it - **ranked**, worst first.
-17. **You, or a model, read the top finding and decide what it means.**
-18. **If enough is known, the function gets implemented; if not, the stub stays and the
-    open question is recorded** with `orbistoun-cli learn`.
+17. **An agent, or you, reads the top finding.** If it represents an unmeasured API or
+    structure, the agent formulates a hardware probe question rather than guessing.
+18. **The hardware oracle measures the truth, and the agent synthesizes the implementation.**
+    `obSCEne` runs the probe on real PS5 silicon via `pros`, records the struct layout and
+    return values to `klog`, and the agent writes the typed Rust function with
+    `known_by: measured`. If an architectural wall or deadlock is hit, the **Escape Hatch**
+    trips immediately.
 19. Go to step 2.
 
 ## Who does what
 
 | Step | Who | Automatic today |
 |---|---|---|
-| 2 - run | you type one command | yes |
+| 2 - run | you type one command / runner script | yes |
 | 3-4 - imports, name lookup | orbistoun | yes |
 | 5-7 - name search, vocabulary widening | orbistoun | yes |
 | 8 - stubs | orbistoun | yes |
@@ -100,9 +110,12 @@ unattended.
 | 13-14 - trace on every outcome | orbistoun | yes |
 | 15 - progress verdict | orbistoun | yes |
 | 16 - ranked findings | orbistoun | yes |
-| **17 - interpret the finding** | **orbistoun, or you** | **mostly** - see below |
+| **17 - interpret finding & formulate probe** | **orbistoun + agent** | **yes** |
 | 17 - a guest that spins rather than faulting | orbistoun | **yes**, since D351 |
-| **18 - write the implementation** | **you / a model** | **no** |
+| **17b - probe silicon on real hardware** | **obSCEne via pros** | **yes** |
+| **18 - write implementation from telemetry** | **agent (grounded in measured data)** | **yes (inert proposal until gated)** |
+| **18b - escape hatch monitoring & gating** | **orbistoun (FURTHER / same / BACK)** | **yes** |
+| **18c - escalate architectural wall / deadlocks** | **human review** | **when tripped** |
 | recording what a function must answer | orbistoun, into `learned.toml` | **yes** |
 | recording what was learned by hand | you, via `learn` | no, deliberately |
 | recording what the title reached | `compat record`, prompted by the run | prompted, not silent |
@@ -161,6 +174,51 @@ that actually binds is provenance rather than verification: a generated implemen
 exactly where recall can be dressed as reasoning, so it carries an oracle like every other
 fact here (D322). See [TESTING.md](TESTING.md) and the automated stub-semantics search entry
 in [BACKLOG.md](BACKLOG.md).
+
+### Closing Step 18 cleanly: The Agent + Hardware Oracle
+
+Step 18 was historically where the loop stopped because asking an unconstrained model to generate implementations produced hallucinations: fake stubs that made a single crash move forward while silently corrupting memory downstream (the Kyty trap).
+
+The solution is not to have a person type every repetitive struct by hand, but to **ground the generator in an empirical oracle**:
+1. When a finding reports an unimplemented function or unwritten struct field, the agent does *not* invent a return value.
+2. The agent synthesizes an `obSCEne` probe case (or sends a probe request via `pros`) directly to physical PS5 hardware (`192.168.1.211`).
+3. The hardware returns the exact struct size, member alignment, and return codes over `klog`.
+4. The agent acts purely as the translation glue: taking the physical measurement and writing the typed Rust struct and HLE function, tagged with `known_by: measured` and the hardware run timestamp.
+5. The emulator re-runs the title. If the trace verdict is `FURTHER`, the inert patch is promoted.
+
+This preserves strict clean-room provenance (CONVENTIONS §1) while automating 90% of routine API expansion.
+
+## The Escape Hatch Protocol
+
+The loop must run autonomously, but it must never thrash, loop infinitely, or mask bugs with fake returns. The **Escape Hatch** is the hard boundary where autonomous iteration halts, the candidate patch is reverted, a detailed diagnostic is written to `worklog.md`, and a human developer is alerted.
+
+### Four Escape Hatch Triggers
+
+1. **Architectural Wall**:
+   The failure is caused by an unimplemented hardware/compiler primitive rather than an HLE OS function. Examples:
+   - An unknown GFX10 PM4 packet opcode in the command processor.
+   - An unsupported RDNA2 ISA instruction in the shader recompiler.
+   - Host/guest ABI calling convention mismatch or stack misalignment.
+   *Action*: The loop halts immediately. Fuzzing or HLE probing cannot write a compiler pass.
+
+2. **Spinlock / Yield Deadlock**:
+   The guest ceases to make forward progress without faulting, producing an unbounded stream of repetitive synchronization syscalls (e.g. `sceKernelWaitElink`, `sched_yield`) without advancing the call graph.
+   *Action*: Bounded by iteration count / watchdog timer; execution terminates with a spin diagnostic.
+
+3. **Regression Wall (`verdict: BACK`)**:
+   A patch enables progress in one subsystem but causes an immediate crash or fault in an earlier, previously conforming subsystem.
+   *Action*: The trial patch is instantly rolled back.
+
+4. **Retry Exhaustion**:
+   The loop executes 3 consecutive probe-and-implement attempts on the same finding and fails to achieve `FURTHER`.
+   *Action*: The open question is logged as `assumed: unsettled`, the stub remains non-lying, and the title is flagged for manual review.
+
+### Escalation Behavior
+
+When any trigger trips:
+- Any uncommitted code changes in `crates/orbistoun-hle/` are reverted cleanly.
+- A diagnostic report with register state, unwritten struct diffs, and the last 10 syscalls is appended to `worklog.md` with an `[ESCALATION-NEEDED]` header.
+- The human developer is notified with the exact file and line of the architectural constraint.
 
 ## The naming sub-loop
 
@@ -432,8 +490,10 @@ Two edges above point the other way:
   what the wall is - the run says so, with the evidence attached and ranked by how much it
   matters. That is the difference between a tool that reports and one that only records.
 
-And one thing it does **not** claim: step 18 is still a person writing code, and there is
-no plan here to have something generate it unverified.
+And one thing it does **not** do: it never generates code unverified. Step 18 produces an
+inert patch derived directly from `obSCEne` silicon telemetry on physical PS5 hardware, and
+the patch is only promoted when mathematically gated by `FURTHER` without tripping an Escape Hatch.
+
 
 ## Turning the loop without a title
 

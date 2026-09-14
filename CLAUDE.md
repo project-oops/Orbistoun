@@ -4,12 +4,8 @@ Working notes on **how** orbistoun is built and the principles to honour when
 changing it. The README and `docs/` cover *what* it is and where it is going; this
 file captures the constraints those decisions fit inside.
 
-**Read [the OOPS conventions](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md) first.** Provenance, naming, honest failure, decision
-logs, worklogs, stale facts and gates are shared across
-[Orbistoun](https://github.com/project-oops/Orbistoun),
-[obSCEne](https://github.com/project-oops/obSCEne),
-[Prosperous](https://github.com/project-oops/Prosperous) and
-[SELFish](https://github.com/project-oops/SELFish). This file holds what orbistoun adds, and how
+**Read [the master agent instructions](../AGENTS.md) and [the OOPS conventions](../docs/CONVENTIONS.md) first.** Provenance, naming, honest failure, decision
+logs, worklogs, stale facts and gates are shared across all OOPS projects and centralized in the parent repository. This file holds what orbistoun adds, and how
 it enforces what it shares.
 
 ## Mission, in one breath

@@ -20,3 +20,6 @@ orbistoun-translate = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

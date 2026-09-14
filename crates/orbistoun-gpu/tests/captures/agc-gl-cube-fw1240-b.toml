@@ -1,0 +1,59 @@
+# The GL cube's frame 30, textured, as submitted to the console's graphics driver.
+#
+# The same frame as `agc-gl-cube-fw1240-a` with the texture on: the pixel shader is the
+# sampling one at payload + 0x200, it takes two user SGPRs carrying the T#/S# table
+# address, and the frame hashed to 0xc51cec32 with the GPU clock at 0x49f1e432f1d. The
+# record is oops-sdk `docs/hardware/agc-gl-cube-oracle-fw1240.md`, record B; orbistoun
+# worklog 539. Everything said in record A's capture about provenance and buffer addresses
+# holds here unchanged.
+
+call  = "sceAgcDriverSubmitCommandBuffer"
+queue = "draw"
+note  = "oops-sdk oracle record B: FW 12.40, 2026-09-14, twelve DRAW_INDEX_AUTO draws, textured, depth on, cull on, hash 0xc51cec32"
+
+# SPI_SHADER_PGM_LO_PS / HI: the sampling pixel shader at payload + 0x200, in 256-byte units.
+[[register]]
+register = 0x2C08
+value    = 0x02008f02
+
+[[register]]
+register = 0x2C09
+value    = 0x00000000
+
+# SPI_SHADER_PGM_RSRC2_PS: USER_SGPR = 2 in bits 5:1, the descriptor table pointer in s[0:1].
+[[register]]
+register = 0x2C0B
+value    = 0x00000004
+
+# SPI_SHADER_USER_DATA_PS_0 / 1: the T#/S# table at payload + 0x900, low and high halves.
+[[register]]
+register = 0x2C0C
+value    = 0x008f0900
+
+[[register]]
+register = 0x2C0D
+value    = 0x00000002
+
+# SPI_SHADER_PGM_LO_GS: the NGG primitive shader at payload + 0x000.
+[[register]]
+register = 0x2C88
+value    = 0x02008f00
+
+# CB_COLOR0_ATTRIB2 for 1920 x 1080, and VGT_GS_OUT_PRIM_TYPE TRISTRIP, as in record A.
+[[register]]
+register = 0xA3B0
+value    = 0x01dfc437
+
+[[register]]
+register = 0xA29B
+value    = 0x00000002
+
+# The pixel shader the draws ran: the sampling one.
+[[shader]]
+stage   = "fragment"
+address = 0x2008f0200
+
+# The vertex program the NGG stage ran.
+[[shader]]
+stage   = "vertex"
+address = 0x2008f0000

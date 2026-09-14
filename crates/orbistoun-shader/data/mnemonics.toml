@@ -44,8 +44,28 @@ name = "global_store_dwordx4"
 
 [[mnemonic]]
 family = "MIMG"
+opcode = 0
+name = "image_load"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 8
+name = "image_store"
+
+[[mnemonic]]
+family = "MIMG"
 opcode = 32
 name = "image_sample"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 36
+name = "image_sample_l"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 39
+name = "image_sample_lz"
 
 [[mnemonic]]
 family = "MTBUF"
@@ -164,6 +184,11 @@ name = "s_mulk_i32"
 
 [[mnemonic]]
 family = "SOPP"
+opcode = 0
+name = "s_nop"
+
+[[mnemonic]]
+family = "SOPP"
 opcode = 1
 name = "s_endpgm"
 
@@ -189,8 +214,18 @@ name = "s_waitcnt"
 
 [[mnemonic]]
 family = "SOPP"
+opcode = 16
+name = "s_sendmsg"
+
+[[mnemonic]]
+family = "SOPP"
 opcode = 31
 name = "s_code_end"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 32
+name = "s_inst_prefetch"
 
 [[mnemonic]]
 family = "SOPP"
@@ -279,8 +314,18 @@ name = "v_max_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 22
+name = "v_lshrrev_b32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 26
 name = "v_lshlrev_b32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 40
+name = "v_add_co_ci_u32_e32"
 
 [[mnemonic]]
 family = "VOP2"

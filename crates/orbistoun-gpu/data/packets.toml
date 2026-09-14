@@ -124,6 +124,10 @@ name = "SET_SH_REG"
 value = 0x79
 name = "SET_UCONFIG_REG"
 
+[[opcode]]
+value = 0x7A
+name = "SET_UCONFIG_REG_INDEX"
+
 # ---- Packets that write registers -------------------------------------------
 #
 # Body word zero is an index relative to `base`; the words after it are values for
@@ -148,6 +152,13 @@ opcode = 0x79
 name = "SET_UCONFIG_REG"
 base = 0xC000
 
+# The indexed form. Its offset word carries an index in bits 31:28 (the GL cube capture writes
+# VGT_PRIMITIVE_TYPE through it as 0x10000242, index 1), which the decoder masks off.
+[[register_write]]
+opcode = 0x7A
+name = "SET_UCONFIG_REG_INDEX"
+base = 0xC000
+
 # ---- Registers holding shader addresses -------------------------------------
 #
 # A shader address is split across two registers: the low half and the high half. Both
@@ -160,13 +171,17 @@ base = 0xC000
 # fragment shader and a compute shader are what a first frame and a first dispatch
 # need - and every entry is a hypothesis until checked against a real submission.
 
+# SPI_SHADER_PGM_LO_PS / HI_PS. These were 0x2C0C / 0x2C0D until the GL cube capture
+# (tests/captures/agc-gl-cube-fw1240-a) showed those two to be SPI_SHADER_USER_DATA_PS_0 / 1,
+# the descriptor-table pointer: the pixel shader the hardware ran sat at the address written
+# four registers lower.
 [[shader_address]]
-register = 0x2C0C
+register = 0x2C08
 stage = "fragment"
 half = "low"
 
 [[shader_address]]
-register = 0x2C0D
+register = 0x2C09
 stage = "fragment"
 half = "high"
 

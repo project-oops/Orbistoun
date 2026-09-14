@@ -703,6 +703,14 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D679 | [an on-disk fallback for the APR index: tried, and not shipped](decisions/D679-an-on-disk-fallback-for-the-apr-index.md) | decided | 2026-09-12 |
 | 🟢 | D680 | [the app-content init sequence, and that it is not Terminator's wall](decisions/D680-the-app-content-init-sequence-and-that.md) | decided | 2026-09-12 |
 | 🟢 | D681 | [the shader-fixture reference toolchain is LLVM 18, reachable in a container](decisions/D681-the-shader-fixture-reference-toolchain.md) | decided | 2026-09-12 |
+| 🟢 | D682 | [shader capture into the census corpus requires a terminator, not a translatable decode](decisions/D682-shader-capture-into-the-census-corpus.md) | decided | 2026-09-13 |
+| 🟢 | D683 | [borrowed packet sizes are cross-checks, never sources](decisions/D683-borrowed-packet-sizes-are-cross-checks.md) | decided | 2026-09-14 |
+| 🟢 | D684 | [worklog numbers are reserved under a lock, like decision numbers](decisions/D684-worklog-numbers-are-reserved-under-a.md) | decided | 2026-09-14 |
+| 🟢 | D685 | [a guest that exited deliberately earns a rung, below a flip](decisions/D685-a-guest-that-exited-deliberately-earns.md) | decided | 2026-09-14 |
+| 🟢 | D686 | [a deliberate exit outranks a fault, above the import count](decisions/D686-a-deliberate-exit-outranks-a-fault.md) | decided | 2026-09-14 |
+| 🟢 | D687 | [a record updates on not-worse-and-different, not only on better](decisions/D687-a-record-updates-on-not-worse-and.md) | decided | 2026-09-14 |
+| 🟡 | D688 | [an NGG primitive shader translates to a mesh shader, not a vertex shader](decisions/D688-an-ngg-primitive-shader-translates-to-a.md) | assumed | 2026-09-14 |
+| 🟢 | D689 | [a translated module's storage buffers are bound on the draw path, and the device asks for what the modules declare](decisions/D689-a-translated-module-s-storage-buffers.md) | decided | 2026-09-14 |
 
 | | meaning |
 |---|---|

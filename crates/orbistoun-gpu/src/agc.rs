@@ -77,6 +77,7 @@ guest_module! {
         "sceAgcDcbPushMarker" => 6,
         "sceAgcDcbResetQueue" => 6,
         "sceAgcDcbSetBaseIndirectArgs" => 6,
+        "sceAgcDcbSetCxRegisterDirect" => 6,
         "sceAgcDcbSetCxRegistersIndirect" => 6,
         "sceAgcDcbSetFlip" => 6,
         "sceAgcDcbSetIndexBuffer" => 6,
@@ -84,6 +85,7 @@ guest_module! {
         "sceAgcDcbSetIndexSize" => 6,
         "sceAgcDcbSetNumInstances" => 6,
         "sceAgcDcbSetShRegistersIndirect" => 6,
+        "sceAgcDcbSetUcRegisterDirect" => 6,
         "sceAgcDcbSetUcRegistersIndirect" => 6,
         "sceAgcDcbStallCommandBufferParser" => 6,
         "sceAgcDcbWaitRegMem" => 6,
@@ -105,6 +107,7 @@ guest_module! {
     }
 }
 
+use crate::packet;
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
 /// Successful return, as the guest reads it.
@@ -158,9 +161,9 @@ unsafe fn peek_u64(at: u64) -> u64 {
     let Ok(at) = usize::try_from(at) else {
         return 0;
     };
-    unsafe {
-        std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at))
-    }
+    // SAFETY: the caller guarantees eight readable guest bytes at `at`; unaligned because these
+    // object fields carry no alignment promise - the same contract `peek_u32` states below.
+    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at)) }
 }
 
 /// `sceAgcCreateShader(out, header, bytecode, flags)`.
@@ -192,22 +195,33 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // Note: +0x50 and other fields are asset metadata (e.g. counts) and are not touched.
     unsafe { poke_u64(header.wrapping_add(0x10), bytecode) };
 
+    // SAFETY: `header` is the guest-owned object region, at least 0x130 bytes (the extent obSCEne
+    // measured), so the quadword at +0x8 is inside it.
     let off_8 = unsafe { peek_u64(header.wrapping_add(0x8)) };
     if off_8 != 0 && off_8 < 0x1000 {
         let sub_table = header.wrapping_add(off_8).wrapping_add(8);
+        // SAFETY: the same +0x8 quadword just read, written back as an absolute pointer.
         unsafe { poke_u64(header.wrapping_add(0x8), sub_table) };
         for i in 0..5 {
             let entry_addr = sub_table.wrapping_add(i * 8);
+            // SAFETY: `sub_table` is inside the guest's own header object - it is that object's
+            // own relative offset, rejected above unless it is non-zero and under 0x1000 - and
+            // `i * 8 < 40`, so the entry is within the region hardware itself dereferences here
+            // (measured, obSCEne 166-agc/create-shader). Unaligned for the field's sake.
             let rel = unsafe { peek_u64(entry_addr) };
             if rel != 0 && rel < 0x1000 {
-                unsafe { poke_u64(entry_addr, header.wrapping_add(rel)) };
+                // SAFETY: the same entry just read, written back as an absolute pointer.
+                unsafe { poke_u64(entry_addr, sub_table.wrapping_add(rel)) };
             }
         }
     }
 
     for &offset in &[0x20, 0x28, 0x30] {
+        // SAFETY: `offset` is one of 0x20/0x28/0x30, inside the guest-owned header object whose
+        // measured extent is 0x130 bytes.
         let rel = unsafe { peek_u64(header.wrapping_add(offset)) };
         if rel != 0 && rel < 0x1000 {
+            // SAFETY: the same field just read, written back as an absolute pointer.
             unsafe { poke_u64(header.wrapping_add(offset), header.wrapping_add(rel)) };
         }
     }
@@ -356,12 +370,176 @@ fn link_shaders(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Field offsets within the command-buffer writer handle every `sceAgcDcb*`/`sceAgcCb*` builder
+/// takes in `arg0`.
+///
+/// **Guest-observed, then confirmed by the library's own behaviour on hardware.** The shape was
+/// read off PPSA02664's stack. obSCEne then built a handle to that shape and called the real
+/// builders through it: they wrote correct packets and advanced the cursor by exactly what each
+/// builder's own `GetSize` had answered, across sixteen builders (worklog 534). Two offsets are
+/// confirmed harder still - poisoning `+0x20` with `0xCC` makes the library `call *0x20(%rdi)` and
+/// fault at `0xCCCCCCCCCCCCCCCC`, which is direct evidence it reads a function pointer there, and
+/// the same poison at `+0x30` underflows its space check first.
+///
+/// Not every field is used here. `+0x00` is the buffer start, `+0x08` one past its end, `+0x20` the
+/// overflow callback and `+0x30` a reserved-dword counter. This writes through the cursor and
+/// respects the limit; it does not touch the rest.
+mod dcb {
+    /// The write cursor - the field a builder advances, and the one that made the layout
+    /// checkable: `cur - begin` after a call is exactly the builder's own `GetSize` answer.
+    pub(super) const CUR: u64 = 0x10;
+    /// The limit a builder checks a packet against before writing it.
+    pub(super) const LIMIT: u64 = 0x18;
+}
+
+// **A builder returns the address of the packet it just wrote.**
+//
+// obSCEne reports `0x200060078` from every builder, in every run, and worklog 538 first recorded
+// that as an opaque constant on the strength of its stability. It is not one. Its probe allocates
+// with `oops_mem_alloc`, and the arithmetic closes exactly: base `0x200060000` aligns to
+// `0x200060040`, the eight-byte count prefix puts the struct at `0x200060038`, and its command
+// buffer sits `0x40` further on - at `0x200060078`. Other allocations in the same sweep
+// (`0x200080000`, `0x200028000`) are in the same region. The value is a pointer into the probe's own
+// command buffer, constant only because that allocator is deterministic and every check resets the
+// writer before calling.
+//
+// **Which pointer is derived, not measured.** Every obSCEne check resets first, so `cur == begin` at
+// the call and "the packet's address" and "the buffer's start" fit the data equally. The packet's
+// address is taken here because it is the reading that makes the guest work: PPSA02664 passes a
+// builder's return straight into `sceAgcSetCxRegIndirectPatchAddRegisters`, and a family of
+// `sceAgc*Patch*` entry points exists to amend an already-written packet. Returning the buffer start
+// would let only the first packet in a buffer ever be patched. Settling it needs two builders called
+// without a reset between them, which is asked of obSCEne rather than guessed at (REQ-...c74f).
+
+/// Appends one packet to the writer handle at `dcb`, advancing its cursor by the packet's length.
+///
+/// This is the effectful half that [`crate::packet::build`] deliberately does not have: the
+/// encoders there are pure and fully measured, and this places what they produce. Splitting it that
+/// way is why the encoders could land before the handle layout did.
+///
+/// Refuses rather than overruns. When a packet will not fit, the real library calls the overflow
+/// callback at `+0x20` and grows the buffer; **this does not**, because calling a guest callback
+/// from a shim is a mechanism nothing has measured. It answers the loud placeholder instead, which
+/// is visible in a trace and cannot be mistaken for a firmware code (principle 3, D670).
+fn dcb_append(dcb: u64, words: &[u32]) -> u64 {
+    if dcb == 0 || words.is_empty() {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and the
+    // limit are quadwords at its `+0x10` and `+0x18`, the offsets hardware itself reads.
+    let cur = unsafe { peek_u64(dcb.wrapping_add(dcb::CUR)) };
+    // SAFETY: the same handle, the adjacent field.
+    let limit = unsafe { peek_u64(dcb.wrapping_add(dcb::LIMIT)) };
+    let length = words.len() as u64 * 4;
+    if cur == 0 || limit == 0 || cur.wrapping_add(length) > limit {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    for (i, word) in words.iter().enumerate() {
+        // SAFETY: every offset written is below `length`, and `cur + length <= limit` was checked
+        // above, so each dword lands inside the guest's own command buffer.
+        unsafe { poke_u32(cur.wrapping_add(i as u64 * 4), *word) };
+    }
+    // SAFETY: the cursor field of the same handle, advanced by what was just written.
+    unsafe { poke_u64(dcb.wrapping_add(dcb::CUR), cur.wrapping_add(length)) };
+    cur
+}
+
+/// `sceAgcDcbEventWrite(dcb, event_type, _)`. Measured: `166-agc/dcb-event-write`.
+fn dcb_event_write(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::event_write(args[1] as u32))
+}
+
+/// `sceAgcDcbSetIndexCount(dcb, indices)`. Measured: `166-agc/dcb-set-index-count`.
+fn dcb_set_index_count(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::set_index_count(args[1] as u32))
+}
+
+/// `sceAgcDcbSetNumInstances(dcb, instances)`. Measured: `166-agc/dcb-set-num-instances`.
+fn dcb_set_num_instances(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::set_num_instances(args[1] as u32))
+}
+
+/// `sceAgcDcbDrawIndexAuto(dcb, index_count, initiator)`. Measured: `166-agc/dcb-draw-auto`.
+fn dcb_draw_index_auto(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::draw_index_auto(args[1] as u32, args[2] as u32),
+    )
+}
+
+/// `sceAgcDcbSetIndexBuffer(dcb, address)`. Measured: `166-agc/dcb-set-index-buffer`.
+fn dcb_set_index_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::set_index_base(args[1]))
+}
+
+/// The register offset and value a `*RegisterDirect` builder takes packed into one quadword.
+///
+/// **Measured** (`166-agc/dcb-set-cx-reg`, `dcb-set-uc-reg`): obSCEne passed
+/// `(value << 32) | offset` and the packet came back carrying the offset then the value, both
+/// unchanged.
+const fn unpack_register_entry(entry: u64) -> (u16, u32) {
+    (entry as u16, (entry >> 32) as u32)
+}
+
+/// `sceAgcDcbSetCxRegisterDirect(dcb, (value << 32) | offset)`. Measured: `166-agc/dcb-set-cx-reg`.
+fn dcb_set_cx_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (offset, value) = unpack_register_entry(args[1]);
+    dcb_append(args[0], &packet::build::set_context_register(offset, value))
+}
+
+/// `sceAgcDcbSetUcRegisterDirect(dcb, (value << 32) | offset)`. Measured: `166-agc/dcb-set-uc-reg`.
+fn dcb_set_uc_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (offset, value) = unpack_register_entry(args[1]);
+    dcb_append(args[0], &packet::build::set_uconfig_register(offset, value))
+}
+
+/// The largest register run this will read out of guest memory in one call.
+///
+/// A packet's count field is fourteen bits, so a run longer than this cannot be encoded at all.
+/// Refusing here keeps a wild count from turning into a wild read.
+const MAX_REGISTER_RUN: u64 = 0x3ffe;
+
+/// `sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count)`. Measured:
+/// `166-agc/dcb-set-sh-reg-direct`, where the run was two registers and came back as
+/// `header, offset, value, value` - no marker, `n + 2` dwords.
+fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (offset, values, count) = (args[1], args[2], args[3]);
+    if values == 0 || count == 0 || count > MAX_REGISTER_RUN {
+        return BAD_ARGUMENT;
+    }
+    let mut run = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        // SAFETY: `values` is the guest's own array of `count` dwords, the argument this call is
+        // defined by; `count` is bounded above so the walk cannot run away.
+        run.push(unsafe { peek_u32(values.wrapping_add(i * 4)) });
+    }
+    dcb_append(
+        args[0],
+        &packet::build::set_sh_register_range(offset as u16, &run),
+    )
+}
+
 /// Implementations this crate provides for `libSceAgc`.
 ///
 /// `sceAgcCreateShader` (object model, 3c5e) and the five shader-linkage calls e4f1 asked for, whose
 /// behaviours obSCEne measured once the 3D-draw sweeps settled (9a41, sweep `20260912-003916`): the
-/// interpolant mapping pair, the primitive-state pair, and the shader linker. The command
-/// **builders** (`sceAgcDcb*`) stay declared-only until a capture grounds each one's encoding.
+/// interpolant mapping pair, the primitive-state pair, and the shader linker.
+///
+/// Eight of the command **builders** are now wired, through the writer handle in `arg0`: the
+/// encodings were measured first (worklog 534, implemented as pure encoders in
+/// [`crate::packet::build`]) and the handle layout that places them was guest-observed and then
+/// confirmed by the library's own behaviour - see [`dcb`].
+///
+/// **Two of the ten measured packets are deliberately not wired**, because a builder that is right
+/// for one input and wrong for the rest is worse than one that answers honestly:
+///
+/// - `sceAgcDcbDrawIndex` - two of its five body dwords were never read back, so placing the
+///   packet means inventing them. The size is known and the encoding is not.
+/// - `sceAgcDcbSetIndexSize` - measured at exactly one input, `(0, 0)`, which produced selector
+///   `0x20000243` and value `0x400`. Nothing maps any other argument to any other packet, so
+///   emitting that one packet for every call would be a guess wearing a measurement's clothes.
+///
+/// Both want a capture with more argument sets, which is a probe request rather than a deduction.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceAgcCreateShader", create_shader),
@@ -370,6 +548,17 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcCreatePrimState", create_prim_state),
         ("sceAgcUpdatePrimState", update_prim_state),
         ("sceAgcLinkShaders", link_shaders),
+        ("sceAgcDcbEventWrite", dcb_event_write),
+        ("sceAgcDcbSetIndexCount", dcb_set_index_count),
+        ("sceAgcDcbSetNumInstances", dcb_set_num_instances),
+        ("sceAgcDcbDrawIndexAuto", dcb_draw_index_auto),
+        ("sceAgcDcbSetIndexBuffer", dcb_set_index_buffer),
+        ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
+        ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
+        (
+            "sceAgcCbSetShRegisterRangeDirect",
+            cb_set_sh_register_range_direct,
+        ),
     ]
 }
 
@@ -407,20 +596,35 @@ mod tests {
         args[2] = bytecode;
 
         assert_eq!(create_shader(&args), OK, "a well-formed call succeeds");
-        assert_eq!(slot, header, "*out is the header address - the object is the header region");
+        assert_eq!(
+            slot, header,
+            "*out is the header address - the object is the header region"
+        );
 
         let read_u64 = |off: usize| {
             let mut b = [0u8; 8];
             b.copy_from_slice(&object[off..off + 8]);
             u64::from_le_bytes(b)
         };
-        assert_eq!(read_u64(0x08), header + 0xe0, "+0x08 is the sub-table pointer");
+        assert_eq!(
+            read_u64(0x08),
+            header + 0xe0,
+            "+0x08 is the sub-table pointer"
+        );
         assert_eq!(read_u64(0x10), bytecode, "+0x10 is the bytecode pointer");
         assert_eq!(read_u64(0x20), header + 0x70, "+0x20 is relocated");
         assert_eq!(read_u64(0x28), header + 0x38, "+0x28 is relocated");
         assert_eq!(read_u64(0x30), header + 0x60, "+0x30 is relocated");
-        assert_eq!(read_u64(0xe0), header + 0x38, "sub-table[0] is relocated");
-        assert_eq!(read_u64(0xe8), header + 0x48, "sub-table[1] is relocated");
+        assert_eq!(
+            read_u64(0xe0),
+            header + 0xe0 + 0x38,
+            "sub-table[0] is relocated relative to sub_table"
+        );
+        assert_eq!(
+            read_u64(0xe8),
+            header + 0xe0 + 0x48,
+            "sub-table[1] is relocated relative to sub_table"
+        );
     }
 
     /// **A null out-parameter is refused, not dereferenced.** The guest's own wrapper answers
@@ -428,7 +632,11 @@ mod tests {
     #[test]
     fn create_shader_refuses_a_null_out_parameter() {
         let args = [0u64; GUEST_ARG_REGISTERS];
-        assert_eq!(create_shader(&args), BAD_ARGUMENT, "null out is the wrapper's bad-argument code");
+        assert_eq!(
+            create_shader(&args),
+            BAD_ARGUMENT,
+            "null out is the wrapper's bad-argument code"
+        );
     }
 
     fn read_le_u64(buf: &[u8], off: usize) -> u64 {
@@ -447,9 +655,21 @@ mod tests {
         args[0] = table.as_mut_ptr() as u64;
 
         assert_eq!(create_interpolant_mapping(&args), OK);
-        assert_eq!(read_le_u64(&table, 0), 0x191, "entry 0 is SPI_PS_INPUT_CNTL_0");
-        assert_eq!(read_le_u64(&table, 8), 0x1_0000_0192, "entry 1 is (1<<32)|0x192");
-        assert_eq!(read_le_u64(&table, 31 * 8), (31u64 << 32) | (0x191 + 31), "entry 31");
+        assert_eq!(
+            read_le_u64(&table, 0),
+            0x191,
+            "entry 0 is SPI_PS_INPUT_CNTL_0"
+        );
+        assert_eq!(
+            read_le_u64(&table, 8),
+            0x1_0000_0192,
+            "entry 1 is (1<<32)|0x192"
+        );
+        assert_eq!(
+            read_le_u64(&table, 31 * 8),
+            (31u64 << 32) | (0x191 + 31),
+            "entry 31"
+        );
     }
 
     /// **LinkShaders writes the interpolant table plus the routing quadword at +0x108.** Both halves
@@ -462,9 +682,17 @@ mod tests {
         args[0] = link.as_mut_ptr() as u64;
 
         assert_eq!(link_shaders(&args), OK);
-        assert_eq!(read_le_u64(&link, 0), 0x191, "interpolant table at the front");
+        assert_eq!(
+            read_le_u64(&link, 0),
+            0x191,
+            "interpolant table at the front"
+        );
         assert_eq!(read_le_u64(&link, 8), 0x1_0000_0192, "second interpolant");
-        assert_eq!(read_le_u64(&link, 0x108), LINK_STAGE_ROUTING, "stage routing at +0x108");
+        assert_eq!(
+            read_le_u64(&link, 0x108),
+            LINK_STAGE_ROUTING,
+            "stage routing at +0x108"
+        );
     }
 
     /// **Primitive topology lands in the low five bits of `sec_state + 0x14`, create then update.**
@@ -485,12 +713,24 @@ mod tests {
         assert_eq!(create_prim_state(&args), OK);
         let after_create = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
         assert_eq!(after_create & 0x1f, 4, "topology is DI_PT_TRILIST");
-        assert_eq!(after_create & !0x1f, 0xabcd_ffe0, "the other bits are preserved");
+        assert_eq!(
+            after_create & !0x1f,
+            0xabcd_ffe0,
+            "the other bits are preserved"
+        );
 
         args[2] = 1; // DI_PT_POINTLIST, arg2 for the update
         assert_eq!(update_prim_state(&args), OK);
         let after_update = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
-        assert_eq!(after_update & 0x1f, 1, "topology updated to DI_PT_POINTLIST");
-        assert_eq!(after_update & !0x1f, 0xabcd_ffe0, "the other bits still preserved");
+        assert_eq!(
+            after_update & 0x1f,
+            1,
+            "topology updated to DI_PT_POINTLIST"
+        );
+        assert_eq!(
+            after_update & !0x1f,
+            0xabcd_ffe0,
+            "the other bits still preserved"
+        );
     }
 }

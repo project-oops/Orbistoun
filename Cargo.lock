@@ -2827,6 +2827,7 @@ dependencies = [
  "orbistoun-shader",
  "orbistoun-translate",
  "serde",
+ "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",
 ]
@@ -3201,6 +3202,7 @@ dependencies = [
  "orbistoun-loader",
  "orbistoun-mem",
  "orbistoun-nid",
+ "orbistoun-overrides",
  "orbistoun-paths",
  "orbistoun-proto",
  "orbistoun-report",

@@ -39,8 +39,20 @@ pub fn summary(coverage: &CorpusCoverage) -> String {
     let instructions: usize = shaders.iter().map(|s| s.instructions).sum();
     let translatable: usize = shaders.iter().map(|s| s.translatable).sum();
 
+    // Which question the count answers, said on the line rather than left to be assumed.
+    // A shader every opcode of which is supported is not a shader that translates - the
+    // refusals that are about operands, registers and stages are invisible to an opcode
+    // census - and the two numbers were reported identically until they disagreed by two
+    // shaders out of six (worklog 550).
+    let attempted = shaders.iter().filter(|s| s.translated.is_some()).count();
+    let basis = if attempted == shaders.len() && !shaders.is_empty() {
+        "translate"
+    } else {
+        "have every opcode supported; no translation was attempted"
+    };
+
     let mut out = String::new();
-    let _ = writeln!(out, "shaders      {complete} of {} complete", shaders.len());
+    let _ = writeln!(out, "shaders      {complete} of {} {basis}", shaders.len());
     let _ = writeln!(
         out,
         "instructions {translatable} of {instructions} translatable"
@@ -207,7 +219,43 @@ mod tests {
         );
 
         let text = summary(&coverage);
-        assert!(text.contains("1 of 2 complete"), "got:\n{text}");
+        assert!(
+            text.contains("1 of 2"),
+            "got:
+{text}"
+        );
+        // And it says which question that count answered. Nobody ran a translator here,
+        // so the number is the opcode-level bound and the line has to admit it - the two
+        // were printed identically until they disagreed by two shaders in six.
+        assert!(
+            text.contains("no translation was attempted"),
+            "got:
+{text}"
+        );
+    }
+
+    /// **The same corpus, judged by a translator that refused, reads differently.**
+    ///
+    /// The one line that distinguishes a bound from a verdict, asserted rather than
+    /// trusted: a shader whose every opcode is supported still counts incomplete when the
+    /// translation of it failed.
+    #[test]
+    fn a_translation_verdict_overrides_the_opcode_estimate() {
+        let (table, _) = parts();
+        let mut coverage = CorpusCoverage::new();
+        coverage.observe_translated(
+            "a",
+            &decode(&stream(&[vop1(1)]), &table, &operands()),
+            &|_| true,
+            Some(false),
+        );
+
+        let text = summary(&coverage);
+        assert!(
+            text.contains("0 of 1 translate"),
+            "got:
+{text}"
+        );
     }
 
     #[test]

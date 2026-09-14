@@ -314,7 +314,7 @@ context cannot re-derive.
 | 2026-09-02 | [(/loop) The ctype tables, measured off hardware: table right, wall unchanged](worklog/297-ctype-tables-from-hardware.md) |
 | 2026-09-02 | [(/loop) The `_Getpctype` wall is a mislabel: measured, and it reframes four decisions](worklog/298-the-wall-is-not-getpctype.md) |
 | 2026-09-02 | [(/loop) Every report today was a file from 01:50; the ctype work had moved the wall](worklog/299-a-stale-trace-was-being-reported-as-this-run.md) |
-| 2026-09-02 | [(/loop) The reporter could not survive an execute fault; fixed, and the ctype work turns out to be a 7x advance](worklog/300-the-ctype-work-was-a-7x-advance.md) |
+| 2026-09-02 | [(/loop) The reporter could not survive an execute fault; fixed, and the ctype work turns out to be a 7x advance](worklog/300-the-ctype-work-was-a-7x-advance.md) |
 | 2026-09-02 | [(/loop) 452 documented functions were knowable all along; the work list is now inventory-driven](worklog/301-the-work-list-is-now-inventory-driven.md) |
 | 2026-09-02 | [(/loop) Bulk port batch 1: the bounded string and memory functions](worklog/302-batch-1-bounded-string-and-memory.md) |
 | 2026-09-02 | [(/loop) Bulk port batch 2: the runtime's out-of-line atomics, conversions and assert](worklog/303-batch-2-runtime-internals.md) |
@@ -329,12 +329,12 @@ context cannot re-derive.
 | 2026-09-02 | [(/loop) Bulk port batch 11: two inits resolved, and the cheap wins are exhausted](worklog/312-batch-11-the-cheap-wins-are-exhausted.md) |
 | 2026-09-02 | [(/loop) Bulk port batch 12: the lock-attribute families - and my stop recommendation was wrong](worklog/313-batch-12-and-a-recommendation-that-was-wrong.md) |
 | 2026-09-02 | [(/loop) Bulk port batch 13: the timed condition wait and `pthread_once`](worklog/314-batch-13-timed-wait-and-once.md) |
-| 2026-09-02 | [(/loop) Bulk port batch 14: the timed acquisitions, and a guard that checked the wrong table](worklog/315-batch-14-deadlines-and-a-guard-on-the-wrong-table.md) |
+| 2026-09-02 | [(/loop) Bulk port batch 14: the timed acquisitions, and a guard that checked the wrong table](worklog/315-batch-14-deadlines-and-a-guard-on-the-wrong-table.md) |
 | 2026-09-02 | [(/loop) R0: the red gates cleared, and the knowledge file catches up](worklog/316-r0-the-red-gates-cleared.md) |
 | 2026-09-02 | [(/loop) R1: the measure count is not a bug, and the name oracle already answered](worklog/317-r1-the-measure-count-is-not-a-bug.md) |
-| 2026-09-02 | [(/loop) R5: the hardware records finally get read, and the two runs disagree](worklog/318-r5-the-hardware-records-finally-get-read.md) |
-| 2026-09-02 | [(/loop) R6: measurements become a work queue with a completion condition](worklog/319-r6-measurements-become-a-work-queue.md) |
-| 2026-09-02 | [(/loop) R7: a live oracle at last, and it found four bugs in twenty-four cases](worklog/320-r7-the-differential-finds-four-bugs-on-day-one.md) |
+| 2026-09-02 | [(/loop) R5: the hardware records finally get read, and the two runs disagree](worklog/318-r5-the-hardware-records-finally-get-read.md) |
+| 2026-09-02 | [(/loop) R6: measurements become a work queue with a completion condition](worklog/319-r6-measurements-become-a-work-queue.md) |
+| 2026-09-02 | [(/loop) R7: a live oracle at last, and it found four bugs in twenty-four cases](worklog/320-r7-the-differential-finds-four-bugs-on-day-one.md) |
 | 2026-09-02 | [(/loop) More differential cases, and the parallel run finds a real concurrency bug](worklog/321-more-differential-cases-and-a-spurious-wakeup.md) |
 | 2026-09-02 | [(/loop) The differential calls back into guest code, and `qsort` agrees](worklog/322-qsort-and-bsearch-call-back-into-guest-code.md) |
 | 2026-09-02 | [(/loop) The sign-extension divergence was mine, not the console's](worklog/323-a-claim-i-made-was-wrong-and-is-withdrawn.md) |
@@ -362,8 +362,8 @@ context cannot re-derive.
 | 2026-09-03 | [(/loop) The guest says which modules to start, and we do not start them](worklog/345-the-guest-says-which-modules-to-start.md) |
 | 2026-09-03 | [(/loop) Six absences, and the tag that made them mean something](worklog/346-six-absences-and-the-tag-that-made-them-mean-something.md) |
 | 2026-09-03 | [(/loop) 24 claims, 24 non-claims, and a restore that broke a mutex](worklog/347-24-claims-24-non-claims-and-a-restore-that-broke-a-mutex.md) |
-| 2026-09-03 | [(/loop) a conformance bug, a stale work item, and a lying instrument](worklog/348-a-conformance-bug-a-stale-work-item-and-a-lying-instrument.md) |
-| 2026-09-03 | [(/loop) The oscillation is one allocation round, and the backlog is now the whole list](worklog/349-the-oscillation-is-one-allocation-round.md) |
+| 2026-09-03 | [(/loop) a conformance bug, a stale work item, and a lying instrument](worklog/348-a-conformance-bug-a-stale-work-item-and-a-lying-instrument.md) |
+| 2026-09-03 | [(/loop) The oscillation is one allocation round, and the backlog is now the whole list](worklog/349-the-oscillation-is-one-allocation-round.md) |
 | 2026-09-03 | [(/loop) What the 96% does not say, a stale red phase, and three more libc functions](worklog/350-what-the-96-percent-does-not-say.md) |
 | 2026-09-03 | [(/loop) The citations were already here, and R9 was already closed](worklog/351-the-citations-were-already-here.md) |
 | 2026-09-03 | [(/loop) The queue had permanent residents, and two asks were about the run](worklog/352-the-queue-had-permanent-residents.md) |
@@ -540,6 +540,35 @@ context cannot re-derive.
 | - | [523. SPIR-V extended-instruction support: the unlock for min/max and the transcendentals](worklog/523-spirv-extended-instruction-support-the-unlock-for-min-max-transcendentals.md) |
 | - | [524. v_min_f32/v_max_f32 wired through the extended set, and the fixture toolchain pinned](worklog/524-v-min-max-wired-through-ext-inst-and-the-fixture-toolchain.md) |
 | - | [525. The transcendental float expansion plan and the allocator out-parameter trace](worklog/525-the-transcendental-alu-expansion-and-out-parameter-trace-plan.md) |
-| - | [526. Unary and transcendental vector float ALU wired through the extended set](worklog/526-unary-transcendental-alu-expansion-landed.md) |
+| - | [526. Unary and transcendental vector float ALU wired through the extended set](worklog/526-unary-transcendental-alu-expansion-landed.md) |
 | - | [527. v_sin_f32/v_cos_f32 take revolutions, not radians - correcting worklog 526](worklog/527-v-sin-cos-take-revolutions-not-radians.md) |
-| - | [528. Terminator reaches flipped: the TempOverflow was graphics cascade; now unified at AGC render-state](worklog/528-terminator-reaches-flipped-unified-at-agc-render-state.md) |
+| - | [528. Terminator reaches flipped: the TempOverflow was graphics cascade; now unified at AGC render-state](worklog/528-terminator-reaches-flipped-unified-at-agc-render-state.md) |
+| - | [529. AGC render-state sub-object model cracked: exact correspondence to obSCEne 0x2c measurement](worklog/529-agc-render-state-sub-object-model-cracked.md) |
+| - | [530. The shader-capture pipeline: from a command stream to the census corpus](worklog/530-shader-capture-pipeline-command-stream-to-census-corpus.md) |
+| - | [531. The DCB-writer-handle request, and a second witness for the packet walker](worklog/531-dcb-writer-handle-request-and-a-second-packet-witness.md) |
+| - | [532. PPSA02664's flip-wait is a symptom; the wall is the Dcb builders (FLIP_TO_ALL confirms)](worklog/532-the-flip-wait-is-a-symptom-the-wall-is-the-dcb-builders.md) |
+| - | [533. Fourteen AGC packet sizes measured, and what a rival's table agreed and disagreed with](worklog/533-measured-agc-packet-sizes-and-the-prosper-cross-check.md) |
+| - | [534. Ten AGC builders measured as whole packets, and a specific prosper claim refuted](worklog/534-ten-measured-pm4-packets-and-a-refuted-claim.md) |
+| - | [535. The GL cube renders on the GPU: five measured fixes in oops-gl's AGC path](worklog/535-the-gl-cube-renders-on-the-gpu-five-measured-fixes.md) |
+| - | [536. The ten measured packets, implemented as encoders - and why they are not yet wired](worklog/536-the-ten-measured-packets-implemented.md) |
+| - | [537. The worklog numbering race, closed](worklog/537-the-worklog-numbering-race.md) |
+| - | [538. The DCB writer handle, and eight builders wired through it](worklog/538-the-dcb-writer-handle-and-eight.md) |
+| - | [539. The GPU badge is a measurement, the frame hashes are stable, and textures sample](worklog/539-the-gpu-badge-is-a-measurement-the.md) |
+| - | [540. The builder return is a pointer, and the run that showed it](worklog/540-the-builder-return-is-a-pointer-and-the.md) |
+| - | [541. Prior-art audit: four public PS5 AGC repositories against the GL cube's measurements](worklog/541-prior-art-audit-four-public-ps5-agc.md) |
+| - | [542. The corpus hottest import is a probe artefact, and worklist cannot say so](worklog/542-the-corpus-hottest-import-is-a-probe.md) |
+| - | [543. Syscall 1 bound to nothing, because a rename named nothing](worklog/543-syscall-1-bound-to-nothing-because-a.md) |
+| - | [544. The Exited rung, and where it had to sit](worklog/544-the-exited-rung-and-where-it-had-to.md) |
+| - | [545. The GL cube oracle through the submission pipeline: m0 lands, five names and one base are missing](worklog/545-the-gl-cube-oracle-through-the.md) |
+| - | [546. Exited beats faulted, and the verdict that proved it](worklog/546-exited-beats-faulted-and-the-verdict.md) |
+| - | [547. Records update on not-worse-and-different, and three wrong diagnoses](worklog/547-records-update-on-not-worse-and.md) |
+| - | [548. The five the vertex program needed: named by the reference, four translated, one blocked](worklog/548-the-five-the-vertex-program-needed.md) |
+| - | [549. The image family named and solved, and a mask that solved one bit too wide](worklog/549-the-image-family-named-and-solved-and-a.md) |
+| - | [550. The census stopped claiming shaders complete that do not translate](worklog/550-the-census-stopped-claiming-shaders.md) |
+| - | [551. The parameter move was blocked on the wrong obstacle](worklog/551-the-parameter-move-was-blocked-on-the.md) |
+| - | [552. A console shader translates: the no-base code was wrong and the stage was never passed](worklog/552-a-console-shader-translates-the-no-base.md) |
+| - | [553. The AGC patch family is one producer and its amendments](worklog/553-the-agc-patch-family-is-a-producer-and.md) |
+| - | [554. The console's pixel shader draws, and five validation errors nobody was watching](worklog/554-the-console-s-pixel-shader-draws-and.md) |
+| - | [555. Terminator recorded flip does not reproduce](worklog/555-terminator-s-recorded-flip-does-not.md) |
+| - | [556. Modules declare the sixteen-bit capabilities only where they use them](worklog/556-modules-declare-the-sixteen-bit.md) |
+| - | [557. A mesh stage stands up, hand-assembled, before anything is translated into it](worklog/557-a-mesh-stage-stands-up-hand-assembled.md) |

@@ -23,4 +23,18 @@ if ! multipass info "$NAME" >/dev/null 2>&1; then
   exit 1
 fi
 
+# A VM with no mount fails inside the guest with `cd: ...: No such file or directory`, which
+# reads as a broken instance rather than as what it is: Multipass ships with
+# `local.privileged-mounts` off on Windows, and enabling it is a machine-wide privileged
+# setting this script has no business changing. Said here, once, with the way round it.
+if ! multipass exec "$NAME" -- sh -lc "[ -d '$MOUNT' ]" >/dev/null 2>&1; then
+  echo "$NAME has no $MOUNT - the repository is not mounted." >&2
+  echo "Either enable mounts (multipass set local.privileged-mounts=true, which needs" >&2
+  echo "administrator rights) and re-run tools/toolchain/setup.sh, or copy the tree in:" >&2
+  echo "  sh tools/toolchain/sync.sh push" >&2
+  echo "  sh tools/toolchain/run.sh <command>" >&2
+  echo "  sh tools/toolchain/sync.sh pull <the files it wrote>" >&2
+  exit 1
+fi
+
 multipass exec "$NAME" --working-directory "$MOUNT" -- "$@"

@@ -51,9 +51,9 @@ fn create_queue(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// **The whole resource-registration subsystem is a stub on retail.** obSCEne disassembled
 /// `libSceAgcDriver.sprx` (REQ-...0925Z-7b3c) and found `sceAgcDriverRegisterOwner`,
-/// `RegisterResource`, `InitResourceRegistration` are each `mov $0x8a6c9018, %eax; ret` - pure stubs
-/// - and confirmed it on hardware: they return `0x8a6c9018` and mutate zero bytes of their caller
-/// buffers. So this is the measured value, and orbistoun returns it for fidelity (principle 1): the
+/// `RegisterResource`, `InitResourceRegistration` are each `mov $0x8a6c9018, %eax; ret` - pure
+/// stubs - and confirmed it on hardware: they return `0x8a6c9018` and mutate zero bytes of their
+/// caller buffers. So this is the measured value, and orbistoun returns it for fidelity (principle 1): the
 /// guest gets exactly the "not supported" the console gives it.
 ///
 /// It is **not** what gates PPSA28061's startup abort, and returning it does not clear that abort.
@@ -99,7 +99,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverCreateQueue", create_queue),
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),
-        ("sceAgcDriverInitResourceRegistration", init_resource_registration),
+        (
+            "sceAgcDriverInitResourceRegistration",
+            init_resource_registration,
+        ),
         (
             "sceAgcDriverQueryResourceRegistrationUserMemoryRequirements",
             query_resource_registration_user_memory_requirements,

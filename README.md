@@ -2,149 +2,120 @@
   <img src="assets/logo.png" alt="Orbistoun" width="200">
 </p>
 
-# orbistoun
+# Orbistoun
 
-A high-level emulator for Prospero-generation hardware, in Rust. A research project.
+**The Clean-Room x86-64 Native High-Level Emulator for Prospero.**
 
-Site + API docs: **[project-oops.github.io/Orbistoun](https://project-oops.github.io/Orbistoun/)**
+Orbistoun is a high-level emulator (HLE) for 8th and 9th generation console software (Orbis and Prospero), written in Rust. Because both the guest console and host PC share the x86-64 CPU architecture, guest code executes **natively** with zero interpreter or CPU recompilation overhead. Orbistoun's work lies entirely in the operating system layer: memory management, dynamic NID linking, thread scheduling, and translating RDNA2 GPU command streams into modern Vulkan.
 
-> **Status: pre-alpha, renders nothing.** Every commercial executable in the local
-> corpus loads, links, and **executes real guest code** - one of them for ninety-nine
-> million system calls before the time limit stops it. None produces a pixel, and no
-> guest has yet spawned a thread. No emulator for this target boots a commercial title
-> today, and this one is younger than the rest.
+Site: **[project-oops.github.io/Orbistoun](https://project-oops.github.io/Orbistoun/)**
 
-## About
+| 📖 **[Player & Tester Guide (GUI & CLI)](docs/USER_GUIDE.md)** | ⚙️ **[Technical Reference & Architecture](docs/README.md)** |
+| :--- | :--- |
+| *Running titles, controller mapping, GUI walkthrough, and crash traces.* | *Address maps, RDNA2/Vulkan pipeline, ABI bridge, and blame engine.* |
 
-orbistoun is a **high-level emulator**: the guest CPU is x86-64 and so is yours, so
-guest code runs natively with no translation. The work is elsewhere - reimplementing
-the target operating system underneath it, and translating its GPU command streams
-to Vulkan.
+---
 
-Three properties shape everything here:
+## Role in THE LOOP
 
-- **No firmware required.** The vendor system libraries are reimplemented, not
-  loaded. A build needs nothing from the hardware to run.
-- **Interception is linking.** Guest modules import by NID hash; orbistoun resolves
-  those hashes and *is* the linker. That means the complete list of what a title
-  needs is available statically, before a single guest instruction executes.
-- **Stub behaviour is data.** What an unimplemented function returns to the guest
-  is a TOML file you edit, not a recompile - because it is usually unknown, and
-  bisecting it should cost a relaunch.
+Within the [OOPS ecosystem](../docs/THE_LOOP.md), Orbistoun is the **execution and verification engine**:
 
-## Getting started
-
-**The recommended way in is [OOPS](https://github.com/project-oops/OOPS)**, which holds all four
-side by side and carries one entry point over them:
-
-```bash
-./bin/oops check orbistoun    # also: build, test, fmt, clean
+```
+Title Executable (from oops-apps or commercial)
+         │
+         ▼
+┌────────────────────────────────────────┐
+│ Orbistoun Native Execution             │
+│ (x86-64 Native + Vulkan Graphics)      │
+└──────────────────┬─────────────────────┘
+                   │
+         [Fault / Crash / Stub]
+                   │
+                   ▼
+┌────────────────────────────────────────┐
+│ orbistoun-turn (Automated Blame)       │
+│ - Snapshot unwritten struct memory     │
+│ - Arm watchpoints on empty slots       │
+│ - Diff trace: FURTHER / same / BACK    │
+└──────────────────┬─────────────────────┘
+                   │
+         [Unmeasured Question]
+                   │
+                   ▼
+  obSCEne Hardware Oracle (PS5: 192.168.1.211)
 ```
 
-That relays to this repository's own entry point rather than reimplementing anything, so the
-two cannot disagree - and it is what CI runs, for the same reason.
-[docs/BUILDING.md](https://github.com/project-oops/OOPS/blob/main/docs/BUILDING.md) has every verb.
+1. **Native Execution**: Orbistoun maps the title into memory, resolves import NID hashes statically, and jumps to entry.
+2. **Automated Blame (`orbistoun-turn`)**: When a guest faults, watchpoints identify which register or unwritten struct field triggered the crash.
+3. **The Hardware Oracle**: If the function or struct is unmeasured, the loop dispatches a probe to [obSCEne](../obscene/) on physical hardware via [Prosperous](../prosperous/). Telemetry from the PS5 is converted into typed Rust structs tagged `known_by: measured`.
+4. **Progress Verification**: The title re-runs. If progress is made (`verdict: FURTHER`), the implementation is promoted. If it regresses (`BACK`), it is reverted.
 
-**From inside this repository the entry point is `bin/orbistoun`**, carrying the shared verbs
-every OOPS project has - `build`, `test`, `lint`, `fmt`, `check`, `clean`, `doc` - and far
-more besides, because the emulator's own loop lives in it:
+👉 **Read the full emulator loop specification in [docs/THE_LOOP.md](docs/THE_LOOP.md)**.
+
+---
+
+## Developer Quickstart
+
+### 1. Build and Health Check
+Orbistoun is developed as a sibling under the [OOPS meta-repository](../README.md):
 
 ```bash
-./bin/orbistoun doctor --fix   # is this machine ready; --fix installs what is missing
-./bin/orbistoun check          # is the tree sound
-./bin/orbistoun run <title>    # one turn of the actual work
+# From repository root
+./bin/orbistoun doctor --fix   # verify toolchains and fix missing dependencies
+./bin/orbistoun check          # compile and run the test suite
 ```
 
-`./bin/orbistoun --help` lists the rest, and **[docs/BUILDING.md](docs/BUILDING.md) is the
-full account**: what each verb does, what `check` runs and in what order, and what CI runs.
+### 2. Run a Title
+To run a title (for example, [`gl-cube`](../oops-apps/src/gl-cube)):
+```bash
+./bin/orbistoun run GLCB00001
+```
+Orbistoun executes the guest until completion or timeout, records the trace, compares it against the previous run, and prints the verdict (`FURTHER`, `same`, or `BACK`) followed by ranked diagnostic findings.
 
-That last command is the project. It resolves a title, refreshes symbol names if they
-are stale, runs the guest under a time limit, and reports what it asked for, how far it
-got, and **whether that is further than last time**.
+### 3. Query Knowledge, Questions, and Worklist
+Inspect what Orbistoun knows, what rests on empirical measurement, and what remains an open question:
 
-**A clone of only this repository is not enough.** Orbistoun takes crates from
-`oops-libs` by relative path, as a sibling, so the collection layout is a build requirement.
-`oops bootstrap orbistoun` fetches it.
-
-**[docs/THE_LOOP.md](docs/THE_LOOP.md) is the one-page explanation of what that loop
-does**, start to finish, including which steps still need a person. New contributors
-should start there.
-
-With no titles on disk, everything below still works and says what it cannot do:
-
-| Command | What it does |
-|---------|--------------|
-| `orbistoun-cli symbols` | Every system-library function orbistoun declares |
-| `orbistoun-cli knows` | What is recorded about those functions, and what it rests on |
-| `orbistoun-cli questions` | Everything written down that this project does **not** know, ranked |
-| `orbistoun-cli worklist` | What to implement next, totalled across every run so far |
-| `orbistoun-cli compat list` | How far each title has got, furthest first |
-| `orbistoun-cli imports <file>` | What a guest module needs, without executing it |
-| `orbistoun-cli policy` | Emit a default stub-policy file to edit |
-
-`imports` reports an honest error rather than an empty list when a container cannot be
-parsed. An empty import list would read as "this title needs nothing", which is never
-true.
-
-## Where it actually is
-
-Every executable in the local corpus runs guest code. That one is measured from a run,
-on material this repository does not ship, so it is not in the generated table below - which
-holds only what the tool can recompute anywhere.
-
-<!-- generated by `orbistoun-cli status` - do not edit by hand -->
-
-| | |
+| Command | Purpose |
 |---|---|
-| Functions declared / implemented | 961 / 720 |
-| Declared in a library that serves nothing | 149 across 23 libraries - names written down, no implementation |
-| Recorded behaviours | 770 - 365 published, 36 measured, 74 guest-observed, 257 assumed |
-| Open questions a hardware probe could settle | 790 |
-| Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
+| `orbistoun-cli symbols` | Lists all 900+ declared system functions |
+| `orbistoun-cli questions` | Lists open questions ranked by how often guest titles call them |
+| `orbistoun-cli worklist` | Ranked action list of what to implement next across all runs |
+| `orbistoun-cli knows <symbol>` | Displays the empirical proof and citation behind any function |
+| `orbistoun-cli compat list` | Shows how far every title in the corpus has reached |
 
-<!-- end generated -->
+---
 
-Unflattering detail, including the three current walls, is in
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md). The number that matters is the share
-of calls answered by a real implementation, not a screenshot.
+## Architecture & Crates
 
-## Layout and scope
+```
+crates/
+├── orbistoun-loader   # ELF64 / SELF container loading, TLS, and address space layout
+├── orbistoun-nid      # Import hash resolution and candidate grammar generation
+├── orbistoun-abi      # System V AMD64 ↔ Microsoft x64 calling convention bridge
+├── orbistoun-hle      # Clean-room system service stubs (libkernel, libScePad, etc.)
+├── orbistoun-gpu      # GFX10 PM4 packet processor, context registers, and queue dispatch
+├── orbistoun-shader   # RDNA2 GFX10 bytecode decoder and SPIR-V recompiler
+├── orbistoun-turn     # Automated blame engine, 2D argument sweep, and Escape Hatch harness
+├── orbistoun-report   # Trace capture, diff comparator, and ranked findings generator
+└── orbistoun-cli      # Developer command-line interface
+```
 
-The workspace is a dependency spine - each crate required by everything after it, which is also
-the build order. What each crate is for: **[docs/CRATES.md](docs/CRATES.md)**.
+---
 
-What orbistoun deliberately **is not**, so that "should we add X?" has an answer already
-written down: **[docs/SCOPE.md](docs/SCOPE.md)**.
+## Strict Clean-Room Rules: No Fake Stubs
 
-## Documentation
+Orbistoun strictly adheres to the OOPS Clean-Room conventions:
+1. **Zero Leaked Code**: Zero proprietary SDK headers, zero disassembly copying.
+2. **Honest Stubs**: An unimplemented function returns an explicit unhandled status or non-zero placeholder. We **never** return fake `0` success codes to "nudge" an emulator past a crash (the *Kyty trap*), as fake stubs cause silent downstream memory corruption.
+3. **The Escape Hatch**: If execution hits an architectural wall (missing GPU opcode or recompiler instruction), deadlocks in a spinloop, or regresses, the autonomous loop halts, rolls back the trial patch, and escalates to `worklog.md`.
 
-Start at the **[documentation hub](docs/README.md)**, or go straight to
-**[docs/THE_LOOP.md](docs/THE_LOOP.md)** for what the tool actually does. Contributors:
-build principles and conventions are in [CLAUDE.md](CLAUDE.md); every decision and its
-reasoning is in [docs/DECISIONS.md](docs/DECISIONS.md).
+---
 
-Work that informed this project is credited in
-[ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md). Reference only - nothing here is lifted.
+## Cross-Project Links
 
-## Licence
-
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
-option - the Rust ecosystem convention.
-
-## Part of OOPS
-
-Orbistoun is one of four projects aimed at the same platform's operating system. They are developed
-together in **[OOPS](https://github.com/project-oops/OOPS)** and released separately.
-
-| | |
-|---|---|
-| **[obSCEne](https://github.com/project-oops/obSCEne)** | the probe - a guest that interrogates whatever runs it and reports what it found |
-| **[Prosperous](https://github.com/project-oops/Prosperous)** | the instrument - remote management for anything that runs Orbis software |
-| **[SELFish](https://github.com/project-oops/SELFish)** | the formats - read, write and build tools for the platform's own file formats |
-
-**Developing any of them?** Clone [OOPS](https://github.com/project-oops/OOPS) - it holds all four side by side, arranged so
-they build against each other. Cloning this repository alone gets you this project; it is
-the right thing for using it and the wrong thing for changing it.
-
-Shared rules - provenance, naming, decision logs, worklogs, gates - live in
-[the OOPS conventions](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md) and are not restated here.
+- **[Master OOPS Front Door](../README.md)** — Collection overview and building instructions.
+- **[The OOPS Loop](../docs/THE_LOOP.md)** — Master ecosystem loop specification.
+- **[obSCEne](../obscene/)** — Hardware conformance probe providing empirical silicon truth.
+- **[Prosperous](../prosperous/)** — Remote hardware tool deploying payloads and streaming logs.
+- **[SELFish](../selfish/)** — Platform file format compiler and ELF/PKG unpacker.
+- **[oops-apps](../oops-apps/)** — Conforming homebrew titles used as test fixtures.

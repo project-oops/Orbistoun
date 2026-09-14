@@ -77,6 +77,41 @@ samples = 3
 operands = [{ word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 7, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
+family = "MIMG"
+opcode = 0
+mnemonic = "image_load"
+samples = 6
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "MIMG"
+opcode = 8
+mnemonic = "image_store"
+samples = 6
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "MIMG"
+opcode = 32
+mnemonic = "image_sample"
+samples = 7
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 21, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "MIMG"
+opcode = 36
+mnemonic = "image_sample_l"
+samples = 6
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 21, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "MIMG"
+opcode = 39
+mnemonic = "image_sample_lz"
+samples = 8
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 21, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
 family = "MTBUF"
 opcode = 0
 mnemonic = "tbuffer_load_format_x"
@@ -309,6 +344,13 @@ operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { w
 
 [[opcode_operands]]
 family = "SOPP"
+opcode = 0
+mnemonic = "s_nop"
+samples = 4
+operands = [{ word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "SOPP"
 opcode = 1
 mnemonic = "s_endpgm"
 samples = 1
@@ -361,6 +403,20 @@ family = "SOPP"
 opcode = 9
 mnemonic = "s_cbranch_execnz"
 samples = 2
+operands = [{ word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "SOPP"
+opcode = 16
+mnemonic = "s_sendmsg"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "SOPP"
+opcode = 32
+mnemonic = "s_inst_prefetch"
+samples = 4
 operands = [{ word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]
@@ -428,6 +484,13 @@ operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { wor
 
 [[opcode_operands]]
 family = "VOP2"
+opcode = 22
+mnemonic = "v_lshrrev_b32_e32"
+samples = 6
+operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP2"
 opcode = 26
 mnemonic = "v_lshlrev_b32_e32"
 samples = 5
@@ -439,6 +502,13 @@ opcode = 37
 mnemonic = "v_add_nc_u32_e32"
 samples = 5
 operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP2"
+opcode = 40
+mnemonic = "v_add_co_ci_u32_e32"
+samples = 6
+operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }]
 
 [[opcode_operands]]
 family = "VOP3"

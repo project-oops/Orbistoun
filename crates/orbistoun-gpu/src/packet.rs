@@ -173,7 +173,19 @@ pub fn walk(bytes: &[u8]) -> PacketWalk {
         // The count field holds one less than the number of body dwords, so a packet
         // with a single body dword stores zero. Reading it without the adjustment
         // truncates every packet by four bytes and desynchronises immediately.
-        let body_dwords = ((header >> field::COUNT_SHIFT) & field::COUNT_MASK) + 1;
+        //
+        // A count of all ones is the exception: a header-only packet. Measured twice:
+        // the console's own no-op builder writes exactly four bytes, `0xffff1000`
+        // (obSCEne `166-agc/cb-nop`, sweep 20260914-100833), and the GL cube capture
+        // ends in sixteen such words that the hardware ran past to retire its fence
+        // (tests/captures/agc-gl-cube-fw1240-a). Read as `0x3fff + 1` body dwords it
+        // would describe a 64 KiB packet and every stream padded this way would overrun.
+        let count = (header >> field::COUNT_SHIFT) & field::COUNT_MASK;
+        let body_dwords = if count == field::COUNT_MASK {
+            0
+        } else {
+            count + 1
+        };
 
         let (kind, length) = match (header >> field::TYPE_SHIFT) & 0x3 {
             0 => (
@@ -281,6 +293,182 @@ pub mod build {
             COMPUTE_SHADER_EN,
         ]
     }
+
+    /// Opcodes measured coming out of the console's own command builders.
+    ///
+    /// **Every value below was read off a packet `libSceAgc` wrote**, not transcribed from a
+    /// document and hoped to match - obSCEne sweep `20260914-100833` called each builder with known
+    /// arguments and recorded the header it produced (orbistoun worklog 534). The public PM4 names
+    /// are mesa's `PKT3_*`; the numbers are ours.
+    ///
+    /// Every one satisfies the type-3 length rule: the header's count field plus two dwords is
+    /// exactly the byte count the builder advanced, on all ten. That is the field split D565 derived
+    /// from four builders and could not then confirm.
+    pub mod measured {
+        /// `IT_INDEX_BUFFER_SIZE`, from `sceAgcDcbSetIndexCount` (header `0xc0001300`).
+        pub const INDEX_BUFFER_SIZE: u8 = 0x13;
+        /// `IT_INDEX_BASE`, from `sceAgcDcbSetIndexBuffer` (header `0xc0012600`).
+        pub const INDEX_BASE: u8 = 0x26;
+        /// `IT_DRAW_INDEX_2`, from `sceAgcDcbDrawIndex` (header `0xc0042700`).
+        pub const DRAW_INDEX_2: u8 = 0x27;
+        /// `IT_DRAW_INDEX_AUTO`, from `sceAgcDcbDrawIndexAuto` (header `0xc0012d00`).
+        pub const DRAW_INDEX_AUTO: u8 = 0x2d;
+        /// `IT_NUM_INSTANCES`, from `sceAgcDcbSetNumInstances` (header `0xc0002f00`).
+        pub const NUM_INSTANCES: u8 = 0x2f;
+        /// `IT_EVENT_WRITE`, from `sceAgcDcbEventWrite` (header `0xc0004600`).
+        pub const EVENT_WRITE: u8 = 0x46;
+        /// `IT_SET_CONTEXT_REG`, from `sceAgcDcbSetCxRegisterDirect` (header `0xc0016900`).
+        pub const SET_CONTEXT_REG: u8 = 0x69;
+        /// `IT_SET_SH_REG`, from `sceAgcCbSetShRegisterRangeDirect` (header `0xc0027600`).
+        pub const SET_SH_REG: u8 = 0x76;
+        /// `IT_SET_UCONFIG_REG`, from `sceAgcDcbSetUcRegisterDirect` (header `0xc0017900`).
+        pub const SET_UCONFIG_REG: u8 = 0x79;
+        /// `IT_SET_UCONFIG_REG_INDEX`, from `sceAgcDcbSetIndexSize` (header `0xc0017a00`).
+        ///
+        /// **Distinct from [`SET_UCONFIG_REG`], and the pair is what shows it.** Measured in one
+        /// run, `0x79` carried selector `0x242` with no high bits while `0x7a` carried
+        /// `0x20000243` - same low-half register offset space, an index in the high half. Derived
+        /// from the two packets side by side, not cited.
+        pub const SET_UCONFIG_REG_INDEX: u8 = 0x7a;
+    }
+
+    /// An `EVENT_WRITE` for `event_type`. Two dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-event-write`): `sceAgcDcbEventWrite(dcb, 62, 0)` wrote
+    /// `0xc0004600` then `0x3e`, advancing 8 bytes. The event type passes through unchanged.
+    ///
+    /// This is the **short, address-less form**. A longer form that carries a destination address
+    /// exists - another implementation publishes four dwords for it - and is not this function.
+    #[must_use]
+    pub fn event_write(event_type: u32) -> [u32; 2] {
+        [command_header(measured::EVENT_WRITE, 1), event_type]
+    }
+
+    /// An `INDEX_BUFFER_SIZE` declaring how many indices a subsequent draw reads. Two dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-set-index-count`): `sceAgcDcbSetIndexCount(dcb, 36)` wrote
+    /// `0xc0001300` then `0x24`, advancing 8 bytes - and its own `GetSize` answered 8 in the same
+    /// run, so the reservation and the packet agree.
+    #[must_use]
+    pub fn set_index_count(indices: u32) -> [u32; 2] {
+        [command_header(measured::INDEX_BUFFER_SIZE, 1), indices]
+    }
+
+    /// A `NUM_INSTANCES` setting the instance count for subsequent draws. Two dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-set-num-instances`): `sceAgcDcbSetNumInstances(dcb, 1)`
+    /// wrote `0xc0002f00` then `1`, advancing 8 bytes.
+    #[must_use]
+    pub fn set_num_instances(instances: u32) -> [u32; 2] {
+        [command_header(measured::NUM_INSTANCES, 1), instances]
+    }
+
+    /// A `DRAW_INDEX_AUTO` - a draw whose indices are generated rather than fetched. Three dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-draw-auto`): `sceAgcDcbDrawIndexAuto(dcb, 3, 2)` wrote
+    /// `0xc0012d00`, `3`, `2`, advancing 12 bytes. Both arguments appear in order.
+    #[must_use]
+    pub fn draw_index_auto(index_count: u32, initiator: u32) -> [u32; 3] {
+        [
+            command_header(measured::DRAW_INDEX_AUTO, 2),
+            index_count,
+            initiator,
+        ]
+    }
+
+    /// An `INDEX_BASE` carrying the 64-bit address of the index buffer. Three dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-set-index-buffer`): `sceAgcDcbSetIndexBuffer(dcb,
+    /// 0x12345678)` wrote `0xc0012600`, `0x12345678`, `0`, advancing 12 bytes - the address split
+    /// low half first.
+    #[must_use]
+    pub fn set_index_base(address: u64) -> [u32; 3] {
+        let lo = u32::try_from(address & 0xffff_ffff).unwrap_or_default();
+        let hi = u32::try_from(address >> 32).unwrap_or_default();
+        [command_header(measured::INDEX_BASE, 2), lo, hi]
+    }
+
+    /// A `SET_CONTEXT_REG` writing one value into one context register. Three dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-set-cx-reg`): the builder takes the register offset and the
+    /// value packed into one quadword as `(value << 32) | offset`, and wrote `0xc0016900`, `0x200`,
+    /// `0x12345678` - the pair unpacked into the packet in that order, advancing 12 bytes.
+    #[must_use]
+    pub fn set_context_register(offset: u16, value: u32) -> [u32; 3] {
+        [
+            command_header(measured::SET_CONTEXT_REG, 2),
+            u32::from(offset),
+            value,
+        ]
+    }
+
+    /// A `SET_UCONFIG_REG` writing one value into one user-config register. Three dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-set-uc-reg`): same packed-quadword argument as
+    /// [`set_context_register`]; `(4 << 32) | 0x242` wrote `0xc0017900`, `0x242`, `4`, advancing 12
+    /// bytes. Its own `GetSize` answered 12 in the same run.
+    #[must_use]
+    pub fn set_uconfig_register(offset: u16, value: u32) -> [u32; 3] {
+        [
+            command_header(measured::SET_UCONFIG_REG, 2),
+            u32::from(offset),
+            value,
+        ]
+    }
+
+    /// A `SET_SH_REG` writing a run of consecutive shader registers. `values.len() + 2` dwords.
+    ///
+    /// **Measured whole** (`166-agc/dcb-set-sh-reg-direct`):
+    /// `sceAgcCbSetShRegisterRangeDirect(cb, 0x08, values, 2)` wrote `0xc0027600`, `8`,
+    /// `0x12345678`, `0x9abcdef0` - one header, one selector, one dword per register - advancing 16
+    /// bytes. So `n` registers cost `n + 2` dwords.
+    ///
+    /// **This refutes a specific published claim.** Another implementation gives `n + 4` for this
+    /// builder and states that the real library prepends a two-dword marker. The measured packet
+    /// begins with the register write itself and carries no marker (worklog 534, D683).
+    ///
+    /// Returns an empty vector for an empty run: a zero-register write is not a packet, and
+    /// `command_header` would have to claim a body dword that does not exist.
+    #[must_use]
+    pub fn set_sh_register_range(offset: u16, values: &[u32]) -> Vec<u32> {
+        if values.is_empty() {
+            return Vec::new();
+        }
+        let Ok(body) = u32::try_from(values.len() + 1) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(values.len() + 2);
+        out.push(command_header(measured::SET_SH_REG, body));
+        out.push(u32::from(offset));
+        out.extend_from_slice(values);
+        out
+    }
+
+    /// A `DRAW_INDEX_2` - an indexed draw from a bound index buffer. Six dwords.
+    ///
+    /// **Three of the five body dwords are measured; two are transcribed.**
+    /// `sceAgcDcbDrawIndex(dcb, 3, 0x12345678, 0)` wrote header `0xc0042700` and advanced 24 bytes,
+    /// and the check read back the address low half, its high half, and the index count at body
+    /// positions 1, 2 and 3 (`166-agc/dcb-draw-index`). It did **not** read positions 0 and 4, so
+    /// `max_size` and `initiator` are placed by the published PM4 field order rather than by
+    /// measurement, and are named here so a caller supplies them rather than inheriting a zero
+    /// somebody invented.
+    ///
+    /// The size is not in doubt - 24 bytes, measured, against another implementation's 7 dwords
+    /// (worklog 534).
+    #[must_use]
+    pub fn draw_index_2(max_size: u32, address: u64, index_count: u32, initiator: u32) -> [u32; 6] {
+        let lo = u32::try_from(address & 0xffff_ffff).unwrap_or_default();
+        let hi = u32::try_from(address >> 32).unwrap_or_default();
+        [
+            command_header(measured::DRAW_INDEX_2, 5),
+            max_size,
+            lo,
+            hi,
+            index_count,
+            initiator,
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +527,18 @@ mod tests {
                 base_register: 0x2C0A
             }
         );
+    }
+
+    #[test]
+    fn a_header_only_no_op_is_one_dword() {
+        // Count all ones: the packet is its header. The console's no-op builder writes
+        // exactly this word and nothing after it (obSCEne 166-agc/cb-nop).
+        let bytes = stream(&[0xFFFF_1000, command(0x05, 1), 0xDEAD_BEEF]);
+        let result = walk(&bytes);
+        assert_eq!(result.packets[0].kind, PacketKind::Command { opcode: 0x10 });
+        assert_eq!(result.packets[0].length, 4);
+        assert_eq!(result.packets[1].kind, PacketKind::Command { opcode: 0x05 });
+        assert!(result.is_trustworthy());
     }
 
     #[test]

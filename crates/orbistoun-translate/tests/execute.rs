@@ -234,6 +234,43 @@ fn the_scalar_and_vector_files_are_separate() {
     assert_eq!(vector(&registers, 3), 4, "v3, got {registers:?}");
 }
 
+/// The operand code the table names `m0`: past the last scalar register.
+const M0_CODE: u32 = 124;
+
+#[test]
+fn a_move_through_m0_round_trips_and_leaves_the_scalar_file_alone() {
+    // m0 is one word of scalar state outside the register file, and both shaders the GL
+    // cube ran on the console write it before their first interpolation. A model that
+    // aliased it onto a scalar register would corrupt that register; one that dropped
+    // the write would read back zero here. Both models hold it, so both are run.
+    if !device_or_skip("a_move_through_m0_round_trips_and_leaves_the_scalar_file_alone") {
+        return;
+    }
+
+    for fidelity in [Fidelity::Lane, Fidelity::Wavefront] {
+        let registers = run_at(
+            fidelity,
+            &[
+                s_mov_inline(2, 9),
+                s_mov_code(M0_CODE, 2),
+                s_mov_inline(2, 1),
+                s_mov_code(5, M0_CODE),
+                s_endpgm(),
+            ],
+        );
+        assert_eq!(
+            scalar(&registers, 5),
+            9,
+            "{fidelity:?}: s5 should hold what m0 held, got {registers:?}"
+        );
+        assert_eq!(
+            scalar(&registers, 2),
+            1,
+            "{fidelity:?}: s2 was overwritten after the copy into m0, got {registers:?}"
+        );
+    }
+}
+
 #[test]
 fn a_wait_instruction_translates_and_changes_nothing() {
     // It orders memory operations rather than computing anything, so the observable
@@ -690,7 +727,7 @@ fn run_memory(fidelity: Fidelity, words: &[u32]) -> (Vec<u32>, Vec<u32>) {
 fn global_store(vaddr: u32, vdata: u32) -> [u32; 2] {
     [
         head("global_store_dword"),
-        vaddr | (vdata << 8) | (0x7F << 16),
+        vaddr | (vdata << 8) | (FLAT_NO_BASE_CODE << 16),
     ]
 }
 
@@ -698,7 +735,7 @@ fn global_store(vaddr: u32, vdata: u32) -> [u32; 2] {
 fn global_load(vdst: u32, vaddr: u32) -> [u32; 2] {
     [
         head("global_load_dword"),
-        vaddr | (0x7F << 16) | (vdst << 24),
+        vaddr | (FLAT_NO_BASE_CODE << 16) | (vdst << 24),
     ]
 }
 
@@ -3393,6 +3430,94 @@ fn a_packed_float16_load_widens_each_half() {
     }
 }
 
+/// Whether a module's header declares a capability, by scanning its words.
+///
+/// `OpCapability` is opcode 17 with one operand and a word count of two, and it can only
+/// appear in the header - so a linear scan for that pair is exact rather than a heuristic.
+fn declares_capability(module: &[u32], capability: u32) -> bool {
+    let mut index = 5; // past the five-word module header
+    while index + 1 < module.len() {
+        let word_count = (module[index] >> 16) as usize;
+        let opcode = module[index] & 0xFFFF;
+        if word_count == 0 {
+            break;
+        }
+        if opcode == 17 && module[index + 1] == capability {
+            return true;
+        }
+        index += word_count;
+    }
+    false
+}
+
+/// **A module declares the sixteen-bit capabilities only if it uses them.**
+///
+/// # Why this is worth a test rather than a comment
+///
+/// Both were declared by every module for months, which asks every device for two features and
+/// makes every module invalid on a device that does not offer them. Nothing noticed, because
+/// the driver in front of the tests supports both and the tests never asked a validator
+/// (worklog 556).
+///
+/// The positive half matters as much: a module that *needs* a half and omits the capability is
+/// invalid in the other direction, and lazily declaring it is exactly the change that could get
+/// that wrong. So both are asserted, from the same corpus, in one place.
+///
+/// Needs no device - it reads the words.
+#[test]
+fn the_sixteen_bit_capabilities_are_declared_only_where_used() {
+    /// `Float16` and `Int16`, from the SPIR-V capability enumeration.
+    const FLOAT16: u32 = 9;
+    const INT16: u32 = 22;
+    /// `BUF_FMT_16_16_FLOAT`, the format whose channels are halves (code 29, measured).
+    const FMT_16X2_FLOAT: u32 = 29;
+
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let strategy = Strategy::Predicated {
+        fidelity: Fidelity::Wavefront,
+        width: Width::Wave64,
+    };
+    let translate_words = |words: &[u32]| {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &table, &operands);
+        translate(&decoded, &table, strategy)
+            .expect("the program translates")
+            .module
+    };
+
+    // Nothing sixteen-bit in sight.
+    let plain = translate_words(&[v_mov_inline(1, 7), s_endpgm()]);
+    assert!(
+        !declares_capability(&plain, FLOAT16),
+        "a module with no half in it declares Float16, so every device it runs on is asked for 
+         a feature it does not need"
+    );
+    assert!(!declares_capability(&plain, INT16), "likewise Int16");
+
+    // A typed load of a half-format channel, which is the one path that needs both.
+    let mut program = describe_buffer(4, 256);
+    program.extend(mtbuf(
+        "tbuffer_load_format_xy",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_16X2_FLOAT,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+    let halves = translate_words(&program);
+    assert!(
+        declares_capability(&halves, FLOAT16),
+        "a module that reads a half must declare Float16, or it is invalid on every device"
+    );
+    assert!(
+        declares_capability(&halves, INT16),
+        "the half is narrowed through a sixteen-bit integer, so Int16 is needed too"
+    );
+}
+
 #[test]
 fn a_single_channel_typed_access_is_an_untyped_one_with_a_format() {
     // The claim that justifies sharing the body: with a plain word format and one
@@ -3869,9 +3994,17 @@ fn a_shader_mixing_condition_code_and_mask_branches_takes_the_model_with_a_mask(
     );
 }
 
+/// The scalar-base field's value for "there is no base; the address is the register pair".
+///
+/// `0x7d`, because that is what the reference assembler emits for `off` and what the console's
+/// own shaders carry - not the top of the field, which is what these helpers used to write and
+/// what the translator used to accept. The two agreed with each other and with nothing that
+/// runs; a real captured stream was refused for two phases on the strength of it (worklog 552).
+const FLAT_NO_BASE_CODE: u32 = 0x7d;
+
 /// A flat **store** of any width: address at bit 0, data at bit 8.
 fn flat_store(name: &str, vaddr: u32, data: u32) -> [u32; 2] {
-    [head(name), vaddr | (data << 8) | (0x7F << 16)]
+    [head(name), vaddr | (data << 8) | (FLAT_NO_BASE_CODE << 16)]
 }
 
 /// A flat **load** of any width: address at bit 0, destination at bit 24.
@@ -3883,7 +4016,10 @@ fn flat_store(name: &str, vaddr: u32, data: u32) -> [u32; 2] {
 /// *refusal*: it translated happily because the register it was meant to overflow was
 /// never decoded.
 fn flat_load(name: &str, vaddr: u32, destination: u32) -> [u32; 2] {
-    [head(name), vaddr | (0x7F << 16) | (destination << 24)]
+    [
+        head(name),
+        vaddr | (FLAT_NO_BASE_CODE << 16) | (destination << 24),
+    ]
 }
 
 /// `s_wqm_b64 s[dst:dst+1], <source code>`.

@@ -10,9 +10,9 @@ master_version = "01.00"
 
 [status]
 reach = "flipped"
-outcome = "image+0x3b3310"
+outcome = "image+0x3b383b"
 imports = 192
-calls = 339538
+calls = 339539
 standing = 100
 default_return = "unimplemented"
 frames = 1

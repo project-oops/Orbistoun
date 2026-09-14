@@ -137,16 +137,18 @@ fn one_builder_can_emit_several_packets() {
     assert_eq!(opcodes, vec![0x79, 0x3c, 0x79], "opcodes as measured");
 }
 
-/// **The no-op does not fit the length rule, and that is recorded rather than smoothed over.**
+/// **The no-op closes under the header-only rule, which it was the evidence for.**
 ///
-/// `sceAgcCbNop` wrote **four** bytes whose header carries a count of `0x3fff` - which under the
-/// rule the other three obey would describe a 65,540-byte packet. Consistent with a no-op used as
-/// filler, where the count is not a body length.
+/// `sceAgcCbNop` wrote **four** bytes whose header carries a count of `0x3fff`. Under the rule the
+/// other builders obey that would describe a 65,540-byte packet, and this test used to record the
+/// disagreement rather than smooth it over. The GL cube capture settled it: its stream ends in
+/// sixteen of these words after the fence event, the hardware retired the fence every frame, and a
+/// walk that read them as 64 KiB packets overran the buffer. A count of all ones is a header-only
+/// packet, and now the walker says so.
 ///
-/// Asserted as a **known disagreement** rather than skipped: if a future length rule ever made
-/// this one close, that would be a change worth noticing, and a skipped case notices nothing.
+/// Asserted as agreement now: if the rule ever regressed, this is the capture that would say.
 #[test]
-fn the_no_op_is_the_one_that_does_not_close() {
+fn the_no_op_closes_as_a_header_only_packet() {
     let nop = CAPTURES
         .iter()
         .find(|c| c.name == "sceAgcCbNop")
@@ -155,10 +157,14 @@ fn the_no_op_is_the_one_that_does_not_close() {
 
     let walk = walk(nop.bytes);
     assert!(
-        !walk.is_trustworthy(),
-        "the no-op's count field now closes against a 4-byte buffer - the length rule changed, \
-         and this disagreement was the reason the rule was believed for the other three"
+        walk.is_trustworthy(),
+        concat!(
+            "the no-op's count of all ones is a header-only packet; ",
+            "the GL cube capture ran sixteen of them past its fence"
+        )
     );
+    assert_eq!(walk.packets.len(), 1);
+    assert_eq!(walk.packets[0].length, 4);
 }
 
 /// **A header from live GPU memory, decoded the same by two independent readers.**
@@ -212,5 +218,101 @@ fn a_live_memory_pm4_header_decodes_as_obscenes_own_reader_did() {
         walk.packets.len(),
         1,
         "the header plus its declared body is exactly one packet"
+    );
+}
+
+/// The same builders, from a **second, independent** hardware run - obSCEne sweep
+/// `20260914-000606`, section `166-agc`, a native Prospero title. Different day, different
+/// firmware leg, and the probe called each builder with **different arguments** than the
+/// `run-native-title` capture above did (its bodies are the argument-cleared case, all zeros where
+/// the first run carried live addresses). Same structure regardless: the header opcode and the
+/// length rule cannot depend on the argument bytes, and a second witness is what shows that.
+const CAPTURES_20260914: &[Captured] = &[
+    Captured {
+        name: "sceAgcDcbDmaData",
+        extent: 28,
+        bytes: &[
+            0x00, 0x50, 0x05, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    },
+    Captured {
+        name: "sceAgcCbReleaseMem",
+        extent: 32,
+        bytes: &[
+            0x00, 0x49, 0x06, 0xc0, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ],
+    },
+    Captured {
+        name: "sceAgcDcbWaitRegMem",
+        extent: 56,
+        bytes: &[
+            0x04, 0x79, 0x02, 0xc0, 0x42, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01, 0xc8, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x3c, 0x05, 0xc0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x04, 0x79, 0x01, 0xc0, 0x42, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc8,
+        ],
+    },
+];
+
+/// **A second hardware run walks the same, so the length rule does not ride on the arguments.**
+///
+/// The captures above (`run-native-title`) and these (`20260914-000606`) are the same builders
+/// called with different arguments. Each fresh buffer must still consume exactly, and the
+/// three-packet `WaitRegMem` - the case the first set could only witness once - must decompose the
+/// same way from bytes that share only its opcodes and lengths, not its body. That is the arm the
+/// single-capture note above asked for.
+#[test]
+fn an_independent_measurement_confirms_the_walk() {
+    for capture in CAPTURES_20260914 {
+        assert_eq!(
+            capture.bytes.len(),
+            capture.extent,
+            "{}: the transcription and the measured extent disagree",
+            capture.name
+        );
+        let walk = walk(capture.bytes);
+        assert!(
+            walk.is_trustworthy(),
+            "{}: desynchronised={} overran={} trailing={}",
+            capture.name,
+            walk.desynchronised,
+            walk.overran,
+            walk.trailing_bytes
+        );
+        let consumed: u32 = walk.packets.iter().map(|p| p.length).sum();
+        assert_eq!(
+            consumed as usize, capture.extent,
+            "{}: the walk consumed {consumed} of {} measured bytes",
+            capture.name, capture.extent
+        );
+    }
+
+    // The multi-packet case, now on a second, argument-independent witness.
+    let wait = CAPTURES_20260914
+        .iter()
+        .find(|c| c.name == "sceAgcDcbWaitRegMem")
+        .expect("the capture is in the table");
+    let walk = walk(wait.bytes);
+    let lengths: Vec<u32> = walk.packets.iter().map(|p| p.length).collect();
+    assert_eq!(
+        lengths,
+        vec![16, 28, 12],
+        "the same 16+28+12 split as the first run, from different argument bytes"
+    );
+    let opcodes: Vec<u8> = walk
+        .packets
+        .iter()
+        .filter_map(|p| match p.kind {
+            PacketKind::Command { opcode } => Some(opcode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opcodes,
+        vec![0x79, 0x3c, 0x79],
+        "the same opcodes, measured again"
     );
 }

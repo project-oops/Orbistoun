@@ -6,6 +6,34 @@ The window's left panel is the library; the detail panel is what is known about 
 entry. On the command line the same material is reached through `orbistoun inspect` and
 `orbistoun status`.
 
+---
+
+## GUI: Game Library & Dashboard
+
+```text
++-------------------------------------------------------------------------------+
+|  Orbistoun - Next-Generation Console Emulator                    [_][O][X]    |
++-------------------------------------------------------------------------------+
+| File  Emulation  View  Debug  Help                                            |
+|-------------------------------------------------------------------------------|
+| [Add Title Dir...]  [Refresh Library]  [Settings]  [Stop Emulation]           |
+|-------------------------------------------------------------------------------|
+| Icon    | Title ID   | Title Name                   | Category | Compatibility|
+|---------+------------+------------------------------+----------+--------------|
+| [ICON]  | GLCB00001  | GL-Cube 3D Demo (Stage 2)    | BIG_APP  | PLAYABLE     |
+| [ICON]  | OBSC00001  | obSCEne Hardware Conformance | BIG_APP  | PASS         |
+| [ICON]  | WIPE00001  | WipEout Model Viewer         | BIG_APP  | IN-GAME      |
+| [ICON]  | PPSA02664  | Commercial Title A           | BIG_APP  | LOAD / FAULT |
++-------------------------------------------------------------------------------+
+| Status: Idle | Vulkan: AMD Radeon RX 6700 XT | Backend: Native x86-64         |
++-------------------------------------------------------------------------------+
+```
+
+![Orbistoun Library UI](screenshots/library.png)
+*(Screenshot placeholder: Game Library & Dashboard)*
+
+---
+
 ## Where titles come from
 
 Orbistoun **does not ship any**, and never will. What it scans is a directory you point it at.

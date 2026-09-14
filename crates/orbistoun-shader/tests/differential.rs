@@ -156,6 +156,14 @@ const FIXTURES: &[(&str, &str)] = &[
         "unreached",
         "SOPK, MTBUF and VINTRP, which no compiled fixture produces",
     ),
+    (
+        "sampling",
+        "the image opcodes a compiled fixture never reaches, `image_sample_lz` above all",
+    ),
+    (
+        "primitive",
+        "the NGG vertex program's prefetch, nop, send-message, shift and carry-add",
+    ),
 ];
 
 #[test]
@@ -355,8 +363,17 @@ fn a_worklist_over_the_whole_fixture_corpus_reads_sensibly() {
         // Derived from the list rather than written out, because the previous literal
         // said nine and adding a fixture made this test fail for a reason that had
         // nothing to do with what it checks.
-        rendered.contains(&format!("0 of {} complete", FIXTURES.len())),
-        "nothing is supported, so no shader is complete:\n{rendered}"
+        //
+        // No translator was run here, so the count is the opcode-level bound and the line
+        // says which it is. That wording is asserted below rather than assumed.
+        rendered.contains(&format!("0 of {}", FIXTURES.len())),
+        "nothing is supported, so no shader is complete:
+{rendered}"
+    );
+    assert!(
+        rendered.contains("no translation was attempted"),
+        "the count is a bound, and the report has to say so:
+{rendered}"
     );
     assert!(
         !rendered.contains("suspect"),
@@ -409,6 +426,7 @@ fn same_number(left: &str, right: &str) -> bool {
 /// is what makes a solved layout comparable to a printed one.
 const MODIFIERS: &[&str] = &[
     "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv", "done", "compr", "vm",
+    "unorm",
 ];
 
 /// An operand the reference spells as a name, and the code it stands for.
@@ -432,7 +450,12 @@ fn symbolic_code(token: &str) -> Option<u32> {
     };
     match token {
         "mrtz" => Some(8),
-        "null" => Some(9),
+        // Two unrelated things that happen to be nine: the export target `null`, and the
+        // geometry-engine allocation request the reference prints by name. Measured the same
+        // way as the targets - the assembler encodes `s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)`
+        // as 0xbf900009, and the console-run vertex program in `primitive.s` carries that
+        // exact word. Sharing an arm is the lint's doing and says nothing about them.
+        "null" | "sendmsg(MSG_GS_ALLOC_REQ)" => Some(9),
         "prim" => Some(20),
         "p10" => Some(0),
         "p20" => Some(1),
@@ -468,6 +491,15 @@ fn normalise(reference: &str) -> Vec<String> {
                 Some(rest) if rest.starts_with('v') || rest.starts_with('s') => rest,
                 _ => token,
             };
+            // `off` is the reference's spelling for a flat access with no scalar base, and
+            // the field holds the code our operand table names `null` - the same code, named
+            // per field by one and globally by the other, which is a fact about the encoding
+            // rather than a disagreement. Offered alongside so the decoded `null` matches,
+            // and the token is still dropped as an operand, as every modifier is.
+            if token == "off" {
+                out.push("null".to_owned());
+                continue;
+            }
             if MODIFIERS.contains(&token) {
                 continue;
             }
@@ -495,6 +527,17 @@ fn normalise(reference: &str) -> Vec<String> {
             if let Some(code) = symbolic_code(token) {
                 out.push(code.to_string());
             }
+            // `dmask:0xf` and the like: a value the encoding carries in a field, printed
+            // with the field's name attached. The probe solver splits these the same way
+            // and finds the field, so the comparison has to split them too - otherwise a
+            // correctly decoded image mask has nothing to match and every image
+            // instruction fails here the moment its layout is solved.
+            if let Some((name, value)) = token.split_once(':')
+                && !name.is_empty()
+                && value.starts_with(|c: char| c.is_ascii_digit())
+            {
+                out.push(value.to_owned());
+            }
             // A register range names its base: the field encodes where the group starts.
             let token = match (token.find('['), token.find(':')) {
                 (Some(open), Some(colon)) if colon > open => {
@@ -513,14 +556,13 @@ fn normalise(reference: &str) -> Vec<String> {
 /// Every entry is a gap with a reason, and the list is asserted to be *exact* - so
 /// closing one fails here until it is removed, and opening a new one fails here too.
 const NO_OPERANDS_DECODED: &[&str] = &[
-    // MIMG. Its first operand is a descriptor living in several consecutive scalar
-    // registers rather than a register, and decoding the field without modelling what it
-    // points at produces a number that reads like a register and is not one.
-    //
-    // MTBUF used to be listed here for the same reason and no longer is: the descriptor
-    // model arrived with the untyped buffer accesses, and a typed one is the same
-    // descriptor with a format conversion on top.
-    "image_sample",
+    // MIMG is no longer here. It was listed for the same reason MTBUF once was - its
+    // resource operand is a descriptor spanning several consecutive scalar registers, and a
+    // field read without modelling what it points at produces a number that reads like a
+    // register and is not one. The field turns out to name where the group *starts*, at a
+    // quarter scale, exactly as the buffer descriptors do, and probes solved it (worklog
+    // 549). What the descriptor points at is still unmodelled; that is the translator's
+    // problem now rather than the decoder's.
     // Structured immediates: one encoded field carrying several independent values.
     // `s_waitcnt` packs three separate counters into sixteen bits and the reference
     // prints whichever are not at their maximum, so the operand text and the encoded

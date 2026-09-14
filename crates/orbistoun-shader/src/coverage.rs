@@ -71,15 +71,35 @@ pub struct ShaderSummary {
     pub translatable: usize,
     /// Whether the decode can be read as a measurement rather than a lower bound.
     pub trustworthy: bool,
+    /// What an actual translation of this shader said, when one was attempted.
+    ///
+    /// [`None`] means nobody asked a translator - a pure decode census, which is the
+    /// useful shape before a translator exists and is what the unit tests here use.
+    pub translated: Option<bool>,
 }
 
 impl ShaderSummary {
-    /// Whether every instruction in this shader could be translated.
+    /// Whether this shader translates whole.
     ///
-    /// The only status that matters for "will this shader render": partial support
-    /// for a shader is no support for a shader.
+    /// The only status that matters for "will this shader render": partial support for a
+    /// shader is no support for a shader.
+    ///
+    /// **A real verdict wins over the estimate**, because the estimate is a claim about
+    /// opcodes and translation refuses for more reasons than an opcode. Two GL cube pixel
+    /// shaders had every opcode on the supported list and translated none of the way
+    /// through - one stopped at a register outside the register file, the next at a
+    /// memory base nobody has measured - and this reported them complete while the
+    /// submission pipeline reported nothing translated (worklogs 545, 550). That is the
+    /// same failure this project already forbids one level down: reporting more than the
+    /// measurement supports.
+    ///
+    /// The estimate remains the answer when no translation was attempted. It is a bound
+    /// rather than a verdict, and [`crate::report::summary`] says which it is showing.
     pub const fn is_complete(&self) -> bool {
-        self.translatable == self.instructions && self.trustworthy
+        match self.translated {
+            Some(verdict) => verdict,
+            None => self.translatable == self.instructions && self.trustworthy,
+        }
     }
 }
 
@@ -166,6 +186,16 @@ pub struct Summary {
     pub translatable: usize,
     /// Distinct instructions seen.
     pub instructions: usize,
+    /// Whether `complete` counts shaders a translator was actually run over.
+    ///
+    /// The field exists so two runs measured differently are not compared. It was added
+    /// when `complete` stopped meaning "every opcode is supported" and started meaning
+    /// "a translation succeeded", which moved this corpus from two to zero without a line
+    /// of the translator changing - and the comparison called that `BACK`, a regression
+    /// that had not happened. A stored record from before the change carries `false` by
+    /// default, which is exactly what it measured.
+    #[serde(default)]
+    pub attempted: bool,
     /// What still blocks something, by name where one is known.
     ///
     /// Kept so a run can say *which* blocker went away, not only that the count fell. A
@@ -233,6 +263,7 @@ impl Summary {
         let shaders = coverage.shaders();
         Self {
             complete: coverage.complete_shaders(),
+            attempted: !shaders.is_empty() && shaders.iter().all(|s| s.translated.is_some()),
             shaders: shaders.len(),
             translatable: shaders.iter().map(|s| s.translatable).sum(),
             instructions: shaders.iter().map(|s| s.instructions).sum(),
@@ -256,6 +287,21 @@ impl Summary {
                 uncovered: Vec::new(),
             };
         };
+
+        // **Two runs that measured different things are not compared.** Reporting a
+        // delta between a count of shaders whose opcodes were all supported and a count
+        // of shaders that actually translate names a movement neither run observed, and
+        // this project has a rule about a message coming from the branch that determined
+        // it. There is nothing to compare against, which is what `FirstRun` says.
+        if self.attempted != previous.attempted {
+            return Movement {
+                verdict: Verdict::FirstRun,
+                complete_delta: 0,
+                translatable_delta: 0,
+                cleared: Vec::new(),
+                uncovered: Vec::new(),
+            };
+        }
 
         let complete_delta = as_delta(self.complete, previous.complete);
         let translatable_delta = as_delta(self.translatable, previous.translatable);
@@ -310,16 +356,36 @@ impl CorpusCoverage {
         Self::default()
     }
 
-    /// Folds one shader's decode in.
+    /// Folds one shader's decode in, with no translation attempted.
     ///
     /// `supported` answers whether a translator can emit code for a given kind.
     /// Passing a closure that always returns `false` gives a pure decode census,
     /// which is the useful shape before any translator exists.
+    ///
+    /// Prefer [`observe_translated`](Self::observe_translated) wherever a translator can
+    /// actually be run: what this can report about a whole shader is a bound, and the
+    /// difference between the bound and the verdict is exactly where shaders hide.
     pub fn observe(
         &mut self,
         id: &str,
         decode: &Decode,
         supported: &impl Fn(OpcodeKey) -> bool,
+    ) -> ShaderSummary {
+        self.observe_translated(id, decode, supported, None)
+    }
+
+    /// Folds one shader's decode in, carrying what a translation of it actually did.
+    ///
+    /// `translated` is [`Some`] when a translator was run over this shader: `true` if it
+    /// produced a module, `false` if it refused. That verdict decides
+    /// [`ShaderSummary::is_complete`]; the per-opcode census still feeds the blocker
+    /// ranking, because a refusal names one instruction and the ranking needs all of them.
+    pub fn observe_translated(
+        &mut self,
+        id: &str,
+        decode: &Decode,
+        supported: &impl Fn(OpcodeKey) -> bool,
+        translated: Option<bool>,
     ) -> ShaderSummary {
         let mut decodable = 0;
         let mut translatable = 0;
@@ -363,6 +429,7 @@ impl CorpusCoverage {
             decodable,
             translatable,
             trustworthy: decode.is_trustworthy(),
+            translated,
         };
         self.shaders.push(summary.clone());
         summary
@@ -428,14 +495,44 @@ impl CorpusCoverage {
 mod tests {
 
     /// A summary with the figures a test cares about and defaults elsewhere.
+    ///
+    /// Measured by translation, because that is what a run does now; the one test about
+    /// comparing across a change of basis builds its own.
     fn summary(complete: usize, translatable: usize, blockers: &[&str]) -> super::Summary {
         super::Summary {
             complete,
+            attempted: true,
             shaders: 10,
             translatable,
             instructions: 127,
             blockers: blockers.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    /// **Two runs that measured different things report no comparison, not a regression.**
+    ///
+    /// The estimate counts shaders whose every opcode is supported; the verdict counts
+    /// shaders that translate. This corpus went from two to zero the day it started asking
+    /// the translator, with nothing in the translator changed - and a plain delta called
+    /// that `BACK`, which names a movement neither run observed.
+    #[test]
+    fn a_run_measured_differently_from_the_last_is_not_compared_with_it() {
+        let estimated = super::Summary {
+            attempted: false,
+            ..summary(2, 196, &["s_sendmsg"])
+        };
+        let translated = summary(0, 196, &["s_sendmsg"]);
+
+        let movement = translated.movement(Some(&estimated));
+        assert_eq!(movement.verdict, super::Verdict::FirstRun);
+        assert_eq!(movement.complete_delta, 0, "no delta is claimed either");
+
+        // And the comparison is restored as soon as both sides measure the same way.
+        let later = summary(1, 198, &["s_sendmsg"]);
+        assert_eq!(
+            later.movement(Some(&translated)).verdict,
+            super::Verdict::Further
+        );
     }
 
     #[test]
