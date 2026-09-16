@@ -44,9 +44,10 @@ pub mod dispatch;
 pub mod syscall;
 
 pub use dispatch::{
-    ArgumentDump, DUMP_BYTES, ForcedWrite, GuestFn, Plant, Pointing, RecordedCall, abi_conformance,
-    argument_dumps, call_counts, current_call, current_thread, dropped_ranges, dumps_dropped,
-    entry_alignment_conforms, forced_return_count, forced_write_counts, host_thread,
+    ArgumentDump, DUMP_BYTES, ForcedWrite, GuestFn, Plant, Pointing, RecordedCall, SHAPE_OTHER,
+    SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO, abi_conformance, arg_shapes, argument_dumps,
+    call_counts, classify_arg, current_call, current_thread, describe_shape, dropped_ranges,
+    dumps_dropped, entry_alignment_conforms, forced_return_count, forced_write_counts, host_thread,
     implemented_count, implemented_count_within, install_call_budget, install_float_handlers,
     install_forced_dumps, install_forced_returns, install_forced_writes, install_handlers,
     install_policy_returns, install_policy_writes, install_readable_ranges, install_stub_returns,

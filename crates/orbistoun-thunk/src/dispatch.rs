@@ -328,6 +328,104 @@ static RING_RETURNED: [AtomicU8; MAX_RECORDED_CALLS] =
 /// Per-import call counts. Allocated once when a table is built, never on the call path.
 static COUNTS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
 
+/// The shape bits an argument value ORs into its slot's profile, so the kinds a slot saw across
+/// calls accumulate into a picture of what that argument *is*.
+///
+/// The guest cannot describe its own imports - the firmware they resolve to is opaque and unreadable
+/// (XOM) - but the guest's **own calls** describe them: a slot that is always a pointer into a guest
+/// region is a pointer, one that is always small is a scalar or a size, one that is never anything
+/// but zero is unused, and one that is sometimes a pointer and sometimes zero is an optional pointer.
+/// This is inference from observed behaviour, the only signature source the black box allows, and it
+/// is a lower bound (a real argument always passed zero reads as unused) - a characterisation, never
+/// a proof.
+pub const SHAPE_ZERO: u8 = 0x1;
+/// A small value: a flag, a count, a size - not an address. See [`SHAPE_ZERO`].
+pub const SHAPE_SCALAR: u8 = 0x2;
+/// A value inside the guest's address space - a pointer. See [`SHAPE_ZERO`].
+pub const SHAPE_POINTER: u8 = 0x4;
+/// Anything else - a large non-address value. See [`SHAPE_ZERO`].
+pub const SHAPE_OTHER: u8 = 0x8;
+
+/// Classifies one argument value into its [shape bit](SHAPE_ZERO).
+///
+/// Pure, so the boundaries are tested without a running guest. The guest address space runs from the
+/// image base up through the stack and the direct-memory pool (`0x4000…`..`0x8000…`); below a page a
+/// value is a scalar, not an address.
+#[must_use]
+pub const fn classify_arg(v: u64) -> u8 {
+    /// The bottom of the guest's address space (image base). Below the pool and stack, above every
+    /// scalar a guest passes.
+    const GUEST_LOW: u64 = 0x4000_0000_0000;
+    /// One past the top of it.
+    const GUEST_HIGH: u64 = 0x8000_0000_0000;
+    /// Under a page: a flag, a small count, or a size - never an address.
+    const SCALAR_CEILING: u64 = 0x1_0000;
+    if v == 0 {
+        SHAPE_ZERO
+    } else if v < SCALAR_CEILING {
+        SHAPE_SCALAR
+    } else if v >= GUEST_LOW && v < GUEST_HIGH {
+        SHAPE_POINTER
+    } else {
+        SHAPE_OTHER
+    }
+}
+
+/// Renders one argument slot's accumulated [shape bits](SHAPE_ZERO) into a kind.
+///
+/// A register that has ever held a pointer is a pointer slot even if it was also null on other
+/// calls, so the categories are read widest-first (pointer, then large non-address, then scalar); a
+/// `?` marks a slot that was **also** zero on some call - a nullable pointer, an optional size. A
+/// slot that was never anything but zero is an argument the guest always passed as nought: present
+/// (the `describe_shape` arity counts it) but carrying no other evidence.
+const fn describe_slot(bits: u8) -> &'static str {
+    let nullable = bits & SHAPE_ZERO != 0;
+    if bits & SHAPE_POINTER != 0 {
+        if nullable { "ptr?" } else { "ptr" }
+    } else if bits & SHAPE_OTHER != 0 {
+        if nullable { "u64?" } else { "u64" }
+    } else if bits & SHAPE_SCALAR != 0 {
+        if nullable { "u32?" } else { "u32" }
+    } else {
+        "0"
+    }
+}
+
+/// Renders an import's inferred argument shapes into a signature like `(ptr, u32, ptr?)`.
+///
+/// The arity is the count up to the last slot that ever carried anything: a register never written
+/// across the sampled calls is one the guest did not pass, so the trailing run of untouched slots is
+/// dropped and the parentheses report how many arguments the calls actually used. An import called
+/// with no arguments renders `()`; all-zero (never sampled, or every argument always nought) does
+/// too - the honest floor of a black-box read (see [`classify_arg`]).
+#[must_use]
+pub fn describe_shape(shape: &[u8]) -> String {
+    let arity = shape
+        .iter()
+        .rposition(|&b| b != 0)
+        .map_or(0, |last| last + 1);
+    let mut out = String::from("(");
+    for (register, &bits) in shape.iter().take(arity).enumerate() {
+        if register != 0 {
+            out.push_str(", ");
+        }
+        out.push_str(describe_slot(bits));
+    }
+    out.push(')');
+    out
+}
+
+/// How many calls of each import contribute to its inferred argument shapes.
+///
+/// Bounded so the busiest imports - called tens of millions of times - pay the six extra stores only
+/// at the start, where the shape is established in far fewer: a slot that is a pointer on sixteen
+/// calls is a pointer, and the seventeenth adds nothing (principle 9).
+const SHAPE_SAMPLE_LIMIT: u64 = 16;
+
+/// Per-import argument shapes: [`SAVED_ARGUMENT_REGISTERS`] slots per import, each an OR of the
+/// [shape bits](SHAPE_ZERO) its calls carried. Allocated with [`COUNTS`], never on the call path.
+static SHAPES: std::sync::OnceLock<Box<[AtomicU8]>> = std::sync::OnceLock::new();
+
 pub use orbistoun_core::GuestFn;
 
 /// How many imports the guest may call before the run is stopped.
@@ -1210,12 +1308,17 @@ pub struct RecordedCall {
     pub ret: Option<u64>,
 }
 
-/// Prepares per-import counters for a table of `count` entries.
+/// Prepares per-import counters and argument-shape slots for a table of `count` entries.
 ///
 /// Called once, at table construction. Doing it here rather than lazily is what keeps
 /// the call path allocation-free.
 pub fn prepare_counters(count: usize) {
     let _ = COUNTS.set((0..count).map(|_| AtomicU64::new(0)).collect());
+    let _ = SHAPES.set(
+        (0..count * SAVED_ARGUMENT_REGISTERS)
+            .map(|_| AtomicU8::new(0))
+            .collect(),
+    );
 }
 
 /// Total calls the guest has made through any thunk.
@@ -1227,6 +1330,27 @@ pub fn total_calls() -> u64 {
 pub fn call_counts() -> Vec<u64> {
     COUNTS.get().map_or_else(Vec::new, |c| {
         c.iter().map(|n| n.load(Ordering::Relaxed)).collect()
+    })
+}
+
+/// The [shape bits](SHAPE_ZERO) inferred for each import's arguments, by index - one
+/// `[u8; SAVED_ARGUMENT_REGISTERS]` per import, parallel to [`call_counts`].
+///
+/// Each slot is the OR of the categories that argument carried across the sampled calls (the
+/// first `SHAPE_SAMPLE_LIMIT` of them): `0` means the slot was never written - either the import
+/// was never called or it takes fewer arguments. This is the guest describing its own imports by
+/// how it uses them, the only signature source a black box allows.
+pub fn arg_shapes() -> Vec<[u8; SAVED_ARGUMENT_REGISTERS]> {
+    SHAPES.get().map_or_else(Vec::new, |s| {
+        s.chunks_exact(SAVED_ARGUMENT_REGISTERS)
+            .map(|chunk| {
+                let mut shape = [0u8; SAVED_ARGUMENT_REGISTERS];
+                for (out, slot) in shape.iter_mut().zip(chunk) {
+                    *out = slot.load(Ordering::Relaxed);
+                }
+                shape
+            })
+            .collect()
     })
 }
 
@@ -1434,7 +1558,29 @@ unsafe extern "sysv64" fn on_guest_call(
 
     if let Some(counts) = COUNTS.get() {
         if let Some(counter) = counts.get(index as usize) {
-            counter.fetch_add(1, Ordering::Relaxed);
+            // `fetch_add` hands back the count *before* this call, so the first
+            // `SHAPE_SAMPLE_LIMIT` calls of each import contribute their argument shapes and the
+            // millions after them pay only the increment - the shape is settled long before the
+            // limit (principle 9).
+            let seen = counter.fetch_add(1, Ordering::Relaxed);
+            if seen < SHAPE_SAMPLE_LIMIT {
+                if let Some(shapes) = SHAPES.get() {
+                    let base = index as usize * SAVED_ARGUMENT_REGISTERS;
+                    for register in 0..SAVED_ARGUMENT_REGISTERS {
+                        // SAFETY: the caller guarantees `SAVED_ARGUMENT_REGISTERS` readable values
+                        // in register order, and `register` is bounded by that count - so the
+                        // offset stays inside the array the caller provided.
+                        let at = unsafe { args.add(register) };
+                        // SAFETY: `at` is inside the caller's array, per the block above, and
+                        // these are plain integers - no alignment or validity demand beyond
+                        // being readable.
+                        let value = unsafe { at.read() };
+                        if let Some(slot) = shapes.get(base + register) {
+                            slot.fetch_or(classify_arg(value), Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1748,6 +1894,107 @@ mod tests {
             None,
             "nor an unwritten index to import zero"
         );
+    }
+
+    /// **Each argument value lands in exactly the category its magnitude names.**
+    ///
+    /// The boundaries are the whole point of the inference: a value one below the scalar ceiling
+    /// is a scalar, the ceiling itself is not; the guest's address space is a pointer, one past
+    /// its top is not. Pure by design so the edges are pinned without a running guest - made to
+    /// fail by asserting the category, not that *some* bit is set.
+    #[test]
+    fn an_argument_is_classified_by_where_its_value_falls() {
+        use super::{SHAPE_OTHER, SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO, classify_arg};
+
+        assert_eq!(classify_arg(0), SHAPE_ZERO, "zero is unused, not a scalar");
+        assert_eq!(classify_arg(1), SHAPE_SCALAR, "a small count is a scalar");
+        assert_eq!(
+            classify_arg(0xffff),
+            SHAPE_SCALAR,
+            "the value just below the ceiling is still a scalar"
+        );
+        assert_eq!(
+            classify_arg(0x1_0000),
+            SHAPE_OTHER,
+            "the ceiling itself is above the scalar band but below any address"
+        );
+        assert_eq!(
+            classify_arg(0x4000_0000_0000),
+            SHAPE_POINTER,
+            "the image base is the bottom of the guest address space"
+        );
+        assert_eq!(
+            classify_arg(0x7fff_ffff_f000),
+            SHAPE_POINTER,
+            "a guest pool address is a pointer"
+        );
+        assert_eq!(
+            classify_arg(0x8000_0000_0000),
+            SHAPE_OTHER,
+            "one past the top of the address space is not a pointer"
+        );
+    }
+
+    /// **A slot that is sometimes a pointer and sometimes zero reads as an optional pointer.**
+    ///
+    /// The accumulator ORs each call's category into the slot, so the inference is the union of
+    /// what the argument has ever been - which is exactly how an optional pointer (`ptr` on some
+    /// calls, `NULL` on others) must present. Pins the OR semantics the reader depends on.
+    #[test]
+    fn shapes_or_together_across_calls_into_an_optional_pointer() {
+        use super::{SHAPE_POINTER, SHAPE_ZERO, classify_arg};
+
+        let across_calls = classify_arg(0) | classify_arg(0x4000_0010_0000);
+        assert_eq!(
+            across_calls,
+            SHAPE_ZERO | SHAPE_POINTER,
+            "a slot seen as both NULL and a pointer is an optional pointer, not one or the other"
+        );
+    }
+
+    /// **The rendered signature reports arity and marks nullable slots.**
+    ///
+    /// Trailing untouched registers are dropped so the parentheses say how many arguments the
+    /// guest actually passed; a slot that was also zero on some call is marked `?`. Made to fail
+    /// by pinning the exact string, so a change to arity handling or the nullable mark shows.
+    #[test]
+    fn a_shape_renders_as_a_signature_with_arity_and_nullable_marks() {
+        use super::{
+            SAVED_ARGUMENT_REGISTERS, SHAPE_OTHER, SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO,
+            describe_shape,
+        };
+
+        // arg0 always a pointer, arg1 pointer-or-null, arg2 a scalar; arg3-5 never written.
+        let mut shape = [0u8; SAVED_ARGUMENT_REGISTERS];
+        shape[0] = SHAPE_POINTER;
+        shape[1] = SHAPE_POINTER | SHAPE_ZERO;
+        shape[2] = SHAPE_SCALAR;
+        assert_eq!(
+            describe_shape(&shape),
+            "(ptr, ptr?, u32)",
+            "three args, the middle one nullable, trailing untouched registers dropped"
+        );
+
+        assert_eq!(
+            describe_shape(&[0u8; SAVED_ARGUMENT_REGISTERS]),
+            "()",
+            "an import called with no arguments renders empty parentheses"
+        );
+
+        // A register the guest always passed as zero is within arity, not dropped.
+        let mut always_zero = [0u8; SAVED_ARGUMENT_REGISTERS];
+        always_zero[0] = SHAPE_SCALAR;
+        always_zero[1] = SHAPE_ZERO;
+        assert_eq!(
+            describe_shape(&always_zero),
+            "(u32, 0)",
+            "an always-zero argument is a present slot, distinct from an unwritten one"
+        );
+
+        // A large non-address value reads as u64, not a pointer.
+        let mut wide = [0u8; SAVED_ARGUMENT_REGISTERS];
+        wide[0] = SHAPE_OTHER;
+        assert_eq!(describe_shape(&wide), "(u64)", "a large non-address is u64");
     }
 
     /// A function answering in `xmm0` counts as implemented.
