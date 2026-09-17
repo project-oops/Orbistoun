@@ -85,8 +85,11 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
         .expect("a constant measurement has a value");
     assert_eq!(
         console as u32, 0x8002_0003,
-        "the console answered ESRCH for memcpy out of libkernel; this test is about that \
-         value and nothing else, got {console:#x}"
+        concat!(
+            "the console answered ESRCH for memcpy out of libkernel; this test is about that ",
+            "value and nothing else, got {:#x}"
+        ),
+        console
     );
 
     let name = std::ffi::CString::new("memcpy").expect("a name with no interior nul");
@@ -100,9 +103,11 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
     );
     assert_eq!(
         bad_handle as u32, 0x8002_0003,
-        "an invalid handle earns ESRCH (D366) - the same value the console answered for a \
-         different reason entirely, which is why claiming the measurement through this path \
-         would be green and meaningless"
+        concat!(
+            "an invalid handle earns ESRCH (D366) - the same value the console answered for a ",
+            "different reason entirely, which is why claiming the measurement through this path ",
+            "would be green and meaningless"
+        )
     );
     // **The payload route, declared before anything asks.** What follows is about the *module
     // handle* narrowing a resolution that happens, and on a title's route no resolution
@@ -144,13 +149,17 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
     );
     assert_eq!(
         narrowed as u32, console as u32,
-        "libkernel's handle and a name libkernel does not declare now answers what the console \
-         answered, which is the whole of this measurement"
+        concat!(
+            "libkernel's handle and a name libkernel does not declare now answers what the console ",
+            "answered, which is the whole of this measurement"
+        )
     );
     assert_eq!(
         out, 0,
-        "and writes nothing, as the console did - a refusal that filled the out-parameter would \
-         leave a caller acting on an address it was told it did not get"
+        concat!(
+            "and writes nothing, as the console did - a refusal that filled the out-parameter would ",
+            "leave a caller acting on an address it was told it did not get"
+        )
     );
 
     // **A name libkernel *does* declare still resolves through the same handle**, which is the
@@ -164,7 +173,9 @@ fn dlsym_ignores_the_module_and_answers_where_the_console_refuses() {
     assert_eq!(
         still as u32,
         orbistoun_core::GuestError::Unimplemented.as_raw(),
-        "it is declared in libkernel, so the narrowing lets it through to the ordinary answer - \
-         which here is 'nothing implements it', because this test installed no thunk for it"
+        concat!(
+            "it is declared in libkernel, so the narrowing lets it through to the ordinary answer - ",
+            "which here is 'nothing implements it', because this test installed no thunk for it"
+        )
     );
 }

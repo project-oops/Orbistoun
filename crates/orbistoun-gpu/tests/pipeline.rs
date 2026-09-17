@@ -170,6 +170,176 @@ fn a_submitted_command_buffer_yields_a_translated_shader() {
     );
 }
 
+/// **An indexed draw reaches the backend as a `DrawIndexed`, with the count from its own body.**
+///
+/// The whole draw path through `submit`, not just `draw_calls`: a stream with a `DRAW_INDEX_2`
+/// packet must produce a `DrawIndexed` command carrying the packet's index count and the running
+/// instance count. Before indexed draws were decoded this stream produced no draw command at all,
+/// so a frame of indexed geometry looked empty to the backend (worklog 628).
+#[test]
+fn an_indexed_draw_reaches_the_backend_as_a_draw_indexed() {
+    // NUM_INSTANCES(2), then DRAW_INDEX_2 whose body carries thirty-six indices and an address.
+    let address: u64 = 0x2_0000;
+    let words: [u32; 8] = [
+        (3 << 30) | (0x2F << 8), // NUM_INSTANCES, one body word
+        2,
+        (3 << 30) | ((5 - 1) << 16) | (0x27 << 8), // DRAW_INDEX_2, five body words
+        0,                                         // max_size
+        u32::try_from(address & 0xFFFF_FFFF).expect("low half"),
+        u32::try_from(address >> 32).expect("high half"),
+        36, // index count
+        0,  // initiator
+    ];
+    let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+    let mut pipeline = pipeline();
+    let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory());
+
+    assert!(
+        submission.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::DrawIndexed {
+                indices: 36,
+                instances: 2,
+                ..
+            }
+        )),
+        "the indexed draw should reach the backend with its measured count: {:?}",
+        submission.commands
+    );
+    assert_eq!(submission.report.draws, 1, "and it counts as one draw");
+}
+
+/// **A stream that sizes its colour target reaches the backend as a `SetRenderTargets`.**
+///
+/// The whole target path through `submit`: a `CB_COLOR0_ATTRIB2` write is decoded (worklog 637) into
+/// a target the submission carries and a `SetRenderTargets` that selects it, so a backend can size
+/// its attachment to the guest's frame rather than a guessed square. The value here is obSCEne's own
+/// measured one for a 64x64 target (sweep 9a41); before this, a stream's target size reached the
+/// backend nowhere.
+#[test]
+fn a_target_size_write_reaches_the_backend_as_set_render_targets() {
+    use orbistoun_gpu::ColourTargetExtent;
+
+    // SET_CONTEXT_REG (0x69, count 1) writing CB_COLOR0_ATTRIB2 (offset 0x3b0) = 0x000fc03f, the
+    // measured 64x64 value; then the compute shader address, so the submission also finds a shader.
+    let header = (3u32 << 30) | ((2 - 1) << 16) | (0x69 << 8);
+    let mut stream: Vec<u8> = [header, 0x3b0, 0x000f_c03f]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    stream.extend(command_stream(SHADER_ADDRESS));
+
+    let mut pipeline = pipeline();
+    let submission = pipeline.submit(&stream, Queue::Compute, &[], &memory());
+
+    assert_eq!(
+        submission.targets.len(),
+        1,
+        "one colour target was sized: {:?}",
+        submission.targets
+    );
+    let (id, extent) = submission.targets.iter().next().expect("the sized target");
+    assert_eq!(
+        *extent,
+        ColourTargetExtent {
+            width: 64,
+            height: 64,
+        },
+        "the decoded 64x64 target"
+    );
+    assert!(
+        submission.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::SetRenderTargets { colour, depth: None }
+                if colour == &vec![*id]
+        )),
+        "a SetRenderTargets selecting the target should reach the backend: {:?}",
+        submission.commands
+    );
+}
+
+/// **A stream that sets the generic scissor reaches the backend as a `SetViewport`.**
+///
+/// The whole viewport path through `submit`: a `GENERIC_SCISSOR` write pair is decoded (worklog 646,
+/// its register offsets and layout mined from a hardware draw capture) into a `SetViewport` the
+/// backend restricts a draw to. Before this, a stream's scissor reached the backend nowhere.
+#[test]
+fn a_scissor_write_reaches_the_backend_as_set_viewport() {
+    use orbistoun_gpu::Rect;
+
+    // SET_CONTEXT_REG (0x69, count 1) writing GENERIC_SCISSOR_TL (offset 0x090) then _BR (0x091) for
+    // a sub-rect: top-left (16, 8), bottom-right (48, 56).
+    let header = (3u32 << 30) | ((2 - 1) << 16) | (0x69 << 8);
+    // Top-left (x 16, y 8) is 0x0008_0010; bottom-right (x 48, y 56) is 0x0038_0030.
+    let top_left = 0x0008_0010;
+    let bottom_right = 0x0038_0030;
+    let stream: Vec<u8> = [header, 0x090, top_left, header, 0x091, bottom_right]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+
+    let mut pipeline = pipeline();
+    let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory());
+    assert!(
+        submission.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::SetViewport(Rect {
+                x: 16,
+                y: 8,
+                width: 32,
+                height: 48,
+            })
+        )),
+        "a SetViewport with the decoded scissor should reach the backend: {:?}",
+        submission.commands
+    );
+}
+
+/// **The guest-memory window is read out of guest memory and carried on the submission.**
+///
+/// A frame's shaders fetch their vertices from the window (worklog 641); the frontend reads exactly
+/// its span - the length the module masks against - from guest memory, so a backend can bind it.
+/// Made to fail against a window over unmapped memory, which must carry nothing rather than a page of
+/// whatever sits at an address the stream never placed.
+#[test]
+fn the_guest_memory_window_is_read_from_guest_memory() {
+    use orbistoun_translate::wavefront::Window;
+
+    let base = 0x2_0000u32;
+    let words = [
+        0x1111_1111u32,
+        0x2222_2222,
+        0x3333_3333,
+        0x4444_4444,
+        0x5555_5555,
+    ];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mapped = Mapping {
+        base: u64::from(base),
+        bytes,
+    };
+
+    // A window spanning four of the five words reads exactly those four.
+    let mut placed = pipeline().with_window(Window::spanning(base, 4).expect("a power of two"));
+    let submission = placed.submit(&[0u8; 64], Queue::Draw, &[], &mapped);
+    assert_eq!(
+        submission.guest_memory,
+        &words[..4],
+        "the window's four words are read from guest memory"
+    );
+
+    // A window somewhere unmapped carries nothing rather than guessing.
+    let mut elsewhere =
+        pipeline().with_window(Window::spanning(0x9_0000, 4).expect("a power of two"));
+    let submission = elsewhere.submit(&[0u8; 64], Queue::Draw, &[], &mapped);
+    assert!(
+        submission.guest_memory.is_empty(),
+        "an unmapped window carries nothing: {:?}",
+        submission.guest_memory
+    );
+}
+
 #[test]
 fn the_same_shader_is_translated_once() {
     // A guest rebinds the same shader every draw. Translating it each time would cost
@@ -192,6 +362,85 @@ fn the_same_shader_is_translated_once() {
 
     // And the command is still emitted, or caching would have silently dropped the draw.
     assert_eq!(second.commands.len(), first.commands.len());
+}
+
+/// **The window a pipeline is given reaches the modules it translates, and the cache knows.**
+///
+/// # What this guards
+///
+/// A window's base and length are compiled into a module - the base is subtracted before an
+/// index is masked, and the length *is* the mask - so the same shader against two windows is two
+/// different modules. The cache is keyed on the shader's bytes, deliberately, and a key that
+/// stopped there would serve the first window's module to the second's draw. Nothing about the
+/// run would look wrong: a module would be bound, a frame would be drawn, and every memory
+/// access in it would be against the wrong span.
+///
+/// So this asserts three things in order: the second window is not a cache hit, the module it
+/// produced differs from the first, and going back to the first window is not a hit either -
+/// because the setter clears the cache, which is the honest behaviour when every entry in it was
+/// built against something else.
+#[test]
+fn a_shader_translated_against_two_windows_is_two_modules() {
+    use orbistoun_translate::wavefront::Window;
+
+    let stream = command_stream(SHADER_ADDRESS);
+
+    let mut near = pipeline().with_window(Window::default());
+    let first = near.submit(&stream, Queue::Compute, &[], &memory());
+    assert_eq!(first.report.cache_hits, 0);
+    let first_module = first
+        .modules
+        .values()
+        .next()
+        .expect("a module for the first window")
+        .clone();
+
+    // Somewhere a guest's buffers might actually be, rather than at address zero.
+    let elsewhere = Window::spanning(0x0090_0000, 1 << 16).expect("a power-of-two window");
+    let mut far = pipeline().with_window(elsewhere);
+    let second = far.submit(&stream, Queue::Compute, &[], &memory());
+    assert_eq!(
+        second.report.cache_hits, 0,
+        "a fresh pipeline has nothing cached: {:?}",
+        second.report
+    );
+    let second_module = second
+        .modules
+        .values()
+        .next()
+        .expect("a module for the second window")
+        .clone();
+
+    assert_ne!(
+        first_module, second_module,
+        concat!(
+            "two windows produced the same module - the base and the length are compiled in, ",
+            "so identical words mean the window never reached the translation"
+        )
+    );
+    assert_eq!(
+        far.window(),
+        elsewhere,
+        "the pipeline kept the window it was given"
+    );
+
+    // And within one pipeline, changing the window does not serve the old module.
+    let mut moved = near.with_window(elsewhere);
+    let third = moved.submit(&stream, Queue::Compute, &[], &memory());
+    assert_eq!(
+        third.report.cache_hits, 0,
+        "the cache served a module built against the window this pipeline no longer has: {:?}",
+        third.report
+    );
+    assert_eq!(
+        third
+            .modules
+            .values()
+            .next()
+            .expect("a module after the window moved"),
+        &second_module,
+        "the same shader and the same window must translate to the same module"
+    );
 }
 
 #[test]
@@ -613,10 +862,19 @@ fn an_arbitrary_command_stream_is_survived() {
 
         // Whatever it decided, it must be self-consistent: nothing may be bound that was
         // not translated, and nothing may be both translated and reported as failed.
+        //
+        // Counted over *bind* commands, not every command: a stream can legitimately emit render
+        // state it recognises - a `SetRenderTargets` from a target-size write, a `Draw`, a
+        // `Dispatch` - without translating a shader, so `commands.len()` overcounts. The property
+        // this guards is the one the comment states, that a bound shader was translated.
+        let bound = submission
+            .commands
+            .iter()
+            .filter(|command| matches!(command, RenderCommand::BindShader { .. }))
+            .count();
         assert!(
-            submission.commands.len() <= submission.report.shaders_translated,
-            "round {round}: {} commands from {} translated shaders",
-            submission.commands.len(),
+            bound <= submission.report.shaders_translated,
+            "round {round}: {bound} bound shaders from {} translated",
             submission.report.shaders_translated
         );
         assert!(

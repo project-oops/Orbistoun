@@ -59,8 +59,13 @@ fn the_descending_region_really_descends() {
         );
         assert!(
             block < previous,
-            "block {step} at {block:#x} must be below the one before it at {previous:#x} - \
-             a region that did not reverse would pass every other assertion here"
+            concat!(
+                "block {} at {:#x} must be below the one before it at {:#x} - ",
+                "a region that did not reverse would pass every other assertion here"
+            ),
+            step,
+            block,
+            previous
         );
         assert_eq!(block % 16, 0, "still aligned like `malloc` must be");
         // The whole block is writable, which a start rounded down past the region's floor

@@ -698,7 +698,10 @@ mod tests {
         for var in intervening {
             assert!(
                 super::any_intervenes(&[(var, "1".to_owned())]),
-                "{} is declared as changing the program, and a run under it would still be                  recorded as an honest measurement",
+                concat!(
+                    "{} is declared as changing the program, and a run under it would ",
+                    "still be recorded as an honest measurement"
+                ),
                 var.name
             );
         }

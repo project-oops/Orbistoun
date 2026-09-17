@@ -206,10 +206,7 @@ impl core::fmt::Display for Strategy {
 pub enum TranslateError {
     /// A strategy that has not been built was asked for.
     #[error(
-        "the {0} strategy is not implemented. It would reconstruct structured control \
-         flow from execution-mask arithmetic; only the predicated strategy exists. \
-         This is not falling back to it, because a silent substitution would present \
-         as unexplained slowness rather than as a missing feature"
+        "the {0} strategy is not implemented. It would reconstruct structured control flow from execution-mask arithmetic; only the predicated strategy exists. This is not falling back to it, because a silent substitution would present as unexplained slowness rather than as a missing feature"
     )]
     StrategyNotImplemented(Strategy),
 
@@ -219,10 +216,7 @@ pub enum TranslateError {
     /// the levels differ in *correctness*, so substituting one would produce output
     /// that is wrong rather than merely slow, with nothing to point at.
     #[error(
-        "the {level} model is not implemented ({would}). This is not falling \
-         back to another level, because the levels differ in correctness rather than \
-         only in speed - a substitution would render something subtly wrong with \
-         nothing to indicate it"
+        "the {level} model is not implemented ({would}). This is not falling back to another level, because the levels differ in correctness rather than only in speed - a substitution would render something subtly wrong with nothing to indicate it"
     )]
     FidelityNotImplemented {
         /// Which level.
@@ -233,8 +227,7 @@ pub enum TranslateError {
 
     /// The decode this was handed cannot be trusted.
     #[error(
-        "refusing to translate an untrustworthy decode ({reason}) - the instruction \
-         stream may not be what it appears to be"
+        "refusing to translate an untrustworthy decode ({reason}) - the instruction stream may not be what it appears to be"
     )]
     UntrustworthyDecode {
         /// Which property failed.
@@ -322,10 +315,13 @@ impl core::fmt::Display for Warning {
                 subgroup_would_need,
             } => write!(
                 f,
-                "translated at wavefront fidelity, which simulates every lane in one \
-                 invocation and is far slower: {because}. Subgroup fidelity would do the \
-                 same work with a mask if this device's subgroup is {subgroup_would_need} \
-                 wide"
+                concat!(
+                    "translated at wavefront fidelity, which simulates every lane in one ",
+                    "invocation and is far slower: {}. Subgroup fidelity would do the ",
+                    "same work with a mask if this device's subgroup is {} ",
+                    "wide"
+                ),
+                because, subgroup_would_need
             ),
         }
     }
@@ -458,6 +454,37 @@ pub fn translate_staged(
     strategy: Strategy,
     stage: wavefront::Stage,
 ) -> Result<Translated, TranslateError> {
+    translate_windowed(
+        decode,
+        encodings,
+        strategy,
+        stage,
+        wavefront::Window::default(),
+    )
+}
+
+/// Translates a decoded shader for a stage, over a guest-memory window at a given address.
+///
+/// # Why the window is a parameter
+///
+/// A translated shader reaches guest memory through one storage buffer covering a fixed span of
+/// the address space, and every access is checked against it. Anchored at zero - which is what
+/// it was until this existed - that span contains nothing a guest ever addresses, so a real
+/// shader's every read answered zero and its every write went nowhere (worklog 561).
+///
+/// Where the span *should* sit is the caller's knowledge, not this crate's: it is wherever the
+/// buffers this shader was compiled against were put.
+///
+/// # Errors
+///
+/// Whatever the translation refuses - an unsupported instruction, an untrustworthy decode.
+pub fn translate_windowed(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    strategy: Strategy,
+    stage: wavefront::Stage,
+    window: wavefront::Window,
+) -> Result<Translated, TranslateError> {
     let Strategy::Predicated { fidelity, width } = strategy else {
         return Err(TranslateError::StrategyNotImplemented(strategy));
     };
@@ -480,7 +507,10 @@ pub fn translate_staged(
         }]
     } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
         vec![Warning::SlowestFidelity {
-            because: "the shader reads or writes a lane mask, which the per-lane model                       cannot represent",
+            because: concat!(
+                "the shader reads or writes a lane mask, which the per-lane model cannot ",
+                "represent"
+            ),
             subgroup_would_need: width.lanes(),
         }]
     } else {
@@ -508,7 +538,7 @@ pub fn translate_staged(
 
     match fidelity {
         Fidelity::Lane => {
-            let (module, instructions) = predicated::translate(decode, encodings)?;
+            let (module, instructions) = predicated::translate(decode, encodings, window)?;
             Ok(Translated {
                 module,
                 strategy,
@@ -519,7 +549,8 @@ pub fn translate_staged(
             })
         }
         Fidelity::Wavefront => {
-            let (module, instructions) = wavefront::translate_for(decode, encodings, width, stage)?;
+            let (module, instructions) =
+                wavefront::translate_for(decode, encodings, width, stage, window)?;
             Ok(Translated {
                 module,
                 strategy,
@@ -531,7 +562,7 @@ pub fn translate_staged(
         }
         Fidelity::Subgroup => {
             let (module, instructions, required_subgroup) =
-                predicated::translate_subgroup(decode, encodings, width)?;
+                predicated::translate_subgroup(decode, encodings, width, window)?;
             Ok(Translated {
                 module,
                 strategy,
@@ -553,6 +584,99 @@ pub fn translate_staged(
 #[cfg(test)]
 mod tests {
     use super::{Fidelity, Strategy, TranslateError, Warning, Width, translate};
+    use crate::predicated::MEMORY_WORDS;
+    use crate::wavefront::Window;
+
+    /// **A length that is not a power of two is refused, not rounded.**
+    ///
+    /// `Model::word_index` masks with `words - 1` and `address_within_window` compares against
+    /// `words`. Those agree only for a power of two; give them 100 and the check admits word 99
+    /// while the mask folds it to word 35. That is the silent aliasing `address_within_window`
+    /// exists to prevent, so the length cannot be set to one that reintroduces it.
+    #[test]
+    fn a_window_length_that_would_alias_is_refused() {
+        for bad in [3_u32, 5, 100, 1000, u32::MAX] {
+            assert!(
+                Window::spanning(0x900_000, bad).is_none(),
+                "{bad} words is not a power of two and must be refused"
+            );
+        }
+    }
+
+    /// Zero words is refused too: `words - 1` underflows to `u32::MAX`, which as a mask admits
+    /// every address there is - the widest possible window from the narrowest possible request.
+    #[test]
+    fn a_window_of_no_words_is_refused() {
+        assert!(Window::spanning(0x900_000, 0).is_none());
+    }
+
+    /// The lengths that do work, and that the window carries what it was given.
+    #[test]
+    fn a_power_of_two_window_keeps_its_length_and_base() {
+        for good in [1_u32, 2, 64, 4096, 32_768, 1 << 31] {
+            let window = Window::spanning(0x900_000, good).expect("a power of two is accepted");
+            assert_eq!(window.words(), good);
+            assert_eq!(window.base, 0x900_000);
+        }
+    }
+
+    /// **The declared buffer is the window's length, not a constant beside it.**
+    ///
+    /// `Model::word_index` masks with the window's length and `address_within_window` compares
+    /// against it, but the SPIR-V array the shader actually indexes is declared separately. Let
+    /// that declaration keep reading a fixed constant and a widened window admits an index the
+    /// buffer does not hold - an out-of-bounds access inside the shader rather than the refusal
+    /// the check promises.
+    ///
+    /// So this asserts the number reaches the module: translated at 65,536 words the literal is
+    /// there, and at the default it is not. 65,536 is the size a real frame wants - the console's
+    /// own canary sits 32,768 words past its base, which no default window can reach.
+    #[test]
+    fn a_widened_window_reaches_the_declared_buffer() {
+        let (encodings, operands) = tables();
+        let decoded = decode(&stream(TRIVIAL), &encodings, &operands);
+        let strategy = Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        };
+        let wide = 65_536_u32;
+
+        let translated = crate::translate_windowed(
+            &decoded,
+            &encodings,
+            strategy,
+            crate::wavefront::Stage::Compute,
+            Window::spanning(0x0090_0000, wide).expect("a power of two"),
+        )
+        .expect("translates");
+        assert!(
+            translated.module.contains(&wide),
+            "the widened length must reach the module the shader indexes"
+        );
+
+        let narrow = crate::translate_windowed(
+            &decoded,
+            &encodings,
+            strategy,
+            crate::wavefront::Stage::Compute,
+            Window::default(),
+        )
+        .expect("translates");
+        assert!(
+            !narrow.module.contains(&wide),
+            "and a default window must not declare a buffer it was never given"
+        );
+        assert!(narrow.module.contains(&MEMORY_WORDS));
+    }
+
+    /// **The default is unchanged**, so every caller that had a window before this existed
+    /// still gets the one it had.
+    #[test]
+    fn the_default_window_is_the_length_it_always_was() {
+        assert_eq!(Window::default().words(), MEMORY_WORDS);
+        assert_eq!(Window::default().base, 0);
+        assert_eq!(Window::at(0x900_000).words(), MEMORY_WORDS);
+    }
     use orbistoun_shader::{EncodingTable, OperandTable, decode};
 
     fn tables() -> (EncodingTable, OperandTable) {

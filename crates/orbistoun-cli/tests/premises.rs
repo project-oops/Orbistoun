@@ -60,10 +60,12 @@ fn asking_for_fewer_premises_does_not_shrink_the_ones_shown() {
     assert_eq!(one.len(), 1, "--top 1 shows one premise");
     assert_eq!(
         one[0], all[0],
-        "the heaviest premise must be reported identically whether or not the run was \
-         truncated - a shorter function list here means the queue was cut before it was \
-         grouped, and the count printed beside it would be a fact about --top rather than \
-         about the knowledge base"
+        concat!(
+            "the heaviest premise must be reported identically whether or not the run was ",
+            "truncated - a shorter function list here means the queue was cut before it was ",
+            "grouped, and the count printed beside it would be a fact about --top rather than ",
+            "about the knowledge base"
+        )
     );
 }
 

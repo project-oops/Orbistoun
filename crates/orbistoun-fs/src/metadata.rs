@@ -287,7 +287,7 @@ pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// directory on any disk, so there is no modification time to report and inventing one would
 /// be a fact about nothing.
 fn facts_of(guest: &str) -> Option<Facts> {
-    if let Some(host) = crate::mount::resolve(guest)
+    if let Some(host) = crate::mount::resolve_existing(guest)
         && let Some(facts) = facts_about(&host)
     {
         return Some(facts);
@@ -404,7 +404,7 @@ fn opendir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // `/dev` exists because a device is in it, which nothing else knows.
         below.push(crate::device::DIRECTORY.trim_start_matches('/').to_owned());
     }
-    let host = crate::mount::resolve(&guest).filter(|path| path.is_dir());
+    let host = crate::mount::resolve_existing(&guest).filter(|path| path.is_dir());
     if below.is_empty() && host.is_none() {
         crate::wanted::note(&guest);
         return 0;
@@ -581,7 +581,10 @@ mod tests {
         assert_ne!(
             refused,
             u64::MAX,
-            "and NOT the POSIX -1 - that is the whole reason this is not the POSIX function              under a second name"
+            concat!(
+                "and NOT the POSIX -1 - that is the whole reason this is not the POSIX ",
+                "function under a second name"
+            )
         );
         assert_eq!(
             refused & 0xffff_0000,

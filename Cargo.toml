@@ -227,7 +227,12 @@ rustix = { version = "1", features = ["mm", "thread", "param"] }
 windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",
+    # Naming the host module a fault landed in, so the recorded outcome is an offset into
+    # something rather than an address that moves every reboot (worklog 594).
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    # Free space on the volume backing a guest mount, for `statfs` (worklog 599).
+    "Win32_Storage_FileSystem",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_Foundation",

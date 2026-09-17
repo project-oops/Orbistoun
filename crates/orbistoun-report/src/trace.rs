@@ -130,6 +130,20 @@ pub struct CallTrace {
     /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<Quiet>,
+    /// Which limit stopped the run, when one did.
+    ///
+    /// **D238 requires these not to read alike**: *"'ran out of clock' and 'made the calls it was
+    /// allowed' call for different next steps and must not read alike"*. The worker distinguishes
+    /// them - it exits with `TIME_LIMIT_EXIT` or `CALL_BUDGET_EXIT` - but that is an exit code the
+    /// *parent* sees, and the trace is written before it. So both arrived at `describe_end` as
+    /// the same absence and both were recorded as `ran to the time limit`, including for a guest
+    /// that never ran out of clock at all.
+    ///
+    /// Set by the branch that stopped the run, which is the only branch that knows. `None` for a
+    /// run that ended on its own - a fault, a deliberate exit - where no limit fired and a value
+    /// here would be claiming one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_by: Option<String>,
     /// What the guest put into words, oldest first.
     ///
     /// **The only signal in a run that arrives already interpreted.** A fault address, an import
@@ -332,10 +346,18 @@ pub struct FaultSite {
     pub address: u64,
     /// The instruction that touched it. This is the number that measures progress.
     pub instruction_pointer: u64,
-    /// Which region the instruction was in, when it is one orbistoun placed.
+    /// Where the instruction was: a region orbistoun placed, or the host module holding it.
+    ///
+    /// **Host modules are named too, and for a measurement reason rather than a cosmetic one.**
+    /// A fault in host code used to be recorded as a bare address, and those move - Windows
+    /// bases system modules per boot, so the same fault reached the same way was
+    /// `0x7fff13abdc8d` one day and `0x7ff9c071dc8d` the next. A recorded outcome that cannot be
+    /// reproduced after a reboot is not a measurement of the guest, and `compare` read the
+    /// change as the ending having moved. An offset into a named module reproduces (worklog
+    /// 594).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-    /// Offset into that region.
+    /// Offset into that region or module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
     /// What each register that holds a readable address is pointing at.
@@ -391,6 +413,56 @@ pub struct FaultSite {
     /// before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registers: Option<Registers>,
+    /// The bytes of the faulting instruction itself.
+    ///
+    /// **The worker reads these at fault time and used to keep them only for its own live print.**
+    /// Empty then in the trace, so the ranked findings - which are the ones the loop routes on -
+    /// could not tell a guest dereferencing a bad pointer from a guest *entering the kernel* via
+    /// `int 0x41`, and reported both as "read of some address". Carrying the bytes here lets
+    /// [`classify_trap`] name the fault class in the finding, not just in the crash print (worklog
+    /// 605).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction: Vec<u8>,
+}
+
+/// A faulting instruction that is a *trap* - the guest leaving ordinary execution deliberately or
+/// by entering the kernel - as opposed to an ordinary instruction that touched a bad address.
+///
+/// The two are different kinds of wall and the difference is the whole diagnosis: a kernel entry
+/// is orbistoun's gap to implement, a guest trap is the guest aborting on something it decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrapKind {
+    /// `int`, `syscall`, `sysenter`, `hlt` - the guest entered the kernel through an instruction
+    /// orbistoun implements no handler for. The vector is carried for `int`, because it names
+    /// exactly which entry has to be characterised.
+    KernelEntry {
+        /// The interrupt vector for `int n`; `None` for `syscall`/`sysenter`/`hlt`.
+        vector: Option<u8>,
+    },
+    /// `ud2` - a trap the guest raised itself, an assertion or abort after a check it failed. The
+    /// cause is upstream, in whatever the guest was told just before.
+    GuestTrap,
+}
+
+/// Classifies a faulting instruction as a trap, if it is one.
+///
+/// **One classifier, so the live crash print and the ranked finding cannot disagree.** They used to
+/// be two: the worker's fault handler recognised `int` and the finding builder did not, so the same
+/// fault named itself in the crash output and hid in the worklist. Pure and allocation-free, so the
+/// fault handler can call it too.
+#[must_use]
+pub fn classify_trap(opcode: &[u8]) -> Option<TrapKind> {
+    match opcode.first().copied()? {
+        0xf4 => Some(TrapKind::KernelEntry { vector: None }), // hlt
+        0xcd => Some(TrapKind::KernelEntry {
+            vector: Some(opcode.get(1).copied().unwrap_or(0)),
+        }),
+        0x0f if matches!(opcode.get(1), Some(&0x05 | &0x34)) => {
+            Some(TrapKind::KernelEntry { vector: None }) // syscall / sysenter
+        }
+        0x0f if opcode.get(1) == Some(&0x0b) => Some(TrapKind::GuestTrap), // ud2
+        _ => None,
+    }
 }
 
 impl FaultSite {
@@ -816,6 +888,16 @@ pub struct CalledImport {
     /// placeholder", which are opposite conclusions drawn from the same line (D179).
     #[serde(default)]
     pub implemented: bool,
+    /// The signature inferred from how the guest called it - `(ptr, u32, ptr?)` - or empty when
+    /// nothing was sampled.
+    ///
+    /// **The guest describing an import it cannot document.** The firmware behind a vendor stub is
+    /// unreadable, so its arity and argument kinds are not knowable from the binary; but the
+    /// guest's own calls carry them, and a slot that is always a pointer is a pointer. It is a
+    /// characterisation, not a proof - a lower bound a black box allows - and it is exactly the
+    /// starting point for implementing an unimplemented function or designing a probe for it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
 }
 
 impl CallTrace {
@@ -1127,11 +1209,51 @@ fn describe_end(trace: &CallTrace) -> String {
     }
     // The guest stopping itself is a *decision*, not a failure, and describing it as a
     // time limit reports the opposite of what happened.
-    trace
-        .stopped
-        .clone()
-        .unwrap_or_else(|| "ran to the time limit".to_owned())
+    if let Some(stopped) = &trace.stopped {
+        return stopped.clone();
+    }
+    // **Stuck and working both end on the clock, and were recorded identically.** D645
+    // measured the silence and `print_quiet` shows it in the run report - but the *outcome*,
+    // the string that reaches `compat/` and the frontier table, stayed flat. So a title
+    // waiting on something it never got was filed exactly as one still working when the clock
+    // ended, and the table a reader actually reads could not tell them apart.
+    //
+    // **Categorical, not quantitative, and that is deliberate.** `compare` tests this string
+    // between runs to decide whether the ending changed; a duration embedded here would make
+    // every pair of runs differ and the field would stop meaning anything. The measurement
+    // stays in `quiet`, where `Quiet::describe` reports it in the terms it was taken, bounded
+    // by its own sample interval.
+    // **The budget and the clock are different endings** and D238 says so in as many words.
+    // Only the branch that stopped the run knows which fired, so this reads what that branch
+    // recorded rather than inferring it from a call count against a budget - the inference would
+    // be a report naming a cause it did not determine.
+    if trace.ended_by.as_deref() == Some(SPENT_THE_BUDGET) {
+        return SPENT_THE_BUDGET.to_owned();
+    }
+    match trace.quiet {
+        Some(quiet) if quiet.is_notable() => QUIET_TO_LIMIT.to_owned(),
+        _ => RAN_TO_LIMIT.to_owned(),
+    }
 }
+
+/// A run the clock ended while the guest was still asking the host for things.
+pub const RAN_TO_LIMIT: &str = "ran to the time limit";
+
+/// A run the **call budget** ended, which is not the clock running out.
+///
+/// A guest that spends twenty million calls in four seconds had all the time it asked for and
+/// used up its allowance; a guest the clock stopped may have been making one call a second. The
+/// next step differs - raise the budget, or find out what it is waiting for - so D238 requires
+/// the two not to read alike, and until now they did.
+pub const SPENT_THE_BUDGET: &str = "spent its call budget";
+
+/// A run the clock ended after the guest had stopped asking for anything.
+///
+/// "Went quiet" is the whole claim, and it is narrower than "was waiting for input": the
+/// measurement is that no import or system call was made for at least a second and for at least
+/// half the run ([`Quiet::is_notable`]). A guest computing hard in its own code with no host
+/// calls reaches this too, and calling it *waiting* would report more than was measured.
+pub const QUIET_TO_LIMIT: &str = "went quiet, then ran to the time limit";
 
 /// Compares a run against the one before it.
 ///
@@ -1368,6 +1490,7 @@ mod tests {
                 label: "libc::memcpy".to_owned(),
                 calls: 9_000,
                 implemented: true,
+                shape: String::new(),
             },
             // One function, thousands of calls: a hot loop on something unimplemented.
             CalledImport {
@@ -1375,12 +1498,14 @@ mod tests {
                 label: "libkernel::sceKernelWaitEqueue".to_owned(),
                 calls: 990,
                 implemented: false,
+                shape: String::new(),
             },
             CalledImport {
                 index: 2,
                 label: "libc::setlocale".to_owned(),
                 calls: 1,
                 implemented: false,
+                shape: String::new(),
             },
         ];
 
@@ -1430,6 +1555,180 @@ mod tests {
         assert_eq!(status.frames, 1, "and the count travels with the rung");
     }
 
+    /// **A guest that went quiet and one still working do not share an outcome.**
+    ///
+    /// Both end on the clock, and both used to be filed as `ran to the time limit` - which reads
+    /// as "still going" and was the opposite of the truth for the title that gets furthest here
+    /// (D645: 310,987 calls, then nothing, for seventeen of twenty seconds). The silence was
+    /// measured and printed, but never reached the outcome, so `compat/` and the frontier table
+    /// could not tell the two apart.
+    ///
+    /// The negative half matters as much: a silence too short or too small a fraction of the run
+    /// must **not** change the outcome, or the split reports noise as a finding.
+    #[test]
+    fn a_run_that_went_quiet_is_not_filed_as_one_still_working() {
+        let working = trace(47, 933, None, None);
+        assert_eq!(
+            super::describe_end(&working),
+            super::RAN_TO_LIMIT,
+            "nothing measured a silence, so nothing may be claimed about one"
+        );
+
+        // Seventeen silent seconds of twenty: notable by both halves of the rule.
+        let mut stuck = trace(47, 933, None, None);
+        stuck.quiet = Some(super::Quiet {
+            silent_ms: 17_000,
+            last_activity_ms: 3_000,
+            run_ms: 20_000,
+            sample_ms: 250,
+        });
+        assert_eq!(super::describe_end(&stuck), super::QUIET_TO_LIMIT);
+
+        // Half the run, but under the one-second floor: a 1.5s run going quiet for 0.9s is not
+        // a finding, and a rule without the floor would file it as one.
+        let mut brief = trace(47, 933, None, None);
+        brief.quiet = Some(super::Quiet {
+            silent_ms: 900,
+            last_activity_ms: 600,
+            run_ms: 1_500,
+            sample_ms: 250,
+        });
+        assert_eq!(
+            super::describe_end(&brief),
+            super::RAN_TO_LIMIT,
+            "below the floor is not a silence worth a category"
+        );
+
+        // Over the floor, but a small fraction of a long run - still working, with a pause.
+        let mut paused = trace(47, 933, None, None);
+        paused.quiet = Some(super::Quiet {
+            silent_ms: 2_000,
+            last_activity_ms: 88_000,
+            run_ms: 90_000,
+            sample_ms: 250,
+        });
+        assert_eq!(
+            super::describe_end(&paused),
+            super::RAN_TO_LIMIT,
+            "two seconds of ninety is a pause, not a stop"
+        );
+
+        // A guest that stopped itself is neither: its own decision outranks the clock.
+        let mut stopped = trace(47, 933, None, None);
+        stopped.quiet = Some(super::Quiet {
+            silent_ms: 17_000,
+            last_activity_ms: 3_000,
+            run_ms: 20_000,
+            sample_ms: 250,
+        });
+        stopped.stopped = Some(orbistoun_overrides::DELIBERATE_EXIT.to_owned());
+        assert_eq!(
+            super::describe_end(&stopped),
+            orbistoun_overrides::DELIBERATE_EXIT,
+            "a deliberate exit is not a silence, however quiet the run was"
+        );
+    }
+
+    /// **A spent call budget is not the clock running out, and no longer reads as it.**
+    ///
+    /// D238 put these on separate exit codes and said why: *"'ran out of clock' and 'made the
+    /// calls it was allowed' call for different next steps and must not read alike"*. A guest
+    /// that burns twenty million calls in four seconds had all the time it wanted; one the clock
+    /// stopped may have been making a call a second. Raise the budget, or find out what it is
+    /// waiting for - different answers, and the outcome now says which.
+    ///
+    /// The negative half is the important one: this must come from the branch that stopped the
+    /// run, never from comparing a call count against a budget. A report that inferred it would
+    /// be naming a cause it did not determine.
+    #[test]
+    fn a_spent_budget_and_a_spent_clock_are_different_endings() {
+        let mut budget = trace(47, 20_000_000, None, None);
+        budget.ended_by = Some(super::SPENT_THE_BUDGET.to_owned());
+        assert_eq!(super::describe_end(&budget), super::SPENT_THE_BUDGET);
+
+        // The clock, with the same call count: the number is not what decides it.
+        let mut clock = trace(47, 20_000_000, None, None);
+        clock.ended_by = Some(super::RAN_TO_LIMIT.to_owned());
+        assert_eq!(super::describe_end(&clock), super::RAN_TO_LIMIT);
+
+        // A budget-ended run that also went quiet is still a budget: it cannot have been
+        // waiting for anything if it was spending calls fast enough to run out.
+        let mut both = trace(47, 20_000_000, None, None);
+        both.ended_by = Some(super::SPENT_THE_BUDGET.to_owned());
+        both.quiet = Some(super::Quiet {
+            silent_ms: 17_000,
+            last_activity_ms: 3_000,
+            run_ms: 20_000,
+            sample_ms: 250,
+        });
+        assert_eq!(super::describe_end(&both), super::SPENT_THE_BUDGET);
+
+        // A guest that stopped itself outranks either: its own decision is not a limit.
+        let mut exited = trace(47, 20_000_000, None, None);
+        exited.ended_by = Some(super::SPENT_THE_BUDGET.to_owned());
+        exited.stopped = Some(orbistoun_overrides::DELIBERATE_EXIT.to_owned());
+        assert_eq!(
+            super::describe_end(&exited),
+            orbistoun_overrides::DELIBERATE_EXIT
+        );
+
+        // And a fault outranks everything, because the run did not reach a limit at all.
+        let mut faulted = trace(47, 20_000_000, Some("image"), Some(0x1234));
+        faulted.ended_by = Some(super::SPENT_THE_BUDGET.to_owned());
+        assert_eq!(super::describe_end(&faulted), "image+0x1234");
+    }
+
+    /// **Nothing this pipeline can produce reaches `Presented`, and that is the measurement.**
+    ///
+    /// `Reach::Presented` means the buffer a flip carried was read back and held pixels the
+    /// guest wrote. No renderer is attached to the run path, so no presented buffer exists to
+    /// inspect and `status_of` has no arm that awards it. Six guests sit at `flipped` with full
+    /// standing and none has produced a pixel; the scale now says so instead of implying
+    /// otherwise.
+    ///
+    /// Asserted over every combination this function can actually be handed - every `reached`
+    /// word it matches on, crossed with a frame count and a deliberate exit - rather than
+    /// against one trace, because the claim is about the function and not about an example.
+    ///
+    /// **The day this test fails is the day the readback landed.** That is the intended way to
+    /// find out: whoever wires a presented buffer into the run path gets told, here, that the
+    /// rung above them is now reachable and its arm has to be written.
+    #[test]
+    fn the_top_rung_is_out_of_reach_until_a_buffer_can_be_read_back() {
+        use orbistoun_overrides::Reach;
+
+        for reached in [
+            "Entered",
+            "Linked",
+            "ImportsResolved",
+            "ContainerParsed",
+            "Rejected",
+            "something nobody has written yet",
+        ] {
+            for frames in [0, 1, 53] {
+                for stopped in [None, Some(orbistoun_overrides::DELIBERATE_EXIT)] {
+                    let mut t = trace(47, 933, None, None);
+                    t.reached = reached.to_owned();
+                    t.frames = frames;
+                    t.stopped = stopped.map(ToOwned::to_owned);
+                    let reach = super::status_of(&t, "2026-09-15".to_owned()).reach;
+                    assert!(
+                        reach < Reach::Presented,
+                        concat!(
+                            "{}/{}/{:?} reached {:?} - if a presented buffer can now be read ",
+                            "back, give `status_of` its arm and replace this test with one ",
+                            "that exercises it"
+                        ),
+                        reached,
+                        frames,
+                        stopped,
+                        reach
+                    );
+                }
+            }
+        }
+    }
+
     /// **A run that never entered is not promoted by a frame count.**
     ///
     /// The negative half. `reached` still decides the floor: a guest whose imports never
@@ -1451,6 +1750,7 @@ mod tests {
     fn trace(distinct: usize, calls: u64, region: Option<&str>, offset: Option<u64>) -> CallTrace {
         CallTrace {
             forced_dumps: Vec::new(),
+            ended_by: None,
             threads: Vec::new(),
             said: Vec::new(),
             quiet: None,
@@ -1470,6 +1770,7 @@ mod tests {
             formats: super::FormatReport::default(),
             stopped: None,
             fault: region.map(|region| FaultSite {
+                instruction: Vec::new(),
                 thread: None,
                 host_thread: None,
                 pointees: Vec::new(),
@@ -1702,7 +2003,10 @@ mod tests {
         };
         assert!(
             !super::wrote_a_trace(Some(stamp), Some(stamp)),
-            "an untouched file is the previous run's, and reporting it as this run's is the              failure this exists to stop"
+            concat!(
+                "an untouched file is the previous run's, and reporting it as this run's ",
+                "is the failure this exists to stop"
+            )
         );
     }
 
@@ -1757,12 +2061,14 @@ mod tests {
                     label: "libc::memset".to_owned(),
                     calls: 60,
                     implemented: true,
+                    shape: String::new(),
                 },
                 CalledImport {
                     index: 1,
                     label: "libc::snprintf_s".to_owned(),
                     calls: 40,
                     implemented: false,
+                    shape: String::new(),
                 },
             ],
             ..under(Conditions::default())

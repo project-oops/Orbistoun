@@ -15,8 +15,10 @@ found_on = "2026-09-14"
 [[function]]
 name = "sceAgcAcbDispatchIndirect"
 purpose = "Records a compute dispatch whose parameters are read from memory rather than given directly."
+edge_cases = ["SIZE ONLY: the builder ran, its GetSize answered 0x10 bytes (4 dwords), and it advanced and wrote exactly that. No packet header or body was reported, so nothing here says what it emits - only how much. Not implementable on a length."]
 found_by = "generated"
-known_by = "assumed"
+known_by = "measured"
+cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/*-getsize."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
@@ -44,6 +46,16 @@ cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100
 found_on = "2026-09-14"
 
 [[function]]
+name = "sceAgcAcbWaitRegMem"
+edge_cases = [
+    "56 BYTES AT ZERO ARGUMENTS, three packets - headers 0xc0027900, 0xc0053c00 and 0xc0017900 by the same reading as its Dcb twin. Byte-for-byte the same shape sceAgcDcbWaitRegMem produces at zero arguments, which is the first evidence the Acb and Dcb forms of a builder emit the same packet.",
+    "NOT WIRED, for the reason its Dcb twin is not: the Dcb form was shown argument-sensitive (56 bytes zeroed, 0 with sentinels), so a zero-argument capture is not the shape a title produces. An argument sweep settles both at once.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-222710, check 166-agc/acb-wait-reg-mem."
+found_on = "2026-09-14"
+
+[[function]]
 name = "sceAgcCbBranch"
 purpose = "Writes a branch into a command buffer."
 edge_cases = [
@@ -52,6 +64,13 @@ edge_cases = [
 ]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcCbDispatch"
+edge_cases = ["SIZE ONLY: the builder ran, its GetSize answered 0x14 bytes (5 dwords), and it advanced and wrote exactly that. No packet header or body was reported, so nothing here says what it emits - only how much. Not implementable on a length."]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/*-getsize."
 found_on = "2026-09-14"
 
 [[function]]
@@ -132,9 +151,9 @@ found_on = "2026-09-12"
 name = "sceAgcCreateShader"
 arity = 4
 purpose = "Hands the driver a shader: a destination for the resulting object, a small header describing the payload, and the shader bytecode itself."
-partial = "Measured in its core - success rc 0x0 with the object filled, +0x30 = 0 (quadword) and +0x50 = 0 (dword, low byte used), on obSCEne's retail call shape (D565, D556) - but not complete, and these are the open questions rather than assumptions (a measured entry carries no assumptions). The 0x18 after the magic is taken to be the header's own size by analogy with sceKernelDirectMemoryQuery's size argument (D083) and is unverified - no guest has been seen reacting to it being wrong. Whether arg3 is a length, a flags word or something else is unestablished; it was not a mapped pointer, so no dump was taken. The full size and contents of the object arg0 points to are unknown beyond the two observed fields, and obSCEne cannot capture the rest until a leg has libSceAgc actually mapped - 472 of its symbols are absent across four captures and its sysinfo says no GPU library is mapped in that process (D556). 0x8a6c002f may be a 'GPU not initialised' refusal rather than a bad-header one (the same leg reports no GPU library mapped and the adjacent dcb-* builders crashed SIGBUS for want of it); a leg where libSceAgc is mapped is needed to tell them apart (REQ-...1621Z-7a5d). And the exact argument layout of the retail shape that succeeded should be read from obSCEne's 166-agc source rather than inferred from the header echo in the shader-object bytes."
+partial = "Measured in its core - success rc 0x0 with the object filled, +0x30 = 0 (quadword) and +0x50 = 0 (dword, low byte used), on obSCEne's retail call shape (D565, D556) - but not complete, and these are the open questions rather than assumptions (a measured entry carries no assumptions). The 0x18 after the magic is the header's **version** at +0x04, not the header size the earlier size-by-analogy reading assumed (D083) - confirmed by SELFish's hardware-derived container layout (selfish/data/agc-shader-format.tsv, SELFish D103), settled by obSCEne's 9f4c differential probe. Whether arg3 is a length, a flags word or something else is unestablished; it was not a mapped pointer, so no dump was taken. The full size and contents of the object arg0 points to are unknown beyond the two observed fields, and obSCEne cannot capture the rest until a leg has libSceAgc actually mapped - 472 of its symbols are absent across four captures and its sysinfo says no GPU library is mapped in that process (D556). 0x8a6c002f may be a 'GPU not initialised' refusal rather than a bad-header one (the same leg reports no GPU library mapped and the adjacent dcb-* builders crashed SIGBUS for want of it); a leg where libSceAgc is mapped is needed to tell them apart (REQ-...1621Z-7a5d). And the exact argument layout of the retail shape that succeeded is named field by field in SELFish's data/agc-shader-format.tsv (SELFish D103) - the collection's clean-room home for the AGC shader container, derived from open-source emulators and hardware-confirmed by obSCEne 9f4c - rather than obSCEne's disassembly (which is being retired) or the header echo in the shader-object bytes."
 edge_cases = [
-    "**Argument convention derived from dumps, not disassembly (D194).** arg0 is an out-parameter - thirty-two zero bytes at an image address, untouched before the call. arg1 is a header beginning with the four bytes 31 32 33 34 ('1234'), then 0x18, then a length that differs per call (0xd8 and 0x118 observed). arg2 points at the bytecode itself.",
+    "**Argument convention derived from dumps, not disassembly (D194).** arg0 is an out-parameter - thirty-two zero bytes at an image address, untouched before the call. arg1 is a header beginning with the four bytes 31 32 33 34 ('1234'), then the version 0x18 at +0x04 (SELFish D103), then a length that differs per call (0xd8 and 0x118 observed). arg2 points at the bytecode itself.",
     "Called eleven times during startup by PPSA28061, which is the furthest-progressing title in the corpus. It is the point at which a guest hands over shader bytecode, so it is the natural capture site for real translation material.",
     "The guest reaches it through a validating wrapper that null-checks rdi, rsi and rdx and answers 0x8a6c000a for any of them, then **tail-jumps** to the import. That bounds what the wrapper checks, NOT the callee's arity - a tail-jump preserves every register, so a fourth argument passes through unexamined. Read as evidence for arity 3 once, against the arity 4 the dumps had already established (D527).",
     "In PPSA02664 arg0 is an out-parameter **on the stack** rather than at an image address. Unimplemented, it is never written, so the caller reads null out of it and faults at read of 0x50 immediately afterwards.",
@@ -169,9 +188,18 @@ edge_cases = [
     'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-acquire-mem-getsize): sceAgcDcbAcquireMemGetSize answered a reservation of 32 bytes (8 dwords); the builder then advanced the writer by exactly 32 bytes and wrote exactly 32 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
     "CROSS-CHECK against prosper, an independent PS5 emulator, whose public packet-size audit (docs/AGC_PACKET_SIZES.md) derives its figures from guest reservation behaviour rather than from the library. It publishes the same dword count. Two projects reaching one number by unrelated routes - theirs inferred from what titles reserve, ours measured from what the library answers - is the strongest corroboration available short of vendor documentation. Reference only; nothing was copied.",
     "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+    "PACKET MEASURED AT ZERO ARGUMENTS: 32 bytes, header 0xc0065800 - type 3, opcode 0x58, count 6, so eight dwords, matching the reservation its GetSize answered. The seven body dwords came back all zero, and the check called it with every argument zero, so the body says nothing about which argument lands where.",
+    "NOT WIRED, and the reason is the argument mapping rather than the encoding. sceAgcDcbSetIndexSize was refused on one data point and implemented once eight argument pairs were swept; this one has a header and a length and no sweep. The same treatment would settle it.",
 ]
 known_by = "measured"
-cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/dcb-acquire-mem."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbDispatchIndirect"
+edge_cases = ["SIZE ONLY: the builder ran, its GetSize answered 0xc bytes (3 dwords), and it advanced and wrote exactly that. No packet header or body was reported, so nothing here says what it emits - only how much. Not implementable on a length."]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/*-getsize."
 found_on = "2026-09-14"
 
 [[function]]
@@ -189,16 +217,30 @@ found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
 
 [[function]]
+name = "sceAgcDcbSetBaseIndirectArgs"
+purpose = "Writes a SET_BASE packet naming the indirect-args base into a command buffer."
+edge_cases = [
+    "MEASURED: 16 bytes. First dword 0xc0021100 - type 3, opcode 0x11 (SET_BASE), count 2; (count + 2) dwords is exactly 16 bytes, so the length arithmetic closes (D565).",
+    "PACKET MEASURED AT ONE ARGUMENT SET (obSCEne sweep 20260915-174357, eboot leg, check 166-agc/dcb-set-base-indirect-args): body 01 00 00 00 | 00 00 00 00 | 00 00 00 00. The first body dword is 1 - which the public SET_BASE layout calls the base-index selector, and 1 is the draw-indirect base this builder's name sets - then a two-dword address that came back zero because the probe passed a zero address.",
+    "NOT ENCODED FROM ARGUMENTS, wired as a reservation skeleton: one argument pass cannot separate a constant selector from an argument, and the address is plainly the argument, so orbistoun reserves the measured 16-byte extent with the measured header and a zero body (the AcquireMem/Cx-producer treatment, D696). What moves the wall is the real cursor, not the body; the body waits on a second argument pass (REQ-...a70f).",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260915-174357, eboot leg, reports/hardware/20260915-174357-eboot.obs.log, check 166-agc/dcb-set-base-indirect-args."
+found_on = "2026-09-15"
+
+[[function]]
 name = "sceAgcDcbDrawIndex"
 purpose = "Records an indexed draw into a draw command buffer."
 edge_cases = [
     "MEASURED: 24 bytes - header 0xc0042700, type 3, opcode 0x27, count 4, so six dwords. Three of the five body dwords were reported: an address low half 0x12345678, its high half 0, and an index count 3. The remaining two body dwords were not dumped by this check, so the body is partially known and the size fully known.",
     "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
     "DIVERGENCE of the private-payload kind. prosper emits 7 dwords against a measured 6, and its table says the extra capacity carries a 64-bit draw modifier of its own - the same shape as its DcbJump row, where a private dword makes the packet one larger than the library. The published PM4 size is 6 and matches the measurement.",
+    "THE TWO UNREAD DWORDS ARE READ. Called as (3, 0x12345678, 0) it wrote 0xc0042700, 3, 0x12345678, 0, 3, 0 - twenty-four bytes, every one now reported. The index count appears at BOTH body[0] and body[3], and the third argument lands in body[4]. Worklog 536 left this builder unwired because body[0] and body[4] had never been read back; they have been.",
+    "ONE ARGUMENT SET, so what body[0] means is still not established - only that this builder puts the index count there. The published PM4 field order names it MAX_SIZE, which is consistent with a count and is not what orbistoun reproduces from: the implementation emits what was measured.",
 ]
 found_by = "generated"
 known_by = "measured"
-cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index."
+cites = "obSCEne sweep 20260914-222710, eboot leg, reports/hardware/20260914-222710-eboot.obs.log, check 166-agc/dcb-draw-index."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
@@ -236,6 +278,13 @@ edge_cases = [
 ]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-multi-getsize."
+found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcDcbDrawIndexOffset"
+edge_cases = ["SIZE ONLY: the builder ran, its GetSize answered 0x14 bytes (5 dwords), and it advanced and wrote exactly that. No packet header or body was reported, so nothing here says what it emits - only how much. Not implementable on a length."]
+known_by = "measured"
+cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/*-getsize."
 found_on = "2026-09-14"
 
 [[function]]
@@ -355,9 +404,10 @@ edge_cases = [
     "MEASURED, complete packet: 12 bytes - header 0xc0017a00, register selector 0x20000243, value 0x400. Type 3, opcode 0x7a, count 1, so three dwords. The selector is notable: its low half 0x243 is an ordinary register offset while the high half 0x20000000 is set, which the sibling sceAgcDcbSetUcRegisterDirect (opcode 0x79, selector 0x242, no high bits) does not carry. So 0x7a is a distinct opcode from 0x79 and the high bits are part of its selector - derived from the pair measured in one run, not cited.",
     "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
     "DIVERGENCE, and this one is prosper being SHORT. It publishes 2 dwords for this builder against a measured 3. Under-emitting is the safe direction for a guest that asks GetSize and still wrong for one that inlined 3, and it is the opposite direction from every other divergence found in this sweep.",
+    "MAPPING MEASURED ACROSS EIGHT PAIRS, which is what makes it implementable where one point did not. sceAgcDcbSetIndexSize(dcb, type, flags) for type 0-3 and flags 0-1 produced values 0x400, 0x440, 0x401, 0x441, 0x402, 0x442, 0x403, 0x443 with the selector 0x20000243 constant throughout. So the value is 0x400 | (flags << 6) | type: the type occupies the low bits, the flag bit 6, and bit 10 is set in every case. Bounded by what was swept - nothing establishes a larger argument, so orbistoun masks rather than guessing.",
 ]
 known_by = "measured"
-cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-set-index-size."
+cites = "obSCEne sweep 20260914-222710, eboot leg, reports/hardware/20260914-222710-eboot.obs.log, check 166-agc/dcb-set-index-size (eight argument pairs)."
 found_on = "2026-09-14"
 
 [[function]]
@@ -465,12 +515,125 @@ name = "sceAgcSetCxRegIndirectPatchAddRegisters"
 purpose = "Amends an already-written indirect register packet to cover another register."
 edge_cases = [
     "A PATCH, NOT A BUILDER, and the guest's own call pattern is what says so. PPSA02664 calls sceAgcDcbSetCxRegistersIndirect exactly ONCE and this exactly THIRTY-TWO times. The same holds for the Sh and Uc families at 1:1 and 1:3. So one packet is written and then amended repeatedly - which is what the whole sceAgc*Patch* family is for, and why a builder's return value matters: it is the packet's address (D686).",
-    "ARG0 IS THE PACKET, and orbistoun currently hands the guest a placeholder there. Because sceAgcDcbSetCxRegistersIndirect is unimplemented it answers 0xf7ff0001, and the trace shows that value arriving as this function's first argument, unchanged, on all thirty-two calls. The guest is carrying orbistoun's placeholder as a pointer - exactly the leak D670 anticipated - and faults later inside memcpy rather than at the call that failed.",
+    "ARG0 IS THE PACKET. Once sceAgcDcbSetCxRegistersIndirect became a real cursor (D696) the producer stopped handing the guest a placeholder there - so arg0 is now a real packet address (0x740002247d9c in the 2026-09-15 run). The wall then moved one call downstream to this function's OWN return: unimplemented, it answered 0xf7ff0001, and the guest carried THAT into a memcpy and faulted in host code. Same placeholder-as-pointer leak (D670), one step later.",
     "EIGHT BYTES PER CALL, from the guest. Each patch call is immediately preceded by a memcpy from the same loop body (image+0x42ebd, then image+0x42ecd), with destinations stepping 0x74000238f028, f030, f038, f040 - eight bytes apart. So the guest writes one 8-byte entry and patches once per entry. That constrains the shape without establishing it: nothing here says what the eight bytes are.",
+    "RETURN MEASURED 0x0 (obSCEne 166-agc/patch-cx-registers-indirect, patch|rc|0x0, cursor delta unchanged at 0x14 - present in sweeps 20260915-125124, 152001 and 174357). The check builds the producer packet and calls this patch through its own harness even though the bare symbol does not resolve from the census, so the return IS measured though the name is not. Implemented to answer 0x0 and write nothing: the guest memcpy's the eight-byte entries itself, and the in-place amendment is an argument mapping no sweep has pinned. Answering 0x0 moved PPSA02664 FURTHER (+1 import, one-bit oracle), where the placeholder walled it.",
 ]
-known_by = "guest-observed"
-cites = "PPSA02664-app0 run 2026-09-14, call trace; obSCEne census sweep 20260914-100833 (symbol absent, never measured)."
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-cx-registers-indirect, sweeps 20260915-125124/152001/174357 (rc 0x0); PPSA02664-app0 run 2026-09-15, call trace."
 found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcSetCxRegIndirectPatchSetAddress"
+purpose = "Writes the target address into a SET_CONTEXT_REG_INDIRECT packet the Cx producer reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-cx-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). It amends one dword in place - the diff moved the address byte 0x20 (pass a) to 0x40 (pass b) in the 0xc0039f00 packet - and grows nothing. Implemented as a measured return that writes nothing: the whole sceAgc*Patch* family answers 0x0, and the return is what walls the guest (the placeholder-as-pointer of worklog 614), not the in-place amendment, which is a GPU-submission detail the CPU flow does not read."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-cx-reg-set-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcSetShRegIndirectPatchAddRegisters"
+purpose = "Extends the register run of a SET_SH_REG_INDIRECT packet the Sh producer reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-reg-add-registers, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the 0xc0036300 packet in place, grows nothing (extent 17, changed 1). Measured return, writes nothing, per the family - see sceAgcSetCxRegIndirectPatchAddRegisters."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-sh-reg-add-registers, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcSetShRegIndirectPatchSetAddress"
+purpose = "Writes the target address into a SET_SH_REG_INDIRECT packet the Sh producer reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends one dword of the 0xc0036300 packet in place (0x20 -> 0x40 across passes), grows nothing. Measured return, writes nothing, per the family."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-sh-reg-set-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcSetUcRegIndirectPatchAddRegisters"
+purpose = "Extends the register run of a SET_UCONFIG_REG_INDIRECT packet the Uc producer reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-uc-reg-add-registers, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the 0xc0036400 packet in place, grows nothing (extent 17, changed 1). Measured return, writes nothing, per the family."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-uc-reg-add-registers, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcSetUcRegIndirectPatchSetAddress"
+purpose = "Writes the target address into a SET_UCONFIG_REG_INDIRECT packet the Uc producer reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-uc-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends one dword of the 0xc0036400 packet in place (0x20 -> 0x40 across passes), grows nothing. Measured return, writes nothing, per the family."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-uc-reg-set-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDmaDataPatchSetDstAddressOrOffset"
+purpose = "Writes the destination address (or offset) into a DMA_DATA packet a DmaData builder reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-dst, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the DMA_DATA (0xc0055000) packet's destination field in place. Measured return, writes nothing, per the family - and one of the placeholders PPSA02664's memcpy loop reached (worklog 614)."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-dma-data-dst, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate"
+purpose = "Writes the source address, offset or immediate into a DMA_DATA packet a DmaData builder reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-src, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the DMA_DATA (0xc0055000) packet's source field in place. Measured return, writes nothing, per the family."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-dma-data-src, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcWaitRegMemPatchAddress"
+purpose = "Writes the polled address into a WAIT_REG_MEM packet the WaitRegMem builder reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-wait-reg-mem-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the WAIT_REG_MEM (0xc0053c00) packet's address field in place. Measured return, writes nothing, per the family."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-wait-reg-mem-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcQueueEndOfPipeActionPatchAddress"
+purpose = "Writes the write-back address into an end-of-pipe action packet (RELEASE_MEM) a builder reserved."
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-queue-eop-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the end-of-pipe (RELEASE_MEM, 0xc0064900) packet's write-back address field in place. Measured return, writes nothing, per the family."]
+known_by = "measured"
+cites = "obSCEne 166-agc/patch-queue-eop-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDcbDrawIndirect"
+purpose = "Writes an indirect draw (arguments fetched from a buffer) into a draw command buffer."
+edge_cases = ["MEASURED: 20 bytes, header 0xc0032400 - type 3, opcode 0x24 (DRAW_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-draw-indirect, sweep 20260915-203058). Wired as a reservation skeleton: header and extent measured, body zeroed (the one pass carried register offsets 0x280 the argument mapping does not pin). Hands the guest a real cursor where the placeholder walled it (worklog 618)."]
+known_by = "measured"
+cites = "obSCEne 166-agc/dcb-draw-indirect, sweep 20260915-203058 (header 0xc0032400, extent 20)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDcbSetShRegistersIndirect"
+purpose = "Writes a SET_SH_REG_INDIRECT packet a patch later fills, into a draw command buffer."
+edge_cases = ["MEASURED: 20 bytes, header 0xc0036300 - type 3, opcode 0x63 (SET_SH_REG_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-set-sh-registers-indirect, sweep 20260915-203058). Reservation skeleton, body zeroed; the Sh producer the sceAgcSetShRegIndirectPatch* family amends. On PPSA02664's command-buffer path, where it was answering the placeholder (worklog 616, 618)."]
+known_by = "measured"
+cites = "obSCEne 166-agc/dcb-set-sh-registers-indirect, sweep 20260915-203058 (header 0xc0036300, extent 20)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDcbSetUcRegistersIndirect"
+purpose = "Writes a SET_UCONFIG_REG_INDIRECT packet a patch later fills, into a draw command buffer."
+edge_cases = ["MEASURED: 20 bytes, header 0xc0036400 - type 3, opcode 0x64 (SET_UCONFIG_REG_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-set-uc-registers-indirect, sweep 20260915-203058). Reservation skeleton, body zeroed; the Uc producer the sceAgcSetUcRegIndirectPatch* family amends."]
+known_by = "measured"
+cites = "obSCEne 166-agc/dcb-set-uc-registers-indirect, sweep 20260915-203058 (header 0xc0036400, extent 20)."
+found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDcbPushMarker"
+purpose = "Writes an opening debug marker (a labelled region begins) into a draw command buffer."
+edge_cases = ["MEASURED: 12 bytes, header 0xc0017904 - a SET_UCONFIG_REG (opcode 0x79, two body dwords) to the command-processor marker register 0x342, with a set bit in the reserved low byte that command_header does not produce (obSCEne 166-agc/dcb-push-marker, sweep 20260915-174357). Reservation skeleton: header and 12-byte extent kept, the value (which distinguishes push from pop) zeroed because one pass cannot separate a constant from a colour argument. Was answering the placeholder on PPSA02664's command-buffer path (worklog 618)."]
+known_by = "measured"
+cites = "obSCEne 166-agc/dcb-push-marker, sweep 20260915-174357 (header 0xc0017904, extent 12)."
+found_on = "2026-09-16"
+
+[[function]]
+name = "sceAgcDcbPopMarker"
+purpose = "Writes a closing debug marker (the labelled region ends) into a draw command buffer."
+edge_cases = ["MEASURED: 12 bytes, the same 0xc0017904 SET_UCONFIG_REG packet to register 0x342 as sceAgcDcbPushMarker, the value distinguishing pop (0xc2000000) from push (0xc1000000) (obSCEne 166-agc/dcb-pop-marker, sweep 20260915-174357). Reservation skeleton with the value zeroed, per the marker pair (worklog 618)."]
+known_by = "measured"
+cites = "obSCEne 166-agc/dcb-pop-marker, sweep 20260915-174357 (header 0xc0017904, extent 12)."
+found_on = "2026-09-16"
 
 [[function]]
 name = "sceAgcUpdateInterpolantMapping"

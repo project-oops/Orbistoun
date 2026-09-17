@@ -1,0 +1,21 @@
+# Guests this collection builds, as opposed to titles it did not write.
+#
+# **Why a list and not a rule.** `worklist` and `questions` rank by call volume across every trace,
+# and our own probes are built to exercise everything - that is their job - so they out-call a title
+# that dies early, every time. Mixing them produces a ranking whose top row is an artefact of which
+# guests happen to have run. It put `libkernel::sceKernelDlsym` first at 27% of all calls, where
+# every retail title calls it exactly **once** and three obSCEne guests account for the rest
+# (worklog 542).
+#
+# Splitting them needs to know which guests are ours, and that is a judgement rather than a pattern.
+# `obscene` and `obscene-payload` are obvious from their names. `PPSA99980` is not: it is obSCEne's
+# own homebrew registered under a retail-shaped title id, and a filename rule gets it wrong. So the
+# list is written down, one name per line, matched against the trace's module name.
+#
+# A guest missing from here is treated as third-party, which is the safe direction: it can only
+# understate how much of a ranking is our own noise, never overstate it.
+
+obscene
+obscene-payload
+PPSA99980
+dist

@@ -360,13 +360,19 @@ fn the_two_models_agree_on_generated_programs() {
 
         assert_eq!(
             lane.0, wave.0,
-            "seed {seed}: the models disagree about the registers.\n\
-             program: {words:#010x?}"
+            concat!(
+                "seed {}: the models disagree about the registers.\n",
+                "program: {:#010x?}"
+            ),
+            seed, words
         );
         assert_eq!(
             lane.1, wave.1,
-            "seed {seed}: the models disagree about guest memory.\n\
-             program: {words:#010x?}"
+            concat!(
+                "seed {}: the models disagree about guest memory.\n",
+                "program: {:#010x?}"
+            ),
+            seed, words
         );
         compared += 1;
     }
@@ -377,9 +383,13 @@ fn the_two_models_agree_on_generated_programs() {
     // finding in its own tests.
     assert!(
         compared * 2 >= PROGRAMS,
-        "only {compared} of {PROGRAMS} programs were comparable - the generator is \
-         producing something neither model accepts, so this test is checking almost \
-         nothing"
+        concat!(
+            "only {} of {} programs were comparable - the generator is ",
+            "producing something neither model accepts, so this test is checking almost ",
+            "nothing"
+        ),
+        compared,
+        PROGRAMS
     );
 }
 
@@ -397,8 +407,12 @@ fn the_generator_produces_programs_that_translate() {
         let decoded = decode(&bytes, &table, &operands);
         assert!(
             decoded.is_trustworthy(),
-            "seed {seed}: the generator emitted something that does not decode cleanly.\n\
-             program: {words:#010x?}"
+            concat!(
+                "seed {}: the generator emitted something that does not decode cleanly.\n",
+                "program: {:#010x?}"
+            ),
+            seed,
+            words
         );
         match translate(&decoded, &table, Strategy::default()) {
             Ok(_) => translatable += 1,
@@ -407,7 +421,9 @@ fn the_generator_produces_programs_that_translate() {
     }
     assert_eq!(
         translatable, PROGRAMS,
-        "every generated program should translate - the generator only emits \
-         instructions both models accept"
+        concat!(
+            "every generated program should translate - the generator only emits ",
+            "instructions both models accept"
+        )
     );
 }

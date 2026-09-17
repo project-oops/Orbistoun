@@ -23,13 +23,14 @@ project will ever have.
 | **G4** | Translation: registers, guest memory, execution mask, comparisons, per-lane divergence | **done** |
 | **G5** | Control flow, as a dispatch loop rather than reconstructed structure | **done** |
 | **G6** | Execution on a real device, as the test oracle | **done** - 225 tests on the shader side, a large fraction executing |
-| **G7** | Instruction breadth | **94%** - 120/127, **8/10** fixtures complete (D554, re-derived from `orbistoun-cli shaders`; this row said 110/127 and 6/10, which was stale before `exp` was translated and staler after). **Four instructions remain, in two families**: VINTRP's three, which need no capture, and MIMG's `image_sample`, which needs the resource model |
-| **G8** | Submission pipeline: packets to register writes to a shader to a running module | **structure done**, synthetic input only; survives arbitrary and truncated streams |
+| **G7** | Instruction breadth | **187/187 instructions, no blockers** - re-derived from `orbistoun-cli shaders` over `crates/orbistoun-shader/tests/fixtures/*.gcn`. The last three are MTBUF's missing channel counts, measured into the mnemonic and operand tables rather than transcribed, which completes that family at eight of eight (worklog 588). VINTRP's three, both sampling forms, the levelled sample, the texel fetch and the store are all translated (D690, D692, worklogs 568, 572, 573, 575, 576 and 577). **Fixtures are 12/14, and both remaining are refusals by decision** - `orbistoun-cli shaders` names them (worklog 578). The sampling fixture uses more than one texture, which D690 refuses on purpose, and `unreached` reads one attribute both interpolated and flat, which a host input cannot be. The one real gap - a division pre-scale writing its flag to `null`, which is a shader asking for *less* rather than for something unsupported - is closed (worklog 579). Two earlier versions of this row were wrong in ways worth keeping: the dimensionality is a field in the instruction and not in the descriptor, and an image instruction is not always eight bytes |
+| **G8** | Submission pipeline: packets to register writes to a shader to a running module | **done, on a captured stream.** 357 packets walked, two shaders found and translated, and the modules it handed back draw a frame - with which module is the geometry and which the shading taken from the stage the pipeline attributed rather than from an offset the test knows (worklog 584). It still survives arbitrary and truncated streams. **It now reads the draw too** - twelve auto-indexed draws of three vertices and one instance, taken out of the packet bodies by opcode, and three is independently what the guest's own primitive shader declares it will emit (worklog 585). Still the harness's: the topology, the index buffer an indexed draw would need, and the render target |
 | **G9** | Packet vocabulary verified against something external | **harness done**, corpus empty - needs a capture |
-| **G10** | Resource model: descriptors, buffers, images, render targets | **guest side done** - the V# buffer-descriptor decoder (D204) and MUBUF/MTBUF-plain translation landed (worklogs 097, 101; D203/D205). The one capture-free remainder is **narrow-component format conversion** in MTBUF (packed UNORM/SNORM/float/etc., which `typed_buffer_memory` still refuses) - not yet done. The *host* side (descriptor base -> host memory) and images/render targets still need G11 or a capture. |
+| **G10** | Resource model: descriptors, buffers, images, render targets | **guest side done** - the V# buffer-descriptor decoder (D204) and MUBUF/MTBUF-plain translation landed (worklogs 097, 101; D203/D205). The capture-free remainder was **narrow-component format conversion** in MTBUF, and the packed *loads* are now done: `UINT`/`SINT`, `UNORM`/`SNORM`, `USCALED`/`SSCALED` and `FLOAT` at width 16, in one word or across two - the whole `16_16_16_16` family included (worklogs 586, 587). Still refused, each by name: the 11- and 10-bit packed floats (not IEEE halves, decode unmeasured), `SRGB`, and packed *stores*. The **untyped** family is now complete at every width too - `buffer_load/store_dword` and their `x2`/`x3`/`x4` forms, measured into the tables rather than transcribed (worklog 617), where before only the single-word pair was named. The *host* side (descriptor base -> host memory) and images/render targets still need G11 or a capture. |
 | **G11** | Graphics pipelines in the Vulkan backend; today it dispatches compute only | **begun** - the backend builds one, and a translated fragment export reaches an attachment through it (D550, D553). Steps (a), (b) and (c) are done; step (d) - which registers configure colour buffer zero - needs a capture |
 | **G12** | Framebuffer diffing | **the harness is built** - it draws a hand-written fragment shader's colour into an attachment over a differing clear, carries a varying through interpolation, and reads every pixel back (D549, D550, D554). A **translated** module has been through it (D553) |
 | **G13** | Subgroup fidelity, the level that would actually be used at speed | **done** (D146) - one invocation per lane, mask by ballot; reports the subgroup width it needs |
+| **G15** | Surface layout: detiling guest images, and whether block-compressed data needs decoding at all | **begun.** The 32-bpp `64KB_R_X` detile is implemented and tested, anchored on obSCEne's one measured texel `(15,15)` → byte 4348 and refusing surfaces past a single 64 KiB block (worklog 653); obSCEne's full texel→offset sweep (`-4d82`) is in flight to verify the rest, and the host upload path is the next wiring. Other tiling modes and bit-depths still wait on their own measurements. The BC half is a device query away: Vulkan takes BC data natively, so the question is whether `textureCompressionBC` is available, and the backend queries four features today and not that one (D690) |
 | **G14** | Performance: collapse the single-block dispatch loop, persist the shader cache | **deferred** until there is something to measure |
 
 ### What each remaining step is waiting on
@@ -135,6 +136,33 @@ least certain thing in the crate. A raw command buffer is data that still has to
 the guest's graphics layer builds buffers through library calls before submitting them -
 checks the table itself. That is the same move that found a wrong encoding row in G1, and
 it is the difference between more data and an oracle.
+
+**G15 - surface layout** had no entry here under any name until 2026-09-15, which is how a gap
+analysis came to list it as the one gap with no plan. G10 covers what a descriptor *contains*;
+nothing covered how the image it points at is arranged in guest memory.
+
+It splits into two halves that are not equally blocked, and saying so is most of the value:
+
+- **Detiling's first mode is measured and landed.** A guest render target or texture is not linear;
+  the descriptor names a tiling mode (D690) and the swizzle it implies is a hardware property that
+  must be measured, not guessed - a wrong swizzle renders a frame that is subtly wrong, the failure
+  this project is least able to detect. The 32-bpp `64KB_R_X` swizzle is now measured: obSCEne drew
+  one pixel into such a surface and read its tiled byte on hardware (4348), the capture's own geometry
+  fixes that pixel as texel `(15,15)`, and three independent tiler models reproduce the full equation.
+  `orbistoun-gpu`'s `tiling` module implements and inverts it, anchored on that pixel and refusing any
+  surface past a single 64 KiB block (worklog 653). obSCEne's full texel→offset sweep (`-4d82`) is
+  being built to confirm every entry, not just the anchor. Other modes, bit-depths and the multi-block
+  case still wait on their own measurements.
+- **Block-compressed decode may not be needed at all.** Vulkan consumes BC data natively, so the
+  work is undoing the tiling and handing the compressed blocks over - not decompressing them.
+  Whether this device can is a published core-optional feature, `textureCompressionBC`, and the
+  backend queries four device features today and not that one. **Querying it is a first step
+  that needs no capture**, and it decides whether a decoder is a requirement or a fallback.
+
+What waits behind the first half: every textured frame. D690 refuses a second texture and maps
+the one bound image by register identity precisely because there is nothing to resolve a
+descriptor *to* - "a descriptor decoder, a surface cache, a format table, an upload path", which
+that entry calls the right eventual answer and correctly declines to build blind.
 
 **G10 - the resource model** splits in two, and this entry used to blur them.
 

@@ -56,7 +56,14 @@ fn translated(colour: [f32; 4], stage: Stage) -> Result<Vec<u32>, TranslateError
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
     let decoded = decode(&export_shader(colour), &encodings, &operands);
-    translate_for(&decoded, &encodings, Width::Wave64, stage).map(|(module, _)| module)
+    translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        stage,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .map(|(module, _)| module)
 }
 
 /// **A translated export puts its colour on the screen, and it is the same colour a
@@ -125,8 +132,12 @@ fn a_translated_export_matches_the_hand_written_shader() {
             assert_eq!(
                 by_translation.at(x, y),
                 Some([0, 0, 255, 255]),
-                "pixel ({x}, {y}) - red here would mean the export produced nothing and the \
-                 clear survived"
+                concat!(
+                    "pixel ({}, {}) - red here would mean the export produced nothing and the ",
+                    "clear survived"
+                ),
+                x,
+                y
             );
         }
     }
@@ -145,7 +156,9 @@ fn an_export_without_an_attachment_is_refused() {
     let refusal = translated([0.0, 0.0, 1.0, 1.0], Stage::Compute);
     assert!(
         refusal.is_err(),
-        "a compute module translated an export, so it stored a colour somewhere that is not an \
-         attachment"
+        concat!(
+            "a compute module translated an export, so it stored a colour somewhere that is ",
+            "not an attachment"
+        )
     );
 }

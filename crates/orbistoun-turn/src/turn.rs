@@ -196,6 +196,21 @@ pub fn step(finding: &Finding) -> Step {
             },
             |target| Step::SweepArguments { target },
         ),
+        // **A person, once the device has been asked.** A guest entering the kernel via a
+        // `syscall`/`hlt`, or an `int` on a vector nothing has measured, needs a handler orbistoun
+        // does not have, and the handler cannot be written until the vector is characterised on
+        // hardware - which is an obSCEne request, not a diagnostic this loop can vary. So the loop's
+        // job here is to *name* it (which the finding now does), and the next step is a person
+        // filing the measurement and writing the handler behind it. (`int 0x41` used to be the
+        // example here; it has since been measured fatal - REQ-...b3c2 - and routes as a `Faulted`
+        // trap whose cause is upstream, not through this arm.)
+        Gap::KernelEntryUnimplemented => Step::Person {
+            why: concat!(
+                "the guest entered the kernel through an instruction orbistoun does not implement; ",
+                "the handler needs the vector characterised on the device first (an obSCEne ",
+                "request), and writing an interrupt/syscall path is a person's job, not a sweep"
+            ),
+        },
         // Deliberately not automated. The loop is allowed to find the wall; writing what
         // goes behind it is a person's job, and generating it unverified is not planned.
         // **Reading what it was handed is not implementing it.** Writing the function stays a

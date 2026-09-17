@@ -77,8 +77,10 @@ fn a_second_read_continues_where_the_first_stopped() {
     assert_eq!(
         &read_four("the second read")[..],
         b"4567",
-        "the second read returned the start of the file again, so the descriptor keeps no \
-         position and every read is the first one"
+        concat!(
+            "the second read returned the start of the file again, so the descriptor keeps no ",
+            "position and every read is the first one"
+        )
     );
 
     // Moving the position, which is what makes it a position rather than a counter.

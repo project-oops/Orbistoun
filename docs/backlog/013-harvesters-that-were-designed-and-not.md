@@ -29,11 +29,23 @@ left, with the reason, so they are not re-argued from scratch (D213).
 - **Cross-title argument correlation** - the same hash called with the same argument shape
   in two titles is the same function, which says nothing about its *name*. Useful for
   arity and for grouping, not for this.
-- **A cited C++ ABI name list.** The seventeen `call-trace` names are `__cxa_*` and mangled
-  C++ ABI symbols. They are **published**, by a public specification - they are simply not
-  in any list this repository ships, so they record as runtime evidence and sit a tier below
-  where they belong. Harvesting a symbol map the way `standard.txt` was harvested from
-  FreeBSD would move all seventeen to *reproducible from this repository*. That is the same
-  fix that turned 470 hand-written names into 3,018 cited ones, and it is the highest-value
-  item on this list.
+- **A cited C++ ABI name list - measured, and it buys nothing. Not the highest-value item.**
+  The seventeen `call-trace` names are `__cxa_*` and mangled C++ ABI symbols, all traceable to
+  the Itanium C++ ABI, and that classification holds. What does not hold is the value.
+
+  Three C++ vocabularies were run through `orbistoun-cli names` against the whole corpus -
+  **2,932 unnamed imports across 54 modules** - and all three named **zero**: every identifier
+  in GCC 15's `cxxabi.h` (659), the full export list of GNU `libstdc++.so.6` (6,046, of which
+  6,000 are mangled `_Z*`), and that list transformed into libc++'s `std::__1` inline namespace
+  (3,048), which is the form an LLVM target would actually use. Validated with a positive
+  control: the same path reports `3 tried, 1 named` against an emptied symbol database, so the
+  zeroes are measurements (worklog 595).
+
+  **So the unnamed imports are not C++ standard-library or C++ ABI symbols** - a whole class
+  eliminated, which is worth more than the re-citation this asked for.
+
+  The provenance half does not work either: `--words-from supplied` records outside names at a
+  *lower* tier than `call-trace` (D119), so that route moves the seventeen down. Doing it as
+  `standard.txt` was done needs a machine-readable authoritative source, and the authoritative
+  source is a prose specification. Leave it.
 

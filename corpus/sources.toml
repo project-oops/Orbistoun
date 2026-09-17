@@ -169,10 +169,10 @@ cite = "https://github.com/project-oops/obSCEne"
 asset = []
 
 [[source]]
-name = "oops-apps-home-shell"
+name = "oops-apps-sceshell"
 target = "titles"
 kind = "local"
-path = "../oops-apps/src/home/build/title/PROH00001"
+path = "../oops-apps/src/sceshell/build/title/SCSH00001"
 licence = "same suite (D043); our own application, not third-party"
 cite = "https://github.com/project-oops/oops-apps"
 

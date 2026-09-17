@@ -67,6 +67,57 @@ global_load_dword v255, v130, s[40:41]
 global_load_dword v44, v255, s[16:17]
 global_load_dword v128, v77, s[24:25]
 
+// **With offsets, which nothing here had.** A flat access carries a byte offset beside its
+// address, and every probe above leaves it at zero - where the reference prints nothing, so the
+// solver had no evidence the field exists and correctly declined to invent one. The translation
+// built on that layout therefore ignored the offset, which is not a refusal: an access sixteen
+// bytes along read the word at zero instead, silently. The GL cube's vertex program fetches its
+// position, colour and texture coordinates from one address at offsets 0, 16 and 32, so it read
+// its position three times over (worklog 565).
+//
+// Values spread across the field so its width is pinned, and paired with varied registers so
+// the offset cannot be confused with an address.
+global_load_dword v12, v34, s[8:9] offset:4
+global_load_dword v56, v78, s[12:13] offset:16
+global_load_dword v90, v210, s[20:21] offset:32
+global_load_dword v130, v9, s[30:31] offset:64
+global_load_dword v200, v111, s[4:5] offset:256
+global_load_dword v33, v255, s[40:41] offset:2044
+global_store_dword v21, v43, s[6:7] offset:4
+global_store_dword v65, v87, s[14:15] offset:16
+global_store_dword v109, v220, s[22:23] offset:32
+global_store_dword v190, v8, s[34:35] offset:64
+global_store_dword v240, v122, s[2:3] offset:256
+global_store_dword v77, v254, s[44:45] offset:2044
+global_load_dwordx2 v[10:11], v20, s[8:9] offset:8
+global_load_dwordx2 v[100:101], v200, s[16:17] offset:512
+global_load_dwordx4 v[20:23], v40, s[10:11] offset:16
+global_load_dwordx4 v[120:123], v240, s[26:27] offset:1024
+// The cache hints set, which is what pins the offset's width. They sit in the bits directly
+// above it, so a probe that leaves them clear lets a sixteen-bit window explain every sample as
+// well as the thirteen-bit field does - the same trap the image mask fell into, where `unorm`
+// was the neighbour (worklog 549). The hints are skipped as operands and still change the bits.
+global_load_dword v13, v35, s[8:9] offset:4 glc
+global_load_dword v57, v79, s[12:13] offset:2044 glc slc
+global_load_dword v91, v211, s[20:21] offset:1024 slc
+global_store_dword v22, v44, s[6:7] offset:8 glc
+global_store_dword v66, v88, s[14:15] offset:2040 glc slc
+global_store_dword v110, v221, s[22:23] offset:512 slc
+global_load_dwordx4 v[24:27], v41, s[10:11] offset:64 glc
+global_load_dwordx4 v[124:127], v241, s[26:27] offset:2044 slc
+
+// And `dlc`, which is the bit **immediately** above the offset. Without it a thirteen-bit
+// window explained every sample here as well as the twelve-bit field does, and the solver wrote
+// thirteen - which reads a compiled instruction that sets the hint as an offset of 4096. The
+// differential test against compiler output said so at once; probes that never set the bit
+// could not (worklog 565).
+global_load_dword v14, v36, s[8:9] offset:4 dlc
+global_load_dword v58, v80, s[12:13] offset:2044 dlc glc
+global_store_dword v23, v45, s[6:7] offset:16 dlc
+global_store_dword v67, v89, s[14:15] offset:2040 dlc slc
+global_load_dwordx2 v[12:13], v22, s[8:9] offset:32 dlc
+global_load_dwordx4 v[28:31], v42, s[10:11] offset:1024 dlc
+
 // High scalar bases. Every base above was under sixty-four, so a six-bit field explains
 // them all - and it also leaves the scale undetermined, since a scaled reading of half
 // the value fits equally well. A base of one hundred separates both questions at once.
@@ -196,3 +247,42 @@ buffer_load_dword v3, v44, s[8:11], 0 offen
 buffer_load_dword v46, v7, s[16:19], 0 idxen
 buffer_store_dword v9, v33, s[24:27], 0 offen
 buffer_store_dword v52, v18, s[32:35], 0 idxen
+// The multi-word untyped loads and stores - x2, x3 and x4. Their operand layout is the
+// single form's exactly, the data field holding the base of a register *range* rather than
+// one register, so the same spread rules apply: a data base above 128, a mix of idxen and
+// offen, a **mix of odd and even** resource group indices, and one inline-0 scalar offset per
+// opcode. Added for worklog 614; opcodes read from llvm-mc are load x2=13 x4=14 x3=15 and
+// store x2=29 x4=30 x3=31. The odd/even mix is not optional: a first draft gave three of these
+// six all-odd group indices and the solver refused them for the exact tie this file's flat-memory
+// note above describes - an all-odd index leaves bit 16 always set, and a nine-bit window over
+// the data field then explains every sample as well as the true layout does.
+buffer_load_dwordx2 v[2:3], v40, s[8:11], s3 offen
+buffer_load_dwordx2 v[46:47], v9, s[12:15], s13 idxen
+buffer_load_dwordx2 v[130:131], v55, s[24:27], s33 offen
+buffer_load_dwordx2 v[188:189], v[8:9], s[32:35], s43 idxen offen
+buffer_load_dwordx2 v[58:59], v14, s[40:43], 0 offen
+buffer_load_dwordx3 v[4:6], v41, s[16:19], s7 offen
+buffer_load_dwordx3 v[134:136], v193, s[20:23], s16 idxen
+buffer_load_dwordx3 v[66:68], v52, s[24:27], s53 offen
+buffer_load_dwordx3 v[208:210], v[15:16], s[36:39], s46 idxen offen
+buffer_load_dwordx3 v[90:92], v6, s[40:43], 0 offen
+buffer_load_dwordx4 v[8:11], v42, s[16:19], s13 offen
+buffer_load_dwordx4 v[52:55], v25, s[24:27], s56 idxen
+buffer_load_dwordx4 v[128:131], v240, s[32:35], s84 offen
+buffer_load_dwordx4 v[192:195], v[82:83], s[40:43], s76 idxen offen
+buffer_load_dwordx4 v[100:103], v7, s[48:51], 0 offen
+buffer_store_dwordx2 v[12:13], v43, s[16:19], s16 offen
+buffer_store_dwordx2 v[142:143], v5, s[28:31], s26 idxen
+buffer_store_dwordx2 v[70:71], v63, s[24:27], s36 offen
+buffer_store_dwordx2 v[196:197], v[85:86], s[44:47], s46 idxen offen
+buffer_store_dwordx2 v[104:105], v29, s[32:35], 0 offen
+buffer_store_dwordx3 v[14:16], v44, s[24:27], s26 offen
+buffer_store_dwordx3 v[150:152], v130, s[32:35], s46 idxen
+buffer_store_dwordx3 v[86:88], v55, s[40:43], s56 offen
+buffer_store_dwordx3 v[218:220], v[15:16], s[48:51], s66 idxen offen
+buffer_store_dwordx3 v[112:114], v23, s[56:59], 0 offen
+buffer_store_dwordx4 v[16:19], v45, s[16:19], s36 offen
+buffer_store_dwordx4 v[160:163], v250, s[36:39], s51 idxen
+buffer_store_dwordx4 v[80:83], v23, s[24:27], s61 offen
+buffer_store_dwordx4 v[212:215], v[85:86], s[52:55], s71 idxen offen
+buffer_store_dwordx4 v[120:123], v130, s[32:35], 0 offen

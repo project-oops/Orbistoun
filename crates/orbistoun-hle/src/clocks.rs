@@ -203,8 +203,11 @@ mod tests {
         );
         assert!(
             mono < 60 * 60 * 24,
-            "the monotonic clock counts from process start, so a test reads a small number, \
-             got {mono} - a large one means it answered the wall clock"
+            concat!(
+                "the monotonic clock counts from process start, so a test reads a small number, ",
+                "got {} - a large one means it answered the wall clock"
+            ),
+            mono
         );
 
         for refused in [
@@ -215,8 +218,11 @@ mod tests {
         ] {
             assert!(
                 super::reading(id(refused)).is_none(),
-                "{refused} must be refused rather than answered with the nearest thing - a \
-                 guest measuring CPU time and receiving wall time cannot tell"
+                concat!(
+                    "{} must be refused rather than answered with the nearest thing - a ",
+                    "guest measuring CPU time and receiving wall time cannot tell"
+                ),
+                refused
             );
         }
     }

@@ -245,3 +245,49 @@ fn every_measured_builder_closes_its_own_length_arithmetic() {
         );
     }
 }
+
+/// **All eight measured argument pairs**, from the sweep that made this builder implementable.
+///
+/// `sceAgcDcbSetIndexSize(dcb, type, flags)` for `type` 0-3 and `flags` 0-1
+/// (`166-agc/dcb-set-index-size`, sweep `20260914-222710`). One point fixes nothing - worklog 536
+/// refused this builder on exactly that ground - and eight fix the two low bits and bit 6.
+#[test]
+fn set_index_size_matches_every_measured_pair() {
+    let measured = [
+        ((0, 0), 0x400_u32),
+        ((0, 1), 0x440),
+        ((1, 0), 0x401),
+        ((1, 1), 0x441),
+        ((2, 0), 0x402),
+        ((2, 1), 0x442),
+        ((3, 0), 0x403),
+        ((3, 1), 0x443),
+    ];
+    for ((index_type, flags), value) in measured {
+        let built = build::set_index_size(index_type, flags);
+        assert_eq!(
+            built,
+            [0xc001_7a00, 0x2000_0243, value],
+            "type {index_type}, flags {flags}"
+        );
+    }
+}
+
+/// `sceAgcDcbDrawIndex(dcb, 3, 0x12345678, 0)` wrote `0xc0042700 3 0x12345678 0 3 0`, 24 bytes -
+/// including the two dwords worklog 536 could not place.
+#[test]
+fn draw_index_2_matches_the_capture_in_full() {
+    let built = build::draw_index_2(3, 0x1234_5678, 3, 0);
+    agrees(
+        "draw_index_2",
+        &built,
+        0xc004_2700,
+        24,
+        build::measured::DRAW_INDEX_2,
+    );
+    assert_eq!(
+        built,
+        [0xc004_2700, 3, 0x1234_5678, 0, 3, 0],
+        "every dword is now measured, not three of five"
+    );
+}

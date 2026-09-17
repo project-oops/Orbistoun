@@ -470,9 +470,12 @@ fn execute_snapshot() -> Vec<String> {
     };
     let count = EXEC_COUNT.load(Ordering::Relaxed);
     let mut lines = vec![format!(
-        "  execute breakpoint at {} hit {count} time(s); registers the first time (arguments in \
-         rdi, rsi, rdx, rcx, r8, r9):",
-        located(rip.wrapping_sub(1))
+        concat!(
+            "  execute breakpoint at {} hit {} time(s); registers the first time (arguments in ",
+            "rdi, rsi, rdx, rcx, r8, r9):"
+        ),
+        located(rip.wrapping_sub(1)),
+        count
     )];
     lines.extend(
         registers

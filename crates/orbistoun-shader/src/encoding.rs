@@ -121,6 +121,22 @@ pub struct Encoding {
     pub opcode_extension: Option<OperandField>,
     /// Instruction length in bytes, before any trailing literal.
     pub width_bytes: u32,
+    /// A field counting **extra dwords** this instruction carries beyond its fixed width.
+    ///
+    /// # Why a family needs one
+    ///
+    /// The image family may name its address registers individually rather than as a
+    /// consecutive range, and the extra register numbers go in dwords appended to the
+    /// instruction. A reference compiler emits that form readily - it does so rather than move
+    /// a register - so it is not a corner nobody reaches.
+    ///
+    /// Getting this wrong desynchronises the decoder for the whole rest of the shader, which is
+    /// exactly what [`literal_operands`](Self::literal_operands) exists to prevent for the other
+    /// variable-length case. This is the same problem with a count instead of a flag.
+    ///
+    /// [`None`] for every family whose length depends on nothing but a literal.
+    #[serde(default)]
+    pub extra_dwords: Option<OperandField>,
     /// Operand fields that can select a trailing 32-bit literal.
     ///
     /// Empty for encodings that cannot take one. Getting this wrong desynchronises
@@ -172,13 +188,19 @@ impl Encoding {
         }
     }
 
-    /// Total length of an instruction of this family, including any literal.
+    /// Total length of an instruction of this family, including any literal and any extra
+    /// address dwords.
     pub fn length_bytes(&self, words: &[u32]) -> u32 {
         let literal = self
             .literal_operands
             .iter()
             .any(|field| field.selects_literal(words));
-        self.width_bytes + if literal { 4 } else { 0 }
+        let extra = self.extra_dwords.as_ref().map_or(0, |field| {
+            words
+                .get(field.word)
+                .map_or(0, |word| field.extract(*word) * 4)
+        });
+        self.width_bytes + extra + if literal { 4 } else { 0 }
     }
 }
 
@@ -346,8 +368,11 @@ impl EncodingTable {
             format!("was generated for {other}")
         };
         Err(ShaderError::Table(format!(
-            "{what} {found}, but the encoding families describe {mine} - regenerate \
-             them, or the two disagree about what every opcode number means"
+            concat!(
+                "{} {}, but the encoding families describe {} - regenerate ",
+                "them, or the two disagree about what every opcode number means"
+            ),
+            what, found, mine
         )))
     }
 
@@ -370,10 +395,12 @@ impl EncodingTable {
         let mut table = Self::load(include_str!("../data/encodings.toml"))?;
         if table.target.trim().is_empty() {
             return Err(ShaderError::Table(
-                "the built-in encoding table declares no target architecture, so \
-                 nothing can check that the generated tables describe the same \
-                 generation it does"
-                    .into(),
+                concat!(
+                    "the built-in encoding table declares no target architecture, so ",
+                    "nothing can check that the generated tables describe the same ",
+                    "generation it does"
+                )
+                .into(),
             ));
         }
         table.load_opcode_operands(include_str!("../data/opcode-operands.toml"))?;
@@ -453,8 +480,11 @@ impl EncodingTable {
                 && existing != name
             {
                 return Err(ShaderError::Table(format!(
-                    "{family}:{opcode:#x} is named {existing} by the probe solver and \
-                     {name} by the fixture generator - the two have drifted"
+                    concat!(
+                        "{}:{:#x} is named {} by the probe solver and ",
+                        "{} by the fixture generator - the two have drifted"
+                    ),
+                    family, opcode, existing, name
                 )));
             }
             self.names.insert(key, name.to_owned());
@@ -624,6 +654,7 @@ mod tests {
             },
             opcode_extension: None,
             width_bytes: 4,
+            extra_dwords: None,
             literal_operands: vec![OperandField {
                 shift: 0,
                 width: 9,

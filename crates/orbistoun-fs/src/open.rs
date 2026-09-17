@@ -153,7 +153,7 @@ fn next_handle() -> FileHandle {
 ///
 /// `None` when the path is under no mount, tries to climb out of one, or does not exist.
 pub fn open(guest_path: &str) -> Option<FileHandle> {
-    let host = crate::mount::resolve(guest_path)?;
+    let host = crate::mount::resolve_existing(guest_path)?;
     let file = std::fs::File::open(host).ok()?;
     crate::opened::note(guest_path);
     let handle = next_handle();

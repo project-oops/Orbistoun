@@ -140,9 +140,12 @@ fn check(
             .find(|write| write.register == expectation.register)
         else {
             return Err(format!(
-                "{name} ({}): the call wrote register {:#x}, and decoding its bytes found \
-                 no write to that register at all. Registers seen: {:?}. Suspect the \
-                 register bases in data/packets.toml before suspecting the capture",
+                concat!(
+                    "{} ({}): the call wrote register {:#x}, and decoding its bytes found ",
+                    "no write to that register at all. Registers seen: {:?}. Suspect the ",
+                    "register bases in data/packets.toml before suspecting the capture"
+                ),
+                name,
                 capture.call,
                 expectation.register,
                 writes.iter().map(|w| w.register).collect::<Vec<_>>()
@@ -150,9 +153,11 @@ fn check(
         };
         if found.value != expectation.value {
             return Err(format!(
-                "{name} ({}): register {:#x} was written with {:#x} according to the \
-                 call, and {:#x} according to the packets",
-                capture.call, expectation.register, expectation.value, found.value
+                concat!(
+                    "{} ({}): register {:#x} was written with {:#x} according to the ",
+                    "call, and {:#x} according to the packets"
+                ),
+                name, capture.call, expectation.register, expectation.value, found.value
             ));
         }
         checked += 1;
@@ -165,9 +170,12 @@ fn check(
             .find(|candidate| candidate.stage == expectation.stage)
         else {
             return Err(format!(
-                "{name} ({}): the call set up a {} shader, and decoding its bytes found \
-                 none. Stages seen: {:?}. Suspect the shader-address rows in \
-                 data/packets.toml",
+                concat!(
+                    "{} ({}): the call set up a {} shader, and decoding its bytes found ",
+                    "none. Stages seen: {:?}. Suspect the shader-address rows in ",
+                    "data/packets.toml"
+                ),
+                name,
                 capture.call,
                 expectation.stage,
                 candidates.iter().map(|c| &c.stage).collect::<Vec<_>>()
@@ -175,10 +183,12 @@ fn check(
         };
         if found.address != expectation.address {
             return Err(format!(
-                "{name} ({}): the {} shader is at {:#x} according to the call, and {:#x} \
-                 according to the packets. A difference in only the top or bottom half \
-                 means the address halves are paired the wrong way round",
-                capture.call, expectation.stage, expectation.address, found.address
+                concat!(
+                    "{} ({}): the {} shader is at {:#x} according to the call, and {:#x} ",
+                    "according to the packets. A difference in only the top or bottom half ",
+                    "means the address halves are paired the wrong way round"
+                ),
+                name, capture.call, expectation.stage, expectation.address, found.address
             ));
         }
         checked += 1;
@@ -220,8 +230,10 @@ fn every_capture_agrees_with_the_register_vocabulary() {
     );
     assert!(
         checked > 0,
-        "{} capture(s) on disk and not one expectation between them - a capture that \
-         claims nothing checks nothing",
+        concat!(
+            "{} capture(s) on disk and not one expectation between them - a capture that ",
+            "claims nothing checks nothing"
+        ),
         captures.len()
     );
 }

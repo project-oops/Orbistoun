@@ -162,6 +162,37 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+/// A resource a submission references, handed to the backend to make resident.
+///
+/// Keyed by a content-addressed [`ResourceId`], so the same resource across frames is recognised
+/// and created once - the "translate once" cache extended to the host as "upload once". The guest
+/// gives its resources by address; the frontend translates and content-hashes them into ids and
+/// extracts their bytes, so the backend is handed plain data and never touches guest memory (which
+/// is what keeps this crate free of any graphics API - D029).
+///
+/// It grows a variant as the decode side learns to extract another kind - a render target's
+/// dimensions now, textures next - the same way [`RenderCommand`] grows as intents are recognised. A
+/// backend matches exhaustively, so a new kind cannot be silently ignored (D701).
+#[derive(Debug, Clone, Copy)]
+pub enum Resource<'a> {
+    /// A translated shader, as SPIR-V words.
+    Shader(&'a [u32]),
+    /// A buffer the guest allocated, as its bytes - a vertex, index, constant or storage buffer.
+    Buffer(&'a [u8]),
+    /// A colour render target, by its pixel dimensions.
+    ///
+    /// It carries no bytes: a backend that draws into an attachment allocates its own and reads it
+    /// back, so what it needs from the frontend is the size to allocate, not the guest's pixels. The
+    /// dimensions are decoded from the register the guest sets (`CB_COLOR0_ATTRIB2`), which is why
+    /// this crate can hand them over without naming a graphics API.
+    RenderTarget {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+    },
+}
+
 /// Something that can carry out [`RenderCommand`]s.
 ///
 /// Implementations live in their own crates and are the only place a graphics API is
@@ -169,6 +200,17 @@ impl std::error::Error for BackendError {}
 pub trait RenderBackend: fmt::Debug + Send {
     /// Human-readable backend name, for logs and the run report.
     fn name(&self) -> &'static str;
+
+    /// Makes a resource resident, keyed by its content [`ResourceId`].
+    ///
+    /// **Idempotent.** A backend that already holds `id` reuses its host object and does not read
+    /// `resource` again. Called for every resource a frame references, before the commands that
+    /// name it, so a `BindShader` and a draw find a host object already built (D701).
+    fn ensure_resident(
+        &mut self,
+        id: ResourceId,
+        resource: Resource<'_>,
+    ) -> Result<(), BackendError>;
 
     /// Carry out one command.
     ///
@@ -179,6 +221,22 @@ pub trait RenderBackend: fmt::Debug + Send {
 
     /// Present whatever has been drawn.
     fn present(&mut self) -> Result<(), BackendError>;
+
+    /// Sets the frame's guest-memory window: the region of guest memory the frame's shaders read
+    /// and write, as words.
+    ///
+    /// Frame-level state, not a command and not a per-slot binding: every translated module reads
+    /// guest memory through one fixed window the whole submission is compiled against (worklog 635),
+    /// so the region is set once per frame rather than named by each draw. The default ignores it -
+    /// a recorder and a backend that binds no guest memory have nothing to do with it - and a
+    /// backend that renders a guest's geometry binds it where its shaders expect it (D703).
+    fn set_guest_memory(&mut self, _memory: &[u32]) {}
+
+    /// Releases a resource the guest freed.
+    ///
+    /// The default keeps it: a backend that never evicts is correct until memory pressure, and
+    /// eviction is the backend's own concern (D701).
+    fn release(&mut self, _id: ResourceId) {}
 }
 
 /// A backend that records commands and draws nothing.
@@ -189,6 +247,8 @@ pub trait RenderBackend: fmt::Debug + Send {
 pub struct RecordingBackend {
     recorded: Vec<RenderCommand>,
     presents: usize,
+    resident: Vec<ResourceId>,
+    guest_memory: Vec<u32>,
 }
 
 impl RecordingBackend {
@@ -197,12 +257,25 @@ impl RecordingBackend {
         Self {
             recorded: Vec::new(),
             presents: 0,
+            resident: Vec::new(),
+            guest_memory: Vec::new(),
         }
     }
 
     /// Everything executed so far, in order.
     pub fn recorded(&self) -> &[RenderCommand] {
         &self.recorded
+    }
+
+    /// Every resource made resident so far, in order - so a test can assert a frame's resources
+    /// reached the backend before the commands that name them.
+    pub fn resident(&self) -> &[ResourceId] {
+        &self.resident
+    }
+
+    /// The guest-memory window the frame set, so a test can assert the driver handed it over.
+    pub fn guest_memory(&self) -> &[u32] {
+        &self.guest_memory
     }
 
     /// How many times the frame was presented.
@@ -213,12 +286,23 @@ impl RecordingBackend {
     /// Discards the recording, keeping the counters meaningful for a fresh frame.
     pub fn clear(&mut self) {
         self.recorded.clear();
+        self.resident.clear();
+        self.guest_memory.clear();
     }
 }
 
 impl RenderBackend for RecordingBackend {
     fn name(&self) -> &'static str {
         "recording"
+    }
+
+    fn ensure_resident(
+        &mut self,
+        id: ResourceId,
+        _resource: Resource<'_>,
+    ) -> Result<(), BackendError> {
+        self.resident.push(id);
+        Ok(())
     }
 
     fn execute(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
@@ -230,11 +314,17 @@ impl RenderBackend for RecordingBackend {
         self.presents += 1;
         Ok(())
     }
+
+    fn set_guest_memory(&mut self, memory: &[u32]) {
+        self.guest_memory = memory.to_vec();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RecordingBackend, RenderBackend, RenderCommand, ResourceId, ShaderStage};
+    use super::{
+        RecordingBackend, RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage,
+    };
 
     #[test]
     fn recording_backend_preserves_order() {
@@ -280,6 +370,33 @@ mod tests {
         b.clear();
         assert!(b.recorded().is_empty());
         assert_eq!(b.presents(), 1);
+    }
+
+    #[test]
+    fn resources_are_made_resident_in_order_and_cleared_with_the_frame() {
+        // The residency call is separate from the command stream: resources come first, in the
+        // order a frame references them, so a backend has its host objects before the commands
+        // that name them. `clear` resets them like the commands, and `release` is a no-op by
+        // default, so a backend that never evicts is still correct.
+        let words = [0x0723_0203_u32];
+        let mut b = RecordingBackend::new();
+        b.ensure_resident(ResourceId(0x11), Resource::Shader(&words))
+            .expect("recording never fails");
+        b.ensure_resident(ResourceId(0x22), Resource::Shader(&words))
+            .expect("recording never fails");
+        b.release(ResourceId(0x11));
+
+        assert_eq!(b.resident(), &[ResourceId(0x11), ResourceId(0x22)]);
+        assert!(
+            b.recorded().is_empty(),
+            "making a resource resident is not a command"
+        );
+
+        b.clear();
+        assert!(
+            b.resident().is_empty(),
+            "a fresh frame starts with nothing resident"
+        );
     }
 
     #[test]

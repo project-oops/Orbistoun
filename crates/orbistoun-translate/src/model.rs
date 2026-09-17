@@ -19,7 +19,7 @@
 //! lives, and whether a write is masked. Everything else was duplication.
 
 use orbistoun_shader::{EncodingTable, Instruction, Operand};
-use orbistoun_spirv::{Builder, Id, op};
+use orbistoun_spirv::{Builder, Id, image_operands, op};
 
 use crate::TranslateError;
 use crate::modifiers::Modifiers;
@@ -52,14 +52,28 @@ pub const SUPPORTED: &[&str] = &[
     "v_interp_p1_f32_e32",
     "v_interp_p2_f32_e32",
     "buffer_load_dword",
+    "buffer_load_dwordx2",
+    "buffer_load_dwordx3",
+    "buffer_load_dwordx4",
     "buffer_store_dword",
+    "buffer_store_dwordx2",
+    "buffer_store_dwordx3",
+    "buffer_store_dwordx4",
     "tbuffer_load_format_x",
     "tbuffer_load_format_xy",
+    "tbuffer_load_format_xyz",
     "tbuffer_load_format_xyzw",
     "tbuffer_store_format_x",
+    "tbuffer_store_format_xy",
+    "tbuffer_store_format_xyz",
     "tbuffer_store_format_xyzw",
     "ds_read_b32",
     "ds_write_b32",
+    "image_load",
+    "image_sample",
+    "image_sample_l",
+    "image_sample_lz",
+    "image_store",
     "global_load_dword",
     "global_load_dwordx2",
     "global_load_dwordx4",
@@ -185,7 +199,25 @@ pub fn supports_named(encodings: &EncodingTable, family: &str, opcode: u32) -> b
 ///
 /// It is matched by name rather than fixed in the operand table because the same code means
 /// different things in different fields, which is a fact about the encoding.
-pub const FLAT_NO_BASE: &str = "null";
+pub const FLAT_NO_BASE: &str = NO_DESTINATION;
+
+/// The operand that names no register at all.
+///
+/// One spelling because it is one thing: a field saying it holds nothing.
+/// [`FLAT_NO_BASE`] is this name in an address field, where it means the access has no base
+/// register; in a **destination** field it means the result is not wanted and must not be
+/// written anywhere.
+///
+/// A shader uses it where a value is computed for its other effects: the division pre-scale
+/// produces a scaled operand and a flag, and a shader that only needs the operand writes the
+/// flag here. Translating that as a write to some register would invent a destination the
+/// guest deliberately declined to name.
+pub const NO_DESTINATION: &str = "null";
+
+/// Whether a destination operand says the result is not wanted.
+fn discards(operand: &Operand) -> bool {
+    matches!(operand, Operand::Named(name) if name == NO_DESTINATION)
+}
 
 /// Scalar registers the guest has.
 ///
@@ -194,6 +226,88 @@ pub const FLAT_NO_BASE: &str = "null";
 /// reachable: `s_load_dwordx8` at s100 would write four registers and then four
 /// specials, and nothing downstream would notice.
 pub const SCALAR_REGISTERS: u32 = 102;
+
+/// Scalar registers an image descriptor occupies.
+///
+/// Eight, which is what the instruction's resource field names: a base address, an extent, a
+/// format and a tiling mode. This translation reads none of them - see
+/// [`Model::sampled_image`] - and the width still matters, because a write anywhere inside the
+/// group means the descriptor is no longer the one the last sample used.
+pub const IMAGE_DESCRIPTOR_REGISTERS: u32 = 8;
+
+/// Scalar registers a sampler descriptor occupies.
+pub const SAMPLER_DESCRIPTOR_REGISTERS: u32 = 4;
+
+/// Components a sampling instruction can return, one per bit of its mask.
+const IMAGE_COMPONENTS: u32 = 4;
+
+/// Where an image instruction says how many dimensions its coordinate has.
+///
+/// **Measured, and it had been assumed.** Every image translation here reads two coordinate
+/// registers, which is right for a two-dimensional image and wrong for every other kind - and
+/// nothing checked, because the field is printed as a symbolic name (`dim:SQ_RSRC_IMG_2D`) and
+/// the operand solver skips symbolic modifiers by design. So the dimensionality never reached
+/// the operand table and the translation could not have looked at it (worklog 576).
+///
+/// It is in the **instruction**, not in the descriptor, which is the part that was written down
+/// wrong. Assembling one instruction at each of the eight dimensionalities and differencing the
+/// encodings puts it at these bits and nowhere else: every other byte of the eight is identical.
+const IMAGE_DIMENSION: (u32, u32) = (3, 0b111);
+
+/// The dimensionality code for a two-dimensional image.
+///
+/// Zero is one-dimensional and the codes run upward in the order a disassembler prints them:
+/// 1D, 2D, 3D, cube, 1D array, 2D array, 2D multi-sampled, 2D multi-sampled array. Measured the
+/// same way, from the same eight encodings.
+const IMAGE_DIMENSION_2D: u32 = 1;
+
+/// What a translated texture sample needs from the model.
+///
+/// Four identifiers that only exist together: the variable, what loading it produces, the type
+/// of the coordinate handed to it, and the type it answers with. They are declared in one place
+/// on first use, so they travel in one value rather than as four accessors that could each be
+/// called without the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Texture {
+    /// The variable holding the image and its sampler together.
+    pub variable: Id,
+    /// The type a load of [`variable`](Self::variable) produces.
+    pub sampled: Id,
+    /// The image type inside that, which a fetch takes and a sample does not.
+    ///
+    /// A guest's `image_load` names an image descriptor and no sampler, because it reads a
+    /// texel by its integer coordinate and there is nothing to filter. On the host that is a
+    /// fetch, and a fetch takes an image - so this is what the bound sampled image is unwrapped
+    /// to, and it is why reading a texel needs no binding of its own (worklog 573).
+    pub image: Id,
+    /// The two-component float vector a two-dimensional sampling coordinate is.
+    pub coordinate: Id,
+    /// The two-component unsigned vector a two-dimensional **texel** coordinate is.
+    ///
+    /// Separate from [`coordinate`](Self::coordinate) because the two are different types and
+    /// the guest means different things by them: a sample takes a normalised position across
+    /// the image, and a fetch takes the texel's own index.
+    pub texel: Id,
+    /// The four-component float vector a sample or a fetch answers with.
+    pub result: Id,
+}
+
+/// What a translated texture store needs from the model.
+///
+/// Separate from [`Texture`] because a storage image is a separate binding and a separate
+/// declaration - a module that only samples must not declare one, because declaring it means
+/// declaring a capability the device may not have (D692).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stored {
+    /// The variable holding the storage image.
+    pub variable: Id,
+    /// The image type a load of [`variable`](Self::variable) produces.
+    pub image: Id,
+    /// The two-component unsigned vector a texel coordinate is.
+    pub texel: Id,
+    /// The four-component float vector a texel's value is.
+    pub value: Id,
+}
 
 /// How the execution mask's low half arrives from the decoder.
 ///
@@ -328,8 +442,10 @@ fn sixty_four_bit_source<M: Model + ?Sized>(
         }
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a 64-bit source is neither a register pair, an inline constant, \
-                     nor the execution mask",
+            detail: concat!(
+                "a 64-bit source is neither a register pair, an inline constant, ",
+                "nor the execution mask"
+            ),
         }),
     }
 }
@@ -407,25 +523,30 @@ pub fn supports(mnemonic: &str) -> bool {
 
 /// Instructions understood well enough to say what they are waiting on.
 ///
-/// It emptied once, at D553, when the export - its only entry then - became translatable at
-/// the fragment stage, and it was kept rather than deleted precisely so the next instruction
-/// waiting on a decision had somewhere to be recorded. Two are now: the geometry-engine
-/// message the console-run vertex program opens with, and a texture sample. Both wait on a
-/// subsystem that does not exist rather than on anything about their encodings.
+/// **Empty, for the second time.** It emptied once at D553, when the export - its only entry
+/// then - became translatable at the fragment stage, and it was kept rather than deleted
+/// precisely so the next instruction waiting on a decision had somewhere to be recorded. Two
+/// went in after that and both have now come out, which is what the list is for.
 ///
-/// A third left it. The parameter move was listed here as waiting on a source for which
-/// operand value names which parameter - and that had been *measured* all along, by the same
-/// solver that measured the export targets. What actually blocked it was the interpolation
-/// mode of the host input, which is a decoration decided when the variable is declared, and
-/// naming the wrong obstacle kept it here for two phases (worklog 551).
+/// The texture sample was the last, and its entry said the obstacle was "a descriptor this
+/// translator has no model for and a host image view nothing here declares". Half of that was
+/// solved by building the host half first (worklog 566) and the other half was settled by
+/// deciding it did not need solving: D690 maps every sample in a module onto the one bound
+/// texture and refuses a module that names a second, so the descriptor still has no model and
+/// the instruction translates anyway.
+///
+/// The parameter move left for a different reason, worth keeping beside that one. It was listed
+/// here as waiting on a source for which operand value names which parameter - and that had
+/// been *measured* all along, by the same solver that measured the export targets. What
+/// actually blocked it was the interpolation mode of the host input, which is a decoration
+/// decided when the variable is declared, and naming the wrong obstacle kept it here for two
+/// phases (worklog 551).
 ///
 /// The distinction it draws, between "nobody has looked at this" and "this is waiting on
 /// something that is not encoding work", is what stops a worklist sending effort at
-/// whichever refusal is most frequent.
-pub const BLOCKED: &[(&str, &str)] = &[(
-    "image_sample_lz",
-    "it samples a texture, and everything hard about that is on the other side of the instruction: its resource operand names eight consecutive scalar registers holding an image descriptor, and its sampler operand four more. The decoder now reads both, because the fields name where each group starts (worklog 549). What they point *at* is a descriptor this translator has no model for and a host image view nothing here declares - the SPIR-V emitter has no image type, no sampled-image type and no sampling instruction. That is a subsystem, not an encoding gap, and it is the last thing between the GL cube's textured pixel shader and a translation",
-)];
+/// whichever refusal is most frequent. Empty is the state to want, and keeping the list is
+/// cheaper than rediscovering why it existed.
+pub const BLOCKED: &[(&str, &str)] = &[];
 
 /// Why an instruction is blocked, if it is one this translator recognises.
 ///
@@ -503,6 +624,56 @@ pub trait Model {
     /// which ones exist is decided before any instruction is seen (D555).
     fn attribute_input(&self, _attribute: u32) -> Option<(Id, Id)> {
         None
+    }
+
+    /// The texture this module samples, declaring it on first use.
+    ///
+    /// `descriptor` and `sampler` are the **first scalar register** of each of the two groups a
+    /// guest's sampling instruction names: eight registers holding an image descriptor and four
+    /// holding a sampler. What those describe is a surface at a guest address in a tiled layout,
+    /// and nothing here has a host image for it - so D690 maps every sample in a module onto the
+    /// one texture the pipeline bound, and refuses a module where that cannot be the whole
+    /// story.
+    ///
+    /// The sampler is [`None`] for a **fetch**, which names an image descriptor and nothing
+    /// else: `image_load` reads a texel by its integer coordinate, and there is nothing for a
+    /// sampler to do. A module that fetches and samples the same image descriptor is one
+    /// texture and is allowed; only the image half of the recording is compared when a caller
+    /// names no sampler.
+    ///
+    /// The refusal is the point rather than a limitation. A translation that sampled whatever
+    /// happened to be bound would render a frame that looks right and is not, which is the
+    /// wording D104 already used to refuse inventing a colour attachment.
+    ///
+    /// The error is a reason rather than a [`TranslateError`], because only the caller knows the
+    /// offset to attach to it.
+    fn sampled_image(
+        &mut self,
+        _descriptor: u32,
+        _sampler: Option<u32>,
+    ) -> Result<Texture, &'static str> {
+        Err(concat!(
+            "this model has no texture to sample - a sampled image is bound by a graphics ",
+            "pipeline, and a compute dispatch has nowhere to put one"
+        ))
+    }
+
+    /// The storage image this module writes, declaring it on first use.
+    ///
+    /// A **different binding** from the one [`sampled_image`](Self::sampled_image) answers with,
+    /// because they are different host objects: one is read through a sampler and cannot be
+    /// written, the other is written and has no sampler. A guest names an image descriptor
+    /// identically for both, and that the two are not the same image on the host is a gap D692
+    /// records rather than closes.
+    ///
+    /// The module declares **no format** for it. The guest's format is in a descriptor this
+    /// project does not decode, so naming one would be inventing it - and a format invented
+    /// wrong reinterprets every texel silently.
+    fn storage_image(&mut self, _descriptor: u32) -> Result<Stored, &'static str> {
+        Err(concat!(
+            "this model has no storage image to write - one is bound by a graphics pipeline, ",
+            "and a compute dispatch has nowhere to put one"
+        ))
     }
 
     /// The value of a source operand, for one lane.
@@ -653,15 +824,21 @@ pub trait Model {
     /// masking has to happen regardless and the check is what callers act on.
     fn word_index(&mut self, address: Id) -> Id {
         let two = self.constant(2);
+        // Relative to where the window starts. Subtracting first is what makes the index mean
+        // the same thing as the check beside it: an address below the base wraps to an enormous
+        // number, which the check then refuses.
+        let base = self.constant(self.memory_base());
         // The window is a power of two words, so masking is the whole of keeping the
         // index legal.
         let limit = self.constant(self.memory_words() - 1);
         let u32_type = self.u32_type();
         let b = self.builder();
+        let offset = b.id();
+        b.function(op::ISUB, &[u32_type.0, offset.0, address.0, base.0]);
         let shifted = b.id();
         b.function(
             op::SHIFT_RIGHT_LOGICAL,
-            &[u32_type.0, shifted.0, address.0, two.0],
+            &[u32_type.0, shifted.0, offset.0, two.0],
         );
         let index = b.id();
         b.function(op::BITWISE_AND, &[u32_type.0, index.0, shifted.0, limit.0]);
@@ -684,18 +861,39 @@ pub trait Model {
     /// visibly wrong rather than quietly aliased.
     fn address_within_window(&mut self, address: Id) -> Id {
         let two = self.constant(2);
+        let base = self.constant(self.memory_base());
         let words = self.constant(self.memory_words());
         let u32_type = self.u32_type();
         let bool_type = self.bool_type();
         let b = self.builder();
+        // Unsigned arithmetic does the work of two comparisons: an address below the base
+        // wraps to something enormous, which fails the one test below as surely as an address
+        // past the end does.
+        let offset = b.id();
+        b.function(op::ISUB, &[u32_type.0, offset.0, address.0, base.0]);
         let shifted = b.id();
         b.function(
             op::SHIFT_RIGHT_LOGICAL,
-            &[u32_type.0, shifted.0, address.0, two.0],
+            &[u32_type.0, shifted.0, offset.0, two.0],
         );
         let inside = b.id();
         b.function(op::ULESS_THAN, &[bool_type.0, inside.0, shifted.0, words.0]);
         inside
+    }
+
+    /// The guest address the memory window starts at.
+    ///
+    /// Zero for a module whose addresses are the test's own, which is every module this project
+    /// emitted until real shaders arrived. A guest's are not: the GL cube's vertex buffer sat at
+    /// `0x200900000`, and a window anchored at zero refuses every access to it - reads answer
+    /// zero, writes go nowhere, and the shader draws three identical vertices (worklog 561).
+    ///
+    /// Thirty-two bits, because that is what an address is by the time it reaches here: a flat
+    /// access names its address in a register pair and this reads the low half of it. A guest
+    /// whose buffers straddle four gigabytes needs the high half too, and that is a separate
+    /// piece of work from this one.
+    fn memory_base(&self) -> u32 {
+        0
     }
 
     /// How many words of guest memory this module addresses.
@@ -714,7 +912,8 @@ pub trait Model {
         result
     }
 
-    /// A float comparison, producing a boolean.
+    /// A comparison of two values, producing a boolean. The opcode decides whether they are
+    /// read as floats or as integers, so this serves both.
     fn compare(&mut self, opcode: u16, lhs: Id, rhs: Id) -> Id {
         let bool_type = self.bool_type();
         let b = self.builder();
@@ -888,7 +1087,18 @@ pub trait Model {
         base: &Operand,
         lane: u32,
     ) -> Result<Id, TranslateError> {
-        let offset = self.read_source(instruction, vaddr, lane)?;
+        let mut address = self.read_source(instruction, vaddr, lane)?;
+        // The byte offset the instruction carries, when it carries one. The reference prints it
+        // only when it is not zero, so the operand is absent from an access at offset zero -
+        // which is why the layout had no field for it at all until probes varied it, and why
+        // every offset access read the wrong word in silence (worklog 565).
+        if let Some(Operand::Immediate(byte_offset)) = instruction.operands.get(3)
+            && let Ok(byte_offset) = u32::try_from(*byte_offset)
+        {
+            let constant = self.constant(byte_offset);
+            address = self.add(address, constant);
+        }
+        let offset = address;
         match base {
             Operand::Named(name) if name == FLAT_NO_BASE => Ok(offset),
             Operand::Scalar(register) => {
@@ -1005,6 +1215,152 @@ pub trait Model {
         bits
     }
 
+    /// Widens a packed float **narrower than a half** - the 11- and 10-bit channels of formats
+    /// like `10_11_11` - to a single-precision float, and returns that float's bits.
+    ///
+    /// # Why this is arithmetic where the half is a conversion
+    ///
+    /// [`Self::half_to_float_bits`] hands a half to `FConvert` and lets the hardware's own IEEE
+    /// path do it. There is no such instruction for these: they are not IEEE types. Each channel
+    /// is an **unsigned** float - no sign bit at all - with a five-bit exponent biased by 15 and
+    /// `width - 5` bits of mantissa. So the three cases are built by hand.
+    ///
+    /// Measured, not derived from the format's name (obSCEne `REQ-...b3d4`, sweep
+    /// `20260916-223136`, `166-agc/typed-buffer-formats`, `rc-submit 0x0`, `fence-hit 0x1`):
+    /// six known words per format, loaded on the device through `tbuffer_load_format_xyz`, with
+    /// all three output floats recorded as raw bit patterns. Thirty-six channel values, and this
+    /// reproduces every one of them.
+    ///
+    /// The two edges are what the measurement bought, and neither could have been guessed safely:
+    ///
+    /// - **Exponent 31 is Inf/NaN**, and the mantissa lands at the *top* of the single's
+    ///   mantissa field rather than the bottom - the all-ones word gives `0x7ffe0000` for an
+    ///   11-bit channel and `0x7ffc0000` for a 10-bit one, which is the payload shifted up, not a
+    ///   canonical NaN and not a zero-extension.
+    /// - **Exponent 0 is subnormal**, and multiplying the mantissa as an integer by
+    ///   `2^-(14 + mantissa)` produces the measured bits exactly. Doing it by normalising the
+    ///   mantissa with a leading-zero count would be the usual trick and needs an instruction
+    ///   this does not have; the multiply needs none.
+    ///
+    /// The caller must have masked the field to its own bits already.
+    fn narrow_float_to_float_bits(&mut self, field: Id, width: u32) -> Id {
+        let mantissa_bits = width - 5;
+
+        let exponent_shift = self.constant(mantissa_bits);
+        let exponent = self.binary(op::SHIFT_RIGHT_LOGICAL, field, exponent_shift);
+        let mantissa_mask = self.constant((1u32 << mantissa_bits) - 1);
+        let mantissa = self.binary(op::BITWISE_AND, field, mantissa_mask);
+
+        // The mantissa sits at the top of the single's 23-bit field in every case, so it is
+        // placed once and shared by all three.
+        let place = self.constant(23 - mantissa_bits);
+        let placed = self.binary(op::SHIFT_LEFT_LOGICAL, mantissa, place);
+
+        // Normal: rebias 15 to 127 and drop the exponent into place.
+        let rebias = self.constant(127 - 15);
+        let biased = self.binary(op::IADD, exponent, rebias);
+        let to_exponent = self.constant(23);
+        let exponent_field = self.binary(op::SHIFT_LEFT_LOGICAL, biased, to_exponent);
+        let normal = self.binary(op::BITWISE_OR, exponent_field, placed);
+
+        // Infinity or NaN: the single's all-ones exponent over the same placed mantissa.
+        let infinity = self.constant(0x7f80_0000);
+        let inf_or_nan = self.binary(op::BITWISE_OR, infinity, placed);
+
+        // Subnormal: the mantissa read as an integer, scaled by 2^-(14 + mantissa_bits). The
+        // scale is exact in single precision, so this is a rounding-free multiply.
+        let scale_bits = self.constant(0x3f80_0000 - ((14 + mantissa_bits) << 23));
+        let subnormal = {
+            let (u32_type, f32_type) = (self.u32_type(), self.f32_type());
+            let b = self.builder();
+            let as_float = b.id();
+            b.function(op::CONVERT_U_TO_F, &[f32_type.0, as_float.0, mantissa.0]);
+            let scale = b.id();
+            b.function(op::BITCAST, &[f32_type.0, scale.0, scale_bits.0]);
+            let scaled = b.id();
+            b.function(op::FMUL, &[f32_type.0, scaled.0, as_float.0, scale.0]);
+            let bits = b.id();
+            b.function(op::BITCAST, &[u32_type.0, bits.0, scaled.0]);
+            bits
+        };
+
+        // Chosen in this order so that exponent 0 wins over the normal arithmetic, which would
+        // otherwise produce 2^-15 times the mantissa rather than 2^-14.
+        let all_ones = self.constant(31);
+        let is_inf_or_nan = self.compare(op::IEQUAL, exponent, all_ones);
+        let finite = self.select(is_inf_or_nan, inf_or_nan, normal);
+        let zero = self.constant(0);
+        let is_subnormal = self.compare(op::IEQUAL, exponent, zero);
+        self.select(is_subnormal, subnormal, finite)
+    }
+
+    /// Packs a single-precision float into an unsigned N-bit packed float - the inverse of
+    /// [`Self::narrow_float_to_float_bits`], for storing a channel of a format like `10_11_11`.
+    ///
+    /// Measured, not derived (obSCEne `REQ-...2f7a` and `REQ-...9f1c`, sweep `20260917-043235`,
+    /// `166-agc/typed-buffer-formats`): the rule is **clamp to `[0, max finite]`, then truncate**.
+    /// `1.009375` - 0.6 of a mantissa step above 1.0 - stores as mantissa 0 where round-to-nearest
+    /// would give 1, so the rounding is toward zero; and `100000` stores as the largest finite value
+    /// (exponent 30, mantissa all ones), not infinity, so an over-range value saturates. Everything
+    /// between is truncated. Two edges are the same choice a clamp makes and are not separately
+    /// measured: a negative or an underflowing value packs to zero, and infinity or NaN to the largest
+    /// finite rather than to the packed infinity.
+    ///
+    /// `value_bits` is the register's bits - a register holds bits, and which of them are a float is
+    /// the instruction's to say.
+    fn float_to_narrow_float_bits(&mut self, value_bits: Id, width: u32) -> Id {
+        let mantissa_bits = width - 5;
+
+        // Decompose the single into its sign, eight-bit exponent and mantissa.
+        let sign_shift = self.constant(31);
+        let sign = self.binary(op::SHIFT_RIGHT_LOGICAL, value_bits, sign_shift);
+        let exponent = {
+            let exponent_shift = self.constant(23);
+            let shifted = self.binary(op::SHIFT_RIGHT_LOGICAL, value_bits, exponent_shift);
+            let mask = self.constant(0xFF);
+            self.binary(op::BITWISE_AND, shifted, mask)
+        };
+        let mantissa = {
+            let mask = self.constant(0x7F_FFFF);
+            self.binary(op::BITWISE_AND, value_bits, mask)
+        };
+
+        // The truncated normal: drop the low mantissa bits, rebias the exponent 127 -> 15, assemble.
+        let drop = self.constant(23 - mantissa_bits);
+        let mantissa_field = self.binary(op::SHIFT_RIGHT_LOGICAL, mantissa, drop);
+        let rebias = self.constant(127 - 15);
+        let exponent15 = self.binary(op::ISUB, exponent, rebias);
+        let place = self.constant(mantissa_bits);
+        let exponent_field = self.binary(op::SHIFT_LEFT_LOGICAL, exponent15, place);
+        let normal = self.binary(op::BITWISE_OR, exponent_field, mantissa_field);
+
+        // The clamp: below the smallest normal (`exp <= 112`) or negative packs to zero; above the
+        // largest finite (`exp >= 143`, where Inf and NaN sit) to the largest finite; else the normal.
+        let zero = self.constant(0);
+        let max_finite = self.constant((30u32 << mantissa_bits) | ((1u32 << mantissa_bits) - 1));
+        let over_edge = self.constant(142);
+        let is_over = self.compare(op::UGREATER_THAN, exponent, over_edge);
+        let clamped_high = self.select(is_over, max_finite, normal);
+        let under_edge = self.constant(113);
+        let is_under = self.compare(op::ULESS_THAN, exponent, under_edge);
+        let non_negative = self.select(is_under, zero, clamped_high);
+        let one = self.constant(1);
+        let is_negative = self.compare(op::IEQUAL, sign, one);
+        self.select(is_negative, zero, non_negative)
+    }
+
+    /// `condition ? when_true : when_false`, on `u32` values.
+    fn select(&mut self, condition: Id, when_true: Id, when_false: Id) -> Id {
+        let u32_type = self.u32_type();
+        let b = self.builder();
+        let result = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, result.0, condition.0, when_true.0, when_false.0],
+        );
+        result
+    }
+
     /// Widens a packed half - a sixteen-bit IEEE float in the low bits of the register - to a
     /// single-precision float, and returns that float's bits.
     ///
@@ -1043,6 +1399,24 @@ fn three_operands(
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "expected exactly three operands",
+        }),
+    }
+}
+
+/// The first three operands, of an instruction that may carry a fourth.
+///
+/// A flat access decodes three operands at offset zero and four when the reference printed an
+/// offset, because the reference prints one only when it is not zero. Demanding *exactly* three
+/// refuses the second kind, which is every access with an offset (worklog 565) - so the flat
+/// paths ask for the first three and read the offset themselves.
+fn first_three_operands(
+    instruction: &Instruction,
+) -> Result<(&Operand, &Operand, &Operand), TranslateError> {
+    match instruction.operands.as_slice() {
+        [first, second, third, ..] => Ok((first, second, third)),
+        _ => Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "expected at least three operands",
         }),
     }
 }
@@ -1091,8 +1465,10 @@ fn resolve<M: Model + ?Sized>(
         // what dispatching by name exists to stop.
         .ok_or(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "this target has no recorded name for that opcode, so there is \
-                     nothing to translate it as",
+            detail: concat!(
+                "this target has no recorded name for that opcode, so there is ",
+                "nothing to translate it as"
+            ),
         })
 }
 /// `v_interp_p1_f32` / `v_interp_p2_f32` - an interpolated fragment attribute.
@@ -1133,16 +1509,20 @@ fn interpolate<M: Model + ?Sized>(
     else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "an interpolation decodes to a destination, a source, an attribute and a \
-                     channel; this one did not",
+            detail: concat!(
+                "an interpolation decodes to a destination, a source, an attribute and a ",
+                "channel; this one did not"
+            ),
         });
     };
     let attribute = u32::try_from(*attribute).unwrap_or(u32::MAX);
     let Some((vec4, input)) = model.attribute_input(attribute) else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "an interpolation needs a fragment input to read, and this module has none \
-                     for that attribute - translate at the fragment stage",
+            detail: concat!(
+                "an interpolation needs a fragment input to read, and this module has none ",
+                "for that attribute - translate at the fragment stage"
+            ),
         });
     };
     let Ok(channel) = u32::try_from(*channel) else {
@@ -1259,12 +1639,19 @@ const MSG_GS_ALLOC_REQ: i64 = 9;
 
 /// Where the vertex and primitive counts sit in `m0`, for the allocation request.
 ///
-/// **`assumed`, and the only assumption in this translation** - D688 says so and
-/// `REQ-20260914T1720Z-9c4a` asks the console to settle it. One sample supports it: oops-sdk's
-/// vertex program writes `0x1003` for one primitive of three vertices, which fits a vertex
-/// count in the low twelve bits and a primitive count in the next twelve, and fits several
-/// other splits equally well. For that shader every candidate split gives the same answer,
-/// which is why this is usable now and still worth measuring.
+/// **Measured: the low field is the vertex count, the high field is the primitive count**
+/// (`REQ-20260915T1652Z-6fad`, sweep `20260915-192617`). The primitive-draw triangle, whose
+/// body emits one primitive of three vertices, was submitted with three `m0` literals: `0x1003`
+/// drew, `0x1004` drew (a surplus of vertices), and `0x3001` never ran and left the fence unhit
+/// (the low field held one vertex, starving a body that writes three). So the vertices are low
+/// and the primitives are high, not the reverse.
+///
+/// The **exact boundary is not uniquely pinned** by those three - any split between bits 3 and 12
+/// fits them - but twelve is the value that reads oops-sdk's `0x1003` as exactly one primitive of
+/// three vertices, which is how that shader encoded it, and it is what real NGG counts (always far
+/// below 2^12) are packed at. Note that obSCEne's own resolution stated a sixteen-bit split
+/// (`prims = m0 >> 16`); that is refuted by its variant A, which would then declare zero
+/// primitives yet drew a triangle (worklog 603).
 const MESH_COUNT_BITS: u32 = 12;
 
 /// `s_sendmsg` - a message to a fixed-function unit outside the shader core.
@@ -1681,9 +2068,23 @@ pub fn instruction<M: Model + ?Sized>(
         | "global_store_dwordx4" => memory(model, instruction, name),
 
         // The local data share: storage the lanes of a wavefront share.
-        "buffer_load_dword" | "buffer_store_dword" => buffer_memory(model, instruction, name),
+        // Untyped buffer access at any width; `buffer_memory` reads the width from the name and
+        // refuses one it does not know, the same shape as the `tbuffer_` guard below. `tbuffer_`
+        // does not start with `buffer_`, so the two families stay distinct.
+        name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
         "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
+
+        // A texture sample. The `lz` form was the last thing between the GL cube's textured
+        // pixel shader and a translation; the plain form is the same instruction letting the
+        // implementation pick a level. Split out because everything hard about either is on the
+        // other side of the instruction rather than in it (D690).
+        "image_sample_lz" | "image_sample" | "image_sample_l" | "image_load" => {
+            image_sample(model, instruction, name)
+        }
+        // A store, which is the one image instruction that needs a binding of its own: nothing
+        // writes to a sampled image (D692).
+        "image_store" => image_store(model, instruction, name),
 
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -2014,8 +2415,10 @@ fn carry_arithmetic<M: Model + ?Sized>(
         if modifiers.touches(source) {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "a source modifier on integer carry arithmetic, which is not \
-                         translated",
+                detail: concat!(
+                    "a source modifier on integer carry arithmetic, which is not ",
+                    "translated"
+                ),
             });
         }
     }
@@ -2029,11 +2432,16 @@ fn carry_arithmetic<M: Model + ?Sized>(
             detail: "carry arithmetic needs a vector destination and a scalar one",
         });
     };
+    // `null` means the carry is not wanted, which is a different thing from an ordinary
+    // register pair below: one declines the result and the other names a place this translator
+    // cannot write. Dropping the first is what the guest asked for; dropping the second would
+    // be a carry silently going nowhere.
     let mask_name = match scalar_destination {
-        Operand::Named(name) => lane_mask_name(name).ok_or(TranslateError::Unsupported {
+        _ if discards(scalar_destination) => None,
+        Operand::Named(name) => Some(lane_mask_name(name).ok_or(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "a carry destination this translator does not know",
-        })?,
+        })?),
         // An ordinary register pair as the carry destination is legal and needs the
         // general per-register write the lane-mask methods do not offer. Refused rather
         // than dropped: a carry silently going nowhere is an address that is wrong only
@@ -2041,8 +2449,10 @@ fn carry_arithmetic<M: Model + ?Sized>(
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "carry arithmetic into an ordinary register pair is not \
-                         translated yet; only the condition mask is",
+                detail: concat!(
+                    "carry arithmetic into an ordinary register pair is not ",
+                    "translated yet; only the condition mask is"
+                ),
             });
         }
     };
@@ -2111,7 +2521,11 @@ fn carry_arithmetic<M: Model + ?Sized>(
         mask = model.set_lane_bit(mask, lane, carried);
     }
 
-    model.write_lane_mask(mask_name, mask.0, mask.1)?;
+    // The carry, where the instruction asked for one. Computed either way - it falls out of the
+    // same arithmetic as the sum - so only the write is conditional.
+    if let Some(mask_name) = mask_name {
+        model.write_lane_mask(mask_name, mask.0, mask.1)?;
+    }
     model.count();
     Ok(())
 }
@@ -2473,6 +2887,10 @@ fn exponent_is_zero<M: Model + ?Sized>(model: &mut M, value: Id) -> Id {
 /// pattern - unlike the fixup, where it gives one - so the canonical quiet NaN is used.
 /// Nothing downstream can observe the difference: this result feeds the reciprocal and
 /// then `v_div_fixup_f32`, which replaces any NaN with a quietened operand of its own.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one algorithm - the division pre-scale's subnormal cases are a single decision table, and splitting it to satisfy a line count would put half a rule in each half"
+)]
 fn division_scale<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -2488,17 +2906,27 @@ fn division_scale<M: Model + ?Sized>(
         });
     };
     let register = u32::from(*destination);
+    // **`null` means the flag is not wanted**, and a shader that only needs the scaled operand
+    // says so there. Writing it somewhere anyway would invent a destination the guest declined
+    // to name; refusing would refuse a shader that is asking for less, not more.
     let mask_name = match scalar_destination {
-        Operand::Named(named) => lane_mask_name(named).ok_or(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "the division pre-scale writes a destination this translator does \
-                     not know as a lane mask",
-        })?,
+        _ if discards(scalar_destination) => None,
+        Operand::Named(named) => {
+            Some(lane_mask_name(named).ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "the division pre-scale writes a destination this translator does ",
+                    "not know as a lane mask"
+                ),
+            })?)
+        }
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "the division pre-scale writes its flag somewhere other than a \
-                         lane mask, which is not translated",
+                detail: concat!(
+                    "the division pre-scale writes its flag somewhere other than a ",
+                    "lane mask, which is not translated"
+                ),
             });
         }
     };
@@ -2605,7 +3033,12 @@ fn division_scale<M: Model + ?Sized>(
         model.write_vector_lane(register, lane, value);
     }
 
-    model.write_lane_mask(mask_name, halves.0, halves.1)?;
+    // The flag, where the instruction asked for one. It is still computed either way: the value
+    // and the flag come out of the same selects, so there is nothing to skip and nothing gained
+    // by skipping it - only the write is conditional.
+    if let Some(mask_name) = mask_name {
+        model.write_lane_mask(mask_name, halves.0, halves.1)?;
+    }
     model.count();
     Ok(())
 }
@@ -3128,8 +3561,10 @@ fn scalar_logic<M: Model + ?Sized>(
     let Operand::Scalar(register) = destination else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a 64-bit scalar logical destination is neither a register pair nor \
-                     the execution mask",
+            detail: concat!(
+                "a 64-bit scalar logical destination is neither a register pair nor ",
+                "the execution mask"
+            ),
         });
     };
     let register = u32::from(*register);
@@ -3200,8 +3635,10 @@ fn scalar_move<M: Model + ?Sized>(
             let Operand::Scalar(register) = destination else {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,
-                    detail: "s_mov_b64 destination is neither a scalar register nor the \
-                             execution mask",
+                    detail: concat!(
+                        "s_mov_b64 destination is neither a scalar register nor the ",
+                        "execution mask"
+                    ),
                 });
             };
             let register = u32::from(*register);
@@ -3244,8 +3681,10 @@ fn scalar_move<M: Model + ?Sized>(
             let Operand::Scalar(register) = destination else {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,
-                    detail: "s_mov_b32 destination is neither a scalar register nor a \
-                             lane mask",
+                    detail: concat!(
+                        "s_mov_b32 destination is neither a scalar register nor a ",
+                        "lane mask"
+                    ),
                 });
             };
             model.write_scalar(u32::from(*register), value);
@@ -3281,8 +3720,10 @@ fn local_share<M: Model + ?Sized>(
     let Operand::Immediate(offset) = offset else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a local-data-share access carries no byte offset - the operand \
-                     layout for this opcode is missing one",
+            detail: concat!(
+                "a local-data-share access carries no byte offset - the operand ",
+                "layout for this opcode is missing one"
+            ),
         });
     };
     let offset = u32::try_from(*offset).map_err(|_| TranslateError::Unsupported {
@@ -3557,16 +3998,19 @@ fn typed_channels(name: &str) -> Option<u32> {
 ///
 /// # What this translates and what it refuses
 ///
-/// Only formats whose components are all thirty-two bits wide. Those move whole words
-/// unchanged, so the work is an untyped access repeated per component and the format
-/// contributes nothing but a component count.
+/// Formats whose components are all thirty-two bits wide move whole words unchanged, so the
+/// work is an untyped access repeated per component and the format contributes nothing but a
+/// component count. Those go through [`buffer_access`] unaltered.
 ///
-/// Everything else is **refused by name**. A narrower component has to be extracted from
-/// within a word and converted - a normalised eight-bit value becomes a float by dividing
-/// by 255, a half-precision one needs a real conversion - and none of that is written.
-/// Translating it as if it were a word would produce a shader that runs, draws, and is
-/// wrong in a way only a rendered frame would show, which is the failure this project is
-/// least equipped to catch.
+/// A narrower component has to be extracted from within a word and converted - a normalised
+/// eight-bit value becomes a float by dividing by 255, a half-precision one needs a real
+/// conversion - which is [`packed_buffer_memory`]'s job, and its own comment says which kinds
+/// it has so far.
+///
+/// **What neither can do is refused by name**, never approximated. Translating a narrow
+/// component as if it were a word would produce a shader that runs, draws, and is wrong in a
+/// way only a rendered frame would show, which is the failure this project is least equipped
+/// to catch.
 ///
 /// The component count must also match the channel count. The hardware permits them to
 /// differ, and what it does then - padding the missing channels with zero and one, or
@@ -3650,7 +4094,7 @@ fn packed_integer_component<M: Model + ?Sized>(
 }
 
 /// Extracts one component from the packed word and produces the value the register is to hold:
-/// the integer itself for the integer kinds, or the bits of a normalised float for `UNORM`.
+/// the integer itself for the integer kinds, or the bits of a float for the converting ones.
 ///
 /// The kinds it understands are exactly the ones [`packed_buffer_memory`] admits before a lane is
 /// emitted, so the `unreachable!` guards a case that cannot arise rather than one left to chance.
@@ -3692,16 +4136,36 @@ fn packed_component<M: Model + ?Sized>(
             let below = model.compare(op::FORD_LESS_THAN, value_f, low_f);
             pick(model, below, minus_one, normalized)
         }
-        // A 16-bit half, widened to a float by the driver's own conversion. Admitted only at
-        // width 16 (the refusal checks it), because the narrower packed floats - the 11- and
-        // 10-bit channels of a format like R11G11B10 - are not IEEE halves and decode differently.
+        // USCALED and SSCALED are UNORM and SNORM with the division taken out: the field's
+        // value as a float, unscaled, so an eight-bit 255 arrives as 255.0 rather than 1.0.
+        // They share the extraction and the convert with the normalised kinds and add nothing,
+        // which is why they carry no clamp - there is no range to clamp *to*.
+        ComponentKind::Uscaled => {
+            let field = packed_integer_component(model, packed, bit, width, false);
+            model.unsigned_to_float_bits(field)
+        }
+        ComponentKind::Sscaled => {
+            let field = packed_integer_component(model, packed, bit, width, true);
+            model.signed_to_float_bits(field)
+        }
+        // A float, by one of two routes. At width 16 it is an IEEE half and the hardware's own
+        // `FConvert` widens it. Narrower - the 11- and 10-bit channels of a format like
+        // `10_11_11` - it is not an IEEE type at all: no sign bit, a five-bit exponent biased by
+        // 15, and the rest mantissa. That one is built by hand, from measured values.
         ComponentKind::Float => {
             let field = packed_integer_component(model, packed, bit, width, false);
-            model.half_to_float_bits(field)
+            if width == 16 {
+                model.half_to_float_bits(field)
+            } else {
+                model.narrow_float_to_float_bits(field, width)
+            }
         }
-        _ => {
+        // The one kind left, and the only one whose conversion is not arithmetic on the field:
+        // an sRGB component is its byte through a transfer curve, which is a piecewise function
+        // rather than a scale. `packed_buffer_memory` refuses it before a lane is emitted.
+        ComponentKind::Srgb => {
             unreachable!(
-                "packed_buffer_memory admits only the integer, normalised and half kinds so far"
+                "packed_buffer_memory admits only the integer, normalised, scaled and half kinds"
             )
         }
     }
@@ -3716,34 +4180,98 @@ fn packed_component<M: Model + ?Sized>(
 /// one component kind at a time, each checked on a real device before the next. What is
 /// translated so far, all single-word: **`UINT`/`SINT`**, exact bit fields that shift and mask
 /// (and sign-extend) without rounding; **`UNORM`**/**`SNORM`**, the field over its range into
-/// 0.0..=1.0 or -1.0..=1.0 (the low end clamped); and **`FLOAT`** at width 16, a half widened by
-/// the driver's own conversion. Narrower packed floats, formats wider than one word, and stores
-/// are still refused - each with a detail that names which, so a shader that needs one is a loud
-/// gap rather than a quiet wrong render.
+/// 0.0..=1.0 or -1.0..=1.0 (the low end clamped); **`USCALED`/`SSCALED`**, the same field as a
+/// float of the same value, which is the normalised pair with the division removed; and
+/// **`FLOAT`** at width 16, a half widened by the driver's own conversion. Narrower packed
+/// floats, `SRGB`, formats wider than one word, and stores are still refused - each with a
+/// detail that names which, so a shader that needs one is a loud gap rather than a quiet wrong
+/// render.
+/// Whether a packed format is one [`packed_buffer_memory`] can translate, and its width in bits.
+///
+/// Split out so the refusal is one thing in one place: every kind that is admitted has a lane
+/// of arithmetic below, and a kind that reaches that arithmetic without passing here is the bug
+/// the `unreachable!` in [`packed_component`] exists to catch.
+fn packed_format_admitted(
+    instruction: &Instruction,
+    format: &orbistoun_shader::BufferFormat,
+    loading: bool,
+) -> Result<u32, TranslateError> {
+    use orbistoun_shader::ComponentKind;
+
+    let total_bits: u32 = format.widths.iter().sum();
+    // Floats are admitted at 16 bits, where they are IEEE halves the hardware widens, and at 11
+    // and 10, where they are the sign-less packed floats of formats like `10_11_11` and are
+    // widened by the arithmetic in `narrow_float_to_float_bits` - measured, not derived
+    // (obSCEne `REQ-...b3d4`). Any other float width is still refused: nothing measured says
+    // how it decodes, and every one of these has an exponent bias and a subnormal rule that a
+    // wrong guess would render plausibly and silently.
+    let known_float_widths = format.kind == ComponentKind::Float
+        && format
+            .widths
+            .iter()
+            .all(|&width| matches!(width, 16 | 11 | 10));
+    let convertible = matches!(
+        format.kind,
+        ComponentKind::Uint
+            | ComponentKind::Sint
+            | ComponentKind::Unorm
+            | ComponentKind::Snorm
+            | ComponentKind::Uscaled
+            | ComponentKind::Sscaled
+    ) || known_float_widths;
+
+    // **Where a component lives is arithmetic, not an assumption.** An element is a
+    // little-endian byte sequence with component zero first, so the component at bit `b` is in
+    // word `b / 32` at bit `b % 32`, exactly as the within-a-word case already reads it.
+    //
+    // What is *not* arithmetic is a component that spans a word boundary: its value would have
+    // to be assembled from two reads, and which end goes where is a rule nothing here has
+    // measured. No format in the table does it - every width divides the word it sits in - so
+    // this refuses a case that does not arise rather than guessing at one that might.
+    let mut bit = 0;
+    let straddles = format.widths.iter().any(|&width| {
+        let crosses = bit / 32 != (bit + width - 1) / 32;
+        bit += width;
+        crosses
+    });
+
+    // A **store** is admitted only for the packed 10/11-bit floats measured for it (obSCEne
+    // `REQ-...2f7a`, `REQ-...9f1c`): those are exactly a 32-bit word and are packed by
+    // clamp-and-truncate (`Model::float_to_narrow_float_bits`). Every other store conversion - the
+    // integers, the normalised and scaled formats, the 16-bit halves - has a rounding and a
+    // saturation rule nothing has measured, so writing one would be the plausible-output this file
+    // refuses. Loads are unchanged.
+    let packed_float_store = format.kind == ComponentKind::Float
+        && total_bits == 32
+        && format.widths.iter().all(|&width| matches!(width, 11 | 10));
+    let direction_admitted = loading || packed_float_store;
+
+    if !direction_admitted || total_bits > ELEMENT_BITS || straddles || !convertible {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a packed typed buffer format needing component conversion ",
+                "(integer, normalised, scaled and half-float loads, and the packed ",
+                "10/11-bit float stores, whose components do not span a word are translated so far)"
+            ),
+        });
+    }
+    Ok(total_bits)
+}
+
+/// The widest element a packed typed access can move: four components of a whole word each.
+///
+/// A format wider than this does not exist in the table, and one that did would not fit the
+/// four registers a `_xyzw` access names.
+const ELEMENT_BITS: u32 = 128;
+
 fn packed_buffer_memory<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     format: &orbistoun_shader::BufferFormat,
     loading: bool,
 ) -> Result<(), TranslateError> {
-    use orbistoun_shader::ComponentKind;
-
-    let total_bits: u32 = format.widths.iter().sum();
-    // Half floats are admitted only at their true width; the narrower packed floats (11- and
-    // 10-bit channels) are not IEEE halves and are left refused.
-    let all_halves =
-        format.kind == ComponentKind::Float && format.widths.iter().all(|&width| width == 16);
-    let convertible = matches!(
-        format.kind,
-        ComponentKind::Uint | ComponentKind::Sint | ComponentKind::Unorm | ComponentKind::Snorm
-    ) || all_halves;
-    if !loading || total_bits > 32 || !convertible {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a packed typed buffer format needing component conversion \
-                     (single-word integer, normalised and half-float loads are translated so far)",
-        });
-    }
+    let total_bits = packed_format_admitted(instruction, format, loading)?;
 
     // The operands and addressing modifiers are read exactly as the untyped path reads them:
     // only the per-component work below differs.
@@ -3783,9 +4311,12 @@ fn packed_buffer_memory<M: Model + ?Sized>(
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
-    // The element is one word here (`total_bits <= 32`), so the whole thing is bounds-checked
-    // once and read once, then the components come out of the bits.
+    // The element is bounds-checked **once, whole**, and then read a word at a time. That is
+    // the difference from [`buffer_access`], which checks each word separately because each is
+    // an independent component: here the words are one value, and a check per word would let
+    // half an element be read at the very end of a buffer.
     let element_bytes = total_bits.div_ceil(8);
+    let element_words = total_bits.div_ceil(32);
 
     for lane in 0..model.lanes() {
         let scalar_offset = model.read_source(instruction, soffset, lane)?;
@@ -3797,8 +4328,10 @@ fn packed_buffer_memory<M: Model + ?Sized>(
                 let Operand::Vector(first) = vaddr else {
                     return Err(TranslateError::Unsupported {
                         offset: instruction.offset,
-                        detail: "a buffer access with both address modifiers does not \
-                                 name a vector register pair",
+                        detail: concat!(
+                            "a buffer access with both address modifiers does not ",
+                            "name a vector register pair"
+                        ),
                     });
                 };
                 let base = *first;
@@ -3823,21 +4356,88 @@ fn packed_buffer_memory<M: Model + ?Sized>(
         );
 
         let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, element_bytes);
-        let packed = read_guarded(model, base);
 
-        let mut bit = 0u32;
-        for component in 0..format.widths.len() {
-            let width = format.widths[component];
-            let register_component =
-                register + u32::try_from(component).expect("a format has at most four components");
-            let value = packed_component(model, packed, bit, width, format.kind);
-            // Out of range reads zero, exactly as the untyped path answers it.
-            let kept = pick(model, outside, zero, value);
-            model.write_vector_lane(register_component, lane, kept);
-            bit += width;
+        // **`widths` is listed as the format's name lists it: highest bits first.** So the last
+        // entry is the component at bit 0, which is `x`, and both directions walk them in reverse.
+        //
+        // This was the other way round until 2026-09-16 and nothing caught it, because every
+        // packed format exercised until then had equal widths - `8_8_8_8` reads the same
+        // forwards or backwards. The measurement that found it is obSCEne `REQ-...b3d4`:
+        // `BUF_FMT_10_11_11_FLOAT` over the word `0x00200401` returns x = 2.03125, which is an
+        // **eleven**-bit channel at bit 0 (exponent 16, mantissa 1). Read the old way, x took
+        // the ten-bit width the name mentions first and decoded to 2^-19 - a subnormal, off by
+        // thirteen orders of magnitude, from a format whose name looked like it was being
+        // honoured.
+        if loading {
+            let mut packed = Vec::with_capacity(element_words as usize);
+            for word in 0..element_words {
+                let step = model.constant(word * 4);
+                let address = model.add(base, step);
+                packed.push(read_guarded(model, address));
+            }
+
+            let mut bit = 0u32;
+            for (component, &width) in format.widths.iter().rev().enumerate() {
+                let register_component = register
+                    + u32::try_from(component).expect("a format has at most four components");
+                // `packed_format_admitted` has already refused anything that spans a word, so the
+                // component is wholly inside this one and the index cannot run off the end.
+                let value = packed_component(
+                    model,
+                    packed[(bit / 32) as usize],
+                    bit % 32,
+                    width,
+                    format.kind,
+                );
+                // Out of range reads zero, exactly as the untyped path answers it.
+                let kept = pick(model, outside, zero, value);
+                model.write_vector_lane(register_component, lane, kept);
+                bit += width;
+            }
+        } else {
+            // A store is admitted only for a packed float that is exactly one word; `packed_store`
+            // assembles that word and writes it. Split out to keep this function under the ceiling.
+            packed_store(model, instruction, data, format, base, outside, lane)?;
         }
     }
     model.count();
+    Ok(())
+}
+
+/// Packs a lane's channels and writes the one word a packed float store produces.
+///
+/// The store half of [`packed_buffer_memory`]'s per-lane body, split out so that function stays under
+/// the line ceiling. The admitted store formats are exactly one word, so it assembles a single word
+/// from the packed channels - each read from its register, packed by clamp-and-truncate
+/// ([`Model::float_to_narrow_float_bits`]), and shifted into place - and writes it, keeping the
+/// previous contents out of bounds exactly as the untyped store does.
+fn packed_store<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    data: &Operand,
+    format: &orbistoun_shader::BufferFormat,
+    base: Id,
+    outside: Id,
+    lane: u32,
+) -> Result<(), TranslateError> {
+    let mut assembled = model.constant(0);
+    let mut bit = 0u32;
+    for (component, &width) in format.widths.iter().rev().enumerate() {
+        let source = step_operand(
+            data,
+            u32::try_from(component).expect("at most four components"),
+        )?;
+        let value_bits = model.read_source(instruction, &source, lane)?;
+        let field = model.float_to_narrow_float_bits(value_bits, width);
+        let shift = model.constant(bit);
+        let placed = model.binary(op::SHIFT_LEFT_LOGICAL, field, shift);
+        assembled = model.binary(op::BITWISE_OR, assembled, placed);
+        bit += width;
+    }
+    let word = model.word_index(base);
+    let previous = model.read_memory(word);
+    let kept = pick(model, outside, previous, assembled);
+    write_guarded(model, base, kept, lane);
     Ok(())
 }
 
@@ -3860,9 +4460,24 @@ fn buffer_memory<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    // One dword, which is what "untyped" means here: no format, no conversion, no
-    // component count beyond the one.
-    buffer_access(model, instruction, name == "buffer_load_dword", 1)
+    // Untyped: no format and no conversion, so the only thing the name adds beyond the single
+    // form is a width. A bare `dword` moves one, `dwordx2`/`x3`/`x4` move that many consecutive
+    // dwords into consecutive registers - which is exactly what `buffer_access` already does per
+    // component for the typed word forms, so this is a component count and nothing else.
+    let loading = name.starts_with("buffer_load");
+    let components = match name.rsplit_once("dword") {
+        Some((_, "")) => 1,
+        Some((_, "x2")) => 2,
+        Some((_, "x3")) => 3,
+        Some((_, "x4")) => 4,
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "an untyped buffer access names a width this does not translate",
+            });
+        }
+    };
+    buffer_access(model, instruction, loading, components)
 }
 
 /// The body shared by the typed and untyped buffer accesses.
@@ -3890,8 +4505,10 @@ fn buffer_access<M: Model + ?Sized>(
     let Operand::Vector(register) = data else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a buffer access names something other than a vector register for \
-                     its data",
+            detail: concat!(
+                "a buffer access names something other than a vector register for ",
+                "its data"
+            ),
         });
     };
     let register = u32::from(*register);
@@ -3933,8 +4550,10 @@ fn buffer_access<M: Model + ?Sized>(
                 let Operand::Vector(first) = vaddr else {
                     return Err(TranslateError::Unsupported {
                         offset: instruction.offset,
-                        detail: "a buffer access with both address modifiers does not \
-                                 name a vector register pair",
+                        detail: concat!(
+                            "a buffer access with both address modifiers does not ",
+                            "name a vector register pair"
+                        ),
                     });
                 };
                 let base = *first;
@@ -4040,6 +4659,363 @@ fn write_guarded<M: Model + ?Sized>(model: &mut M, address: Id, value: Id, lane:
     model.write_memory(index, kept, lane);
 }
 
+/// Translates a texture sample at level zero.
+///
+/// # What the instruction says
+///
+/// Five operands, solved from assembled probes like every other layout here: a destination
+/// register, the register pair holding the coordinate, the first register of an eight-register
+/// image descriptor, the first of a four-register sampler descriptor, and a four-bit mask
+/// saying which components come back.
+///
+/// # What becomes of the two descriptors
+///
+/// Nothing, and D690 is the argument for that. They describe a surface at a guest address that
+/// no host image stands behind, so the sample reads the one texture the pipeline bound and
+/// [`Model::sampled_image`] refuses a module that names a second. The registers are still read:
+/// their **numbers** are what that refusal is built on.
+///
+/// # Level zero, named
+///
+/// The `lz` in the guest's mnemonic is "level zero", stated rather than derived, so this emits
+/// the explicit form with a level of zero rather than the implicit one. The two are different
+/// instructions with different operands, and only one of them is available to a stage that has
+/// no derivatives to choose a level from.
+///
+/// The zero is a bitcast of the integer zero rather than a float constant, because the constant
+/// pool here is typed as registers are - every value in it is a word. Bitcasting one is what
+/// every other float in this translation is, so a second kind of constant would be a second
+/// thing to keep right.
+/// What a texture access's operands say, once they have been checked.
+///
+/// Register numbers rather than [`Operand`]s, because every one of them has been through a
+/// bounds check by the time this exists - which is the point of separating the reading from the
+/// emitting.
+struct ImageAccess {
+    /// First vector register the components land in.
+    destination: u32,
+    /// First vector register of the coordinate.
+    address: u32,
+    /// First scalar register of the image descriptor.
+    descriptor: u32,
+    /// First scalar register of the sampler descriptor, when the instruction names one.
+    sampler: Option<u32>,
+    /// Which components come back, one bit each.
+    mask: u32,
+    /// Whether this reads a texel by its index rather than sampling a position.
+    fetches: bool,
+    /// Whether the level of detail comes from an address register rather than being named.
+    levelled: bool,
+}
+
+/// Address registers a two-dimensional access uses, by instruction.
+///
+/// Two for a coordinate, and **three** where the level is one of them. Measured rather than
+/// assumed: the assembler refuses an address operand whose register count does not match the
+/// instruction's dimensionality field, so a levelled two-dimensional sample takes three and a
+/// level-zero one takes two, and it says so by refusing the wrong count (worklog 577).
+const fn address_registers(levelled: bool) -> u32 {
+    if levelled { 3 } else { 2 }
+}
+
+/// Reads a texture access's operands, refusing anything it cannot use.
+///
+/// **The operand at index three is not the same field in both instructions**, which is the only
+/// awkward thing here: a sample names a sampler there and a fetch's mask is there instead. The
+/// mnemonic is what says which, and the solved layouts agree with it - a sample has five
+/// operands and a fetch has four.
+fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+
+    // **Two dimensions, checked rather than assumed.** Every image translation here reads two
+    // coordinate registers; a one- or three-dimensional image has a different count, and one
+    // read as two would sample somewhere else entirely and draw a frame that looks plausible.
+    // The instruction says which, and until this was measured nothing here could ask.
+    let (shift, mask) = IMAGE_DIMENSION;
+    let dimension = (instruction.word >> shift) & mask;
+    if dimension != IMAGE_DIMENSION_2D {
+        return Err(refuse(concat!(
+            "only a two-dimensional image is translated - this instruction's coordinate has a ",
+            "different number of components, and reading two of them would sample a place the ",
+            "guest did not name"
+        )));
+    }
+
+    // A load reads a texel by its integer coordinate and names no sampler; a sample takes a
+    // position across the image and names one. Everything that differs between them follows
+    // from this one line.
+    let fetches = name == "image_load";
+    // The level from a register rather than named. It is the **last** address element, after the
+    // coordinates - measured, by compiling a levelled sample whose three arguments arrive in
+    // known registers and reading which the compiler put where (worklog 577).
+    let levelled = name == "image_sample_l";
+
+    let (Some(Operand::Vector(destination)), Some(Operand::Vector(address))) =
+        (instruction.operands.first(), instruction.operands.get(1))
+    else {
+        return Err(refuse(
+            "a texture access's destination and coordinate are not vector registers",
+        ));
+    };
+    let Some(Operand::Scalar(descriptor)) = instruction.operands.get(2) else {
+        return Err(refuse(concat!(
+            "a texture access's image descriptor is not a scalar register - it names the first ",
+            "register of a group, and a group has to start somewhere"
+        )));
+    };
+    let sampler = match instruction.operands.get(3) {
+        Some(Operand::Scalar(sampler)) if !fetches => Some(u32::from(*sampler)),
+        _ => None,
+    };
+    let mask_at = if sampler.is_some() { 4 } else { 3 };
+    let Some(Operand::Immediate(mask)) = instruction.operands.get(mask_at) else {
+        return Err(refuse(
+            "a texture access carries no component mask, so what it returns is unknown",
+        ));
+    };
+    let Ok(mask) = u32::try_from(*mask) else {
+        return Err(refuse("a texture access's component mask is negative"));
+    };
+    if mask == 0 || mask >= 1 << IMAGE_COMPONENTS {
+        return Err(refuse(concat!(
+            "a texture access's component mask selects nothing, or selects a component the ",
+            "instruction does not have"
+        )));
+    }
+
+    // The address registers and the components coming back both have to fit.
+    let address = u32::from(*address);
+    let destination = u32::from(*destination);
+    if address + address_registers(levelled) > VECTOR_REGISTERS
+        || destination + mask.count_ones() > VECTOR_REGISTERS
+    {
+        return Err(refuse(
+            "a texture access runs past the end of the vector register file",
+        ));
+    }
+
+    Ok(ImageAccess {
+        destination,
+        address,
+        descriptor: u32::from(*descriptor),
+        sampler,
+        mask,
+        fetches,
+        levelled,
+    })
+}
+
+fn image_sample<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+
+    let ImageAccess {
+        destination,
+        address,
+        descriptor,
+        sampler,
+        mask,
+        fetches,
+        levelled,
+    } = image_access(instruction, name)?;
+
+    let texture = model.sampled_image(descriptor, sampler).map_err(refuse)?;
+
+    // Which of the sampling instructions this is. `lz` in a guest mnemonic is "level zero,
+    // named", `_l` takes the level from a register, and the plain form lets the implementation
+    // choose from the derivatives of the coordinate - which is a different SPIR-V instruction
+    // with different operands rather than an option on one (worklog 566).
+    let named_level = name.ends_with("_lz") || levelled;
+
+    let f32_type = model.f32_type();
+    let u32_type = model.u32_type();
+    let zero = model.constant(0);
+    let constant_level = model.as_float(zero);
+
+    for lane in 0..model.lanes() {
+        // Two dimensions, from consecutive registers - the dimensionality field was checked
+        // above, so the count is not in doubt here.
+        let u = model.read_source(instruction, &Operand::Vector(address_of(address)), lane)?;
+        let v = model.read_source(instruction, &Operand::Vector(address_of(address + 1)), lane)?;
+        // The level, where the instruction takes one from a register: the **last** address
+        // element, after the coordinates.
+        let level = if levelled {
+            let bits =
+                model.read_source(instruction, &Operand::Vector(address_of(address + 2)), lane)?;
+            model.as_float(bits)
+        } else {
+            constant_level
+        };
+        // **A fetch's coordinate is already what it needs to be.** The registers hold a texel
+        // index, which is an integer, and every register in this model is one - so the words go
+        // straight in. A sample's coordinate is a position across the image and the same words
+        // are float bits, which is the reinterpretation the other branch does.
+        let (u, v, kind) = if fetches {
+            (u, v, texture.texel)
+        } else {
+            (model.as_float(u), model.as_float(v), texture.coordinate)
+        };
+
+        let builder = model.builder();
+        let coordinate = builder.id();
+        builder.function(op::COMPOSITE_CONSTRUCT, &[kind.0, coordinate.0, u.0, v.0]);
+        // Loaded per lane rather than hoisted: the load is what turns the bound descriptor into
+        // a value, and a translation that hoisted it would be reordering the guest's program on
+        // an assumption about aliasing nobody here has checked.
+        let bound = builder.id();
+        builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+        let texel = builder.id();
+        if fetches {
+            // A fetch takes an image rather than an image and its sampler, so the bound pair is
+            // unwrapped first. The level is named because Vulkan requires one here for an image
+            // that is not multi-sampled, and zero is the only level this harness binds.
+            let image = builder.id();
+            builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+            builder.function(
+                op::IMAGE_FETCH,
+                &[
+                    texture.result.0,
+                    texel.0,
+                    image.0,
+                    coordinate.0,
+                    image_operands::LOD,
+                    zero.0,
+                ],
+            );
+        } else if named_level {
+            builder.function(
+                op::IMAGE_SAMPLE_EXPLICIT_LOD,
+                &[
+                    texture.result.0,
+                    texel.0,
+                    bound.0,
+                    coordinate.0,
+                    image_operands::LOD,
+                    level.0,
+                ],
+            );
+        } else {
+            builder.function(
+                op::IMAGE_SAMPLE_IMPLICIT_LOD,
+                &[texture.result.0, texel.0, bound.0, coordinate.0],
+            );
+        }
+
+        // The mask says which components come back, and they land in **consecutive** registers
+        // - so a mask with a hole in it does not leave a hole in the destination.
+        let mut written = 0;
+        for component in 0..IMAGE_COMPONENTS {
+            if mask & (1 << component) == 0 {
+                continue;
+            }
+            let builder = model.builder();
+            let extracted = builder.id();
+            builder.function(
+                op::COMPOSITE_EXTRACT,
+                &[f32_type.0, extracted.0, texel.0, component],
+            );
+            let bits = builder.id();
+            builder.function(op::BITCAST, &[u32_type.0, bits.0, extracted.0]);
+            model.write_vector_lane(destination + written, lane, bits);
+            written += 1;
+        }
+    }
+
+    model.count();
+    Ok(())
+}
+
+/// Translates a texel store.
+///
+/// # What the instruction says
+///
+/// Four operands, the same shape as a fetch: the **data** registers rather than a destination,
+/// the coordinate registers, the image descriptor, and the component mask. The mask decides how
+/// many consecutive registers hold the texel, exactly as it decides how many a fetch fills.
+///
+/// # The components the mask does not select
+///
+/// Written as zero. A guest that stores three channels leaves the fourth to whatever the format
+/// says, and the format is in a descriptor nothing here decodes (D692) - so there is no value to
+/// preserve and no way to leave it alone. Zero is stated rather than inherited, which is the
+/// difference between a choice and an accident.
+fn image_store<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+
+    let ImageAccess {
+        destination: data,
+        address,
+        descriptor,
+        mask,
+        ..
+    } = image_access(instruction, name)?;
+
+    let stored = model.storage_image(descriptor).map_err(refuse)?;
+    let zero = model.constant(0);
+
+    for lane in 0..model.lanes() {
+        let u = model.read_source(instruction, &Operand::Vector(address_of(address)), lane)?;
+        let v = model.read_source(instruction, &Operand::Vector(address_of(address + 1)), lane)?;
+
+        // The texel's components, in the order the mask selects them out of consecutive
+        // registers - so a mask with a hole in it reads no register for that component.
+        let mut components = [model.as_float(zero); IMAGE_COMPONENTS as usize];
+        let mut read = 0;
+        for (component, slot) in components.iter_mut().enumerate() {
+            let selected = u32::try_from(component).unwrap_or(IMAGE_COMPONENTS);
+            if mask & (1 << selected) == 0 {
+                continue;
+            }
+            let source = Operand::Vector(address_of(data + read));
+            let bits = model.read_source(instruction, &source, lane)?;
+            *slot = model.as_float(bits);
+            read += 1;
+        }
+
+        let builder = model.builder();
+        let coordinate = builder.id();
+        builder.function(
+            op::COMPOSITE_CONSTRUCT,
+            &[stored.texel.0, coordinate.0, u.0, v.0],
+        );
+        let value = builder.id();
+        let mut construct = vec![stored.value.0, value.0];
+        construct.extend(components.iter().map(|id| id.0));
+        builder.function(op::COMPOSITE_CONSTRUCT, &construct);
+        let bound = builder.id();
+        builder.function(op::LOAD, &[stored.image.0, bound.0, stored.variable.0]);
+        builder.function(op::IMAGE_WRITE, &[bound.0, coordinate.0, value.0]);
+    }
+
+    model.count();
+    Ok(())
+}
+
+/// One vector register number as the decoder spells it.
+///
+/// Saturating rather than wrapping, and unreachable either way: the caller has already checked
+/// the pair fits inside the register file. It exists so the conversion is in one place instead
+/// of at both coordinate reads.
+fn address_of(register: u32) -> u16 {
+    u16::try_from(register).unwrap_or(u16::MAX)
+}
+
 /// Translates the flat memory instructions.
 ///
 /// Loads and stores of one, two or four consecutive words. A load's destination and a
@@ -4057,7 +5033,7 @@ fn flat_memory<M: Model + ?Sized>(
         // width" is the assumption that produced four disagreeing scalar loads.
         "global_load_dword" | "global_load_dwordx2" | "global_load_dwordx4" => {
             let words = access_words(name);
-            let (destination, vaddr, base) = three_operands(instruction)?;
+            let (destination, vaddr, base) = first_three_operands(instruction)?;
             let Operand::Vector(register) = destination else {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,
@@ -4090,7 +5066,7 @@ fn flat_memory<M: Model + ?Sized>(
         // because another lane will read what it would have left behind.
         "global_store_dword" | "global_store_dwordx2" | "global_store_dwordx4" => {
             let words = access_words(name);
-            let (vaddr, data, base) = three_operands(instruction)?;
+            let (vaddr, data, base) = first_three_operands(instruction)?;
             let Operand::Vector(first_register) = data else {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,

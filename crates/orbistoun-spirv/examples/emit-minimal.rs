@@ -29,4 +29,23 @@ fn main() {
         "mesh.spv",
         orbistoun_spirv::triangle_mesh_module([[0.0, 1.0, 0.0, 1.0]; 3]),
     );
+    // The sampling oracle, whose image type, sampled-image type and sampling instructions are
+    // all new here and none of which this crate can judge for itself. Both forms, because they
+    // are different instructions: a guest asks for level zero by name and a fragment stage may
+    // let the implementation choose.
+    write(
+        "sampling.spv",
+        orbistoun_spirv::sampling_fragment_module(orbistoun_spirv::Lod::Implicit),
+    );
+    write(
+        "sampling-lod0.spv",
+        orbistoun_spirv::sampling_fragment_module(orbistoun_spirv::Lod::Zero),
+    );
+    // The storing oracle, whose storage image type, write instruction and format-less
+    // capability are all new here - and whose capability is the one a validator has most to say
+    // about, because a module may not write a format-less image without declaring it.
+    write(
+        "storing.spv",
+        orbistoun_spirv::storing_fragment_module([1, 0], [0.0, 1.0, 0.0, 1.0]),
+    );
 }

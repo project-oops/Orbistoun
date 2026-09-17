@@ -214,7 +214,10 @@ impl EmbeddedEngine {
         if self.device == Device::Gpu {
             tracing::warn!(
                 model = %self.model.id,
-                "the in-process engine has no accelerator support; running on the                  processor. The managed runtime is the accelerated path"
+                concat!(
+                    "the in-process engine has no accelerator support; running on the ",
+                    "processor. The managed runtime is the accelerated path"
+                )
             );
         }
         CandleDevice::Cpu

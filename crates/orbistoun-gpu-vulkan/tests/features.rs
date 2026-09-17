@@ -68,21 +68,46 @@ fn the_capability_report_describes_what_was_enabled() {
 
     assert_eq!(
         properties.fragment_stores, offered,
-        "the report and the device disagree about fragmentStoresAndAtomics. The session asks 
-         for it exactly where the hardware offers it, so a report saying otherwise is either 
-         reading the physical device's capabilities instead of the enabled set, or claiming 
-         something a module would be refused for relying on"
+        concat!(
+            "the report and the device disagree about fragmentStoresAndAtomics. The session ",
+            "asks for it exactly where the hardware offers it, so a report saying otherwise is ",
+            "either reading the physical device's capabilities instead of the enabled set, or ",
+            "claiming something a module would be refused for relying on"
+        )
     );
     if offered {
-        println!(
-            "[the_capability_report_describes_what_was_enabled] the hardware offers 
-             fragmentStoresAndAtomics, the session enabled it, and the report says so"
-        );
+        println!(concat!(
+            "[the_capability_report_describes_what_was_enabled] the hardware offers ",
+            "fragmentStoresAndAtomics, the session enabled it, and the report says so"
+        ));
     } else {
-        println!(
-            "[the_capability_report_describes_what_was_enabled] this GPU does not offer 
-             fragmentStoresAndAtomics, so the session did not enable it and the report says 
-             so - a guest pixel shader that writes memory cannot run here at all"
-        );
+        println!(concat!(
+            "[the_capability_report_describes_what_was_enabled] this GPU does not offer ",
+            "fragmentStoresAndAtomics, so the session did not enable it and the report says ",
+            "so - a guest pixel shader that writes memory cannot run here at all"
+        ));
     }
+}
+
+/// **What this device says about block-compressed sampling, reported rather than assumed.**
+///
+/// Not an assertion about the answer - a device is allowed to say no, and one that does makes a
+/// decoder a requirement instead of a fallback. The point is that the question is now *asked*:
+/// G15 splits surface layout into detiling, which is blocked on a capture nobody has taken, and
+/// compression, which is blocked on nothing because Vulkan consumes BC data natively.
+///
+/// Printed so a run of the suite on a new machine records its answer, the way the subgroup size
+/// is reported rather than fixed.
+#[test]
+fn whether_this_device_samples_compressed_textures_is_recorded() {
+    let Availability::Available { properties } = probe() else {
+        println!(
+            "[whether_this_device_samples_compressed_textures_is_recorded] SKIPPED - no device"
+        );
+        return;
+    };
+    println!(
+        "[whether_this_device_samples_compressed_textures_is_recorded] {} reports textureCompressionBC = {}",
+        properties.device, properties.compressed_textures
+    );
 }

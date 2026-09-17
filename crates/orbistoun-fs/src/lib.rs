@@ -90,6 +90,8 @@ guest_module! {
         "sceKernelLseek" => 3,
         "sceKernelStat" => 2,
         "sceKernelMkdir" => 2,
+        // POSIX, and imported under its bare name: a guest asking how much room a mount has.
+        "statfs" => 2,
         "sceKernelDebugOutText" => 2,
     }
 }
@@ -315,6 +317,138 @@ fn kernel_mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from(GuestError::vendor(orbistoun_core::errno::DENIED).as_raw())
 }
 
+/// Offsets into `struct statfs`, from FreeBSD's `sys/mount.h`.
+///
+/// **Published rather than inferred, which is what makes writing them defensible.** The target
+/// kernel is FreeBSD-derived (principle 1's first oracle), and these four have held across every
+/// FreeBSD this could descend from. obSCEne reads two of them at exactly these offsets on real
+/// hardware and gets a believable number back, which is a second, independent check that the
+/// layout is the one in use (obSCEne D272).
+mod statfs_at {
+    /// `f_bsize`, the fragment size. `u64`.
+    pub(super) const BSIZE: usize = 0x10;
+    /// `f_blocks`, total data blocks. `u64`.
+    pub(super) const BLOCKS: usize = 0x20;
+    /// `f_bfree`, blocks free. `u64`.
+    pub(super) const BFREE: usize = 0x28;
+    /// `f_bavail`, blocks free to a non-superuser. `i64`.
+    pub(super) const BAVAIL: usize = 0x30;
+    /// How far this writes, and no further.
+    ///
+    /// **The structure is longer than this and the rest is deliberately untouched.** Its full
+    /// size on the target is not measured, and zeroing out to FreeBSD's length would overrun a
+    /// caller whose buffer is the size the *target's* header says. Writing only as far as the
+    /// last field it has a real value for cannot overrun anything, and a field this leaves alone
+    /// is one this could only have guessed.
+    pub(super) const WRITTEN: usize = 0x38;
+}
+
+/// The block size `statfs` reports.
+///
+/// A unit for the counts rather than a measurement of anything: the host is asked for bytes, and
+/// bytes have to be divided by something to become the blocks the interface answers in. 4096 is
+/// the page size and the commonest fragment size; the product `f_bavail * f_bsize` - which is all
+/// any caller can do with the pair - is exact whatever is chosen, because the division that
+/// produced the count used this same number.
+const STATFS_BLOCK: u64 = 4096;
+
+/// `statfs(path, buf)` - how much room the mount holding `path` has.
+///
+/// # Why this is written from a host measurement and not a constant
+///
+/// A guest asks this to decide whether a save will fit. Answering with a plausible number is the
+/// failure principle 3 exists to forbid, and it is not hypothetical here: answering the call
+/// `0x0` without filling the buffer - which is all `ORBISTOUN_RETURN` can do - turns obSCEne's
+/// honest `storage|unconfirmed|unknown` into a confident `storage|known|0M`. A wrong answer
+/// arrived faster than the right one, and looked better.
+///
+/// So the numbers come from the volume actually backing the mount, and a path under no mount is
+/// refused rather than given a figure.
+///
+/// # What it writes, and what it does not
+///
+/// The four capacity fields at [`statfs_at`], and nothing else. Everything past
+/// [`statfs_at::WRITTEN`] - the file counts, the mount names, the filesystem type - is left as
+/// the caller had it, because this knows none of them and the structure's real length on the
+/// target has never been measured.
+fn kernel_statfs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(path) = read_guest_path(args[0]) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
+    let into = args[1];
+    if into == 0 {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::FAULT).as_raw());
+    }
+    // A path the sandbox does not have is not a filesystem with no room; it is not there.
+    let Some(host) = mount::resolve_existing(&path) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw());
+    };
+    // The mount is there and the host would not say how big it is. Denied rather than zero:
+    // "I cannot tell you" and "there is no room" are different answers and only one is true.
+    let Some((available, total)) = host_capacity(&host) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::DENIED).as_raw());
+    };
+
+    let mut fields = [0_u8; statfs_at::WRITTEN];
+    let put = |fields: &mut [u8; statfs_at::WRITTEN], at: usize, value: u64| {
+        fields[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    };
+    put(&mut fields, statfs_at::BSIZE, STATFS_BLOCK);
+    put(&mut fields, statfs_at::BLOCKS, total / STATFS_BLOCK);
+    put(&mut fields, statfs_at::BFREE, available / STATFS_BLOCK);
+    put(&mut fields, statfs_at::BAVAIL, available / STATFS_BLOCK);
+
+    let Ok(at) = usize::try_from(into) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::FAULT).as_raw());
+    };
+    // SAFETY: a guest-supplied destination under the identity mapping (D014), written for
+    // exactly `WRITTEN` bytes - a prefix of a structure the caller sized - from a local array of
+    // that length. The two cannot overlap: one is guest memory and the other is this stack.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            fields.as_ptr(),
+            std::ptr::with_exposed_provenance_mut::<u8>(at),
+            statfs_at::WRITTEN,
+        );
+    }
+    OK
+}
+
+/// Bytes available to this process, and bytes in total, on the volume holding `path`.
+///
+/// [`None`] when the host will not say - which is reported to the guest as an I/O failure rather
+/// than as an empty disk, for the reason the whole function exists.
+#[cfg(windows)]
+fn host_capacity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let (mut available, mut total, mut free) = (0_u64, 0_u64, 0_u64);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the three out-parameters are live
+    // locals. The call only reads the path and writes the three words.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut available,
+            &raw mut total,
+            &raw mut free,
+        )
+    };
+    (ok != 0).then_some((available, total))
+}
+
+/// Away from Windows this is not wired, and says so rather than answering a number.
+#[cfg(not(windows))]
+fn host_capacity(_path: &std::path::Path) -> Option<(u64, u64)> {
+    None
+}
+
 /// How much of a debug-log string to read before giving up on its terminator.
 ///
 /// A report record is a line, not a path, so this is larger than [`read_guest_path`]'s cap - but
@@ -380,6 +514,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceKernelWrite", kernel_write),
         ("sceKernelLseek", kernel_lseek),
         ("sceKernelMkdir", kernel_mkdir),
+        ("statfs", kernel_statfs),
         // The body is in `metadata`, beside the POSIX form it shares its success path with;
         // the name is declared here, so this is where it is offered (D525).
         ("sceKernelStat", metadata::kernel_stat),
@@ -405,6 +540,77 @@ mod tests {
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = path;
         args
+    }
+
+    /// **`statfs` answers a real measurement, refuses what it cannot measure, and stops writing
+    /// where its knowledge stops.**
+    ///
+    /// # Why each half is here
+    ///
+    /// The *positive* half is the whole reason the function exists: answering the call
+    /// successfully without filling the buffer is one environment variable away, and it turns
+    /// obSCEne's honest `storage|unconfirmed|unknown` into a confident `storage|known|0M`. So a
+    /// non-zero product is the thing to assert, not a zero return.
+    ///
+    /// The *extent* half is the one that would go unnoticed. The structure is longer than the
+    /// four fields this knows, its real length on the target has never been measured, and a
+    /// write that ran past what it knows would either overrun a caller's buffer or publish zeroes
+    /// as though they were file counts. The sentinel past [`statfs_at::WRITTEN`] has to survive.
+    #[test]
+    fn statfs_measures_what_it_can_reach_and_writes_no_further() {
+        // The mount table is process-wide, and a test that installs one without this lock
+        // unmounts whatever a concurrent test just mounted - the intermittent red D241 exists
+        // to stop. The guard also resets the tables, so nothing needs clearing first.
+        let _tables = super::exclusively();
+        mount::mount("/statfstest", std::env::temp_dir());
+
+        // A sentinel the call must not touch, past everything it claims to write.
+        let mut buffer = [0xAB_u8; 256];
+        let mut args = args_with_path(guest_cstr("/statfstest"));
+        args[1] = buffer.as_mut_ptr() as usize as u64;
+        assert_eq!(
+            super::kernel_statfs(&args),
+            super::OK,
+            "a mount that exists"
+        );
+
+        let word =
+            |at: usize| u64::from_le_bytes(buffer[at..at + 8].try_into().expect("eight bytes"));
+        let bsize = word(super::statfs_at::BSIZE);
+        let bavail = word(super::statfs_at::BAVAIL);
+        assert_eq!(bsize, super::STATFS_BLOCK, "the unit the counts are in");
+        assert!(
+            bavail > 0 && bavail.checked_mul(bsize).is_some(),
+            "a real volume has room and the product does not overflow: {bavail} x {bsize}"
+        );
+        assert!(
+            word(super::statfs_at::BLOCKS) >= word(super::statfs_at::BFREE),
+            "a volume cannot have more free blocks than blocks"
+        );
+
+        // **Measured from the last field, not from `WRITTEN`.** A first draft asserted against
+        // `WRITTEN` itself, which moves the boundary and the assertion together - widening the
+        // write to 0x80 still passed. The invariant is "nothing past the last field this has a
+        // value for", so the bound is that field's end and the constant has to agree with it.
+        let past_last_field = super::statfs_at::BAVAIL + 8;
+        assert!(
+            buffer[past_last_field..].iter().all(|b| *b == 0xAB),
+            "everything past the last known field is left exactly as the caller had it"
+        );
+
+        // A path under no mount is not a full disk and not an empty one.
+        let mut missing = args_with_path(guest_cstr("/nowhere/at/all"));
+        missing[1] = buffer.as_mut_ptr() as usize as u64;
+        assert_ne!(
+            super::kernel_statfs(&missing),
+            super::OK,
+            "a path the sandbox does not have is refused, not given a figure"
+        );
+
+        // Nowhere to put the answer.
+        let mut nowhere = args_with_path(guest_cstr("/statfstest"));
+        nowhere[1] = 0;
+        assert_ne!(super::kernel_statfs(&nowhere), super::OK, "a null buffer");
     }
 
     /// **A positioned read reads at the offset and leaves the position alone**, and a bad
@@ -459,7 +665,10 @@ mod tests {
         assert_eq!(kernel_read(&read_args), 4);
         assert_eq!(
             &after, b"0123",
-            "the positioned read left the descriptor where it was - a seek/read/seek-back              would pass the assertion above and fail this one"
+            concat!(
+                "the positioned read left the descriptor where it was - a ",
+                "seek/read/seek-back would pass the assertion above and fail this one"
+            )
         );
 
         let mut bad = [0_u64; GUEST_ARG_REGISTERS];

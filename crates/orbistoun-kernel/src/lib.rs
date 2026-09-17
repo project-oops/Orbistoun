@@ -27,6 +27,7 @@
 
 pub mod apr;
 pub mod direct;
+pub mod interrupt;
 pub mod mapped;
 pub mod sync;
 pub mod thread;
@@ -508,10 +509,11 @@ fn sw_version_body(version: &orbistoun_core::machine::SoftwareVersion) -> [u8; 0
 
 /// `sceKernelGetDirectMemorySize()`.
 ///
-/// How much physical memory exists. Answered from the same model the query walks, so the
-/// two cannot describe different machines.
+/// How much physical memory exists. Answered from the same setting the pool is built from, so the
+/// two cannot describe different machines (D398) - and that setting is guest-dependent: twelve
+/// gibibytes for a retail title, five for homebrew, both measured (`REQ-...5d1c`, D398).
 fn direct_memory_size(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    direct::DIRECT_MEMORY_SIZE
+    direct::configured().pool_bytes
 }
 
 /// `std::_Execute_once(once_flag&, callback, context)` - runs a `call_once` initialiser once.
@@ -1122,6 +1124,27 @@ fn allocate_main_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Out of memory is a real answer and distinct from not being written: a guest
         // that gets this can shrink its request, and one that gets `Unimplemented`
         // cannot tell the difference between a full pool and a missing function.
+        //
+        // **Said out loud, with the numbers that decided it.** The guest gets one error code
+        // for a full pool, a fragmented one and an alignment nothing can place, and the three
+        // want different fixes - so the branch that knows which it was is the branch that has
+        // to say so (CLAUDE.md principle 3). PPSA04263 is why: it asks for one span, is
+        // refused, and faults on the next instruction, and nothing in the run said whether the
+        // pool was short or the alignment was impossible.
+        eprintln!(
+            concat!(
+                "orbistoun: sceKernelAllocateMainDirectMemory refused {:#x} at alignment {:#x} ",
+                "(asked {:#x}) - largest placeable span is {:#x}, {:#x} free in total, across ",
+                "{} region(s): {}"
+            ),
+            len,
+            align,
+            alignment,
+            guard.largest_free_at(align),
+            guard.available(),
+            guard.regions().len(),
+            direct::describe_regions(guard.regions(), REFUSAL_REGIONS),
+        );
         return u64::from(GuestError::NoMemory.as_raw());
     };
     drop(guard);
@@ -1131,6 +1154,13 @@ fn allocate_main_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     OK
 }
+
+/// How many regions a refused allocation lists before summarising the rest.
+///
+/// A pool a guest has fragmented holds thousands of regions, and a refusal that printed all of
+/// them would bury the three numbers that matter in its own output. Seven is what PPSA04263's
+/// refusal has - enough that the interesting case prints whole.
+const REFUSAL_REGIONS: usize = 12;
 
 /// How many times a placement steps past a conflict before giving up.
 ///
@@ -7648,9 +7678,40 @@ mod tests {
     #[test]
     fn the_reported_size_matches_the_model_being_walked() {
         // Two answers about the same machine. If they disagree, a guest sizes its heaps
-        // against memory the walk will never show it.
+        // against memory the walk will never show it. Both read the same `pool_bytes`
+        // setting now, so the identity is by construction rather than by two constants
+        // that happen to agree.
         let args = [0_u64; GUEST_ARG_REGISTERS];
-        assert_eq!(super::direct_memory_size(&args), direct::DIRECT_MEMORY_SIZE);
+        assert_eq!(
+            super::direct_memory_size(&args),
+            direct::configured().pool_bytes
+        );
+    }
+
+    /// **The default pool is the retail figure, and the homebrew figure is a different measured
+    /// value - not a rounding of it.**
+    ///
+    /// Both are hardware measurements of `sceKernelGetDirectMemorySize`: twelve gibibytes on a
+    /// retail eboot leg (`REQ-...5d1c`), five on a homebrew payload (D398). The corpus is retail
+    /// and every memory wall in it is retail, so twelve is the default; five is what a homebrew
+    /// leg configures. This pins that the default did not quietly drift back to five - which would
+    /// re-wall PPSA04263 - and that the two are genuinely different values rather than one.
+    #[test]
+    fn the_default_pool_is_the_retail_size_and_homebrew_is_a_distinct_measured_size() {
+        assert_eq!(
+            direct::Settings::default().pool_bytes,
+            0x3_0000_0000,
+            "the retail default is twelve gibibytes (REQ-...5d1c)"
+        );
+        assert_eq!(
+            direct::HOMEBREW_DIRECT_MEMORY_SIZE,
+            0x1_4000_0000,
+            "the homebrew figure is five gibibytes (D398)"
+        );
+        assert!(
+            direct::Settings::default().pool_bytes > direct::HOMEBREW_DIRECT_MEMORY_SIZE,
+            "retail hands out more than homebrew - the whole reason PPSA04263's 8.5 GiB fits"
+        );
     }
 
     #[test]
@@ -7788,8 +7849,10 @@ mod tests {
         assert_ne!(
             super::mprotect(&args),
             super::OK,
-            "a region nothing has reported is refused, which is the guard that stops a typo \
-             re-protecting this process's own code"
+            concat!(
+                "a region nothing has reported is refused, which is the guard that stops a typo ",
+                "re-protecting this process's own code"
+            )
         );
 
         super::note_region(base, len);

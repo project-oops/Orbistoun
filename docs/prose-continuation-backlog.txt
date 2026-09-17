@@ -8,9 +8,9 @@
 # The replacement is `concat!` of one-line literals. Note that `concat!` defeats implicit
 # `{name}` capture, so arguments go positional.
 #
-# `./orbistoun.sh prose` fails on any file here that is *not* listed, and fails again on any
-# entry listed that has stopped offending. So this list can only shrink, and it cannot
-# quietly become permanent by being ignored - the same mechanism the duplicate decision
+# `./bin/orbistoun check --only prose` fails on any file here that is *not* listed, and fails
+# again on any entry listed that has stopped offending. So this list can only shrink, and it
+# cannot quietly become permanent by being ignored - the same mechanism the duplicate decision
 # numbers use (D201).
 #
 # **It went 8 -> 21 once, which is the one direction the paragraph above forbids.** The
@@ -19,21 +19,14 @@
 # emptying the offender list entirely. Both failures reported "none added". Twenty-one is
 # the first count taken with the guard able to see, and it is the ceiling from here (D199).
 #
-crates/orbistoun-gpu/src/pipeline.rs
-crates/orbistoun-gpu/tests/vocabulary.rs
-crates/orbistoun-gui/src/app.rs
-crates/orbistoun-gui/src/prefs.rs
-crates/orbistoun-overrides/tests/frontier.rs
-crates/orbistoun-report/src/diagnose.rs
-crates/orbistoun-shader/src/encoding.rs
-crates/orbistoun-shader/src/report.rs
-crates/orbistoun-shader/tests/differential.rs
-crates/orbistoun-shader/tests/hostile.rs
-crates/orbistoun-spirv/src/lib.rs
-crates/orbistoun-translate/src/blocks.rs
-crates/orbistoun-translate/src/lib.rs
-crates/orbistoun-translate/src/model.rs
-crates/orbistoun-translate/src/modifiers.rs
-crates/orbistoun-translate/src/predicated.rs
-crates/orbistoun-translate/tests/agreement.rs
-crates/orbistoun-translate/tests/execute.rs
+# **The list is now empty, and the ceiling is zero.** It had drifted to 48 files carrying 169
+# literals - the ceiling held at 18 while 30 more files were added underneath it, so the gate
+# was red and could no longer report a *new* offender, which is the only thing it exists to
+# do. All 169 were converted and the rendered text of every one was checked, hunk by hunk,
+# against what Rust's continuation rule produced before. One message was found already
+# collapsed, carrying eighteen spaces in the middle of a sentence a reader sees: exactly the
+# damage above, shipped. It is repaired.
+#
+# An empty list is the useful state, not a milestone: from here the gate refuses the first
+# line-continued literal anybody adds, instead of the twenty-ninth. Keep it empty. If one has
+# to be listed, it is a debt with a name, and it comes off again.

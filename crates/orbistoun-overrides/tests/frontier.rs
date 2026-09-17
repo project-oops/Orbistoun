@@ -72,9 +72,11 @@ fn the_frontier_matches_what_is_committed() {
     assert_eq!(
         rendered.replace("\r\n", "\n"),
         expected.replace("\r\n", "\n"),
-        "\nthe frontier changed. If a run genuinely improved, regenerate it:\n  \
-         UPDATE_FRONTIER=1 cargo test -p orbistoun-overrides --test frontier\n\
-         and read the diff - that diff is the whole point of this test.\n"
+        concat!(
+            "\nthe frontier changed. If a run genuinely improved, regenerate it:\n  ",
+            "UPDATE_FRONTIER=1 cargo test -p orbistoun-overrides --test frontier\n",
+            "and read the diff - that diff is the whole point of this test.\n"
+        )
     );
 }
 

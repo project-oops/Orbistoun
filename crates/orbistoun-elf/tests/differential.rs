@@ -560,10 +560,10 @@ fn titles_root() -> Option<PathBuf> {
 fn both_readers_agree_on_every_module_in_the_corpus() {
     let modules = corpus();
     if modules.is_empty() {
-        println!(
-            "differential: skipped - no modules under the OOPS titles directory. \
-             This test needs installed titles, which a clean checkout has none of."
-        );
+        println!(concat!(
+            "differential: skipped - no modules under the OOPS titles directory. ",
+            "This test needs installed titles, which a clean checkout has none of."
+        ));
         return;
     }
     let mut disagreeing = 0_usize;

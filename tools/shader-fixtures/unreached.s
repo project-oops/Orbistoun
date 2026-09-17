@@ -61,6 +61,25 @@ tbuffer_store_format_x v5, v6, s[16:19], 0 format:[BUF_FMT_32_FLOAT] idxen
 tbuffer_load_format_xyzw v[8:11], v12, s[20:23], 0 format:[BUF_FMT_32_32_32_32_UINT] idxen
 tbuffer_load_format_x v20, v21, s[24:27], s5 format:[BUF_FMT_8_UINT] offen
 tbuffer_store_format_xyzw v[24:27], v28, s[28:31], s7 format:[BUF_FMT_32_32_32_32_FLOAT] idxen
+// The three forms the family has that nothing here named until now. A mnemonic is only in
+// the table if a reference disassembler printed it, so an instruction nothing assembles is
+// one the decoder reports as a bare family and opcode number - which is honest, and is also
+// a gap in a family whose other five forms are covered.
+tbuffer_load_format_xyz v[32:34], v35, s[32:35], s9 format:[BUF_FMT_32_32_32_FLOAT] idxen
+tbuffer_store_format_xy v[36:37], v38, s[36:39], s11 format:[BUF_FMT_32_32_UINT] offen
+tbuffer_store_format_xyz v[40:42], v43, s[40:43], 0 format:[BUF_FMT_32_32_32_FLOAT] idxen
+
+// The multi-word *untyped* buffer forms, for the same reason: the compiler emits
+// buffer_load_dword and buffer_store_dword (buffer.ll), but nothing in the fixtures made it
+// reach for the x2/x3/x4 widths, so the census reported those opcodes as a bare family and
+// number - the same gap MTBUF sat in at five of eight (worklog 588). Their opcodes are not
+// contiguous: load x2/x4/x3 are 13/14/15 and store x2/x4/x3 are 29/30/31.
+buffer_load_dwordx2 v[44:45], v46, s[44:47], 0 offen
+buffer_load_dwordx3 v[47:49], v50, s[48:51], 0 offen
+buffer_load_dwordx4 v[52:55], v56, s[52:55], 0 offen
+buffer_store_dwordx2 v[57:58], v59, s[56:59], 0 offen
+buffer_store_dwordx3 v[60:62], v63, s[60:63], 0 offen
+buffer_store_dwordx4 v[64:67], v68, s[64:67], 0 offen
 
 // A trailing scalar instruction, so the last MTBUF's length is asserted by something
 // following it rather than by the end of the stream.

@@ -62,8 +62,10 @@ fn an_export_decodes_to_a_target_and_four_registers() {
         );
         assert!(
             instruction.operands_decoded,
-            "the export's operand layout is not established - it was, solved from ten samples, \
-             so a regenerated table has lost the EXP entry"
+            concat!(
+                "the export's operand layout is not established - it was, solved from ten ",
+                "samples, so a regenerated table has lost the EXP entry"
+            )
         );
         assert_eq!(
             instruction.operands,

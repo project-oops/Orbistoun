@@ -52,7 +52,14 @@ fn translated(stage: Stage) -> Result<Vec<u32>, TranslateError> {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
     let decoded = decode(&interpolating_shader(), &encodings, &operands);
-    translate_for(&decoded, &encodings, Width::Wave64, stage).map(|(module, _)| module)
+    translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        stage,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .map(|(module, _)| module)
 }
 
 /// **A translated interpolation reads the value the pipeline interpolated.**
@@ -145,7 +152,14 @@ fn translated_move(parameter: u32, stage: Stage) -> Result<Vec<u32>, TranslateEr
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
     let decoded = decode(&parameter_move_shader(parameter), &encodings, &operands);
-    translate_for(&decoded, &encodings, Width::Wave64, stage).map(|(module, _)| module)
+    translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        stage,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .map(|(module, _)| module)
 }
 
 /// The parameter codes, as the committed fixture encodes them.
@@ -187,8 +201,13 @@ fn a_translated_parameter_move_reads_one_corner_flat() {
             assert_eq!(
                 framebuffer.at(x, y),
                 Some(first),
-                "pixel ({x}, {y}) differs from ({0}, {0}), so the attribute was interpolated 
-                 after all",
+                concat!(
+                    "pixel ({}, {}) differs from ({}, {}), so the attribute was interpolated ",
+                    "after all"
+                ),
+                x,
+                y,
+                0,
                 0
             );
         }
@@ -232,7 +251,9 @@ fn moving_an_interpolation_delta_is_refused() {
 fn an_interpolation_without_a_fragment_input_is_refused() {
     assert!(
         translated(Stage::Compute).is_err(),
-        "a compute module translated an interpolation, so it read an attribute that does not \
-         exist in it"
+        concat!(
+            "a compute module translated an interpolation, so it read an attribute that does ",
+            "not exist in it"
+        )
     );
 }

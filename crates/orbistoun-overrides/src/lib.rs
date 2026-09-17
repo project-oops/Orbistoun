@@ -175,6 +175,39 @@ pub enum Reach {
     /// Distance within this rung is *still* imports and standing before frames - see
     /// [`Status::beats`], where the reason is D182's, a second time.
     Flipped,
+    /// The guest put **pixels it produced** into a buffer that reached the output layer.
+    ///
+    /// # What separates this from a flip
+    ///
+    /// [`Self::Flipped`] says the guest reached the layer that would present a frame, and says
+    /// so honestly: nothing scans a buffer out, and a flip completes the instant it is accepted.
+    /// Six guests sit there with a hundred percent standing and **not one has produced a
+    /// pixel**. COMPATIBILITY.md's prose has said so since D558 - *"a place reached and not a
+    /// picture shown"* - while the table said `flipped`, and the table is what gets read.
+    ///
+    /// This rung is the sentence the table could not say. It is awarded only when the buffer a
+    /// flip carried is read back and found to hold something the guest wrote, which no amount of
+    /// reaching the interface can fake.
+    ///
+    /// # Nothing awards it yet, and that is the point
+    ///
+    /// [`crate`] does not decide rungs; `orbistoun_report::trace::status_of` does, and it has no
+    /// arm for this one because there is nothing to read back: no renderer is attached to the
+    /// run path at all, so no presented buffer exists to inspect. A test beside that function
+    /// asserts the absence rather than leaving it to be noticed.
+    ///
+    /// So every guest in the corpus now ranks below the top rung, which is the accurate reading
+    /// and was not previously expressible. **The scale is supposed to be able to say "not yet".**
+    /// A ladder whose top rung everything has reached measures nothing about the work left.
+    ///
+    /// # Why this is a thing done, not a thing not happening
+    ///
+    /// D182's rule, which refused a rung for surviving to the time limit, is the test every rung
+    /// here has to pass. Pixels pass it in the strongest form available: a buffer differing from
+    /// what it held before the guest ran is a positive measurement against a known prior, and it
+    /// is the framebuffer-diffing oracle this project already treats as its only cheap
+    /// mechanical correctness signal. There is no way to spin into it.
+    Presented,
 }
 
 impl Reach {
@@ -187,6 +220,7 @@ impl Reach {
             Self::Entered => "entered",
             Self::Exited => "exited",
             Self::Flipped => "flipped",
+            Self::Presented => "presented",
         }
     }
 }
@@ -417,7 +451,36 @@ impl Status {
         self.default_return == other.default_return && self.propped_up() == other.propped_up()
     }
 
-    /// Whether this result is better than `previous`, and therefore worth recording.
+    /// Whether this result should replace `previous`: **not worse, and not the same run again**.
+    ///
+    /// [`Self::beats`] answers "is this an improvement", which is the right question for a verdict
+    /// and the wrong one for a record. A run can be *equal* on every ranked field and still carry
+    /// something the record should hold - most obviously how it ended. A guest that stopped
+    /// deliberately where it used to fault reaches exactly as far, so `beats` is false, and the
+    /// record then keeps saying the guest died for as long as nothing else changes (D687).
+    ///
+    /// So: comparable, **not below** the record on the ranked key, and differing from it in the
+    /// key or in the outcome. An identical rerun changes neither and is not written - the record
+    /// would gain nothing but a new date, and a file that churns on every run is one nobody reads
+    /// diffs of.
+    ///
+    /// **`measured_on` is deliberately not part of "different".** It differs on every run by
+    /// construction, so counting it would make every rerun worth recording and delete the rule.
+    #[must_use]
+    pub fn worth_recording(&self, previous: &Self) -> bool {
+        if !self.comparable_with(previous) {
+            return false;
+        }
+        let (mine, theirs) = (self.ranking_key(), previous.ranking_key());
+        mine >= theirs && (mine != theirs || self.outcome != previous.outcome)
+    }
+
+    /// Whether this result is an improvement on `previous`.
+    ///
+    /// **Not the recording gate** - that is [`Self::worth_recording`], which also accepts a run
+    /// that is equal but ended differently (D687). This answers the verdict question: did it get
+    /// further. The two were one function until a record kept saying a guest died after it had
+    /// stopped calling `exit`.
     ///
     /// **Refuses to claim an improvement it cannot justify.** A run under a looser stub
     /// policy reaches further by construction, so ranking on the numbers alone would let
@@ -443,30 +506,6 @@ impl Status {
     /// frames above imports would sort that run above one that presented three times and then
     /// got twice as far into the engine - the exact failure that cost `Entered` its rung above
     /// "survived". The rung says it presented; the imports still say how far it got (D558).
-    /// Whether this result should replace `previous`: **not worse, and not the same run again**.
-    ///
-    /// [`Self::beats`] answers "is this an improvement", which is the right question for a verdict
-    /// and the wrong one for a record. A run can be *equal* on every ranked field and still carry
-    /// something the record should hold - most obviously how it ended. A guest that stopped
-    /// deliberately where it used to fault reaches exactly as far, so `beats` is false, and the
-    /// record then keeps saying the guest died for as long as nothing else changes (D687).
-    ///
-    /// So: comparable, **not below** the record on the ranked key, and differing from it in the
-    /// key or in the outcome. An identical rerun changes neither and is not written - the record
-    /// would gain nothing but a new date, and a file that churns on every run is one nobody reads
-    /// diffs of.
-    ///
-    /// **`measured_on` is deliberately not part of "different".** It differs on every run by
-    /// construction, so counting it would make every rerun worth recording and delete the rule.
-    #[must_use]
-    pub fn worth_recording(&self, previous: &Self) -> bool {
-        if !self.comparable_with(previous) {
-            return false;
-        }
-        let (mine, theirs) = (self.ranking_key(), previous.ranking_key());
-        mine >= theirs && (mine != theirs || self.outcome != previous.outcome)
-    }
-
     pub fn beats(&self, previous: &Self) -> bool {
         if !self.comparable_with(previous) {
             return false;
@@ -637,11 +676,11 @@ pub fn render_markdown(rows: &[Row]) -> String {
     let shots: Vec<&&Row> = ranked.iter().filter(|r| r.screenshot.is_some()).collect();
     out.push_str("\n## Screenshots\n\n");
     if shots.is_empty() {
-        out.push_str(
-            "_None yet. A screenshot needs a captured guest framebuffer, which the video \
-             subsystem does not surface yet; a guest that produces graphics gains an image here \
-             once it does._\n",
-        );
+        out.push_str(concat!(
+            "_None yet. A screenshot needs a captured guest framebuffer, which the video ",
+            "subsystem does not surface yet; a guest that produces graphics gains an image ",
+            "here once it does._\n"
+        ));
     } else {
         for r in shots {
             if let Some(path) = &r.screenshot {
@@ -686,8 +725,10 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
     let _ = writeln!(out, "# {name}\n");
     let _ = writeln!(
         out,
-        "_Generated by `orbistoun-cli compat markdown` from `compat/{}.toml`. \
-         Do not edit by hand; re-run it._\n",
+        concat!(
+            "_Generated by `orbistoun-cli compat markdown` from `compat/{}.toml`. ",
+            "Do not edit by hand; re-run it._\n"
+        ),
         row.title
     );
 
@@ -1797,7 +1838,10 @@ reason = "..."
 
         assert!(
             presented.beats(&entered),
-            "a guest that got a frame to the output layer with a twelfth of the imports is              still further along than one that never reached it"
+            concat!(
+                "a guest that got a frame to the output layer with a twelfth of the ",
+                "imports is still further along than one that never reached it"
+            )
         );
         assert!(!entered.beats(&presented));
     }

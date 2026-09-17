@@ -65,14 +65,35 @@ has no deadline.
 C stays recorded as the fallback if the extension turns out to be unavailable on the host this
 runs on. It is a fallback, not a plan.
 
-## What is not yet known, and how to find out
+## The allocation request's payload, now measured
 
-The allocation request's payload. Our shader writes `m0 = 0x1003` and the comment beside it
-says one primitive of three vertices, which is consistent with the vertex count in the low
-half and the primitive count above it - and one sample cannot separate that from several other
-field splits. It is `assumed`, and the way to settle it is cheap: emit a shader that asks for a
-different pair, say two primitives of four vertices, and see which bits move. That is a probe
-for the same toolchain path worklogs 548 and 549 used, or an obSCEne request.
+Our shader writes `m0 = 0x1003` for one primitive of three vertices. Which bits are the vertex
+count and which the primitive count was the one assumption in this translation, and it is now
+**measured**: the low field is vertices, the high field is primitives.
+
+`REQ-20260915T1652Z-6fad` (sweep `20260915-192617`) submitted the primitive-draw triangle - body
+unchanged, one primitive of three vertices - with three `m0` literals and read the fence and the
+colour target back:
+
+| `m0` | low 12 = verts, high = prims | drew? |
+|---|---|---|
+| `0x1003` | 3 verts, 1 prim - exact | yes, red, fence `0xbeefcafe` |
+| `0x1004` | 4 verts, 1 prim - surplus verts | yes |
+| `0x3001` | 1 vert, 3 prims - starved of vertices | no, fence stayed `0x11111111`, shader never ran |
+
+Starving the vertex count stops the draw and inflating it does not, so vertices are low and
+primitives high. The translator already read it that way (`MESH_COUNT_BITS = 12` in
+`model.rs`), so no code changed; the assumption became a measurement.
+
+**Two earlier "resolutions" were not measurements and must not be cited.**
+`REQ-20260914T1720Z-9c4a` and `REQ-20260915T1211Z-5b01` came back "delivered" from sweeps
+`20260915-125124` and `-152001`, but `check_agc_ngg_gs_alloc_req` there only prints a static table
+of the answer - no queue, no submit, no shader (worklog 602). **And 6fad's own stated conclusion,
+`prims = m0 >> 16`, is wrong**: under a sixteen-bit split variant A (`0x1003`) is zero primitives
+and would not draw, yet it drew a triangle. The rows are sound; the prose over them is not. The
+exact boundary is not uniquely pinned by three samples (anything from bit 3 to bit 12 fits), but
+twelve reads oops-sdk's own encoding correctly and real NGG counts never approach 2^12 (worklog
+603).
 
 ## What this costs when it is built
 

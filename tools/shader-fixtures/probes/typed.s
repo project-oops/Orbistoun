@@ -29,8 +29,8 @@
 // fits every sample forever, the true one fits too, and the opcode reports as unsolvable
 // with nothing pointing at the cause.
 //
-// Four of these five opcodes failed exactly that way on the first run. The one that
-// solved was the one that happened to have a `v200` in it.
+// Four of the five opcodes here at the time failed exactly that way on the first run. The
+// one that solved was the one that happened to have a `v200` in it.
 //
 // The resource bases also vary in whether the *group index* is odd or even, for the same
 // class of reason one bit along. The index is `base / 4` and it sits at 20:16, so its low
@@ -74,6 +74,13 @@ tbuffer_load_format_xy v[130:131], v163, s[28:31], s76 format:[BUF_FMT_32_32_FLO
 tbuffer_load_format_xy v[58:59], v11, s[32:35], s36 format:[BUF_FMT_32_32_FLOAT] idxen
 tbuffer_load_format_xy v[188:189], v70, s[52:55], 0 format:[BUF_FMT_32_32_FLOAT] offen
 
+// Three channels.
+tbuffer_load_format_xyz v[16:18], v199, s[12:15], s88 format:[BUF_FMT_32_32_32_FLOAT] offen
+tbuffer_load_format_xyz v[134:136], v23, s[36:39], s41 format:[BUF_FMT_32_32_32_UINT] idxen
+tbuffer_load_format_xyz v[66:68], v171, s[48:51], s67 format:[BUF_FMT_32_32_32_FLOAT] offen
+tbuffer_load_format_xyz v[208:210], v31, s[68:71], s19 format:[BUF_FMT_32_32_32_UINT] idxen
+tbuffer_load_format_xyz v[90:92], v14, s[80:83], 0 format:[BUF_FMT_32_32_32_FLOAT] offen
+
 // Four channels.
 tbuffer_load_format_xyzw v[8:11], v212, s[20:23], s95 format:[BUF_FMT_32_32_32_32_UINT] idxen
 tbuffer_load_format_xyzw v[52:55], v18, s[48:51], s53 format:[BUF_FMT_32_32_32_32_FLOAT] offen
@@ -87,6 +94,20 @@ tbuffer_store_format_x v45, v5, s[24:27], s16 format:[BUF_FMT_32_UINT] idxen
 tbuffer_store_format_x v132, v233, s[28:31], s74 format:[BUF_FMT_8_UINT] offen
 tbuffer_store_format_x v58, v11, s[40:43], s36 format:[BUF_FMT_32_FLOAT] idxen
 tbuffer_store_format_x v201, v55, s[60:63], 0 format:[BUF_FMT_32_UINT] offen
+
+// Storing, two channels.
+tbuffer_store_format_xy v[6:7], v237, s[16:19], s91 format:[BUF_FMT_32_32_FLOAT] offen
+tbuffer_store_format_xy v[142:143], v27, s[32:35], s38 format:[BUF_FMT_32_32_UINT] idxen
+tbuffer_store_format_xy v[70:71], v183, s[44:47], s72 format:[BUF_FMT_32_32_FLOAT] offen
+tbuffer_store_format_xy v[196:197], v13, s[64:67], s25 format:[BUF_FMT_32_32_UINT] idxen
+tbuffer_store_format_xy v[104:105], v41, s[84:87], 0 format:[BUF_FMT_32_32_FLOAT] offen
+
+// Storing, three channels.
+tbuffer_store_format_xyz v[30:32], v221, s[20:23], s79 format:[BUF_FMT_32_32_32_FLOAT] idxen
+tbuffer_store_format_xyz v[150:152], v35, s[40:43], s44 format:[BUF_FMT_32_32_32_UINT] offen
+tbuffer_store_format_xyz v[86:88], v167, s[52:55], s90 format:[BUF_FMT_32_32_32_FLOAT] offen
+tbuffer_store_format_xyz v[218:220], v21, s[72:75], s33 format:[BUF_FMT_32_32_32_UINT] idxen
+tbuffer_store_format_xyz v[112:114], v49, s[88:91], 0 format:[BUF_FMT_32_32_32_FLOAT] offen
 
 // Storing, four channels.
 tbuffer_store_format_xyzw v[24:27], v228, s[28:31], s87 format:[BUF_FMT_32_32_32_32_FLOAT] idxen

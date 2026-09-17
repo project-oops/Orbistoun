@@ -79,6 +79,11 @@ name = "tbuffer_load_format_xy"
 
 [[mnemonic]]
 family = "MTBUF"
+opcode = 2
+name = "tbuffer_load_format_xyz"
+
+[[mnemonic]]
+family = "MTBUF"
 opcode = 3
 name = "tbuffer_load_format_xyzw"
 
@@ -86,6 +91,16 @@ name = "tbuffer_load_format_xyzw"
 family = "MTBUF"
 opcode = 4
 name = "tbuffer_store_format_x"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 5
+name = "tbuffer_store_format_xy"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 6
+name = "tbuffer_store_format_xyz"
 
 [[mnemonic]]
 family = "MTBUF"
@@ -99,8 +114,38 @@ name = "buffer_load_dword"
 
 [[mnemonic]]
 family = "MUBUF"
+opcode = 13
+name = "buffer_load_dwordx2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 14
+name = "buffer_load_dwordx4"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 15
+name = "buffer_load_dwordx3"
+
+[[mnemonic]]
+family = "MUBUF"
 opcode = 28
 name = "buffer_store_dword"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 29
+name = "buffer_store_dwordx2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 30
+name = "buffer_store_dwordx4"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 31
+name = "buffer_store_dwordx3"
 
 [[mnemonic]]
 family = "SMEM"

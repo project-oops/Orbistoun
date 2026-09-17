@@ -28,9 +28,20 @@
 //! wrong arity degrades a call trace and does not break the call, while a wrong name means
 //! a NID that matches no import and a shim that can never be reached.
 //!
-//! [`pad::PadState`] and the rest of this crate model a controller for the *host* side. What
-//! a title reads is a structure nobody here has measured, which is why the two functions
-//! that write one are declared and not implemented (D326).
+//! [`pad::PadState`] and the rest of this crate model a controller for the *host* side. What a
+//! title reads is a 120-byte image obSCEne measured on hardware (`100-input/read-extent`, sweep
+//! 20260909-110725), so `pad_read_state` and its batched twin are implemented and answer the
+//! whole extent every call.
+//!
+//! **What is still missing is input itself, and only that.** Those functions write
+//! [`pad::AT_REST`] unconditionally: the *extent and contents* are measured, but which offset
+//! within them carries the buttons is an inference, so mapping a live pad state onto the bytes
+//! would publish that inference as though it were the measurement. [`latest`] holds what the
+//! window sent and stays unread until obSCEne runs a button held down
+//! (`REQ-20260910T0650Z-d1c4`, open).
+//!
+//! This paragraph previously said the structure was unmeasured and the functions unimplemented,
+//! which stopped being true on 2026-09-09.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn, Handle, HandleAllocator};
 use orbistoun_hle::guest_module;
@@ -43,6 +54,7 @@ pub mod mouse;
 pub mod latest;
 pub mod mapping;
 pub mod pad;
+pub mod script;
 pub mod shell_button;
 
 pub use mapping::{Conflict, MAX_PORTS, Pads, Port, Push, Source};
@@ -202,6 +214,24 @@ fn pad_discard(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// was there before in the rest - which is the failure `100-input/read-extent` exists to catch.
 fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, into) = (args[0], args[1]);
+    // **A scripted pad is sampled here, and then not delivered - on purpose.**
+    //
+    // `script::poll` is a pure function of how long the run has been going, so sampling it at
+    // the moment the guest asks keeps the run repeatable with no feeder thread to race.
+    //
+    // What cannot happen yet is writing it into the bytes below, because *which* byte carries a
+    // button has never been measured - the extent and the at-rest contents are measured, the
+    // field positions are an inference from that one image (D345, D704). Writing a guessed
+    // offset is the confident wrong answer this subsystem exists to avoid.
+    //
+    // So it is handed to `latest`, whose arrived-versus-read counters exist for exactly this
+    // gap, and the run report says how many updates never reached the guest. That turns a block
+    // that was previously invisible - a script pressing buttons into a void, forever, with
+    // nothing to show for it - into a counted, named one. When obSCEne's
+    // `REQ-20260910T0650Z-d1c4` lands, what changes is the copy below.
+    if let Some(state) = script::poll() {
+        latest::arrived(&[state]);
+    }
     if ours(handle).is_none() {
         return u64::from(
             GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),

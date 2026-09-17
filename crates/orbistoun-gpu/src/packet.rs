@@ -330,6 +330,236 @@ pub mod build {
         /// `0x20000243` - same low-half register offset space, an index in the high half. Derived
         /// from the two packets side by side, not cited.
         pub const SET_UCONFIG_REG_INDEX: u8 = 0x7a;
+        /// `IT_SET_CONTEXT_REG_INDIRECT`, from `sceAgcDcbSetCxRegistersIndirect`
+        /// (header `0xc0039f00`, four body dwords, 20 bytes total).
+        ///
+        /// **The opcode and the extent are measured; the body is not.** `166-agc/patch-cx-registers-indirect`
+        /// dumped one producer call (`REQ-...4386`): header `0xc0039f00`, cursor delta `0x14`. The
+        /// body it carried reflects obSCEne's own arguments, not a general encoding, so the encoder
+        /// reserves the measured length and writes only the header - the argument-to-body mapping
+        /// needs a sweep this single before/after cannot give.
+        pub const SET_CONTEXT_REG_INDIRECT: u8 = 0x9f;
+        /// `IT_NOP`, from `sceAgcCbNop` (the whole packet is the header `0xffff1000`, 4 bytes).
+        pub const NOP: u8 = 0x10;
+        /// `IT_ACQUIRE_MEM`, from `sceAgcDcbAcquireMem` (header `0xc0065800`, seven body dwords,
+        /// 32 bytes total).
+        pub const ACQUIRE_MEM: u8 = 0x58;
+        /// `IT_RELEASE_MEM`, from `sceAgcCbReleaseMem` (header `0xc0064900`, seven body dwords,
+        /// 32 bytes total). Measured in `166-agc/cb-release-mem`, sweep `20260915-174357` (the zero-
+        /// argument pass wrote the header then seven zeroed dwords; the arg-to-body map is unpinned).
+        pub const RELEASE_MEM: u8 = 0x49;
+        /// `IT_DMA_DATA`, from `sceAgcDcbDmaData` (header `0xc0055000`, six body dwords, 28 bytes
+        /// total). Measured in `166-agc/dcb-dma-data`, sweep `20260915-174357`.
+        pub const DMA_DATA: u8 = 0x50;
+        /// `IT_SET_BASE`, from `sceAgcDcbSetBaseIndirectArgs` (header `0xc0021100`, three body
+        /// dwords, 16 bytes total). Measured in `166-agc/dcb-set-base-indirect-args`, sweep
+        /// `20260915-174357`.
+        pub const SET_BASE: u8 = 0x11;
+        /// `IT_DISPATCH_INDIRECT`, from `sceAgcDcbDispatchIndirect`/`AcbDispatchIndirect` (headers
+        /// `0xc0011600` / `0xc0021600`). Measured in `166-agc/dcb-dispatch-indirect` and
+        /// `acb-dispatch-indirect`, sweep `20260915-203058` (REQ-...a70f).
+        pub const DISPATCH_INDIRECT: u8 = 0x16;
+        /// `IT_DRAW_INDIRECT`, from `sceAgcDcbDrawIndirect` (header `0xc0032400`, four body dwords,
+        /// 20 bytes). Measured in `166-agc/dcb-draw-indirect`, sweep `20260915-203058`.
+        pub const DRAW_INDIRECT: u8 = 0x24;
+        /// `IT_DRAW_INDEX_INDIRECT`, from `sceAgcDcbDrawIndexIndirect` (header `0xc0032500`, four
+        /// body dwords, 20 bytes). Measured in `166-agc/dcb-draw-index-indirect`, sweep
+        /// `20260915-203058`.
+        pub const DRAW_INDEX_INDIRECT: u8 = 0x25;
+        /// `IT_SET_SH_REG_INDIRECT`, from `sceAgcDcbSetShRegistersIndirect` (header `0xc0036300`,
+        /// four body dwords, 20 bytes). Measured in `166-agc/dcb-set-sh-registers-indirect`, sweep
+        /// `20260915-203058`.
+        pub const SET_SH_REG_INDIRECT: u8 = 0x63;
+        /// `IT_SET_UCONFIG_REG_INDIRECT`, from `sceAgcDcbSetUcRegistersIndirect` (header
+        /// `0xc0036400`, four body dwords, 20 bytes). Measured in
+        /// `166-agc/dcb-set-uc-registers-indirect`, sweep `20260915-203058`.
+        pub const SET_UCONFIG_REG_INDIRECT: u8 = 0x64;
+        /// The stall from `sceAgcDcbStallCommandBufferParser` (header `0xc0004200`, one body dword,
+        /// 8 bytes). Measured in `166-agc/dcb-stall-cb-parser`, sweep `20260915-203058`.
+        pub const STALL_COMMAND_BUFFER_PARSER: u8 = 0x42;
+    }
+
+    /// A **reservation skeleton** for a builder measured only by its header and its extent: the
+    /// measured `opcode`, the measured `body_dwords`, and a zeroed body.
+    ///
+    /// This is the shape [`acquire_mem_skeleton`] and the DmaData/ReleaseMem/SetBase skeletons take,
+    /// generalised for the batch REQ-...a70f measured in one pass each: a header and a length are
+    /// solid, the argument-to-body permutation is not, so the body is zero and the value is a **real
+    /// cursor** where an unwired builder handed the guest a placeholder to `memcpy` through (D696,
+    /// worklog 600). The header is rebuilt from the opcode through [`command_header`], so it walks
+    /// back to the packet it stands for; the caller cites which measured opcode it passed.
+    #[must_use]
+    pub fn reservation(opcode: u8, body_dwords: u32) -> Vec<u32> {
+        let mut out = vec![command_header(opcode, body_dwords)];
+        out.resize(1 + body_dwords as usize, 0);
+        out
+    }
+
+    /// The `SET_UCONFIG_REG` header the marker and wait builders write, with the set bit in its
+    /// reserved low byte that `command_header` does not produce.
+    ///
+    /// `sceAgcDcbPushMarker`/`PopMarker` write a 12-byte `SET_UCONFIG_REG` (opcode `0x79`, two body
+    /// dwords) to the command-processor marker register `0x342`; the header came back `0xc0017904`,
+    /// not the `0xc0017900` [`command_header`] builds - a bit set in the reserved low byte, inert to
+    /// the packet walk (which reads only type, count and opcode) and kept because it is what obSCEne
+    /// measured (`166-agc/dcb-push-marker`/`pop-marker`, sweep `20260915-174357`).
+    const MARKER_HEADER: u32 = 0xc001_7904;
+
+    /// A push/pop debug-marker skeleton: the measured 12-byte header, body zeroed.
+    ///
+    /// Both markers write the same `0x79` packet to register `0x342`, the value distinguishing push
+    /// from pop. The value is left zero because one pass cannot separate a constant from a colour
+    /// argument (the skeleton discipline); what this buys is a **real cursor** where the unwired
+    /// marker handed the guest a placeholder to `memcpy` through (worklog 618).
+    #[must_use]
+    pub fn marker_skeleton() -> [u32; 3] {
+        [MARKER_HEADER, 0, 0]
+    }
+
+    /// A `WAIT_REG_MEM` skeleton - the measured 56-byte compound stream, every header kept, body zero.
+    ///
+    /// `sceAgcDcbWaitRegMem` writes three packets (`166-agc/dcb-wait-reg-mem`, sweep
+    /// `20260915-174357`; the framing confirmed again by REQ-...3d1e): a `SET_UCONFIG_REG`
+    /// (`0xc0027904`, four dwords), a `WAIT_REG_MEM` (`0xc0053c00`, seven dwords), and a second
+    /// `SET_UCONFIG_REG` (`MARKER_HEADER`, three dwords) - 56 bytes. The bodies carry the polled
+    /// address and value, an argument mapping one pass does not pin, so they are zeroed; the three
+    /// headers are kept so the reservation walks back to three packets and advances the cursor by the
+    /// measured 56. The `WAIT_REG_MEM` header is `command_header(0x3c, 6)`; the two `SET_UCONFIG`
+    /// headers carry the reserved-byte bit, so they are the raw measured values.
+    #[must_use]
+    pub fn wait_reg_mem_skeleton() -> [u32; 14] {
+        [
+            0xc002_7904,
+            0,
+            0,
+            0,
+            command_header(0x3c, 6),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            MARKER_HEADER,
+            0,
+            0,
+        ]
+    }
+
+    /// A `SET_CONTEXT_REG_INDIRECT` skeleton - the packet a guest patches with register data. Five
+    /// dwords, 20 bytes.
+    ///
+    /// **The header and the extent are measured; the body is deliberately zero.** `REQ-...4386`
+    /// dumped one producer call and the immediately following patch: the producer wrote a 20-byte
+    /// packet with header `0xc0039f00`, and `sceAgcSetCxRegIndirectPatchAddRegisters` then amended
+    /// it *in place* without advancing the cursor. So the packet a guest gets from this builder is a
+    /// skeleton it fills through the patch family, and the one thing the producer must get right for
+    /// that to work is the reservation: a real cursor, advanced by exactly the measured length, so
+    /// the patch's target address and the guest's own `memcpy` land in real command-buffer memory
+    /// rather than on the loud placeholder a missing builder answers (worklog 553).
+    ///
+    /// The four body dwords are zeroed rather than guessed. A single before/after cannot say which
+    /// argument becomes which dword, and writing obSCEne's captured values would encode obSCEne's
+    /// arguments into the guest's stream. The header is a valid, self-describing `SET_*_INDIRECT`
+    /// packet of the right length either way, which is all the reservation needs.
+    #[must_use]
+    pub fn set_cx_registers_indirect_skeleton() -> [u32; 5] {
+        [
+            command_header(measured::SET_CONTEXT_REG_INDIRECT, 4),
+            0,
+            0,
+            0,
+            0,
+        ]
+    }
+
+    /// A `NOP` - a header-only no-op packet, one dword, four bytes.
+    ///
+    /// **Measured whole** (`166-agc/cb-nop`): `sceAgcCbNop` writes exactly `0xffff1000` and nothing
+    /// after it - a type-3 header with an all-ones count, the header-only form `walk` already knows.
+    /// No arguments enter it, so unlike the reservation skeletons this is complete, not a stand-in.
+    #[must_use]
+    pub fn nop() -> [u32; 1] {
+        [0xffff_1000]
+    }
+
+    /// An `ACQUIRE_MEM` skeleton - the packet reserved, its cursor real, its argument-body zeroed.
+    ///
+    /// **Header and extent measured, body deliberately not** (`166-agc/dcb-acquire-mem`, REQ-...72d7,
+    /// c74f): the builder emits `0xc0065800` and advances 32 bytes across every sentinel, so the
+    /// reservation is solid. The seven body dwords, though, are a permutation of the arguments with
+    /// shifts the sweep summary does not pin exactly - `dw2` carries arg5 masked, `dw4` arg4, `dw7`
+    /// arg3, with `dw1`/`dw6` constant - and encoding a mapping this fingerprinted from a summary
+    /// would be guessing. So the body is zeroed, on the same terms as
+    /// [`set_cx_registers_indirect_skeleton`]: a guest gets a real cursor advanced by the right
+    /// length where an unwired builder gave it the loud placeholder, which is what moves the wall;
+    /// the exact body waits on the systematic sweep (REQ-...a70f).
+    #[must_use]
+    pub fn acquire_mem_skeleton() -> [u32; 8] {
+        [
+            command_header(measured::ACQUIRE_MEM, 7),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+    }
+
+    /// A `RELEASE_MEM` skeleton - the packet reserved, its cursor real, its body zeroed. Eight
+    /// dwords, 32 bytes.
+    ///
+    /// **Header and extent measured, body deliberately not** (`166-agc/cb-release-mem`, sweep
+    /// `20260915-174357`, REQ-...a70f). Called with zero arguments the builder wrote `0xc0064900`
+    /// then seven zeroed dwords and advanced 32 bytes - so the reservation is solid and the zero-arg
+    /// body is reproduced exactly, while the argument-to-body permutation (a `RELEASE_MEM` carries an
+    /// event selector and a write-back address/data) is left unencoded on the same terms as
+    /// [`acquire_mem_skeleton`]: a guest gets a real cursor advanced by the right length where an
+    /// unwired builder handed it the loud placeholder to `memcpy` through (worklog 600). It is in
+    /// the command-builder cluster the retail titles reach on their command buffers.
+    #[must_use]
+    pub fn release_mem_skeleton() -> [u32; 8] {
+        [
+            command_header(measured::RELEASE_MEM, 7),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+    }
+
+    /// A `DMA_DATA` skeleton - the packet reserved, its cursor real, its body zeroed. Seven dwords,
+    /// 28 bytes.
+    ///
+    /// **Header and extent measured, body deliberately not** (`166-agc/dcb-dma-data`, sweep
+    /// `20260915-174357`, REQ-...a70f). The zero-argument pass wrote `0xc0055000` then six zeroed
+    /// dwords, 28 bytes; a `DMA_DATA` carries a source and a destination address and a size, which is
+    /// exactly the arg-to-body map a single zero-argument pass cannot pin - and two captures of it
+    /// this session disagreed on the body, which is the disagreement that says "do not encode it from
+    /// one pass". So the reservation stands and the body is zero, like [`acquire_mem_skeleton`].
+    #[must_use]
+    pub fn dma_data_skeleton() -> [u32; 7] {
+        [command_header(measured::DMA_DATA, 6), 0, 0, 0, 0, 0, 0]
+    }
+
+    /// A `SET_BASE` skeleton for the indirect-args base - the packet reserved, cursor real, body
+    /// zeroed. Four dwords, 16 bytes.
+    ///
+    /// **Header and extent measured, body deliberately not** (`166-agc/dcb-set-base-indirect-args`,
+    /// sweep `20260915-174357`, REQ-...a70f): header `0xc0021100`, 16 bytes. The one measured pass
+    /// carried `1` in the first body dword - which the public `SET_BASE` layout calls the base-index
+    /// selector, and `1` is the draw-indirect base this builder's name sets - then a zeroed address.
+    /// That single pass cannot separate a constant selector from an argument, and the address is
+    /// plainly the argument, so the whole body is zeroed rather than half-encoded: the reservation is
+    /// what the guest needs and it is what is measured.
+    #[must_use]
+    pub fn set_base_indirect_args_skeleton() -> [u32; 4] {
+        [command_header(measured::SET_BASE, 3), 0, 0, 0]
     }
 
     /// An `EVENT_WRITE` for `event_type`. Two dwords.
@@ -442,6 +672,30 @@ pub mod build {
         out.push(u32::from(offset));
         out.extend_from_slice(values);
         out
+    }
+
+    /// A `SET_UCONFIG_REG_INDEX` selecting the index buffer's entry width. Three dwords.
+    ///
+    /// **Measured across eight argument pairs** (`166-agc/dcb-set-index-size`, sweep
+    /// `20260914-222710`): `sceAgcDcbSetIndexSize(dcb, type, flags)` for `type` 0-3 and `flags` 0-1
+    /// produced `0x400, 0x440, 0x401, 0x441, 0x402, 0x442, 0x403, 0x443` - so the value is
+    /// `0x400 | (flags << 6) | type`, with the selector `0x20000243` constant throughout.
+    ///
+    /// **Bounded by what was swept.** Only `type` 0-3 and `flags` 0-1 were tried, which is what
+    /// fixes the two low bits and bit 6; nothing establishes what a larger argument does, and this
+    /// masks rather than guesses so a wild value cannot corrupt the neighbouring fields.
+    #[must_use]
+    pub fn set_index_size(index_type: u32, flags: u32) -> [u32; 3] {
+        /// The `0x20000243` selector, constant across all eight measured calls. Its low half is an
+        /// ordinary register offset; the high bits are what distinguish opcode `0x7a` from `0x79`.
+        const SELECTOR: u32 = 0x2000_0243;
+        /// Bit 10, set in every measured value.
+        const BASE: u32 = 0x400;
+        [
+            command_header(measured::SET_UCONFIG_REG_INDEX, 2),
+            SELECTOR,
+            BASE | ((flags & 0x1) << 6) | (index_type & 0x3),
+        ]
     }
 
     /// A `DRAW_INDEX_2` - an indexed draw from a bound index buffer. Six dwords.

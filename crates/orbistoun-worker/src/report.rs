@@ -467,6 +467,93 @@ const fn readable(_address: u64, _len: usize) -> bool {
     false
 }
 
+/// The host module holding `address`, as a file name and the offset into it.
+///
+/// # Why a fault in host code needs a name
+///
+/// **A bare host address is not a reproducible measurement.** PPSA02664 and PPSA03416 both end
+/// in host code, and the number moves: `0x7fff13abdc8d` one day, `0x7ff9c071dc8d` the next, for
+/// the same fault reached the same way. Windows bases system modules per boot, so it is stable
+/// within a boot session and changes across reboots. Two things follow, and both are bad:
+///
+/// - the recorded outcome in `compat/` **cannot be reproduced after a reboot**, so what reads as
+///   a measurement of the guest is partly a measurement of where the host loader put something;
+/// - `compare` sees the ending change whenever the machine rebooted between two runs, with
+///   nothing having changed - a false signal in the only measure of progress this project has.
+///
+/// A module's own base is stable relative to itself, so `name+offset` reproduces - and it says
+/// *which* host code faulted, where the address said only that some did. (worklog 594)
+///
+/// # The file name, never the path
+///
+/// `GetModuleFileNameW` answers a full path. Only the last component is kept, because this
+/// string is written into `compat/` and an absolute path from this machine must never reach a
+/// tracked file - the identity guard blocks exactly that, and it is right to.
+///
+/// Runs after the fault rather than inside the handler, on the same terms as the call trace
+/// below it: this allocates, and by then the process is only assembling its report.
+#[cfg(windows)]
+fn host_module_of(address: u64) -> Option<(String, u64)> {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+    use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
+
+    if address == 0 {
+        return None;
+    }
+    // SAFETY: every field is a plain integer or pointer, so all-zero is a valid initialised
+    // value; `VirtualQuery` overwrites it before it is read.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live, correctly sized buffer this call owns. `VirtualQuery` only
+    // describes the mapping at `address` - it never dereferences it - so asking about an
+    // address that just faulted is exactly what it is for.
+    let written = unsafe {
+        VirtualQuery(
+            address as *const core::ffi::c_void,
+            &raw mut info,
+            size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    if written == 0 {
+        return None;
+    }
+    // The allocation base of a mapped image is its module handle, which is what makes this
+    // two calls rather than a module walk.
+    // **`base == 0` is not a formality.** `GetModuleFileNameW(NULL)` is documented to answer the
+    // *current executable*, so without this an address in no mapping comes back named as this
+    // binary at a nonsense offset - a fabricated location inside a record that reads as a
+    // measurement, which is principle 3's failure exactly. The negative test pins it.
+    let base = info.AllocationBase as u64;
+    if base == 0 || address < base {
+        return None;
+    }
+
+    // Generous rather than `MAX_PATH`: a truncated answer keeps the *prefix*, and the prefix is
+    // the directory this deliberately throws away - so truncation would cost the one part worth
+    // having.
+    let mut buffer = [0_u16; 1024];
+    // SAFETY: `base` is the allocation base reported above and `buffer` is a live array of the
+    // length passed. An address that is not a mapped image answers zero rather than misbehaving.
+    let len = unsafe {
+        GetModuleFileNameW(
+            base as *mut core::ffi::c_void,
+            buffer.as_mut_ptr(),
+            u32::try_from(buffer.len()).unwrap_or(u32::MAX),
+        )
+    };
+    if len == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..len as usize]);
+    let name = path.rsplit(['\\', '/']).next()?.to_owned();
+    (!name.is_empty()).then(|| (name, address - base))
+}
+
+/// Away from Windows nothing reaches the fault reporter, so no host module is ever named.
+#[cfg(not(windows))]
+const fn host_module_of(_address: u64) -> Option<(String, u64)> {
+    None
+}
+
 /// The bytes of the faulting instruction, copied straight from the instruction pointer.
 ///
 /// Returns a fixed buffer and how many of it are valid - no allocation, because this runs inside the
@@ -560,6 +647,18 @@ fn note_placeholder_fault(line: &mut Line, what: &'static str, exact: bool) {
     line.text(NEWLINE);
 }
 
+/// A fault address this far from zero or below is a null pointer plus a field offset, not an
+/// address the guest computed. Matches `orbistoun-report`'s `NEAR_NULL` (a page).
+const NEAR_NULL_FAULT: u64 = 0x1000;
+
+/// Whether a fault **in orbistoun's own code** is a null-ish pointer - the guest's, handed to a libc
+/// shim - rather than an emulator logic bug. Pure, so the threshold is tested without raising a real
+/// fault. Null plus a field offset below a page is a dereferenced null structure, not an address any
+/// running code computed.
+fn is_null_pointer_fault(faulting_address: u64) -> bool {
+    faulting_address < NEAR_NULL_FAULT
+}
+
 /// Says, unmistakably, that the fault is in orbistoun's own code rather than the guest's.
 ///
 /// The header names the guest's *last import call* for context, which reads as "the guest
@@ -581,6 +680,63 @@ fn note_emulator_fault(line: &mut Line) {
     line.text(NEWLINE);
 }
 
+/// The refinement of [`note_emulator_fault`] for a **null-ish** faulting address in orbistoun's code.
+///
+/// The instruction pointer being outside the guest image is the same test either way, but a fault
+/// address of null-plus-a-small-offset is a different diagnosis: it is the signature of the guest
+/// handing an **unpopulated pointer** to a libc function - `memcpy`, `strlen`, `memset` - which the
+/// host stack below shows as `orbistoun_libc`. When it does, the guest's own libc would fault the
+/// same way on real hardware, so this is not the emulator's logic misbehaving - the cause is
+/// upstream, the call that should have filled the pointer, exactly the reframe `int 0x41` needed
+/// (worklog 611). Calling this "EMULATOR BUG" sends the reader to debug orbistoun's `memcpy`, which
+/// is correct, instead of the guest state that is not. Stated conditionally, because a null deref in
+/// orbistoun's *own* logic lands here too, and the host stack is what tells the two apart.
+fn note_null_pointer_to_libc(line: &mut Line) {
+    line.text("  >> NULL-ISH ADDRESS IN OWN CODE: the instruction pointer is in orbistoun's code");
+    line.text(NEWLINE);
+    line.text(
+        "     and the faulting address is null plus a small offset. When the host stack below",
+    );
+    line.text(NEWLINE);
+    line.text("     is orbistoun_libc, this is the guest handing an unpopulated pointer to");
+    line.text(NEWLINE);
+    line.text(
+        "     memcpy/strlen - its own libc would fault the same on hardware, so the cause is",
+    );
+    line.text(NEWLINE);
+    line.text(
+        "     upstream (the call that should have filled the pointer), not this emulator. When",
+    );
+    line.text(NEWLINE);
+    line.text("     the stack is not a libc shim, it is an emulator null-deref after all.");
+    line.text(NEWLINE);
+}
+
+/// Services a faulting instruction that is a software interrupt, if a handler is registered.
+///
+/// The decision half of the interrupt glue, pure so it can be tested without raising a real trap:
+/// the `CONTEXT` read and write-back stay in the vectored handler, and everything that could be
+/// *wrong* - is this an `int`, which vector, where does it resume, did a handler run - is here.
+///
+/// Returns the frame to resume the guest from when the instruction is an `int n` with a registered
+/// handler; `None` otherwise, which is every case today, because the table is empty until obSCEne
+/// measures a vector (worklog 608). The resume point is set past the two-byte `int` before the
+/// handler runs, so a handler that touches nothing returns to the instruction after the trap.
+fn serviced_interrupt(
+    opcode: &[u8],
+    mut frame: orbistoun_kernel::interrupt::InterruptFrame,
+) -> Option<orbistoun_kernel::interrupt::InterruptFrame> {
+    let orbistoun_report::trace::TrapKind::KernelEntry {
+        vector: Some(vector),
+    } = orbistoun_report::trace::classify_trap(opcode)?
+    else {
+        return None;
+    };
+    // `cd NN` is two bytes; resume after it unless the handler jumps.
+    frame.rip = frame.rip.wrapping_add(2);
+    orbistoun_kernel::interrupt::service(vector, &mut frame).then_some(frame)
+}
+
 /// Names a privileged or trap faulting instruction, and explains an all-ones fault address.
 ///
 /// A guest executing `syscall`, `sysenter`, `int`, `hlt` or `ud2` has gone *under* the library
@@ -590,26 +746,119 @@ fn note_emulator_fault(line: &mut Line) {
 /// `0xffffffffffffffff`, which looks exactly like a guest dereferencing -1 and is not a pointer
 /// at all - a confusion that cost a dozen wrong eliminations before it was understood (D384).
 fn note_instruction_shape(line: &mut Line, opcode: &[u8], faulting_address: u64) {
-    let privileged = match opcode.first().copied() {
-        Some(0xf4) => Some("hlt"),
-        Some(0xcd) => Some("int (a software interrupt)"),
-        Some(0x0f) if opcode.get(1) == Some(&0x05) => Some("syscall"),
-        Some(0x0f) if opcode.get(1) == Some(&0x34) => Some("sysenter"),
-        Some(0x0f) if opcode.get(1) == Some(&0x0b) => Some("ud2 (a deliberate trap)"),
-        _ => None,
+    // A software interrupt carries its vector in the byte after `0xcd`, and that vector is the
+    // whole actionable fact: it names which kernel entry the guest took and, therefore, exactly
+    // what has to be characterised. Reporting a bare "int" threw that away and read as a shrug -
+    // it is what sent one investigation off after a filesystem path when the answer was "int 0x41
+    // is a kernel entry we do not implement" (worklog 603).
+    //
+    // Written straight into the line, never through `format!`: this runs in the fault handler
+    // where allocating may deadlock, which is the whole reason `Line::hex` is hand-rolled.
+    //
+    // **The classification is `orbistoun_report::trace::classify_trap`, the same one the ranked
+    // finding uses** - one classifier so the crash print and the worklist cannot name the same
+    // fault two different ways. It is pure and allocation-free, so it is safe here.
+    use orbistoun_report::trace::{TrapKind, classify_trap};
+    let Some(kind) = classify_trap(opcode) else {
+        if faulting_address == u64::MAX {
+            line.text(
+                "  >> 0xffffffffffffffff is usually a general-protection fault reported by the host",
+            );
+            line.text(NEWLINE);
+            line.text("     (a misaligned SSE access, or a privileged instruction), not a genuine read of -1 (D384).");
+            line.text(NEWLINE);
+        }
+        return;
     };
-    if let Some(name) = privileged {
-        line.text("  >> the faulting instruction is ")
-            .text(name)
-            .text(NEWLINE);
-        line.text(
-            "     - a privileged/trap instruction orbistoun does not intercept. The guest has gone",
-        );
+    {
+        // int 0x41 is measured fatal (obSCEne REQ-...b3c2): a guest trap whose cause is upstream,
+        // not a kernel entry awaiting a handler - so it is headed and explained as a trap, even
+        // though `classify_trap` decodes its bytes as a `KernelEntry` shape. Every other vector
+        // keeps the kernel-entry framing until it too is measured. One classifier still, one extra
+        // fact layered on the one vector a measurement has settled.
+        let int_0x41 = opcode.first() == Some(&0xcd) && opcode.get(1) == Some(&0x41);
+        line.text(if int_0x41 {
+            "  >> GUEST TRAP (int 0x41, measured fatal): the faulting instruction is "
+        } else {
+            match kind {
+                TrapKind::KernelEntry { .. } => {
+                    "  >> KERNEL ENTRY, UNIMPLEMENTED: the faulting instruction is "
+                }
+                TrapKind::GuestTrap => "  >> GUEST TRAP: the faulting instruction is ",
+            }
+        });
+        match opcode.first().copied() {
+            Some(0xf4) => {
+                line.text("hlt");
+            }
+            Some(0xcd) => {
+                // The vector is the actionable half. `int 0x41` names the kernel entry exactly.
+                line.text("int ")
+                    .hex(u64::from(opcode.get(1).copied().unwrap_or(0)));
+                line.text(" (a software interrupt)");
+            }
+            Some(0x0f) if opcode.get(1) == Some(&0x34) => {
+                line.text("sysenter");
+            }
+            Some(0x0f) if opcode.get(1) == Some(&0x0b) => {
+                line.text("ud2 (a deliberate trap)");
+            }
+            _ => {
+                line.text("syscall");
+            }
+        }
         line.text(NEWLINE);
-        line.text("     under the library boundary (D378): this wants a kernel-level handler (a syscall or");
-        line.text(NEWLINE);
-        line.text("     interrupt path), not a library shim, and no import is to blame.");
-        line.text(NEWLINE);
+        if int_0x41 {
+            // The measurement refuted "characterise it, then add the handler": there is nothing to
+            // add. A bare int 0x41 faults on hardware too, so a guest reaching it took a path real
+            // hardware would fault on - which puts the cause upstream, the same place a ud2 points.
+            line.text(
+                "     Measured fatal on retail: a bare int 0x41 raises a signal and does not return",
+            );
+            line.text(NEWLINE);
+            line.text(
+                "     (obSCEne REQ-...b3c2), so it is not a kernel service to add. The guest reached it",
+            );
+            line.text(NEWLINE);
+            line.text(
+                "     via an upstream wrong value, like a ud2 abort: the cause is what it was told just before.",
+            );
+            line.text(NEWLINE);
+        } else if matches!(kind, TrapKind::KernelEntry { .. }) {
+            // The load-bearing reframe: this is orbistoun's gap, stated as one, with the next
+            // step. orbistoun resolves the library boundary (imports) and the syscall-gadget path
+            // (D376), but implements no interrupt/trap vectors at all (D378) - so any guest that
+            // enters the kernel this way stops here regardless of what it is. The old wording -
+            // "orbistoun does not intercept ... no import is to blame" - was true and useless; it
+            // read as "nothing to do", when the thing to do is precise.
+            line.text(
+                "     The guest entered the kernel through an instruction orbistoun does not implement.",
+            );
+            line.text(NEWLINE);
+            line.text(
+                "     This is orbistoun's gap, not the guest's - a retail title reaching it runs on real",
+            );
+            line.text(NEWLINE);
+            line.text(
+                "     hardware, so the wall is here. Next step: characterise what this entry reads and",
+            );
+            line.text(NEWLINE);
+            line.text(
+                "     returns (an obSCEne measurement, since it is below the NID/library layer), then add",
+            );
+            line.text(NEWLINE);
+            line.text("     the handler. No import is involved and none is to blame.");
+            line.text(NEWLINE);
+        } else {
+            line.text(
+                "     A deliberate trap the guest raised itself - typically an assertion or an abort after",
+            );
+            line.text(NEWLINE);
+            line.text(
+                "     a check it failed. The cause is upstream: read what the guest was told just before.",
+            );
+            line.text(NEWLINE);
+        }
     }
     if faulting_address == u64::MAX {
         line.text(
@@ -626,6 +875,10 @@ fn note_instruction_shape(line: &mut Line, opcode: &[u8], faulting_address: u64)
 /// Shared by both platforms so the wording, and the region attribution, cannot drift
 /// between them. `kind` carries its own preposition - "read of" wants the address
 /// straight after it, "illegal instruction at" does not - so nothing is inserted here.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear report builder; each block appends one labelled section and splitting them would scatter the fault report across functions for no reader's benefit"
+)]
 fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: Registers) {
     use std::io::Write as _;
 
@@ -659,7 +912,14 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     if let Some((what, exact)) = placeholder {
         note_placeholder_fault(&mut line, what, exact);
     } else if inside.is_some() {
-        note_emulator_fault(&mut line);
+        // A null-ish faulting address in our code is usually the guest handing a libc shim an
+        // unpopulated pointer, not orbistoun's logic misbehaving - said apart so the reader is not
+        // sent to debug a correct `memcpy` (the `int 0x41` lesson, worklog 611).
+        if is_null_pointer_fault(faulting_address) {
+            note_null_pointer_to_libc(&mut line);
+        } else {
+            note_emulator_fault(&mut line);
+        }
     }
 
     // **Where in *our* code, when it is our code.** `inside` names the last import called,
@@ -766,9 +1026,15 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // the alternative is discarding the only output the run had. If it ever does
     // deadlock, it deadlocks a process that was about to die anyway.
     let module = MODULE.get().map_or("unknown", String::as_str);
+    // A region orbistoun placed if it is one, and otherwise the host module the address falls
+    // in - which is the difference between an outcome that reproduces and one that moves every
+    // reboot. The bare address survives in `instruction_pointer` either way.
     let (region, offset) = match locate(instruction_pointer) {
         Some((name, offset)) => (Some(name.to_owned()), Some(offset)),
-        None => (None, None),
+        None => match host_module_of(instruction_pointer) {
+            Some((name, offset)) => (Some(name), Some(offset)),
+            None => (None, None),
+        },
     };
     let trace = collect_with_fault(
         module,
@@ -790,6 +1056,13 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
             registers: Some(registers),
             pointees: describe_pointees(&registers),
             frames: walk_frames(registers.rbp),
+            // The faulting instruction's bytes, so the ranked findings can classify the trap the
+            // way the live print does - a kernel entry (`int 0x41`) names itself in the worklist,
+            // not only in the crash output (worklog 605).
+            instruction: {
+                let (opcode, len) = instruction_bytes(instruction_pointer);
+                opcode[..len].to_vec()
+            },
         }),
     );
     persist(&trace);
@@ -1207,6 +1480,10 @@ mod imp {
     /// A fetch from a page with no execute permission.
     const ACCESS_WAS_EXECUTE: usize = 8;
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one linear exception dispatcher: watchpoint, TLS backstop, interrupt service, then the fault report - each a labelled block, and splitting the register copies into helpers would scatter one context read/write across functions"
+    )]
     unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
         // Read one field per block, as the lints require. Verbose, but each read is a
         // separate dereference of a pointer the operating system owns, and stating that
@@ -1289,6 +1566,69 @@ mod imp {
         // rather than reading wrong data.
         if code == ACCESS_VIOLATION && crate::tls_backstop::restore_if_reverted() {
             return CONTINUE_EXECUTION;
+        }
+
+        // **A software interrupt with a registered handler is serviced, not reported.** A guest
+        // reaching the kernel by `int n` raises a general-protection fault the host delivers as an
+        // access violation (at `0xffff...`, D384), and orbistoun has no interrupt handling beyond
+        // this point - so without this the trap falls through to the fault report and the process
+        // ends, which is why `int 0x41` walled PPSA04263 (worklog 603, 608). When the vector has a
+        // handler, run it against the guest's registers and resume past the instruction, the way the
+        // kernel's own interrupt gate would. `orbistoun-kernel`'s table is empty until obSCEne
+        // measures a vector's semantics, so today every `int` still falls through here - this is the
+        // mechanism, in place and ready for the one-line registration that follows the measurement.
+        if matches!(code, ACCESS_VIOLATION | ILLEGAL_INSTRUCTION) {
+            let (opcode, len) = super::instruction_bytes(rip);
+            let frame = orbistoun_kernel::interrupt::InterruptFrame {
+                rax: ctx.Rax,
+                rbx: ctx.Rbx,
+                rcx: ctx.Rcx,
+                rdx: ctx.Rdx,
+                rsi: ctx.Rsi,
+                rdi: ctx.Rdi,
+                rbp: ctx.Rbp,
+                rsp: ctx.Rsp,
+                r8: ctx.R8,
+                r9: ctx.R9,
+                r10: ctx.R10,
+                r11: ctx.R11,
+                r12: ctx.R12,
+                r13: ctx.R13,
+                r14: ctx.R14,
+                r15: ctx.R15,
+                rip,
+            };
+            if let Some(resumed) = super::serviced_interrupt(&opcode[..len], frame) {
+                // The register fields are updated on a **copy** of the context - which is safe,
+                // ordinary struct assignment - and the whole record is written back in one store,
+                // so the guest resumes with the handler's answers. Building the copy here rather
+                // than seventeen writes through the raw pointer keeps the single unsafe operation
+                // that the discipline wants (principle 4).
+                let mut next = ctx;
+                next.Rax = resumed.rax;
+                next.Rbx = resumed.rbx;
+                next.Rcx = resumed.rcx;
+                next.Rdx = resumed.rdx;
+                next.Rsi = resumed.rsi;
+                next.Rdi = resumed.rdi;
+                next.Rbp = resumed.rbp;
+                next.Rsp = resumed.rsp;
+                next.R8 = resumed.r8;
+                next.R9 = resumed.r9;
+                next.R10 = resumed.r10;
+                next.R11 = resumed.r11;
+                next.R12 = resumed.r12;
+                next.R13 = resumed.r13;
+                next.R14 = resumed.r14;
+                next.R15 = resumed.r15;
+                next.Rip = resumed.rip;
+                // SAFETY: `context` is the operating system's live context record for this call;
+                // writing the whole record it owns is what resuming a serviced interrupt is.
+                unsafe {
+                    *context = next;
+                }
+                return CONTINUE_EXECUTION;
+            }
         }
 
         // An access violation reports what was attempted and where; the others carry no
@@ -1573,6 +1913,10 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         .collect();
     counts.sort_unstable_by_key(|(_, calls)| std::cmp::Reverse(*calls));
 
+    // Read once, beside the counts, and indexed by the same import index - so each row's inferred
+    // signature comes from the same snapshot as its call count and cannot disagree with it.
+    let shapes = orbistoun_thunk::arg_shapes();
+
     CallTrace {
         module: module.to_owned(),
         reached: reached.to_owned(),
@@ -1607,6 +1951,7 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         title_modules: TITLE_MODULES.get().cloned().unwrap_or_default(),
         forced_dumps: FORCED_DUMPS.get().cloned().unwrap_or_default(),
         quiet: QUIET.get().copied(),
+        ended_by: ENDED_BY.get().cloned(),
         threads: thread_notes(),
         said: orbistoun_core::said::lines(),
         conditions: {
@@ -1671,6 +2016,10 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
                 label: labelled(*index),
                 calls: *calls,
                 implemented: orbistoun_thunk::is_implemented(*index),
+                shape: shapes
+                    .get(*index)
+                    .map(|s| orbistoun_thunk::describe_shape(s))
+                    .unwrap_or_default(),
             })
             .collect(),
         fault,
@@ -2008,6 +2357,7 @@ pub fn start_time_limit(seconds: u64, module: String) {
     std::thread::spawn(move || {
         let quiet = wait_watching_for_silence(seconds);
         note_quiet(quiet);
+        note_ended_by(orbistoun_report::trace::RAN_TO_LIMIT);
         let trace = collect_calls(&module, "Entered");
         // Persisted *before* the summary is printed and before the process ends. A
         // guest that had to be stopped is exactly the case where the trace matters
@@ -2072,6 +2422,24 @@ fn note_quiet(quiet: Quiet) {
     let _ = QUIET.set(quiet);
 }
 
+/// Records which limit is stopping this run, before the trace that reports it is collected.
+///
+/// Called from the branch that decided, which is the point: the clock and the budget leave the
+/// process by different exit codes, but an exit code is something the *parent* reads and the
+/// trace is written before it - so without this both endings reach the report as the same
+/// absence and both are described as the clock (D238).
+fn note_ended_by(reason: &str) {
+    let _ = ENDED_BY.set(reason.to_owned());
+}
+
+/// Which limit stopped the run, once one has.
+///
+/// A fourth slot beside the conditions, the experiments and the silence, for the reason they are
+/// all slots: the trace is collected with no route back up to the thread that knows (D160).
+/// Empty for a run that ended on its own, so `None` means "no limit fired" rather than "nobody
+/// said which".
+static ENDED_BY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// The silence, once something has measured it.
 ///
 /// A third slot beside the conditions and the experiments, for the same reason they are slots:
@@ -2106,6 +2474,7 @@ pub fn start_call_budget(budget: u64, module: String) {
 /// (principle 9). What it would have captured lives in the two statics above.
 fn on_budget_reached() {
     let module = BUDGET_MODULE.get().map_or("", String::as_str);
+    note_ended_by(orbistoun_report::trace::SPENT_THE_BUDGET);
     let trace = collect_calls(module, "Entered");
     persist(&trace);
     // Not "after N calls": the count is already the second half of that line, and saying
@@ -2167,7 +2536,158 @@ pub fn install() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Line, Region, describe_region, describe_unreadable, locate, published_envelope};
+    use super::{
+        Line, Region, describe_region, describe_unreadable, is_null_pointer_fault, locate,
+        note_emulator_fault, note_instruction_shape, note_null_pointer_to_libc, published_envelope,
+        serviced_interrupt,
+    };
+
+    /// **A null-ish fault in orbistoun's code is called the guest's libc pointer, not an emulator
+    /// bug.** PPSA02664 faults at `read of 0xa8` inside `orbistoun_libc::memcpy` - the guest handed
+    /// an unpopulated pointer to `memcpy`, which the "EMULATOR BUG" message sent a reader to debug
+    /// (a correct `memcpy`) instead of the upstream guest state. The threshold decides it, and a real
+    /// guest address (well above a page) still reads as an emulator fault, so a genuine emulator bug
+    /// is not relabelled away.
+    #[test]
+    fn a_null_ish_fault_in_own_code_is_the_guests_libc_pointer_not_an_emulator_bug() {
+        // The classifier: null plus a field offset is the guest's pointer; a guest address is not.
+        assert!(
+            is_null_pointer_fault(0xa8),
+            "read of 0xa8 is null plus an offset"
+        );
+        assert!(is_null_pointer_fault(0x0), "a bare null too");
+        assert!(
+            !is_null_pointer_fault(0x7400_01f8_f070),
+            "a real guest address is not null-ish, so it stays an emulator fault"
+        );
+
+        // The two messages are distinct and neither borrows the other's verdict.
+        let mut libc = Line::new();
+        note_null_pointer_to_libc(&mut libc);
+        let libc_text = String::from_utf8_lossy(libc.as_bytes()).into_owned();
+        assert!(
+            libc_text.contains("libc") && libc_text.contains("upstream"),
+            "the libc-pointer note points upstream, not at orbistoun's logic: {libc_text}"
+        );
+        assert!(
+            !libc_text.contains("EMULATOR BUG"),
+            "and it does not carry the emulator-bug verdict: {libc_text}"
+        );
+
+        let mut emu = Line::new();
+        note_emulator_fault(&mut emu);
+        assert!(
+            String::from_utf8_lossy(emu.as_bytes()).contains("EMULATOR BUG"),
+            "a non-null fault in our code is still called an emulator bug"
+        );
+    }
+
+    /// **The interrupt glue services an `int` with a handler, resumes past it, and answers - and
+    /// declines everything else.** The `CONTEXT` copy is trivial; this pins the part that could be
+    /// wrong: which instructions count, where execution resumes, and that an unhandled vector is
+    /// left for the fault report (worklog 608).
+    #[test]
+    fn a_software_interrupt_with_a_handler_is_serviced_and_resumes_past_it() {
+        use orbistoun_kernel::interrupt::{InterruptFrame, clear, install};
+
+        fn answer_7(frame: &mut InterruptFrame) {
+            frame.rax = 7;
+        }
+        const VECTOR: u8 = 0x7f;
+        clear(VECTOR);
+        install(VECTOR, answer_7);
+
+        // `int 0x7f` at rip: serviced, rax answered, rip advanced two bytes past the trap.
+        let at = 0x4000_0000_5000;
+        let frame = InterruptFrame {
+            rax: 0,
+            rip: at,
+            ..InterruptFrame::default()
+        };
+        let resumed = serviced_interrupt(&[0xcd, VECTOR], frame).expect("a handled interrupt");
+        assert_eq!(resumed.rax, 7, "the handler answered into rax");
+        assert_eq!(
+            resumed.rip,
+            at + 2,
+            "execution resumes past the two-byte int"
+        );
+        clear(VECTOR);
+
+        // Same instruction, no handler: not serviced, so the fault report gets it.
+        assert!(
+            serviced_interrupt(&[0xcd, VECTOR], InterruptFrame::default()).is_none(),
+            "an int with no handler is left for the report, not silently swallowed"
+        );
+        // An ordinary instruction is never mistaken for an interrupt.
+        assert!(
+            serviced_interrupt(&[0x48, 0x8b, 0x00], InterruptFrame::default()).is_none(),
+            "a mov is not an interrupt"
+        );
+        // int 0x41 specifically has no handler - it is measured fatal, so there is nothing to
+        // register - and so it is left for the report, which frames it as the trap it is.
+        assert!(
+            serviced_interrupt(&[0xcd, 0x41], InterruptFrame::default()).is_none(),
+            "int 0x41 is measured fatal, so it is never serviced - it falls through to the report"
+        );
+    }
+
+    /// **A software interrupt names its own vector and its own category, deterministically.**
+    ///
+    /// This is the report answering the question instead of a person decoding the bytes by hand.
+    /// `int 0x41` walled a commercial title for an afternoon because the report said a bare "int"
+    /// and framed it as "orbistoun does not intercept ... no import to blame" - which read as a
+    /// dead end and sent the investigation after a filesystem path (worklog 603).
+    ///
+    /// **The categories now diverge on the one vector that was measured, and this pins it.** obSCEne
+    /// measured `int 0x41` fatal on hardware (REQ-...b3c2): it is a guest trap whose cause is
+    /// upstream, framed as a trap, *not* as an unimplemented kernel entry to characterise. Every
+    /// other vector is still unmeasured and keeps the "KERNEL ENTRY, this is orbistoun's gap"
+    /// framing - because a vector nobody has measured really might be a service to add. A `ud2` is
+    /// checked to be a guest trap too, because conflating the two is how "orbistoun's gap" and "the
+    /// guest aborted" get mistaken for each other.
+    #[test]
+    fn a_software_interrupt_names_its_vector_and_its_measured_category() {
+        // int 0x41: measured fatal, so a guest trap pointing upstream - not an entry to characterise.
+        let mut fatal = Line::new();
+        note_instruction_shape(&mut fatal, &[0xcd, 0x41], 0xffff_ffff_ffff_ffff);
+        let fatal_text = String::from_utf8_lossy(fatal.as_bytes());
+        assert!(
+            fatal_text.contains("int 0x41") && fatal_text.contains("measured fatal"),
+            "the vector is named and said to be measured fatal, not awaiting a handler: {fatal_text}"
+        );
+        assert!(
+            fatal_text.contains("upstream") && !fatal_text.contains("characterise"),
+            "a measured-fatal trap points upstream, not at another measurement: {fatal_text}"
+        );
+
+        // int 0x42: unmeasured, so still a kernel entry that is orbistoun's gap to characterise.
+        let mut entry = Line::new();
+        note_instruction_shape(&mut entry, &[0xcd, 0x42], 0xffff_ffff_ffff_ffff);
+        let entry_text = String::from_utf8_lossy(entry.as_bytes());
+        assert!(
+            entry_text.contains("int 0x42")
+                && entry_text.contains("KERNEL ENTRY, UNIMPLEMENTED")
+                && entry_text.contains("orbistoun's gap"),
+            "an unmeasured vector is orbistoun's gap and must be categorised as one: {entry_text}"
+        );
+
+        // A ud2 is the guest trapping itself, a different category with a different next step.
+        let mut trap = Line::new();
+        note_instruction_shape(&mut trap, &[0x0f, 0x0b], 0);
+        let trap_text = String::from_utf8_lossy(trap.as_bytes());
+        assert!(
+            trap_text.contains("GUEST TRAP") && trap_text.contains("upstream"),
+            "a self-raised trap points upstream, not at an unimplemented entry: {trap_text}"
+        );
+
+        // An ordinary instruction says nothing - the note must not fire on a normal fault.
+        let mut ordinary = Line::new();
+        note_instruction_shape(&mut ordinary, &[0x48, 0x8b, 0x00], 0x1234);
+        assert!(
+            !String::from_utf8_lossy(ordinary.as_bytes()).contains("KERNEL ENTRY"),
+            "a mov is not a kernel entry"
+        );
+    }
 
     #[test]
     fn an_address_inside_a_registered_region_is_named_with_its_offset() {
@@ -2344,7 +2864,10 @@ mod pointee_tests {
         assert_eq!(
             printable_text(b"noterminator"),
             None,
-            "an unterminated run is the start of something longer, and quoting it would show              a fragment as though it were the whole"
+            concat!(
+                "an unterminated run is the start of something longer, and quoting it ",
+                "would show a fragment as though it were the whole"
+            )
         );
         assert_eq!(
             printable_text(b"has	tab ......"),
@@ -2428,8 +2951,11 @@ pub(crate) fn tables_disagree() {
         return;
     }
     eprintln!(
-        "orbistoun: the tables an import index is used against are different lengths - \
-         {labels} label(s), {counters} call counter(s)"
+        concat!(
+            "orbistoun: the tables an import index is used against are different lengths - ",
+            "{} label(s), {} call counter(s)"
+        ),
+        labels, counters
     );
     eprintln!(
         "orbistoun:   an index past the shortest of those names one import and counts another"
@@ -2449,11 +2975,73 @@ pub(crate) fn bound_yet_called() {
     }
     let total: u64 = offenders.iter().map(|(_, calls)| *calls).sum();
     eprintln!(
-        "orbistoun: {} import(s) were bound into a module this title ships and were called \
-         through a stub anyway, {total} time(s) - the binding did not reach the relocation",
-        offenders.len()
+        concat!(
+            "orbistoun: {} import(s) were bound into a module this title ships and were called ",
+            "through a stub anyway, {} time(s) - the binding did not reach the relocation"
+        ),
+        offenders.len(),
+        total
     );
     for (label, calls) in offenders.iter().take(6) {
         eprintln!("orbistoun:   {label}, {calls} call(s)");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod host_module_tests {
+    use super::host_module_of;
+
+    /// **An address inside this very binary is named as it, at a stable offset.**
+    ///
+    /// The whole reason `host_module_of` exists is that a bare host address is not reproducible
+    /// across reboots, so the test has to check the two properties that buy the reproducibility:
+    /// that a *name* comes back, and that the offset is the distance from the module's own base
+    /// rather than anything absolute.
+    ///
+    /// Uses this test function's own address, because it is the one host address whose module is
+    /// known without asking the platform a second time.
+    #[test]
+    fn an_address_in_this_module_is_named_and_offset_from_its_base() {
+        let here = an_address_in_this_module_is_named_and_offset_from_its_base as *const () as usize
+            as u64;
+        let (name, offset) = host_module_of(here).expect("this binary is a mapped image");
+
+        assert!(
+            !name.is_empty() && !name.contains('\\') && !name.contains('/'),
+            "the file name and never the path - an absolute path must not reach a record: {name}"
+        );
+        assert!(
+            offset > 0 && offset < here,
+            "an offset into the module, not the address itself: {offset:#x} of {here:#x}"
+        );
+        // The property that makes it worth recording: reconstructing the address from the
+        // answer gives back the address, so `name+offset` names this place and no other.
+        let (_, again) = host_module_of(here).expect("stable across calls");
+        assert_eq!(offset, again, "the same address answers the same offset");
+
+        // A second address in the same module differs by exactly the distance between them,
+        // which is what a reader comparing two recorded faults relies on.
+        let other = host_module_of as *const () as usize as u64;
+        let (other_name, other_offset) = host_module_of(other).expect("also in this binary");
+        assert_eq!(other_name, name, "both are in this binary");
+        assert_eq!(
+            other_offset.abs_diff(offset),
+            other.abs_diff(here),
+            "offsets keep the distance the addresses had"
+        );
+    }
+
+    /// **Nothing is invented for an address that is in no module.**
+    ///
+    /// The negative half, and the one that matters: answering a name for an unmapped address
+    /// would put a fabricated location into a record that reads as a measurement.
+    #[test]
+    fn an_address_in_no_module_is_not_named() {
+        assert_eq!(host_module_of(0), None, "the null page is in no module");
+        assert_eq!(
+            host_module_of(0x0000_7f00_0000_0000),
+            None,
+            "an address in no mapping has no module to name"
+        );
     }
 }

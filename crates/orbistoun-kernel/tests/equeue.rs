@@ -64,8 +64,10 @@ fn a_queue_answers_to_the_handle_it_wrote_and_no_other() {
     );
     assert_ne!(
         handle, 0,
-        "and the handle is written through the out-parameter - leaving it unwritten is what \
-         handed every later call a value orbistoun never issued"
+        concat!(
+            "and the handle is written through the out-parameter - leaving it unwritten is what ",
+            "handed every later call a value orbistoun never issued"
+        )
     );
 
     let mut add = [0_u64; GUEST_ARG_REGISTERS];
@@ -85,14 +87,18 @@ fn a_queue_answers_to_the_handle_it_wrote_and_no_other() {
     let refused = implementation("sceKernelAddUserEventEdge")(&stranger);
     assert_ne!(
         refused, 0,
-        "a queue nobody created must not accept a registration - reporting success would \
-         promise delivery from a queue that does not exist"
+        concat!(
+            "a queue nobody created must not accept a registration - reporting success would ",
+            "promise delivery from a queue that does not exist"
+        )
     );
     assert_eq!(
         refused,
         u64::from(orbistoun_core::GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw()),
-        "and it refuses with the vendor code the event-flag family answers, which obSCEne \
-         measured - not the placeholder a guest would fail to recognise (D125)"
+        concat!(
+            "and it refuses with the vendor code the event-flag family answers, which obSCEne ",
+            "measured - not the placeholder a guest would fail to recognise (D125)"
+        )
     );
     drop(name);
 }

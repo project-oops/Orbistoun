@@ -418,15 +418,49 @@ fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                 None => return 0,
             },
             b'F' => format!("{}-{:02}-{:02}", year + 1900, mon + 1, mday),
-            b'T' => format!("{hour:02}:{min:02}:{sec:02}"),
+            // `%X` is the C-locale time, which is `%T` outright; `%x` the C-locale date, `%D`.
+            // Only the C locale is modelled, so they are the same rendering, not a lookup.
+            b'T' | b'X' => format!("{hour:02}:{min:02}:{sec:02}"),
             b'R' => format!("{hour:02}:{min:02}"),
-            b'D' => format!(
+            b'D' | b'x' => format!(
                 "{:02}/{:02}/{:02}",
                 mon + 1,
                 mday,
                 (year + 1900).rem_euclid(100)
             ),
-            // Anything else - a zone, a locale form, a modifier - stops it. A half-rendered
+            // The twelve-hour clock. Midnight and noon both read as twelve, not zero.
+            b'I' => {
+                let h = if hour % 12 == 0 { 12 } else { hour % 12 };
+                format!("{h:02}")
+            }
+            // `%r` is the twelve-hour time in full: `%I:%M:%S %p`.
+            b'r' => {
+                let h = if hour % 12 == 0 { 12 } else { hour % 12 };
+                let meridiem = if hour < 12 { "AM" } else { "PM" };
+                format!("{h:02}:{min:02}:{sec:02} {meridiem}")
+            }
+            // Weekday as a number: `%w` has Sunday at zero, `%u` (ISO) has Monday at one and
+            // Sunday at seven.
+            b'w' => format!("{wday}"),
+            b'u' => format!("{}", if wday == 0 { 7 } else { wday }),
+            // The century - the year's first two digits.
+            b'C' => format!("{:02}", (year + 1900).div_euclid(100)),
+            // `%c` is the C-locale date-and-time, `%a %b %e %H:%M:%S %Y`.
+            b'c' => {
+                // The day and month names refuse a broken structure, exactly as `%a` and `%b`
+                // do on their own - a `%c` that rendered a wrong name would hide it.
+                let (Some(day), Some(month)) = (
+                    name(&DAYS, wday).and_then(|day| day.get(..3)),
+                    name(&MONTHS, mon).and_then(|month| month.get(..3)),
+                ) else {
+                    return 0;
+                };
+                format!(
+                    "{day} {month} {mday:2} {hour:02}:{min:02}:{sec:02} {}",
+                    year + 1900
+                )
+            }
+            // Anything else - a zone, a week number, a locale modifier - stops it. A half-rendered
             // timestamp is a wrong date rather than a short one.
             _ => return 0,
         };
@@ -596,6 +630,64 @@ mod tests {
         );
         let end = usize::try_from(written).expect("a length");
         assert_eq!(&out[..end], b"Aug 29 21:47 Sat");
+    }
+
+    /// Renders `format` against `tm` and returns what was written.
+    fn rendered(tm: &[i32; 9], format: &std::ffi::CStr) -> String {
+        let mut out = [0_u8; 64];
+        let written = call(
+            "strftime",
+            [
+                out.as_mut_ptr() as u64,
+                out.len() as u64,
+                format.as_ptr() as u64,
+                tm.as_ptr() as u64,
+                0,
+                0,
+            ],
+        );
+        let end = usize::try_from(written).expect("a length");
+        String::from_utf8(out[..end].to_vec()).expect("ascii")
+    }
+
+    /// **The twelve-hour clock, the weekday numbers, and the C-locale date/time forms.**
+    ///
+    /// Each is a pure function of the fields `struct tm` holds. 2026-08-29 21:47:05 is an
+    /// afternoon, so `%I` wraps twenty-one to nine and `%r` reads `PM`.
+    #[test]
+    fn the_twelve_hour_and_c_locale_forms_render() {
+        let tm = a_time();
+        assert_eq!(
+            rendered(&tm, c"%I"),
+            "09",
+            "21:00 is nine on the twelve-hour clock"
+        );
+        assert_eq!(rendered(&tm, c"%r"), "09:47:05 PM");
+        assert_eq!(
+            rendered(&tm, c"%w %u"),
+            "6 6",
+            "Saturday is six on both scales"
+        );
+        assert_eq!(rendered(&tm, c"%C"), "20", "the century of 2026");
+        assert_eq!(rendered(&tm, c"%x %X"), "08/29/26 21:47:05");
+        assert_eq!(rendered(&tm, c"%c"), "Sat Aug 29 21:47:05 2026");
+    }
+
+    /// **Midnight reads as twelve, and Sunday is the day the two weekday scales disagree.**
+    ///
+    /// `%I` of hour zero is twelve, not zero, and `%r` says `AM`; `%u` puts Sunday at seven where
+    /// `%w` puts it at zero, which is the one weekday that separates the ISO scale from the other.
+    #[test]
+    fn midnight_and_sunday_hit_the_clock_and_weekday_edges() {
+        // 2026-08-30 00:00:00, the Sunday after the Saturday above.
+        let tm = [0, 0, 0, 30, 7, 126, 0, 241, 0];
+        assert_eq!(rendered(&tm, c"%I"), "12", "midnight is twelve, not zero");
+        assert_eq!(rendered(&tm, c"%r"), "12:00:00 AM");
+        assert_eq!(
+            rendered(&tm, c"%w %u"),
+            "0 7",
+            "Sunday: zero one way, seven the ISO way"
+        );
     }
 
     /// **A conversion it cannot render stops the whole thing.**

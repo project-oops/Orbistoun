@@ -20,3 +20,6 @@ orbistoun-env = { workspace = true }
 orbistoun-hle = { workspace = true }
 orbistoun-mem = { workspace = true }
 orbistoun-nid = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

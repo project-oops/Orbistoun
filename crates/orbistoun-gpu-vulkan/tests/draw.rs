@@ -91,8 +91,12 @@ fn a_fragment_shader_writes_its_colour_into_the_attachment() {
             assert_eq!(
                 pixels.at(x, y),
                 Some([0, 0, 255, 255]),
-                "pixel ({x}, {y}) is not the fragment shader's blue - red would mean the clear \
-                 survived and the draw did nothing"
+                concat!(
+                    "pixel ({}, {}) is not the fragment shader's blue - red would mean the ",
+                    "clear survived and the draw did nothing"
+                ),
+                x,
+                y
             );
         }
     }

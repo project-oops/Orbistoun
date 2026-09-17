@@ -512,7 +512,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFloatFn)] {
 #[cfg(test)]
 #[expect(
     clippy::float_cmp,
-    reason = "exactness is the property under test - that scaling by a power of two, a               ties-to-even round and a sign-preserving split are exact rather than close.               An epsilon here would let the wrong answer pass, which is the whole failure               these guard against"
+    reason = "exactness is the property under test - that scaling by a power of two, a ties-to-even round and a sign-preserving split are exact rather than close. An epsilon here would let the wrong answer pass, which is the whole failure these guard against"
 )]
 mod bulk_ported {
     use super::{

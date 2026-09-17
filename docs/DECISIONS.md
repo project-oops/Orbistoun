@@ -704,13 +704,28 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D680 | [the app-content init sequence, and that it is not Terminator's wall](decisions/D680-the-app-content-init-sequence-and-that.md) | decided | 2026-09-12 |
 | 🟢 | D681 | [the shader-fixture reference toolchain is LLVM 18, reachable in a container](decisions/D681-the-shader-fixture-reference-toolchain.md) | decided | 2026-09-12 |
 | 🟢 | D682 | [shader capture into the census corpus requires a terminator, not a translatable decode](decisions/D682-shader-capture-into-the-census-corpus.md) | decided | 2026-09-13 |
-| 🟢 | D683 | [borrowed packet sizes are cross-checks, never sources](decisions/D683-borrowed-packet-sizes-are-cross-checks.md) | decided | 2026-09-14 |
-| 🟢 | D684 | [worklog numbers are reserved under a lock, like decision numbers](decisions/D684-worklog-numbers-are-reserved-under-a.md) | decided | 2026-09-14 |
-| 🟢 | D685 | [a guest that exited deliberately earns a rung, below a flip](decisions/D685-a-guest-that-exited-deliberately-earns.md) | decided | 2026-09-14 |
-| 🟢 | D686 | [a deliberate exit outranks a fault, above the import count](decisions/D686-a-deliberate-exit-outranks-a-fault.md) | decided | 2026-09-14 |
-| 🟢 | D687 | [a record updates on not-worse-and-different, not only on better](decisions/D687-a-record-updates-on-not-worse-and.md) | decided | 2026-09-14 |
-| 🟡 | D688 | [an NGG primitive shader translates to a mesh shader, not a vertex shader](decisions/D688-an-ngg-primitive-shader-translates-to-a.md) | assumed | 2026-09-14 |
-| 🟢 | D689 | [a translated module's storage buffers are bound on the draw path, and the device asks for what the modules declare](decisions/D689-a-translated-module-s-storage-buffers.md) | decided | 2026-09-14 |
+| 🟢 | D683 | [Borrowed packet sizes are cross-checks, never sources](decisions/D683-borrowed-packet-sizes-are-cross-checks.md) | decided | 2026-09-14 |
+| 🟢 | D684 | [Worklog numbers are reserved under a lock, like decision numbers](decisions/D684-worklog-numbers-are-reserved-under-a.md) | decided | 2026-09-14 |
+| 🟢 | D685 | [A guest that exited deliberately earns a rung, below a flip](decisions/D685-a-guest-that-exited-deliberately-earns.md) | decided | 2026-09-14 |
+| 🟢 | D686 | [A deliberate exit outranks a fault, above the import count](decisions/D686-a-deliberate-exit-outranks-a-fault.md) | decided | 2026-09-14 |
+| 🟢 | D687 | [A record updates on not-worse-and-different, not only on better](decisions/D687-a-record-updates-on-not-worse-and.md) | decided | 2026-09-14 |
+| 🟡 | D688 | [An NGG primitive shader translates to a mesh shader, not a vertex shader](decisions/D688-an-ngg-primitive-shader-translates-to-a.md) | assumed | 2026-09-14 |
+| 🟢 | D689 | [A translated module's storage buffers are bound on the draw path, and the device asks for what the modules declare](decisions/D689-a-translated-module-s-storage-buffers.md) | decided | 2026-09-14 |
+| 🟡 | D690 | [A guest's image descriptor maps to the one bound texture, and a second one is refused](decisions/D690-a-guest-s-image-descriptor-maps-to-the.md) | assumed | 2026-09-15 |
+| 🟡 | D691 | [A window length that is not a power of two is refused](decisions/D691-a-window-length-that-is-not-a-power-of.md) | assumed | 2026-09-15 |
+| 🟡 | D692 | [A stored image declares no format, and the device feature is what makes that possible](decisions/D692-a-stored-image-declares-no-format-and.md) | assumed | 2026-09-15 |
+| 🟡 | D693 | [A refused direct-memory allocation reports what refused it](decisions/D693-the-direct-memory-refusal-reports-what.md) | assumed | 2026-09-15 |
+| 🟡 | D694 | [The compatibility ladder gains a rung nothing can reach](decisions/D694-the-compatibility-ladder-gains-a-rung.md) | assumed | 2026-09-15 |
+| 🟡 | D695 | [The worker hands the shim pixels, not a window and not GPU memory](decisions/D695-the-worker-hands-the-shim-pixels-not-a.md) | assumed | 2026-09-15 |
+| 🟡 | D696 | [An unmeasured-body producer earns wiring when it hands the guest a real cursor](decisions/D696-an-unmeasured-body-producer-earns.md) | assumed | 2026-09-15 |
+| 🟡 | D697 | [The direct-memory pool size is guest-dependent, defaulting to the retail figure](decisions/D697-the-direct-memory-pool-size-is-guest.md) | assumed | 2026-09-15 |
+| 🟢 | D698 | [the give-up gate is the closest call below the stop, not the most recent](decisions/D698-the-give-up-gate-is-the-closest-call.md) | decided | 2026-09-15 |
+| 🟢 | D699 | [int 0x41 is measured fatal, so it reclassifies from kernel entry to guest trap](decisions/D699-int-0x41-is-measured-fatal-so-it.md) | decided | 2026-09-15 |
+| 🟢 | D700 | [the remaining fs host-divergences are measured near-zero-reachability, so the verbatim chokepoint is declined](decisions/D700-the-remaining-fs-host-divergences-are.md) | decided | 2026-09-16 |
+| 🟢 | D701 | [ensure_resident is the backend resource-residency mechanism, generalizing modules to all resource kinds](decisions/D701-ensure-resident-is-the-backend-resource.md) | decided | 2026-09-16 |
+| 🟢 | D702 | [Render targets are identified by extent, not their disputed base address](decisions/D702-render-targets-are-identified-by-extent.md) | decided | 2026-09-16 |
+| 🟢 | D703 | [The guest-memory window is frame state the driver sets, seeded per draw, not a bound resource yet](decisions/D703-the-guest-memory-window-is-frame-state.md) | decided | 2026-09-16 |
+| 🟢 | D704 | [A scripted pad is a level held until the next step, and carries typed state rather than bytes](decisions/D704-a-scripted-pad-is-a-level-held-until.md) | decided | 2026-09-16 |
 
 | | meaning |
 |---|---|

@@ -1658,12 +1658,18 @@ mod tests {
     /// (D356).
     #[test]
     fn one_sentence_punctuated_two_ways_is_one_premise_and_one_word_apart_is_two() {
-        let full_stop = "Modelled on the POSIX call of the same shape. The correspondence is \
-                         inferred from the name.";
-        let semicolon = "Modelled on the POSIX call of the same shape; the correspondence is \
-                         inferred from the name.";
-        let one_word_off = "Modelled on the POSIX call of the same name. The correspondence is \
-                            inferred from the name.";
+        let full_stop = concat!(
+            "Modelled on the POSIX call of the same shape. The correspondence is ",
+            "inferred from the name."
+        );
+        let semicolon = concat!(
+            "Modelled on the POSIX call of the same shape; the correspondence is ",
+            "inferred from the name."
+        );
+        let one_word_off = concat!(
+            "Modelled on the POSIX call of the same name. The correspondence is ",
+            "inferred from the name."
+        );
 
         let asked = vec![
             ("sceKernelWrite".to_owned(), full_stop.to_owned()),
@@ -1676,14 +1682,19 @@ mod tests {
         assert_eq!(
             premises.len(),
             2,
-            "a full stop and a semicolon do not make two premises, and one different word \
-             does: {premises:#?}"
+            concat!(
+                "a full stop and a semicolon do not make two premises, and one different word ",
+                "does: {:#?}"
+            ),
+            premises
         );
         assert_eq!(premises[0].functions.len(), 3);
         assert_eq!(
             premises[0].wordings, 2,
-            "the two punctuations must be reported, not hidden - that count is what says the \
-             data needs tidying"
+            concat!(
+                "the two punctuations must be reported, not hidden - that count is what says ",
+                "the data needs tidying"
+            )
         );
         assert_eq!(
             premises[0].question, full_stop,
@@ -1730,8 +1741,10 @@ mod tests {
             assert_eq!(
                 premise.wordings,
                 1,
-                "{} entries share this premise and write it {} different ways, so it is \
-                 counted as {} open questions rather than one: {:?}",
+                concat!(
+                    "{} entries share this premise and write it {} different ways, so it is ",
+                    "counted as {} open questions rather than one: {:?}"
+                ),
                 premise.functions.len(),
                 premise.wordings,
                 premise.wordings,
@@ -1780,13 +1793,19 @@ mod tests {
         }
         assert!(
             strays.is_empty(),
-            "these ask the delegation question in words of their own, so each becomes a \
-             premise of its own: {strays:#?}"
+            concat!(
+                "these ask the delegation question in words of their own, so each becomes a ",
+                "premise of its own: {:#?}"
+            ),
+            strays
         );
         assert!(
             asking > 1,
-            "the shared wording is what makes this one premise - finding it on {asking} \
-             entries means it stopped being shared rather than that the entries were fixed"
+            concat!(
+                "the shared wording is what makes this one premise - finding it on {} ",
+                "entries means it stopped being shared rather than that the entries were fixed"
+            ),
+            asking
         );
     }
 }

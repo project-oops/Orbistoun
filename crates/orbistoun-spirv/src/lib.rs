@@ -177,6 +177,38 @@ pub mod op {
     /// Two operands, both ids. Everything a mesh shader writes afterwards is within what it
     /// declared here - which is the instruction a guest's `MSG_GS_ALLOC_REQ` corresponds to.
     pub const SET_MESH_OUTPUTS_EXT: u16 = 5295;
+    /// A texture: the element type, its dimensionality, and how it is used.
+    pub const TYPE_IMAGE: u16 = 25;
+    /// An image paired with the sampler that reads it.
+    pub const TYPE_SAMPLED_IMAGE: u16 = 27;
+    /// Samples a texture, letting the implementation pick the level of detail from the
+    /// derivatives of the coordinate - which only a fragment stage has.
+    pub const IMAGE_SAMPLE_IMPLICIT_LOD: u16 = 87;
+    /// Samples a texture at a level of detail the instruction names.
+    ///
+    /// The form a guest's `image_sample_lz` asks for, and the one available in a stage with
+    /// no derivatives. Carries a literal operand mask after the coordinate, then the level.
+    pub const IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88;
+    /// Reads one texel by its integer coordinate, with no sampler involved.
+    ///
+    /// What a guest's `image_load` is: an image descriptor, a texel coordinate, and no
+    /// filtering, wrapping or level selection to speak of. Carries a literal operand mask like
+    /// the explicit sampling form, and Vulkan requires the level be named for a non-multisampled
+    /// image - so in practice it always carries one.
+    pub const IMAGE_FETCH: u16 = 95;
+    /// The image inside a sampled image, so it can be fetched from rather than sampled.
+    ///
+    /// A fetch takes an image; a descriptor binds the image and its sampler together. This is
+    /// the one that gets from the second to the first, and it is why reading a texel needs no
+    /// binding of its own.
+    pub const IMAGE: u16 = 100;
+    /// Writes one texel of a storage image by its integer coordinate.
+    ///
+    /// What a guest's `image_store` is. No result: an image write is an effect, like a store to
+    /// memory, so nothing names its outcome.
+    pub const IMAGE_WRITE: u16 = 99;
+    /// Builds a vector from components of two others, by index.
+    pub const VECTOR_SHUFFLE: u16 = 79;
     /// Reads through a pointer.
     pub const LOAD: u16 = 61;
     /// Reinterprets a value's bits as another type of the same width.
@@ -316,11 +348,26 @@ pub mod storage {
     /// Where a vertex shader puts its position and a fragment shader its colour. Like
     /// [`INPUT`], an output variable must appear in the entry point's interface.
     pub const OUTPUT: u32 = 3;
+    /// Read-only storage the pipeline binds: images, samplers, and the two together.
+    ///
+    /// Not a buffer. A sampled image is bound through a descriptor and read with a sampling
+    /// instruction rather than loaded, which is why it has a storage class of its own.
+    pub const UNIFORM_CONSTANT: u32 = 0;
     /// Module-scope storage private to one invocation.
     ///
     /// Used here for a constant table a shader indexes: a composite constant cannot be
     /// indexed dynamically, but a `Private` variable initialised with one can.
     pub const PRIVATE: u32 = 6;
+}
+
+/// The optional operands a sampling instruction may carry, as a mask.
+///
+/// Measured from compiled output, like everything else here: a GLSL shader calling
+/// `textureLod` was compiled and disassembled, and its sampling instruction carries mask `2`
+/// followed by the level (worklog 566).
+pub mod image_operands {
+    /// A level of detail follows the mask.
+    pub const LOD: u32 = 2;
 }
 
 /// Decorations.
@@ -344,6 +391,12 @@ pub mod decoration {
     /// without this decoration interpolates it, which is a different number everywhere except
     /// at one vertex - so the decoration is the translation rather than a hint about it.
     pub const FLAT: u32 = 14;
+    /// Marks a storage image the module only ever writes.
+    ///
+    /// Emitted because the reference compiler emits it for a write-only image, and because it
+    /// is true of everything this project stores to: a guest's `image_store` writes, and the
+    /// instruction that reads is a fetch through the sampled binding instead.
+    pub const NON_READABLE: u32 = 25;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
@@ -354,6 +407,17 @@ pub mod decoration {
 pub mod capability {
     /// Shader stages. The baseline for anything graphics or compute.
     pub const SHADER: u32 = 1;
+    /// Permits writing to a storage image whose format the module does not declare.
+    ///
+    /// **The whole reason a store is translatable at all.** A storage image normally names its
+    /// format in the module, and a guest's format lives in a descriptor this project does not
+    /// decode - so declaring one would be inventing it. With this, the module says `Unknown` and
+    /// the format is whatever the pipeline bound, which is a fact rather than a guess (D692).
+    ///
+    /// The device has to offer `shaderStorageImageWriteWithoutFormat`, and a module declaring a
+    /// capability the device was not created with is refused rather than run - which is the
+    /// behaviour to want.
+    pub const STORAGE_IMAGE_WRITE_WITHOUT_FORMAT: u32 = 56;
     /// Mesh and task stages, from `SPV_EXT_mesh_shader`.
     ///
     /// It implies [`SHADER`], so a mesh module declares this alone - which is what the
@@ -1150,6 +1214,28 @@ fn declare_varying_table(
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
+    interpolating_vertex_module(&[corners])
+}
+
+/// The same triangle carrying **one varying per location**, in order from zero.
+///
+/// # Why more than one
+///
+/// A guest's textured pixel shader reads two: a colour it modulates by and a coordinate it
+/// samples at. Fed by a vertex module that writes only the first, the second arrives undefined -
+/// so the shader samples one texel everywhere and the frame says nothing about whether the
+/// coordinate reached the sample. The console's own shader is exactly that shape (worklog 581).
+///
+/// Each entry is that varying's value at the three corners, and the location is its index.
+/// Everything else is [`interpolated_vertex_module`] unchanged - the same position table, so a
+/// failure is about the varyings rather than about the geometry.
+// A module is a linear sequence of declarations, and every identifier in it is a local the
+// next line needs. Splitting further means helpers taking six or eight ids apiece, which
+// moves the length rather than removing it and makes the order harder to read - the one
+// property that matters in a builder. The varying and position tables are already out.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn interpolating_vertex_module(varying_values: &[[[f32; 4]; 3]]) -> Vec<u32> {
     let mut b = Builder::new();
 
     let void = b.id();
@@ -1170,23 +1256,24 @@ pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     let positions = b.id();
     let position = b.id();
     let vertex_index = b.id();
-    let varyings = b.id();
-    let varying_table = b.id();
-    let varying_out = b.id();
+    // One set of identifiers per varying, in location order.
+    let slots: Vec<(Id, Id, Id)> = varying_values
+        .iter()
+        .map(|_| (b.id(), b.id(), b.id()))
+        .collect();
     let main = b.id();
     let entry_block = b.id();
     let index = b.id();
     let slot = b.id();
     let chosen = b.id();
-    let varying_slot = b.id();
-    let varying_value = b.id();
 
     b.header(op::CAPABILITY, &[capability::SHADER]);
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
     let mut entry = vec![execution::VERTEX, main.0];
     entry.extend(Builder::literal_string("main"));
-    entry.extend([position.0, vertex_index.0, varying_out.0]);
+    entry.extend([position.0, vertex_index.0]);
+    entry.extend(slots.iter().map(|(_, _, out)| out.0));
     b.header(op::ENTRY_POINT, &entry);
 
     b.annotate(
@@ -1197,7 +1284,10 @@ pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
         op::DECORATE,
         &[vertex_index.0, decoration::BUILT_IN, built_in::VERTEX_INDEX],
     );
-    b.annotate(op::DECORATE, &[varying_out.0, decoration::LOCATION, 0]);
+    for (location, (_, _, out)) in slots.iter().enumerate() {
+        let location = u32::try_from(location).unwrap_or(0);
+        b.annotate(op::DECORATE, &[out.0, decoration::LOCATION, location]);
+    }
 
     b.declare(op::TYPE_VOID, &[void.0]);
     b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
@@ -1233,7 +1323,9 @@ pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
         &[array.0, table.0, corner.0, right.0, up.0],
     );
 
-    declare_varying_table(&mut b, f32_type, vec4, array, varying_table, corners);
+    for ((_, table, _), corners) in slots.iter().zip(varying_values) {
+        declare_varying_table(&mut b, f32_type, vec4, array, *table, *corners);
+    }
 
     b.declare(
         op::TYPE_POINTER,
@@ -1250,20 +1342,14 @@ pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
         op::VARIABLE,
         &[private_array.0, positions.0, storage::PRIVATE, table.0],
     );
-    b.declare(
-        op::VARIABLE,
-        &[
-            private_array.0,
-            varyings.0,
-            storage::PRIVATE,
-            varying_table.0,
-        ],
-    );
+    for (values, table, out) in &slots {
+        b.declare(
+            op::VARIABLE,
+            &[private_array.0, values.0, storage::PRIVATE, table.0],
+        );
+        b.declare(op::VARIABLE, &[output_vec4.0, out.0, storage::OUTPUT]);
+    }
     b.declare(op::VARIABLE, &[output_vec4.0, position.0, storage::OUTPUT]);
-    b.declare(
-        op::VARIABLE,
-        &[output_vec4.0, varying_out.0, storage::OUTPUT],
-    );
     b.declare(op::VARIABLE, &[input_i32.0, vertex_index.0, storage::INPUT]);
 
     b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
@@ -1275,12 +1361,289 @@ pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     );
     b.function(op::LOAD, &[vec4.0, chosen.0, slot.0]);
     b.function(op::STORE, &[position.0, chosen.0]);
-    b.function(
-        op::ACCESS_CHAIN,
-        &[private_vec4.0, varying_slot.0, varyings.0, index.0],
+    for (values, _, out) in &slots {
+        let at = b.id();
+        let value = b.id();
+        b.function(op::ACCESS_CHAIN, &[private_vec4.0, at.0, values.0, index.0]);
+        b.function(op::LOAD, &[vec4.0, value.0, at.0]);
+        b.function(op::STORE, &[out.0, value.0]);
+    }
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// Which level of detail a sampling module asks its texture for.
+///
+/// Not a detail to default: a guest's `image_sample_lz` names level zero *explicitly*, and a
+/// fragment stage is also free to let the implementation choose from the derivatives of the
+/// coordinate. The two are different instructions, and an oracle that only had one of them
+/// could not be what a translation is measured against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lod {
+    /// Chosen by the implementation from the derivatives of the coordinate. Fragment stages
+    /// only - nothing else has derivatives.
+    Implicit,
+    /// Level zero, named by the instruction. What a guest's `_lz` form asks for.
+    Zero,
+}
+
+/// A fragment shader that samples a bound texture at the interpolated coordinate.
+///
+/// # Why this exists
+///
+/// The oracle for the one thing a guest's textured pixel shader needs and this project has
+/// never had: an image, a sampler, and an instruction that reads one through the other. A
+/// guest's `image_sample_lz` takes its texture from a descriptor held in eight scalar registers
+/// and its sampler from four more; what those describe has to become *this* on the host, and
+/// building the host half first is the order that worked for the mesh stage (D549, worklog 557).
+///
+/// # Where the numbers came from
+///
+/// Measured, like every other encoding here. A GLSL fragment shader that samples a texture was
+/// compiled with the SDK's compiler and read back with `spirv-dis`: the image type and its seven
+/// operands, the sampled-image type, the storage class a descriptor-bound image lives in, and
+/// the sampling instruction are that module's own (worklog 566).
+///
+/// The sampled image sits at set 0, binding 2, because bindings 0 and 1 are the two storage
+/// buffers every translated module declares.
+///
+/// The level of detail is the implementation's, chosen from the derivatives of the coordinate.
+/// That is what a fragment stage can do and a guest's `_lz` form asks for level zero explicitly;
+/// which of the two a translation should emit is a question for the translation, not for this.
+// A module is a linear sequence of declarations, each needed by the line after it - the same
+// judgement every other builder here records.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn sampling_fragment_module(lod: Lod) -> Vec<u32> {
+    let mut b = Builder::new();
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let vec4 = b.id();
+    let vec2 = b.id();
+    let image = b.id();
+    let sampled_image = b.id();
+    let sampled_ptr = b.id();
+    let texture = b.id();
+    let input_vec4 = b.id();
+    let output_vec4 = b.id();
+    let input = b.id();
+    let output = b.id();
+    let zero = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+    let mut entry = vec![execution::FRAGMENT, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.extend([input.0, output.0]);
+    b.header(op::ENTRY_POINT, &entry);
+    b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
+
+    b.annotate(op::DECORATE, &[input.0, decoration::LOCATION, 0]);
+    b.annotate(op::DECORATE, &[output.0, decoration::LOCATION, 0]);
+    b.annotate(op::DECORATE, &[texture.0, decoration::DESCRIPTOR_SET, 0]);
+    b.annotate(
+        op::DECORATE,
+        &[texture.0, decoration::BINDING, TEXTURE_BINDING],
     );
-    b.function(op::LOAD, &[vec4.0, varying_value.0, varying_slot.0]);
-    b.function(op::STORE, &[varying_out.0, varying_value.0]);
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+    b.declare(op::TYPE_VECTOR, &[vec2.0, f32_type.0, 2]);
+    // Element type, then: two-dimensional, not a depth texture, not an array, not
+    // multi-sampled, used with a sampler, and of no declared format - which is what a
+    // descriptor-bound sampled image is.
+    b.declare(op::TYPE_IMAGE, &[image.0, f32_type.0, 1, 0, 0, 0, 1, 0]);
+    b.declare(op::TYPE_SAMPLED_IMAGE, &[sampled_image.0, image.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[sampled_ptr.0, storage::UNIFORM_CONSTANT, sampled_image.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[sampled_ptr.0, texture.0, storage::UNIFORM_CONSTANT],
+    );
+    b.declare(op::TYPE_POINTER, &[input_vec4.0, storage::INPUT, vec4.0]);
+    b.declare(op::VARIABLE, &[input_vec4.0, input.0, storage::INPUT]);
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(op::VARIABLE, &[output_vec4.0, output.0, storage::OUTPUT]);
+
+    // The level an explicit sample asks for. Declared whichever form this module emits: a
+    // constant nothing references is dead weight in a module, not an error, and declaring it
+    // under a branch would put one in the single place a builder should read straight down.
+    b.declare(op::CONSTANT, &[f32_type.0, zero.0, 0.0f32.to_bits()]);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+
+    let bound = b.id();
+    b.function(op::LOAD, &[sampled_image.0, bound.0, texture.0]);
+    let attribute = b.id();
+    b.function(op::LOAD, &[vec4.0, attribute.0, input.0]);
+    // The first two components of the attribute, which is where a texture coordinate is.
+    let coordinate = b.id();
+    b.function(
+        op::VECTOR_SHUFFLE,
+        &[vec2.0, coordinate.0, attribute.0, attribute.0, 0, 1],
+    );
+    let sampled = b.id();
+    match lod {
+        Lod::Implicit => b.function(
+            op::IMAGE_SAMPLE_IMPLICIT_LOD,
+            &[vec4.0, sampled.0, bound.0, coordinate.0],
+        ),
+        // The mask says a level follows, and the level is the constant zero. Two extra
+        // operands, which is the whole difference between the two instructions.
+        Lod::Zero => b.function(
+            op::IMAGE_SAMPLE_EXPLICIT_LOD,
+            &[
+                vec4.0,
+                sampled.0,
+                bound.0,
+                coordinate.0,
+                image_operands::LOD,
+                zero.0,
+            ],
+        ),
+    }
+    b.function(op::STORE, &[output.0, sampled.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// Which binding a sampled image is bound at.
+///
+/// Two, because zero and one are the storage buffers every translated module declares - the
+/// observation window and guest memory - and a pipeline binds one set.
+pub const TEXTURE_BINDING: u32 = 2;
+
+/// Which binding a storage image is bound at.
+///
+/// Three, after the sampled image. They are two bindings rather than one because they are two
+/// different things: a sampled image is read through a sampler and cannot be written, and a
+/// storage image is written and declares no sampler. A guest's `image_store` names an image
+/// descriptor exactly as `image_load` does, and only the host cares that the two are separate.
+pub const STORAGE_IMAGE_BINDING: u32 = 3;
+
+/// A fragment shader that writes one texel of a storage image, and a colour.
+///
+/// # Why both
+///
+/// A fragment shader that only stored would be a draw with nothing to look at, and a frame that
+/// came back as the clear would be indistinguishable from a draw that never ran. Writing the
+/// colour too means the attachment says "the shader ran" and the image says "and this is what it
+/// stored", which is the same pair of observations the guest-memory window gives (worklog 570).
+///
+/// # Where the numbers came from
+///
+/// Measured. A GLSL fragment shader calling `imageStore` through a format-less `writeonly
+/// image2D` was compiled and disassembled: the write instruction, the capability a format-less
+/// storage image requires, the `NonReadable` decoration, and the image type with its `Sampled`
+/// operand at **2** rather than 1 - which is the whole difference between a storage image and a
+/// sampled one (worklog 575).
+///
+/// The texel and its coordinate are the caller's, so a test can name what it expects to find
+/// where, rather than deriving it from a varying and asserting on arithmetic this module did.
+// A module is a linear sequence of declarations, each needed by the line after it - the same
+// judgement every other builder here records.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn storing_fragment_module(at: [u32; 2], texel: [f32; 4]) -> Vec<u32> {
+    let mut b = Builder::new();
+
+    let void = b.id();
+    let fn_type = b.id();
+    let f32_type = b.id();
+    let u32_type = b.id();
+    let vec4 = b.id();
+    let uvec2 = b.id();
+    let image = b.id();
+    let image_ptr = b.id();
+    let target = b.id();
+    let output_vec4 = b.id();
+    let output = b.id();
+    let components: [Id; 4] = [b.id(), b.id(), b.id(), b.id()];
+    let colour = b.id();
+    let at_x = b.id();
+    let at_y = b.id();
+    let coordinate = b.id();
+    let main = b.id();
+    let entry_block = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(
+        op::CAPABILITY,
+        &[capability::STORAGE_IMAGE_WRITE_WITHOUT_FORMAT],
+    );
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+    let mut entry = vec![execution::FRAGMENT, main.0];
+    entry.extend(Builder::literal_string("main"));
+    entry.push(output.0);
+    b.header(op::ENTRY_POINT, &entry);
+    b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
+
+    b.annotate(op::DECORATE, &[output.0, decoration::LOCATION, 0]);
+    b.annotate(op::DECORATE, &[target.0, decoration::DESCRIPTOR_SET, 0]);
+    b.annotate(
+        op::DECORATE,
+        &[target.0, decoration::BINDING, STORAGE_IMAGE_BINDING],
+    );
+    b.annotate(op::DECORATE, &[target.0, decoration::NON_READABLE]);
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
+    b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
+    b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+    b.declare(op::TYPE_VECTOR, &[uvec2.0, u32_type.0, 2]);
+    // The same seven operands a sampled image takes, with **`Sampled` at 2**: written to
+    // through an image instruction rather than read through a sampler. The format stays
+    // `Unknown`, which is what the capability above buys.
+    b.declare(op::TYPE_IMAGE, &[image.0, f32_type.0, 1, 0, 0, 0, 2, 0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[image_ptr.0, storage::UNIFORM_CONSTANT, image.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[image_ptr.0, target.0, storage::UNIFORM_CONSTANT],
+    );
+    b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
+    b.declare(op::VARIABLE, &[output_vec4.0, output.0, storage::OUTPUT]);
+
+    for (id, component) in components.iter().zip(texel) {
+        b.declare(op::CONSTANT, &[f32_type.0, id.0, component.to_bits()]);
+    }
+    let mut composite = vec![vec4.0, colour.0];
+    composite.extend(components.iter().map(|id| id.0));
+    b.declare(op::CONSTANT_COMPOSITE, &composite);
+    b.declare(op::CONSTANT, &[u32_type.0, at_x.0, at[0]]);
+    b.declare(op::CONSTANT, &[u32_type.0, at_y.0, at[1]]);
+    b.declare(
+        op::CONSTANT_COMPOSITE,
+        &[uvec2.0, coordinate.0, at_x.0, at_y.0],
+    );
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+
+    let bound = b.id();
+    b.function(op::LOAD, &[image.0, bound.0, target.0]);
+    b.function(op::IMAGE_WRITE, &[bound.0, coordinate.0, colour.0]);
+    b.function(op::STORE, &[output.0, colour.0]);
     b.function(op::RETURN, &[]);
     b.function(op::FUNCTION_END, &[]);
 
@@ -1393,14 +1756,26 @@ pub enum ModuleError {
 impl fmt::Display for ModuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            // The eighteen spaces that used to sit before "checked" are what D184 is about:
+            // this message was written as a line-continued literal, `cargo fmt` collapsed it,
+            // and the source indentation was baked into what a reader sees. It had shipped
+            // that way. Repaired here rather than left, because the whole point of converting
+            // the rest of the tree is that a message reads as the sentence it was written as.
             Self::UnknownOpcode { opcode } => write!(
                 f,
-                "opcode {opcode} has no row in the shape table, so this module cannot be                  checked - add one rather than trusting the result"
+                concat!(
+                    "opcode {} has no row in the shape table, so this module cannot be ",
+                    "checked - add one rather than trusting the result"
+                ),
+                opcode
             ),
             Self::Undefined { id, opcode } => write!(
                 f,
-                "%{id} is used by opcode {opcode} but nothing defines it - a driver \
-                 handed this module faults rather than diagnosing it"
+                concat!(
+                    "%{} is used by opcode {} but nothing defines it - a driver ",
+                    "handed this module faults rather than diagnosing it"
+                ),
+                id, opcode
             ),
             Self::UsedBeforeDefined { id, opcode } => write!(
                 f,
@@ -1626,6 +2001,62 @@ static SHAPES: &[ShapeEntry] = &[
         None,
         &[],
         Some(0),
+        RestStride::Every,
+    ),
+    // A texture type: result id, the element type, then six literals saying what kind of
+    // texture it is. Only operand one is an identifier - reading the dimensionality or the
+    // format as one would reject a module that is fine.
+    (op::TYPE_IMAGE, Some(0), &[1], None, RestStride::Every),
+    // An image paired with a sampler: result id and the image type it wraps.
+    (
+        op::TYPE_SAMPLED_IMAGE,
+        Some(0),
+        &[1],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, the sampled image, and the coordinate. A tail of image operands
+    // may follow - a literal mask and then identifiers - and this crate emits none, so it is
+    // named by neither `fixed` nor `rest`. **Emitting one means extending this row**: the
+    // alternative is reading the mask as an identifier and rejecting a valid module.
+    (
+        op::IMAGE_SAMPLE_IMPLICIT_LOD,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    // The same, plus a literal operand mask at index four and the identifiers it announces
+    // from index five - so the mask is named by neither `fixed` nor `rest`, and the level
+    // that follows it is checked.
+    (
+        op::IMAGE_SAMPLE_EXPLICIT_LOD,
+        Some(1),
+        &[0, 2, 3],
+        Some(5),
+        RestStride::Every,
+    ),
+    // The same shape as the explicit sampling form, and for the same reason: a literal mask at
+    // index four, and the level it announces from index five.
+    (
+        op::IMAGE_FETCH,
+        Some(1),
+        &[0, 2, 3],
+        Some(5),
+        RestStride::Every,
+    ),
+    // Result type, result, and the sampled image the image is taken out of.
+    (op::IMAGE, Some(1), &[0, 2], None, RestStride::Every),
+    // No result at all - an image write is an effect. The image, the coordinate and the texel
+    // are all identifiers, so the whole instruction is `rest` from zero.
+    (op::IMAGE_WRITE, None, &[], Some(0), RestStride::Every),
+    // Result type, result, the two vectors, then literal component indices - which are
+    // positions in a vector, not identifiers.
+    (
+        op::VECTOR_SHUFFLE,
+        Some(1),
+        &[0, 2, 3],
+        None,
         RestStride::Every,
     ),
     (op::UCONVERT, Some(1), &[0, 2], None, RestStride::Every),

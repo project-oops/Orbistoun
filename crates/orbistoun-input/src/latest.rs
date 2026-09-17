@@ -6,11 +6,17 @@
 //! is not the title (D326). The guest is in another process, so pad state has to travel -
 //! and this is where it lands.
 //!
-//! **Nothing reads it yet, and that is not an oversight.** `scePadReadStateExt` writes a
-//! structure whose size and layout nobody here has measured, so the shim that would consume
-//! this is deliberately unimplemented. Building the transport anyway is the same call the
-//! event queue makes: the mechanism is ours and testable, the payload's *encoding* is a
-//! measurement, and mixing the two is what produces confident wrong answers (D345).
+//! **Nothing reads it yet, and that is not an oversight** - though the reason has narrowed since
+//! this was written. The shim is no longer unimplemented: obSCEne measured the 120-byte extent
+//! and its contents at rest, so `scePadReadState` answers the whole of it (`100-input/read-extent`,
+//! sweep 20260909-110725). What it cannot do is answer anything *else*, because which offset
+//! inside those bytes carries the buttons is an inference from one at-rest image rather than a
+//! measurement.
+//!
+//! So the transport stays unconsumed for the original reason in its sharper form: the mechanism
+//! is ours and testable, the payload's *encoding* is a measurement, and mixing the two is what
+//! produces confident wrong answers (D345). It is one hardware run from being read -
+//! `REQ-20260910T0650Z-d1c4`, open, asks for a button held down.
 //!
 //! What that buys now is not nothing. The window sends what a **title is allowed to see** -
 //! the shell's own button stripped, and a neutral pad while the shell has focus - so the

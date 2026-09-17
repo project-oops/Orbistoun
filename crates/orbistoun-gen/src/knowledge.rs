@@ -328,14 +328,18 @@ pub(crate) fn record_from(symbol: &str, arity: Option<u8>, doc: &[String]) -> Re
         Oracle::Assumed
     });
     let assumptions = vec![if cites.is_some() {
-        "The published specification is the source. Nothing on the target has confirmed that \
-         this platform's build follows it, and the failure convention in particular is \
-         unestablished."
-            .to_owned()
+        concat!(
+            "The published specification is the source. Nothing on the target has confirmed that ",
+            "this platform's build follows it, and the failure convention in particular is ",
+            "unestablished."
+        )
+        .to_owned()
     } else {
-        "Derived from the implementation's own documentation, which cites no published \
-         specification. Nothing on the target has confirmed it."
-            .to_owned()
+        concat!(
+            "Derived from the implementation's own documentation, which cites no published ",
+            "specification. Nothing on the target has confirmed it."
+        )
+        .to_owned()
     }];
     Record {
         function: symbol.to_owned(),

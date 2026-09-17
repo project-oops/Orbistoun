@@ -6,9 +6,16 @@ surface. A Vulkan device, swapchain, and enough command translation to service o
 flip.
 
 This is also where D032's deferred cost comes due: output is produced in the worker
-while the window lives in the shim, so it needs either a reparented child-owned
-window or shared images via external-memory extensions. Deferred deliberately - until
-now the worker produces no video at all.
+while the window lives in the shim. **Settled by D695, and as neither of the two
+options D032 named**: the worker owns no window and no surface, renders headless,
+reads the frame back to ordinary bytes, and the shim uploads those as a texture -
+the path `framebuffer.rs` already takes and `egui` already displays.
+
+That matters for the order of work here rather than only for the answer. The worry
+was that shared images would constrain device creation, queue ownership and image
+allocation from the first line, so it had to be decided before a renderer existed.
+It constrains none of them, so the device and swapchain work below can start without
+carrying it.
 
 **Observable result:** a window with something in it. Also the arrival of framebuffer
 diffing, the only cheap mechanical correctness oracle this project will ever have

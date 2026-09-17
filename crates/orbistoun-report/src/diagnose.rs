@@ -64,6 +64,17 @@ pub enum Gap {
     /// registers and the arguments all had to be read out of the trace by hand - which is
     /// the tool asking a person to do its job (D198).
     Faulted,
+    /// The guest entered the kernel through an instruction orbistoun implements no handler for -
+    /// a `syscall`/`hlt`, or an `int` on a vector nothing has measured. Distinct from
+    /// [`Self::Faulted`] because it is a different job: not "find the bad pointer" but "characterise
+    /// this kernel entry and add its handler". It surfaced as a `Faulted` "read of -1" and walled a
+    /// title for an afternoon (worklog 603, 605).
+    ///
+    /// **`int 0x41` no longer classifies here.** It was this class's motivating case, and the
+    /// obSCEne measurement it was waiting on came back "fatal on hardware too, no return"
+    /// (REQ-...b3c2) - so it is a guest trap reached via an upstream wrong value, a [`Self::Faulted`],
+    /// not an entry awaiting a handler. This variant is what is left: the vectors still unmeasured.
+    KernelEntryUnimplemented,
     /// One call dominating the run, which means the guest is not progressing.
     Spinning,
     /// Guest calls arriving on a stack the calling convention forbids.
@@ -90,6 +101,9 @@ impl Gap {
                 "the subsystem crate that declares the symbol"
             }
             Self::Unnamed => "crates/orbistoun-names/data/vendor.toml",
+            Self::KernelEntryUnimplemented => {
+                "orbistoun's interrupt/syscall handling, and an obSCEne measurement of the vector"
+            }
             Self::GuestGaveUp | Self::Spinning | Self::Faulted => "the calls immediately before it",
             Self::AbiViolation => "crates/orbistoun-thunk, and how the guest is entered",
             Self::ShortRead => "crates/orbistoun-fs",
@@ -236,6 +250,16 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         return None;
     }
 
+    // **The instruction is checked before the address.** A trap instruction - `int 0x41`,
+    // `syscall`, `hlt` - raises a general-protection fault the host reports as a read of some
+    // arbitrary address (often -1), so the address-arithmetic shapes below would call it "an
+    // address in no region" and send a reader off after a pointer that does not exist. It is a
+    // different wall entirely: the guest entered the kernel and orbistoun has no handler. Named as
+    // its own gap, with its own action (worklog 605).
+    if let Some(kind) = crate::trace::classify_trap(&f.instruction) {
+        return Some(kernel_entry_finding(trace, f, kind));
+    }
+
     // Three shapes, distinguished only by arithmetic on the address. Each names a
     // different mistake, and the differences are what a reader would otherwise work out
     // by hand every time.
@@ -264,7 +288,28 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         .chain(on_other_threads(trace, f.host_thread))
         .collect();
 
+    // **The call that supplied the bad pointer, named rather than left to a search.** This is the
+    // half that makes a null dereference route itself: the base the guest dereferenced was answered
+    // by some call, and this finds the most recent one whose return matches it (worklog 606).
+    let source = pointer_source(trace, f.address, f.host_thread);
+
     let mut evidence = vec![format!("{} {:#x} is {shape}", f.kind, f.address)];
+    if let Some(c) = source {
+        // The sound observation, stated as one and no more: this call's answer is the value the
+        // guest went on to dereference. Whether *that call* is the gap or an earlier one is left
+        // open, because a call answering the dereferenced value is not proof it answered wrongly -
+        // `__cxa_guard_release` answers zero correctly, and blaming it would be the confident-wrong
+        // diagnosis this whole class of change exists to avoid.
+        evidence.push(format!(
+            concat!(
+                ">> {} answered {} immediately before, and the guest dereferenced that value ",
+                "here without checking it"
+            ),
+            c.label,
+            c.returned
+                .map_or_else(|| "that".to_owned(), |r| format!("{r:#x}")),
+        ));
+    }
     if let Some(r) = &f.registers {
         // Name the null base before the raw dump, so the one register that mattered is not left
         // for the reader to find by matching sixteen values against the address.
@@ -295,18 +340,130 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
                 .map_or_else(String::new, |t| format!(", on guest thread {t:#x}"))
         ),
         evidence,
-        action: Some(
-            concat!(
-                "read the calls just before it and the arguments they were given - ",
-                "the value that became this address was answered by one of them"
-            )
-            .to_owned(),
-        ),
+        // Routed to the supplying call when the trace shows one, and to the general search when
+        // it does not - but stated as a lead with both readings, never a verdict, because the
+        // immediately-preceding call answering the dereferenced value is a sound observation and
+        // not a sound accusation (an implemented function answering zero is usually correct).
+        action: Some(source.map_or_else(
+            || {
+                concat!(
+                    "read the calls just before it and the arguments they were given - ",
+                    "the value that became this address was answered by one of them"
+                )
+                .to_owned()
+            },
+            |c| {
+                format!(
+                    concat!(
+                        "the guest used {}'s answer as a pointer without checking it. If {} ",
+                        "should answer a pointer here, it is the gap - implement or fix it; if ",
+                        "its answer is correct, the guest reached this path from an earlier ",
+                        "wrong value, so read the calls further back"
+                    ),
+                    c.label, c.label
+                )
+            },
+        )),
         // Weighted like `gave_up`, because they are the same class of statement: how the
         // run ended. Ranked below them it sat under findings about functions called twice,
         // which is the opposite of what a reader opening a failed run wants first.
         weight: trace.total_calls,
     })
+}
+
+/// The finding for a fault whose instruction is a trap - a kernel entry, or a guest-raised abort.
+///
+/// Split from [`faulted`] so the two kinds each state their own job. A kernel entry is orbistoun's
+/// to implement and needs the vector characterised; a `ud2` is the guest aborting on a check it
+/// failed, and points upstream. Both keep the fault's evidence (registers, pointees, the calls
+/// leading in), because the neighbourhood is still what a reader wants next.
+fn kernel_entry_finding(
+    trace: &CallTrace,
+    f: &crate::trace::FaultSite,
+    kind: crate::trace::TrapKind,
+) -> Finding {
+    use crate::trace::TrapKind;
+
+    let last: Vec<String> = on_this_thread(trace, f.host_thread)
+        .into_iter()
+        .chain(on_other_threads(trace, f.host_thread))
+        .collect();
+    let mut evidence = Vec::new();
+    if let Some(r) = &f.registers {
+        evidence.extend(r.lines());
+    }
+    evidence.extend(f.pointees.iter().cloned());
+    evidence.extend(last);
+
+    let (gap, what, action) = match kind {
+        // **int 0x41 is measured, and the measurement refuted the hypothesis this class was built
+        // on.** A bare `int 0x41` from userspace on retail raises a signal and never returns
+        // (obSCEne REQ-...b3c2: selectors 0x0 and 0x1 both fault, no return) - so it is not a
+        // kernel service orbistoun can add a handler for. A guest reaching it took a path that
+        // faults on hardware too, which means an upstream wrong value sent it there, exactly like a
+        // `ud2`. So it routes as a trap whose cause is upstream, not as a kernel entry awaiting a
+        // handler. Every *other* vector is still unmeasured and may genuinely be a service.
+        TrapKind::KernelEntry { vector: Some(0x41) } => (
+            Gap::Faulted,
+            format!(
+                concat!(
+                    "the guest executed int 0x41 at {} - measured a fatal trap on retail (it ",
+                    "raises a signal and does not return), not a kernel service"
+                ),
+                describe_site(f)
+            ),
+            concat!(
+                "int 0x41 is not orbistoun's to implement: obSCEne measured it fatal on ",
+                "hardware too (REQ-...b3c2), so the guest reached it via an upstream wrong ",
+                "value. Read the calls just before it - that answer is the gap, not the trap"
+            )
+            .to_owned(),
+        ),
+        TrapKind::KernelEntry { vector } => {
+            let entry = match vector {
+                Some(v) => format!("int {v:#x}"),
+                None => "a syscall/trap instruction (syscall, sysenter or hlt)".to_owned(),
+            };
+            (
+                Gap::KernelEntryUnimplemented,
+                format!(
+                    "the guest entered the kernel via {entry} at {}, which orbistoun does not implement",
+                    describe_site(f)
+                ),
+                format!(
+                    concat!(
+                        "characterise what {} reads and returns - an obSCEne measurement, since ",
+                        "it is below the NID/library layer - then add the handler. A retail ",
+                        "title reaching this runs on real hardware, so the wall is orbistoun's, ",
+                        "not the guest's"
+                    ),
+                    entry
+                ),
+            )
+        }
+        TrapKind::GuestTrap => (
+            Gap::Faulted,
+            format!(
+                "the guest raised a ud2 trap at {} - it aborted itself on a check it failed",
+                describe_site(f)
+            ),
+            concat!(
+                "read the calls just before it: the guest decided to abort, so the cause is ",
+                "what it was told, not the trap"
+            )
+            .to_owned(),
+        ),
+    };
+
+    Finding {
+        gap,
+        confidence: Confidence::Certain,
+        subject: f.region.clone(),
+        what,
+        evidence,
+        action: Some(action),
+        weight: trace.total_calls,
+    }
 }
 
 /// Where the fault was, named against a region when the run knew one.
@@ -337,8 +494,11 @@ fn marker(address: u64) -> Option<String> {
     // it (see orbistoun-firmware, and the sibling D404).
     if let Some(offset) = orbistoun_firmware::firmware_slot(address) {
         return Some(format!(
-            "firmware+{offset:#x} - the guest reached into the firmware image, which holds a \
-             zeroed skeleton and not the console's real memory"
+            concat!(
+                "firmware+{:#x} - the guest reached into the firmware image, which holds a ",
+                "zeroed skeleton and not the console's real memory"
+            ),
+            offset
         ));
     }
 
@@ -347,8 +507,11 @@ fn marker(address: u64) -> Option<String> {
             format!("what handoff field {field} points at - the guest read through it")
         } else {
             format!(
-                "handoff field {field} plus {offset:#x} - the guest read through the field and \
-                 then used a value from that offset"
+                concat!(
+                    "handoff field {} plus {:#x} - the guest read through the field and ",
+                    "then used a value from that offset"
+                ),
+                field, offset
             )
         });
     }
@@ -415,27 +578,115 @@ fn null_base_registers(fault_address: u64, r: &crate::trace::Registers) -> Vec<S
         .collect()
 }
 
+/// The call whose return became the bad pointer the guest dereferenced, if the trace shows one.
+///
+/// **This is what turns "find where rax was set to zero" from an instruction into an answer - but
+/// only when the link is sound.** A function's return lands in `rax`, so the value the guest
+/// carries to `[rax + offset]` is the return of the **immediately preceding** call, and only that
+/// one, by the calling convention. A call further back that happens to return the same value is not
+/// evidence - matching on "any recent call that answered zero" pointed ASTRO BOT's null at
+/// `__cxa_guard_release`, four calls back and returning zero correctly, while the real preceding
+/// calls were `strcmp`s. That is the confident-wrong-diagnosis this whole class of change exists to
+/// prevent, so this matches the *last* call and no other.
+///
+/// Returns it only when its answer is at or just below the faulting base (zero for a null
+/// dereference, the address itself for a wild pointer). When the last call answered something else,
+/// the null came from further back than one call - stored earlier, or loaded from memory - and the
+/// honest answer is the general search, not a name.
+fn pointer_source(
+    trace: &CallTrace,
+    fault_address: u64,
+    host_thread: Option<u64>,
+) -> Option<&TracedCall> {
+    // The pointer's base: zero for a null-ish fault, the address itself for a wild one (the
+    // offset from the base is small either way, which the window below absorbs).
+    let base = if fault_address < NEAR_NULL {
+        0
+    } else {
+        fault_address
+    };
+    let last = trace
+        .tail
+        .iter()
+        .rev()
+        .find(|c| host_thread.is_none_or(|t| c.thread == t))?;
+    last.returned
+        .is_some_and(|r| base >= r && base - r < NEAR_NULL)
+        .then_some(last)
+}
+
+/// The call the giving-up code made **itself**, just before it stopped, and how far back.
+///
+/// A deliberate stop - `abort`, `exit`, a `ud2` - is almost always gated on one call's answer:
+/// the guest calls something, tests what it got, and stops a few instructions later. That call
+/// is the closest one *below* where the stop was decided, on the same thread - the giving-up
+/// function called it, then `0x4d` bytes later called `abort` (PPSA28061's measured mapper gate,
+/// D677). The distance is the discriminator and it is stark: the gate sits dozens of bytes back,
+/// where the calls before *it* are in another module and sit gigabytes away.
+///
+/// Naming the near one is what stops a reader blaming a call two frames back that answered `0x0`
+/// in a *different image* - which is exactly the misread D677 had to correct by hand, and the one
+/// this project made again reading PPSA28061's own trace. The delta is returned with it so the
+/// finding shows the distance rather than asserting a cause: `0x4d` reads as the same function,
+/// a gigabyte reads as "not this decision", and the reader judges from the number.
+///
+/// [`None`] when nothing was called from below the stop on its thread - then the finding says
+/// only what it always did, rather than reaching for an unrelated call to name.
+fn gave_up_gate(trace: &CallTrace) -> Option<(&TracedCall, u64)> {
+    let decided = trace.tail.last()?;
+    let mut gate: Option<&TracedCall> = None;
+    for c in trace.tail.iter().rev().skip(1) {
+        // Same thread, and a call site below where it stopped: the giving-up frame's own last
+        // action sits just under its `abort`. `rev` visits most-recent first and the update is
+        // strict, so a function that reached here twice keeps the more recent of the two.
+        if c.thread != decided.thread || c.from >= decided.from {
+            continue;
+        }
+        if gate.is_none_or(|g| c.from > g.from) {
+            gate = Some(c);
+        }
+    }
+    gate.map(|g| (g, decided.from - g.from))
+}
+
 /// The guest stopped itself.
 fn gave_up(trace: &CallTrace) -> Option<Finding> {
     let stopped = trace.stopped.as_ref()?;
     // What it called immediately before deciding, which is the closest thing to a reason
     // the guest offers.
     let last: Vec<String> = trace.tail.iter().rev().take(4).map(traced_line).collect();
+    // The one call the giving-up code made itself, singled out from the recent history so the
+    // near call it gated on is not read as equal to the far ones behind it (D677).
+    let gate = gave_up_gate(trace);
     Some(Finding {
         gap: Gap::GuestGaveUp,
         confidence: Confidence::Certain,
-        subject: None,
+        subject: gate.map(|(g, _)| g.label.clone()),
         what: format!("{stopped} - it decided to stop rather than failing"),
         evidence: {
             let mut e = vec![format!("after {} calls", trace.total_calls)];
+            if let Some((g, delta)) = gate {
+                e.push(format!(
+                    "its own last call before stopping: {} ({delta:#x} before it stopped)",
+                    traced_line(g)
+                ));
+            }
             e.extend(last.into_iter().map(|c| format!("{PRECEDED_BY}{c}")));
             e
         },
-        action: Some(
-            "read the calls immediately before it - a guest that gives up usually reports \
-             why first, and that call is the gap"
-                .to_owned(),
-        ),
+        action: Some(match gate {
+            Some(_) => concat!(
+                "read that call first - the closest one below where it stopped is the one the ",
+                "giving-up code made itself, and a deliberate stop is usually gated on its answer. ",
+                "Calls much further back are from other modules, not this decision"
+            )
+            .to_owned(),
+            None => concat!(
+                "read the calls immediately before it - a guest that gives up usually reports ",
+                "why first, and that call is the gap"
+            )
+            .to_owned(),
+        }),
         weight: trace.total_calls,
     })
 }
@@ -569,14 +820,19 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
                 // D299: a finding that sends a reader looking must carry what they are to
                 // look at. With a tag there is nothing to look for - the value is the answer.
                 Some(source) => format!(
-                    "give {source} a real return - a function whose answer is read as data \
-                     must never answer an error code (D125)"
+                    concat!(
+                        "give {} a real return - a function whose answer is read as data ",
+                        "must never answer an error code (D125)"
+                    ),
+                    source
                 ),
-                None => "find what answered with that code just before, and give it a real \
-                         return - a pointer-returning function must never answer an error \
-                         code (D125). Re-run under ORBISTOUN_TAG_PLACEHOLDERS to be told \
-                         which (D567)"
-                    .to_owned(),
+                None => concat!(
+                    "find what answered with that code just before, and give it a real ",
+                    "return - a pointer-returning function must never answer an error ",
+                    "code (D125). Re-run under ORBISTOUN_TAG_PLACEHOLDERS to be told ",
+                    "which (D567)"
+                )
+                .to_owned(),
             }),
             weight: 1,
         });
@@ -608,10 +864,12 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
                     e
                 },
                 action: Some(
-                    "the function that returned it must answer a real value; if it returns \
-                     a pointer or handle, it needs an implementation rather than a policy \
-                     change"
-                        .to_owned(),
+                    concat!(
+                        "the function that returned it must answer a real value; if it returns ",
+                        "a pointer or handle, it needs an implementation rather than a policy ",
+                        "change"
+                    )
+                    .to_owned(),
                 ),
                 weight: trace.total_calls,
             });
@@ -645,9 +903,11 @@ fn spinning(trace: &CallTrace) -> Option<Finding> {
             "a guest that keeps asking the same question has not accepted the answer".to_owned(),
         ],
         action: Some(
-            "the answer this returns is being rejected. Vary it and watch whether the call \
-             pattern changes - the shape of the loop says more than the return code"
-                .to_owned(),
+            concat!(
+                "the answer this returns is being rejected. Vary it and watch whether the call ",
+                "pattern changes - the shape of the loop says more than the return code"
+            )
+            .to_owned(),
         ),
         weight: top.calls,
     })
@@ -678,9 +938,11 @@ fn abi_violation(trace: &CallTrace) -> Option<Finding> {
             e
         },
         action: Some(
-            "this is almost never the guest's fault - check how it is entered. A remainder \
-             of 0 means control arrived by a jump where a call was expected"
-                .to_owned(),
+            concat!(
+                "this is almost never the guest's fault - check how it is entered. A remainder ",
+                "of 0 means control arrived by a jump where a call was expected"
+            )
+            .to_owned(),
         ),
         weight: trace.abi.misaligned_calls,
     })
@@ -701,9 +963,11 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
         ),
         evidence: vec![format!("{} bytes delivered in total", trace.reads.bytes)],
         action: Some(
-            "a guest that receives a truncated asset faults inside its own parser, far \
-             from here - check the length arithmetic before looking anywhere else"
-                .to_owned(),
+            concat!(
+                "a guest that receives a truncated asset faults inside its own parser, far ",
+                "from here - check the length arithmetic before looking anywhere else"
+            )
+            .to_owned(),
         ),
         weight: trace.reads.short,
     })
@@ -733,6 +997,12 @@ fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
             evidence: {
                 let mut evidence =
                     vec!["the call landed on a stub, which answered a placeholder".to_owned()];
+                // The signature the guest's own calls imply, so the finding says what to
+                // implement, not only that something is missing. Empty for a function whose
+                // arguments were never sampled; then it simply is not claimed.
+                if !c.shape.is_empty() {
+                    evidence.push(format!("the guest called it as {}", c.shape));
+                }
                 // **The pointers it was handed belong to the finding, not to whoever prints
                 // it.** A shim was rendering these beside the finding while the finding itself
                 // carried one sentence, so anything reading a finding programmatically - the
@@ -852,11 +1122,20 @@ fn unnamed(trace: &CallTrace) -> Vec<Finding> {
                 confidence: Confidence::Certain,
                 subject: Some(c.label.clone()),
                 what: format!("{} was called {} times and has no name", c.label, c.calls),
-                evidence: vec![if shipped {
-                    format!("{library} is a module this title ships, so the hash is the game's own symbol")
-                } else {
-                    "the hash resolved to no name in the symbol database".to_owned()
-                }],
+                evidence: {
+                    let mut evidence = vec![if shipped {
+                        format!("{library} is a module this title ships, so the hash is the game's own symbol")
+                    } else {
+                        "the hash resolved to no name in the symbol database".to_owned()
+                    }];
+                    // The inferred signature narrows a bare hash: a name candidate whose arity
+                    // disagrees with how the guest actually called it is wrong before the hash is
+                    // even computed.
+                    if !c.shape.is_empty() {
+                        evidence.push(format!("the guest called it as {}", c.shape));
+                    }
+                    evidence
+                },
                 // Names the commands, because "extend the vocabulary" is advice and a command
                 // is an action. `suggest` is mentioned rather than run: it is slow, optional,
                 // and nothing on this path should ever wait on a model.
@@ -995,6 +1274,7 @@ mod tests {
     fn empty() -> CallTrace {
         CallTrace {
             forced_dumps: Vec::new(),
+            ended_by: None,
             threads: Vec::new(),
             said: Vec::new(),
             quiet: None,
@@ -1086,12 +1366,14 @@ mod tests {
                 label: "PS5Util::0xf948d02a4f9f5ace".to_owned(),
                 calls: 19_689_015,
                 implemented: false,
+                shape: String::new(),
             },
             CalledImport {
                 index: 1,
                 label: "libSceAgc::0x53bbd82b51d172db".to_owned(),
                 calls: 1,
                 implemented: false,
+                shape: String::new(),
             },
         ];
         trace.title_modules = vec!["PS5Util".to_owned()];
@@ -1134,6 +1416,7 @@ mod tests {
             label: "libSceAgc::sceAgcCreateShader".to_owned(),
             calls: 40,
             implemented: false,
+            shape: String::new(),
         }];
         let found = findings(&trace);
         assert_eq!(found[0].gap, Gap::Unimplemented);
@@ -1143,6 +1426,43 @@ mod tests {
                 .as_ref()
                 .expect("has one")
                 .contains("libSceAgc")
+        );
+    }
+
+    /// **The inferred signature reaches the finding, so the work says what to implement.**
+    ///
+    /// A shape carried on the import must surface as evidence on its unimplemented finding -
+    /// otherwise the characterisation is computed and thrown away. Made to fail by asserting the
+    /// exact signature string is present, and that an import with no shape does not invent one.
+    #[test]
+    fn an_inferred_signature_is_carried_into_the_unimplemented_finding() {
+        let mut trace = empty();
+        trace.total_calls = 40;
+        trace.calls = vec![CalledImport {
+            index: 0,
+            label: "libSceAgc::sceAgcCreateShader".to_owned(),
+            calls: 40,
+            implemented: false,
+            shape: "(ptr, u32, ptr?)".to_owned(),
+        }];
+        let found = findings(&trace);
+        assert_eq!(found[0].gap, Gap::Unimplemented);
+        assert!(
+            found[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("(ptr, u32, ptr?)")),
+            "the signature the guest implied must be evidence on the finding: {:?}",
+            found[0].evidence
+        );
+
+        // No shape, no claim: the finding must not manufacture a signature it never saw.
+        trace.calls[0].shape.clear();
+        let bare = findings(&trace);
+        assert!(
+            !bare[0].evidence.iter().any(|e| e.contains("called it as")),
+            "an unsampled import must not be given an invented signature: {:?}",
+            bare[0].evidence
         );
     }
 
@@ -1157,6 +1477,7 @@ mod tests {
             label: "libkernel::0xcedb06001fd4c617".to_owned(),
             calls: 3,
             implemented: false,
+            shape: String::new(),
         }];
         let kinds: Vec<Gap> = findings(&trace).iter().map(|f| f.gap).collect();
         assert_eq!(kinds, vec![Gap::Unnamed]);
@@ -1209,6 +1530,7 @@ mod tests {
             label: "libkernel::sceKernelDirectMemoryQuery".to_owned(),
             calls: 999_000,
             implemented: true,
+            shape: String::new(),
         }];
         let found = findings(&trace);
         assert_eq!(found[0].gap, Gap::Spinning);
@@ -1225,6 +1547,7 @@ mod tests {
             label: "libc::memset".to_owned(),
             calls: 4,
             implemented: true,
+            shape: String::new(),
         }];
         assert!(findings(&trace).is_empty());
     }
@@ -1242,6 +1565,117 @@ mod tests {
         assert!(
             found[0].evidence.iter().any(|e| e.contains("just before")),
             "the reason is in what it called last"
+        );
+    }
+
+    #[test]
+    fn the_gate_named_is_the_giving_up_codes_own_last_call_not_a_far_one() {
+        // PPSA28061's measured shape (D677): the guest calls the mapper in game.bin (0x4800...),
+        // tests the answer, and aborts 0x4d bytes later. Its abort path then opens an error dialog
+        // - a call into a *different* module (0x4000...), and the **most recent** call before the
+        // abort. So "the last thing it called" is the wrong signal: it names the error dialog. The
+        // gate is the call closest *below* where it stopped, which is the near mapper - the same
+        // `-> 0x80020006` gate D677 read by hand, and the discriminator that would have kept this
+        // project from blaming a cross-module call the abort path made on its way down.
+        let near_mapper = TracedCall {
+            thread: 7,
+            sequence: 1,
+            label: "libkernel::sceKernelMapperGetParam".to_owned(),
+            args: [0x6000_0080_0e20, 0, 0, 0, 0, 0],
+            from: 0x4800_00a1_c760,
+            returned: Some(0x8002_0006),
+        };
+        let error_dialog = TracedCall {
+            thread: 7,
+            sequence: 2,
+            label: "libSceErrorDialog::sceErrorDialogInitialize".to_owned(),
+            args: [0x81, 0, 0, 0, 0, 0],
+            from: 0x4000_0012_741e,
+            returned: Some(0x0),
+        };
+        let abort = TracedCall {
+            thread: 7,
+            sequence: 3,
+            label: "libc::abort".to_owned(),
+            args: [0xbe9c, 0, 0, 0, 0, 0],
+            from: 0x4800_00a1_c7ad,
+            returned: None,
+        };
+        let mut trace = empty();
+        trace.total_calls = 391;
+        trace.stopped = Some("the guest called abort".to_owned());
+        // Order: gate, then the far dialog the abort path made, then abort. Most-recent picks the
+        // dialog; closest-below picks the mapper. Only the second is right.
+        trace.tail = vec![near_mapper, error_dialog, abort];
+
+        let found = findings(&trace);
+        assert_eq!(found[0].gap, Gap::GuestGaveUp);
+        let gate_line = found[0]
+            .evidence
+            .iter()
+            .find(|e| e.contains("before it stopped"))
+            .expect("the gate line is present");
+        assert!(
+            gate_line.contains("sceKernelMapperGetParam"),
+            "the near mapper is named the gate, not the more recent cross-module call: {gate_line}"
+        );
+        assert!(
+            gate_line.contains("0x4d"),
+            "its distance back is the measured 0x4d: {gate_line}"
+        );
+        assert!(
+            !gate_line.contains("sceErrorDialogInitialize"),
+            "the far call the abort path made on its way down is not named the gate: {gate_line}"
+        );
+        assert_eq!(
+            found[0].subject.as_deref(),
+            Some("libkernel::sceKernelMapperGetParam"),
+            "the gate is the finding's subject, so a consumer routes to it without parsing prose"
+        );
+    }
+
+    #[test]
+    fn a_give_up_with_nothing_called_below_it_names_no_gate() {
+        // The near-call rule must not invent a gate. A stop whose only preceding call is on
+        // another thread has nothing the giving-up code itself did below it, so the finding falls
+        // back to what it always said rather than pointing at an unrelated call - the same
+        // discipline the null-deref router learned when it blamed a call four frames back.
+        let other_thread = TracedCall {
+            thread: 9,
+            sequence: 1,
+            label: "libkernel::sceKernelUsleep".to_owned(),
+            args: [0, 0, 0, 0, 0, 0],
+            from: 0x4800_00a1_c700,
+            returned: Some(0),
+        };
+        let abort = TracedCall {
+            thread: 7,
+            sequence: 2,
+            label: "libc::abort".to_owned(),
+            args: [0xbe9c, 0, 0, 0, 0, 0],
+            from: 0x4800_00a1_c7ad,
+            returned: None,
+        };
+        let mut trace = empty();
+        trace.total_calls = 10;
+        trace.stopped = Some("the guest called abort".to_owned());
+        trace.tail = vec![other_thread, abort];
+
+        let found = findings(&trace);
+        assert_eq!(found[0].gap, Gap::GuestGaveUp);
+        assert!(
+            !found[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("before it stopped")),
+            "a call on another thread is not the giving-up code's own, so no gate is named"
+        );
+        assert!(
+            found[0]
+                .action
+                .as_deref()
+                .is_some_and(|a| a.contains("usually reports")),
+            "with no gate it falls back to the original advice"
         );
     }
 
@@ -1268,6 +1702,7 @@ mod tests {
         // the prose.
         let mut trace = empty();
         trace.fault = Some(FaultSite {
+            instruction: Vec::new(),
             thread: None,
             host_thread: None,
             pointees: Vec::new(),
@@ -1286,10 +1721,182 @@ mod tests {
         }
     }
 
+    /// **A kernel-entry fault names itself as one, in the ranked finding, not just the crash print.**
+    ///
+    /// A trap instruction raises a GP fault the host reports as `read of 0xffff...`, so the
+    /// address-arithmetic shapes would call it "an address in no region" and hand back "find the bad
+    /// pointer". It is a different job and the finding has to say so, name the vector, and point at
+    /// the right next step. This walled a title for an afternoon because the finding did not
+    /// (worklog 603, 605).
+    ///
+    /// **`int 0x41` and an unmeasured vector now take different steps, and this pins the split.**
+    /// obSCEne measured `int 0x41` fatal on hardware (REQ-...b3c2), so it is a guest trap whose cause
+    /// is upstream - a [`Gap::Faulted`], routed to sweep the call before it - not a
+    /// [`Gap::KernelEntryUnimplemented`] awaiting a handler. Every other vector is still unmeasured
+    /// and keeps the "characterise it, then add the handler" job.
+    #[test]
+    fn int_0x41_is_a_measured_fatal_trap_and_an_unmeasured_vector_still_awaits_a_handler() {
+        let int_41 = |instruction: Vec<u8>| {
+            let mut trace = empty();
+            trace.total_calls = 100;
+            trace.fault = Some(FaultSite {
+                instruction,
+                thread: None,
+                host_thread: None,
+                pointees: Vec::new(),
+                kind: "read of".to_owned(),
+                address: u64::MAX, // the GP-fault masquerade a trap raises
+                instruction_pointer: 0x4000_0019_6b91_u64,
+                region: Some("image".to_owned()),
+                offset: Some(0x0196_b91a),
+                inside_import: None,
+                registers: None,
+                frames: Vec::new(),
+            });
+            findings(&trace)
+                .into_iter()
+                .find(|f| matches!(f.gap, Gap::KernelEntryUnimplemented | Gap::Faulted))
+                .expect("a fault finding")
+        };
+
+        // int 0x41: measured fatal, so a guest trap pointing upstream - not a kernel entry to add.
+        let fatal = int_41(vec![0xcd, 0x41]);
+        assert_eq!(
+            fatal.gap,
+            Gap::Faulted,
+            "int 0x41 is measured fatal on hardware, so it is a guest trap, not an entry to add: {}",
+            fatal.what
+        );
+        assert!(
+            fatal.what.contains("int 0x41") && fatal.what.contains("fatal"),
+            "it must name the vector and say it is measured fatal, not awaiting a handler: {}",
+            fatal.what
+        );
+        let fatal_action = fatal.action.as_deref().unwrap_or("");
+        assert!(
+            !fatal_action.contains("characterise") && fatal_action.contains("upstream"),
+            concat!(
+                "the measurement is in: the action points upstream, not at another ",
+                "measurement: {}"
+            ),
+            fatal_action
+        );
+
+        // int 0x42: no measurement, so still a kernel entry that needs one, then a handler.
+        let unmeasured = int_41(vec![0xcd, 0x42]);
+        assert_eq!(
+            unmeasured.gap,
+            Gap::KernelEntryUnimplemented,
+            "an unmeasured vector is still an entry awaiting a handler: {}",
+            unmeasured.what
+        );
+        assert!(
+            unmeasured
+                .action
+                .as_deref()
+                .is_some_and(|a| a.contains("characterise")),
+            "an unmeasured vector still routes to a device measurement"
+        );
+
+        // An ordinary instruction at the same address is still a generic fault, not a kernel entry.
+        let ordinary = int_41(vec![0x48, 0x8b, 0x00]); // mov rax, [rax]
+        assert_eq!(
+            ordinary.gap,
+            Gap::Faulted,
+            "a mov through a null pointer is a bad pointer, not a kernel entry"
+        );
+        assert!(
+            !ordinary.what.contains("int 0x41"),
+            "a plain fault must not borrow the trap's wording: {}",
+            ordinary.what
+        );
+    }
+
+    /// **A null dereference routes itself to the call that answered zero.**
+    ///
+    /// The base the guest dereferenced was somebody's return value; naming that call is the
+    /// difference between an answer and "go find where rax was set to zero" (worklog 606). The
+    /// negative half matters as much: when nothing in the trace answered the base, the finding must
+    /// fall back to the general search rather than blame an unrelated call.
+    #[test]
+    fn a_null_dereference_names_the_call_that_answered_zero() {
+        let mut trace = empty();
+        trace.total_calls = 100;
+        // A call that answered zero, then a field read through that zero at +0x38.
+        let mut supplier = call("libkernel::sceKernelGetDirectMemoryType", 0);
+        supplier.returned = Some(0);
+        trace.tail = vec![supplier];
+        trace.fault = Some(FaultSite {
+            instruction: vec![0x48, 0x8b, 0x40, 0x38], // mov rax, [rax+0x38]
+            thread: Some(1),
+            host_thread: Some(0),
+            pointees: Vec::new(),
+            kind: "read of".to_owned(),
+            address: 0x38,
+            instruction_pointer: 0x4000_0000_1234,
+            region: Some("image".to_owned()),
+            offset: Some(0x1234),
+            inside_import: None,
+            registers: None,
+            frames: Vec::new(),
+        });
+
+        let f = findings(&trace)
+            .into_iter()
+            .find(|f| f.gap == Gap::Faulted)
+            .expect("a fault finding");
+        assert!(
+            f.action
+                .as_deref()
+                .unwrap_or("")
+                .contains("sceKernelGetDirectMemoryType"),
+            "the action must route to the call that answered zero, not a general search: {:?}",
+            f.action
+        );
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("sceKernelGetDirectMemoryType") && e.contains("0x0")),
+            "the evidence must name the supplying call and its answer"
+        );
+
+        // Nothing answered the base: fall back to the general search, blame no one.
+        let mut orphan = empty();
+        orphan.total_calls = 100;
+        let mut unrelated = call("libc::strlen", 6);
+        unrelated.returned = Some(6); // not the null base
+        orphan.tail = vec![unrelated];
+        orphan.fault = Some(FaultSite {
+            instruction: vec![0x48, 0x8b, 0x00],
+            thread: Some(1),
+            host_thread: Some(0),
+            pointees: Vec::new(),
+            kind: "read of".to_owned(),
+            address: 0x38,
+            instruction_pointer: 0x4000_0000_1234,
+            region: Some("image".to_owned()),
+            offset: Some(0x1234),
+            inside_import: None,
+            registers: None,
+            frames: Vec::new(),
+        });
+        let orphan_action = findings(&orphan)
+            .into_iter()
+            .find(|f| f.gap == Gap::Faulted)
+            .and_then(|f| f.action)
+            .unwrap_or_default();
+        assert!(
+            orphan_action.contains("read the calls just before it")
+                && !orphan_action.contains("strlen"),
+            "with no supplier the finding searches, and blames no unrelated call: {orphan_action}"
+        );
+    }
+
     /// A trace whose call list places two imports at known stub slots.
     fn trace_with_slots() -> CallTrace {
         CallTrace {
             forced_dumps: Vec::new(),
+            ended_by: None,
             threads: Vec::new(),
             said: Vec::new(),
             quiet: None,
@@ -1305,12 +1912,14 @@ mod tests {
                     label: "libSceUlt::sceUltUlthreadRuntimeGetWorkAreaSize".to_owned(),
                     calls: 1,
                     implemented: false,
+                    shape: String::new(),
                 },
                 CalledImport {
                     index: 0x215,
                     label: "libSceAgc::sceAgcCreateShader".to_owned(),
                     calls: 1,
                     implemented: false,
+                    shape: String::new(),
                 },
             ],
             syscalls: Vec::new(),

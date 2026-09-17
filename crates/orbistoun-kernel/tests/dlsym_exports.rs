@@ -81,13 +81,17 @@ fn a_symbol_the_guest_exports_resolves_and_one_nothing_exports_does_not() {
     assert_eq!(
         dlsym(&regs),
         0,
-        "a name the guest's own binary exports must resolve - it was answered \
-         `Unimplemented` before, which told a title its own symbol did not exist"
+        concat!(
+            "a name the guest's own binary exports must resolve - it was answered ",
+            "`Unimplemented` before, which told a title its own symbol did not exist"
+        )
     );
     assert_eq!(
         out, EXPORT_AT,
-        "and the address is written through the out-parameter, which is where the caller \
-         reads it"
+        concat!(
+            "and the address is written through the out-parameter, which is where the caller ",
+            "reads it"
+        )
     );
 
     let absent = Text::new("aNameNothingExports");
@@ -98,8 +102,10 @@ fn a_symbol_the_guest_exports_resolves_and_one_nothing_exports_does_not() {
     assert_ne!(
         dlsym(&regs),
         0,
-        "a name nothing exports is still refused - a lookup that answers everything passes \
-         the half above and is worse than no lookup"
+        concat!(
+            "a name nothing exports is still refused - a lookup that answers everything passes ",
+            "the half above and is worse than no lookup"
+        )
     );
     assert_eq!(
         nothing, 0,

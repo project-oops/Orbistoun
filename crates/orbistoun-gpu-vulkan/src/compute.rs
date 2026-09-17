@@ -83,6 +83,14 @@ fn entry() -> Result<&'static ash::Entry, DispatchError> {
 /// Everything here is a *property of the device*, reported verbatim. Nothing here is a
 /// judgement about whether it is good enough; that belongs to whoever is asking.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Four of these are yes-or-no facts about one device, and each is asked about on its own by
+// code that needs it. Grouping them into a sub-structure to satisfy a count would put a name
+// between a caller and the one bit it wants, and the usual reason this lint fires - a boolean
+// parameter list nobody can read at a call site - does not apply to a report nobody passes.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a device report is a list of independent facts, not an argument list"
+)]
 pub struct Properties {
     /// What the driver calls itself, for the record.
     pub device: String,
@@ -119,6 +127,25 @@ pub struct Properties {
     /// run a frame's pixel shaders and not its geometry, which is worth saying in a report
     /// rather than discovering at pipeline creation.
     pub mesh_shading: bool,
+    /// Whether a shader may write a storage image without declaring its format.
+    ///
+    /// What a translated `image_store` needs. The alternative is to name a format in the
+    /// module, and the guest's format is in a descriptor nothing here decodes - so a device
+    /// without this cannot run a shader that stores to an image, and saying so is better than
+    /// picking a format and rendering something subtly wrong (D692).
+    pub storage_image_write: bool,
+    /// Whether this device can sample block-compressed images without them being decoded.
+    ///
+    /// **The half of surface layout that is not blocked on a capture** (G15). A guest's textures
+    /// are block-compressed and tiled; the tiling swizzle is hardware nothing here has measured,
+    /// so detiling cannot be written yet - but the compression is a different question, because
+    /// Vulkan consumes BC data natively. If a device offers this, the eventual upload path
+    /// undoes the tiling and hands the blocks over untouched, and a decoder is a fallback for
+    /// devices without it rather than a requirement.
+    ///
+    /// Asked now, before there is anything to upload, because it decides whether a decoder is on
+    /// the critical path - and that is a one-line question whose answer changes a plan.
+    pub compressed_textures: bool,
 }
 
 /// Whether a device is available to run anything.
@@ -189,7 +216,7 @@ pub fn probe() -> Availability {
 /// Zeroing matters: without it, a value read back afterwards might be whatever
 /// previously occupied that memory rather than something the shader wrote, and a
 /// shader that does nothing would be indistinguishable from one that works.
-fn create_host_buffer(
+pub(crate) fn create_host_buffer(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     device: &ash::Device,
@@ -512,12 +539,22 @@ impl Session {
         // refused by the code that needs it rather than at creation.
         // SAFETY: the handle came from enumeration on this live instance.
         let available = unsafe { instance.get_physical_device_features(physical) };
+        //   `shader_storage_image_write_without_format` - a module that writes a storage image
+        //     whose format it does not declare. A guest's `image_store` names a format in a
+        //     descriptor this project does not decode, so declaring one in the module would be
+        //     inventing it; saying `Unknown` instead needs this (D692, worklog 575).
         let wanted_features = vk::PhysicalDeviceFeatures::default()
             .shader_int16(available.shader_int16 == vk::TRUE)
             .fragment_stores_and_atomics(available.fragment_stores_and_atomics == vk::TRUE)
+            .shader_storage_image_write_without_format(
+                available.shader_storage_image_write_without_format == vk::TRUE,
+            )
             .vertex_pipeline_stores_and_atomics(
                 available.vertex_pipeline_stores_and_atomics == vk::TRUE,
-            );
+            )
+            //   `texture_compression_bc` - sampling block-compressed images directly. Requested
+            //     so the report can say whether an upload path would need a decoder (G15).
+            .texture_compression_bc(available.texture_compression_bc == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -579,6 +616,9 @@ impl Session {
             fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,
             // Enabled, not merely offered - the same rule every other row here follows.
             mesh_shading: wanted_mesh.mesh_shader == vk::TRUE,
+            storage_image_write: wanted_features.shader_storage_image_write_without_format
+                == vk::TRUE,
+            compressed_textures: wanted_features.texture_compression_bc == vk::TRUE,
         };
 
         Ok(Self {
@@ -592,46 +632,43 @@ impl Session {
     }
 }
 
-/// Runs a compute shader over two storage buffers and returns what it left in them.
+/// A host-visible storage buffer bound in a compute dispatch, with what read-back needs.
 ///
-/// Binding zero is the observation window a translated shader reports registers
-/// through; binding one is guest memory. Both are zeroed before the dispatch, so a
-/// value read back afterwards was written by the shader rather than left over.
+/// Grouped so a dispatch can bind a buffer whether it created it (the throwaway one [`dispatch`]
+/// makes) or was handed a resident one (the backend, through [`dispatch_into`]). Copyable because
+/// it is plain handles and sizes; the backend keeps the owning copy and passes a copy to dispatch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DispatchBuffer {
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+    pub size: vk::DeviceSize,
+    pub words: usize,
+}
+
+/// Records and runs one compute dispatch against two caller-owned buffers, and reads both back.
 ///
-/// They are separate bindings rather than halves of one buffer, because a guest address
-/// must not be able to reach the observation area: an out-of-range store would rewrite
-/// the registers a test is about to assert on, and the failure would present as a
-/// register bug rather than a memory one.
-pub fn dispatch(
+/// Releases everything it created **except the buffers** - the caller owns those, and whether they
+/// are throwaway or resident is the caller's business. On an error before read-back it releases
+/// nothing, which is the successful-path-only release the whole module has always had: the note at
+/// the top explains why the session survives a leak, and refusing every later dispatch would be
+/// worse.
+fn dispatch_core(
+    device: &ash::Device,
+    queue: vk::Queue,
+    family: u32,
     module: &[u32],
-    words: usize,
-    memory_words: usize,
+    binding0: &DispatchBuffer,
+    binding1: &DispatchBuffer,
     groups: [u32; 3],
-) -> Result<Output, DispatchError> {
-    // A poisoned lock means an earlier dispatch panicked. Every handle a dispatch
-    // creates is released before it returns, so the session itself is still sound, and
-    // refusing every later dispatch would turn one failed test into all of them.
-    let session = session()?;
-    let session = session
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Session {
-        ref instance,
-        physical,
-        ref device,
-        queue,
-        family,
-        ..
-    } = *session;
-
-    let size = (words * 4) as vk::DeviceSize;
-    let memory_size = (memory_words * 4) as vk::DeviceSize;
-
-    let (buffer, memory) = create_host_buffer(instance, physical, device, size, words)?;
-    let (memory_buffer, memory_memory) =
-        create_host_buffer(instance, physical, device, memory_size, memory_words)?;
-
-    let bound = build_pipeline(device, module, buffer, size, memory_buffer, memory_size)?;
+) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
+    let bound = build_pipeline(
+        device,
+        module,
+        binding0.buffer,
+        binding0.size,
+        binding1.buffer,
+        binding1.size,
+    )?;
     let pipeline = bound.pipeline;
     let pipeline_layout = bound.layout;
     let sets = [bound.set];
@@ -676,24 +713,22 @@ pub fn dispatch(
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
 
     let submits = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-    // SAFETY: the command buffer has finished recording and the queue belongs to this
-    // device.
+    // SAFETY: the command buffer has finished recording and the queue belongs to this device.
     unsafe { device.queue_submit(queue, &submits, vk::Fence::null()) }
         .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
-    // Waiting on the device rather than a fence: one submission, and a fence would be
-    // more objects to release for no extra guarantee.
+    // Waiting on the device rather than a fence: one submission, and a fence would be more objects
+    // to release for no extra guarantee.
     // SAFETY: the device is live and nothing else is using it.
     unsafe { device.device_wait_idle() }
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
 
     // ---- read back -----------------------------------------------------------
-    let observed = read_back(device, memory, size, words)?;
-    let guest_memory = read_back(device, memory_memory, memory_size, memory_words)?;
+    let observed = read_back(device, binding0.memory, binding0.size, binding0.words)?;
+    let guest_memory = read_back(device, binding1.memory, binding1.size, binding1.words)?;
 
-    // ---- release -------------------------------------------------------------
-    // Only on the successful path. See the note at the top of the module.
-    // SAFETY: every handle below was created on this device, is not in use - the queue
-    // has been waited on - and is destroyed exactly once.
+    // ---- release (everything but the buffers) --------------------------------
+    // SAFETY: every handle below was created here on this device, is not in use - the queue has
+    // been waited on - and is destroyed exactly once.
     unsafe { device.destroy_command_pool(command_pool, None) };
     // SAFETY: as above.
     unsafe { device.destroy_descriptor_pool(bound.descriptor_pool, None) };
@@ -705,7 +740,67 @@ pub fn dispatch(
     unsafe { device.destroy_descriptor_set_layout(bound.set_layout, None) };
     // SAFETY: as above.
     unsafe { device.destroy_shader_module(bound.shader, None) };
-    // SAFETY: as above.
+
+    Ok((observed, guest_memory))
+}
+
+/// Runs a compute shader over two throwaway storage buffers and returns what it left in them.
+///
+/// Binding zero is the observation window a translated shader reports registers through; binding
+/// one is guest memory. Both are created here, zeroed, and destroyed after, so a value read back
+/// was written by the shader rather than left over. They are separate bindings rather than halves
+/// of one buffer, because a guest address must not be able to reach the observation area: an
+/// out-of-range store would rewrite the registers a test is about to assert on, and the failure
+/// would present as a register bug rather than a memory one.
+///
+/// [`dispatch_into`] is the variant that binds a *resident* buffer instead of a throwaway one.
+pub fn dispatch(
+    module: &[u32],
+    words: usize,
+    memory_words: usize,
+    groups: [u32; 3],
+) -> Result<Output, DispatchError> {
+    // A poisoned lock means an earlier dispatch panicked. Every handle a dispatch
+    // creates is released before it returns, so the session itself is still sound, and
+    // refusing every later dispatch would turn one failed test into all of them.
+    let session = session()?;
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Session {
+        ref instance,
+        physical,
+        ref device,
+        queue,
+        family,
+        ..
+    } = *session;
+
+    let size = (words * 4) as vk::DeviceSize;
+    let memory_size = (memory_words * 4) as vk::DeviceSize;
+
+    let (buffer, memory) = create_host_buffer(instance, physical, device, size, words)?;
+    let (memory_buffer, memory_memory) =
+        create_host_buffer(instance, physical, device, memory_size, memory_words)?;
+    let binding0 = DispatchBuffer {
+        buffer,
+        memory,
+        size,
+        words,
+    };
+    let binding1 = DispatchBuffer {
+        buffer: memory_buffer,
+        memory: memory_memory,
+        size: memory_size,
+        words: memory_words,
+    };
+
+    // On an error the buffers leak with everything else - the successful-path-only release this
+    // has always had.
+    let (observed, guest_memory) =
+        dispatch_core(device, queue, family, module, &binding0, &binding1, groups)?;
+
+    // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
     unsafe { device.destroy_buffer(buffer, None) };
     // SAFETY: as above.
     unsafe { device.destroy_buffer(memory_buffer, None) };
@@ -721,6 +816,79 @@ pub fn dispatch(
         observed,
         memory: guest_memory,
     })
+}
+
+/// Runs a compute dispatch binding two caller-owned buffers - an observation at binding 0 and the
+/// guest-memory window at binding 1 - and reads **both** back, destroying neither (worklog 647).
+///
+/// This is how a guest's dispatch is observed. A guest compute shader's result is in guest memory
+/// (binding 1), not in the observation window a *translated* shader reports registers through - so
+/// the window is bound at binding 1 and returned, where the former `dispatch_into` bound a scratch
+/// there and discarded it (worklog 635 named that gap). Both buffers are the caller's - a resident
+/// observation and the resident guest-memory window - and are left for it, reused across dispatches.
+pub(crate) fn dispatch_bound(
+    observation: &DispatchBuffer,
+    window: &DispatchBuffer,
+    module: &[u32],
+    groups: [u32; 3],
+) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
+    let session = session()?;
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Session {
+        ref device,
+        queue,
+        family,
+        ..
+    } = *session;
+    dispatch_core(device, queue, family, module, observation, window, groups)
+}
+
+/// Runs a compute dispatch over a caller-owned guest-memory window at binding 1, with a throwaway
+/// observation of `observation_words` at binding 0, and reads both back (worklog 647).
+///
+/// The window is the caller's and is left for it; the observation is created and destroyed here,
+/// because a dispatch with no bound observation buffer still needs one for the module's binding 0.
+pub(crate) fn dispatch_reading_window(
+    window: &DispatchBuffer,
+    observation_words: usize,
+    module: &[u32],
+    groups: [u32; 3],
+) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
+    let session = session()?;
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Session {
+        ref instance,
+        physical,
+        ref device,
+        queue,
+        family,
+        ..
+    } = *session;
+
+    let size = (observation_words * 4) as vk::DeviceSize;
+    let (scratch, scratch_memory) =
+        create_host_buffer(instance, physical, device, size, observation_words)?;
+    let observation = DispatchBuffer {
+        buffer: scratch,
+        memory: scratch_memory,
+        size,
+        words: observation_words,
+    };
+
+    let result = dispatch_core(device, queue, family, module, &observation, window, groups);
+
+    // The throwaway observation, destroyed whether or not the dispatch succeeded; the window is the
+    // caller's and is left alone.
+    // SAFETY: created here on this device, no longer in use, and destroyed exactly once.
+    unsafe { device.destroy_buffer(scratch, None) };
+    // SAFETY: as above, and nothing is bound to the memory now.
+    unsafe { device.free_memory(scratch_memory, None) };
+
+    result
 }
 
 #[cfg(test)]

@@ -72,8 +72,10 @@ fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
     assert_eq!(
         first,
         BASE + HEADER,
-        "the first block must be the header's width into the region - anything else means \
-         the host allocator answered"
+        concat!(
+            "the first block must be the header's width into the region - anything else means ",
+            "the host allocator answered"
+        )
     );
 
     let second = call("malloc", &[64]);
@@ -144,7 +146,10 @@ fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
     );
     assert!(
         summary.contains("did NOT hold every address fixed"),
-        "a run that spilled must say so - a partial fixing read as a whole one is the \
-         conclusion this diagnostic must never support: {summary}"
+        concat!(
+            "a run that spilled must say so - a partial fixing read as a whole one is the ",
+            "conclusion this diagnostic must never support: {}"
+        ),
+        summary
     );
 }

@@ -10,16 +10,16 @@ master_version = "01.00"
 
 [status]
 reach = "flipped"
-outcome = "0x7fff13abdc8d"
-imports = 220
-calls = 418420
+outcome = "VCRUNTIME140.dll+0x1dc8d"
+imports = 222
+calls = 418426
 standing = 100
 default_return = "unimplemented"
 frames = 1
-unanswered = 34
+unanswered = 13
 limit_seconds = 20
 build = "0.1.0"
-measured_on = "2026-09-14"
+measured_on = "2026-09-16"
 
 [experiment]
 reach = "flipped"

@@ -121,8 +121,10 @@ fn a_varying_the_corners_disagree_about_is_not_uniform() {
         .expect("a pixel at the far corner");
     assert_ne!(
         first, last,
-        "opposite corners of the image are identical, so the varying was not interpolated - a \
-         pipeline forwarding one corner's value to every fragment looks like this"
+        concat!(
+            "opposite corners of the image are identical, so the varying was not interpolated ",
+            "- a pipeline forwarding one corner's value to every fragment looks like this"
+        )
     );
     // And it is the varying that is showing, not the clear: the alpha the corners carry is one
     // everywhere, and every corner's colour has a channel the clear does not.

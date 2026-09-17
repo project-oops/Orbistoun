@@ -27,12 +27,23 @@ mod common;
 
 use std::path::PathBuf;
 
+use orbistoun_gpu::RenderCommand;
 use orbistoun_gpu::pipeline::{GuestMemory, Pipeline, Queue};
 use orbistoun_gpu::walk;
+use orbistoun_shader::{EncodingTable, Operand, OperandTable, decode_program};
 use orbistoun_translate::{Fidelity, Strategy, Width};
 
 /// Where the shader payload sat on the console; `oracle-payload-va` in the record.
 const PAYLOAD_ADDRESS: u64 = 0x2_008f_0000;
+
+/// Where the vertex buffer sat on the console; `oracle-vbo-va` in the record.
+const VERTEX_BUFFER_ADDRESS: u64 = 0x2_0090_0000;
+
+/// Where the fence sat; `oracle-fence-va` in the record.
+const FENCE_ADDRESS: u64 = 0x2_0091_0000;
+
+/// The colour target; `oracle-color-va` in the record.
+const COLOUR_TARGET_ADDRESS: u64 = 0x40_0140_0000;
 
 /// The two records: which pixel shader each ran, and the pixel hash the console produced.
 struct Record {
@@ -41,9 +52,13 @@ struct Record {
     hash: u32,
     /// Whether that pixel shader translates today, and what it is waiting for if not.
     ///
-    /// Pinned rather than printed. Record A's translates whole, as does the vertex program
-    /// both records share, and a change that stopped either would otherwise show up as one
+    /// Pinned rather than printed. Both translate now, as does the vertex program the two
+    /// records share, and a change that stopped any of them would otherwise show up as one
     /// fewer line of output nobody was watching.
+    ///
+    /// **It has been `false` and the field is kept anyway.** Record B's was the last refusal
+    /// in either stream, and the next shader this project meets may well be a refusal again -
+    /// a field that only ever holds one value is one nobody notices going wrong.
     fragment_translates: bool,
 }
 
@@ -58,9 +73,11 @@ const RECORDS: [Record; 2] = [
         stem: "agc-gl-cube-fw1240-b",
         fragment: PAYLOAD_ADDRESS + 0x200,
         hash: 0xc51c_ec32,
-        // Its sampling instruction needs an image subsystem: a descriptor model and a
-        // SPIR-V image type, neither of which exists (worklog 549).
-        fragment_translates: false,
+        // Its sampling instruction needed an image subsystem. The host half was built first
+        // (worklog 566) and the descriptor half was settled by deciding it did not need
+        // building: every sample reads the one bound texture and a module naming a second is
+        // refused (D690). **This shader is the reason both of those exist.**
+        fragment_translates: true,
     },
 ];
 
@@ -196,6 +213,41 @@ fn walked_cleanly(record: &Record, stream: &[u8]) {
     );
 }
 
+/// **The draws the stream asked for**, which nothing extracted until worklog 585.
+///
+/// Twelve of three vertices apiece, one instance each: a cube's twelve triangles, issued one at
+/// a time. That count is worth pinning for a reason beyond regression - **three is what the
+/// guest's own primitive shader declares it will emit**, and the two numbers were arrived at
+/// from opposite ends. The stream says it through a packet body read by opcode; the shader says
+/// it through `MSG_GS_ALLOC_REQ`, translated into a mesh module's output declaration. They
+/// agree, and nothing made them.
+fn drew_twelve_triangles(record: &Record, submission: &orbistoun_gpu::pipeline::Submission) {
+    let draws: Vec<_> = submission
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            RenderCommand::Draw {
+                vertices,
+                instances,
+                ..
+            } => Some((*vertices, *instances)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        draws,
+        vec![(3, 1); 12],
+        "{}: the stream's draws are not twelve triangles",
+        record.stem
+    );
+    assert_eq!(
+        submission.report.draws,
+        draws.len(),
+        "{}: the report's count and the commands disagree",
+        record.stem
+    );
+}
+
 /// **Both hardware streams walk cleanly and find both shaders where the console found them.**
 #[test]
 fn the_gl_cube_streams_resolve_their_shaders_from_the_payload() {
@@ -231,6 +283,8 @@ fn the_gl_cube_streams_resolve_their_shaders_from_the_payload() {
             "{}: every shader address the registers named lies inside the payload image",
             record.stem
         );
+
+        drew_twelve_triangles(record, &submission);
 
         // **The pixel shader translates, or it does not, and which is not left to the eye.**
         let fragment_failed = report
@@ -292,5 +346,129 @@ fn the_gl_cube_streams_resolve_their_shaders_from_the_payload() {
                 failure.address
             );
         }
+    }
+}
+
+/// Every scalar register pair the program loads as two literals, with the 64-bit value they make
+/// and the offset of the low half's load.
+///
+/// A pair is a `s_mov_b32` of a literal into `sN` and another into `sN+1`, which is how a shader
+/// forms a 64-bit address in two scalar registers when it has nowhere else to get one from.
+fn literal_address_pairs(program: &[u8]) -> Vec<(u64, u16, u32)> {
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let decoded = decode_program(program, &encodings, &operands);
+    let loads: Vec<(u16, u32, u32)> = decoded
+        .instructions
+        .iter()
+        .filter(|instruction| {
+            instruction.encoding.is_some_and(|index| {
+                let family = &encodings.encodings()[usize::from(index)].name;
+                encodings.mnemonic_for(family, instruction.opcode) == Some("s_mov_b32")
+            })
+        })
+        .filter_map(|instruction| match instruction.operands.as_slice() {
+            [Operand::Scalar(register), Operand::Literal(value)] => {
+                Some((*register, *value, instruction.offset))
+            }
+            _ => None,
+        })
+        .collect();
+    loads
+        .iter()
+        .filter_map(|&(register, low, at)| {
+            loads
+                .iter()
+                .find(|&&(high_register, _, _)| high_register == register + 1)
+                .map(|&(_, high, _)| ((u64::from(high) << 32) | u64::from(low), register, at))
+        })
+        .collect()
+}
+
+/// **No register write carries the vertex buffer's address. The vertex program loads it itself.**
+///
+/// `REQ-20260914T2348Z-4e71` asked the console which register writes in a submitted stream carry
+/// a draw's vertex-buffer address, so the submission pipeline could anchor a shader's memory window
+/// there instead of at zero. The request came back without an answer this project can use - the
+/// values it quoted are not in the sweep log it cites - but the question never needed hardware:
+/// these two captures are a draw the console really made from a real vertex buffer, at an address
+/// the record states, and the stream and the payload are both here.
+///
+/// Searching them says the question was aimed at the wrong place. The vertex program forms the
+/// address itself, `s_mov_b32 s2, 0x00900000` then `s_mov_b32 s3, 0x2` at +0x4c, and uses the pair
+/// as a base. The stream names the buffer nowhere, in either encoding it uses for addresses.
+///
+/// # Why the absence is worth trusting
+///
+/// A search that finds nothing proves nothing unless it can find something, so the same search is
+/// required to find the three addresses the stream *does* carry: the shader payload and the colour
+/// target in 256-byte units (register `SPI_SHADER_PGM_LO_*` and `CB_COLOR0_BASE`), and the fence as
+/// a whole 64-bit address. Remove the positive checks and this test can pass on an empty file.
+///
+/// # What this does not say
+///
+/// That a *retail* title does the same. oops-gl bakes its addresses into its own shaders; a title
+/// built with the vendor toolchain presumably reaches its buffers through register or table state,
+/// and nothing here has measured that. So this settles where to look for these two captures and is
+/// no licence to derive a window from shader literals in general.
+#[test]
+fn the_gl_cube_vertex_buffer_address_is_a_shader_literal_and_no_register_carries_it() {
+    for record in &RECORDS {
+        let (stream, memory) = load(record);
+
+        // The vertex program is the payload's first 0x200 bytes (the record's own layout).
+        let pairs = literal_address_pairs(&memory.bytes[..0x200]);
+        assert!(
+            pairs.contains(&(VERTEX_BUFFER_ADDRESS, 2, 0x4c)),
+            concat!(
+                "{}: the vertex program does not load {:#x} into s2:s3 at +0x4c; ",
+                "literal pairs found: {:#x?}"
+            ),
+            record.stem,
+            VERTEX_BUFFER_ADDRESS,
+            pairs
+        );
+
+        let words: Vec<u32> = stream
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four bytes")))
+            .collect();
+        let in_units = |address: u64| u32::try_from(address >> 8).expect("fits a register");
+        let low = |address: u64| u32::try_from(address & 0xffff_ffff).expect("low half");
+        let high = |address: u64| u32::try_from(address >> 32).expect("high half");
+        let as_pair = |address: u64| {
+            words
+                .windows(2)
+                .any(|pair| pair == [low(address), high(address)])
+        };
+
+        // The positive controls: the search finds what the stream does carry.
+        assert!(
+            words.contains(&in_units(PAYLOAD_ADDRESS)),
+            "{}: the shader payload is not named in 256-byte units - the search is broken",
+            record.stem
+        );
+        assert!(
+            words.contains(&in_units(COLOUR_TARGET_ADDRESS)),
+            "{}: the colour target is not named in 256-byte units - the search is broken",
+            record.stem
+        );
+        assert!(
+            as_pair(FENCE_ADDRESS),
+            "{}: the fence is not named as a whole address - the search is broken",
+            record.stem
+        );
+
+        // And the finding.
+        assert!(
+            !words.contains(&in_units(VERTEX_BUFFER_ADDRESS)),
+            "{}: the stream names the vertex buffer in 256-byte units after all",
+            record.stem
+        );
+        assert!(
+            !words.contains(&low(VERTEX_BUFFER_ADDRESS)),
+            "{}: the stream carries the vertex buffer's low half after all",
+            record.stem
+        );
     }
 }

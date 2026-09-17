@@ -64,15 +64,22 @@ fn well_formed(bytes: &[u8], decoded: &orbistoun_shader::Decode, what: &str) {
         if let Some(previous) = previous {
             assert!(
                 instruction.offset > previous,
-                "{what}: offsets did not advance - {previous:#x} then {:#x}. A decode \
-                 that does not move forward does not terminate",
+                concat!(
+                    "{}: offsets did not advance - {:#x} then {:#x}. A decode ",
+                    "that does not move forward does not terminate"
+                ),
+                what,
+                previous,
                 instruction.offset
             );
         }
         assert!(
             instruction.length > 0,
-            "{what}: an instruction at {:#x} claims zero length, which is the shape of \
-             an endless loop",
+            concat!(
+                "{}: an instruction at {:#x} claims zero length, which is the shape of ",
+                "an endless loop"
+            ),
+            what,
             instruction.offset
         );
         previous = Some(instruction.offset);
@@ -122,8 +129,10 @@ fn a_buffer_of_zeros_is_not_reported_as_a_hundred_instructions() {
                 .instructions
                 .iter()
                 .all(orbistoun_shader::Instruction::is_known),
-        "a decode of zeros must either be flagged untrustworthy or consist entirely of \
-         instructions the table recognises - anything else is a confident guess"
+        concat!(
+            "a decode of zeros must either be flagged untrustworthy or consist entirely of ",
+            "instructions the table recognises - anything else is a confident guess"
+        )
     );
 }
 
@@ -179,7 +188,11 @@ fn the_typed_buffer_half_precision_variants_decode_distinctly() {
     );
     assert_ne!(
         plain_opcode, half_opcode,
-        "the fourth opcode bit is not being read - these differ only in bit 53 and          decoding them alike means every half-precision variant is reported as the          operation it is a variant of"
+        concat!(
+            "the fourth opcode bit is not being read - these differ only in bit 53 and ",
+            "decoding them alike means every half-precision variant is reported as the ",
+            "operation it is a variant of"
+        )
     );
     // The continuation is the *high* bit, so the variant is its counterpart plus eight.
     // Asserting the arithmetic rather than just inequality catches a continuation
@@ -214,8 +227,10 @@ fn a_truncated_instruction_is_reported_as_overrunning() {
     well_formed(&bytes, &decoded, "truncated");
     assert!(
         decoded.overran,
-        "an instruction claiming more bytes than exist must set `overran`, or a caller \
-         cannot tell a complete shader from a clipped one"
+        concat!(
+            "an instruction claiming more bytes than exist must set `overran`, or a caller ",
+            "cannot tell a complete shader from a clipped one"
+        )
     );
     assert!(!decoded.is_trustworthy());
 }

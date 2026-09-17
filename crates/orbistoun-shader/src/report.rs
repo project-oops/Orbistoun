@@ -63,8 +63,11 @@ pub fn summary(coverage: &CorpusCoverage) -> String {
         // unimplemented instruction and goes to a different file.
         let _ = writeln!(
             out,
-            "suspect      {untrustworthy} shader(s) decoded unreliably - \
-             likely an encoding table fault, not a missing feature"
+            concat!(
+                "suspect      {} shader(s) decoded unreliably - ",
+                "likely an encoding table fault, not a missing feature"
+            ),
+            untrustworthy
         );
     }
     out
@@ -109,8 +112,10 @@ pub fn worklist(
             announced = true;
             let _ = writeln!(
                 out,
-                "\n-- waiting on a subsystem; ranked so the payoff is visible, not so \
-                 they are next --"
+                concat!(
+                    "\n-- waiting on a subsystem; ranked so the payoff is visible, not so ",
+                    "they are next --"
+                )
             );
         }
         let _ = writeln!(

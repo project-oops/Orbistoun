@@ -31,5 +31,10 @@ images via external-memory extensions. Deferring that is legitimate rather than 
 dodge - until phase 6 the child produces no video at all, only traces and
 diagnostics, and the control/event channel is needed either way.
 
+**Settled on 2026-09-15 by D695, and by neither of those two.** The child renders
+headless and hands the shim ordinary bytes, which is the path the readback for
+framebuffer diffing has to take regardless. This paragraph stands as the cost as it
+was understood when the process boundary was chosen.
+
 Supersedes an initial in-process lean, which was a shortcut under D028.
 

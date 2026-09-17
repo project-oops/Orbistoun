@@ -38,8 +38,16 @@ use crate::table::Encoding;
 /// window explain every sample as well as the four-bit field does - and the solver wrote the
 /// five, which would read `dmask` as sixteen greater on any shader that sets it. Varying it
 /// is what makes the narrower field the only answer.
-const MODIFIERS: [&str; 11] = [
-    "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv", "unorm",
+/// **`done`, `compr` and `vm` were missing from this list and are in the decoder's.** They are
+/// an export's flags: the last export of its kind, a compressed one, and one whose result the
+/// memory pipeline waits on. Nothing noticed while the solver took the *fewest* operands any
+/// sample had, because an export without `done` set the count and the flag was never reached.
+/// Taking the most exposed the drift immediately - as a phantom operand no field could explain
+/// (worklog 565). The decoder's copy of this list carries the note that the two agreeing is
+/// what makes a solved layout comparable with a printed one; that was true and unenforced.
+const MODIFIERS: [&str; 14] = [
+    "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv", "unorm", "done",
+    "compr", "vm",
 ];
 
 /// Field shapes worth trying, for register selectors.
@@ -68,9 +76,15 @@ const WIDTHS: std::ops::Range<u32> = 5..10;
 /// that set it left the mask with no candidate at all, which is the refusal working: the
 /// answer was missing from the search, not wrong in the table.
 ///
+/// **Twelve**, because a flat access's byte offset is that wide with its cache hints in the
+/// bits above. It is the same shape as the image mask and it went the same way twice: without
+/// the width there was no candidate at all and four opcodes reported unsolvable, and with only
+/// thirteen the field swallowed the hint above it - which probes that left that hint clear could
+/// not see and the differential test against compiled output could, immediately (worklog 565).
+///
 /// Widening the search cannot produce a wrong answer, only fewer answers: an extra width
 /// that also fits makes an operand *ambiguous*, and the solver refuses rather than picking.
-const IMMEDIATE_WIDTHS: [u32; 7] = [2, 3, 4, 16, 20, 21, 32];
+const IMMEDIATE_WIDTHS: [u32; 9] = [2, 3, 4, 12, 13, 16, 20, 21, 32];
 
 /// How a field's bits are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -247,15 +261,21 @@ pub(crate) fn candidates_for(
     symbolic: &BTreeMap<String, i64>,
     reserved: &BTreeMap<usize, u32>,
 ) -> Vec<Field> {
+    // Samples that carry this operand. One that does not carry it says nothing about it -
+    // the reference omits an operand at its default - so it is left out rather than treated
+    // as evidence of absence.
     let mut wanted: Vec<(&Sample, Vec<Reading>)> = Vec::new();
     for sample in samples {
         let Some(operand) = sample.operands.get(position) else {
-            return Vec::new();
+            continue;
         };
         let Some(readings) = expected(operand, named, symbolic) else {
             return Vec::new();
         };
         wanted.push((sample, readings));
+    }
+    if wanted.is_empty() {
+        return Vec::new();
     }
 
     let Some(word_count) = samples.iter().map(|s| s.words.len()).min() else {
@@ -385,7 +405,18 @@ pub(crate) fn solve(
     reserved: &BTreeMap<usize, u32>,
     oracle: &dyn Oracle,
 ) -> Option<Vec<Field>> {
-    let count = samples.iter().map(|s| s.operands.len()).min()?;
+    // **The most operands any sample has, not the fewest.** An operand the reference omits
+    // when it is at its default - a flat access's byte offset, printed only when non-zero -
+    // is absent from some samples and present in others, and taking the minimum meant one
+    // zero-offset probe hid the field from every probe that had it. The field then did not
+    // exist as far as the decoder was concerned, and a translation built on that layout
+    // ignored the offset rather than refusing it: an access sixteen bytes along read the word
+    // at zero, silently (worklog 565).
+    //
+    // A position only some samples carry is solved from those samples. That is not a
+    // weakening: a position one sample carries has many fields that explain it, which is
+    // ambiguous, and ambiguous is refused.
+    let count = samples.iter().map(|s| s.operands.len()).max()?;
     if count == 0 {
         return Some(Vec::new());
     }

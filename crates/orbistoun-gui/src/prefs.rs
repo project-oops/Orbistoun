@@ -190,15 +190,19 @@ pub(crate) fn pane_contents(
         Pane::Video => not_built(
             ui,
             "video",
-            "No output subsystem exists. The guest runs in a child process and nothing \
-             presents a frame yet, so resolution, window mode and vertical sync would all \
-             be controls over nothing.",
+            concat!(
+                "No output subsystem exists. The guest runs in a child process and nothing ",
+                "presents a frame yet, so resolution, window mode and vertical sync would all ",
+                "be controls over nothing.",
+            ),
         ),
         Pane::Input => not_built(
             ui,
             "input",
-            "No input subsystem exists. The controller shim declares its interface and \
-             implements none of it, so a binding here could not reach a guest.",
+            concat!(
+                "No input subsystem exists. The controller shim declares its interface and ",
+                "implements none of it, so a binding here could not reach a guest.",
+            ),
         ),
     }
 }
@@ -231,11 +235,11 @@ fn general(ui: &mut egui::Ui, prefs: &mut Preferences) {
         ui.add(egui::DragValue::new(&mut prefs.file.library.run_limit_seconds).range(0..=600));
         ui.label("seconds (0 = no limit)");
     });
-    ui.small(
-        "A limit is not a safety net - a guest with everything unimplemented settles into \
-         a loop waiting for something that will never happen, and without a limit the run \
-         hangs and takes its call trace with it.",
-    );
+    ui.small(concat!(
+        "A limit is not a safety net - a guest with everything unimplemented settles into ",
+        "a loop waiting for something that will never happen, and without a limit the run ",
+        "hangs and takes its call trace with it.",
+    ));
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("open in");
@@ -478,11 +482,11 @@ fn entry(ui: &mut egui::Ui, file: &mut FileConfig) {
     use orbistoun_loader::process::{Convention, EntryArgument};
 
     ui.heading("entry");
-    ui.small(
-        "How control reaches the guest's first instruction. Measured, not assumed: \
-         entering by call leaves every later guest call on a conforming stack, and \
-         entering by jump does not.",
-    );
+    ui.small(concat!(
+        "How control reaches the guest's first instruction. Measured, not assumed: ",
+        "entering by call leaves every later guest call on a conforming stack, and ",
+        "entering by jump does not.",
+    ));
     ui.separator();
 
     ui.label("convention");
@@ -546,11 +550,11 @@ fn threads(ui: &mut egui::Ui, file: &mut FileConfig) {
     use orbistoun_kernel::thread::AffinityPolicy;
 
     ui.heading("threads");
-    ui.small(
-        "The guest decides how many threads exist by asking for them; the host decides \
-         how many run at once. There is no minimum to enforce - a slower machine runs the \
-         same program more slowly.",
-    );
+    ui.small(concat!(
+        "The guest decides how many threads exist by asking for them; the host decides ",
+        "how many run at once. There is no minimum to enforce - a slower machine runs the ",
+        "same program more slowly.",
+    ));
     ui.separator();
 
     ui.horizontal(|ui| {
@@ -590,11 +594,11 @@ fn memory(ui: &mut egui::Ui, file: &mut FileConfig) {
         &mut file.memory.map_direct_memory,
         "map direct memory for real",
     );
-    ui.small(
-        "Off, this answers unimplemented and the guest gets no virtual address for memory \
-         it reserved. It was off for one afternoon while a fault inside it went \
-         unexplained - the cause turned out to be the entry convention, not the mapping.",
-    );
+    ui.small(concat!(
+        "Off, this answers unimplemented and the guest gets no virtual address for memory ",
+        "it reserved. It was off for one afternoon while a fault inside it went ",
+        "unexplained - the cause turned out to be the entry convention, not the mapping.",
+    ));
 }
 
 /// A pane for a subsystem that does not exist.
@@ -605,9 +609,9 @@ fn not_built(ui: &mut egui::Ui, name: &str, why: &str) {
     ui.add_space(4.0);
     ui.label(why);
     ui.add_space(8.0);
-    ui.small(
-        "This pane is deliberately empty rather than filled with controls that do \
-         nothing. A setting that silently has no effect is indistinguishable from one \
-         that is broken.",
-    );
+    ui.small(concat!(
+        "This pane is deliberately empty rather than filled with controls that do ",
+        "nothing. A setting that silently has no effect is indistinguishable from one ",
+        "that is broken.",
+    ));
 }

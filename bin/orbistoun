@@ -290,6 +290,26 @@ decisions() {
         bad "these are listed in docs/decision-number-backlog.txt and no longer duplicate - remove them"
         return 1
     fi
+
+    # **Coverage, the direction nothing checked.** Everything above reads the index and
+    # asks whether its numbers are sound. None of it asks whether the index describes the
+    # *files*, so a decision written and never listed is invisible in the one place
+    # CLAUDE.md says to consult - and nine of them were, D691 and D693 through D700, which
+    # is every decision taken over two days. The worklog gate has had exactly this check
+    # for its own directory all along; this is that check, one directory across.
+    #
+    # A warn rather than a failure, for the same reason it is a warn there: an entry
+    # written minutes ago has not been indexed yet and that is not a broken tree.
+    local unindexed="" entry base
+    for entry in docs/decisions/D*.md; do
+        base=$(basename "$entry")
+        grep -q "decisions/$base" docs/DECISIONS.md || unindexed="$unindexed    $base
+"
+    done
+    if [ -n "$unindexed" ]; then
+        warn "written but not listed in docs/DECISIONS.md (expected while one is still being written):"
+        printf '%s' "$unindexed"
+    fi
 }
 
 # The documentation states its own numbers, and it says they are printed by the tool rather
@@ -345,6 +365,28 @@ prose() {
         return 1
     fi
     echo "  none added; $(echo "$known" | grep -c .) file(s) on the known ceiling"
+
+    # **The other way to bake a newline into a message**, which the search above cannot see: a
+    # literal that simply contains one, with no backslash anywhere. Then the newline and the
+    # next line's indentation are in the rendered text from the moment it is written, and no
+    # formatter has to do anything for the damage to be there.
+    #
+    # Six such messages were found in one session and every one had shipped, including a lint's
+    # own reason and a refusal a reader sees with twenty-nine spaces through the middle of it
+    # (worklogs 578 and 582). There is no ceiling for this one because it started at zero.
+    step "no literal carries a newline into its own text"
+    local newlines
+    newlines=$(find crates -name '*.rs' -print0 \
+        | xargs -0 -n 50 awk -f tools/prose-newlines.awk 2>/dev/null || true)
+    if [ -n "$newlines" ]; then
+        printf '%s\n' "$newlines"
+        echo "  A newline inside a literal is fine where the output is meant to have one."
+        echo "  This is the other case: a sentence continued on the next line, which puts that"
+        echo "  line's indentation in the middle of it. Use concat! of one-line literals."
+        bad "a string literal carries a line break and the following indentation into its text"
+        return 1
+    fi
+    echo "  none"
 }
 
 # --- generated tables ---------------------------------------------------------
@@ -356,6 +398,21 @@ prose() {
 # `--transcript` replays a committed recording of that assembler, which needs nothing
 # installed. Regenerating from it and diffing is the check that was impossible before
 # (D209).
+#
+# **There are two questions here, not one, and this step used to answer only the first.**
+# Diffing the table against its recording catches a hand-edited table. It cannot catch a
+# hand-edited *probe*: a recording that predates a probe edit still replays, still solves,
+# and still produces the committed table, so the gate stays green while the recording no
+# longer describes the probes it claims to be a recording of. That happened - worklog 588
+# found `operands-memory.in` predating the flat-offset probes added in worklog 565, green
+# throughout.
+#
+# The generator answers the second question itself: every solver calls `check_recording`
+# before replaying, which compares the recorded input against the probe text being solved
+# now. That guard was already there and already failing correctly - but this step sent its
+# message to /dev/null and then blamed a hand-edited table, which is a cause it had no
+# evidence for and sends the reader to the wrong file. So the two outcomes are told apart
+# and the generator's own words are shown.
 tables() {
     step "generated tables match their recordings"
     local transcripts="crates/orbistoun-gen/tests/fixtures/transcripts"
@@ -363,19 +420,30 @@ tables() {
         warn "no recordings at $transcripts - the tables are unverified this run"
         return 0
     fi
-    local failed=0
+    local failed=0 stale=0
     # generator : the file it writes
     for pair in \
         "buffer-formats:crates/orbistoun-shader/data/buffer-formats.toml" \
         "operands:crates/orbistoun-shader/data/opcode-operands.toml"; do
         local gen="${pair%%:*}" file="${pair#*:}"
+        # Kept, not discarded: a replay that fails says which recording and why, and that
+        # sentence is the whole value of the failure.
         if ! cargo run -q -p orbistoun-gen -- --transcript "$transcripts" "$gen" --dry-run \
-            2>/dev/null > "$file.regenerated"; then
+            2>"$file.stderr" > "$file.regenerated"; then
             rm -f "$file.regenerated"
-            warn "$gen could not replay - recordings may be stale"
+            if grep -q "was taken for different probes" "$file.stderr"; then
+                echo "  a probe file has been edited since its recording was taken:"
+                sed 's/^/    /' "$file.stderr"
+                stale=1
+            else
+                warn "$gen could not replay - the generator said:"
+                sed 's/^/    /' "$file.stderr"
+            fi
+            rm -f "$file.stderr"
             failed=1
             continue
         fi
+        rm -f "$file.stderr"
         # The line naming the generator is the one difference a rename legitimately makes.
         if diff -q <(grep -v "^# Generated by" "$file") \
             <(grep -v "^# Generated by" "$file.regenerated") >/dev/null; then
@@ -389,6 +457,10 @@ tables() {
         fi
         rm -f "$file.regenerated"
     done
+    if [ "$stale" -ne 0 ]; then
+        bad "a recording no longer describes the probes it was taken from - re-record it in the build VM (tools/toolchain/sync.sh, then --record)"
+        return 1
+    fi
     [ "$failed" -eq 0 ] || { bad "a generated table no longer matches its generator - it was edited by hand, or the generator changed"; return 1; }
 }
 

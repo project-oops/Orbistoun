@@ -93,8 +93,15 @@ case "${1:-}" in
       rm -f "$archive_path"
       # Replaced rather than unpacked over: a file deleted here has to be gone there too, or
       # a generator reads a source that no longer exists and its output cannot be reproduced.
+      #
+      # **The archive is deleted in the guest too**, which it was not: it is most of a
+      # gigabyte and it was left behind by every push, on an eleven-gigabyte disk that also
+      # holds a Rust toolchain and a `target/`. The first symptom was a release build running
+      # out of space with 337MB free and no obvious reason - the space was one push's leftover
+      # copy of the tree it had just extracted.
       multipass exec "$NAME" -- sh -lc \
-        "rm -rf '$to' && mkdir -p '$to' && tar -xzf /home/ubuntu/$ARCHIVE -C '$to'"
+        "rm -rf '$to' && mkdir -p '$to' && tar -xzf /home/ubuntu/$ARCHIVE -C '$to' \
+         && rm -f /home/ubuntu/$ARCHIVE"
     }
 
     echo "packing the working tree"

@@ -608,7 +608,7 @@ mod knowledge_tests {
         ),
         (
             "libSceVideoRecording",
-            "declared as 10 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
     ];
 
@@ -657,6 +657,71 @@ mod knowledge_tests {
                 serves = serves
             );
         }
+    }
+
+    /// **An excuse that counts the names must count them right.**
+    ///
+    /// Every reason above opens `declared as N name(s)`, and nothing checked N. It had
+    /// already rotted: `libSceVideoRecording` said ten while its module declares four,
+    /// because six names were taken out of that module for having no provenance - they came
+    /// from a probe check that was read as measuring that they *resolve* and in fact records
+    /// the branch where the lookup returned null. The removal was right and the excuse was
+    /// not updated with it.
+    ///
+    /// Two other numbers describe this same set and **neither one was wrong**, which is why
+    /// the drift was invisible: the guard above checks membership rather than size, and
+    /// README's `149 across 23 libraries` is counted from the declarations themselves in
+    /// `orbistoun-cli`, so it never read this string at all. A transcribed number with two
+    /// correct derived neighbours is the easiest kind to leave rotting (D085's rule, one
+    /// level down: if it can be derived, do not also write it down unchecked).
+    ///
+    /// Tolerant on purpose: a reason that does not open with that phrase is a bespoke one -
+    /// the retired entries had them - and has nothing to check.
+    #[test]
+    fn an_excuse_that_states_a_name_count_states_the_right_one() {
+        let declared: std::collections::BTreeMap<&str, usize> = super::modules()
+            .into_iter()
+            .map(|m| (m.name, m.imports.len()))
+            .collect();
+
+        let mut checked = 0_usize;
+        for (name, reason) in SERVES_NOTHING {
+            let Some(rest) = reason.strip_prefix("declared as ") else {
+                continue;
+            };
+            let Some((digits, _)) = rest.split_once(" name(s)") else {
+                continue;
+            };
+            let claimed: usize = digits
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} opens `declared as {digits} name(s)`, which is the counted form, but {digits} is not a number"));
+            let actual = declared
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("{name} is excused but no module declares it"));
+            assert_eq!(
+                claimed,
+                actual,
+                concat!(
+                    "{} says it declares {claimed} name(s) and its module declares {actual}. ",
+                    "The module is the fact; this sentence is a copy of it."
+                ),
+                name,
+                claimed = claimed,
+                actual = actual
+            );
+            checked += 1;
+        }
+
+        // **The count of what was checked, asserted.** Every entry uses the counted form
+        // today, so a loop that silently checked none of them - a `strip_prefix` that stopped
+        // matching after a rewording, say - would pass exactly as loudly as one that checked
+        // all of them. That is the vacuous-loop failure `docs/TESTING.md` names.
+        assert_eq!(
+            checked,
+            SERVES_NOTHING.len(),
+            "every entry states a name count today, so all of them should have been checked"
+        );
     }
 
     /// Every excuse names a library that is actually declared.

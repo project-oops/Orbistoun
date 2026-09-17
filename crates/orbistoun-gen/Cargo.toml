@@ -31,5 +31,11 @@ sha1 = { workspace = true }
 # genuinely TOML into a second dialect for it to disagree with.
 toml = { workspace = true }
 
+[dev-dependencies]
+# A directory to write a recording into, so the staleness guard can be watched rejecting
+# one. The guard reads from disk, and a test that stubbed the read would be testing the
+# stub (D209, REQ-...4c2f).
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

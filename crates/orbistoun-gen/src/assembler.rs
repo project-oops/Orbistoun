@@ -238,10 +238,15 @@ fn paths(dir: &Path, key: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 /// Replays a recording.
 ///
-/// The input is recorded alongside the output and **checked**, not ignored. A solver whose
-/// probe list has changed since the recording was taken would otherwise be handed the old
-/// answers to new questions, and the mismatch would show up as a wrong table rather than as
-/// a stale recording.
+/// **This reads the answers and does not look at the question.** The recorded input is
+/// deliberately untouched here, because a replay that checked its own input would have to
+/// be handed that input, and the callers that have it are the solvers - so the comparison
+/// lives in [`check_recording`], which each of them calls before replaying.
+///
+/// Saying so plainly because the comment that used to be here claimed this function did the
+/// checking, which was not true and made the hazard it describes look handled: a solver
+/// whose probe list has changed since the recording was taken gets the old answers to new
+/// questions, and that surfaces as a wrong table rather than as a stale recording.
 fn read_recording(dir: &Path, key: &str) -> Result<Output> {
     let (input_path, out_path, err_path) = paths(dir, key);
     let stdout = std::fs::read_to_string(&out_path)
@@ -387,7 +392,7 @@ pub(crate) fn key_for(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Output, parse};
+    use super::{Output, check_recording, parse, write_recording};
 
     /// A refusal shifts nothing.
     ///
@@ -437,5 +442,140 @@ mod tests {
             stderr: String::new(),
         };
         assert!(parse("", &output).samples.is_empty());
+    }
+
+    /// The words `bin/orbistoun` looks for to tell a stale recording from a broken replay.
+    ///
+    /// Duplicated across a language boundary on purpose - the shell cannot call into this
+    /// crate - and pinned below from both ends, because the coupling is otherwise the kind
+    /// that rots in silence: reword the Rust message and the shell's `grep` simply stops
+    /// matching, with no failure anywhere, and the gate quietly goes back to blaming a
+    /// hand-edited table for an edited probe.
+    const STALE_MARKER: &str = "was taken for different probes";
+
+    /// Writes a recording for `key` whose input is `input`.
+    fn recorded(dir: &std::path::Path, key: &str, input: &str) {
+        let output = Output {
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        write_recording(dir, key, input, &output).expect("writing the recording");
+    }
+
+    /// The ordinary case: the probes have not moved, so replaying is sound.
+    #[test]
+    fn a_recording_taken_for_these_probes_is_accepted() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        recorded(
+            dir.path(),
+            "operands-memory",
+            "s_load_dword s5, s[6:7], 0x10\n",
+        );
+        check_recording(
+            dir.path(),
+            "operands-memory",
+            "s_load_dword s5, s[6:7], 0x10\n",
+        )
+        .expect("the recording describes exactly these probes");
+    }
+
+    /// **The hazard this guard exists for, watched rejecting.**
+    ///
+    /// A probe added after the recording was taken. The replay would still work, still
+    /// solve, and still produce the committed table - so every other check in the gate
+    /// stays green while the recording has stopped describing the probes. Only this
+    /// comparison can see it.
+    #[test]
+    fn a_probe_added_since_the_recording_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        recorded(
+            dir.path(),
+            "operands-memory",
+            "s_load_dword s5, s[6:7], 0x10\n",
+        );
+
+        let with_one_more = concat!(
+            "s_load_dword s5, s[6:7], 0x10\n",
+            "s_load_dword s44, s[80:81], 0x2a0\n"
+        );
+        let refused = check_recording(dir.path(), "operands-memory", with_one_more)
+            .expect_err("a recording taken for fewer probes is not a recording of these");
+
+        let said = refused.to_string();
+        assert!(
+            said.contains(STALE_MARKER),
+            "the message must carry the words the gate greps for, said: {said}"
+        );
+        assert!(
+            said.contains("operands-memory.in"),
+            "the message must name the recording to re-record, said: {said}"
+        );
+    }
+
+    /// A removed probe is the same failure from the other side.
+    #[test]
+    fn a_probe_removed_since_the_recording_is_refused_too() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let two = concat!(
+            "s_load_dword s5, s[6:7], 0x10\n",
+            "s_load_dword s44, s[80:81], 0x2a0\n"
+        );
+        recorded(dir.path(), "operands-memory", two);
+        check_recording(
+            dir.path(),
+            "operands-memory",
+            "s_load_dword s5, s[6:7], 0x10\n",
+        )
+        .expect_err("dropping a probe changes what was solved just as much as adding one");
+    }
+
+    /// **Line endings alone are not a probe edit, and saying they are would be worse than
+    /// not checking at all.**
+    ///
+    /// These files are checked out on Windows as often as not. A guard that failed on a
+    /// checkout's line endings would fail on a tree nobody had touched, and the thing
+    /// people learn from a gate that cries wolf is to stop reading it.
+    #[test]
+    fn line_endings_alone_are_not_a_different_probe_set() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        recorded(
+            dir.path(),
+            "operands-memory",
+            "s_load_dword s5, s[6:7], 0x10\r\nds_read_b32 v1, v2 offset:4\r\n",
+        );
+        check_recording(
+            dir.path(),
+            "operands-memory",
+            "s_load_dword s5, s[6:7], 0x10\nds_read_b32 v1, v2 offset:4\n",
+        )
+        .expect("the same probes, checked out differently, are the same probes");
+    }
+
+    /// A recording that is not there names the file it should be.
+    #[test]
+    fn a_missing_recording_says_which_one_is_missing() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let refused = check_recording(dir.path(), "operands-memory", "s_nop 0\n")
+            .expect_err("there is no recording to compare against");
+        assert!(
+            refused.to_string().contains("operands-memory.in"),
+            "said: {refused}"
+        );
+    }
+
+    /// The other end of the marker: the gate really does look for these words.
+    ///
+    /// Without this, [`STALE_MARKER`] pins only that the Rust message has not changed -
+    /// which is half a coupling. Reading the script is the only way to pin the other half
+    /// from here.
+    #[test]
+    fn the_gate_looks_for_the_words_this_message_carries() {
+        let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/orbistoun");
+        let script = std::fs::read_to_string(&runner)
+            .unwrap_or_else(|why| panic!("reading {}: {why}", runner.display()));
+        assert!(
+            script.contains(STALE_MARKER),
+            "bin/orbistoun no longer greps for `{STALE_MARKER}`, so it can no longer tell a stale recording from a failed replay"
+        );
     }
 }

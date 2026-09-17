@@ -286,6 +286,23 @@ mask = "0xFC000000"
 value = "0xF0000000"
 opcode = { shift = 18, width = 7 }
 width_bytes = 8
+# **This family is not always eight bytes.** Its address registers may be named individually
+# rather than as a consecutive range, and the extra register numbers go in dwords appended to
+# the instruction - two bits at 2:1 say how many.
+#
+# Measured, by assembling the same instruction in both forms and comparing the encodings:
+#
+#   image_sample_l v0, v[0:2],        ...  -> 8 bytes,  first byte 0x08, field 0
+#   image_sample_l v0, [v2, v1, v0],  ...  -> 12 bytes, first byte 0x0a, field 1
+#   image_sample_d v0, [v0..v5],      ...  -> 16 bytes, first byte 0x0c, field 2
+#   image_sample_d v0, [v0..v8], 3D   ...  -> 16 bytes, first byte 0x14, field 2
+#
+# so the length is eight plus four times the field. It is not a corner nobody reaches: a
+# reference compiler emits this form in preference to moving a register, which it did on the
+# first program written to ask (worklog 577). Reading it as eight bytes would desynchronise
+# the decoder for the whole rest of the shader - the same failure `literal_operands` exists to
+# prevent for the other variable-length case.
+extra_dwords = { shift = 1, width = 2 }
 # No layout: which fields are live depends on the opcode, not just the family
 # (D096). A per-family list cannot express that, so none is claimed.
 

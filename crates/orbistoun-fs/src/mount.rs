@@ -161,7 +161,65 @@ pub fn is_contained(relative: &str) -> bool {
 /// refusals rather than errors: a guest asking for something it cannot have gets the same
 /// answer as a guest asking for something that is not there, which is what the interface
 /// it thinks it is calling would tell it.
+/// Whether the guest's path components (`rest`, under orbistoun's host `root`) exist on disk
+/// **case-sensitively**, matching the console's FreeBSD-derived filesystem.
+///
+/// # Why the host's own answer is not enough
+///
+/// The console's filesystem is case-sensitive: `Foo.dat` and `foo.dat` are different names, and a
+/// guest that opens one when only the other exists is answered `ENOENT`. `Path::exists` on a **Windows**
+/// host is case-*in*sensitive, so it would report the file present under the wrong case - the guest
+/// then reads a file the console would not have found, a host-semantic leak of exactly the class that
+/// answered PPSA04263's `/app0` directory open wrong (worklog 615, 624). Only the guest-supplied
+/// components are checked; orbistoun's own `root` case is orbistoun's concern.
+///
+/// On a case-sensitive host (Unix), `exists` is already the right answer, so this is a plain check.
+#[cfg(not(windows))]
+fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
+    root.join(rest).exists()
+}
+
+/// The Windows half: `canonicalize` returns the path's **real on-disk case**, so a wrong-case request
+/// resolves to a different spelling than it asked for, and that mismatch is the not-found the console
+/// gives. Compared over the guest's trailing components only, so the host root's own case (and the
+/// `\\?\` prefix canonicalize adds) is not part of the test.
+#[cfg(windows)]
+fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
+    let Ok(real) = std::fs::canonicalize(root.join(rest)) else {
+        return false;
+    };
+    let want: Vec<&str> = rest.split('/').filter(|c| !c.is_empty()).collect();
+    let real_components: Vec<&str> = real
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    real_components.len() >= want.len()
+        && real_components[real_components.len() - want.len()..]
+            .iter()
+            .zip(&want)
+            .all(|(on_disk, asked)| on_disk == asked)
+}
+
+/// Maps a guest path to its host path - the existing layer if it has one, else the writable layer
+/// where a new file would go. **Path mapping, not an existence check**: a title's own copy shadows
+/// the base, and a not-yet-created file still maps to where it belongs. Creates and the tests that
+/// pin the mapping use this; reads that must fail when the path is not there use [`resolve_existing`].
 pub fn resolve(guest_path: &str) -> Option<PathBuf> {
+    resolve_inner(guest_path, true)
+}
+
+/// The host path for a guest path that **exists**, case-sensitively - `None` when it is not there,
+/// including when it exists only under a different case, which the console (case-sensitive) would not
+/// find either.
+///
+/// The read resolver. Reads must not use [`resolve`]'s mapping, because it answers where a file
+/// *could* be written even when nothing is there - and on a case-insensitive host `File::open` would
+/// then open a wrong-case file that maps to that same location, the leak worklog 624 closes.
+pub fn resolve_existing(guest_path: &str) -> Option<PathBuf> {
+    resolve_inner(guest_path, false)
+}
+
+fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
     // Normalised so `\` from a guest that mixes conventions cannot slip a component past
     // the component walk below.
     let guest_path = guest_path.replace('\\', "/");
@@ -187,16 +245,16 @@ pub fn resolve(guest_path: &str) -> Option<PathBuf> {
             let candidate = root.join(rest);
             // The first layer that actually has it. A title's own copy shadows the base,
             // which is the whole point of layering rather than merging.
-            if candidate.exists() {
+            if exists_case_sensitive(root, rest) {
                 return Some(candidate);
             }
             if index == 0 {
                 found = Some(candidate);
             }
         }
-        // Nowhere yet: answer the writable layer, so creating a file puts it where a
-        // title's data belongs and reading one fails because it is genuinely not there.
-        return found;
+        // Nowhere yet: for a create, answer the writable layer so the new file lands where a title's
+        // data belongs; for a read, it is genuinely not there.
+        return if writable_fallback { found } else { None };
     }
     None
 }
@@ -268,7 +326,7 @@ pub fn is_directory(guest_path: &str) -> bool {
     if !mounts_under(guest_path).is_empty() {
         return true;
     }
-    resolve(guest_path).is_some_and(|host| host.is_dir())
+    resolve_existing(guest_path).is_some_and(|host| host.is_dir())
 }
 
 #[cfg(test)]

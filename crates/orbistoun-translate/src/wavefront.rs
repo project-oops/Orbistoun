@@ -101,6 +101,41 @@ const OUTPUT: u32 = 3;
 /// The `Input` storage class, where an interpolated fragment attribute arrives.
 const INPUT: u32 = 1;
 
+/// The `UniformConstant` storage class, where a descriptor-bound sampled image lives.
+///
+/// Not a buffer: an image is read through a sampling instruction rather than loaded from, so it
+/// has a storage class of its own. Spelled here beside the other three for the same reason they
+/// are.
+const UNIFORM_CONSTANT: u32 = 0;
+
+/// The texture a module samples, once something has asked for one.
+///
+/// Declared on first use, like the sixteen-bit types, because most modules never sample. The
+/// two register numbers are not used to *find* anything - D690 binds every sample to the one
+/// texture the pipeline bound - they are what makes the refusal possible: a second sample
+/// naming a different pair is a module using two textures, and only one is bound.
+#[derive(Debug, Clone, Copy)]
+struct BoundTexture {
+    /// What a translated sample needs, handed back whole.
+    texture: model::Texture,
+    /// First scalar register of the image descriptor the guest named.
+    descriptor: u32,
+    /// First scalar register of the sampler descriptor, when one was named.
+    ///
+    /// [`None`] until something samples. A fetch names an image descriptor and no sampler, so a
+    /// module that only fetches never records one - and comparing a sampler nobody named would
+    /// refuse a module for using two of something it uses none of.
+    sampler: Option<u32>,
+    /// Set when a scalar write lands inside either group.
+    ///
+    /// **This is the rule that makes the other two an argument rather than a hope.** A shader
+    /// that loads a second descriptor into the same eight registers and samples again names the
+    /// same registers both times, so comparing register numbers alone would let two different
+    /// textures through as one. A write into the group says the descriptor is not the one the
+    /// last sample used, and the next sample is refused.
+    disturbed: bool,
+}
+
 /// Words of local data share a translated module provides.
 ///
 /// A placeholder, like the guest-memory window: the real size is declared per dispatch by
@@ -237,6 +272,73 @@ struct MeshOutputs {
     uvec3: Id,
 }
 
+/// Where the guest-memory window sits in the guest's address space.
+///
+/// A translated shader reaches guest memory through one storage buffer, and the buffer is a
+/// *window*: a fixed number of words somewhere in the address space, with every access checked
+/// against it. Until this existed the window was anchored at zero, which is nowhere near where
+/// a guest puts anything - so a real shader's every access was refused and it drew nothing
+/// (worklog 561).
+///
+/// Both halves are now the caller's: [`Window::at`] takes the default length, [`Window::spanning`]
+/// a chosen one. The length had to follow the base rather than lead it, because a length is
+/// useless without somewhere to start - and it is load-bearing for a real frame, where the
+/// console's own canary sat 32,768 words past its base and no 64-word window could reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    /// The guest address of the window's first word.
+    pub base: u32,
+    /// How many words it spans. Private on purpose - see [`Window::spanning`].
+    words: u32,
+}
+
+impl Window {
+    /// A window of the default length, anchored at `base`.
+    #[must_use]
+    pub const fn at(base: u32) -> Self {
+        Self {
+            base,
+            words: MEMORY_WORDS,
+        }
+    }
+
+    /// A window of `words` words at `base`, or `None` when `words` is not a power of two.
+    ///
+    /// # Refused rather than rounded, and the field is private so it cannot be sidestepped
+    ///
+    /// [`crate::model::Model::word_index`] keeps an index legal by masking it with
+    /// `words - 1`, which is the bound **only** when `words` is a power of two.
+    /// `address_within_window` beside it compares against the true count instead. Give those
+    /// two a length that is not a power of two and they stop agreeing: the check admits an
+    /// address, the mask then folds it to a different word, and a store lands somewhere the
+    /// guest never asked for while everything about the run looks fine.
+    ///
+    /// That is precisely the aliasing `address_within_window` was written to prevent, so a
+    /// length that would reintroduce it is refused at construction. Rounding would be worse
+    /// than refusing: up admits addresses the window does not hold, down refuses ones it does,
+    /// and neither tells the caller its length was not the one it asked for.
+    #[must_use]
+    pub const fn spanning(base: u32, words: u32) -> Option<Self> {
+        if words == 0 || !words.is_power_of_two() {
+            return None;
+        }
+        Some(Self { base, words })
+    }
+
+    /// How many words this window spans.
+    #[must_use]
+    pub const fn words(self) -> u32 {
+        self.words
+    }
+}
+
+impl Default for Window {
+    /// The default length at address zero - what every caller had before a base existed.
+    fn default() -> Self {
+        Self::at(0)
+    }
+}
+
 /// How a fragment input is read.
 ///
 /// The guest decides this per attribute rather than per shader: `v_interp_p1_f32` and its
@@ -330,12 +432,17 @@ fn emit_entry_point(b: &mut Builder, stage: Stage, main: Id, interface: &[u32]) 
 ///
 /// Together because they are one idea - how big everything is - and separate from the
 /// constructor for its length.
-fn declare_counts(b: &mut Builder, u32_type: Id, counts: [Id; 4], width: Width) {
+fn declare_counts(b: &mut Builder, u32_type: Id, counts: [Id; 4], width: Width, memory_words: u32) {
     let [wave, registers, observed, memory] = counts;
     b.declare(op::CONSTANT, &[u32_type.0, wave.0, width.lanes()]);
     b.declare(op::CONSTANT, &[u32_type.0, registers.0, REGISTER_COUNT]);
     b.declare(op::CONSTANT, &[u32_type.0, observed.0, OBSERVED_WORDS]);
-    b.declare(op::CONSTANT, &[u32_type.0, memory.0, MEMORY_WORDS]);
+    // **The declared array and the bounds check must be the same number.** `Model::word_index`
+    // masks with `memory_words - 1` and `address_within_window` compares against
+    // `memory_words`; declaring the array from a constant instead would let a widened window
+    // admit an index the buffer does not hold, which is an out-of-bounds access in the shader
+    // rather than a refusal. So the length arrives here from the same place they read it.
+    b.declare(op::CONSTANT, &[u32_type.0, memory.0, memory_words]);
 }
 
 /// Declares the two storage buffers every module binds.
@@ -609,6 +716,8 @@ pub struct Wavefront<'a> {
     mesh: Option<MeshOutputs>,
     /// The four-component float vector, which the stages that have one share.
     vec4: Id,
+    /// The guest address the memory window starts at. See [`Model::memory_base`].
+    memory_base: u32,
     /// How many words of guest memory this module addresses.
     ///
     /// Carried rather than read from a constant so a test can widen the window and reach
@@ -632,6 +741,21 @@ pub struct Wavefront<'a> {
     /// every module was relying on capabilities the device had not enabled (worklog 556).
     f16_type: Option<Id>,
     u16_type: Option<Id>,
+    /// The sampled image, declared the first time an instruction samples one.
+    ///
+    /// [`None`] for every module that does not sample, which is nearly all of them - and
+    /// declaring one unconditionally would put a descriptor binding in the layout of every
+    /// pipeline that runs a translated module, whether or not anything reads it.
+    texture: Option<BoundTexture>,
+    /// The storage image, declared the first time an instruction stores to one.
+    ///
+    /// Lazy for a stronger reason than the sampled image is: declaring it declares a
+    /// **capability**, and a device that was not created with the matching feature refuses a
+    /// module carrying it. A module that never stores must therefore never declare one (D692).
+    ///
+    /// The image descriptor register it was first named with rides along, so D690's rules apply
+    /// to a store as they do to a sample.
+    stored: Option<(model::Stored, u32)>,
     bool_type: Id,
     /// Pointer to one lane of one vector register.
     lane_ptr: Id,
@@ -659,7 +783,14 @@ pub struct Wavefront<'a> {
 impl<'a> Wavefront<'a> {
     /// Prepares the module and sets every lane active.
     pub fn new(encodings: &'a EncodingTable, width: Width) -> Self {
-        Self::for_stage(encodings, width, Stage::Compute, &[], &[])
+        Self::for_stage(
+            encodings,
+            width,
+            Stage::Compute,
+            &[],
+            &[],
+            Window::default(),
+        )
     }
 
     /// Prepares the module for a named stage.
@@ -675,6 +806,7 @@ impl<'a> Wavefront<'a> {
         stage: Stage,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
+        window: Window,
     ) -> Self {
         // A mesh module declares 1.4, which its extension requires; everything else stays at
         // 1.3, where an entry point lists only its inputs and outputs (worklog 557).
@@ -760,6 +892,7 @@ impl<'a> Wavefront<'a> {
             u32_type,
             [wave_count, register_count, observed_count, memory_count],
             width,
+            window.words(),
         );
 
         let files = declare_files(&mut b, u32_type, register_count, wave_count);
@@ -795,9 +928,10 @@ impl<'a> Wavefront<'a> {
             inputs,
             mesh,
             vec4,
+            memory_base: window.base,
             builder: b,
             encodings,
-            memory_words: MEMORY_WORDS,
+            memory_words: window.words(),
             width,
             constants: BTreeMap::new(),
             glsl_set: None,
@@ -805,6 +939,8 @@ impl<'a> Wavefront<'a> {
             f32_type,
             f16_type: None,
             u16_type: None,
+            texture: None,
+            stored: None,
             bool_type,
             lane_ptr: files.lane_ptr,
             scalar_ptr: files.scalar_ptr,
@@ -1125,6 +1261,10 @@ impl Model for Wavefront<'_> {
         self.memory_words
     }
 
+    fn memory_base(&self) -> u32 {
+        self.memory_base
+    }
+
     fn lanes(&self) -> u32 {
         self.width.lanes()
     }
@@ -1199,6 +1339,22 @@ impl Model for Wavefront<'_> {
     }
 
     fn write_scalar(&mut self, register: u32, value: Id) {
+        // A write into either descriptor group means the texture the next sample reads is not
+        // the one the last sample read. Recorded here rather than checked at the sample,
+        // because this is the only place that sees a write at all - and D690's third rule is
+        // what stops a shader reloading the same eight registers from reading two textures
+        // while naming one.
+        if let Some(bound) = self.texture.as_mut() {
+            let within = |first: u32, count: u32| register >= first && register < first + count;
+            // The sampler's range only exists once something named a sampler - a module that
+            // only fetches has an image descriptor and nothing else to disturb.
+            let sampler_disturbed = bound
+                .sampler
+                .is_some_and(|first| within(first, model::SAMPLER_DESCRIPTOR_REGISTERS));
+            if within(bound.descriptor, model::IMAGE_DESCRIPTOR_REGISTERS) || sampler_disturbed {
+                bound.disturbed = true;
+            }
+        }
         Self::store_scalar(self, register, value);
     }
 
@@ -1247,6 +1403,179 @@ impl Model for Wavefront<'_> {
         self.builder.declare(op::TYPE_INT, &[id.0, 16, 0]);
         self.u16_type = Some(id);
         id
+    }
+
+    fn storage_image(&mut self, descriptor: u32) -> Result<model::Stored, &'static str> {
+        // The fragment stage only, for the same two reasons a sample is: the harness binds its
+        // storage image with fragment stage flags, and the four-component type a texel is comes
+        // from the colour output, which only a fragment module has.
+        if self.stage != Stage::Fragment {
+            return Err(concat!(
+                "only a fragment module stores to an image here - a storage image is bound with ",
+                "fragment stage flags, and a guest's pixel shader is what asked for one"
+            ));
+        }
+        if let Some((stored, was)) = self.stored {
+            if was != descriptor {
+                return Err(concat!(
+                    "this shader stores to more than one image and a pipeline binds one - ",
+                    "resolving which is which needs the descriptors decoded, and writing ",
+                    "whichever happened to be bound would corrupt a texture nobody asked to ",
+                    "write (D690)"
+                ));
+            }
+            return Ok(stored);
+        }
+
+        let image = self.builder.id();
+        let pointer = self.builder.id();
+        let variable = self.builder.id();
+        let texel = self.builder.id();
+
+        // The capability the format-less declaration below needs, and the reason this is
+        // declared lazily: a module carrying it is refused by a device that was not created
+        // with the matching feature, so a module that never stores must never carry it (D692).
+        self.builder.header(
+            op::CAPABILITY,
+            &[capability::STORAGE_IMAGE_WRITE_WITHOUT_FORMAT],
+        );
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
+        self.builder.annotate(
+            op::DECORATE,
+            &[
+                variable.0,
+                decoration::BINDING,
+                orbistoun_spirv::STORAGE_IMAGE_BINDING,
+            ],
+        );
+        // Written and never read, which is what a guest's store does and what the reference
+        // compiler marks a write-only image with.
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::NON_READABLE]);
+
+        // The same seven operands a sampled image takes, with `Sampled` at **2** - written to
+        // through an image instruction rather than read through a sampler - and the format left
+        // `Unknown`, which is what the capability above buys.
+        self.builder.declare(
+            op::TYPE_IMAGE,
+            &[image.0, self.f32_type.0, 1, 0, 0, 0, 2, 0],
+        );
+        self.builder
+            .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, image.0]);
+        self.builder
+            .declare(op::VARIABLE, &[pointer.0, variable.0, UNIFORM_CONSTANT]);
+        self.builder
+            .declare(op::TYPE_VECTOR, &[texel.0, self.u32_type.0, 2]);
+
+        let stored = model::Stored {
+            variable,
+            image,
+            texel,
+            value: self.vec4,
+        };
+        self.stored = Some((stored, descriptor));
+        Ok(stored)
+    }
+
+    fn sampled_image(
+        &mut self,
+        descriptor: u32,
+        sampler: Option<u32>,
+    ) -> Result<model::Texture, &'static str> {
+        // The fragment stage only, and for two reasons that happen to agree. The harness binds
+        // its sampled image with fragment stage flags, so a pipeline whose other stage sampled
+        // would be invalid. And the `vec4` type a sample answers with is declared by the colour
+        // output, which only a fragment module has - a compute module would reference a type
+        // nothing declared, which is a module a driver faults on rather than diagnoses.
+        if self.stage != Stage::Fragment {
+            return Err(concat!(
+                "only a fragment module samples a texture here - a sampled image is bound with ",
+                "fragment stage flags, and a guest's textured shading is what asked for one"
+            ));
+        }
+        if let Some(bound) = self.texture.as_mut() {
+            if bound.disturbed {
+                return Err(concat!(
+                    "the registers holding this shader's image descriptor were written ",
+                    "between one access and the next, so the two read different textures and ",
+                    "only one is bound (D690)"
+                ));
+            }
+            // A sampler only conflicts with a sampler. A fetch names none, so it neither
+            // conflicts with the recorded one nor clears it.
+            let conflicts = bound.descriptor != descriptor
+                || matches!((bound.sampler, sampler), (Some(was), Some(now)) if was != now);
+            if conflicts {
+                return Err(concat!(
+                    "this shader reads more than one texture and a pipeline binds one - ",
+                    "resolving which is which needs the descriptors decoded, and reading ",
+                    "whichever happened to be bound would draw a frame that looks right and ",
+                    "is not (D690)"
+                ));
+            }
+            // The first instruction to name a sampler is what puts one on the record, which may
+            // be a later one than the first to name the image.
+            bound.sampler = bound.sampler.or(sampler);
+            return Ok(bound.texture);
+        }
+
+        let image = self.builder.id();
+        let combined = self.builder.id();
+        let pointer = self.builder.id();
+        let variable = self.builder.id();
+        let coordinate = self.builder.id();
+
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
+        self.builder.annotate(
+            op::DECORATE,
+            &[
+                variable.0,
+                decoration::BINDING,
+                orbistoun_spirv::TEXTURE_BINDING,
+            ],
+        );
+
+        // Element type, then: two-dimensional, not a depth texture, not an array, not
+        // multi-sampled, used with a sampler, and of no declared format. Read out of compiled
+        // output rather than assumed (worklog 566), and the same seven values the hand-written
+        // oracle this is checked against declares.
+        self.builder.declare(
+            op::TYPE_IMAGE,
+            &[image.0, self.f32_type.0, 1, 0, 0, 0, 1, 0],
+        );
+        self.builder
+            .declare(op::TYPE_SAMPLED_IMAGE, &[combined.0, image.0]);
+        self.builder
+            .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, combined.0]);
+        self.builder
+            .declare(op::VARIABLE, &[pointer.0, variable.0, UNIFORM_CONSTANT]);
+        self.builder
+            .declare(op::TYPE_VECTOR, &[coordinate.0, self.f32_type.0, 2]);
+        // The integer coordinate a fetch takes, which is a different type from the one a sample
+        // takes and means a different thing - a texel's index rather than a position across the
+        // image. Declared beside it because whichever of the two a module uses, the other costs
+        // one type declaration nothing references.
+        let texel = self.builder.id();
+        self.builder
+            .declare(op::TYPE_VECTOR, &[texel.0, self.u32_type.0, 2]);
+
+        let texture = model::Texture {
+            variable,
+            sampled: combined,
+            image,
+            coordinate,
+            texel,
+            result: self.vec4,
+        };
+        self.texture = Some(BoundTexture {
+            texture,
+            descriptor,
+            sampler,
+            disturbed: false,
+        });
+        Ok(texture)
     }
 
     /// Writes both halves of a lane mask.
@@ -1433,8 +1762,10 @@ fn interpolated_attributes(
             Some((_, seen_as)) if *seen_as != how => {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,
-                    detail: "this shader reads one attribute both interpolated and flat, and a 
-                             host input is one or the other; refused rather than picking one",
+                    detail: concat!(
+                        "this shader reads one attribute both interpolated and flat, and a host ",
+                        "input is one or the other; refused rather than picking one"
+                    ),
                 });
             }
             Some(_) => {}
@@ -1484,10 +1815,12 @@ pub fn translate_for(
     encodings: &EncodingTable,
     width: Width,
     stage: Stage,
+    window: Window,
 ) -> Result<(Vec<u32>, usize), TranslateError> {
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);
-    let mut module = Wavefront::for_stage(encodings, width, stage, &attributes, &parameters);
+    let mut module =
+        Wavefront::for_stage(encodings, width, stage, &attributes, &parameters, window);
     crate::control::emit(&mut module, decode, encodings)?;
     module.finish()
 }

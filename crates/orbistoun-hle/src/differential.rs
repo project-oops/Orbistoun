@@ -223,11 +223,13 @@ fn hex(text: &str) -> Option<u64> {
 mod tests {
     use super::{Argument, Reference};
 
-    const RUN: &str = "REF|library|glibc|2.39\n\
-         REF|case|strtoul/trailing-text|strtoul|s:42abc|i:10\n\
-         REF|ret|strtoul/trailing-text|0x2a\n\
-         REF|errno|strtoul/trailing-text|0x0\n\
-         REF|out|strtoul/trailing-text|end_offset|0x2\n";
+    const RUN: &str = concat!(
+        "REF|library|glibc|2.39\n",
+        "REF|case|strtoul/trailing-text|strtoul|s:42abc|i:10\n",
+        "REF|ret|strtoul/trailing-text|0x2a\n",
+        "REF|errno|strtoul/trailing-text|0x0\n",
+        "REF|out|strtoul/trailing-text|end_offset|0x2\n"
+    );
 
     /// A run is read back with its library, its inputs and all three answers.
     #[test]
@@ -331,9 +333,11 @@ mod tests {
     /// Steps of one sequence group together, and a lone case is a sequence of one.
     #[test]
     fn numbered_steps_group_into_one_sequence() {
-        let run = "REF|case|strtok/a#0|strtok|s:x,y|s:,\nREF|ret|strtok/a#0|0x1\n\
-                   REF|case|strtok/a#1|strtok|n:|s:,\nREF|ret|strtok/a#1|0x1\n\
-                   REF|case|strcmp/b|strcmp|s:a|s:a\nREF|ret|strcmp/b|0x0\n";
+        let run = concat!(
+            "REF|case|strtok/a#0|strtok|s:x,y|s:,\nREF|ret|strtok/a#0|0x1\n",
+            "REF|case|strtok/a#1|strtok|n:|s:,\nREF|ret|strtok/a#1|0x1\n",
+            "REF|case|strcmp/b|strcmp|s:a|s:a\nREF|ret|strcmp/b|0x0\n"
+        );
         let reference = Reference::parse(run);
         let grouped = reference.sequences();
         assert_eq!(grouped.len(), 2);

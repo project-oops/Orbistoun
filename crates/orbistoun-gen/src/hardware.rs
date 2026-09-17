@@ -164,8 +164,11 @@ pub(crate) fn edge_case(observation: &Observation) -> String {
     let head = format!("Measured on hardware: obSCEne `{}` ", observation.check);
     match observation.outcomes.as_slice() {
         [only] => format!(
-            "{head}{}. The check names the condition; see {} in the sibling \
-             conformance-probe repository.",
+            concat!(
+                "{}{}. The check names the condition; see {} in the sibling ",
+                "conformance-probe repository."
+            ),
+            head,
             reported(only),
             seen_in(&only.sources)
         ),
@@ -177,9 +180,12 @@ pub(crate) fn edge_case(observation: &Observation) -> String {
             // **The disagreement is said first**, because a reader scanning for a constant
             // needs to know this is not one before they reach a value they might copy.
             format!(
-                "{head}did not report the same thing twice, so the value is not a constant of \
-                 the platform: {}. The check names the condition; both are in the sibling \
-                 conformance-probe repository.",
+                concat!(
+                    "{}did not report the same thing twice, so the value is not a constant of ",
+                    "the platform: {}. The check names the condition; both are in the sibling ",
+                    "conformance-probe repository."
+                ),
+                head,
                 parts.join("; ")
             )
         }
@@ -481,14 +487,16 @@ mod tests {
         );
     }
 
-    const CAPTURE: &str = "OBS|try|015-sync/mutex-unlock-unheld|libkernel|scePthreadMutexUnlock\n\
-         OBS|res|015-sync/mutex-unlock-unheld|pass|0xffffffff80020001||derived\n\
-         OBS|try|900-surface/census|libkernel|(census)\n\
-         OBS|res|900-surface/census|pass|0x2f1||derived\n\
-         OBS|try|010-kernel/is-stack|libkernel|sceKernelIsStack\n\
-         OBS|res|010-kernel/is-stack|fail|0x0|a stack address was reported static|derived\n\
-         OBS|try|050-time/clock|libkernel|sceKernelGetProcessTime\n\
-         OBS|res|050-time/clock|pass|||derived\n";
+    const CAPTURE: &str = concat!(
+        "OBS|try|015-sync/mutex-unlock-unheld|libkernel|scePthreadMutexUnlock\n",
+        "OBS|res|015-sync/mutex-unlock-unheld|pass|0xffffffff80020001||derived\n",
+        "OBS|try|900-surface/census|libkernel|(census)\n",
+        "OBS|res|900-surface/census|pass|0x2f1||derived\n",
+        "OBS|try|010-kernel/is-stack|libkernel|sceKernelIsStack\n",
+        "OBS|res|010-kernel/is-stack|fail|0x0|a stack address was reported static|derived\n",
+        "OBS|try|050-time/clock|libkernel|sceKernelGetProcessTime\n",
+        "OBS|res|050-time/clock|pass|||derived\n"
+    );
 
     /// A census row names no function, so it is not attached to one.
     ///
@@ -521,10 +529,10 @@ mod tests {
         let found = observations_in(CAPTURE, "ps5-full.txt");
         let text = edge_case(&found[0]);
         assert!(
-            text.starts_with(
-                "Measured on hardware: obSCEne `015-sync/mutex-unlock-unheld` reported pass, \
-                 value 0xffffffff80020001"
-            ),
+            text.starts_with(concat!(
+                "Measured on hardware: obSCEne `015-sync/mutex-unlock-unheld` reported pass, ",
+                "value 0xffffffff80020001"
+            )),
             "{text}"
         );
         assert!(
@@ -573,10 +581,14 @@ mod tests {
     /// throw away the only evidence that the value varies at all.
     #[test]
     fn a_value_that_differs_between_runs_says_so() {
-        let a = "OBS|try|010-kernel/clock|libkernel|sceKernelGetProcessTime\n\
-                 OBS|res|010-kernel/clock|pass|0xc3||derived\n";
-        let b = "OBS|try|010-kernel/clock|libkernel|sceKernelGetProcessTime\n\
-                 OBS|res|010-kernel/clock|pass|0x83||derived\n";
+        let a = concat!(
+            "OBS|try|010-kernel/clock|libkernel|sceKernelGetProcessTime\n",
+            "OBS|res|010-kernel/clock|pass|0xc3||derived\n"
+        );
+        let b = concat!(
+            "OBS|try|010-kernel/clock|libkernel|sceKernelGetProcessTime\n",
+            "OBS|res|010-kernel/clock|pass|0x83||derived\n"
+        );
         let mut both = observations_in(a, "ps5-full.txt");
         both.extend(observations_in(b, "ps5-imports.txt"));
 

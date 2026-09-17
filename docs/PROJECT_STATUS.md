@@ -97,12 +97,12 @@ guest code. None produces a pixel, and no guest has yet spawned a thread.
 | Title | Reach | Imports | Calls | Standing | Ends |
 |---|---|---|---|---|---|
 | PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` |
-| PPSA03416-app0 | flipped | 220 | 470,416 | 100% | `0x7fff13abdc8d` |
-| PPSA02664-app0 | flipped | 220 | 418,419 | 100% | `0x7fff13abdc8d` |
+| PPSA02664-app0 | flipped | 222 | 418,426 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
+| PPSA03416-app0 | flipped | 222 | 470,422 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` |
 | PPSA25872-app0 | flipped | 192 | 339,539 | 100% | `image+0x3b383b` |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` |
-| PPSA04263-app0 | entered | 70 | 30,261 | 100% | `image+0x196b91a` |
+| PPSA04263-app0 | entered | 71 | 30,262 | 100% | `image+0x196b91a` |
 | PPSA21564-app0 | entered | 57 | 500,260 | 100% | `the title's own modules+0x7af792` |
 | PPSA28061-app0 | entered | 47 | 933 | 94% | `image+0x43c4` |
 | dist | entered | 0 | 0 | 100% | `0x1` |
@@ -172,10 +172,10 @@ So the three current walls are **phase 4 completion problems**, not threading on
 
 | | |
 |---|---|
-| Functions declared / implemented | 961 / 720 |
+| Functions declared / implemented | 965 / 761 |
 | Declared in a library that serves nothing | 149 across 23 libraries - names written down, no implementation |
-| Recorded behaviours | 770 - 365 published, 36 measured, 74 guest-observed, 257 assumed |
-| Open questions a hardware probe could settle | 790 |
+| Recorded behaviours | 812 - 366 published, 79 measured, 75 guest-observed, 255 assumed |
+| Open questions a hardware probe could settle | 789 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
@@ -199,15 +199,27 @@ the marginal yield is zero.** The last full pass over all 53 modules named nothi
 given up, and the runtime harvester found none. That is not a fault - it is the plateau
 those mechanisms have, and it says exactly where the next name has to come from. Either a
 word the vocabulary does not have, or a source that is not yet being read. Both are listed
-in [PROVENANCE.md](PROVENANCE.md) and [BACKLOG.md](BACKLOG.md); the cheapest is a cited C++
-ABI name list, and the one aimed at a live wall is call-position inference.
+in [PROVENANCE.md](PROVENANCE.md) and [BACKLOG.md](BACKLOG.md); the one aimed at a live wall is
+call-position inference.
+
+**The cited C++ ABI name list was the cheapest, and it has now been measured: it buys nothing.**
+Three C++ vocabularies totalling 9,753 candidates - a C++ ABI header, a whole standard library's
+export list, and that list in the `std::__1` inline namespace an LLVM target would use - named
+**zero** of the 2,932 unnamed imports across the corpus, against a positive control that does
+report hits. The unnamed imports are not C++ symbols, which eliminates a class rather than
+naming one (worklog 595).
 
 ## The three walls
 
-**Both of the first two now point at the same thing**, reached from opposite directions: an
-**out-parameter nobody wrote**. That convergence is worth more than either result alone,
-and it is a measurement rather than a reading - each step below eliminated a class by
-running something, not by arguing about it (D217).
+**One of these has since been passed** - PPSA02664 and PPSA03416 now flip a frame and stop in
+the AGC patch family instead - so read this section as two live walls and one record of a
+wall that was. The entries stay because the eliminations in them cost days and are not
+repeatable for free.
+
+As it stood, **both of the first two pointed at the same thing**, reached from opposite
+directions: an **out-parameter nobody wrote**. That convergence was worth more than either
+result alone, and it was a measurement rather than a reading - each step below eliminated a
+class by running something, not by arguing about it (D217).
 
 - **PPSA28061, `image+0x43c4`.** A null dereference after ten textures load correctly. Nine
   attempts. The full register set - visible since D230, captured all along - says `rbx` holds
@@ -218,7 +230,25 @@ running something, not by arguing about it (D217).
   byte-identical - same fault, same `rdi=0x3` and `rax=0x9ba49`, same ten textures. Three
   classes gone; a side effect nobody performed is what is left, somewhere that is not the
   stack.
-- **PPSA02664 / PPSA03416, `image+0xafc959`.** A write to `0xfffe0` with `rdx = 0x100000`.
+- **PPSA02664 / PPSA03416 — this wall is passed. Kept as history, not as status.**
+
+  Both titles now reach `flipped` with 220 imports, one frame each, and die in the AGC patch
+  family instead: `sceAgcSetCxRegIndirectPatchAddRegisters` carries orbistoun's own
+  `0xf7ff0001` placeholder as a pointer into a `memcpy`, thirty-two times over, because
+  `sceAgcDcbSetCxRegistersIndirect` is unimplemented and answers it (worklog 553). That wall
+  is characterised and blocked on a hardware probe, not on anything below.
+
+  **Load-time module initialisation is ruled out as an explanation, by measurement.** Both
+  titles start two modules — `PS5Util.prx` and `Il2CppUserAssemblies.prx` — and each runs its
+  initialiser; the loader places three more (four for PPSA03416) with initialisers of their
+  own, and **no module got a handle and went unstarted** in either run. `run_initialisers`
+  calls `DT_INIT` and every `DT_INIT_ARRAY` slot, counting each that returned, so "constructors
+  never ran" is not what is happening here. What that count cannot say is whether a
+  constructor that ran *did its job* (worklog 593).
+
+  The investigation below stands as the record of the `0xfffe0` wall while it was the wall.
+
+- **The `0xfffe0` wall, as it was: `image+0xafc959`.** A write to `0xfffe0` with `rdx = 0x100000`.
   `memalign` was ruled out by dumping it. The lead is `libkernel::0x6abac2f3dc6f8cee`,
   unnamed, called immediately before - and its arguments were unreadable for weeks because
   the dump path's readable window was declared a guard page too low, so its one pointer

@@ -2684,9 +2684,13 @@ fn the_consoles_float_configuration_is_the_raw_value_without_its_status_flags() 
         assert_eq!(
             value & !STATUS_FLAGS,
             live,
-            "the console reported {value:#x}; without status flags that is {:#x} \
-             and orbistoun installs {live:#x}",
-            value & !STATUS_FLAGS
+            concat!(
+                "the console reported {:#x}; without status flags that is {:#x} ",
+                "and orbistoun installs {:#x}"
+            ),
+            value,
+            value & !STATUS_FLAGS,
+            live
         );
     }
 

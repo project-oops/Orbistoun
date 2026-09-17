@@ -76,17 +76,21 @@ impl Modifiers {
         if instruction.word & (1 << CLAMP_SHIFT) != 0 {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "this instruction clamps its result to [0, 1], which is not \
-                         translated - ignoring it would compute a value outside the \
-                         range the guest asked for and nothing downstream would notice",
+                detail: concat!(
+                    "this instruction clamps its result to [0, 1], which is not ",
+                    "translated - ignoring it would compute a value outside the ",
+                    "range the guest asked for and nothing downstream would notice"
+                ),
             });
         }
         if (second >> OMOD_SHIFT) & OMOD_MASK != 0 {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "this instruction scales its result by an output multiplier, \
-                         which is not translated - ignoring it would be wrong by a \
-                         factor of two or four",
+                detail: concat!(
+                    "this instruction scales its result by an output multiplier, ",
+                    "which is not translated - ignoring it would be wrong by a ",
+                    "factor of two or four"
+                ),
             });
         }
 

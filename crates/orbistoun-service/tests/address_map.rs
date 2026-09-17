@@ -73,8 +73,10 @@ fn declared() -> BTreeMap<String, u64> {
     }
     assert!(
         found.len() > 10,
-        "the walk found {} bases, which means it stopped working rather than that the tree \
-         emptied - a gate that silently matches nothing passes for the wrong reason",
+        concat!(
+            "the walk found {} bases, which means it stopped working rather than that the tree ",
+            "emptied - a gate that silently matches nothing passes for the wrong reason"
+        ),
         found.len()
     );
     found
@@ -134,8 +136,11 @@ fn the_map_describes_the_tree_it_claims_to() {
         .collect();
     assert!(
         missing.is_empty(),
-        "declared in the tree and absent from docs/ADDRESS_MAP.md: {missing:?} - a base \
-         nobody can find is a base somebody else will collide with"
+        concat!(
+            "declared in the tree and absent from docs/ADDRESS_MAP.md: {:?} - a base ",
+            "nobody can find is a base somebody else will collide with"
+        ),
+        missing
     );
 
     let phantom: Vec<_> = documented
@@ -144,8 +149,11 @@ fn the_map_describes_the_tree_it_claims_to() {
         .collect();
     assert!(
         phantom.is_empty(),
-        "in docs/ADDRESS_MAP.md and not in the tree: {phantom:?} - a map naming a region \
-         that no longer exists is worse than no map"
+        concat!(
+            "in docs/ADDRESS_MAP.md and not in the tree: {:?} - a map naming a region ",
+            "that no longer exists is worse than no map"
+        ),
+        phantom
     );
 
     for (name, value) in &declared {
@@ -172,10 +180,17 @@ fn no_two_bases_are_within_four_gibibytes() {
         };
         assert!(
             high.saturating_sub(*low) >= CLOSEST,
-            "{low_name} at {low:#x} and {high_name} at {high:#x} are {} bytes apart, closer \
-             than the {CLOSEST:#x} this tree spaces regions by - one of them is about to be \
-             inside the other",
-            high - low
+            concat!(
+                "{} at {:#x} and {} at {:#x} are {} bytes apart, closer ",
+                "than the {:#x} this tree spaces regions by - one of them is about to be ",
+                "inside the other"
+            ),
+            low_name,
+            low,
+            high_name,
+            high,
+            high - low,
+            CLOSEST
         );
     }
 }

@@ -284,8 +284,18 @@ the principles; those two hold the history and the state.
   ```
   Include the reasoning, not just the choice - the reasoning is what stops it being
   re-litigated. **Never hand-edit `docs/DECISIONS.md`**: its table is generated from the
-  files by `tools/split-decisions.sh`, so an entry typed into the index is lost on the
-  next run and `tools/check-decisions.sh` reds the gate on a `## Dnnn` heading there.
+  files, so an entry typed into the index is lost on the next run, and a `## Dnnn` heading
+  there reds the gate. Both scripts live in the **collection's** `tools/`, not this
+  repository's - run them from `<OOPS>`, which is what `docs/README.md` shows:
+
+  ```bash
+  tools/split-decisions.sh --index orbistoun   # regenerate docs/DECISIONS.md
+  tools/check-decisions.sh                     # and check it
+  ```
+
+  Writing a decision file does **not** index it - `./bin/orbistoun decide` reserves the
+  number and creates the file, and nothing adds the row - so regenerate when you finish
+  one. `./bin/orbistoun decisions` warns about entries that are written and unlisted.
 - A choice made without input is status **`assumed`**, which the generated table renders
   🟡. There is no separate "needs review" list to add it to - the status column is the
   index. Assume freely and keep moving; do not stall an unattended run waiting for input

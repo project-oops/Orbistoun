@@ -600,14 +600,17 @@ impl App {
         // error: the first thing anybody does here is create one.
         let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
             format!(
-                "# Per-title overrides for {name}.\n\
-                 #\n\
-                 # Settings are merged per key over the shipped defaults, never wholesale,\n\
-                 # so anything left out keeps the value it already had.\n\
-                 #\n\
-                 # A compatibility entry names the *behaviour*, never the title, and carries\n\
-                 # a mandatory reason - that is what lets a second title needing the same\n\
-                 # thing add a line rather than a code path.\n"
+                concat!(
+                    "# Per-title overrides for {}.\n",
+                    "#\n",
+                    "# Settings are merged per key over the shipped defaults, never wholesale,\n",
+                    "# so anything left out keeps the value it already had.\n",
+                    "#\n",
+                    "# A compatibility entry names the *behaviour*, never the title, and carries\n",
+                    "# a mandatory reason - that is what lets a second title needing the same\n",
+                    "# thing add a line rather than a code path.\n"
+                ),
+                name
             )
         });
         self.title_config = Some(TitleConfig {
@@ -1179,10 +1182,10 @@ impl App {
             .open(&mut open)
             .default_width(620.0)
             .show(ctx, |ui| {
-                ui.small(
-                    "Merged per key over the shipped defaults, never wholesale - anything \
-                     left out keeps the value it already had.",
-                );
+                ui.small(concat!(
+                    "Merged per key over the shipped defaults, never wholesale - anything ",
+                    "left out keeps the value it already had."
+                ));
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(360.0)

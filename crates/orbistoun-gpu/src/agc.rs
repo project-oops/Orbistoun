@@ -30,11 +30,38 @@
 //! for a command-buffer interface the arguments are buffer addresses and sizes, which is
 //! precisely what a trace of it is for.
 //!
-//! Nothing here is implemented. That is deliberate: `docs/ROADMAP.md` puts the first frame
-//! at Phase 6, which has not begun, and principle 6 puts a subsystem after the address
-//! space and threads. What this buys now is that a guest reaching the graphics interface is
-//! **named and counted** instead of vanishing into `unknown::`, and that the loud stub
-//! policy answers it rather than a placeholder a caller might read as a handle (D125).
+//! **Forty-four of the fifty-seven declared here are implemented; the rest are declarations.**
+//! What the declarations buy is that a guest reaching the graphics interface is **named and
+//! counted** instead of vanishing into `unknown::`, and that the loud stub policy answers it
+//! rather than a placeholder a caller might read as a handle (D125).
+//!
+//! Ten are neither encoders nor skeletons but **measured returns**: the whole `sceAgc*Patch*` family
+//! answers the `0x0` obSCEne measured for each (`166-agc/patch-*`, REQ-...4386 and ...3d1e) rather
+//! than the placeholder the guest was carrying into a `memcpy`. They amend a packet in place, which
+//! is a GPU-submission detail the CPU flow does not read, so they share one handler that returns the
+//! measured success and writes nothing.
+//!
+//! Most are fully-measured encoders: each writes a packet whose bytes obSCEne measured on
+//! hardware, wired only once those bytes were known across more than one input. `sceAgcDcbDrawIndex`
+//! and `sceAgcDcbSetIndexSize`, which worklog 536 refused on a single input each, were later measured
+//! across more inputs and wired - the two draw-index body dwords placed, the index-size mapping taken
+//! from eight argument pairs. `sceAgcCbNop` is the simplest of them - a header-only packet that takes
+//! no arguments, measured whole.
+//!
+//! The rest are **reservation skeletons** rather than full encoders: `sceAgcDcbSetCxRegistersIndirect`
+//! (the producer the patch family fills), the Acquire/Release/DmaData/SetBase set, and the
+//! REQ-...a70f cluster wired from sweep `20260915-203058` (`CbDispatch`, the dispatch- and
+//! draw-indirect builders, `SetShRegistersIndirect`/`SetUcRegistersIndirect`,
+//! `StallCommandBufferParser`, and the Acb twins). Each reserves the measured extent and writes only
+//! the measured header - rebuilt from the opcode through [`packet::build::command_header`] - leaving
+//! the body zero. They earn their place not by encoding a packet but by handing the guest a real
+//! cursor where an unwired builder handed it a placeholder to `memcpy` through (D696, worklog 553,
+//! 600, 618) - the exact bodies wait on more argument passes.
+//!
+//! **This paragraph used to say "nothing here is implemented".** It was wrong for long
+//! enough that a gap analysis read it at its word and reported the surface as emptier than
+//! it is. A document claiming *less* than the code does is the mirror of the failure
+//! principle 3 names, and it misleads in the same direction: by being believed.
 
 use orbistoun_hle::guest_module;
 
@@ -493,6 +520,202 @@ fn dcb_set_uc_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::set_uconfig_register(offset, value))
 }
 
+/// `sceAgcDcbSetCxRegistersIndirect(dcb, ...)` - reserve the packet a title patches, and hand back
+/// a real address for it.
+///
+/// # Why a skeleton rather than a full encoder
+///
+/// This is the producer half of the patch family that walls PPSA02664 and PPSA03416. Unwired, it
+/// answered the loud placeholder, the guest carried that placeholder as the packet's address into a
+/// `memcpy`, and the run died in `VCRUNTIME140.dll` (worklog 553, 594). The one thing it must do to
+/// clear that is what every other builder here does: append a correctly sized packet and return the
+/// **real cursor**, so the guest's `memcpy` and the patch that follows it land in command-buffer
+/// memory rather than on `0xf7ff0001`.
+///
+/// The packet body is not encoded from the arguments, and deliberately: `REQ-...4386` measured one
+/// producer call, which fixes the header and the 20-byte extent but not which argument becomes which
+/// body dword. The guest fills the body itself through `sceAgcSetCxRegIndirectPatchAddRegisters`, so
+/// the reservation is the part that has to be right and is the part that is measured.
+fn dcb_set_cx_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::set_cx_registers_indirect_skeleton(),
+    )
+}
+
+/// The `sceAgc*Patch*` family - amend an already-written packet in place, and **return the measured
+/// `0x0`**.
+///
+/// # One handler for ten entry points, because the measurement is one answer
+///
+/// obSCEne measured every patch in the family returning `0x0`, each across two argument passes
+/// (`166-agc/patch-*`, sweep `20260915-203058`, REQ-...3d1e; and `patch-cx-registers-indirect` in
+/// three earlier sweeps, REQ-...4386): the Cx/Sh/Uc register patches (`AddRegisters` and
+/// `SetAddress`), the two DmaData address patches, and the wait-reg-mem and end-of-pipe address
+/// patches. So they share one handler that answers that `0x0`.
+///
+/// # Why a return and not an encoder
+///
+/// It writes nothing to the packet. Each patch amends a specific field in place - a `SetAddress`
+/// writes an address, an `AddRegisters` extends the register run - but that is a GPU-submission
+/// detail the CPU-side flow does not read, and where the guest cares about the bytes it writes them
+/// itself (the Cx case: one eight-byte entry per call, worklog 614). What walled the guest was the
+/// *return*: unimplemented, each answered the placeholder, and the guest carried it as a pointer into
+/// a `memcpy` and faulted in host code (worklog 614). Answering the measured `0x0` is what clears
+/// that, and closing the whole family at once is what stops the wall moving one patch downstream each
+/// time (the exact shape worklog 614 hit after the Cx producer skeleton). The `packet` argument is
+/// not dereferenced, so a null needs no guard.
+fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `sceAgcCbNop(cb)` - a header-only no-op. Measured whole: `166-agc/cb-nop`.
+///
+/// The packet takes no arguments, so unlike the reservation skeletons this is the complete,
+/// measured encoding, not a stand-in. It is in the cluster the retail titles reach on their
+/// secondary command buffer (worklog 600).
+fn cb_nop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::nop())
+}
+
+/// `sceAgcDcbAcquireMem(dcb, ...)` - reserve the 32-byte ACQUIRE_MEM packet, cursor real, body zero.
+///
+/// Header and extent are measured (`166-agc/dcb-acquire-mem`); the argument-to-body mapping is a
+/// permutation the sweep summary does not pin, so the body is left zero on the same terms as the Cx
+/// producer (D696). PPSA02664 calls this three times on its secondary buffer, so a real cursor here
+/// is one fewer placeholder the cluster's patches carry (worklog 600).
+fn dcb_acquire_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::acquire_mem_skeleton())
+}
+
+/// `sceAgcCbReleaseMem(cb, ...)` - reserve the 32-byte RELEASE_MEM packet, cursor real, body zero.
+///
+/// Header (`0xc0064900`) and extent measured (`166-agc/cb-release-mem`, sweep `20260915-174357`);
+/// the argument-to-body permutation is not, so the body is zero on the same terms as the AcquireMem
+/// and Cx-producer skeletons (D696). One fewer placeholder in the command-builder cluster the retail
+/// titles reach (worklog 600, REQ-...a70f).
+fn cb_release_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::release_mem_skeleton())
+}
+
+/// `sceAgcDcbDmaData(dcb, ...)` - reserve the 28-byte DMA_DATA packet, cursor real, body zero.
+///
+/// Header (`0xc0055000`) and extent measured (`166-agc/dcb-dma-data`, sweep `20260915-174357`); the
+/// source/destination/size body is an argument permutation a single zero-argument pass cannot pin
+/// (and two captures disagreed on it this session), so it is left zero rather than encoded from one
+/// pass. The reservation is what moves the wall (REQ-...a70f).
+fn dcb_dma_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::dma_data_skeleton())
+}
+
+/// `sceAgcDcbSetBaseIndirectArgs(dcb, ...)` - reserve the 16-byte SET_BASE packet, cursor real,
+/// body zero.
+///
+/// Header (`0xc0021100`) and extent measured (`166-agc/dcb-set-base-indirect-args`, sweep
+/// `20260915-174357`); the body carries the base-index selector and an address, which one pass
+/// cannot separate, so it is zeroed like the other skeletons (REQ-...a70f).
+fn dcb_set_base_indirect_args(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::set_base_indirect_args_skeleton())
+}
+
+// The REQ-...a70f cluster, wired as reservation skeletons from the headers and extents obSCEne
+// measured in sweep 20260915-203058: each hands the guest a real cursor where the unimplemented
+// builder handed it a placeholder to memcpy through (worklog 618). Every header is rebuilt from its
+// measured opcode through `command_header`, so it walks back to the packet it stands for; the body is
+// zero because a single argument pass does not pin the mapping, the same terms as the earlier
+// skeletons.
+use packet::build::measured;
+
+/// `sceAgcCbDispatch(cb, ...)` - a compute dispatch. Header `0xc0031500`, 20 bytes.
+fn cb_dispatch(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(packet::build::DISPATCH_DIRECT, 4),
+    )
+}
+
+/// `sceAgcDcbDispatchIndirect(dcb, ...)`. Header `0xc0011600`, 12 bytes.
+fn dcb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::DISPATCH_INDIRECT, 2),
+    )
+}
+
+/// `sceAgcAcbDispatchIndirect(acb, ...)`. Header `0xc0021600`, 16 bytes (the Acb twin, one dword
+/// longer than the Dcb form - the measured extent, not an assumed one).
+fn acb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::DISPATCH_INDIRECT, 3),
+    )
+}
+
+/// `sceAgcDcbDrawIndirect(dcb, ...)`. Header `0xc0032400`, 20 bytes.
+fn dcb_draw_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::DRAW_INDIRECT, 4),
+    )
+}
+
+/// `sceAgcDcbDrawIndexIndirect(dcb, ...)`. Header `0xc0032500`, 20 bytes.
+fn dcb_draw_index_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::DRAW_INDEX_INDIRECT, 4),
+    )
+}
+
+/// `sceAgcDcbSetShRegistersIndirect(dcb, ...)`. Header `0xc0036300`, 20 bytes. On PPSA02664's path.
+fn dcb_set_sh_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::SET_SH_REG_INDIRECT, 4),
+    )
+}
+
+/// `sceAgcDcbSetUcRegistersIndirect(dcb, ...)`. Header `0xc0036400`, 20 bytes.
+fn dcb_set_uc_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::SET_UCONFIG_REG_INDIRECT, 4),
+    )
+}
+
+/// `sceAgcDcbStallCommandBufferParser(dcb, ...)`. Header `0xc0004200`, 8 bytes.
+fn dcb_stall_command_buffer_parser(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::reservation(measured::STALL_COMMAND_BUFFER_PARSER, 1),
+    )
+}
+
+/// `sceAgcAcbAcquireMem(acb, ...)` - the Acb twin of `sceAgcDcbAcquireMem`, its header `0xc0065800`
+/// now dumped for the Acb form too (203058), so the twin is measured rather than assumed.
+fn acb_acquire_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::acquire_mem_skeleton())
+}
+
+/// `sceAgcDcbPushMarker(dcb, label, ...)` - a debug marker. Measured 12-byte `SET_UCONFIG_REG`
+/// (`166-agc/dcb-push-marker`, sweep 20260915-174357), reserved as a skeleton so it hands a real
+/// cursor rather than the placeholder it was answering on PPSA02664's path (worklog 618).
+fn dcb_push_marker(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::marker_skeleton())
+}
+
+/// `sceAgcDcbPopMarker(dcb, ...)` - the closing debug marker, the same 12-byte packet as
+/// [`dcb_push_marker`] (the value, unpinned here, is what distinguishes them).
+fn dcb_pop_marker(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::marker_skeleton())
+}
+
+/// `sceAgcDcbWaitRegMem(dcb, ...)` - wait on a register or memory word. The measured 56-byte compound
+/// of three packets (`166-agc/dcb-wait-reg-mem`), reserved with its headers and zeroed bodies.
+fn dcb_wait_reg_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::wait_reg_mem_skeleton())
+}
+
 /// The largest register run this will read out of guest memory in one call.
 ///
 /// A packet's count field is fourteen bits, so a run longer than this cannot be encoded at all.
@@ -525,21 +748,50 @@ fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// behaviours obSCEne measured once the 3D-draw sweeps settled (9a41, sweep `20260912-003916`): the
 /// interpolant mapping pair, the primitive-state pair, and the shader linker.
 ///
+/// `sceAgcDcbDrawIndex(dcb, index_count, address, initiator)`.
+///
+/// **Now measured whole** (`166-agc/dcb-draw-index`, sweep `20260914-222710`, answering the request
+/// worklog 536 left it out for). Called as `(3, 0x12345678, 0)` it wrote
+/// `0xc0042700, 3, 0x12345678, 0, 3, 0` - so the index count appears at **both** body[0] and
+/// body[3], and the third argument lands in body[4]. The two dwords worklog 536 could not place are
+/// placed.
+///
+/// One argument set, so what body[0] *means* is not established - only that this builder puts the
+/// count there. The published field order calls it `MAX_SIZE`, which is consistent and is not what
+/// this reproduces from.
+fn dcb_draw_index(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (count, address, initiator) = (args[1] as u32, args[2], args[3] as u32);
+    dcb_append(
+        args[0],
+        &packet::build::draw_index_2(count, address, count, initiator),
+    )
+}
+
+/// `sceAgcDcbSetIndexSize(dcb, type, flags)`.
+///
+/// **Measured across eight argument pairs**, which is what makes it implementable where worklog 536
+/// refused it on one: see [`packet::build::set_index_size`] for the mapping the sweep establishes.
+fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::set_index_size(args[1] as u32, args[2] as u32),
+    )
+}
+
 /// Eight of the command **builders** are now wired, through the writer handle in `arg0`: the
 /// encodings were measured first (worklog 534, implemented as pure encoders in
 /// [`crate::packet::build`]) and the handle layout that places them was guest-observed and then
-/// confirmed by the library's own behaviour - see [`dcb`].
+/// confirmed by the library's own behaviour - see the `dcb` module below, which is private.
 ///
-/// **Two of the ten measured packets are deliberately not wired**, because a builder that is right
-/// for one input and wrong for the rest is worse than one that answers honestly:
+/// **The two that worklog 536 refused on a single input each have since been measured across more
+/// inputs and wired**, so each is a builder that is right rather than a guess:
 ///
-/// - `sceAgcDcbDrawIndex` - two of its five body dwords were never read back, so placing the
-///   packet means inventing them. The size is known and the encoding is not.
-/// - `sceAgcDcbSetIndexSize` - measured at exactly one input, `(0, 0)`, which produced selector
-///   `0x20000243` and value `0x400`. Nothing maps any other argument to any other packet, so
-///   emitting that one packet for every call would be a guess wearing a measurement's clothes.
-///
-/// Both want a capture with more argument sets, which is a probe request rather than a deduction.
+/// - `sceAgcDcbDrawIndex` - the two body dwords worklog 536 could not place were read back on a
+///   later capture (`(3, 0x12345678, 0)` wrote `0xc0042700, 3, 0x12345678, 0, 3, 0`), placing the
+///   count at body[0] and body[3] and the argument at body[4]; `packet::build::draw_index_2` now
+///   encodes the whole packet.
+/// - `sceAgcDcbSetIndexSize` - measured across eight argument pairs, enough to establish the mapping
+///   `packet::build::set_index_size` uses rather than emit one measured packet for every call.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceAgcCreateShader", create_shader),
@@ -556,9 +808,80 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
         ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
         (
+            "sceAgcDcbSetCxRegistersIndirect",
+            dcb_set_cx_registers_indirect,
+        ),
+        ("sceAgcCbNop", cb_nop),
+        ("sceAgcDcbAcquireMem", dcb_acquire_mem),
+        ("sceAgcCbReleaseMem", cb_release_mem),
+        ("sceAgcDcbDmaData", dcb_dma_data),
+        ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
+        // The REQ-...a70f cluster, reservation skeletons from measured headers (sweep 203058).
+        ("sceAgcCbDispatch", cb_dispatch),
+        ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),
+        ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
+        ("sceAgcDcbDrawIndirect", dcb_draw_indirect),
+        ("sceAgcDcbDrawIndexIndirect", dcb_draw_index_indirect),
+        (
+            "sceAgcDcbSetShRegistersIndirect",
+            dcb_set_sh_registers_indirect,
+        ),
+        (
+            "sceAgcDcbSetUcRegistersIndirect",
+            dcb_set_uc_registers_indirect,
+        ),
+        (
+            "sceAgcDcbStallCommandBufferParser",
+            dcb_stall_command_buffer_parser,
+        ),
+        ("sceAgcAcbAcquireMem", acb_acquire_mem),
+        ("sceAgcDcbPushMarker", dcb_push_marker),
+        ("sceAgcDcbPopMarker", dcb_pop_marker),
+        ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
+        // The whole `sceAgc*Patch*` family - each measured to return 0x0 (REQ-...4386, ...3d1e).
+        (
+            "sceAgcSetCxRegIndirectPatchAddRegisters",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcSetCxRegIndirectPatchSetAddress",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcSetShRegIndirectPatchAddRegisters",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcSetShRegIndirectPatchSetAddress",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcSetUcRegIndirectPatchAddRegisters",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcSetUcRegIndirectPatchSetAddress",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcDmaDataPatchSetDstAddressOrOffset",
+            agc_patch_returns_ok,
+        ),
+        (
+            "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
+            agc_patch_returns_ok,
+        ),
+        ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
+        (
+            "sceAgcQueueEndOfPipeActionPatchAddress",
+            agc_patch_returns_ok,
+        ),
+        (
             "sceAgcCbSetShRegisterRangeDirect",
             cb_set_sh_register_range_direct,
         ),
+        ("sceAgcDcbDrawIndex", dcb_draw_index),
+        ("sceAgcDcbSetIndexSize", dcb_set_index_size),
     ]
 }
 

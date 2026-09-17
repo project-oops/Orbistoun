@@ -269,6 +269,10 @@ fn address_zero_is_claimed_by_two_segments_in_a_title() {
     let by_address = container.vaddr_to_offset(&bytes, 0).expect("resolves");
     assert!(
         by_address == Some(0x300) || by_address == Some(0x380),
-        "address zero lands in one of the two segments that claim it, and which one is          nothing but header order: {by_address:?}"
+        concat!(
+            "address zero lands in one of the two segments that claim it, and which one ",
+            "is nothing but header order: {:?}"
+        ),
+        by_address
     );
 }

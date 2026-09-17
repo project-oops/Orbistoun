@@ -26,22 +26,38 @@
 //! that cares, and inventing behaviour for them now would be exactly the plausible
 //! output principle 3 warns about.
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Total direct memory a guest may allocate from.
+/// The default total direct memory a guest may allocate from - the **retail** figure.
 ///
-/// **Measured, where it used to be a round figure.** A conformance run on a target console
-/// called `sceKernelGetDirectMemorySize` and it answered `0x1_4000_0000` - five gibibytes, not
-/// the eight assumed here, and not a power of two, which is why it was never going to be
-/// guessed.
+/// **Measured twice, at two different values, because it depends on the guest.** A retail eboot
+/// leg on real hardware called `sceKernelGetDirectMemorySize` and it answered `0x3_0000_0000` -
+/// twelve gibibytes (obSCEne `020-memory/direct-size`, sweep `20260915-125124`, `REQ-...5d1c`). An
+/// earlier conformance/homebrew run answered `0x1_4000_0000` - five gibibytes (D398). Both are
+/// hardware measurements of the same call; they differ because a retail title and a homebrew
+/// payload are handed different budgets by the platform's sandbox, the same way their filesystem
+/// and network reach differ.
 ///
-/// **Verified to matter, before it was known.** A guest reads this and walks the map against
-/// it: changing it from 8 GiB to 6 GiB moved the second query a guest made from `0x200000000`
-/// to `0x180000000`, exactly tracking. So every title that sizes its heaps off this has been
-/// sizing them against a machine three gibibytes larger than the one it was written for
-/// (D398).
-pub const DIRECT_MEMORY_SIZE: u64 = 0x1_4000_0000;
+/// This is the default because the corpus and every memory wall in it are retail: PPSA04263 asks
+/// for 4.51 GiB after taking ~4 GiB, which a five-gibibyte pool refuses and a twelve-gibibyte pool
+/// answers - moving that title from a `NoMemory` fault to its recorded position exactly (worklog
+/// 574, 601). A homebrew leg sets [`Settings::pool_bytes`] to the five-gibibyte figure through its
+/// config; the value is a setting rather than a constant for precisely that reason.
+///
+/// **Verified to matter, before it was known.** A guest reads this and walks the map against it:
+/// changing it from 8 GiB to 6 GiB moved the second query a guest made from `0x200000000` to
+/// `0x180000000`, exactly tracking (D398), so the reported size and the pool it hands out must be
+/// the same number - which is why both come from one setting.
+pub const DIRECT_MEMORY_SIZE: u64 = 0x3_0000_0000;
+
+/// The direct-memory pool a **homebrew or conformance** guest is handed, five gibibytes.
+///
+/// The value D398 measured, kept because it is the right one for that guest class and a homebrew
+/// leg should set [`Settings::pool_bytes`] to it. Not the default: the corpus is retail (see
+/// [`DIRECT_MEMORY_SIZE`]).
+pub const HOMEBREW_DIRECT_MEMORY_SIZE: u64 = 0x1_4000_0000;
 
 /// The flexible-memory available figure at launch, before the guest maps any. **Measured, and now
 /// applied as a separate budget** (D444).
@@ -311,6 +327,54 @@ impl DirectMemory {
             .map(Region::len)
             .sum()
     }
+
+    /// The largest single allocation that could still be placed at `align`.
+    ///
+    /// Distinct from [`Self::available`], which sums every free byte and so answers a question
+    /// no allocation asks: a pool with two gibibytes free in two separate regions cannot place
+    /// one span of a gibibyte and a half, and an alignment large enough to push a start past a
+    /// region's end takes that region out of reach entirely.
+    ///
+    /// **This is what makes an out-of-memory answer diagnosable.** Without it a refusal is the
+    /// same value whether the pool is full, fragmented, or merely being asked for an alignment
+    /// nothing can satisfy - three different problems with three different fixes.
+    pub fn largest_free_at(&self, align: u64) -> u64 {
+        if !align.is_power_of_two() {
+            return 0;
+        }
+        self.regions
+            .iter()
+            .filter(|r| !r.allocated)
+            .filter_map(|r| r.end.checked_sub(r.start.checked_next_multiple_of(align)?))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Renders regions for a diagnostic, listing at most `most` of them.
+///
+/// Bounded because a pool a guest has fragmented holds thousands, and a message that printed
+/// every one would bury whatever it was written to say. The tail is counted rather than
+/// dropped silently - a reader who cannot see how much was elided cannot tell a short list
+/// from a truncated one.
+pub fn describe_regions(regions: &[Region], most: usize) -> String {
+    let mut out = regions
+        .iter()
+        .take(most)
+        .map(|r| {
+            format!(
+                "{:#x}..{:#x}{}",
+                r.start,
+                r.end,
+                if r.allocated { " taken" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(rest) = regions.len().checked_sub(most).filter(|n| *n > 0) {
+        let _ = write!(out, ", and {rest} more");
+    }
+    out
 }
 
 /// How the physical range is laid out before a guest has touched it.
@@ -482,6 +546,14 @@ pub struct Settings {
     /// shapes remain for sweeping the questions the walk still leaves open (the `end`-vs-`size` field
     /// meaning; the multi-region case).
     pub map_shape: MapShape,
+    /// How large the direct-memory pool is, and what `sceKernelGetDirectMemorySize` reports.
+    ///
+    /// A setting rather than a constant because it is **guest-dependent**: a retail eboot leg
+    /// measured twelve gibibytes and a homebrew payload five, both on hardware (see
+    /// [`DIRECT_MEMORY_SIZE`]). Defaults to the retail figure. The pool the guest allocates from
+    /// and the size the query reports are the same field here, so they cannot describe different
+    /// machines - the invariant D398 established.
+    pub pool_bytes: u64,
 }
 
 impl Default for Settings {
@@ -489,6 +561,7 @@ impl Default for Settings {
         Self {
             map_direct_memory: true,
             map_shape: MapShape::ReservedLow,
+            pool_bytes: DIRECT_MEMORY_SIZE,
         }
     }
 }
@@ -524,16 +597,17 @@ pub fn map() -> &'static Mutex<DirectMemory> {
     // `configure` time keeps one initialisation path: a map built eagerly at startup and
     // then reconfigured would be two, and the second would be the one nothing tested.
     MAP.get_or_init(|| {
+        let settings = configured();
         Mutex::new(DirectMemory::with_shape(
-            DIRECT_MEMORY_SIZE,
-            configured().map_shape,
+            settings.pool_bytes,
+            settings.map_shape,
         ))
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DIRECT_ALIGN, DirectMemory};
+    use super::{DIRECT_ALIGN, DIRECT_MEMORY_SIZE, DirectMemory, MapShape};
 
     #[test]
     fn flexible_budget_is_the_measured_pair_and_falls_as_it_is_mapped() {
@@ -724,6 +798,77 @@ mod tests {
         assert!(
             !m.release(0, 2 * DIRECT_ALIGN),
             "a length that does not match must not be honoured"
+        );
+    }
+
+    /// **A region list long enough to bury its own message says how much it left out.**
+    ///
+    /// Silent truncation is the failure here: a reader cannot tell a pool with three regions
+    /// from one with three thousand whose tail was dropped.
+    #[test]
+    fn a_long_region_list_is_cut_short_and_admits_it() {
+        let m = DirectMemory::with_shape(DIRECT_MEMORY_SIZE, MapShape::Fragmented);
+        let all = super::describe_regions(m.regions(), 64);
+        assert!(!all.contains("more"), "nothing elided when they all fit");
+        assert_eq!(all.matches("..").count(), m.regions().len());
+
+        let cut = super::describe_regions(m.regions(), 2);
+        assert!(cut.ends_with(&format!(", and {} more", m.regions().len() - 2)));
+        assert_eq!(cut.matches("..").count(), 2, "only the two it promised");
+        assert!(cut.contains("taken"), "allocation is still distinguished");
+    }
+
+    /// **An alignment nothing can satisfy is not the same as a full pool, and says so.**
+    ///
+    /// Both refuse, and before `largest_free_at` both refused with the same value and no way to
+    /// tell them apart. The pool here is empty in every case; only the alignment moves.
+    #[test]
+    fn the_largest_placeable_span_shrinks_as_the_alignment_grows() {
+        let m = DirectMemory::with_shape(DIRECT_MEMORY_SIZE, MapShape::ReservedLow);
+        assert_eq!(
+            m.available(),
+            DIRECT_MEMORY_SIZE - super::RESERVED_LOW,
+            "every free byte, which is the number that cannot diagnose anything"
+        );
+        // At the pool's own alignment the whole free span is reachable.
+        assert_eq!(
+            m.largest_free_at(DIRECT_ALIGN),
+            DIRECT_MEMORY_SIZE - super::RESERVED_LOW
+        );
+        // At half a gibibyte the start is pushed to 0x2000_0000 and that much is lost.
+        assert_eq!(
+            m.largest_free_at(0x2000_0000),
+            DIRECT_MEMORY_SIZE - 0x2000_0000
+        );
+        // An alignment past the end of the pool leaves nothing placeable at all.
+        assert_eq!(m.largest_free_at(DIRECT_MEMORY_SIZE << 1), 0);
+        // Not a power of two is not a length question - nothing can be placed at all.
+        assert_eq!(m.largest_free_at(3), 0);
+    }
+
+    /// **The largest allocation a real title has been seen to ask for is answered.**
+    ///
+    /// PPSA04263 asks for `0x1_20F0_0000` in one call, as its first and only direct-memory
+    /// request, and orbistoun answered `NoMemory` - after which the guest faulted on the next
+    /// instruction. The pool is `0x1_4000_0000` and the default shape holds back only
+    /// `RESERVED_LOW` at the bottom, so the request fits with half a gibibyte to spare and the
+    /// refusal is the allocator's, not the pool's.
+    ///
+    /// Written with the title's own number rather than a round one: a rounded length would sit
+    /// on the alignment boundary and miss whatever the real one lands on.
+    #[test]
+    fn the_largest_allocation_a_title_asks_for_fits_the_default_pool() {
+        let mut m = DirectMemory::with_shape(DIRECT_MEMORY_SIZE, MapShape::ReservedLow);
+        let asked = 0x1_20F0_0000;
+        assert!(
+            asked < DIRECT_MEMORY_SIZE,
+            "the premise: the request is smaller than the pool"
+        );
+        let address = m.allocate_aligned(asked, DIRECT_ALIGN, 0);
+        assert!(
+            address.is_some(),
+            "a request that fits the pool was refused; free was {:#x}",
+            m.available()
         );
     }
 }

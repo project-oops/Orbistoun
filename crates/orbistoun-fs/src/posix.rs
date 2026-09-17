@@ -164,7 +164,7 @@ fn access(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(guest) = crate::read_guest_path(args[0]) else {
         return FAILED;
     };
-    let Some(host) = mount::resolve(&guest) else {
+    let Some(host) = mount::resolve_existing(&guest) else {
         return FAILED;
     };
     if !host.exists() {

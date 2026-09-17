@@ -219,8 +219,12 @@ fn every_instruction_boundary_matches_the_reference() {
         // would bury the cause under its consequences.
         assert!(
             decoded.is_trustworthy(),
-            "{name} ({exercises}): decode was not trustworthy - \
-             desynchronised={}, overran={}, trailing={}",
+            concat!(
+                "{} ({}): decode was not trustworthy - ",
+                "desynchronised={}, overran={}, trailing={}"
+            ),
+            name,
+            exercises,
             decoded.desynchronised,
             decoded.overran,
             decoded.trailing_bytes
@@ -229,8 +233,11 @@ fn every_instruction_boundary_matches_the_reference() {
         for (index, expected) in reference.iter().enumerate() {
             let actual = decoded.instructions.get(index).unwrap_or_else(|| {
                 panic!(
-                    "{name}: reference has {} instructions, we decoded {} - \
-                     first missing is {} at {:#x}",
+                    concat!(
+                        "{}: reference has {} instructions, we decoded {} - ",
+                        "first missing is {} at {:#x}"
+                    ),
+                    name,
                     reference.len(),
                     decoded.instructions.len(),
                     expected.mnemonic,
@@ -240,10 +247,12 @@ fn every_instruction_boundary_matches_the_reference() {
 
             assert_eq!(
                 actual.offset, expected.offset,
-                "{name}: instruction {index} ({}) should start at {:#x} but we put it \
-                 at {:#x}. Every offset is the sum of the lengths before it, so the \
-                 encoding for the *previous* instruction has the wrong length.",
-                expected.mnemonic, expected.offset, actual.offset
+                concat!(
+                    "{}: instruction {} ({}) should start at {:#x} but we put it ",
+                    "at {:#x}. Every offset is the sum of the lengths before it, so the ",
+                    "encoding for the *previous* instruction has the wrong length."
+                ),
+                name, index, expected.mnemonic, expected.offset, actual.offset
             );
 
             assert_eq!(
@@ -671,10 +680,14 @@ fn every_decoded_operand_appears_in_the_reference() {
                                 || format!("{p}_lo") == rendered
                                 || same_number(p, &rendered)
                         }),
-                    "{name}: {} at {:#x} - we decoded operand {rendered}, \
-                     the reference printed [{}]",
+                    concat!(
+                        "{}: {} at {:#x} - we decoded operand {}, ",
+                        "the reference printed [{}]"
+                    ),
+                    name,
                     expected.mnemonic,
                     expected.offset,
+                    rendered,
                     printed.join(" | ")
                 );
                 checked += 1;

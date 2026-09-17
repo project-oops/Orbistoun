@@ -89,8 +89,10 @@ fn harvest() -> BTreeSet<&'static str> {
         .collect();
     assert!(
         names.len() > 1000,
-        "the harvest is the oracle here, and {} names is not it - a truncated list would make \
-         every check below pass by having nothing to disagree with",
+        concat!(
+            "the harvest is the oracle here, and {} names is not it - a truncated list would make ",
+            "every check below pass by having nothing to disagree with"
+        ),
         names.len()
     );
     names
@@ -128,8 +130,11 @@ fn a_claimed_posix_namesake_exists_and_a_denied_one_does_not() {
             spellings_of(gone)
                 .iter()
                 .all(|s| !standard.contains(s.as_str())),
-            "{gone} spells into {:?}, and if any of those are harvested names then this check \
-             would no longer catch the entries D540 corrected",
+            concat!(
+                "{} spells into {:?}, and if any of those are harvested names then this check ",
+                "would no longer catch the entries D540 corrected"
+            ),
+            gone,
             spellings_of(gone)
         );
     }
@@ -165,19 +170,29 @@ fn a_claimed_posix_namesake_exists_and_a_denied_one_does_not() {
 
     assert!(
         claiming > 1 && denying > 1,
-        "these are claims a family of entries share; finding them on {claiming} and {denying} \
-         entries means a wording changed and this is checking less than it reads as"
+        concat!(
+            "these are claims a family of entries share; finding them on {} and {} ",
+            "entries means a wording changed and this is checking less than it reads as"
+        ),
+        claiming,
+        denying
     );
     assert!(
         unfounded.is_empty(),
-        "these say their semantics follow the POSIX function of the same name, and no harvested \
-         name is spelled that way - so the question sends a probe after something that does not \
-         exist: {unfounded:#?}"
+        concat!(
+            "these say their semantics follow the POSIX function of the same name, and no harvested ",
+            "name is spelled that way - so the question sends a probe after something that does not ",
+            "exist: {:#?}"
+        ),
+        unfounded
     );
     assert!(
         wrongly_denied.is_empty(),
-        "these say there is no POSIX function of their name, and the harvest has one: \
-         {wrongly_denied:#?}"
+        concat!(
+            "these say there is no POSIX function of their name, and the harvest has one: ",
+            "{:#?}"
+        ),
+        wrongly_denied
     );
 }
 
@@ -217,8 +232,11 @@ fn an_open_question_does_not_announce_a_measurement() {
     }
     assert!(
         announcing.is_empty(),
-        "an assumption is a thing nobody has established; these say a console established it, \
-         so the queue asks hardware for an answer it already has: {announcing:#?}"
+        concat!(
+            "an assumption is a thing nobody has established; these say a console established it, ",
+            "so the queue asks hardware for an answer it already has: {:#?}"
+        ),
+        announcing
     );
 }
 
@@ -277,12 +295,18 @@ fn an_entry_holding_a_measurement_does_not_say_nothing_is_established() {
     }
     assert!(
         measured > 10,
-        "the hardware absorption writes these edge cases; finding them on {measured} entries \
-         means the prefix changed and this is checking almost nothing"
+        concat!(
+            "the hardware absorption writes these edge cases; finding them on {} entries ",
+            "means the prefix changed and this is checking almost nothing"
+        ),
+        measured
     );
     assert!(
         contradicting.is_empty(),
-        "these carry a hardware result and report that nothing about them has been \
-         established: {contradicting:#?}"
+        concat!(
+            "these carry a hardware result and report that nothing about them has been ",
+            "established: {:#?}"
+        ),
+        contradicting
     );
 }

@@ -64,7 +64,7 @@ fn payload() -> Vec<u8> {
 }
 
 /// The console's pixel shader, translated for the fragment stage.
-fn console_fragment_module() -> Vec<u32> {
+fn console_fragment_module(window: orbistoun_translate::wavefront::Window) -> Vec<u32> {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
     let payload = payload();
@@ -76,7 +76,12 @@ fn console_fragment_module() -> Vec<u32> {
         fidelity: Fidelity::Auto,
         width: Width::default(),
     };
-    translate_staged(&decoded, &encodings, strategy, Stage::Fragment)
+    // **The window is a parameter now, and it has to be.** A pixel shader stores to guest
+    // memory - the console's writes a canary - and where its window sits decides whether that
+    // store lands or is refused. Translating it at the default while the vertex program was
+    // translated somewhere else meant the two disagreed about what guest memory is, which is a
+    // difference no picture would show.
+    orbistoun_translate::translate_windowed(&decoded, &encodings, strategy, Stage::Fragment, window)
         .expect("the console's pixel shader translates")
         .module
 }
@@ -92,10 +97,13 @@ fn console_fragment_module() -> Vec<u32> {
 ///
 /// # What it cannot assert
 ///
-/// **That these are the console's pixels.** The console drew this shader over its own vertex
-/// program, which does not translate yet (D688), so the geometry here is the oracle's
-/// hand-written triangle. This says the shader runs and computes with what it is given; the
-/// frame hash in the oracle record is a different claim and needs the other half.
+/// **That these are the console's pixels.** The geometry here is the oracle's hand-written
+/// triangle, deliberately: this test isolates the pixel shader, so what it draws depends on
+/// nothing else that could be wrong. The console's own vertex program does translate now, and
+/// `the_consoles_two_shaders_draw_together` below is the pair running together.
+///
+/// The frame hash in the oracle record is still a different claim, and needs a vertex buffer
+/// the record did not capture.
 ///
 /// # Validation
 ///
@@ -108,7 +116,10 @@ fn the_consoles_pixel_shader_draws_on_a_device() {
     if !device_or_skip("the_consoles_pixel_shader_draws_on_a_device") {
         return;
     }
-    let module = console_fragment_module();
+    // The default window, because this test is about the picture and touches no guest memory.
+    // Naming it rather than defaulting it keeps the choice visible: the other test below wants
+    // a window somewhere else entirely, and the two are asking different questions.
+    let module = console_fragment_module(orbistoun_translate::wavefront::Window::default());
     println!("module: {} words", module.len());
 
     let green = [0.0, 1.0, 0.0, 1.0];
@@ -162,6 +173,9 @@ fn the_consoles_vertex_program_translates_for_the_mesh_stage() {
     }
 }
 
+/// The low half of the guest address the console's vertex buffer sat at, `0x200900000`.
+const VERTEX_BUFFER_BASE: u32 = 0x0090_0000;
+
 /// Where the console's vertex program looks for each vertex, in the memory window.
 ///
 /// Its address arithmetic is `vbo + lane * 48`, and the window is addressed by the module's own
@@ -169,6 +183,48 @@ fn the_consoles_vertex_program_translates_for_the_mesh_stage() {
 /// `0x200900000`, which masks to word zero, and each vertex is twelve words: four of position,
 /// four of colour, four of texture coordinates.
 const VERTEX_WORDS: [usize; 3] = [0, 12, 24];
+
+/// The low half of the guest address the console's pixel shader stores its canary at,
+/// `0x200920000`.
+const CANARY_BASE: u32 = 0x0092_0000;
+
+/// Which word of a window anchored at the vertex buffer the canary is.
+///
+/// A hundred and twenty-eight kilobytes further on, which is thirty-two thousand words. The
+/// number is what makes the point: a window sized to hold a vertex buffer cannot reach it, and
+/// that is why one span covering both had to be possible before this could be asked at all.
+const CANARY_WORD: usize = ((CANARY_BASE - VERTEX_BUFFER_BASE) / 4) as usize;
+
+/// Words in a window that covers the vertex buffer **and** the canary.
+///
+/// The next power of two past the canary's own index, because
+/// [`Window::spanning`](orbistoun_translate::wavefront::Window::spanning) refuses anything else
+/// - the index is kept legal by masking, and masking is only a bound on a power of two.
+const SPANNING_WORDS: u32 = 1 << 16;
+
+/// A value nothing else here writes, so a canary word that changed can only have been stored.
+const SENTINEL: u32 = 0x5EED_1234;
+
+/// What the console's pixel shader stores at its canary address.
+///
+/// **Measured, not assumed.** The word was seeded with [`SENTINEL`] in a host-visible buffer
+/// this test wrote, the draw ran, and this is what came back - so it is the shader's own
+/// constant, arriving through a translated store at a guest address. Pinned rather than printed
+/// for the usual reason: a change that stopped the store landing would otherwise be a line of
+/// output nobody was watching.
+const CANARY_VALUE: u32 = 0xBEEF_0001;
+
+/// The window both of the console's shaders are translated against.
+///
+/// One span, covering the vertex buffer the primitive shader reads and the canary the pixel
+/// shader writes. A function rather than a constant because
+/// [`Window::spanning`](orbistoun_translate::wavefront::Window::spanning) is fallible, and the
+/// one way it fails - a length that is not a power of two - is a mistake in this file rather
+/// than anything a run could produce.
+fn window() -> orbistoun_translate::wavefront::Window {
+    orbistoun_translate::wavefront::Window::spanning(VERTEX_BUFFER_BASE, SPANNING_WORDS)
+        .expect("a power-of-two window length")
+}
 
 /// The console's whole frame path: its primitive shader and its pixel shader, together.
 ///
@@ -184,17 +240,26 @@ const VERTEX_WORDS: [usize; 3] = [0, 12, 24];
 /// **Not the console's frame.** The vertices here are this test's, because the oracle record
 /// captured the command stream and the shader payload and not the vertex buffer.
 ///
-/// # And it does not draw yet, which is the measurement
+/// # It draws, and it stores
 ///
-/// Reported rather than asserted, because what it reports is an open question rather than a
-/// property to defend. The module is valid - `spirv-val` accepts it and the validation layer
-/// is silent on the draw - and **nothing happens**: the attachment keeps its clear, and the
-/// guest-memory window still holds exactly what this test seeded, including at the word the
-/// shader's own canary store would have overwritten. So the shader is not running, rather than
-/// running and producing a degenerate triangle (worklog 559).
+/// Both halves are asserted. Every pixel is the colour the vertex carried, so the primitive
+/// shader fetched real vertices and the pixel shader interpolated a real colour. And the word
+/// the pixel shader's own canary store names comes back holding the console's constant rather
+/// than the sentinel this test seeded - so the shader reached its store, computed a guest
+/// address, and wrote there.
 ///
-/// The seeding and the read-back exist so that distinction can be made at all: the attachment
-/// says what was drawn and the window says what was stored, and a guest's shaders do both.
+/// The seeding and the read-back are what make those two separable at all: the attachment says
+/// what was drawn and the window says what was stored, and a guest's shaders do both. For a
+/// long time this test could only report that neither happened (worklog 559).
+///
+/// # What the window had to become
+///
+/// The vertex buffer and the canary are a hundred and twenty-eight kilobytes apart, and a
+/// window is one span. Anchored at zero, every fetch was refused (worklog 561). Sized to the
+/// vertex buffer alone, the store was past the end and refused - correct behaviour, recorded as
+/// unfinished (worklog 565). One span covering both, with **both shaders translated against
+/// it**, is what this test now does. Translating the two against different windows would have
+/// meant the pair disagreeing about what guest memory is, which no picture would show.
 #[test]
 fn the_consoles_two_shaders_draw_together() {
     use orbistoun_gpu_vulkan::framebuffer::draw_mesh_over;
@@ -210,11 +275,23 @@ fn the_consoles_two_shaders_draw_together() {
             fidelity: Fidelity::Auto,
             width: Width::default(),
         };
-        translate_staged(&decoded, &encodings, strategy, Stage::Mesh)
-            .expect("the vertex program translates")
-            .module
+        // **The window sits where the console's vertex buffer sat, and reaches as far as its
+        // canary.** Its low half, because a flat access names its address in a register pair
+        // and the translation reads the low one. Anchored at zero the shader's every fetch was
+        // refused and it drew three identical vertices (worklog 561); sized to the vertex
+        // buffer alone, the pixel shader's store to a word a hundred and twenty-eight kilobytes
+        // further on was refused too, and both shaders have to agree about what memory is.
+        orbistoun_translate::translate_windowed(
+            &decoded,
+            &encodings,
+            strategy,
+            Stage::Mesh,
+            window(),
+        )
+        .expect("the vertex program translates")
+        .module
     };
-    let fragment = console_fragment_module();
+    let fragment = console_fragment_module(window());
 
     // A triangle covering the viewport, every corner the same colour, so every pixel is that
     // colour exactly and no sample position or rounding enters into it.
@@ -224,13 +301,16 @@ fn the_consoles_two_shaders_draw_together() {
         [-1.0, 3.0, 0.0, 1.0],
     ];
     let green = [0.0f32, 1.0, 0.0, 1.0];
-    let mut memory = vec![0u32; 64];
+    let mut memory = vec![0u32; SPANNING_WORDS as usize];
     for (vertex, at) in VERTEX_WORDS.into_iter().enumerate() {
         for component in 0..4 {
             memory[at + component] = corners[vertex][component].to_bits();
             memory[at + 4 + component] = green[component].to_bits();
         }
     }
+    // The canary word, seeded with something the shader cannot have written, so "it stored
+    // here" and "it stored nothing" are different answers rather than the same zero.
+    memory[CANARY_WORD] = SENTINEL;
 
     let red = [1.0, 0.0, 0.0, 1.0];
     // Isolation: a fragment shader that writes one colour whatever it is given, so the picture
@@ -244,16 +324,45 @@ fn the_consoles_two_shaders_draw_together() {
 
     let (pixels, after) =
         draw_mesh_over(&mesh, &fragment, red, 8, 5, &memory).expect("the draw ran");
-    println!("first pixel: {:?}", pixels.at(0, 0));
+    for y in 0..5 {
+        for x in 0..8 {
+            assert_eq!(
+                pixels.at(x, y),
+                Some([0, 255, 0, 255]),
+                "pixel ({x}, {y}) - red is the clear, so the pair drew nothing"
+            );
+        }
+    }
 
-    // The shader's own canary, which it stores at the end. Its absence is the finding: the
-    // seeded word is still there, so nothing the shader does reached memory.
-    println!("window word 0 after the draw: {:08x}", after[0]);
+    // **The canary lands.**
+    //
+    // A word a hundred and twenty-eight kilobytes past the vertex buffer, seeded with a value
+    // this test invented, comes back holding the console's own constant. That is the shader
+    // reaching its store, computing the guest address, and writing there - and it is the first
+    // time anything in this project has observed a guest's shader change guest memory.
+    //
+    // It needed both halves of the window change. Anchored at zero, the address was refused
+    // (worklog 561). Sized to the vertex buffer alone, the address was past the end and refused
+    // again, which worklog 565 recorded as correct-but-unfinished. One span covering both, and
+    // both shaders translated against it, is what makes the store reachable at all.
     assert_eq!(
-        after[0], memory[0],
-        "the window changed, so the shader did run - this test is the record of that and wants 
-         turning back into an assertion about the picture"
+        after[CANARY_WORD], CANARY_VALUE,
+        concat!(
+            "canary word {}: seeded {:#010x} and expected the shader's {:#010x}, read back ",
+            "{:#010x} - the sentinel here means the store was refused or never reached"
+        ),
+        CANARY_WORD, SENTINEL, CANARY_VALUE, after[CANARY_WORD]
     );
+
+    // The vertices are untouched, which is the claim that holds whatever the canary did: a
+    // window wide enough to reach the canary must not have moved the buffer the other shader
+    // reads, and a masked index that folded differently would show up right here.
+    for at in VERTEX_WORDS {
+        assert_eq!(
+            after[at], memory[at],
+            "vertex word {at} changed - a wider window must not move what the fetch reads"
+        );
+    }
 }
 
 /// A primitive shader with nothing in it but the four things a mesh module needs.

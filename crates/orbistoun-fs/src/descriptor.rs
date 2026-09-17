@@ -98,17 +98,49 @@ pub fn open(guest_path: &str) -> Option<u64> {
         crate::opened::note(guest_path);
         return insert(Target::Device(device));
     }
-    let Some(host) = crate::mount::resolve(guest_path) else {
+    let Some(host) = crate::mount::resolve_existing(guest_path) else {
         // A path nothing here holds, recorded as the work item it is (D387).
         crate::wanted::note(guest_path);
         return None;
     };
-    let Ok(file) = std::fs::File::open(host) else {
+    let Ok(file) = open_readable(&host) else {
         crate::wanted::note(guest_path);
         return None;
     };
     crate::opened::note(guest_path);
     insert_file(file)
+}
+
+/// Opens `host` for reading, whether it is a file **or a directory**.
+///
+/// The directory half is a host-platform note, not a guest one: a guest opens its own `/app0` mount
+/// to check it is there and gets a descriptor on the console, so it must here too. `std::fs::File::open`
+/// gives one on Unix - a read-only handle a caller can `fstat` but not read - and **fails on Windows**
+/// without `FILE_FLAG_BACKUP_SEMANTICS`, so an `open("/app0/")` answered `ENOENT` there where the
+/// console answers a descriptor. PPSA04263 aborts on that `ENOENT` (`int 0x41`, the fatal trap of
+/// worklog 611): its last call before the trap is `sceKernelOpen("/app0/") -> 0x80020002`, the
+/// upstream wrong value the reclassified finding points at (worklog 615).
+///
+/// A file opens the same way on both platforms; only the directory needs the flag, and only on
+/// Windows.
+#[cfg(windows)]
+fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_FLAG_BACKUP_SEMANTICS` from `winbase.h` - the documented Win32 flag that lets
+    /// `CreateFile` return a handle to a directory. A host-API constant, not a guest or vendor one.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    if host.is_dir() {
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options.open(host)
+}
+
+/// The non-Windows half: `File::open` already opens a directory read-only, so there is nothing to add.
+#[cfg(not(windows))]
+fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(host)
 }
 
 /// Opens a guest path for writing, creating it, answering a descriptor.
@@ -827,6 +859,44 @@ mod tests {
         a_title_with("first", b"x");
         let fd = open("/app0/game.bin").expect("opens");
         assert!(fd >= FIRST_FILE);
+        assert!(!is_standard(fd));
+        assert!(close(fd));
+    }
+
+    #[test]
+    fn a_wrong_case_path_is_not_found_because_the_console_is_case_sensitive() {
+        let _guard = exclusively();
+        a_title_with("case", b"x"); // creates game.bin
+        // The console's filesystem is FreeBSD-derived and **case-sensitive**: `GAME.BIN` is a
+        // different name from `game.bin` and simply does not exist. On a Windows host `.exists()`
+        // and `File::open` are case-insensitive, so a wrong-case name would open the file anyway -
+        // a host-semantic leak, the same class as PPSA04263's `/app0` directory bug (worklog 615).
+        // On Unix this already passes (the host is case-sensitive too); this pins it on Windows.
+        assert!(
+            open("/app0/game.bin").is_some(),
+            "the exact-case name opens"
+        );
+        assert_eq!(
+            open("/app0/GAME.BIN"),
+            None,
+            "a wrong-case name does not exist, as on the console"
+        );
+    }
+
+    #[test]
+    fn a_directory_opens_to_a_descriptor_not_enoent() {
+        let _guard = exclusively();
+        a_title_with("dir-open", b"x");
+        // A guest opens "/app0/" - its own mount root - to check its directory is there, and the
+        // console answers a descriptor. On Windows `File::open` fails on a directory without
+        // FILE_FLAG_BACKUP_SEMANTICS, and that surfaced as ENOENT: PPSA04263 opened `/app0/`, got
+        // ENOENT, and aborted (int 0x41, worklog 615). On Unix `File::open` already opens a
+        // directory. Either way it must be a descriptor here, not the None that reads as "not there".
+        let fd = open("/app0/").expect("a directory opens to a descriptor, not ENOENT");
+        assert!(
+            fd >= FIRST_FILE,
+            "a real descriptor, above the standard streams"
+        );
         assert!(!is_standard(fd));
         assert!(close(fd));
     }

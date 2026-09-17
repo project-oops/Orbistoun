@@ -239,8 +239,11 @@ fn a_held_mutex_refuses_another_thread_with_the_measured_code() {
     );
     assert_eq!(
         refused, expected,
-        "a second thread's trylock on a held mutex: the console answered {expected:#010x}, \
-         orbistoun {refused:#010x}"
+        concat!(
+            "a second thread's trylock on a held mutex: the console answered {:#010x}, ",
+            "orbistoun {:#010x}"
+        ),
+        expected, refused
     );
 
     assert_eq!(

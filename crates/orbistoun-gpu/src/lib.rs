@@ -54,13 +54,27 @@ mod backend;
 pub mod packet;
 pub mod pipeline;
 pub mod registers;
+mod render;
+pub mod tiling;
 
 pub use backend::{
-    BackendError, RecordingBackend, Rect, RenderBackend, RenderCommand, ResourceId, ShaderStage,
+    BackendError, RecordingBackend, Rect, RenderBackend, RenderCommand, Resource, ResourceId,
+    ShaderStage,
 };
 pub use packet::{Packet, PacketKind, PacketWalk, walk};
 pub use registers::{
-    RegisterWrite, ShaderCandidate, Vocabulary, VocabularyError, register_writes, shader_candidates,
+    BufferDescriptor, ColourTarget, ColourTargetExtent, DispatchCall, DrawCall, DrawCorrelation,
+    DrawKind, DrawOrDispatch, ImageDescriptor, RegisterWrite, Scissor, ShaderCandidate,
+    SwizzleMode, TargetMask, Vocabulary, VocabularyError, buffer_descriptor_at,
+    colour_swizzle_mode_at, colour_target_at, colour_target_extent_at, correlate_draws,
+    decode_buffer_descriptor, decode_colour_swizzle_mode, decode_colour_target_extent,
+    decode_image_descriptor, decode_scissor, decode_swizzle_mode, decode_target_mask,
+    dispatch_calls, draw_calls, register_writes, scissor_at, shader_candidates, target_mask_at,
+};
+pub use render::{FrameOutcome, drive};
+pub use tiling::{
+    DetileError, Surface, SurfaceError, detile_64kb_rx_bpp4, detile_colour_target, detile_image,
+    detile_texture, tiled_byte_offset_64kb_rx_bpp4,
 };
 
 use orbistoun_hle::guest_module;

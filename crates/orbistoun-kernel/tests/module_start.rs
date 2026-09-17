@@ -61,8 +61,10 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
     assert_eq!(
         orbistoun_kernel::module_start_summary(),
         None,
-        "nothing has asked for a module yet, so the run must stay quiet - a report that \
-         fires on an empty run says nothing about a run that loaded something"
+        concat!(
+            "nothing has asked for a module yet, so the run must stay quiet - a report that ",
+            "fires on an empty run says nothing about a run that loaded something"
+        )
     );
 
     let path = Path::new("/app0/Media/Modules/ATitleModule.prx");
@@ -78,8 +80,11 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
         .expect("a module was asked for, so the run is no longer quiet");
     assert!(
         summary.contains("ATitleModule.prx"),
-        "the report names the module, because a count alone cannot tell a reader which one \
-         is missing its constructors: {summary}"
+        concat!(
+            "the report names the module, because a count alone cannot tell a reader which one ",
+            "is missing its constructors: {}"
+        ),
+        summary
     );
     assert!(
         summary.contains(&format!("{handle:#x}")),
@@ -87,8 +92,11 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
     );
     assert!(
         summary.contains("NOT started"),
-        "the report says the module did not start - the whole point, and the half a reader \
-         would otherwise supply themselves: {summary}"
+        concat!(
+            "the report says the module did not start - the whole point, and the half a reader ",
+            "would otherwise supply themselves: {}"
+        ),
+        summary
     );
     drop(path);
 
@@ -116,11 +124,21 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
     let summary = orbistoun_kernel::module_start_summary().expect("two modules asked for now");
     assert!(
         summary.contains("ARecordedModule.prx (0 initialiser(s)"),
-        "a module the loader recorded is reported as started - matched on the library name          with the extension off, which is the comparison that was wrong first (D515): {summary}"
+        concat!(
+            "a module the loader recorded is reported as started - matched on the library ",
+            "name with the extension off, which is the comparison that was wrong first ",
+            "(D515): {}"
+        ),
+        summary
     );
     assert!(
         summary.contains("ran NO initialiser"),
-        "a start that ran nothing is called out - it produces the same handle as one that ran          every constructor, and only one of those is a module the guest can use: {summary}"
+        concat!(
+            "a start that ran nothing is called out - it produces the same handle as one ",
+            "that ran every constructor, and only one of those is a module the guest can ",
+            "use: {}"
+        ),
+        summary
     );
     drop(recorded);
 
@@ -143,7 +161,11 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
     let summary = orbistoun_kernel::module_start_summary().expect("modules were started");
     assert!(
         summary.contains("before entry"),
-        "a start nobody asked for has no handle, and inventing one would be a handle a guest          could be thought to hold: {summary}"
+        concat!(
+            "a start nobody asked for has no handle, and inventing one would be a handle ",
+            "a guest could be thought to hold: {}"
+        ),
+        summary
     );
 }
 
@@ -167,7 +189,10 @@ fn setting_a_threads_affinity_is_accepted_rather_than_refused() {
     let answer = implementation("scePthreadSetaffinity")(&regs);
     assert_eq!(
         answer, 0,
-        "a call orbistoun can honestly accept must not answer a placeholder - a caller          testing this against zero would read one as a refusal"
+        concat!(
+            "a call orbistoun can honestly accept must not answer a placeholder - a ",
+            "caller testing this against zero would read one as a refusal"
+        )
     );
     assert!(
         answer & 0x8000_0000 == 0,
@@ -208,7 +233,10 @@ fn the_vendor_clock_writes_both_fields_and_refuses_what_it_cannot_answer() {
     );
     assert_ne!(
         when[1], 0xA5A5_A5A5_A5A5_A5A5,
-        "and the nanoseconds field is written too - a call that fills one and leaves the other          is the shape a guard word exists to catch (D509)"
+        concat!(
+            "and the nanoseconds field is written too - a call that fills one and leaves ",
+            "the other is the shape a guard word exists to catch (D509)"
+        )
     );
 
     let mut refused_regs = [0_u64; GUEST_ARG_REGISTERS];
@@ -219,7 +247,10 @@ fn the_vendor_clock_writes_both_fields_and_refuses_what_it_cannot_answer() {
     assert_ne!(
         refused,
         u64::MAX,
-        "and NOT the POSIX -1 - that is the whole reason this is not the POSIX function under          a second name"
+        concat!(
+            "and NOT the POSIX -1 - that is the whole reason this is not the POSIX ",
+            "function under a second name"
+        )
     );
     assert_eq!(
         refused & 0xffff_0000,

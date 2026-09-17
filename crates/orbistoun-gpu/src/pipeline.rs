@@ -86,11 +86,15 @@ use orbistoun_shader::{
     Capture, EncodingTable, OperandTable, ShaderCorpus, ShaderError, decode_program,
 };
 use orbistoun_translate::wavefront::Stage;
-use orbistoun_translate::{Strategy, translate_staged};
+use orbistoun_translate::wavefront::Window;
+use orbistoun_translate::{Strategy, translate_windowed};
 
-use crate::backend::{RenderCommand, ResourceId, ShaderStage};
-use crate::packet::walk;
-use crate::registers::{Vocabulary, register_writes, shader_candidates};
+use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage};
+use crate::packet::{PacketWalk, walk};
+use crate::registers::{
+    ColourTargetExtent, DrawKind, Vocabulary, colour_target_extent_at, dispatch_calls, draw_calls,
+    register_writes, scissor_at, shader_candidates,
+};
 
 /// Which queue a command buffer was submitted to.
 ///
@@ -154,6 +158,19 @@ const fn stage_salt(stage: Stage) -> u64 {
     }
 }
 
+/// Distinguishes the same shader translated against different memory windows, in the cache key.
+///
+/// **The same reason the stage is in there.** A window's base and length are compiled into the
+/// module - the base is subtracted before an index is masked, and the length is the mask - so
+/// two windows produce two different modules from one shader. A cache that ignored the window
+/// would serve whichever was translated first, and the shader would read the wrong memory while
+/// everything about the run looked fine.
+///
+/// Both halves, because a window that moved and a window that grew are both different windows.
+const fn window_salt(window: Window) -> u64 {
+    ((window.base as u64) << 32) | window.words() as u64
+}
+
 /// A shader the guest registered by name, rather than one inferred from register writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisteredShader {
@@ -206,6 +223,12 @@ pub struct SubmissionReport {
     pub packets: usize,
     /// Register writes extracted from them.
     pub register_writes: usize,
+    /// Draws the stream asked for.
+    ///
+    /// Auto-indexed draws only. An indexed one takes its count from separate state and an index
+    /// buffer in guest memory, and neither is read - so a stream full of indexed draws reports
+    /// none here, which is the honest answer rather than a guess at how many.
+    pub draws: usize,
     /// Shader addresses the registers named.
     pub shaders_found: usize,
     /// Of those, how many produced a module.
@@ -327,6 +350,16 @@ pub struct Submission {
     pub commands: Vec<RenderCommand>,
     /// Modules the commands refer to, for a backend that has not seen them before.
     pub modules: BTreeMap<ResourceId, Vec<u32>>,
+    /// Colour render targets the commands select, by the id a [`RenderCommand::SetRenderTargets`]
+    /// names, to their dimensions. A target carries no bytes - only the size a backend allocates its
+    /// attachment to - so it rides here rather than in [`Self::modules`], and the driver makes it
+    /// resident the same way (D701).
+    pub targets: BTreeMap<ResourceId, ColourTargetExtent>,
+    /// The guest-memory window this submission's shaders read, as words, read out of guest memory at
+    /// the pipeline's window (D703). Frame-level rather than per-draw, because every module is
+    /// compiled against one window (worklog 635). Empty when the window is not mapped - a stream
+    /// against the default window at address zero reads nothing, and a real one reads its region.
+    pub guest_memory: Vec<u32>,
     /// What was seen and what failed.
     pub report: SubmissionReport,
 }
@@ -421,6 +454,20 @@ pub struct Pipeline {
     operands: OperandTable,
     vocabulary: Vocabulary,
     strategy: Strategy,
+    /// The span of guest memory a translated shader may reach, and where it starts.
+    ///
+    /// **Named by the caller, not derived from the submission, and that is the open half.**
+    /// Every memory access a translated shader makes is checked against this; anchored in the
+    /// wrong place, every one is refused and the shader draws nothing (worklog 561). A window
+    /// placed where a record says the buffers were is what got the console's own shaders
+    /// fetching vertices and landing a store (worklog 570).
+    ///
+    /// Deriving one from the command stream needs a register vocabulary that says which
+    /// register carries a buffer address, and nothing has measured that - so the default is
+    /// the default, and a caller that knows can say. Inventing the mapping instead would
+    /// produce a plausible frame drawn from the wrong memory, which is what the vocabulary
+    /// exists to prevent (`REQ-20260914T2348Z-4e71`).
+    window: Window,
     /// Shader bytes, by content hash, to the resource holding the translation.
     cache: BTreeMap<u64, Cached>,
     next_resource: u64,
@@ -439,9 +486,32 @@ impl Pipeline {
             operands: OperandTable::builtin().map_err(|e| PipelineError::Table(e.to_string()))?,
             vocabulary: Vocabulary::builtin().map_err(|e| PipelineError::Table(e.to_string()))?,
             strategy,
+            window: Window::default(),
             cache: BTreeMap::new(),
             next_resource: 1,
         })
+    }
+
+    /// Places the guest-memory window every shader this pipeline translates is built against.
+    ///
+    /// The default is at address zero, which refuses every access a real guest shader makes -
+    /// a guest's buffers are not there. A caller that knows where they are says so here.
+    ///
+    /// **It clears the cache**, because the cached modules were built against the old window
+    /// and are not the modules this one would produce. The key carries the window too, so the
+    /// clear is belt and braces rather than the mechanism - but a cache holding entries no key
+    /// will ever match again is just memory nobody can reach.
+    #[must_use]
+    pub fn with_window(mut self, window: Window) -> Self {
+        self.window = window;
+        self.cache.clear();
+        self
+    }
+
+    /// Where this pipeline's guest-memory window sits.
+    #[must_use]
+    pub const fn window(&self) -> Window {
+        self.window
     }
 
     /// How many distinct shaders have been translated and kept.
@@ -510,6 +580,41 @@ impl Pipeline {
             ..Submission::default()
         };
 
+        // **The colour target, before anything that draws into it.** A stream sizes its target with
+        // a register write; decoding that (worklog 637) lets a backend allocate a real attachment
+        // rather than a guessed square. Emitted first, because it is state a draw reads. Only the
+        // dimensions are decoded - the target's guest address is not, because the register that
+        // carries it is disputed between the sources while the size register is corroborated by both
+        // (D702) - so a target is identified by its extent here.
+        if let Some(extent) = colour_target_extent_at(&writes) {
+            let target = colour_target_id(extent);
+            submission.targets.insert(target, extent);
+            submission.commands.push(RenderCommand::SetRenderTargets {
+                colour: vec![target],
+                depth: None,
+            });
+        }
+
+        // The scissor a stream set, as a viewport the backend restricts a draw to (worklog 646). The
+        // generic scissor's corners are decoded (register offsets and layout mined from a hardware
+        // draw capture) into the command's rectangle; a stream that set no scissor emits none, so a
+        // draw covers the whole target.
+        if let Some(scissor) = scissor_at(&writes) {
+            submission.commands.push(RenderCommand::SetViewport(Rect {
+                x: i32::try_from(scissor.x).unwrap_or(0),
+                y: i32::try_from(scissor.y).unwrap_or(0),
+                width: scissor.width,
+                height: scissor.height,
+            }));
+        }
+
+        // The guest-memory window this frame's shaders read, out of guest memory at the pipeline's
+        // window (D703). Read here, once, because every module shares the one window; a shader
+        // fetches its vertices from it. The default window at address zero is unmapped and reads
+        // nothing, so a stream that never placed its window carries an empty region rather than a
+        // guessed one - the honest answer, and what a shader reading it would find.
+        submission.guest_memory = read_guest_window(memory, self.window);
+
         let candidates = Self::reconcile(queue, registered, &inferred, &mut submission.report);
         submission.report.shaders_found = candidates.len();
 
@@ -560,6 +665,21 @@ impl Pipeline {
                 }
             }
         }
+
+        // **The draws and dispatches, after the binds.** A stream sets its state and then asks for
+        // geometry, so emitting them in that order is what a backend can act on - and the order is
+        // the stream's own, from the packet walk rather than from anything this function decides.
+        push_geometry_commands(&mut submission.commands, &walked, stream);
+        submission.report.draws = submission
+            .commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. }
+                )
+            })
+            .count();
 
         submission
     }
@@ -668,26 +788,34 @@ impl Pipeline {
         // They are assumed to be the same number - see `guest_address_of`.
         let window = read_window(memory, guest_address_of(address)).ok_or_else(|| {
             PrepareFailure::Unresolved(format!(
-                "no mapped memory at {address:#x}. That address came from a hardware \
-                 register and is a GPU virtual address; it is being read as a guest \
-                 virtual address on the assumption the two coincide, which is not yet \
-                 confirmed - so suspect that before suspecting the register decode"
+                concat!(
+                    "no mapped memory at {:#x}. That address came from a hardware ",
+                    "register and is a GPU virtual address; it is being read as a guest ",
+                    "virtual address on the assumption the two coincide, which is not yet ",
+                    "confirmed - so suspect that before suspecting the register decode"
+                ),
+                address
             ))
         })?;
 
         let decoded = decode_program(window, &self.encodings, &self.operands);
         if !decoded.terminated {
             return Err(PrepareFailure::Resolved(format!(
-                "no end-of-program instruction within {} bytes of {address:#x} - the \
-                 address is wrong, or this shader is larger than the window",
-                window.len()
+                concat!(
+                    "no end-of-program instruction within {} bytes of {:#x} - the ",
+                    "address is wrong, or this shader is larger than the window"
+                ),
+                window.len(),
+                address
             )));
         }
         if !decoded.is_trustworthy() {
             return Err(PrepareFailure::Resolved(format!(
-                "the shader at {address:#x} did not decode cleanly \
-                 (desynchronised={}, overran={})",
-                decoded.desynchronised, decoded.overran
+                concat!(
+                    "the shader at {:#x} did not decode cleanly ",
+                    "(desynchronised={}, overran={})"
+                ),
+                address, decoded.desynchronised, decoded.overran
             )));
         }
 
@@ -697,7 +825,7 @@ impl Pipeline {
         // for a fragment stage and for a compute dispatch are different modules - one declares
         // inputs and a colour output and the other publishes its registers - so a cache that
         // ignored the stage would serve whichever was translated first.
-        let key = content_hash(shader) ^ stage_salt(host_stage);
+        let key = content_hash(shader) ^ stage_salt(host_stage) ^ window_salt(self.window);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -710,19 +838,28 @@ impl Pipeline {
             // recovering from either would leave the cache in a state nobody can reason
             // about.
             return Err(PrepareFailure::Resolved(format!(
-                "the shader at {address:#x} hashes to a cached entry it does not match \
-                 ({} bytes against {}) - the cache key no longer identifies a shader",
+                concat!(
+                    "the shader at {:#x} hashes to a cached entry it does not match ",
+                    "({} bytes against {}) - the cache key no longer identifies a shader"
+                ),
+                address,
                 shader.len(),
                 cached.length
             )));
         }
 
-        let translated = translate_staged(&decoded, &self.encodings, self.strategy, host_stage)
-            .map_err(|e| {
-                PrepareFailure::Resolved(format!(
-                    "the shader at {address:#x} could not be translated: {e}"
-                ))
-            })?;
+        let translated = translate_windowed(
+            &decoded,
+            &self.encodings,
+            self.strategy,
+            host_stage,
+            self.window,
+        )
+        .map_err(|e| {
+            PrepareFailure::Resolved(format!(
+                "the shader at {address:#x} could not be translated: {e}"
+            ))
+        })?;
 
         let resource = ResourceId(self.next_resource);
         self.next_resource += 1;
@@ -736,6 +873,42 @@ impl Pipeline {
                 .map(|warning| format!("the shader at {address:#x}: {warning}"))
                 .collect(),
         })
+    }
+}
+
+/// Appends a submission's draws and dispatches to its command list, in the stream's order.
+///
+/// Split from `submit` for length, but it is a coherent step: the geometry a stream asks for, after
+/// its state. An auto draw becomes a [`RenderCommand::Draw`] and an indexed one a
+/// [`RenderCommand::DrawIndexed`] - the index buffer's address is decoded (`DrawKind::Indexed`) but
+/// bound separately (worklog 628), so the count is emitted and the address waits. Each
+/// `DISPATCH_DIRECT` becomes a [`RenderCommand::Dispatch`]; the guest memory it reads and writes is a
+/// windowed buffer the backend binds on its own, so only the workgroup counts are carried.
+///
+/// A guest's frame is many small draws: the captured GL cube asks for three vertices at a time,
+/// twelve times over, one triangle per draw (worklog 585).
+fn push_geometry_commands(commands: &mut Vec<RenderCommand>, walked: &PacketWalk, stream: &[u8]) {
+    for draw in draw_calls(walked, stream) {
+        let command = match draw.kind {
+            DrawKind::Auto { vertices } => RenderCommand::Draw {
+                vertices,
+                instances: draw.instances,
+                first_vertex: 0,
+            },
+            DrawKind::Indexed { indices, .. } => RenderCommand::DrawIndexed {
+                indices,
+                instances: draw.instances,
+                first_index: 0,
+            },
+        };
+        commands.push(command);
+    }
+    for dispatch in dispatch_calls(walked, stream) {
+        commands.push(RenderCommand::Dispatch {
+            x: dispatch.groups[0],
+            y: dispatch.groups[1],
+            z: dispatch.groups[2],
+        });
     }
 }
 
@@ -755,6 +928,27 @@ fn read_window(memory: &impl GuestMemory, address: u64) -> Option<&[u8]> {
     None
 }
 
+/// Reads the guest-memory window a pipeline is built against, as words.
+///
+/// Exactly the window's span - `words()` words from `base` - because that length is the mask the
+/// module applies (`Window::spanning` refuses a non-power-of-two for that reason), so a backend that
+/// binds a region of a different length would fold an index to a different word than the shader
+/// meant. An empty vector when the region is not fully mapped: a partial window is not one to bind,
+/// and the default window at address zero is unmapped, so a stream that never placed its window
+/// reads nothing rather than a page of whatever happens to be at zero.
+fn read_guest_window(memory: &impl GuestMemory, window: Window) -> Vec<u32> {
+    let byte_len = window.words() as usize * 4;
+    memory
+        .read(u64::from(window.base), byte_len)
+        .map(|bytes| {
+            bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Converts a GPU virtual address to the guest virtual address holding the same bytes.
 ///
 /// The identity function, and deliberately a function rather than nothing at all.
@@ -771,6 +965,30 @@ fn read_window(memory: &impl GuestMemory, address: u64) -> Option<&[u8]> {
 /// call site.
 pub const fn guest_address_of(gpu_address: u64) -> u64 {
     gpu_address
+}
+
+/// A content-addressed id for a colour target of a given extent.
+///
+/// # Why the extent and not the address
+///
+/// A resource's id is meant to be its guest identity, and a render target's is really its guest
+/// address. But the register carrying that address is the disputed one - the hardware capture and
+/// obSCEne's constructed stream name different offsets for `CB_COLOR0_BASE`, while they agree on the
+/// size register - so keying on the address would rest the id on the less certain of the two. The
+/// extent is what is corroborated, and it is enough: the backend draws into an attachment it
+/// allocates and reads back, storing nothing per-target, so two same-sized targets sharing an id is
+/// harmless today. When a per-target host object exists, the address becomes the identity and this
+/// changes (D702).
+///
+/// # Why the top bit
+///
+/// Shader ids are minted sequentially from one and stay small. Tagging a target id into the top of
+/// the id space keeps the two disjoint without a shared counter, so a target and a shader can never
+/// collide. Width and height are each at most fourteen bits (the register's fields), so the packed
+/// extent uses thirty bits and the tag is free.
+fn colour_target_id(extent: ColourTargetExtent) -> ResourceId {
+    const TARGET_NAMESPACE: u64 = 1 << 63;
+    ResourceId(TARGET_NAMESPACE | (u64::from(extent.width) << 16) | u64::from(extent.height))
 }
 
 /// The smallest window worth trying: one instruction that ends a program.

@@ -62,7 +62,14 @@ pub struct BufferFormat {
     pub code: u32,
     /// The name the reference prints, carried so a row can be checked by eye.
     pub name: String,
-    /// One entry per component, in bits.
+    /// One entry per component, in bits, **listed highest bits first** - the order the name
+    /// lists them, because that is where these are read from.
+    ///
+    /// So `BUF_FMT_10_11_11_FLOAT` is `[10, 11, 11]`, and the component at bit 0 - `x` - is the
+    /// **last** entry, eleven bits wide. A consumer walking this front-to-back and calling the
+    /// first entry `x` has the packing mirrored, which is invisible on the many formats whose
+    /// widths are all equal and wrong by orders of magnitude on the few that are not. The order
+    /// was undocumented until a measurement caught exactly that (obSCEne `REQ-...b3d4`).
     pub widths: Vec<u32>,
     /// How those bits become a number.
     pub kind: ComponentKind,

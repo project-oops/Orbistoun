@@ -37,6 +37,7 @@ use crate::TranslateError;
 use crate::Width;
 use crate::buffer;
 use crate::model::{self, Model};
+use crate::wavefront::Window;
 
 /// Vector registers the register file holds.
 ///
@@ -106,6 +107,13 @@ pub struct Predicated<'a> {
     /// an address the default cannot hold - which is otherwise impossible, and is why
     /// every buffer test has to pretend memory starts at zero (D101).
     memory_words: u32,
+    /// The guest address the memory window starts at. See [`Model::memory_base`].
+    ///
+    /// Zero until a caller says otherwise, which is where every module this model built used
+    /// to sit - and where a real guest's buffers never are. It was the wavefront model alone
+    /// that honoured a window for a while, so a caller asking this one for a window at a guest
+    /// address got a module anchored at zero and nothing said so (worklog 571).
+    memory_base: u32,
     builder: Builder,
     encodings: &'a EncodingTable,
     /// Present when lanes can be masked - see [`Mask`]. `None` is the per-lane model,
@@ -217,8 +225,8 @@ fn declare_mask(builder: &mut Builder, lane: Id, u32_type: Id, bool_type: Id) ->
 
 impl<'a> Predicated<'a> {
     /// Prepares a module with no lane mask: the per-lane model.
-    pub fn new(encodings: &'a EncodingTable) -> Self {
-        Self::build(encodings, None)
+    pub fn new(encodings: &'a EncodingTable, window: Window) -> Self {
+        Self::build(encodings, None, window)
     }
 
     /// Prepares a module whose lanes are the invocations of a subgroup.
@@ -230,14 +238,14 @@ impl<'a> Predicated<'a> {
     /// The module it produces is only correct where the host's subgroup is as wide as the
     /// guest's wavefront, which is a property of the device. [`Predicated::finish`]
     /// reports the width it needs so that can be checked where it is known.
-    pub fn subgroup(encodings: &'a EncodingTable, width: Width) -> Self {
-        let mut this = Self::build(encodings, Some(width.lanes()));
+    pub fn subgroup(encodings: &'a EncodingTable, width: Width, window: Window) -> Self {
+        let mut this = Self::build(encodings, Some(width.lanes()), window);
         this.required_subgroup = Some(width.lanes());
         this
     }
 
     /// Prepares a module: types, the register file, and the observation buffer.
-    fn build(encodings: &'a EncodingTable, lanes: Option<u32>) -> Self {
+    fn build(encodings: &'a EncodingTable, lanes: Option<u32>, window: Window) -> Self {
         let mut builder = Builder::new().with_version(orbistoun_spirv::VERSION_1_3);
 
         let void = builder.id();
@@ -320,7 +328,7 @@ impl<'a> Predicated<'a> {
             &[register_array_ptr.0, scalars.0, PRIVATE, register_zero.0],
         );
 
-        builder.declare(op::CONSTANT, &[u32_type.0, memory_count.0, MEMORY_WORDS]);
+        builder.declare(op::CONSTANT, &[u32_type.0, memory_count.0, window.words()]);
 
         let observation =
             buffer::declare(&mut builder, u32_type, observed_count, buffer::OBSERVATION);
@@ -335,7 +343,8 @@ impl<'a> Predicated<'a> {
         Self {
             builder,
             encodings,
-            memory_words: MEMORY_WORDS,
+            memory_base: window.base,
+            memory_words: window.words(),
             mask,
             constants: BTreeMap::new(),
             glsl_set: None,
@@ -474,20 +483,24 @@ impl Predicated<'_> {
     fn no_local_share() -> TranslateError {
         TranslateError::Unsupported {
             offset: 0,
-            detail: "the lane model has no local data share. Lanes are separate \
-                     invocations here, so storage they share cannot be represented - \
-                     each would get its own and read back only what it wrote itself. \
-                     Translate at wavefront fidelity instead",
+            detail: concat!(
+                "the lane model has no local data share. Lanes are separate ",
+                "invocations here, so storage they share cannot be represented - ",
+                "each would get its own and read back only what it wrote itself. ",
+                "Translate at wavefront fidelity instead"
+            ),
         }
     }
 
     fn no_lane_masks() -> TranslateError {
         TranslateError::Unsupported {
             offset: 0,
-            detail: "the lane model has no execution mask and no condition mask. Lanes \
-                     are separate invocations here, so neither an inactive lane nor a \
-                     per-lane comparison result can be represented - translate at \
-                     wavefront fidelity instead",
+            detail: concat!(
+                "the lane model has no execution mask and no condition mask. Lanes ",
+                "are separate invocations here, so neither an inactive lane nor a ",
+                "per-lane comparison result can be represented - translate at ",
+                "wavefront fidelity instead"
+            ),
         }
     }
 }
@@ -501,6 +514,10 @@ impl Model for Predicated<'_> {
     /// the lane index is always zero.
     fn memory_words(&self) -> u32 {
         self.memory_words
+    }
+
+    fn memory_base(&self) -> u32 {
+        self.memory_base
     }
 
     fn lanes(&self) -> u32 {
@@ -543,7 +560,10 @@ impl Model for Predicated<'_> {
             Operand::Named(named) if model::lane_mask_name(named).is_some() => {
                 Err(TranslateError::Unsupported {
                     offset: instruction.offset,
-                    detail: "this model has no lane mask, so a mask cannot be read as a                              source - translate at wavefront fidelity instead",
+                    detail: concat!(
+                        "this model has no lane mask, so a mask cannot be read as a source - ",
+                        "translate at wavefront fidelity instead"
+                    ),
                 })
             }
             // The m0 register read back as a source: whatever the shader last wrote.
@@ -871,8 +891,9 @@ pub fn translate_subgroup(
     decode: &Decode,
     encodings: &EncodingTable,
     width: Width,
+    window: Window,
 ) -> Result<(Vec<u32>, usize, u32), TranslateError> {
-    let mut module = Predicated::subgroup(encodings, width);
+    let mut module = Predicated::subgroup(encodings, width, window);
     crate::control::emit(&mut module, decode, encodings)?;
     let required = module.required_subgroup.expect("set by `subgroup`");
     let (words, count) = module.finish()?;
@@ -886,8 +907,9 @@ pub fn translate_subgroup(
 pub fn translate(
     decode: &Decode,
     encodings: &EncodingTable,
+    window: Window,
 ) -> Result<(Vec<u32>, usize), TranslateError> {
-    let mut module = Predicated::new(encodings);
+    let mut module = Predicated::new(encodings, window);
     crate::control::emit(&mut module, decode, encodings)?;
     module.finish()
 }

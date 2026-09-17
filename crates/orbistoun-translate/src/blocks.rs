@@ -129,8 +129,10 @@ pub fn branch_target(instruction: &Instruction) -> Result<u32, TranslateError> {
     let Some(Operand::Immediate(raw)) = instruction.operands.first() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a branch carries no target - the operand layout for this opcode is \
-                     missing, so where it goes is not known",
+            detail: concat!(
+                "a branch carries no target - the operand layout for this opcode is ",
+                "missing, so where it goes is not known"
+            ),
         });
     };
     let offset = i64::from(i32::from(
@@ -182,9 +184,11 @@ pub fn split(
         let target = branch_target(instruction)?;
         let at = *index_of.get(&target).ok_or(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a branch target is not the start of any instruction - the \
-                         stream is not what it appears to be, and moving the target to \
-                         a nearby boundary would run a program the guest did not write",
+            detail: concat!(
+                "a branch target is not the start of any instruction - the ",
+                "stream is not what it appears to be, and moving the target to ",
+                "a nearby boundary would run a program the guest did not write"
+            ),
         })?;
         starts.insert(at);
         // The instruction after a branch begins a block too: it is the not-taken path,
