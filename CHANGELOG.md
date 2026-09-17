@@ -7,10 +7,24 @@ versioning. Every push to `main` rebuilds one `latest-main` artifact, so the
 Each entry below is headed by the SHA (+ date) that shipped it, newest first.
 Within an entry, changes are grouped **Added / Changed / Fixed**.
 
-Nothing has shipped yet. This is the initial commit, so no entry below carries a SHA and none
-of the CI that would produce one has ever run.
+Nothing has shipped as a tagged release. The entry below was written at the initial commit
+and is kept as the historical record of it; it is no longer a description of the current
+tree - 29 commits have landed since, through `a8b2d74` (2026-09-17), and the "Not yet"
+section at the bottom is stale in ways `docs/PROJECT_STATUS.md` (generated, and checked
+against the tree on every `check`) does not share. Read that page for the current, accurate
+state; this file has not been kept up to date entry-by-entry since the initial commit.
 
-## [unreleased] - as of 2026-09-01
+**Known stale as of 2026-09-17**, so it is not repeated by mistake below: the guest *has*
+spawned real host threads since - `scePthreadCreate` runs across four titles in the
+corpus - and GPU command-stream decode, shader translation to SPIR-V, and Vulkan compute
+dispatch on a real device all exist now, none of which is reflected in the "Not yet"
+section this file originally shipped with. See
+[PROJECT_STATUS.md](docs/PROJECT_STATUS.md) and [graphics.md](docs/features/graphics.md)
+for what is and is not true today, including that presentation - an actual rendered
+frame - is still not implemented.
+
+## [unreleased] - as of 2026-09-01 (the initial commit; see the note above for what has
+changed since)
 
 ### Added
 
@@ -134,8 +148,11 @@ of the CI that would produce one has ever run.
   Sweeps only the shapes the new words reach, which is 83x cheaper and, unlike the
   narrowing past it, leaves the record intact (D214).
 
-### Not yet
+### Not yet, as of this entry (2026-09-01) - superseded, see the note at the top of this file
 
-No pixel has been rendered, no guest has spawned a thread, and no title reaches its own
-main loop. Three walls, all in guest startup, are named in
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md).
+No pixel had been rendered, no guest had spawned a thread, and no title reached its own
+main loop, as of the initial commit. **That is no longer current**: threads are spawned
+today, and GPU decode/shader translation/compute dispatch exist. A rendered pixel is still
+not - the Vulkan backend remains a presentation stub. The living account is
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md), generated and checked against the tree on
+every `check`, not this entry.

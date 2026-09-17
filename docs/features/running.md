@@ -13,10 +13,14 @@ because the specification is the thing being reconstructed.
 So a run records the calls, and comparing two runs is how a change is judged.
 
 ```bash
-orbistoun run <title>
-orbistoun report            # what the last run asked for
-orbistoun verify            # this run against the last
+orbistoun-cli run <path-to-eboot.bin>      # execute; prints its own FURTHER/same/BACK verdict
+orbistoun-cli report <path-to-eboot.bin>   # survey + persist a report; the delta from last time
+orbistoun-cli verify <path-to-eboot.bin>   # how much of the import list the symbol db can name
 ```
+
+`run` prints its own progress verdict on every call - see below. `verify` is a different,
+narrower question - naming coverage, not progress - and is covered on its own in
+[naming.md](naming.md).
 
 ## Honest failure, and why a stub is not free
 
@@ -35,9 +39,9 @@ what success looks like when the change replaced a lie with a refusal.
 An ordinary run is quiet. Everything below is off unless asked for:
 
 ```bash
-OOPS_LOG=debug orbistoun run <title>          # decisions and resolved configuration
-OOPS_LOG=trace orbistoun run <title>          # per-call detail
-OOPS_LOG=warn,orbistoun_loader=debug orbistoun run <title>
+OOPS_LOG=debug orbistoun-cli run <title>          # decisions and resolved configuration
+OOPS_LOG=trace orbistoun-cli run <title>          # per-call detail
+OOPS_LOG=warn,orbistoun_loader=debug orbistoun-cli run <title>
 ```
 
 `OOPS_LOG` and `RUST_LOG` both work; the first is the one the whole collection answers to.
@@ -48,8 +52,10 @@ per-item.
 
 ## The verdict, and what it is not
 
-`verify` compares this run with the previous one and says what moved. It is a *differential*
-tool: it knows that something changed, not that the new answer is correct.
+`run` compares this run with the previous one for the same title and prints `FURTHER`,
+`same`, or `BACK`; `report` prints the same delta at more length (reached state, newly
+resolved and newly unresolved imports). Both are *differential*: they know that something
+changed, not that the new answer is correct.
 
 Nothing here can tell you an answer was right. That question needs an oracle, and the oracle is
 either a probe you wrote yourself ([obSCEne](https://github.com/project-oops/obSCEne)) or real
@@ -59,4 +65,4 @@ can only ever tell you it stopped.
 ## Where the artefacts go
 
 Reports, traces and screenshots land under the data root - see [paths](paths.md), or run
-`orbistoun paths` to be told exactly where, on this machine, in this mode.
+`orbistoun-cli paths` to be told exactly where, on this machine, in this mode.

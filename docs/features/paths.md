@@ -1,8 +1,8 @@
 # Where Orbistoun writes
 
 Everything Orbistoun produces - logs, traces, reports, screenshots, title data, savestates,
-settings - hangs off one root. `orbistoun paths` prints them for the machine you are on, in the
-mode you are in, which is always more reliable than a page like this one.
+settings - hangs off one root. `orbistoun-cli paths` prints them for the machine you are on, in
+the mode you are in, which is always more reliable than a page like this one.
 
 ## The three ways the root is chosen
 
@@ -59,7 +59,7 @@ real hardware.
 Orbistoun logs to the terminal by default. To keep them:
 
 ```bash
-OOPS_LOG=debug orbistoun run <title> 2> run.log
+OOPS_LOG=debug orbistoun-cli run <title> 2> run.log
 ```
 
 Levels and filtering are the same in every tool in the collection - see

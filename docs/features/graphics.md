@@ -1,49 +1,37 @@
 # Graphics
 
-Vulkan 1.3 rendering pipeline, RDNA2 shader lowering, GFX10 texture detiling, and display configuration.
+RDNA2 PM4 command-stream decode, shader translation to SPIR-V, and the Vulkan backend that
+does not present yet.
 
-Orbistoun intercepts platform graphics command buffers (`sceAgcSubmitDcb`), decodes hardware PM4 packets, translates RDNA2 Wave32 compute and graphics shaders into SPIR-V, and submits them to modern host Vulkan devices.
+Orbistoun decodes GFX10 PM4 packets from platform graphics command buffers
+(`sceAgcSubmitDcb`), translates RDNA2 Wave32 shaders into SPIR-V, and can dispatch a
+translated shader on a real Vulkan device for compute. **Presentation is not implemented**:
+`orbistoun-gpu-vulkan` is the only crate that knows Vulkan exists (CLAUDE.md principle 12),
+and its own README states the rendering backend is still a stub — every draw and present
+call is refused by name, tracked against roadmap phase 6. See
+[PROJECT_STATUS.md](../PROJECT_STATUS.md) for the current, generated numbers.
 
----
-
-## GUI: Graphics Settings
-
-Open **Settings → Graphics** from the top menu bar.
-
-```text
-+-------------------------------------------------------------------------------+
-|  Orbistoun Settings: Graphics                                    [_][O][X]    |
-+-------------------------------------------------------------------------------+
-| Renderer:           [ Vulkan 1.3 (Hardware Accelerated)                     v]|
-| Device:             [ AMD Radeon RX 6700 XT (RADV)                          v]|
-| V-Sync:             [ Enabled                                               v]|
-| RDNA2 PM4 Shader:   [ SPIR-V SSA Lowering (Strict Wave32)                   v]|
-| Texture Detiling:   [ GFX10 Hardware Detiler (4KB / 64KB)                   v]|
-| Resolution Scale:   [ 1.0x (Native 3840 x 2160)                             v]|
-+-------------------------------------------------------------------------------+
-| [ Apply Settings ]   [ Restore Defaults ]   [ Cancel ]                        |
-+-------------------------------------------------------------------------------+
-```
-
-![Orbistoun Graphics Settings](screenshots/graphics.png)
-*(Screenshot placeholder: Graphics Settings)*
-
-### GUI Controls:
-- **Renderer Selection**: Vulkan 1.3 (Hardware) or CPU Software fallback.
-- **V-Sync**: Synchronizes frame flips with host monitor refresh rate (60 / 120 Hz).
-- **RDNA2 PM4 Shader Lowering**: Controls SPIR-V SSA restructuring passes for Wave32 execution.
-- **Texture Detiling**: Toggles between software and hardware compute-based 4KB/64KB GFX10 detiling kernels.
-- **Resolution Scale**: Scales render targets from 1.0x (native 4K) down to 0.5x (1080p performance mode).
+There is also no CPU software renderer, current or planned: this project has deliberately
+chosen not to build a second graphics backend (CLAUDE.md principle 12) or a second
+execution backend, so "Vulkan or CPU fallback" is not a real choice anywhere in the tool.
 
 ---
 
-## CLI: Graphics Configuration Flags
+## What exists today
 
-```bash
-# Force specific Vulkan physical device
-orbistoun run --gpu-device 0 build/title/GLCB00001
+- **Command-stream decode.** PM4 packet walking, register file, and pipeline assembly, in
+  `orbistoun-gpu` — no dependency on a host graphics API, so nothing here can leak Vulkan
+  concepts into the translator.
+- **Shader translation.** RDNA2 GFX10 bytecode decode and an instruction census
+  (`orbistoun-shader`), and decoded shaders to SPIR-V (`orbistoun-translate`,
+  `orbistoun-spirv`), checked by executing the result on a real device and comparing
+  against expected values rather than only validating structure.
+- **Vulkan compute dispatch.** `orbistoun-gpu-vulkan` depends on `ash` for exactly this: a
+  real device, a translated shader, and a buffer read back — the mechanical correctness
+  signal the translation work is checked against.
+- **Vulkan presentation.** Not yet. Every draw and present command is refused, by name, so
+  a missing implementation is never mistaken for a rendering bug.
 
-# Disable V-Sync for uncapped benchmarking
-orbistoun run --no-vsync build/title/GLCB00001
-```
-
+There is no GUI graphics-settings panel to describe yet, and no `run` flags for renderer
+device selection or V-Sync — neither exists in `orbistoun-cli` today. When presentation
+lands, this page will document the real settings surface rather than a mockup of one.

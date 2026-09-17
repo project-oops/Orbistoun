@@ -33,11 +33,11 @@ flowchart TD
     L --> M["the guest faults, gives up,<br/>or hits the time limit"]
     M --> O["write the trace;<br/>compare it with last time"]
     O --> P["print FURTHER / same / BACK,<br/>then the ranked findings"]
-    P --> Q{"read top finding<br/>(Agent as glue)"}
-    Q -- "escape hatch tripped<br/>(architectural wall / spin / regression)" --> X["HALT & ESCALATE<br/>revert patch, log in worklog.md"]
-    Q -- "enough is known" --> R["synthesize Rust implementation<br/>(known_by: published/spec)"]
-    Q -- "not enough is known" --> S["dispatch probe to obSCEne<br/>on PS5 via pros"]
-    S --> T["capture silicon telemetry<br/>from klog"]
+    P --> Q{"orbistoun-turn runs the<br/>mechanical steps, then stops"}
+    Q -- "wall hit<br/>(architectural / spin / regression)" --> X["a person reads the findings<br/>and decides what next"]
+    Q -- "enough is known already" --> R["a person writes the Rust<br/>implementation (known_by: published)"]
+    Q -- "not enough is known" --> S["a person writes and runs an<br/>obSCEne probe on real hardware"]
+    S --> T["a person reads the transcript<br/>orbistoun-cli probe reports on"]
     T --> R
     R --> U{"trace verdict"}
     U -- FURTHER --> B
@@ -45,11 +45,19 @@ flowchart TD
 
     classDef human fill:#7a2f2f,stroke:#d08a8a,color:#fff
     classDef agent fill:#2f4f7a,stroke:#8aafd0,color:#fff
-    class X human
-    class Q,R,S,T,U agent
+    class X,R,S,T human
+    class Q,U agent
 ```
 
-The loop runs unattended through routine OS/HLE gaps. The highlighted red box (**HALT & ESCALATE**) is the only point where a person must intervene: when an Escape Hatch is tripped by an architectural barrier, spinlock deadlock, or regression.
+The mechanical part of the loop - naming, stub-building, execution, tracing, the progress
+verdict, and the sweeps `orbistoun-turn` can run without reading the guest's code - runs
+unattended. **Deciding what a finding means and writing the implementation is a person's
+job throughout**, not only when something trips: nothing here dispatches a hardware probe,
+drives `obSCEne` or `pros`, or writes Rust from a measurement on its own. See
+[orbistoun-probe](../crates/orbistoun-probe/README.md) ("does not drive a session, open a
+socket, or know what machine it is reading about") and
+[orbistoun-propose](../crates/orbistoun-propose/README.md), whose own oracle table lists an
+automated *implementation* proposer as `(no)` - not built.
 
 
 ## Step by step
@@ -89,13 +97,16 @@ The loop runs unattended through routine OS/HLE gaps. The highlighted red box (*
     **FURTHER**, **same**, or **BACK**.
 16. It prints the findings - what went wrong, the evidence for it, and what to do about
     it - **ranked**, worst first.
-17. **An agent, or you, reads the top finding.** If it represents an unmeasured API or
-    structure, the agent formulates a hardware probe question rather than guessing.
-18. **The hardware oracle measures the truth, and the agent synthesizes the implementation.**
-    `obSCEne` runs the probe on real PS5 silicon via `pros`, records the struct layout and
-    return values to `klog`, and the agent writes the typed Rust function with
-    `known_by: measured`. If an architectural wall or deadlock is hit, the **Escape Hatch**
-    trips immediately.
+17. **You read the top finding.** `orbistoun-turn` has already run the mechanical sweeps
+    against it; if what is left represents an unmeasured API or structure, the next step is
+    to write a hardware probe question rather than guess.
+18. **The hardware oracle measures the truth, and you write the implementation.** You write
+    and run the probe against real PS5 silicon via `pros`; `obSCEne` records the struct
+    layout and return values, and `orbistoun-cli probe` reads the resulting transcript back.
+    You then write the typed Rust function with `known_by: measured` - nothing here does
+    that step automatically, see "Step 18 is the whole gap," below. A wall - an
+    architectural gap, a spinning guest, a regression - is just another thing this step
+    notices in the findings, not a separate automated trigger.
 19. Go to step 2.
 
 ## Who does what
@@ -110,12 +121,13 @@ The loop runs unattended through routine OS/HLE gaps. The highlighted red box (*
 | 13-14 - trace on every outcome | orbistoun | yes |
 | 15 - progress verdict | orbistoun | yes |
 | 16 - ranked findings | orbistoun | yes |
-| **17 - interpret finding & formulate probe** | **orbistoun + agent** | **yes** |
+| 17 - run the mechanical sweeps (`orbistoun-turn`) | orbistoun | yes |
+| 17 - interpret a finding and design a probe | you | no - a person's job |
 | 17 - a guest that spins rather than faulting | orbistoun | **yes**, since D351 |
-| **17b - probe silicon on real hardware** | **obSCEne via pros** | **yes** |
-| **18 - write implementation from telemetry** | **agent (grounded in measured data)** | **yes (inert proposal until gated)** |
-| **18b - escape hatch monitoring & gating** | **orbistoun (FURTHER / same / BACK)** | **yes** |
-| **18c - escalate architectural wall / deadlocks** | **human review** | **when tripped** |
+| 17b - write and run an obSCEne probe on real hardware | you, via `pros` | no - `orbistoun-probe` only reads the transcript afterwards |
+| 18 - write the implementation from what the probe measured | you | no - see "Step 18 is the whole gap," above |
+| progress verdict (`FURTHER` keeps a change, `same`/`BACK` does not) | orbistoun | yes |
+| noticing a wall (architectural gap, regression, a spin) in the ranked findings | you, reading step 16's output | manual, same as any other finding |
 | recording what a function must answer | orbistoun, into `learned.toml` | **yes** |
 | recording what was learned by hand | you, via `learn` | no, deliberately |
 | recording what the title reached | `compat record`, prompted by the run | prompted, not silent |
@@ -175,50 +187,50 @@ exactly where recall can be dressed as reasoning, so it carries an oracle like e
 fact here (D322). See [TESTING.md](TESTING.md) and the automated stub-semantics search entry
 in [BACKLOG.md](BACKLOG.md).
 
-### Closing Step 18 cleanly: The Agent + Hardware Oracle
+### Why step 18 is not closed by an agent
 
-Step 18 was historically where the loop stopped because asking an unconstrained model to generate implementations produced hallucinations: fake stubs that made a single crash move forward while silently corrupting memory downstream (the Kyty trap).
+It would be convenient if an agent could take a finding, run an `obSCEne` probe on real
+hardware, and write the Rust implementation from the reply with nobody deciding anything in
+between. **That is not what exists today, and this page should not read as though it does.**
 
-The solution is not to have a person type every repetitive struct by hand, but to **ground the generator in an empirical oracle**:
-1. When a finding reports an unimplemented function or unwritten struct field, the agent does *not* invent a return value.
-2. The agent synthesizes an `obSCEne` probe case (or sends a probe request via `pros`) directly to physical PS5 hardware (`192.168.1.211`).
-3. The hardware returns the exact struct size, member alignment, and return codes over `klog`.
-4. The agent acts purely as the translation glue: taking the physical measurement and writing the typed Rust struct and HLE function, tagged with `known_by: measured` and the hardware run timestamp.
-5. The emulator re-runs the title. If the trace verdict is `FURTHER`, the inert patch is promoted.
+- `orbistoun-probe` - the crate that reads a probe's output - says so about itself: "it does
+  not drive a session, open a socket, or know what machine it is reading about." It reads a
+  transcript file. Nothing in this repository sends a probe request, opens a connection to
+  hardware, or reads `klog`.
+- `orbistoun-propose` - the crate that pairs a proposal with an oracle - lists three kinds of
+  proposer in its own README. The vocabulary proposer (naming) is built. An *implementation*
+  proposer is listed as `(no)` - not built, on purpose, because unlike a word a wrong
+  implementation is not free.
+- So concretely: a person writes and runs the `obSCEne` probe (see "Getting the probe onto
+  the hardware" below), a person reads what it reports, and a person writes the typed Rust
+  and tags it `known_by: measured`. The emulator's job resumes at re-running the title and
+  printing the verdict - `FURTHER` keeps the change, `same`/`BACK` does not.
 
-This preserves strict clean-room provenance (CONVENTIONS §1) while automating 90% of routine API expansion.
+This preserves clean-room provenance for the reason CONVENTIONS §1 exists, but it does not
+automate the decision. See "Step 18 is the whole gap," above, which is the accurate account.
 
-## The Escape Hatch Protocol
+## What actually happens when the loop hits a wall
 
-The loop must run autonomously, but it must never thrash, loop infinitely, or mask bugs with fake returns. The **Escape Hatch** is the hard boundary where autonomous iteration halts, the candidate patch is reverted, a detailed diagnostic is written to `worklog.md`, and a human developer is alerted.
+There is no separate "Escape Hatch" mechanism in the code - grep the tree and nothing
+implements one. What is real, and does the job the name was reaching for:
 
-### Four Escape Hatch Triggers
+- **A guest that never calls out and never faults is still bounded.** `--limit` (wall clock)
+  and the call budget (`DEFAULT_GUEST_CALL_BUDGET`, 20,000,000 imports) both stop a run that
+  is spinning, and the exit status says which one fired (D238) - see
+  [PROJECT_STATUS.md](PROJECT_STATUS.md).
+- **A regression is visible, not reverted.** The run prints `verdict: BACK`. Nothing in this
+  repository rolls back a change automatically; keeping or discarding the edit is a decision
+  for whoever is at the keyboard, same as any other commit.
+- **An architectural gap** - a GPU opcode nobody decoded, a shader instruction the translator
+  does not have - shows up as a stub or a refusal in the trace, same as any other missing
+  piece, and is worked the same way: read the finding, decide, write it down.
+- **Recording the outcome is the worklog convention already described in
+  [CLAUDE.md](../CLAUDE.md)** - one numbered file per completed unit of work under
+  `docs/worklog/`, written by a person, not a single `worklog.md` an agent appends an
+  `[ESCALATION-NEEDED]` header to.
 
-1. **Architectural Wall**:
-   The failure is caused by an unimplemented hardware/compiler primitive rather than an HLE OS function. Examples:
-   - An unknown GFX10 PM4 packet opcode in the command processor.
-   - An unsupported RDNA2 ISA instruction in the shader recompiler.
-   - Host/guest ABI calling convention mismatch or stack misalignment.
-   *Action*: The loop halts immediately. Fuzzing or HLE probing cannot write a compiler pass.
-
-2. **Spinlock / Yield Deadlock**:
-   The guest ceases to make forward progress without faulting, producing an unbounded stream of repetitive synchronization syscalls (e.g. `sceKernelWaitElink`, `sched_yield`) without advancing the call graph.
-   *Action*: Bounded by iteration count / watchdog timer; execution terminates with a spin diagnostic.
-
-3. **Regression Wall (`verdict: BACK`)**:
-   A patch enables progress in one subsystem but causes an immediate crash or fault in an earlier, previously conforming subsystem.
-   *Action*: The trial patch is instantly rolled back.
-
-4. **Retry Exhaustion**:
-   The loop executes 3 consecutive probe-and-implement attempts on the same finding and fails to achieve `FURTHER`.
-   *Action*: The open question is logged as `assumed: unsettled`, the stub remains non-lying, and the title is flagged for manual review.
-
-### Escalation Behavior
-
-When any trigger trips:
-- Any uncommitted code changes in `crates/orbistoun-hle/` are reverted cleanly.
-- A diagnostic report with register state, unwritten struct diffs, and the last 10 syscalls is appended to `worklog.md` with an `[ESCALATION-NEEDED]` header.
-- The human developer is notified with the exact file and line of the architectural constraint.
+None of this needs a fourth mechanism on top of what THE_LOOP already documents above: the
+progress verdict, the ranked findings, and a person reading both.
 
 ## The naming sub-loop
 
@@ -490,9 +502,10 @@ Two edges above point the other way:
   what the wall is - the run says so, with the evidence attached and ranked by how much it
   matters. That is the difference between a tool that reports and one that only records.
 
-And one thing it does **not** do: it never generates code unverified. Step 18 produces an
-inert patch derived directly from `obSCEne` silicon telemetry on physical PS5 hardware, and
-the patch is only promoted when mathematically gated by `FURTHER` without tripping an Escape Hatch.
+And one thing it does **not** do: it never generates code unverified. Step 18 is a person
+writing an implementation from `obSCEne` silicon telemetry gathered on physical PS5
+hardware - nothing here writes that code automatically - and the change is only kept once
+the title is re-run and the verdict says `FURTHER`.
 
 
 ## Turning the loop without a title

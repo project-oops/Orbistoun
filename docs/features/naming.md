@@ -16,10 +16,10 @@ project gets an oracle that good, which is why the naming work is worth doing at
 ## Doing it
 
 ```bash
-orbistoun names            # what is named and what is not
-orbistoun harvest          # take names from a lawful source and test them
-orbistoun learn            # record what was established
-orbistoun ask              # ask a model for vocabulary to try
+orbistoun-cli names            # what is named and what is not
+orbistoun-cli harvest          # take names from a lawful source and test them
+orbistoun-cli learn            # record what was established
+orbistoun-cli ask              # ask a model for vocabulary to try
 ```
 
 `harvest` reads published sources - FreeBSD's own symbol maps, for one - and tests every name in

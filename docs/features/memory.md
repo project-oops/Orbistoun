@@ -26,7 +26,6 @@ Open the **Memory** tab from the main emulation window (or press `Ctrl+M`).
 +-------------------------------------------------------------------------------+
 ```
 
-![Orbistoun Memory & Register State](screenshots/memory.png)
 *(Screenshot placeholder: Memory & Register State)*
 
 ### GUI Controls:
@@ -41,6 +40,6 @@ Open the **Memory** tab from the main emulation window (or press `Ctrl+M`).
 To print memory maps at execution exit:
 
 ```bash
-OOPS_LOG=orbistoun_mem=debug orbistoun run build/title/GLCB00001
+OOPS_LOG=orbistoun_mem=debug orbistoun-cli run build/title/GLCB00001
 ```
 

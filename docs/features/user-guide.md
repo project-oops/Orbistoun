@@ -36,11 +36,12 @@ Shared across all OOPS projects, so a save directory pulled from physical hardwa
 
 ### Portable Mode
 
-Drop a `.portable` directory (or sentinel file) next to the Orbistoun executable, or set `ORBISTOUN_PORTABLE=1` / `OOPS_PORTABLE=1`:
+Drop a `.portable` directory (or sentinel file) next to the executable, or set
+`ORBISTOUN_PORTABLE_MODE=1`:
 
 ```text
 <wherever you put it>/
-    orbistoun.exe       (or orbistoun-gui.exe)
+    orbistoun-cli.exe   (or orbistoun-gui.exe)
     .portable           (sentinel directory or file)
     titles/             (stored right beside the binary)
     saves/

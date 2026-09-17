@@ -26,14 +26,16 @@ Title Executable (from oops-apps or commercial)
          ▼
 ┌────────────────────────────────────────┐
 │ Orbistoun Native Execution             │
-│ (x86-64 Native + Vulkan Graphics)      │
+│ (x86-64 native; GPU command decode -   │
+│  the Vulkan backend does not present   │
+│  a frame yet)                          │
 └──────────────────┬─────────────────────┘
                    │
          [Fault / Crash / Stub]
                    │
                    ▼
 ┌────────────────────────────────────────┐
-│ orbistoun-turn (Automated Blame)       │
+│ orbistoun-turn (mechanical findings)   │
 │ - Snapshot unwritten struct memory     │
 │ - Arm watchpoints on empty slots       │
 │ - Diff trace: FURTHER / same / BACK    │
@@ -42,13 +44,20 @@ Title Executable (from oops-apps or commercial)
          [Unmeasured Question]
                    │
                    ▼
-  obSCEne Hardware Oracle (PS5: 192.168.1.211)
+   A person runs an obSCEne probe on
+   real hardware via Prosperous
 ```
 
 1. **Native Execution**: Orbistoun maps the title into memory, resolves import NID hashes statically, and jumps to entry.
-2. **Automated Blame (`orbistoun-turn`)**: When a guest faults, watchpoints identify which register or unwritten struct field triggered the crash.
-3. **The Hardware Oracle**: If the function or struct is unmeasured, the loop dispatches a probe to [obSCEne](../obscene/) on physical hardware via [Prosperous](../prosperous/). Telemetry from the PS5 is converted into typed Rust structs tagged `known_by: measured`.
-4. **Progress Verification**: The title re-runs. If progress is made (`verdict: FURTHER`), the implementation is promoted. If it regresses (`BACK`), it is reverted.
+2. **Mechanical findings (`orbistoun-turn`)**: When a guest faults, the steps that need no person - argument sweeps, watchpoints identifying which register or unwritten struct field triggered the crash - run automatically and rank what to try next.
+3. **The Hardware Oracle is a person's step.** If the function or struct is unmeasured,
+   somebody writes an [obSCEne](../obscene/) probe and runs it on real hardware via
+   [Prosperous](../prosperous/). `orbistoun-cli probe` then reads the resulting transcript
+   and reports what it establishes - it does not open a socket, drive a probe, or dispatch
+   anything itself (see `crates/orbistoun-probe`). Writing the Rust implementation from that
+   measurement, tagged `known_by: measured`, is a deliberate act by whoever read the result,
+   not an automated one.
+4. **Progress Verification**: The title re-runs. If progress is made (`verdict: FURTHER`), the implementation is kept. If it regresses (`BACK`), it is reverted.
 
 👉 **Read the full emulator loop specification in [docs/THE_LOOP.md](docs/THE_LOOP.md)**.
 
@@ -114,6 +123,9 @@ Unflattering detail, including the current walls, is in
 
 ## Architecture & Crates
 
+Eight of the workspace's 41 crates, to give the shape of it; **[docs/CRATES.md](docs/CRATES.md)
+is the complete, accurate map**:
+
 ```
 crates/
 ├── orbistoun-loader   # ELF64 / SELF container loading, TLS, and address space layout
@@ -122,7 +134,7 @@ crates/
 ├── orbistoun-hle      # Clean-room system service stubs (libkernel, libScePad, etc.)
 ├── orbistoun-gpu      # GFX10 PM4 packet processor, context registers, and queue dispatch
 ├── orbistoun-shader   # RDNA2 GFX10 bytecode decoder and SPIR-V recompiler
-├── orbistoun-turn     # Automated blame engine, 2D argument sweep, and Escape Hatch harness
+├── orbistoun-turn     # Mechanical findings: 2D argument sweep, watchpoint diagnostics
 ├── orbistoun-report   # Trace capture, diff comparator, and ranked findings generator
 └── orbistoun-cli      # Developer command-line interface
 ```
@@ -134,7 +146,11 @@ crates/
 Orbistoun strictly adheres to the OOPS Clean-Room conventions:
 1. **Zero Leaked Code**: Zero proprietary SDK headers, zero disassembly copying.
 2. **Honest Stubs**: An unimplemented function returns an explicit unhandled status or non-zero placeholder. We **never** return fake `0` success codes to "nudge" an emulator past a crash (the *Kyty trap*), as fake stubs cause silent downstream memory corruption.
-3. **The Escape Hatch**: If execution hits an architectural wall (missing GPU opcode or recompiler instruction), deadlocks in a spinloop, or regresses, the autonomous loop halts, rolls back the trial patch, and escalates to `worklog.md`.
+3. **No autonomous patching**: a run bounds a spinning guest with a call budget and time
+   limit (D238) and prints `FURTHER`/`same`/`BACK` so a regression is visible immediately -
+   but nothing here rolls back a change, writes an implementation, or drives a hardware
+   probe on its own. Recognising an architectural wall, deciding what to do about it, and
+   writing the fix are a person's job; see [docs/THE_LOOP.md](docs/THE_LOOP.md).
 
 ---
 

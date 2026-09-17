@@ -3,8 +3,8 @@
 What Orbistoun has found that it can try to run, and how it decides.
 
 The window's left panel is the library; the detail panel is what is known about the selected
-entry. On the command line the same material is reached through `orbistoun inspect` and
-`orbistoun status`.
+entry. On the command line the same material is reached through `orbistoun-cli inspect` and
+`orbistoun-cli status`.
 
 ---
 
@@ -20,16 +20,20 @@ entry. On the command line the same material is reached through `orbistoun inspe
 |-------------------------------------------------------------------------------|
 | Icon    | Title ID   | Title Name                   | Category | Compatibility|
 |---------+------------+------------------------------+----------+--------------|
-| [ICON]  | GLCB00001  | GL-Cube 3D Demo (Stage 2)    | BIG_APP  | PLAYABLE     |
-| [ICON]  | OBSC00001  | obSCEne Hardware Conformance | BIG_APP  | PASS         |
-| [ICON]  | WIPE00001  | WipEout Model Viewer         | BIG_APP  | IN-GAME      |
-| [ICON]  | PPSA02664  | Commercial Title A           | BIG_APP  | LOAD / FAULT |
+| [ICON]  | GLCB00001  | GL-Cube 3D Demo (Stage 2)    | BIG_APP  | entered      |
+| [ICON]  | OBSC00001  | obSCEne Hardware Conformance | BIG_APP  | flipped      |
+| [ICON]  | WIPE00001  | WipEout Model Viewer         | BIG_APP  | entered      |
+| [ICON]  | PPSA02664  | Commercial Title A           | BIG_APP  | flipped      |
 +-------------------------------------------------------------------------------+
 | Status: Idle | Vulkan: AMD Radeon RX 6700 XT | Backend: Native x86-64         |
 +-------------------------------------------------------------------------------+
 ```
 
-![Orbistoun Library UI](screenshots/library.png)
+Compatibility is the reach column from [COMPATIBILITY.md](../../COMPATIBILITY.md)
+(`rejected` / `parsed` / `linked` / `entered` / `flipped`) - not a "does it play" verdict.
+"flipped" means a frame reached the output layer, not that anything was drawn; see
+[graphics.md](graphics.md).
+
 *(Screenshot placeholder: Game Library & Dashboard)*
 
 ---

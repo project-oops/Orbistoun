@@ -40,18 +40,23 @@ If you are an AI coding agent, compiler architect, or low-level systems engineer
 
 ## 2. Quickstart: Running Titles via CLI
 
-Orbistoun accepts title directories (created by `selfish --format title` or dumped from hardware) or bare `eboot.bin` containers:
+**The binary is `orbistoun-cli`** — there is no bare `orbistoun` executable. Point `run` at a
+title's `eboot.bin` (created by `selfish --format title` or dumped from hardware):
 
 ```powershell
-# Run a title directory
-orbistoun run C:\Games\GLCB00001
+# Run a title's eboot.bin
+orbistoun-cli run C:\Games\GLCB00001\eboot.bin
 
 # Run with detailed debug output
-OOPS_LOG=debug orbistoun run C:\Games\GLCB00001
+OOPS_LOG=debug orbistoun-cli run C:\Games\GLCB00001\eboot.bin
 
 # Run with trace-level per-syscall logging
-OOPS_LOG=trace orbistoun run C:\Games\GLCB00001
+OOPS_LOG=trace orbistoun-cli run C:\Games\GLCB00001\eboot.bin
 ```
+
+From a source checkout, `./bin/orbistoun run <title-id>` is the development wrapper: it
+resolves a title id under `titles/`, rebuilds, refreshes names if stale, and runs it in one
+step — see [WORKFLOW.md](WORKFLOW.md).
 
 ---
 
@@ -76,16 +81,19 @@ Manage your installed title directories, view game icons, and launch with one cl
 |-------------------------------------------------------------------------------|
 | Icon    | Title ID   | Title Name                   | Category | Compatibility|
 |---------+------------+------------------------------+----------+--------------|
-| [ICON]  | GLCB00001  | GL-Cube 3D Demo (Stage 2)    | BIG_APP  | PLAYABLE     |
-| [ICON]  | OBSC00001  | obSCEne Hardware Conformance | BIG_APP  | PASS         |
-| [ICON]  | WIPE00001  | WipEout Model Viewer         | BIG_APP  | IN-GAME      |
-| [ICON]  | PPSA02664  | Commercial Title A           | BIG_APP  | LOAD / FAULT |
+| [ICON]  | GLCB00001  | GL-Cube 3D Demo (Stage 2)    | BIG_APP  | ENTERED      |
+| [ICON]  | OBSC00001  | obSCEne Hardware Conformance | BIG_APP  | FLIPPED      |
+| [ICON]  | WIPE00001  | WipEout Model Viewer         | BIG_APP  | ENTERED      |
+| [ICON]  | PPSA02664  | Commercial Title A           | BIG_APP  | FLIPPED      |
 +-------------------------------------------------------------------------------+
 | Status: Idle | Vulkan: AMD Radeon RX 6700 XT | Backend: Native x86-64         |
 +-------------------------------------------------------------------------------+
 ```
 
-![Orbistoun Library UI](screenshots/orbistoun_gui_library.png)
+Compatibility labels are the reach terms from [COMPATIBILITY.md](../COMPATIBILITY.md)
+(`rejected` / `parsed` / `linked` / `entered` / `flipped`) — "flipped" means a frame reached
+the output layer, not that anything was drawn; see [graphics.md](features/graphics.md).
+
 *(Screenshot placeholder: Game Library & Dashboard)*
 
 ---
@@ -100,17 +108,20 @@ When running in debug mode, inspect live system calls and HLE resolutions as the
 +-------------------------------------------------------------------------------+
 | Step | Function / Symbol Name        | Known By | Return Code | Latency       |
 |------+-------------------------------+----------+-------------+---------------|
-| 0001 | sceKernelVirtualQueryInfo     | measured | 0x00000000  | 0.04 ms       |
-| 0002 | sceKernelAllocateDirectMemory | measured | 0x00000000  | 0.12 ms       |
-| 0003 | sceKernelMapDirectMemory      | measured | 0x00000000  | 0.08 ms       |
-| 0004 | sceAgcDriverCreateQueue       | measured | 0x00000000  | 0.45 ms       |
+| 0001 | sceKernelVirtualQueryInfo     | assumed  | 0x00000000  | 0.04 ms       |
+| 0002 | sceKernelAllocateDirectMemory | published| 0x00000000  | 0.12 ms       |
+| 0003 | sceKernelMapDirectMemory      | assumed  | 0x00000000  | 0.08 ms       |
+| 0004 | sceAgcDriverCreateQueue       | guest-observed | 0x00000000 | 0.45 ms  |
 | 0005 | sceAgcSubmitDcb               | measured | 0x00000000  | 0.22 ms       |
 +-------------------------------------------------------------------------------+
-| [Pause Execution]   [Step Into]   [Compare against Golden Run (D016)]         |
+| [Pause Execution]   [Step Into]                                              |
 +-------------------------------------------------------------------------------+
 ```
 
-![Orbistoun Inspector UI](screenshots/orbistoun_gui_inspector.png)
+`Known By` is one of `published` / `measured` / `guest-observed` / `assumed` — see
+[CLAUDE.md](../CLAUDE.md) principle 1. Most recorded behaviour today is `assumed`; `measured`
+is the minority, earned from a hardware probe, not the default.
+
 *(Screenshot placeholder: Call Trace & Execution Inspector)*
 
 ---
@@ -135,40 +146,35 @@ Inspect the native x86-64 host context and guest virtual memory layout:
 +-------------------------------------------------------------------------------+
 ```
 
-![Orbistoun Memory State UI](screenshots/orbistoun_gui_memory.png)
 *(Screenshot placeholder: Memory & Register State)*
 
 ---
 
 ### D. Display & Graphics Settings
 
-Configure rendering backends and presentation options:
+The Vulkan device orbistoun would present to, shown for information rather than
+configuration — **the rendering backend itself is still a stub**: every draw and present
+call is refused by name today, so nothing here changes what appears on screen yet. See
+[graphics.md](features/graphics.md) for the honest current state.
 
 ```text
 +-------------------------------------------------------------------------------+
 |  Orbistoun Settings: Graphics                                    [_][O][X]    |
 +-------------------------------------------------------------------------------+
-| Renderer:           [ Vulkan 1.3 (Hardware Accelerated)                     v]|
-| Device:             [ AMD Radeon RX 6700 XT (RADV)                          v]|
-| V-Sync:             [ Enabled                                               v]|
-| RDNA2 PM4 Shader:   [ SPIR-V SSA Lowering (Strict Wave32)                   v]|
-| Texture Detiling:   [ GFX10 Hardware Detiler (4KB / 64KB)                   v]|
-| Resolution Scale:   [ 1.0x (Native 3840 x 2160)                             v]|
-+-------------------------------------------------------------------------------+
-| [ Apply Settings ]   [ Restore Defaults ]   [ Cancel ]                        |
+| Vulkan device:      [ AMD Radeon RX 6700 XT (RADV)                          v]|
+| Presentation:        not implemented - every draw/present call is refused     |
 +-------------------------------------------------------------------------------+
 ```
 
-![Orbistoun Settings UI](screenshots/orbistoun_gui_settings.png)
 *(Screenshot placeholder: Graphics Settings Menu)*
 
 ---
 
 ## 4. Controller Configuration
 
-Orbistoun natively supports modern gamepads via SDL2:
-- **PlayStation DualSense / DualShock 4**: Plug-and-play via USB or Bluetooth.
-- **Xbox / XInput Controllers**: Fully supported with automatic button mapping.
+Controller support is HLE: `orbistoun-input` reimplements guest-visible `libScePad` state
+rather than wrapping a host gamepad library, so what is supported is whatever the GUI's own
+input layer maps for you, not a vendor SDK. See [controllers.md](features/controllers.md).
 - **Keyboard Fallback**:
   - `D-Pad`: Arrow Keys
   - `Cross (X)`: Enter / Space
@@ -185,35 +191,33 @@ Orbistoun natively supports modern gamepads via SDL2:
 Orbistoun emphasizes honest failure. When an implementation is missing, it refuses to fake success:
 
 ```powershell
-orbistoun report
+orbistoun-cli report C:\Games\GLCB00001\eboot.bin
 ```
-Output:
-```text
-Title: GLCB00001 (gl-cube)
-Total calls: 24
-Known implementations: 24 (100% measured)
-Placeholders encountered: 0
-Verdict: CLEAN_EXIT (0x0)
-```
+`report` surveys the module, persists a run report, and prints the delta against the
+previous run for the same title — reached state, unresolved-import count, and (from the
+second run on) how many imports became newly resolved or newly unresolved.
 
-To compare whether a code modification got further or regressed:
-```powershell
-orbistoun verify
-```
-- `FURTHER`: The title progressed past previous barriers without regressing other calls.
-- `SAME`: Identical execution path.
-- `BACK`: Regression detected; execution stopped earlier than previous run.
+**The `FURTHER` / `same` / `BACK` progress verdict is part of a `run`'s own output**, printed
+by `orbistoun-cli run` (or `./bin/orbistoun run <title>`) each time, not a separate command:
+- `FURTHER`: The title executed guest code it could not reach before.
+- `same`: Identical execution path — the expected result on an unchanged tree.
+- `BACK`: A regression — the run stopped earlier than the previous one.
+
+`orbistoun-cli verify <path>` is a different, narrower question: how much of a module's
+import list the current symbol database can name (`N of M imports named`) — useful before
+debugging a title with mostly-unnamed imports, not a progress comparison.
 
 ---
 
 ## 6. Submitting Traces to the Corpus
 
 If you encounter an unhandled call or crash while testing:
-1. Run with trace output:
+1. Just run the title — every run writes a call trace to disk on both the fault and
+   time-limit paths, with no separate flag needed:
    ```powershell
-   orbistoun run --record-trace my_title > trace.log
+   orbistoun-cli run C:\Games\my_title\eboot.bin
    ```
-2. Check `orbistoun paths` to locate trace artifacts.
+2. Run `orbistoun-cli paths` to see exactly where trace artifacts land on this machine.
 3. Submit the trace log in an issue to help ground our next `obSCEne` probe!
 
 ---
@@ -224,7 +228,10 @@ If you encounter an unhandled call or crash while testing:
 - **Explanation**: Orbistoun encountered an API that has not yet been probed on hardware. Rather than returning dummy values that silently corrupt state 40,000 frames later, Orbistoun stops honestly.
 - **Resolution**: This finding enters our oracle loop to be probed on real PS5 silicon.
 
-### Q: The window opens but remains black
-- Ensure Vulkan 1.3 drivers are up to date.
-- Confirm whether the title has reached draw submissions (`sceAgcSubmitDcb`) or is currently initializing thread state.
+### Q: There is no rendered window at all
+- **This is currently expected**, not a misconfiguration. The Vulkan backend
+  (`orbistoun-gpu-vulkan`) still refuses every draw and present call by name — see
+  [graphics.md](features/graphics.md) — so no title produces a picture yet, only guest
+  execution and (where wired up) GPU compute dispatch. Check the run's own log for whether
+  the title reached draw submissions (`sceAgcSubmitDcb`) even though nothing is shown.
 
