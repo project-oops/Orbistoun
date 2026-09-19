@@ -61,8 +61,8 @@ success is indistinguishable from working code until forty thousand frames later
 binds three concrete things:
 
 - `StubPolicy` defaults to `Unimplemented`, never `Ok`.
-- `GuestError` placeholder codes deliberately avoid the high bit, so they can never
-  be mistaken for real firmware values.
+- `GuestError` placeholder codes sit in a reserved range no real firmware value
+  occupies (`0xF7FF_0000`, D670), so they can never be mistaken for real ones.
 - `Container::imports` errors rather than returning an empty list - an empty list
   reads as "needs nothing", which is never true.
 

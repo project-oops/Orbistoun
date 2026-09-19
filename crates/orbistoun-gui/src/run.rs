@@ -196,7 +196,7 @@ fn execute(
         call_budget: (budget > 0).then_some(budget),
     });
     let events = match events {
-        Ok(events) => events.iter().map(describe).collect(),
+        Ok(events) => events.iter().map(|e| describe(e, traces_dir)).collect(),
         Err(e) => return failed(format!("driving the worker: {e}")),
     };
 
@@ -244,7 +244,11 @@ fn failed(error: String) -> Finished {
 ///
 /// Presentation, which is this crate's whole remit - the event types themselves are
 /// `orbistoun-proto` data and say nothing about how they are shown.
-fn describe(event: &orbistoun_proto::Event) -> String {
+///
+/// A `Frame` event carries only a descriptor; its bytes are in a region on the same shared route the
+/// traces take (`frames_dir`), so this is where the shim reads them back (D695). Rendered as a line
+/// today, and read whole - the image goes to a texture once a run produces one to send (36c0).
+fn describe(event: &orbistoun_proto::Event, frames_dir: &std::path::Path) -> String {
     match event {
         orbistoun_proto::Event::Reached { phase } => format!("reached    {phase:?}"),
         orbistoun_proto::Event::Terminated { outcome, .. } => match outcome {
@@ -252,6 +256,19 @@ fn describe(event: &orbistoun_proto::Event) -> String {
             other => format!("outcome    {other:?}"),
         },
         orbistoun_proto::Event::Failed { error } => format!("failed     {error}"),
+        orbistoun_proto::Event::Frame {
+            sequence,
+            width,
+            height,
+            format,
+            ..
+        } => match crate::frame::frame_image(frames_dir, event) {
+            Ok(image) => format!(
+                "frame      #{sequence} {width}x{height} {format:?} ({} px)",
+                image.pixels.len()
+            ),
+            Err(e) => format!("frame      #{sequence} unreadable: {e}"),
+        },
         other => format!("event      {other:?}"),
     }
 }

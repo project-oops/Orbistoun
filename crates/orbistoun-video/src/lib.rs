@@ -40,6 +40,12 @@ guest_module! {
         // Confirmed by hash against a real import (D167): the guest was calling this with
         // our unimplemented code as the port to register against.
         "sceVideoOutRegisterBuffers2" => 6,
+        // PPSA02664 imports these and makes each twice from two title modules, and they reach
+        // orbistoun undeclared (D500). Declared at arity 6 - the trampoline's full capture, the
+        // shape `agc.rs` uses until a call is measured - and **not** implemented, so the loud stub
+        // policy answers them by name rather than letting them arrive as bare hashes.
+        "sceVideoOutSetBufferAttribute2" => 6,
+        "sceVideoOutGetOutputStatus" => 6,
     }
 }
 
@@ -97,9 +103,41 @@ mod port {
         /// address the guest agreed to write into, and framebuffer diffing needs bytes to read - both
         /// live here (REQ-...6a86).
         pub buffers: Vec<u64>,
+        /// The `attribute` pointer (`arg4`) the guest passed to `sceVideoOutRegisterBuffers`, which
+        /// describes the buffers' pixel format, extent and tiling. Kept because a `presented` rung
+        /// (REQ-...9b1f) cannot read a flipped buffer's bytes without knowing its extent and layout,
+        /// and that is what this points at. Zero until a set is registered.
+        pub attribute: u64,
         /// The buffer index the guest last submitted a flip for, if any - which of [`Self::buffers`]
         /// it last asked to present.
         pub last_flip: Option<u64>,
+    }
+
+    /// The handle of the port that most recently completed a flip, or zero for none.
+    ///
+    /// A run has one output today, but a reader wanting *the* flipped frame should not have to guess
+    /// which port that was, so `submit_flip` records it here and `last_flipped_buffer` reads it.
+    fn last_flipped_handle() -> &'static std::sync::atomic::AtomicU64 {
+        static HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        &HANDLE
+    }
+
+    /// Records `handle` as the port that most recently flipped.
+    pub(super) fn note_flipped(handle: u64) {
+        last_flipped_handle().store(handle, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// For the port that last flipped, the guest address of the buffer it presented and the
+    /// `attribute` pointer registered with it - `(address, attribute)` - or `None` if none has
+    /// flipped, or the flipped index has no registered buffer.
+    pub(super) fn last_flipped_buffer() -> Option<(u64, u64)> {
+        let handle = last_flipped_handle().load(std::sync::atomic::Ordering::Relaxed);
+        with(handle, |p| {
+            let index = usize::try_from(p.last_flip?).ok()?;
+            let address = p.buffers.get(index).copied()?;
+            Some((address, p.attribute))
+        })
+        .flatten()
     }
 
     /// Every port ever opened. Index plus [`FIRST`] is the handle; a closed one stays, so handles
@@ -238,7 +276,9 @@ const MAX_REGISTERED_BUFFERS: usize = 16;
 /// and answers success. **The addresses are now kept** (REQ-...6a86): they are the frames, and a
 /// renderer needs an address the guest agreed to write into while framebuffer diffing needs bytes to
 /// read, so both come from here. `index` (`args[1]`) is where in the set they land; `addresses`
-/// (`args[2]`) is the array of `count` guest addresses.
+/// (`args[2]`) is the array of `count` guest addresses; `attribute` (`args[4]`) is kept too - it
+/// describes the buffers' format, extent and tiling, which a `presented` rung needs to read a flipped
+/// frame back and know its layout (REQ-...9b1f).
 ///
 /// Answering success rather than refusing is a deliberate choice and a reversible one. A guest that
 /// cannot register buffers stops setting up its display; one that believes it can proceeds to submit
@@ -246,7 +286,8 @@ const MAX_REGISTERED_BUFFERS: usize = 16;
 /// case refused: it registers buffers a renderer could never read, so it earns the video-out error
 /// rather than storing a row of zeros.
 fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (handle, start_index, addresses, count) = (args[0], args[1], args[2], args[3]);
+    let (handle, start_index, addresses, count, attribute) =
+        (args[0], args[1], args[2], args[3], args[4]);
     if addresses == 0 {
         return video_error::INVALID_HANDLE;
     }
@@ -270,6 +311,7 @@ fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     match port::with(handle, |p| {
         p.registered = args[3];
+        p.attribute = attribute;
         let end = start + read.len();
         if p.buffers.len() < end {
             p.buffers.resize(end, 0);
@@ -308,6 +350,8 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     {
         return video_error::INVALID_HANDLE;
     }
+    // Record which port flipped, so a reader of the presented frame does not have to guess (9b1f).
+    port::note_flipped(handle);
     // **And the completion is posted**, which is the half that was missing. A flip completing
     // with nobody told is how PPSA02664 came to call `sceKernelWaitEqueue` 839 times against a
     // queue nothing ever delivered to: it registered a flip event, submitted, and waited on a
@@ -547,6 +591,18 @@ pub fn flips_accepted() -> u64 {
     port::flips()
 }
 
+/// For the port that last completed a flip, the guest address of the buffer it presented and the
+/// `attribute` pointer registered with those buffers - `(address, attribute)`.
+///
+/// This is what a `presented` rung reads (REQ-...9b1f): the address is where the frame's bytes are,
+/// and the attribute describes their format, extent and tiling, without which the bytes cannot be
+/// read as an image. `None` until a guest has submitted a flip against a port whose flipped index has
+/// a registered buffer - which is every run today, since none gets this far.
+#[must_use]
+pub fn last_flipped_buffer() -> Option<(u64, u64)> {
+    port::last_flipped_buffer()
+}
+
 /// Implementations this crate provides, by symbol name.
 ///
 /// Names rather than hashes: the hash is derived from the name, so a table written in
@@ -610,6 +666,49 @@ mod tests {
         a
     }
 
+    /// A flip records the process-global "last flipped port", so the tests that submit one run in
+    /// turn - otherwise `last_flipped_buffer` could read a handle another test set. A poisoned lock is
+    /// recovered rather than cascading a panic.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// **The registered attribute is kept, and the last-flipped buffer and its attribute read back.**
+    ///
+    /// 420c: a `presented` rung (9b1f) needs the flipped frame's address *and* its attribute (format,
+    /// extent, tiling). Registering a set with an attribute pointer in `arg4` and flipping one records
+    /// both, and `last_flipped_buffer` returns the flipped buffer's address paired with that attribute.
+    #[test]
+    fn the_attribute_is_kept_and_the_flipped_buffer_reads_back() {
+        let _guard = serial();
+        // Bus 5: the already-open refusal test holds bus 7 open for the whole run, so this must
+        // not share it or the open is refused in a parallel suite (buses 1/3/4/6/7 are taken).
+        let handle = open_on(5);
+        let addresses: [u64; 3] = [0x2_0100_0000, 0x2_0101_0000, 0x2_0102_0000];
+        let attribute = 0x2_0900_0000_u64;
+        let mut a = args([handle, 0, addresses.as_ptr() as u64, 3]);
+        a[4] = attribute;
+        assert_eq!(
+            video_out_register_buffers(&a),
+            0,
+            "registered with an attribute"
+        );
+        assert_eq!(
+            port::with(handle, |p| p.attribute).expect("the port"),
+            attribute,
+            "the attribute pointer is kept on the port"
+        );
+
+        assert_eq!(video_out_submit_flip(&args([handle, 1, 0, 0])), 0);
+        assert_eq!(
+            super::last_flipped_buffer(),
+            Some((0x2_0101_0000, attribute)),
+            "the flipped buffer's address and its attribute read back together"
+        );
+    }
+
     /// Opens a distinct output so the shared, process-wide port table cannot make two tests
     /// collide on ownership. `[user, bus, index, param]`; each test picks its own bus.
     fn open_on(bus: u64) -> u64 {
@@ -625,6 +724,7 @@ mod tests {
     /// would read as frames.
     #[test]
     fn registering_buffers_stores_their_addresses_and_a_flip_records_the_index() {
+        let _guard = serial();
         let handle = open_on(6);
         assert!(handle >= port::FIRST, "a port opened");
 
@@ -678,6 +778,7 @@ mod tests {
     /// model the flip count already uses.
     #[test]
     fn nothing_is_ever_pending_because_a_flip_completes_on_submit() {
+        let _guard = serial();
         let handle = open_on(4);
         assert!(handle >= port::FIRST, "a port opened");
 
@@ -715,6 +816,7 @@ mod tests {
     /// field obSCEne assembles from `status[0..8]`.
     #[test]
     fn a_flip_completes_on_submit_and_the_count_is_readable() {
+        let _guard = serial();
         let handle = open_on(1);
         assert!(handle >= port::FIRST, "a port opened");
 
@@ -749,6 +851,7 @@ mod tests {
     /// and refuses with the wrong code, the D125 shape this crate exists to avoid.
     #[test]
     fn the_flip_calls_refuse_an_unopened_handle_with_the_video_code() {
+        let _guard = serial();
         let bogus = port::FIRST + 9999;
         let mut status = [0_u64; 8];
         let status_ptr = status.as_mut_ptr() as usize as u64;

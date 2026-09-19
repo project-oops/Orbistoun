@@ -3057,6 +3057,7 @@ name = "orbistoun-report"
 version = "0.1.0"
 dependencies = [
  "orbistoun-abi",
+ "orbistoun-core",
  "orbistoun-firmware",
  "orbistoun-overrides",
  "orbistoun-proto",

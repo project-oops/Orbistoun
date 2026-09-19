@@ -16,7 +16,7 @@ assumptions = [
     "That the surplus registers carry nothing. It is measured across two runs of one build, which is this project's own standard for a measurement, and it is not a reading of the interface.",
 ]
 found_on = "2026-09-08"
-note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What completes driver work in an emulator with no GPU execution - the question D560 answered for flips - is now decided in D705: nothing posts until execution lands (roadmap phase 6), so this stays unimplemented deliberately, and the run report names the resulting starvation rather than papering over it. D705 is `assumed` and retires when execution or obSCEne's 3423 (what the console posts) arrives."
+note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What completes driver work in an emulator with no GPU execution - the question D560 answered for flips - is now decided in D705: nothing posts until execution lands (roadmap phase 6), so this stays unimplemented deliberately, and the run report names the resulting starvation rather than papering over it. D705 is `assumed` and retires when execution lands - obSCEne's 3423 (what the console posts) came back not-possible (the symbol is not exported on the retail eboot), so no measurement is coming."
 
 [[function]]
 name = "sceAgcDriverCreateQueue"

@@ -305,7 +305,8 @@ observed constructs it - the guest already holds it by the first call. If the ce
 a constructor, that one call opens nine.
 
 **Class C - a handle returned by an earlier call. Not standalone-probeable, and this is why it
-matters.** Four of these receive `0x7fff0001` in `arg0` - which is **orbistoun's own placeholder**,
+matters.** Four of these receive `0xf7ff0001` in `arg0` - which is **orbistoun's own placeholder**
+(since D670),
 meaning the guest fed them the return value of a call nothing implements:
 
 `sceAgcSetCxRegIndirectPatchAddRegisters` (23 calls), `sceAgcSetUcRegIndirectPatchAddRegisters`,

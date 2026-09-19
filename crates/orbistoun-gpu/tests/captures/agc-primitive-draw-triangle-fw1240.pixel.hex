@@ -1,0 +1,6 @@
+# agc-primitive-draw-triangle-fw1240 pixel shader: 26 dwords the DCB names at guest 0x2000c0200
+# (obSCEne 166-agc/primitive-draw, sweep 20260917-124503). Little-endian dwords.
+bf8c0000 be84037e befe0381 be8003ff 000f0000 be8103ff 00000002 7e100200
+7e120201 7e1402ff beef0002 dc708004 007d0a08 7e1402ff beef0004 dc708028
+007d0a08 bf8c3f70 befe0304 7e0002f2 7e020280 7e040280 7e0602f2 f800180f
+03020100 bf810000

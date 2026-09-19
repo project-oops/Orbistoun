@@ -28,6 +28,7 @@
 
 mod app;
 mod capture;
+mod frame;
 mod icons;
 mod input;
 mod prefs;

@@ -638,12 +638,13 @@ pub const MAP_SHAPE: Var = Var {
 ///
 /// # What it buys
 ///
-/// Every stub answers `0x7fff_0001`, so a placeholder turning up in a guest's argument says
-/// *some* unimplemented function produced it and never which. `error_used_as_pointer`'s own
-/// action is a person's search - *"find what answered with that code just before"* - and D299
-/// says a finding that sends a reader looking must carry what they are to look at.
+/// Every stub answers the same placeholder (`0xf7ff_0001` since D670), so one turning up in a
+/// guest's argument says *some* unimplemented function produced it and never which.
+/// `error_used_as_pointer`'s own action is a person's search - *"find what answered with that code
+/// just before"* - and D299 says a finding that sends a reader looking must carry what they are to
+/// look at.
 ///
-/// Under this, a stub answers `0x7fff_0000 | index`, so the value **is** the attribution. It cost
+/// Under this, a stub answers `PLACEHOLDER_BASE | index`, so the value **is** the attribution. It cost
 /// four gigabytes to not have: a work-area sizer answered the placeholder and PPSA28061 handed it
 /// to `malloc` twice, and the report could only list the three calls before it (D564, D567).
 ///

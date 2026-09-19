@@ -220,10 +220,14 @@ pub fn read_title_metadata(title_dir: &Path) -> Option<TitleMetadata> {
 /// `docs/ADDRESS_MAP.md` is gated against every one of them (D513). Calling this a base made the
 /// gate demand it be documented as somewhere memory is mapped, which it is not - it is an
 /// error-code prefix. The gate was right and the name was wrong (D567).
-const PLACEHOLDER_PREFIX: u64 = 0x7fff_0000;
+///
+/// The value is the core's `PLACEHOLDER_BASE`, not a restated literal: a tagged placeholder must
+/// carry the same high bit the untagged one gained in D670, or a guest testing `rc < 0` reads a tag
+/// as success - the very behaviour D670 removed (ed20).
+const PLACEHOLDER_PREFIX: u64 = orbistoun_core::PLACEHOLDER_BASE as u64;
 
 /// Where tagged placeholders start, clear of the fixed `GuestError` codes that occupy
-/// `0x7fff_0000..0x7fff_0010` - a tag must never be mistaken for one of those (D567).
+/// `PLACEHOLDER_BASE..=PLACEHOLDER_BASE | 0xf` - a tag must never be mistaken for one of those (D567).
 const PLACEHOLDER_TAG_FLOOR: u64 = 0x10;
 
 /// Whether the placeholder-tagging diagnostic is on for this process.
@@ -1541,14 +1545,15 @@ impl Service {
                 .or_else(|| self.policy.overrides.get(&format!("{:016x}", import.nid)));
             let overridden = by_name.or(by_nid).map(|r| u64::from(r.as_raw()));
             // **A tagged placeholder names its own source.** Every stub answers the same
-            // `0x7fff_0001`, so one found in a guest's argument says *some* unimplemented
+            // `PLACEHOLDER_BASE | 0x1`, so one found in a guest's argument says *some* unimplemented
             // function produced it and never which - `error_used_as_pointer` can only tell a
             // reader to go looking, which D299 says a finding must not do. Under
-            // `ORBISTOUN_TAG_PLACEHOLDERS` each stub answers `0x7fff_0000 | (0x10 + its slot)`,
-            // so the value **is** the attribution.
+            // `ORBISTOUN_TAG_PLACEHOLDERS` each stub answers `PLACEHOLDER_PREFIX | (0x10 + its slot)`,
+            // so the value **is** the attribution - and it keeps the high bit D670 gave the untagged
+            // code, so a guest's `rc < 0` still catches it.
             //
-            // Above `0x10` because `0x7fff_0000..0x7fff_0010` is the fixed placeholder range the
-            // `GuestError` codes occupy - a tag must not be mistaken for one of those (D567).
+            // Above `0x10` because `PLACEHOLDER_BASE..=PLACEHOLDER_BASE | 0xf` is the fixed placeholder
+            // range the `GuestError` codes occupy - a tag must not be mistaken for one of those (D567).
             let slot_index = offset.saturating_add(import.symbol_index as usize);
             let tagged = tag_placeholders()
                 .then(|| u64::try_from(slot_index).ok())

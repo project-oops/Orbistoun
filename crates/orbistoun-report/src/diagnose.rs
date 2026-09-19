@@ -161,21 +161,40 @@ pub struct Finding {
 /// a finding that misdirects is worse than one that says less (D570).
 const ARGUMENT_REGISTERS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
-const PLACEHOLDER_LOW: u64 = 0x7FFF_0000;
-/// One past the placeholder range.
-const PLACEHOLDER_HIGH: u64 = 0x7FFF_0010;
+/// The base of the placeholder block, from the core's single definition rather than a restated
+/// literal - so when D670 moved it from `0x7FFF_0000` to `0xF7FF_0000` (the high bit set, to read as
+/// negative to a guest's own `rc < 0` check) the detector followed instead of going blind (ed20).
+const PLACEHOLDER_LOW: u64 = orbistoun_core::PLACEHOLDER_BASE as u64;
+/// One past the fixed `GuestError` codes (`PLACEHOLDER_BASE | 0x1..=0x4`); tagged placeholders begin here.
+const PLACEHOLDER_HIGH: u64 = PLACEHOLDER_LOW + 0x10;
 
 /// One past every placeholder, tagged ones included.
 ///
-/// `ORBISTOUN_TAG_PLACEHOLDERS` gives each stub `0x7fff_0000 | (0x10 + its slot)`, so a tagged
-/// value sits above [`PLACEHOLDER_HIGH`] and still inside the half-word this project reserves.
-const PLACEHOLDER_TAGGED_HIGH: u64 = 0x8000_0000;
+/// `ORBISTOUN_TAG_PLACEHOLDERS` gives each stub `PLACEHOLDER_BASE | (0x10 + its slot)`, so a tagged
+/// value sits above [`PLACEHOLDER_HIGH`] and still inside the half-word this project reserves - now
+/// carrying the same high bit D670 gave the untagged code.
+const PLACEHOLDER_TAGGED_HIGH: u64 = PLACEHOLDER_LOW + 0x1_0000;
+
+/// Folds a placeholder widened from `int` to `long` back to 32 bits.
+///
+/// A negative code sign-extends: `0xF7FF_0001` becomes `0xFFFF_FFFF_F7FF_0001` when a guest widens
+/// it before using it, so a value whose top half is all ones is tested by its low half - the same
+/// normalisation `orbistoun_core::placeholder_named` does, and a case that only exists since the high
+/// bit went on (D670). Anything else above 32 bits is left alone, and is not one of ours.
+fn low32_if_sign_extended(value: u64) -> u64 {
+    if value >> 32 == 0xFFFF_FFFF {
+        value & 0xFFFF_FFFF
+    } else {
+        value
+    }
+}
 
 /// Which stub produced a tagged placeholder, if this value is one.
 ///
-/// [`None`] for an untagged placeholder - the ordinary `0x7fff_0001` says only that *some*
+/// [`None`] for an untagged placeholder - the ordinary `PLACEHOLDER_BASE | 0x1` says only that *some*
 /// unimplemented function answered, which is the whole reason tagging exists (D567).
 fn tagged_stub(value: u64) -> Option<usize> {
+    let value = low32_if_sign_extended(value);
     if !(PLACEHOLDER_HIGH..PLACEHOLDER_TAGGED_HIGH).contains(&value) {
         return None;
     }
@@ -202,9 +221,10 @@ fn source_of(trace: &CallTrace, value: u64) -> Option<&str> {
 /// bare value alone would miss every case where the guest did anything with it (D125).
 fn looks_like_placeholder(value: u64) -> bool {
     const NEAR: u64 = 0x1000;
+    let value = low32_if_sign_extended(value);
     // The upper bound is the tagged range's, not the fixed one's: under
-    // `ORBISTOUN_TAG_PLACEHOLDERS` a placeholder can be any `0x7fff_xxxx`, and a detector that
-    // only knew the first sixteen would go blind exactly when asked to say more (D567).
+    // `ORBISTOUN_TAG_PLACEHOLDERS` a placeholder can be any `PLACEHOLDER_BASE | 0xxxxx`, and a
+    // detector that only knew the first sixteen would go blind exactly when asked to say more (D567).
     value >= PLACEHOLDER_LOW.saturating_sub(NEAR)
         && value < PLACEHOLDER_TAGGED_HIGH.saturating_add(NEAR)
 }
@@ -1216,6 +1236,14 @@ mod tests {
         AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport,
         ReadReport, Registers, SubmissionSummary, TracedCall,
     };
+    use orbistoun_core::GuestError;
+
+    /// The untagged placeholder every unimplemented call answers since D670, as the tests read it -
+    /// `0xF7FF_0001`, derived from the core rather than restated so a later move takes the tests with
+    /// it (ed20).
+    fn placeholder_code() -> u64 {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
 
     /// Registers with every field a distinct value well above the null page, so a test can zero
     /// exactly the ones it means to and nothing matches the null-base check by accident. (The
@@ -1367,6 +1395,7 @@ mod tests {
             total_calls: 0,
             distinct: 0,
             frames: 0,
+            frame_written: false,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -1581,7 +1610,7 @@ mod tests {
         let mut trace = empty();
         trace.tail = vec![call(
             "libSceVideoOut::sceVideoOutRegisterBuffers2",
-            0x7FFF_0001,
+            placeholder_code(),
         )];
         let found = findings(&trace);
         assert_eq!(found.len(), 1);
@@ -1593,14 +1622,62 @@ mod tests {
         );
     }
 
+    /// **The post-D670 placeholder is recognised, in `rdx` and as a faulting address.**
+    ///
+    /// Since D670 an unimplemented call answers `0xF7FF_0001` (`GuestError::Unimplemented.as_raw()`),
+    /// not the `0x7FFF_0001` the detector was built for. The sites that gate on
+    /// `looks_like_placeholder` (a placeholder handed to a later call, and one dereferenced) went
+    /// silent on exactly the wall this corpus produces: the `0xf7ff0001`-into-`memcpy` wall of
+    /// worklogs 594/616 was found by hand. Both directions are asserted, and the register is `rdx`
+    /// rather than `rdi` because `error_used_as_pointer` reads every argument, not the first (ed20).
+    #[test]
+    fn the_post_d670_placeholder_is_recognised_in_a_register_and_as_a_fault() {
+        let code = placeholder_code();
+
+        // Handed on in rdx (argument index 2), not rdi.
+        let mut passed = empty();
+        let mut handed = call("libSceGnmDriver::sceGnmSubmitCommandBuffers", 0);
+        handed.args[2] = code;
+        passed.tail = vec![handed];
+        assert!(
+            findings(&passed)
+                .iter()
+                .any(|f| f.gap == Gap::ErrorUsedAsPointer),
+            "a placeholder handed on in rdx is a placeholder used as a pointer"
+        );
+
+        // Dereferenced: the run died reading the code as an address.
+        let mut faulted = empty();
+        faulted.fault = Some(FaultSite {
+            instruction: Vec::new(),
+            thread: None,
+            host_thread: None,
+            pointees: Vec::new(),
+            kind: "read of".to_owned(),
+            address: code,
+            instruction_pointer: 0x1234,
+            region: None,
+            offset: None,
+            inside_import: None,
+            registers: None,
+            frames: Vec::new(),
+        });
+        assert!(
+            findings(&faulted)
+                .iter()
+                .any(|f| f.gap == Gap::ErrorUsedAsPointer),
+            "a fault at the placeholder code is the guest dereferencing our refusal"
+        );
+    }
+
     #[test]
     fn a_placeholder_is_recognised_at_an_offset_from_itself() {
         // A guest treating a code as a struct pointer reads a *field* through it, so the
         // address that faults is the code plus or minus a little. Matching the bare value
         // would miss every case where the guest did anything with it.
-        assert!(looks_like_placeholder(0x7FFF_0001));
-        assert!(looks_like_placeholder(0x7FFF_0019), "code plus 0x18");
-        assert!(looks_like_placeholder(0x7FFE_FFF9), "code minus 8");
+        assert!(looks_like_placeholder(placeholder_code()));
+        assert!(looks_like_placeholder(0xF7FF_0019), "code plus 0x18");
+        assert!(looks_like_placeholder(0xF7FE_FFF9), "code minus 8");
         assert!(!looks_like_placeholder(0));
         assert!(!looks_like_placeholder(0x4000_0000_0000));
     }
@@ -1773,7 +1850,7 @@ mod tests {
             short: 90,
             bytes: 10,
         };
-        trace.tail = vec![call("libc::something", 0x7FFF_0001)];
+        trace.tail = vec![call("libc::something", placeholder_code())];
         let found = findings(&trace);
         assert_eq!(found[0].confidence, Confidence::Certain);
         assert_eq!(found[0].gap, Gap::ErrorUsedAsPointer);
@@ -1791,7 +1868,7 @@ mod tests {
             host_thread: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
-            address: 0x7FFF_0001,
+            address: placeholder_code(),
             instruction_pointer: 0x1234,
             region: Some("image".to_owned()),
             offset: Some(0x1234),
@@ -1990,6 +2067,7 @@ mod tests {
             total_calls: 2,
             distinct: 2,
             frames: 0,
+            frame_written: false,
             submission: None,
             calls: vec![
                 CalledImport {
@@ -2021,12 +2099,12 @@ mod tests {
 
     /// **A tagged placeholder names the function that answered it.**
     ///
-    /// The whole point of D567. Untagged, every stub answers `0x7fff_0001`, so a placeholder in a
-    /// guest's argument says *some* unimplemented function produced it - and the finding could
-    /// only tell a reader to go looking, which D299 says a finding must not do.
+    /// The whole point of D567. Untagged, every stub answers `PLACEHOLDER_BASE | 0x1`, so a
+    /// placeholder in a guest's argument says *some* unimplemented function produced it - and the
+    /// finding could only tell a reader to go looking, which D299 says a finding must not do.
     ///
-    /// The tag is `0x7fff_0000 | (0x10 + slot)`, and the trace indexes calls by the same slot, so
-    /// the value resolves to a name with no new plumbing.
+    /// The tag is `PLACEHOLDER_BASE | (0x10 + slot)`, and the trace indexes calls by the same slot,
+    /// so the value resolves to a name with no new plumbing.
     ///
     /// # What this cannot assert
     ///
@@ -2035,42 +2113,45 @@ mod tests {
     /// differently, and the symptom would be a confident finding naming the wrong function.
     #[test]
     fn a_tagged_placeholder_names_its_source() {
+        let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
         let trace = trace_with_slots();
         assert_eq!(
-            source_of(&trace, 0x7fff_0091),
+            source_of(&trace, base | 0x91),
             Some("libSceUlt::sceUltUlthreadRuntimeGetWorkAreaSize"),
             "0x91 is slot 0x81 plus the 0x10 floor"
         );
         assert_eq!(
-            source_of(&trace, 0x7fff_0225),
+            source_of(&trace, base | 0x225),
             Some("libSceAgc::sceAgcCreateShader")
         );
         // **A tag for a slot this run never called resolves to nothing**, and this is the
-        // load-bearing half rather than hygiene. Guest registers routinely hold stale values
-        // that fall inside the tag range: PPSA28061's tail carries `0x7fff0201` and
-        // `0x7fffbe01` in argument slots, which decode to stubs 497 and 48,625 - neither of
-        // which that run ever called. Without this check both would have been reported as
-        // confident attributions built from garbage, which is worse than the vague finding
-        // tagging replaced (D570).
-        assert_eq!(source_of(&trace, 0x7fff_0999), None);
+        // load-bearing half rather than hygiene: a garbage value landing in the tag range must not
+        // be read as a confident attribution (D570). `base | 0x999` decodes to a slot this run
+        // never called, so it resolves to nothing.
+        assert_eq!(source_of(&trace, base | 0x999), None);
+        // And PPSA28061's real stale registers `0x7fff0201` / `0x7fffbe01` (measured guest garbage)
+        // now fall *outside* the placeholder block entirely, since D670 moved it onto the high bit -
+        // so they cannot even be mistaken for a tag, which the old positive range could. The
+        // measured values are kept; only the block they miss has moved.
         assert_eq!(
             source_of(&trace, 0x7fff_0201),
             None,
-            "PPSA28061's real stale register"
+            "PPSA28061's real stale register, now out of range"
         );
         assert_eq!(source_of(&trace, 0x7fff_be01), None, "and the other one");
     }
 
     /// **An untagged placeholder names nothing, and must not pretend to.**
     ///
-    /// `0x7fff_0001` is what every stub answers when tagging is off, and the fixed `GuestError`
-    /// codes live below `0x7fff_0010`. Reading one of those as a slot would attribute a finding to
-    /// whichever import happened to be at index 0 - a confident, wrong answer, which is worse than
-    /// the vague one it replaced.
+    /// `PLACEHOLDER_BASE | 0x1` is what every stub answers when tagging is off, and the fixed
+    /// `GuestError` codes live below `PLACEHOLDER_BASE | 0x10`. Reading one of those as a slot would
+    /// attribute a finding to whichever import happened to be at index 0 - a confident, wrong
+    /// answer, which is worse than the vague one it replaced.
     #[test]
     fn an_untagged_placeholder_attributes_nothing() {
+        let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
         let trace = trace_with_slots();
-        for fixed in [0x7fff_0000_u64, 0x7fff_0001, 0x7fff_000f] {
+        for fixed in [base, base | 0x1, base | 0xf] {
             assert_eq!(
                 tagged_stub(fixed),
                 None,
@@ -2082,19 +2163,42 @@ mod tests {
 
     /// **The detector still recognises a tagged placeholder as one of ours.**
     ///
-    /// `looks_like_placeholder` bounded itself at `0x7fff_0010` - the fixed codes. A tagged run
-    /// answers far above that, so the detector would have gone blind **exactly when it was asked
-    /// to say more**, and the diagnostic would have silently reported nothing.
+    /// `looks_like_placeholder` bounded itself at `PLACEHOLDER_BASE | 0x10` - the fixed codes. A
+    /// tagged run answers far above that, so the detector would have gone blind **exactly when it
+    /// was asked to say more**, and the diagnostic would have silently reported nothing.
     #[test]
     fn the_detector_sees_tagged_placeholders_too() {
-        for tagged in [0x7fff_0010_u64, 0x7fff_0091, 0x7fff_0225, 0x7fff_beac] {
+        let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
+        for tagged in [base | 0x10, base | 0x91, base | 0x225, base | 0xbeac] {
             assert!(
                 looks_like_placeholder(tagged),
                 "{tagged:#x} is one of ours and the detector missed it"
             );
         }
         // And still recognises the untagged one, and still rejects an ordinary address.
-        assert!(looks_like_placeholder(0x7fff_0001));
+        assert!(looks_like_placeholder(placeholder_code()));
         assert!(!looks_like_placeholder(0x4000_0000_0000));
+    }
+
+    /// **Every tagged value the service can produce is negative and is recognised.**
+    ///
+    /// The service hands out `PLACEHOLDER_BASE | (0x10 + slot)`, and D670's whole point is that a
+    /// placeholder reads as negative to a guest's own `rc < 0` - so bit 31 must be set on the tagged
+    /// codes as well as the untagged one, and the detector must catch every one. Checked across the
+    /// slot range the tags span, from the first to the last that stays inside the reserved half-word.
+    /// A tag that lost the high bit is exactly the regression D670 removed and ed20 keeps removed.
+    #[test]
+    fn every_tag_the_service_produces_is_negative_and_recognised() {
+        const FLOOR: u64 = 0x10;
+        let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
+        for slot in [0_u64, 1, 0x81, 0x215, 0xbe9c, 0xffff - FLOOR] {
+            let tag = base | (FLOOR + slot);
+            assert_eq!(
+                tag & 0x8000_0000,
+                0x8000_0000,
+                "{tag:#x} must be negative to the guest (D670)"
+            );
+            assert!(looks_like_placeholder(tag), "{tag:#x} must be recognised");
+        }
     }
 }

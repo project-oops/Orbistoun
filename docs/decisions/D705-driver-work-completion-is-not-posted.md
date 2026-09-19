@@ -41,7 +41,8 @@ Three things already in the tree point the same way:
   producer buys nothing; a producer that lies buys a regression.
 - **An intervention that moves a wall needs a second observation** (D226/D227). Firing the completion
   would move the wall with no measurement of what the guest then does, and none of what the console
-  itself posts to such a queue - `obSCEne REQ-...3423`, unresolved.
+  itself posts to such a queue - `obSCEne -3423` came back **not-possible** (the symbol is not
+  exported on the retail eboot), so it cannot be measured that way.
 
 ## What this is not
 
@@ -49,8 +50,8 @@ It is **not** a claim that driver work can never complete here. When execution l
 completion posts from the real thing: orbistoun processes a submission synchronously (there is no
 asynchronous GPU), so the event fires the instant the executed submit returns - the same shape D560
 gives flips, but earned by work that ran. Until then the honest state is a named starvation, and this
-decision is `assumed` precisely so it retires the moment either execution or the `3423` measurement
-arrives.
+decision is `assumed` precisely so it retires the moment execution lands (36c0) - the `3423`
+measurement it once also named cannot arrive, obSCEne having found the symbol unexported on retail.
 
 ## Consequence
 

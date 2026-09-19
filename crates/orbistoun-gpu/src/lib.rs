@@ -67,15 +67,15 @@ pub use packet::{Packet, PacketKind, PacketWalk, walk};
 pub use registers::{
     BlendControl, BlendFactor, BufferDescriptor, ColourTarget, ColourTargetExtent, CombineFunc,
     CompareFunc, DepthControl, DispatchCall, DrawCall, DrawCorrelation, DrawKind, DrawOrDispatch,
-    ImageDescriptor, RegisterWrite, Scissor, ShaderCandidate, StencilControl, StencilOp,
-    SwizzleMode, TargetMask, Vocabulary, VocabularyError, blend_control_at, buffer_descriptor_at,
-    colour_swizzle_mode_at, colour_target_at, colour_target_extent_at, correlate_draws,
-    decode_blend_control, decode_blend_factor, decode_buffer_descriptor,
+    ImageDescriptor, PrimitiveTopology, RegisterWrite, Scissor, ShaderCandidate, StencilControl,
+    StencilOp, SwizzleMode, TargetMask, Vocabulary, VocabularyError, blend_control_at,
+    buffer_descriptor_at, colour_swizzle_mode_at, colour_target_at, colour_target_extent_at,
+    correlate_draws, decode_blend_control, decode_blend_factor, decode_buffer_descriptor,
     decode_colour_swizzle_mode, decode_colour_target_extent, decode_combine_func,
-    decode_compare_func, decode_depth_control, decode_image_descriptor, decode_scissor,
-    decode_stencil_control, decode_stencil_op, decode_swizzle_mode, decode_target_mask,
-    depth_control_at, dispatch_calls, draw_calls, register_writes, scissor_at, shader_candidates,
-    stencil_control_at, target_mask_at,
+    decode_compare_func, decode_depth_control, decode_image_descriptor, decode_primitive_topology,
+    decode_scissor, decode_stencil_control, decode_stencil_op, decode_swizzle_mode,
+    decode_target_mask, depth_control_at, dispatch_calls, draw_calls, primitive_topology_at,
+    register_writes, scissor_at, shader_candidates, stencil_control_at, target_mask_at,
 };
 pub use render::{FrameOutcome, drive};
 pub use tiling::{

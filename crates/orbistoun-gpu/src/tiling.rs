@@ -211,7 +211,7 @@ fn element_bytes(format: u32) -> Option<u32> {
 const MEASURED_ELEMENT_BYTES: u32 = 4;
 
 /// A thin wrapper over [`detile_64kb_rx_bpp4`] that takes the extent from the descriptor. It applies
-/// the 32-bpp `64KB_R_X` swizzle, so it refuses a format that is not 32 bpp ([`element_bytes`]); the
+/// the 32-bpp `64KB_R_X` swizzle, so it refuses a format that is not 32 bpp (`element_bytes`); the
 /// tiling mode is still the caller's to confirm is `64KB_R_X`, since this reads the pixels directly
 /// rather than from a guest window.
 ///
@@ -322,11 +322,11 @@ fn detile_surface(
 /// from the register writes.
 ///
 /// [`colour_target_at`] gives the base and size and [`colour_swizzle_mode_at`] the tiling; then
-/// [`detile_surface`] maps the base into `guest` (first word at `window_base`) and unswizzles it.
+/// `detile_surface` maps the base into `guest` (first word at `window_base`) and unswizzles it.
 ///
 /// # Errors
 ///
-/// [`SurfaceError::Incomplete`] when the stream set no base or extent, else [`detile_surface`]'s
+/// [`SurfaceError::Incomplete`] when the stream set no base or extent, else `detile_surface`'s
 /// refusals (a tiling not modelled, a base outside the window, or a detile refusal).
 pub fn detile_colour_target(
     writes: &[RegisterWrite],
@@ -349,9 +349,9 @@ pub fn detile_colour_target(
 ///
 /// The texture analog of [`detile_colour_target`]: an [`ImageDescriptor`] already carries the base,
 /// extent, format and tiling (`crate::registers::decode_image_descriptor`). It applies the 32-bpp
-/// `64KB_R_X` swizzle, so it refuses a descriptor whose format is not 32 bpp ([`element_bytes`])
+/// `64KB_R_X` swizzle, so it refuses a descriptor whose format is not 32 bpp (`element_bytes`)
 /// before touching the window - a different element size is a different swizzle, not this one - then
-/// hands the rest to [`detile_surface`].
+/// hands the rest to `detile_surface`.
 ///
 /// # Errors
 ///

@@ -12,6 +12,8 @@
 //! - [`experiment`] plants sentinels in a call's arguments and reads where the fault lands.
 //! - [`axis`] is every other diagnostic, each rendered as the variable that carries it.
 //! - [`trial`] runs the guest and reads back what happened.
+//! - [`escape`] is when the loop should stop retrying and ask a person: a wall, a spin, a
+//!   regression, or three attempts without progress.
 //!
 //! # There is no model here, by construction
 //!
@@ -30,6 +32,7 @@
 
 pub mod axis;
 pub mod conformance;
+pub mod escape;
 pub mod experiment;
 pub mod patch;
 pub mod question;

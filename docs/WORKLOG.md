@@ -11,7 +11,7 @@ Entry format: what changed, what it unblocks, what is next, and anything surpris
 found on the way. Surprises are the most valuable field; they are what a fresh
 context cannot re-derive.
 **This table is generated.** Edit an item under `worklog/`, then run
-`tools/split-doc.sh --index orbistoun WORKLOG 2 worklog`.
+`tools/split-doc.sh --index orbistoun WORKLOG 1 worklog`.
 
 | date | entry |
 |---|---|
@@ -708,3 +708,16 @@ context cannot re-derive.
 | - | [691. The detile's provenance, corrected: one measured byte, not two points and a whole frame](worklog/691-the-detile-provenance-corrected-one-measured-byte-not-two-points-and-a-frame.md) |
 | - | [692. The handover resolves shader addresses against the guest's regions, and bounds-checks the descriptor](worklog/692-the-handover-resolves-shader-addresses-against-the-guests-regions.md) |
 | - | [693. Five statements the code beside them contradicted](worklog/693-five-statements-the-code-contradicted.md) |
+| - | [694. Seven stale facts corrected, and the flip builder's measurement recorded](worklog/694-seven-stale-facts-and-a-flip-builder-recorded.md) |
+| - | [695. Video-out: the two undeclared calls named, the attribute kept, the flipped buffer readable](worklog/695-video-out-attribute-kept-and-flipped-buffer-readable.md) |
+| - | [696. The presented rung gets its arm, awarded by a framebuffer readback](worklog/696-presented-rung-awarded-by-a-framebuffer-readback.md) |
+| - | [697. The doc gate was red behind an earlier one, on stale intra-doc links](worklog/697-the-doc-gate-was-red-behind-an-earlier-one.md) |
+| - | [698. The findings engine recognises the placeholder D670 moved](worklog/698-the-findings-engine-recognises-the-post-d670-placeholder.md) |
+| - | [699. The frame crossing D695 decided gets built](worklog/699-the-frame-crossing-d695-decided-gets-built.md) |
+| - | [700. The triangle record, its target and both shaders, brought into the tree](worklog/700-the-triangle-record-and-its-shaders-brought-in.md) |
+| - | [701. The console's triangle, rendered through the backend and compared with its own frame](worklog/701-the-console-triangle-rendered-and-compared.md) |
+| - | [702. The primitive topology, decoded and carried - and where the render gap really is](worklog/702-the-primitive-topology-decoded-and-where-the-render-gap-really-is.md) |
+| - | [703. The compatibility scale now sees a missing picture](worklog/703-the-compat-scale-now-sees-a-missing-picture.md) |
+| - | [704. Run records name the build that made them, and the stamp follows commits](worklog/704-run-records-name-their-build-and-the-stamp-follows-commits.md) |
+| - | [705. The SRT provenance seam its premise asks for is contradicted by measurement](worklog/705-the-srt-provenance-seam-is-contradicted-by-measurement.md) |
+| - | [706. The Escape Hatch: the four conditions an autonomous loop halts itself on](worklog/706-the-escape-hatch-the-loop-halts-itself-on.md) |

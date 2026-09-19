@@ -1270,6 +1270,86 @@ pub fn colour_swizzle_mode_at(writes: &[RegisterWrite]) -> Option<SwizzleMode> {
     Some(decode_colour_swizzle_mode(value))
 }
 
+/// The absolute dword index of `VGT_GS_OUT_PRIM_TYPE`.
+///
+/// From `oops-mesa src/amd/registers/gfx103.json` (`"map": {"at": 166508}`; `166508 / 4` = `0xA29B`),
+/// a context-space register. Measured against the captures: the point record
+/// (`agc-primitive-draw-fw1240`) writes `0` (POINTLIST), the triangle and gl-cube records `2`
+/// (TRISTRIP).
+const VGT_GS_OUT_PRIM_TYPE: u32 = 0xA29B;
+
+/// The primitive a draw's geometry produces, from `VGT_GS_OUT_PRIM_TYPE.OUTPRIM_TYPE`.
+///
+/// This is the **output** primitive type - what the geometry stage emits and the rasteriser
+/// assembles - which is the topology a draw actually produces. It is the register that tells a point
+/// draw from a triangle one: the input-assembly `VGT_PRIMITIVE_TYPE` reads `TRILIST` for the point and
+/// the triangle records alike, while this reads POINTLIST for the one and TRISTRIP for the other.
+///
+/// Only the values with a meaning here are named; anything else is carried by its raw field so an
+/// unhandled topology is refused downstream rather than assembled as something it is not (D010, the
+/// same rule [`SwizzleMode`] follows). `RectangleList` is named but has no graphics-primitive
+/// analogue, so it too is for a consumer to refuse by name rather than draw as triangles.
+///
+/// Values are `VGT_GS_OUTPRIM_TYPE` (`oops-mesa src/amd/registers/gfx103.json`): POINTLIST 0,
+/// LINESTRIP 1, TRISTRIP 2, RECTLIST 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimitiveTopology {
+    /// A list of points (POINTLIST).
+    PointList,
+    /// A connected strip of lines (LINESTRIP).
+    LineStrip,
+    /// A connected strip of triangles (TRISTRIP).
+    TriangleStrip,
+    /// A list of screen-space rectangles (RECTLIST) - no direct graphics-primitive analogue here.
+    RectangleList,
+    /// A value not in `VGT_GS_OUTPRIM_TYPE`, carried by its raw six-bit field.
+    Other(u32),
+}
+
+impl PrimitiveTopology {
+    /// A short name for a report - what a reader sees when a submission's topology is surfaced.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::PointList => "point list".to_owned(),
+            Self::LineStrip => "line strip".to_owned(),
+            Self::TriangleStrip => "triangle strip".to_owned(),
+            Self::RectangleList => "rectangle list".to_owned(),
+            Self::Other(value) => format!("VGT_GS_OUTPRIM_TYPE {value}"),
+        }
+    }
+}
+
+/// Decodes `VGT_GS_OUT_PRIM_TYPE.OUTPRIM_TYPE` (bits 5:0) into a topology.
+///
+/// The field bits are from `oops-mesa src/amd/registers/gfx103.json` (`VGT_GS_OUT_PRIM_TYPE` type,
+/// `OUTPRIM_TYPE` at bits `[0, 5]`); the values are its `VGT_GS_OUTPRIM_TYPE` enum.
+#[must_use]
+pub fn decode_primitive_topology(field: u32) -> PrimitiveTopology {
+    match field & 0x3F {
+        0 => PrimitiveTopology::PointList,
+        1 => PrimitiveTopology::LineStrip,
+        2 => PrimitiveTopology::TriangleStrip,
+        3 => PrimitiveTopology::RectangleList,
+        other => PrimitiveTopology::Other(other),
+    }
+}
+
+/// The primitive a draw produces, from the live value of `VGT_GS_OUT_PRIM_TYPE` among the writes.
+///
+/// [`None`] when the stream never sets it - a draw whose topology is unknown must not be assumed a
+/// triangle list, which is exactly what the backend's mesh output does today (`-0c58`).
+/// Most-recent-write-wins.
+#[must_use]
+pub fn primitive_topology_at(writes: &[RegisterWrite]) -> Option<PrimitiveTopology> {
+    let value = writes
+        .iter()
+        .rev()
+        .find(|write| write.register == VGT_GS_OUT_PRIM_TYPE)?
+        .value;
+    Some(decode_primitive_topology(value))
+}
+
 /// An image resource descriptor - a "T#" - decoded from its eight dwords.
 ///
 /// The concrete-value counterpart of the sampled image the translator emits as *arithmetic* - it

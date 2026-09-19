@@ -817,7 +817,7 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// - `sceAgcDcbDrawIndex` - the two body dwords worklog 536 could not place were read back on a
 ///   later capture (`(3, 0x12345678, 0)` wrote `0xc0042700, 3, 0x12345678, 0, 3, 0`), placing the
-///   count at body[0] and body[3] and the argument at body[4]; `packet::build::draw_index_2` now
+///   count at `body[0]` and `body[3]` and the argument at `body[4]`; `packet::build::draw_index_2` now
 ///   encodes the whole packet.
 /// - `sceAgcDcbSetIndexSize` - measured across eight argument pairs, enough to establish the mapping
 ///   `packet::build::set_index_size` uses rather than emit one measured packet for every call.
@@ -834,7 +834,7 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// failure, not an empty encoding. The re-probe settled it: its `GetSize` symbol is absent from
 /// `libSceAgc`, and the builder wrote 0 bytes and returned `0x0` on a bare writer and on one prepared
 /// through `sceAgcDcbResetQueue` (sweeps `20260917-090300`/`101310`), `empty-encoding` true under
-/// every condition. So it is a library-level no-op, and [`agc_no_op_returns_ok`] answers the measured
+/// every condition. So it is a library-level no-op, and `agc_no_op_returns_ok` answers the measured
 /// `0x0` and writes nothing - like the patch family, it dereferences nothing, so a null needs no guard.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[

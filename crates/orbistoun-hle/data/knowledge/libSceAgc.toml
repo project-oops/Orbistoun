@@ -477,7 +477,7 @@ edge_cases = [
     "**The identifier a real title imports is 0x53bbd82b51d172db (orbistoun spelling), and this name does not hash to it.** The hash of this name is 0x916dc62dbed07cf8. The published tables list BOTH identifiers against this one name, so the second is an alias no derivation can reach - which is why 30,184 names and 3.9 billion generated candidates never explained it.",
     "**known_by is published, and that is the ceiling on it.** The attribution is external; this project cannot confirm it the way it confirms every other name, because confirmation here means the hash reproducing and this one demonstrably does not. It is recorded so a reader meeting the bare hash knows what it is believed to be and exactly how much that is worth.",
     "**The systematic shape matters more than the single name.** Of 116 published libSceAgc identifiers, 108 reproduce and 8 do not; five of the 8 are a second identifier on a name whose first one reproduces. So this library carries a class of alias identifiers, and a future unnameable hash here should be checked against that pattern before a word list is extended.",
-    "PPSA02664, PPSA03416 and PPSA28061 all stop inside this library's initialisation, which corroborates the attribution semantically without confirming it.",
+    "PPSA28061 stops inside this library's initialisation; PPSA02664 and PPSA03416 call it, pass it, reach flipped, and fault later in command-buffer construction (the 0xa8 null object, worklogs 672/684). All three import and exercise the library, which corroborates the attribution semantically without confirming it.",
 ]
 known_by = "published"
 cites = "SELFish REQ-20260909T1250Z-1f74, resolved 2026-09-09: five independent published identifier tables (SharpEMU, SharpEMU-aerolib, aerolib.csv, craziiEmu, fpPS4) carried in obSCEne data/mined-names.txt"
@@ -643,3 +643,11 @@ edge_cases = ["MEASURED (obSCEne 9a41): rewrites the low five bits of sec_state+
 known_by = "measured"
 cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
 found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcDcbSetFlip"
+purpose = "Appends a flip request to a draw command buffer - the guest's ask to present the frame it built."
+edge_cases = ["MEASURED (obSCEne REQ-20260917T1055Z-7443, 166-agc/dcb-set-flip, sweep 20260917-124503): appends an empty encoding (0 bytes changed) and returns rc 0x0 under both a bare writer and one prepared through sceAgcDcbResetQueue, and its GetSize symbol (sceAgcDcbSetFlipGetSize) is absent from libSceAgc. So on this firmware the call writes no packet a walk would see and answers success - the same library-level no-op shape as sceAgcDcbWaitUntilSafeForRendering. Unwired, because no guest reaches it (the corpus stalls before submit, principle 6); recorded so the measured empty-encoding/0x0 is what to answer when one does."]
+known_by = "measured"
+cites = "obSCEne REQ-20260917T1055Z-7443, 166-agc/dcb-set-flip, sweep 20260917-124503: empty encoding, rc 0x0 under bare and prepared writers, GetSize symbol absent."
+found_on = "2026-09-19"

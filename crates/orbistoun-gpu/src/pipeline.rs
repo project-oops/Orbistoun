@@ -92,10 +92,10 @@ use orbistoun_translate::{Strategy, translate_windowed};
 use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage};
 use crate::packet::{PacketWalk, walk};
 use crate::registers::{
-    BlendControl, ColourTarget, ColourTargetExtent, DepthControl, DrawKind, StencilControl,
-    SwizzleMode, Vocabulary, blend_control_at, colour_swizzle_mode_at, colour_target_at,
-    colour_target_extent_at, depth_control_at, dispatch_calls, draw_calls, register_writes,
-    scissor_at, shader_candidates, stencil_control_at,
+    BlendControl, ColourTarget, ColourTargetExtent, DepthControl, DrawKind, PrimitiveTopology,
+    StencilControl, SwizzleMode, Vocabulary, blend_control_at, colour_swizzle_mode_at,
+    colour_target_at, colour_target_extent_at, depth_control_at, dispatch_calls, draw_calls,
+    primitive_topology_at, register_writes, scissor_at, shader_candidates, stencil_control_at,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -231,6 +231,13 @@ pub struct SubmissionReport {
     /// buffer in guest memory, and neither is read - so a stream full of indexed draws reports
     /// none here, which is the honest answer rather than a guess at how many.
     pub draws: usize,
+    /// The primitive the draw's geometry produces, from `VGT_GS_OUT_PRIM_TYPE` (`-0c58`).
+    ///
+    /// `None` when the stream set it nowhere. Carried so a reader - and a backend - can tell a point
+    /// draw from a triangle one, which the input-assembly register cannot: it reads `TRILIST` for
+    /// both. The backend's mesh output still emits triangles unconditionally, so this is decoded and
+    /// reported before it is drawn with; making the mesh output follow it is the rest of `-0c58`.
+    pub primitive_topology: Option<PrimitiveTopology>,
     /// Shader addresses the registers named.
     pub shaders_found: usize,
     /// Of those, how many produced a module.
@@ -625,6 +632,10 @@ impl Pipeline {
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&writes);
+        // The primitive the draw produces, read from `VGT_GS_OUT_PRIM_TYPE` and reported - a point
+        // draw and a triangle draw are told apart here, though the mesh output still emits triangles
+        // for both until the rest of `-0c58` lands.
+        submission.report.primitive_topology = primitive_topology_at(&writes);
 
         // The scissor a stream set, as a viewport the backend restricts a draw to (worklog 646). The
         // generic scissor's corners are decoded (register offsets and layout mined from a hardware

@@ -1,0 +1,8 @@
+# agc-primitive-draw-triangle-fw1240 vertex shader: 44 dwords the DCB names at guest 0x2000c0000
+# (obSCEne 166-agc/primitive-draw, sweep 20260917-124503). Little-endian dwords.
+bfa00001 be8c037e befc03ff 00001003 bf800000 bf900009 befe0381 7e0202ff
+20280600 f8000941 00000001 bf8cff0f befe0381 be8003ff 000f0000 be8103ff
+00000002 7e100200 7e120201 7e1402ff beef0001 dc708000 007d0a08 7e1402ff
+beef0003 dc708018 007d0a08 bf8c3f70 befe0381 7e0a02f1 7e0c02f1 befe0382
+7e0a02f0 7e0c02f1 befe0384 7e0a0280 7e0c02f0 befe0387 7e060280 7e0802f2
+f80008cf 04030605 bf8cff0f bf810000

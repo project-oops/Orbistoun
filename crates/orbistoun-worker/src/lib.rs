@@ -27,6 +27,7 @@ use orbistoun_proto::codec::{read_message, write_message};
 use orbistoun_proto::{Event, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
 pub mod experiment;
 pub mod fault;
+pub mod frame_region;
 pub mod report;
 pub mod session;
 pub mod tls_backstop;
@@ -792,7 +793,10 @@ fn prepare_diagnostics(
                     .collect()
             })
             .unwrap_or_default(),
-        build: env!("CARGO_PKG_VERSION").to_owned(),
+        // The commit the worker was built from (with `-dirty` for an uncommitted tree), not the
+        // crate version - so a run record names the tree that produced it and a regression can be
+        // bisected from the records (8ae5). `env!("CARGO_PKG_VERSION")` was `0.1.0` on every record.
+        build: orbistoun_env::build::line(),
     });
 
     // Hand the graphics submit path the regions the guest can read, so a submitted command buffer

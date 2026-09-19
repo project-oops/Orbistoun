@@ -35,6 +35,19 @@ pub struct CallTrace {
     /// (D558).
     #[serde(default)]
     pub frames: u64,
+    /// Whether the buffer the guest last flipped held bytes it had written.
+    ///
+    /// **The framebuffer signal that separates `presented` from `flipped` (9b1f).** `frames`
+    /// counts flips a port accepted; this says one of those flips carried a buffer the guest
+    /// actually wrote into. The worker reads the last-flipped buffer back after the run and
+    /// sets this when its head differs from the zero a fresh allocation holds - a positive
+    /// measurement against a known prior, which is the framebuffer-diffing oracle this project
+    /// treats as its only cheap correctness signal. `status_of` awards `Reach::Presented` only
+    /// when it is set. Defaults false, so a trace that predates the field, and every run whose
+    /// flipped buffer is unwritten or unreadable, stays at `flipped` - which is the whole
+    /// corpus until a run says otherwise.
+    #[serde(default)]
+    pub frame_written: bool,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
     /// Every system call the guest asked the kernel for **directly**, not through a stub.
@@ -1001,6 +1014,13 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
         // words; the frame count comes from the video crate's own port table, so a title
         // reaches this rung by a flip a real port accepted rather than by a call it made
         // (D558).
+        // **The top rung, awarded by a readback and nothing weaker.** A flip reaches
+        // `Flipped`; a flip whose buffer the worker read back and found holding bytes the
+        // guest wrote reaches `Presented`. This is the framebuffer-diffing oracle arriving as
+        // a rung - a positive measurement against the zero a fresh buffer held, which reaching
+        // the interface cannot fake (9b1f, and the rung's own doc in `orbistoun-overrides`).
+        // Above the plain flip arm because it is the stronger, more specific claim.
+        "Entered" if trace.frames > 0 && trace.frame_written => Reach::Presented,
         "Entered" if trace.frames > 0 => Reach::Flipped,
         // **Checked after the flip, deliberately.** A guest that presented a frame and then
         // exited is recorded as having flipped: the frame is the stronger claim, and the
@@ -1739,54 +1759,52 @@ mod tests {
         assert_eq!(super::describe_end(&faulted), "image+0x1234");
     }
 
-    /// **Nothing this pipeline can produce reaches `Presented`, and that is the measurement.**
+    /// **A written frame reaches `Presented`; an unwritten flip stops at `Flipped`.**
     ///
-    /// `Reach::Presented` means the buffer a flip carried was read back and held pixels the
-    /// guest wrote. No renderer is attached to the run path, so no presented buffer exists to
-    /// inspect and `status_of` has no arm that awards it. Six guests sit at `flipped` with full
-    /// standing and none has produced a pixel; the scale now says so instead of implying
-    /// otherwise.
+    /// `Reach::Presented` is the framebuffer-diffing oracle as a rung: awarded when the buffer a
+    /// flip carried was read back and found holding bytes the guest wrote, which the worker
+    /// records in `frame_written` (9b1f). This replaces the test that asserted the rung was out
+    /// of reach - the readback landed, so the claim to protect is now what reaches it and, just
+    /// as much, what does not.
     ///
-    /// Asserted over every combination this function can actually be handed - every `reached`
-    /// word it matches on, crossed with a frame count and a deliberate exit - rather than
-    /// against one trace, because the claim is about the function and not about an example.
-    ///
-    /// **The day this test fails is the day the readback landed.** That is the intended way to
-    /// find out: whoever wires a presented buffer into the run path gets told, here, that the
-    /// rung above them is now reachable and its arm has to be written.
+    /// Three things hold together, or the rung would be reachable by less than a presented frame:
+    /// a written frame (`Entered`, a flip accepted, and `frame_written`) reaches it; the same run
+    /// with nothing written stops at `Flipped`, which is why the corpus is unchanged - every
+    /// title flips an unwritten buffer; and `frame_written` without an accepted flip, or below
+    /// `Entered`, does not reach it - a buffer nobody flipped is not a presented frame, and a
+    /// guest whose imports never resolved cannot present one.
     #[test]
-    fn the_top_rung_is_out_of_reach_until_a_buffer_can_be_read_back() {
+    fn a_written_frame_reaches_presented_and_an_unwritten_flip_stops_at_flipped() {
         use orbistoun_overrides::Reach;
 
+        let reach = |reached: &str, frames: u64, frame_written: bool| {
+            let mut t = trace(47, 933, None, None);
+            t.reached = reached.to_owned();
+            t.frames = frames;
+            t.frame_written = frame_written;
+            super::status_of(&t, "2026-09-15".to_owned()).reach
+        };
+
+        // A flip whose buffer the guest wrote into is the one thing that reaches the top rung.
+        assert_eq!(reach("Entered", 1, true), Reach::Presented);
+        // The same run with nothing written stops one below, at flipped - the corpus's place.
+        assert_eq!(reach("Entered", 1, false), Reach::Flipped);
+        // A written buffer that no port accepted a flip for is not a presented frame.
+        assert_eq!(reach("Entered", 0, true), Reach::Entered);
+
+        // The floor still decides: a frame written and flipped cannot lift a guest past a rung
+        // it skipped, so nothing below `Entered` presents.
         for reached in [
-            "Entered",
             "Linked",
             "ImportsResolved",
             "ContainerParsed",
             "Rejected",
             "something nobody has written yet",
         ] {
-            for frames in [0, 1, 53] {
-                for stopped in [None, Some(orbistoun_overrides::DELIBERATE_EXIT)] {
-                    let mut t = trace(47, 933, None, None);
-                    t.reached = reached.to_owned();
-                    t.frames = frames;
-                    t.stopped = stopped.map(ToOwned::to_owned);
-                    let reach = super::status_of(&t, "2026-09-15".to_owned()).reach;
-                    assert!(
-                        reach < Reach::Presented,
-                        concat!(
-                            "{}/{}/{:?} reached {:?} - if a presented buffer can now be read ",
-                            "back, give `status_of` its arm and replace this test with one ",
-                            "that exercises it"
-                        ),
-                        reached,
-                        frames,
-                        stopped,
-                        reach
-                    );
-                }
-            }
+            assert!(
+                reach(reached, 53, true) < Reach::Presented,
+                "{reached} with a written frame must not reach presented - it never entered",
+            );
         }
     }
 
@@ -1821,6 +1839,7 @@ mod tests {
             total_calls: calls,
             distinct,
             frames: 0,
+            frame_written: false,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),

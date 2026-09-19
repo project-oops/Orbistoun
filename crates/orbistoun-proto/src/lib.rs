@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 pub mod codec;
 
 /// Wire format version. Bump on any incompatible change to [`Request`] or [`Event`].
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// 4: added [`Event::Frame`] (the frame crossing, D695) - a peer without the variant would reject
+/// the message, which is the incompatibility this counter exists to catch.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// How far a run got. Ordered, so "furthest point reached" is a comparison.
 ///
@@ -161,6 +164,37 @@ pub enum Event {
         /// Human-readable cause.
         error: String,
     },
+    /// A rendered frame is ready, its bytes in a shared region this names.
+    ///
+    /// **The descriptor, never the pixels (D035, D695).** The bytes cross as bulk in the region the
+    /// worker wrote; this message carries only how to find and read them - dimensions, format, a
+    /// sequence number, and the region's name. No pointer and no handle: `region` is a bare name the
+    /// shim resolves against the same frames directory, exactly as a trace file's name is.
+    Frame {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// How the bytes are laid out.
+        format: FrameFormat,
+        /// Which frame this is, so the shim can order arrivals and drop a stale one.
+        sequence: u64,
+        /// The name of the region holding the bytes, resolved against the frames directory.
+        region: String,
+    },
+}
+
+/// How a frame's bytes are laid out in its region.
+///
+/// One variant today: the detile path produces 32-bpp RGBA (`orbistoun-gpu`'s `tiling.rs`), which is
+/// what the worker writes and the shim uploads. An enum rather than a bare assumption so a second
+/// layout, when one is measured, is a variant the shim is made to handle rather than a silent
+/// reinterpretation of the same bytes (principle 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameFormat {
+    /// Eight bits per channel, `R G B A` in byte order - the 32-bpp the detile produces.
+    Rgba8,
 }
 
 /// How a run ended.
@@ -463,7 +497,7 @@ pub const fn check_version(theirs: u32) -> Result<(), VersionMismatch> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
+    use super::{Event, FrameFormat, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
     use std::path::PathBuf;
 
     #[test]
@@ -507,6 +541,27 @@ mod tests {
         })
         .expect("serialise");
         assert!(json.contains("\"event\""), "got {json}");
+    }
+
+    #[test]
+    fn a_frame_event_names_its_region_and_carries_no_pointer() {
+        let json = serde_json::to_string(&Event::Frame {
+            width: 1920,
+            height: 1080,
+            format: FrameFormat::Rgba8,
+            sequence: 7,
+            region: "frame-7.bin".to_owned(),
+        })
+        .expect("serialise");
+        assert!(
+            json.contains("\"event\""),
+            "tagged like every event: {json}"
+        );
+        assert!(json.contains("frame-7.bin"), "names its region: {json}");
+        // D035: a protocol message carries the bulk's *name*, never a pointer or a handle to it.
+        for forbidden in ["0x", "ptr", "handle", "addr"] {
+            assert!(!json.contains(forbidden), "{forbidden} leaked into {json}");
+        }
     }
 
     #[test]

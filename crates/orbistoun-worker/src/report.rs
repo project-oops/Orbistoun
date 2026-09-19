@@ -1904,6 +1904,81 @@ fn submission_summary() -> Option<SubmissionSummary> {
     })
 }
 
+/// The head window of the flipped buffer to read, as `(address, len)`, or `None` when the
+/// address is not inside any allocated region.
+///
+/// **Pure, so the bounds arithmetic can be made to fail in a test** (principle 8). A guest can
+/// flip a buffer index registered with any address at all, so the range is checked against the
+/// run's own allocated regions before a byte of it is read - the D101 boundary that keeps a
+/// blind dereference off the report path, the same rule `-5bff` put on the submit path. The
+/// window is capped, and never runs past the end of the region the address falls in.
+fn flipped_window(address: u64, regions: &[(u64, u64, bool)], cap: u64) -> Option<(u64, usize)> {
+    let room = regions
+        .iter()
+        .filter(|(_, _, allocated)| *allocated)
+        .find(|(start, end, _)| address >= *start && address < *end)
+        .map(|(_, end, _)| end - address)?;
+    let len = usize::try_from(room.min(cap)).ok()?;
+    (len > 0).then_some((address, len))
+}
+
+/// Whether the head of `address`, bounded to `regions` and capped at `cap`, holds a byte the
+/// guest wrote (any non-zero one).
+///
+/// The read-and-decide behind [`flipped_frame_written`], split out so the whole of it - the
+/// bounds check *and* the read - can be exercised on a real buffer in a test, with the regions
+/// supplied rather than taken from the global map. False when the address is outside every
+/// allocated region or the window is all zero.
+fn frame_written_against(address: u64, regions: &[(u64, u64, bool)], cap: u64) -> bool {
+    let Some((at, len)) = flipped_window(address, regions, cap) else {
+        return false;
+    };
+    let Ok(at) = usize::try_from(at) else {
+        return false;
+    };
+    // SAFETY: `flipped_window` returned this range only after finding it inside an allocated
+    // region, and the caller guarantees those regions describe currently-mapped memory - in a
+    // run the guest's own under the identity mapping (D014) with the map locked, in a test a
+    // live host buffer. `len` was clamped to the region's end.
+    unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), len) }
+        .iter()
+        .any(|&b| b != 0)
+}
+
+/// Whether the buffer the guest last flipped holds bytes it wrote - the framebuffer signal
+/// behind `Reach::Presented` (9b1f).
+///
+/// The last-flipped buffer's guest address comes from the video crate (`-6a86`/`-420c`). Under
+/// the identity mapping (D014) that address is a host pointer, but it is bounds-checked against
+/// the run's allocated regions before it is read, and only a bounded head is read: the buffer's
+/// true extent needs the attribute struct decoded, which is unmeasured, and an unwritten buffer
+/// is the zero a fresh allocation holds throughout while a written one differs at its start, so
+/// the head separates them. False when nothing flipped, when the address lies outside every
+/// allocated region, or when the window is all zero - which is every corpus title today, none of
+/// which writes a frame a reader can see without a renderer (36c0).
+fn flipped_frame_written() -> bool {
+    /// The head read of a flipped buffer, in bytes: one page - enough for a written frame to
+    /// show at its start, small enough to read cheaply off the report path.
+    const WINDOW: u64 = 4096;
+
+    let Some((address, _attribute)) = orbistoun_video::last_flipped_buffer() else {
+        return false;
+    };
+    let Ok(map) = orbistoun_kernel::direct::map().lock() else {
+        return false;
+    };
+    // The regions are copied out so the read-and-decide is a function of data, and the lock is
+    // held across it so a region it validated cannot be unmapped underneath the read.
+    let regions: Vec<(u64, u64, bool)> = map
+        .regions()
+        .iter()
+        .map(|r| (r.start, r.end, r.allocated))
+        .collect();
+    let written = frame_written_against(address, &regions, WINDOW);
+    drop(map);
+    written
+}
+
 /// Collects the trace, recording where the guest died.
 pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>) -> CallTrace {
     // What the watched region became, printed here because this is the one point reached
@@ -1943,6 +2018,11 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         // submission a port refused is still a call to something implemented and the rows
         // cannot tell the two apart (D558).
         frames: orbistoun_video::flips_accepted(),
+        // Whether the buffer that flip carried holds bytes the guest wrote - read back and
+        // bounds-checked against the run's own regions, the signal that lifts `flipped` to
+        // `presented` (9b1f). False for every corpus title today: none writes a frame a
+        // reader can see without the renderer that 36c0 tracks.
+        frame_written: flipped_frame_written(),
         // The first command buffer a guest handed to `sceAgcDriverSubmitDcb`, summarised (3861).
         submission: submission_summary(),
         // **Recorded, not just printed.** These used to reach stderr at the end of a run and
@@ -2556,6 +2636,69 @@ mod tests {
         note_emulator_fault, note_instruction_shape, note_null_pointer_to_libc, published_envelope,
         serviced_interrupt,
     };
+
+    /// **The flipped-buffer window is bounded to an allocated region, and refuses to leave it.**
+    ///
+    /// `flipped_window` is the bounds check that keeps `flipped_frame_written` from reading a
+    /// guest address blind - the D101 boundary the presented rung rests on (9b1f). An address
+    /// inside an allocated region yields a window clamped to the region's end; one past the end,
+    /// in an unallocated region, or in no region at all, yields nothing to read.
+    #[test]
+    fn the_flipped_window_stays_inside_an_allocated_region() {
+        // One allocated region [0x1000, 0x3000) beside one unallocated [0x4000, 0x5000).
+        let regions = [(0x1000_u64, 0x3000_u64, true), (0x4000, 0x5000, false)];
+
+        // Inside the allocated region, the window is capped by `cap`.
+        assert_eq!(
+            super::flipped_window(0x1000, &regions, 256),
+            Some((0x1000, 256))
+        );
+        // Near the end it is clamped to the region's end, not `cap`: 0x3000 - 0x2f00 = 256.
+        assert_eq!(
+            super::flipped_window(0x2f00, &regions, 4096),
+            Some((0x2f00, 256))
+        );
+        // The region's last byte still has exactly one byte of room.
+        assert_eq!(
+            super::flipped_window(0x2fff, &regions, 4096),
+            Some((0x2fff, 1))
+        );
+        // The end itself is outside [start, end), so there is nothing to read.
+        assert_eq!(super::flipped_window(0x3000, &regions, 4096), None);
+        // An unallocated region is refused even though the address falls inside it.
+        assert_eq!(super::flipped_window(0x4000, &regions, 4096), None);
+        // An address in no region at all is refused.
+        assert_eq!(super::flipped_window(0x9999, &regions, 4096), None);
+    }
+
+    /// **A written head reads back as written; a zero head, and an out-of-region address, do
+    /// not.** The whole point of the presented rung is that a flip's buffer is *read back*, so
+    /// this drives the read on a real buffer - the one thing that proves `frame_written` can be
+    /// set at all, rather than being a field that is always false (9b1f, principle 3). A single
+    /// non-zero byte in the head is enough; all-zero is the unwritten buffer every corpus title
+    /// flips; and an address outside the region is never dereferenced.
+    #[test]
+    fn a_written_head_reads_back_as_written_and_a_zero_head_does_not() {
+        let mut buf = [0_u8; 64];
+        let address = buf.as_ptr() as u64;
+        let regions = [(address, address + 64, true)];
+
+        // All zero: nothing was written, so the buffer is not a presented frame.
+        assert!(!super::frame_written_against(address, &regions, 4096));
+
+        // One byte written into the head flips the answer - read back off the real buffer.
+        buf[3] = 0xAB;
+        let address = buf.as_ptr() as u64;
+        let regions = [(address, address + 64, true)];
+        assert!(super::frame_written_against(address, &regions, 4096));
+
+        // An address past the region is refused without a read, even with a written buffer near.
+        assert!(!super::frame_written_against(
+            address + 1024,
+            &regions,
+            4096
+        ));
+    }
 
     /// **A null-ish fault in orbistoun's code is called the guest's libc pointer, not an emulator
     /// bug.** PPSA02664 faults at `read of 0xa8` inside `orbistoun_libc::memcpy` - the guest handed

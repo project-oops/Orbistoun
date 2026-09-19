@@ -753,7 +753,7 @@ fn dispatch_core(
 /// out-of-range store would rewrite the registers a test is about to assert on, and the failure
 /// would present as a register bug rather than a memory one.
 ///
-/// [`dispatch_into`] is the variant that binds a *resident* buffer instead of a throwaway one.
+/// `dispatch_bound` is the variant that binds a *resident* buffer instead of a throwaway one.
 pub fn dispatch(
     module: &[u32],
     words: usize,

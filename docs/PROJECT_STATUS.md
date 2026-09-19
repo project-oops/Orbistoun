@@ -178,9 +178,9 @@ threads - it is a question the run has to answer rather than an assumption. Phas
 
 | | |
 |---|---|
-| Functions declared / implemented | 965 / 765 |
+| Functions declared / implemented | 967 / 765 |
 | Declared in a library that serves nothing | 149 across 23 libraries - names written down, no implementation |
-| Recorded behaviours | 814 - 366 published, 81 measured, 75 guest-observed, 255 assumed |
+| Recorded behaviours | 815 - 366 published, 82 measured, 75 guest-observed, 255 assumed |
 | Open questions a hardware probe could settle | 790 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
@@ -217,9 +217,10 @@ naming one (worklog 595).
 
 ## The three walls
 
-**One of these has since been passed** - PPSA02664 and PPSA03416 now flip a frame and stop in
-the AGC patch family instead - so read this section as two live walls and one record of a
-wall that was. The entries stay because the eliminations in them cost days and are not
+**One of these has since been passed twice over** - PPSA02664 and PPSA03416 now flip a frame,
+have moved past the AGC patch family too, and stop at a null-object read in command-buffer
+construction (the `0xa8` wall) - so read this section as one live wall (PPSA28061) and one
+record of walls that were. The entries stay because the eliminations in them cost days and are not
 repeatable for free.
 
 As it stood, **both of the first two pointed at the same thing**, reached from opposite
@@ -236,13 +237,14 @@ class by running something, not by arguing about it (D217).
   byte-identical - same fault, same `rdi=0x3` and `rax=0x9ba49`, same ten textures. Three
   classes gone; a side effect nobody performed is what is left, somewhere that is not the
   stack.
-- **PPSA02664 / PPSA03416 — this wall is passed. Kept as history, not as status.**
+- **PPSA02664 / PPSA03416 — passed twice over. Kept as history, not as status.**
 
-  Both titles now reach `flipped` with 220 imports, one frame each, and die in the AGC patch
-  family instead: `sceAgcSetCxRegIndirectPatchAddRegisters` carries orbistoun's own
-  `0xf7ff0001` placeholder as a pointer into a `memcpy`, thirty-two times over, because
-  `sceAgcDcbSetCxRegistersIndirect` is unimplemented and answers it (worklog 553). That wall
-  is characterised and blocked on a hardware probe, not on anything below.
+  Both titles now reach `flipped` with 222 imports, one frame each. The
+  `0xf7ff0001`-through-`memcpy` wall this once described is gone: `sceAgcDcbSetCxRegistersIndirect`
+  is implemented and the whole AGC patch family answers its measured `0x0` (worklog 616). They now
+  die deeper, at a host `memcpy` reading `0xa8` - a null object field inside the title's
+  command-buffer construction (`VCRUNTIME140.dll+0x1dc8d`, worklogs 672/684), upstream of submit and
+  not blocked on any hardware probe.
 
   **Load-time module initialisation is ruled out as an explanation, by measurement.** Both
   titles start two modules — `PS5Util.prx` and `Il2CppUserAssemblies.prx` — and each runs its
