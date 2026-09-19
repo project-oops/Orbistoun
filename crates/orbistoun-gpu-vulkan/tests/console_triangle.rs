@@ -96,9 +96,9 @@ fn capture(name: &str) -> Vec<u8> {
     bytes
 }
 
-/// The console's target, detiled to a linear frame of `[u8; 4]` pixels, MSB-first.
-fn console_frame() -> Vec<[u8; 4]> {
-    let target: Vec<u32> = capture("agc-primitive-draw-triangle-fw1240.target.hex")
+/// A named console target, detiled to a linear frame of `[u8; 4]` pixels, MSB-first.
+fn console_frame(target_capture: &str) -> Vec<[u8; 4]> {
+    let target: Vec<u32> = capture(target_capture)
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
@@ -193,7 +193,7 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
         "the target sized the frame"
     );
 
-    let console = console_frame();
+    let console = console_frame("agc-primitive-draw-triangle-fw1240.target.hex");
     let mut drawn = 0usize;
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -221,4 +221,103 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
         }
     }
     assert_eq!(drawn, 512, "the console drew 512 texels and all reproduced");
+}
+
+/// **A point draw renders as a point, not the triangle the same bytes made.**
+///
+/// The point record (`agc-primitive-draw-fw1240`) is the triangle record's near-twin: its stream
+/// differs only in `VGT_GS_OUT_PRIM_TYPE` (0 = POINTLIST against the triangle's 2 = TRISTRIP) and
+/// two counts, and it names the *same* shader addresses. So the triangle's captured shaders drive
+/// it, and the one thing that changes the picture is the topology this crate now threads into the
+/// mesh output (`-0c58`).
+///
+/// # What it asserts, and what it cannot
+///
+/// The topology decodes to a point list through the whole submit path - device-free and certain.
+/// With a device, the point module translates and the draw runs (the point-shaped mesh SPIR-V is
+/// one a driver accepts), and it covers far fewer texels than the triangle's 512 - it is not a
+/// triangle list (`-0c58` acceptance 2/4).
+///
+/// **What it cannot yet assert:** that the lit texel is the console's exact pixel. The point
+/// record did not capture its own shaders, so this drives it with the triangle's on the premise -
+/// supported by the near-identical streams - that the two draws share a primitive program; and
+/// where the point lands also depends on the assumed `exp prim` point packing (worklog 712). That
+/// exact match waits on the point record's own shaders.
+#[test]
+fn a_point_draw_renders_as_a_point_not_a_triangle() {
+    let stream = capture("agc-primitive-draw-fw1240.hex");
+    let vertex = capture("agc-primitive-draw-triangle-fw1240.vertex.hex");
+    let pixel = capture("agc-primitive-draw-triangle-fw1240.pixel.hex");
+    let mut bytes = vec![0u8; 0x1000];
+    bytes[..vertex.len()].copy_from_slice(&vertex);
+    bytes[0x200..0x200 + pixel.len()].copy_from_slice(&pixel);
+    let memory = Shaders { bytes };
+
+    let mut pipeline = Pipeline::new(Strategy::Predicated {
+        fidelity: Fidelity::Auto,
+        width: Width::default(),
+    })
+    .expect("a pipeline over the built-in tables");
+
+    let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory);
+    let report = &submission.report;
+
+    // Device-free and certain: the point record's topology is a point list, carried through the
+    // whole submit path - not the triangle record's strip.
+    assert_eq!(
+        report.primitive_topology,
+        Some(orbistoun_gpu::registers::PrimitiveTopology::PointList),
+        "the point record's VGT_GS_OUT_PRIM_TYPE decodes to a point list"
+    );
+
+    if !device_or_skip("a_point_draw_renders_as_a_point_not_a_triangle") {
+        return;
+    }
+
+    assert!(
+        report.failures.is_empty(),
+        "the point submission refused a shader: {:?}",
+        report.failures
+    );
+    assert_eq!(
+        report.shaders_translated, 2,
+        "both shaders translate for a point draw"
+    );
+
+    let mut backend = VulkanBackend::new();
+    let outcome = drive(&mut backend, &submission).expect("the point draw drives");
+    assert_eq!(outcome.refused, 0, "no command was refused");
+    let frame = backend.last_frame().expect("a frame was rendered");
+    assert_eq!(
+        (frame.width, frame.height),
+        (WIDTH, HEIGHT),
+        "the target sized the frame"
+    );
+
+    // The console's point target, detiled the same way the triangle's is.
+    let console = console_frame("agc-primitive-draw-fw1240.target.hex");
+
+    // Where the console lit a texel, and where orbistoun did.
+    let console_drawn: Vec<(u32, u32)> = (0..HEIGHT)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+        .filter(|&(x, y)| console[(y * WIDTH + x) as usize] == DRAWN)
+        .collect();
+    let orbistoun_drawn: Vec<(u32, u32)> = (0..HEIGHT)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+        .filter(|&(x, y)| frame.at(x, y) == Some(DRAWN))
+        .collect();
+    println!("[point] console lit {console_drawn:?}, orbistoun lit {orbistoun_drawn:?}");
+
+    // It is not the triangle: a point covers nowhere near the strip's 512 texels.
+    assert!(
+        orbistoun_drawn.len() < 512,
+        "a point draw is not a triangle list: it drew {} texels, the triangle's whole count",
+        orbistoun_drawn.len()
+    );
+    // And it is the console's point: the same texel, pixel-exact. This confirms both that the two
+    // records share a primitive program and that the assumed `exp prim` point packing is right.
+    assert_eq!(
+        orbistoun_drawn, console_drawn,
+        "the point orbistoun drew is not the console's point"
+    );
 }

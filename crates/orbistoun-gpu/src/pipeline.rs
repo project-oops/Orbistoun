@@ -85,9 +85,10 @@ use std::collections::BTreeMap;
 use orbistoun_shader::{
     Capture, EncodingTable, OperandTable, ShaderCorpus, ShaderError, decode_program,
 };
+use orbistoun_translate::wavefront::MeshPrimitive;
 use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
-use orbistoun_translate::{Strategy, translate_windowed};
+use orbistoun_translate::{Strategy, translate_windowed_primitive};
 
 use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage};
 use crate::packet::{PacketWalk, walk};
@@ -157,6 +158,41 @@ const fn stage_salt(stage: Stage) -> u64 {
         Stage::Compute => 0,
         Stage::Fragment => 0x5352_4746_0000_0001,
         Stage::Mesh => 0x4d45_5348_0000_0001,
+    }
+}
+
+/// Distinguishes the same shader translated for different mesh primitives, in the cache key.
+///
+/// A mesh module's output shape is in the module (D688), so a point and a triangle built from
+/// the same bytes are different modules and must not share a cache entry (`-0c58`).
+const fn primitive_salt(primitive: MeshPrimitive) -> u64 {
+    match primitive {
+        MeshPrimitive::Points => 0x504f_494e_0000_0001,
+        MeshPrimitive::Lines => 0x4c49_4e45_0000_0001,
+        MeshPrimitive::Triangles => 0,
+    }
+}
+
+/// The mesh primitive a decoded topology asks the translator to assemble, or a refusal naming a
+/// topology that has no mesh-primitive shape (`-0c58`).
+///
+/// A point, line and triangle map onto the three the mesh extension emits. A rectangle list and
+/// any unknown value are **refused by name** rather than drawn as a triangle: assembling a shape
+/// the stream did not ask for is the plausible-output principle 3 forbids, at the last step
+/// before a picture.
+fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, String> {
+    match topology {
+        PrimitiveTopology::PointList => Ok(MeshPrimitive::Points),
+        PrimitiveTopology::LineStrip => Ok(MeshPrimitive::Lines),
+        PrimitiveTopology::TriangleStrip => Ok(MeshPrimitive::Triangles),
+        other => Err(format!(
+            concat!(
+                "the draw's primitive topology is {}, which has no mesh-primitive shape to ",
+                "assemble - a point, line or triangle is emitted, and this is refused rather ",
+                "than drawn as one of them"
+            ),
+            other.label()
+        )),
     }
 }
 
@@ -632,9 +668,9 @@ impl Pipeline {
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&writes);
-        // The primitive the draw produces, read from `VGT_GS_OUT_PRIM_TYPE` and reported - a point
-        // draw and a triangle draw are told apart here, though the mesh output still emits triangles
-        // for both until the rest of `-0c58` lands.
+        // The primitive the draw produces, read from `VGT_GS_OUT_PRIM_TYPE` - a point draw and a
+        // triangle draw are told apart here, and `prepare` threads this into the mesh module's
+        // output shape (points, lines or triangles), so the two no longer render alike (`-0c58`).
         submission.report.primitive_topology = primitive_topology_at(&writes);
 
         // The scissor a stream set, as a viewport the backend restricts a draw to (worklog 646). The
@@ -661,7 +697,12 @@ impl Pipeline {
         submission.report.shaders_found = candidates.len();
 
         for candidate in candidates {
-            match self.prepare(candidate.address, candidate.stage, memory) {
+            match self.prepare(
+                candidate.address,
+                candidate.stage,
+                submission.report.primitive_topology,
+                memory,
+            ) {
                 Ok(prepared) => {
                     // The address resolved, whatever happened to the shader after that.
                     submission.report.addresses_resolved += 1;
@@ -824,6 +865,7 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
+        topology: Option<PrimitiveTopology>,
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
         // The register named a GPU address; guest memory is indexed by a guest one.
@@ -863,11 +905,27 @@ impl Pipeline {
 
         let shader = &window[..decoded.consumed];
         let host_stage = host_stage(stage);
-        // **Keyed by content and stage, not content alone.** The same instructions translated
-        // for a fragment stage and for a compute dispatch are different modules - one declares
-        // inputs and a colour output and the other publishes its registers - so a cache that
-        // ignored the stage would serve whichever was translated first.
-        let key = content_hash(shader) ^ stage_salt(host_stage) ^ window_salt(self.window);
+        // The primitive the mesh output assembles, from the stream's decoded topology. Only the
+        // mesh stage emits primitives, so only there does the topology matter or a bad one refuse;
+        // a stream that set no topology draws the measured triangle (`-0c58`).
+        let primitive = if host_stage == Stage::Mesh {
+            match topology {
+                Some(t) => mesh_primitive_of(t).map_err(PrepareFailure::Resolved)?,
+                None => MeshPrimitive::default(),
+            }
+        } else {
+            MeshPrimitive::default()
+        };
+        // **Keyed by content, stage and primitive, not content alone.** The same instructions
+        // translated for a fragment stage and for a compute dispatch are different modules - one
+        // declares inputs and a colour output and the other publishes its registers - and a mesh
+        // module's output shape is in the module too, so a point and a triangle from the same
+        // bytes are different modules. A cache that ignored any of these would serve whichever was
+        // translated first.
+        let key = content_hash(shader)
+            ^ stage_salt(host_stage)
+            ^ primitive_salt(primitive)
+            ^ window_salt(self.window);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -890,11 +948,12 @@ impl Pipeline {
             )));
         }
 
-        let translated = translate_windowed(
+        let translated = translate_windowed_primitive(
             &decoded,
             &self.encodings,
             self.strategy,
             host_stage,
+            primitive,
             self.window,
         )
         .map_err(|e| {
@@ -1178,6 +1237,65 @@ fn stage_of(name: &str) -> Option<ShaderStage> {
 #[cfg(test)]
 mod tests {
     use super::{Cached, ResourceId};
+
+    /// **A topology maps to the mesh primitive its shape is, or is refused by the name of the
+    /// shape it is not.** The mesh module carries the output topology (D688), so this is the seam
+    /// where a stream's `VGT_GS_OUT_PRIM_TYPE` becomes the primitive the translator emits. The
+    /// negative is the point: a rectangle list and an unmeasured value have no mesh-primitive
+    /// shape, and drawing one as a triangle is the plausible output principle 3 forbids at the
+    /// last step before a picture - so they are refused, and the refusal names the topology
+    /// (`-0c58` acceptance 3, watched failing here).
+    #[test]
+    fn a_topology_maps_to_its_primitive_or_is_refused_by_name() {
+        use super::{MeshPrimitive, PrimitiveTopology, mesh_primitive_of};
+
+        assert_eq!(
+            mesh_primitive_of(PrimitiveTopology::PointList),
+            Ok(MeshPrimitive::Points)
+        );
+        assert_eq!(
+            mesh_primitive_of(PrimitiveTopology::LineStrip),
+            Ok(MeshPrimitive::Lines)
+        );
+        assert_eq!(
+            mesh_primitive_of(PrimitiveTopology::TriangleStrip),
+            Ok(MeshPrimitive::Triangles)
+        );
+
+        let rect = mesh_primitive_of(PrimitiveTopology::RectangleList).unwrap_err();
+        assert!(
+            rect.contains("rectangle list") && rect.contains("refused"),
+            "a rectangle list is refused by name, not drawn as a triangle: {rect}"
+        );
+        let other = mesh_primitive_of(PrimitiveTopology::Other(9)).unwrap_err();
+        assert!(
+            other.contains("VGT_GS_OUTPRIM_TYPE 9"),
+            "an unmeasured value is refused by its raw field: {other}"
+        );
+    }
+
+    /// The index count is the whole difference between the three shapes, and the mesh output is
+    /// built from it - one index for a point, two for a line, three for a triangle.
+    #[test]
+    fn a_primitive_carries_its_index_count_and_a_distinct_cache_salt() {
+        use super::{MeshPrimitive, primitive_salt};
+
+        assert_eq!(MeshPrimitive::Points.indices(), 1);
+        assert_eq!(MeshPrimitive::Lines.indices(), 2);
+        assert_eq!(MeshPrimitive::Triangles.indices(), 3);
+
+        // The salts must differ, or the same bytes at two topologies would share a cache entry
+        // and the second draw would be served the first's module.
+        let salts = [
+            primitive_salt(MeshPrimitive::Points),
+            primitive_salt(MeshPrimitive::Lines),
+            primitive_salt(MeshPrimitive::Triangles),
+        ];
+        assert!(
+            salts[0] != salts[1] && salts[1] != salts[2] && salts[0] != salts[2],
+            "each primitive salts the cache key differently: {salts:?}"
+        );
+    }
 
     #[test]
     fn a_cache_entry_recognises_the_shader_it_was_built_from() {

@@ -462,7 +462,11 @@ pub mod built_in {
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
-    /// A mesh shader's triangle index array: three vertex indices per primitive.
+    /// A mesh shader's point index array: one vertex index per primitive (a `uint`).
+    pub const PRIMITIVE_POINT_INDICES_EXT: u32 = 5294;
+    /// A mesh shader's line index array: two vertex indices per primitive (a `uvec2`).
+    pub const PRIMITIVE_LINE_INDICES_EXT: u32 = 5295;
+    /// A mesh shader's triangle index array: three vertex indices per primitive (a `uvec3`).
     pub const PRIMITIVE_TRIANGLE_INDICES_EXT: u32 = 5296;
     /// Which vertex of the draw this invocation is.
     ///
@@ -514,6 +518,10 @@ pub mod mode {
     pub const OUTPUT_VERTICES: u32 = 26;
     /// The most primitives a mesh shader's workgroup will emit. One literal operand.
     pub const OUTPUT_PRIMITIVES_EXT: u32 = 5270;
+    /// A mesh shader's primitives are points. No operand.
+    pub const OUTPUT_POINTS: u32 = 19;
+    /// A mesh shader's primitives are lines. No operand.
+    pub const OUTPUT_LINES_EXT: u32 = 5269;
     /// A mesh shader's primitives are triangles. No operand.
     pub const OUTPUT_TRIANGLES_EXT: u32 = 5298;
 }

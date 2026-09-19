@@ -245,6 +245,56 @@ pub enum Stage {
     Mesh,
 }
 
+/// The primitive a mesh module assembles its vertices into.
+///
+/// The stream sets it in `VGT_GS_OUT_PRIM_TYPE`, `orbistoun-gpu` decodes it, and the caller maps
+/// it here (`-0c58`). It is meaningful only at [`Stage::Mesh`]; every other stage carries the
+/// default, which is never read. Vulkan ignores a *pipeline's* input-assembly topology for a mesh
+/// pipeline (D688), so the shape has to be stated in the mesh module itself - three things that
+/// must agree: the output execution mode, the per-primitive index built-in, and how many of the
+/// packed `exp prim` indices are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeshPrimitive {
+    /// One vertex per primitive.
+    Points,
+    /// Two vertices per primitive.
+    Lines,
+    /// Three vertices per primitive. The default and, so far, the only shape measured.
+    #[default]
+    Triangles,
+}
+
+impl MeshPrimitive {
+    /// How many of the packed `exp prim` indices this primitive uses - the width of its index
+    /// built-in, too (a `uint`, `uvec2` or `uvec3`).
+    #[must_use]
+    pub const fn indices(self) -> u32 {
+        match self {
+            Self::Points => 1,
+            Self::Lines => 2,
+            Self::Triangles => 3,
+        }
+    }
+
+    /// The `OutputPoints`/`OutputLinesEXT`/`OutputTrianglesEXT` execution mode declaring the shape.
+    const fn output_mode(self) -> u32 {
+        match self {
+            Self::Points => mode::OUTPUT_POINTS,
+            Self::Lines => mode::OUTPUT_LINES_EXT,
+            Self::Triangles => mode::OUTPUT_TRIANGLES_EXT,
+        }
+    }
+
+    /// The `PrimitivePointIndicesEXT`/`Line`/`Triangle` built-in decorating the index array.
+    const fn indices_built_in(self) -> u32 {
+        match self {
+            Self::Points => built_in::PRIMITIVE_POINT_INDICES_EXT,
+            Self::Lines => built_in::PRIMITIVE_LINE_INDICES_EXT,
+            Self::Triangles => built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+        }
+    }
+}
+
 /// How many vertices and primitives a mesh module declares room for.
 ///
 /// One per lane, because that is how the guest arranges a primitive shader's wave: a lane is a
@@ -260,16 +310,18 @@ const MESH_SLOTS: u32 = 64;
 struct MeshOutputs {
     /// The per-vertex block array; member zero of each element carries `Position`.
     vertices: Id,
-    /// The triangle index array: one `uvec3` per primitive.
+    /// The primitive index array: one index element per primitive, of [`Self::index_type`].
     indices: Id,
     /// One output array per parameter location the shader exports, by location.
     parameters: BTreeMap<u32, Id>,
     /// Pointer to one `vec4` in an output array.
     vec4_ptr: Id,
-    /// Pointer to one `uvec3` in an output array.
-    uvec3_ptr: Id,
-    /// The `uvec3` type itself, for composing an index triple.
-    uvec3: Id,
+    /// Pointer to one index element in the index array.
+    index_ptr: Id,
+    /// The index element type - a scalar `uint` for a point, a `uvec2`/`uvec3` for a line/triangle.
+    index_type: Id,
+    /// How many vertex indices one primitive carries: 1, 2 or 3.
+    index_width: u32,
 }
 
 /// Where the guest-memory window sits in the guest's address space.
@@ -359,7 +411,13 @@ pub enum Interpolation {
 ///
 /// Split out of the constructor for length, and it groups cleanly: everything here is a
 /// statement about the module as a whole rather than about anything inside it.
-fn emit_header(b: &mut Builder, stage: Stage, main: Id, output: Option<Id>) {
+fn emit_header(
+    b: &mut Builder,
+    stage: Stage,
+    primitive: MeshPrimitive,
+    main: Id,
+    output: Option<Id>,
+) {
     if stage == Stage::Mesh {
         // `MeshShadingEXT` implies `Shader`, and the extension must be declared with it.
         b.header(op::CAPABILITY, &[capability::MESH_SHADING_EXT]);
@@ -395,7 +453,9 @@ fn emit_header(b: &mut Builder, stage: Stage, main: Id, output: Option<Id>) {
                 op::EXECUTION_MODE,
                 &[main.0, mode::OUTPUT_PRIMITIVES_EXT, MESH_SLOTS],
             );
-            b.header(op::EXECUTION_MODE, &[main.0, mode::OUTPUT_TRIANGLES_EXT]);
+            // The shape the stream asked for, not a fixed triangle - Vulkan reads the mesh
+            // output topology from here, never from the pipeline's input assembly (`-0c58`, D688).
+            b.header(op::EXECUTION_MODE, &[main.0, primitive.output_mode()]);
         }
     }
     if let Some(colour) = output {
@@ -547,6 +607,7 @@ fn declare_mesh_outputs(
     u32_type: Id,
     vec4: Id,
     stage: Stage,
+    primitive: MeshPrimitive,
     reserved: &MeshReserved,
 ) -> Option<MeshOutputs> {
     if stage != Stage::Mesh {
@@ -555,8 +616,17 @@ fn declare_mesh_outputs(
     let slots = b.id();
     b.declare(op::CONSTANT, &[u32_type.0, slots.0, MESH_SLOTS]);
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
-    let uvec3 = b.id();
-    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, 3]);
+    // The index element carries one vertex index per component: a scalar `uint` for a point,
+    // a `uvec2` for a line, a `uvec3` for a triangle. The width is the primitive's, and it is
+    // what the matching `PrimitivePointIndices`/`Line`/`Triangle` built-in expects (`-0c58`).
+    let index_width = primitive.indices();
+    let index_type = if index_width == 1 {
+        u32_type
+    } else {
+        let v = b.id();
+        b.declare(op::TYPE_VECTOR, &[v.0, u32_type.0, index_width]);
+        v
+    };
 
     let per_vertex = b.id();
     b.annotate(op::DECORATE, &[per_vertex.0, decoration::BLOCK]);
@@ -569,7 +639,7 @@ fn declare_mesh_outputs(
         &[
             reserved.indices.0,
             decoration::BUILT_IN,
-            built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+            primitive.indices_built_in(),
         ],
     );
     for (location, id) in &reserved.parameters {
@@ -591,7 +661,7 @@ fn declare_mesh_outputs(
 
     let index_array = b.id();
     let index_array_ptr = b.id();
-    b.declare(op::TYPE_ARRAY, &[index_array.0, uvec3.0, slots.0]);
+    b.declare(op::TYPE_ARRAY, &[index_array.0, index_type.0, slots.0]);
     b.declare(
         op::TYPE_POINTER,
         &[index_array_ptr.0, OUTPUT, index_array.0],
@@ -615,17 +685,18 @@ fn declare_mesh_outputs(
     }
 
     let vec4_ptr = b.id();
-    let uvec3_ptr = b.id();
+    let index_ptr = b.id();
     b.declare(op::TYPE_POINTER, &[vec4_ptr.0, OUTPUT, vec4.0]);
-    b.declare(op::TYPE_POINTER, &[uvec3_ptr.0, OUTPUT, uvec3.0]);
+    b.declare(op::TYPE_POINTER, &[index_ptr.0, OUTPUT, index_type.0]);
 
     Some(MeshOutputs {
         vertices: reserved.vertices,
         indices: reserved.indices,
         parameters,
         vec4_ptr,
-        uvec3_ptr,
-        uvec3,
+        index_ptr,
+        index_type,
+        index_width,
     })
 }
 
@@ -714,6 +785,9 @@ pub struct Wavefront<'a> {
     inputs: BTreeMap<u32, Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
     mesh: Option<MeshOutputs>,
+    /// The primitive a mesh module assembles. Only read at [`Stage::Mesh`]; the default
+    /// otherwise, which never reaches a declaration or an index write (`-0c58`).
+    primitive: MeshPrimitive,
     /// The four-component float vector, which the stages that have one share.
     vec4: Id,
     /// The guest address the memory window starts at. See [`Model::memory_base`].
@@ -787,6 +861,7 @@ impl<'a> Wavefront<'a> {
             encodings,
             width,
             Stage::Compute,
+            MeshPrimitive::default(),
             &[],
             &[],
             Window::default(),
@@ -804,6 +879,7 @@ impl<'a> Wavefront<'a> {
         encodings: &'a EncodingTable,
         width: Width,
         stage: Stage,
+        primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
         window: Window,
@@ -855,7 +931,7 @@ impl<'a> Wavefront<'a> {
         // that costs an afternoon (D555).
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
         let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
-        emit_header(&mut b, stage, main, output);
+        emit_header(&mut b, stage, primitive, main, output);
 
         b.declare(op::TYPE_VOID, &[void.0]);
         b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
@@ -865,7 +941,15 @@ impl<'a> Wavefront<'a> {
         b.declare(op::TYPE_BOOL, &[bool_type.0]);
         let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
-        let mesh = declare_mesh_outputs(&mut b, f32_type, u32_type, vec4, stage, &mesh_reserved);
+        let mesh = declare_mesh_outputs(
+            &mut b,
+            f32_type,
+            u32_type,
+            vec4,
+            stage,
+            primitive,
+            &mesh_reserved,
+        );
         // The program counter, the scalar condition code and m0: one private word each,
         // sharing a pointer type and a zero initialiser. Zero so the shader starts at its
         // first block rather than at whatever the driver left in the variable.
@@ -927,6 +1011,7 @@ impl<'a> Wavefront<'a> {
             output,
             inputs,
             mesh,
+            primitive,
             vec4,
             memory_base: window.base,
             builder: b,
@@ -1225,30 +1310,34 @@ impl Model for Wavefront<'_> {
         Some(())
     }
 
-    fn write_mesh_indices(&mut self, lane: u32, indices: [Id; 3]) -> Option<()> {
+    fn write_mesh_indices(&mut self, lane: u32, indices: &[Id]) -> Option<()> {
         let mesh = self.mesh.clone()?;
         let slot = Self::constant(self, lane);
         let pointer = self.builder.id();
         self.builder.function(
             op::ACCESS_CHAIN,
-            &[mesh.uvec3_ptr.0, pointer.0, mesh.indices.0, slot.0],
+            &[mesh.index_ptr.0, pointer.0, mesh.indices.0, slot.0],
         );
 
-        let triple = self.builder.id();
-        self.builder.function(
-            op::COMPOSITE_CONSTRUCT,
-            &[
-                mesh.uvec3.0,
-                triple.0,
-                indices[0].0,
-                indices[1].0,
-                indices[2].0,
-            ],
-        );
+        // A point's index element is the scalar index itself; a line or triangle composes a
+        // vector of its two or three. The caller supplies exactly `index_width` of them.
+        let value = if mesh.index_width == 1 {
+            indices[0]
+        } else {
+            let composite = self.builder.id();
+            let mut operands = vec![mesh.index_type.0, composite.0];
+            operands.extend(indices.iter().map(|id| id.0));
+            self.builder.function(op::COMPOSITE_CONSTRUCT, &operands);
+            composite
+        };
         // Unmasked, for the reason `store_vec4` gives: a mesh module's outputs cannot be read,
         // so there is no old value to select against.
-        self.builder.function(op::STORE, &[pointer.0, triple.0]);
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
         Some(())
+    }
+
+    fn mesh_primitive(&self) -> MeshPrimitive {
+        self.primitive
     }
 
     fn attribute_input(&self, attribute: u32) -> Option<(Id, Id)> {
@@ -1817,10 +1906,38 @@ pub fn translate_for(
     stage: Stage,
     window: Window,
 ) -> Result<(Vec<u32>, usize), TranslateError> {
+    // The measured shape. A caller binding a mesh stage whose topology it decoded uses
+    // [`translate_for_primitive`]; every other caller wants a triangle (`-0c58`).
+    translate_for_primitive(
+        decode,
+        encodings,
+        width,
+        stage,
+        MeshPrimitive::default(),
+        window,
+    )
+}
+
+/// As [`translate_for`], for a caller that knows the mesh primitive the stream set.
+pub fn translate_for_primitive(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    width: Width,
+    stage: Stage,
+    primitive: MeshPrimitive,
+    window: Window,
+) -> Result<(Vec<u32>, usize), TranslateError> {
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);
-    let mut module =
-        Wavefront::for_stage(encodings, width, stage, &attributes, &parameters, window);
+    let mut module = Wavefront::for_stage(
+        encodings,
+        width,
+        stage,
+        primitive,
+        &attributes,
+        &parameters,
+        window,
+    );
     crate::control::emit(&mut module, decode, encodings)?;
     module.finish()
 }

@@ -726,3 +726,5 @@ context cannot re-derive.
 | - | [709. Three unused dependencies removed, the machete lint job green](worklog/709-three-unused-dependencies-removed-machete-green.md) |
 | - | [710. The red CI is three root causes, not four - confirmed against the run logs](worklog/710-the-ci-failures-are-three-roots-not-four-confirmed-against-the-logs.md) |
 | - | [711. The first green push was incomplete - two more roots the run surfaced](worklog/711-the-first-green-push-was-incomplete-two-more-roots-from-the-run.md) |
+| - | [712. The mesh output assembles the primitive the stream set, not always a triangle](worklog/712-the-mesh-output-assembles-the-primitive-the-stream-set.md) |
+| - | [713. The point record renders pixel-exact as a point, and the assumption is now measured](worklog/713-the-point-record-renders-pixel-exact-as-a-point.md) |

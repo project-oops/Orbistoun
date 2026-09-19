@@ -485,6 +485,31 @@ pub fn translate_windowed(
     stage: wavefront::Stage,
     window: wavefront::Window,
 ) -> Result<Translated, TranslateError> {
+    // A caller binding a mesh stage whose topology it decoded uses `translate_windowed_primitive`;
+    // every other wants the measured triangle (`-0c58`).
+    translate_windowed_primitive(
+        decode,
+        encodings,
+        strategy,
+        stage,
+        wavefront::MeshPrimitive::default(),
+        window,
+    )
+}
+
+/// As [`translate_windowed`], for a caller that knows the mesh primitive the stream set.
+///
+/// # Errors
+///
+/// Whatever the translation refuses - an unsupported instruction, an untrustworthy decode.
+pub fn translate_windowed_primitive(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    strategy: Strategy,
+    stage: wavefront::Stage,
+    primitive: wavefront::MeshPrimitive,
+    window: wavefront::Window,
+) -> Result<Translated, TranslateError> {
     let Strategy::Predicated { fidelity, width } = strategy else {
         return Err(TranslateError::StrategyNotImplemented(strategy));
     };
@@ -549,8 +574,9 @@ pub fn translate_windowed(
             })
         }
         Fidelity::Wavefront => {
-            let (module, instructions) =
-                wavefront::translate_for(decode, encodings, width, stage, window)?;
+            let (module, instructions) = wavefront::translate_for_primitive(
+                decode, encodings, width, stage, primitive, window,
+            )?;
             Ok(Translated {
                 module,
                 strategy,

@@ -612,9 +612,16 @@ pub trait Model {
         None
     }
 
-    /// Writes one primitive's three vertex indices, for the lane that is that primitive.
-    fn write_mesh_indices(&mut self, _lane: u32, _indices: [Id; 3]) -> Option<()> {
+    /// Writes one primitive's vertex indices, for the lane that is that primitive. As many as
+    /// [`Self::mesh_primitive`] carries: one for a point, two for a line, three for a triangle.
+    fn write_mesh_indices(&mut self, _lane: u32, _indices: &[Id]) -> Option<()> {
         None
+    }
+
+    /// The primitive this module assembles - only meaningful for a mesh module, and the default
+    /// ([`crate::wavefront::MeshPrimitive::Triangles`]) for every other, where it is never read.
+    fn mesh_primitive(&self) -> crate::wavefront::MeshPrimitive {
+        crate::wavefront::MeshPrimitive::default()
     }
 
     /// The fragment input carrying an attribute, and its vector type, if this module has one.
@@ -1757,16 +1764,24 @@ fn mesh_primitive_export<M: Model + ?Sized>(
     /// Where each index starts.
     const INDEX_SHIFTS: [u32; 3] = [0, 10, 20];
 
+    // How many indices this primitive uses: three for a triangle, two for a line, one for a
+    // point (`-0c58`). **Assumed** for a point and a line, and marked so: the measured packing
+    // (oracle record A) is a triangle, and this reads the low `count` nine-bit fields on the
+    // assumption a point or line packs its indices in the same low-to-high order. A point or
+    // line record would settle it; until one is measured this is a written-down assumption, not
+    // a fact (principle 1).
+    let count = model.mesh_primitive().indices() as usize;
+
     for lane in 0..model.lanes() {
         let word = model.read_source(instruction, packed, lane)?;
         let mask = model.constant((1 << INDEX_BITS) - 1);
-        let mut indices = [Id(0); 3];
-        for (slot, shift) in INDEX_SHIFTS.into_iter().enumerate() {
+        let mut indices = Vec::with_capacity(count);
+        for shift in INDEX_SHIFTS.into_iter().take(count) {
             let amount = model.constant(shift);
             let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, amount);
-            indices[slot] = model.binary(op::BITWISE_AND, shifted, mask);
+            indices.push(model.binary(op::BITWISE_AND, shifted, mask));
         }
-        if model.write_mesh_indices(lane, indices).is_none() {
+        if model.write_mesh_indices(lane, &indices).is_none() {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: "a primitive export needs the index array a mesh module declares, and 
