@@ -725,3 +725,4 @@ context cannot re-derive.
 | - | [708. CI tests macOS as x86_64-apple-darwin, so the sysv64 wall stops walling it](worklog/708-ci-tests-macos-as-x86-64-not-aarch64.md) |
 | - | [709. Three unused dependencies removed, the machete lint job green](worklog/709-three-unused-dependencies-removed-machete-green.md) |
 | - | [710. The red CI is three root causes, not four - confirmed against the run logs](worklog/710-the-ci-failures-are-three-roots-not-four-confirmed-against-the-logs.md) |
+| - | [711. The first green push was incomplete - two more roots the run surfaced](worklog/711-the-first-green-push-was-incomplete-two-more-roots-from-the-run.md) |

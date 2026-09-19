@@ -32,7 +32,11 @@
 //! exactly that and nothing else, so the more elaborate framing a sibling project needed is
 //! not carried over until something shows it is required.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+// `Path` is only referenced by the Windows launcher-discovery block and `newest_versioned`,
+// both `#[cfg(target_os = "windows")]`; importing it unconditionally is unused off Windows.
+#[cfg(target_os = "windows")]
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::Error;
