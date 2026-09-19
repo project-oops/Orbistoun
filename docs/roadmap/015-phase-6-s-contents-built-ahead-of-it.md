@@ -25,12 +25,12 @@ project will ever have.
 | **G6** | Execution on a real device, as the test oracle | **done** - 225 tests on the shader side, a large fraction executing |
 | **G7** | Instruction breadth | **187/187 instructions, no blockers** - re-derived from `orbistoun-cli shaders` over `crates/orbistoun-shader/tests/fixtures/*.gcn`. The last three are MTBUF's missing channel counts, measured into the mnemonic and operand tables rather than transcribed, which completes that family at eight of eight (worklog 588). VINTRP's three, both sampling forms, the levelled sample, the texel fetch and the store are all translated (D690, D692, worklogs 568, 572, 573, 575, 576 and 577). **Fixtures are 12/14, and both remaining are refusals by decision** - `orbistoun-cli shaders` names them (worklog 578). The sampling fixture uses more than one texture, which D690 refuses on purpose, and `unreached` reads one attribute both interpolated and flat, which a host input cannot be. The one real gap - a division pre-scale writing its flag to `null`, which is a shader asking for *less* rather than for something unsupported - is closed (worklog 579). Two earlier versions of this row were wrong in ways worth keeping: the dimensionality is a field in the instruction and not in the descriptor, and an image instruction is not always eight bytes |
 | **G8** | Submission pipeline: packets to register writes to a shader to a running module | **done, on a captured stream.** 357 packets walked, two shaders found and translated, and the modules it handed back draw a frame - with which module is the geometry and which the shading taken from the stage the pipeline attributed rather than from an offset the test knows (worklog 584). It still survives arbitrary and truncated streams. **It now reads the draw too** - twelve auto-indexed draws of three vertices and one instance, taken out of the packet bodies by opcode, and three is independently what the guest's own primitive shader declares it will emit (worklog 585). Still the harness's: the topology, the index buffer an indexed draw would need, and the render target |
-| **G9** | Packet vocabulary verified against something external | **harness done**, corpus empty - needs a capture |
+| **G9** | Packet vocabulary verified against something external | **harness and corpus done** - `tests/vocabulary.rs` walks every `.toml` capture in `tests/captures/` (three today: the two `agc-gl-cube-fw1240` and `agc-set-cx-register-direct`) through `register_writes` against `data/packets.toml`. What is open is narrower and worth stating instead: `tests/oracle_gl_cube.rs` prints its two recorded pixel hashes rather than asserting them, because the streams' inputs (vertex buffer, targets, fence) are deliberately unmapped so only the shaders resolve |
 | **G10** | Resource model: descriptors, buffers, images, render targets | **guest side done** - the V# buffer-descriptor decoder (D204) and MUBUF/MTBUF-plain translation landed (worklogs 097, 101; D203/D205). The capture-free remainder was **narrow-component format conversion** in MTBUF, and the packed *loads* are now done: `UINT`/`SINT`, `UNORM`/`SNORM`, `USCALED`/`SSCALED` and `FLOAT` at width 16, in one word or across two - the whole `16_16_16_16` family included (worklogs 586, 587). Still refused, each by name: the 11- and 10-bit packed floats (not IEEE halves, decode unmeasured), `SRGB`, and packed *stores*. The **untyped** family is now complete at every width too - `buffer_load/store_dword` and their `x2`/`x3`/`x4` forms, measured into the tables rather than transcribed (worklog 617), where before only the single-word pair was named. The *host* side (descriptor base -> host memory) and images/render targets still need G11 or a capture. |
-| **G11** | Graphics pipelines in the Vulkan backend; today it dispatches compute only | **begun** - the backend builds one, and a translated fragment export reaches an attachment through it (D550, D553). Steps (a), (b) and (c) are done; step (d) - which registers configure colour buffer zero - needs a capture |
+| **G11** | Graphics pipelines in the Vulkan backend | **begun** - the backend builds one, and a translated fragment export reaches an attachment through it (D550, D553). Steps (a), (b) and (c) are done; **step (d)'s decode is written too** - `colour_target_at` reads `CB_COLOR0_BASE` (`0xA318`) and `ATTRIB2` (`0xA3B0`) into base/width/height and `colour_swizzle_mode_at` reads the tiling, both cited to a public register database (worklogs 655/637/657), and the `Submission` now carries them (worklog 675). What is left of (d) is the backend *consuming* that state, which waits with the backend itself |
 | **G12** | Framebuffer diffing | **the harness is built** - it draws a hand-written fragment shader's colour into an attachment over a differing clear, carries a varying through interpolation, and reads every pixel back (D549, D550, D554). A **translated** module has been through it (D553) |
 | **G13** | Subgroup fidelity, the level that would actually be used at speed | **done** (D146) - one invocation per lane, mask by ballot; reports the subgroup width it needs |
-| **G15** | Surface layout: detiling guest images, and whether block-compressed data needs decoding at all | **begun.** The 32-bpp `64KB_R_X` detile is implemented and tested, anchored on obSCEne's one measured texel `(15,15)` → byte 4348 and refusing surfaces past a single 64 KiB block (worklog 653); obSCEne's full texel→offset sweep (`-4d82`) is in flight to verify the rest, and the host upload path is the next wiring. Other tiling modes and bit-depths still wait on their own measurements. The BC half is a device query away: Vulkan takes BC data natively, so the question is whether `textureCompressionBC` is available, and the backend queries four features today and not that one (D690) |
+| **G15** | Surface layout: detiling guest images, and whether block-compressed data needs decoding at all | **begun.** The 32-bpp `64KB_R_X` detile is implemented and tested, anchored to the **one** texel obSCEne read back on hardware - `(15,15)` → byte 4348 (`166-agc/primitive-draw`) - and agreeing with obSCEne's own tiler on a second point `(32,21)` → 2640 and a bijection over the 16,384-texel block, which is software-model agreement, not a second readback (worklog 674, corrected 691); it refuses surfaces past a single 64 KiB block and non-32-bpp formats (worklogs 653/667), and the `Submission` carries the target's base and tiling for a backend upload path (worklog 675). Other tiling modes, bit-depths and the multi-block case still wait on their own measurements. The BC half: Vulkan takes BC data natively, so the question is whether `textureCompressionBC` is available - the backend now queries it and the run report says whether the device has it, so a decoder is a fallback only where one is absent (D690) |
 | **G14** | Performance: collapse the single-block dispatch loop, persist the shader cache | **deferred** until there is something to measure |
 
 ### What each remaining step is waiting on
@@ -87,24 +87,25 @@ attachment configuration a capture would settle.
 
 An export is not a memory write. `exp mrt0 v0,v1,v2,v3` means *this is colour zero*, and
 the destination is a **render target** - a thing that exists only inside a graphics
-pipeline. Three things stand between here and there:
+pipeline. Three things stood between here and there, and the first two are done:
 
 1. The translated module has to be a **fragment** shader: execution model `Fragment`, with
-   output variables. Every module emitted today is a compute dispatch writing a storage
-   buffer.
-2. The backend has to build a **graphics pipeline** - render pass, attachments, a draw. It
-   dispatches compute and nothing else.
+   output variables. Done - `orbistoun-translate` emits fragment modules alongside compute
+   dispatches (D553).
+2. The backend has to build a **graphics pipeline** - render pass, attachments, a draw. Done
+   too - `VulkanBackend::execute` handles `Draw` and `DrawIndexed`, not compute alone (D550).
 3. Something has to say **which attachment `mrt0` is** - its format, size and address.
    That is register state the guest writes, and it cannot be invented (D104).
 
-Only the third needs a capture. In the order worth doing them:
+The third once needed a capture; its register mapping is decoded now (the (d) row below). In the
+order worth doing them:
 
 | | Step | Needs a capture | What it buys |
 |---|---|---|---|
 | **b** | Render pass, a draw with a hand-written fragment shader, and read the attachment back | no | **done** (D549, D550). `orbistoun_gpu_vulkan::framebuffer::draw_with` clears to red, draws a hand-written fullscreen triangle whose fragment shader writes blue, and every pixel comes back blue. The two colours differ on purpose: the clear is what failure looks like |
 | **a** | Solve the export's operand layout by probe | no | **already done, and this table did not say so.** `opcode-operands.toml` carries the EXP entry solved from ten samples, and decoding `0xF8000000 | target << 4` answers `Immediate(target)` plus four vector registers for every target tried (D551). The remaining export work is translation, not decoding |
 | **c** | Emit `Fragment` modules with output variables | no | **done** (D553). `orbistoun_translate::wavefront::Stage::Fragment` emits the execution model, `OriginUpperLeft` and a `Location 0` output in the entry point's interface, and skips the observation epilogue - which is what keeps a fragment module inside a device that requests no features. `exp mrt0` translates into a store to it, and `orbistoun-gpu-vulkan/tests/translated_export.rs` draws the translated module and the hand-written one over the same clear and compares every pixel |
-| **d** | Which registers configure colour buffer zero | **yes** | the mapping D104 refuses to invent |
+| **d** | Which registers configure colour buffer zero | **no longer** | the mapping D104 refused to invent is decoded - `CB_COLOR0_BASE`/`ATTRIB2`/`ATTRIB3` cited to a register database (worklogs 655/637/657) and carried on the `Submission` (worklog 675); what waits is the backend reading it |
 
 **(b) is done.** Framebuffer diffing was described above as the only cheap mechanical oracle
 this project will ever have, and it was the one part of that sentence that was not built. It is
@@ -146,18 +147,21 @@ It splits into two halves that are not equally blocked, and saying so is most of
 - **Detiling's first mode is measured and landed.** A guest render target or texture is not linear;
   the descriptor names a tiling mode (D690) and the swizzle it implies is a hardware property that
   must be measured, not guessed - a wrong swizzle renders a frame that is subtly wrong, the failure
-  this project is least able to detect. The 32-bpp `64KB_R_X` swizzle is now measured: obSCEne drew
-  one pixel into such a surface and read its tiled byte on hardware (4348), the capture's own geometry
-  fixes that pixel as texel `(15,15)`, and three independent tiler models reproduce the full equation.
-  `orbistoun-gpu`'s `tiling` module implements and inverts it, anchored on that pixel and refusing any
-  surface past a single 64 KiB block (worklog 653). obSCEne's full texel→offset sweep (`-4d82`) is
-  being built to confirm every entry, not just the anchor. Other modes, bit-depths and the multi-block
-  case still wait on their own measurements.
+  this project is least able to detect. The 32-bpp `64KB_R_X` swizzle is anchored to **one** texel read back on hardware -
+  obSCEne drew into such a surface and read tiled byte 4348 for texel `(15,15)` (`166-agc/primitive-draw`) -
+  and its extension across the block is agreement with obSCEne's own tiler (the second point
+  `(32,21)` → 2640 and the bijection over all 16,384 texels of the 128×128 block are computed alike),
+  software-model agreement rather than a second readback (worklog 674, corrected 691).
+  `orbistoun-gpu`'s `tiling` module
+  implements and inverts it - derived to fit `(15,15)`, it reproduces `(32,21)` on its own - refusing
+  any surface past a single 64 KiB block, and a non-32-bpp format (worklog 667). Other modes,
+  bit-depths and the multi-block case (block-level tiling + `pipeBankXor`) still wait on their own
+  measurements.
 - **Block-compressed decode may not be needed at all.** Vulkan consumes BC data natively, so the
   work is undoing the tiling and handing the compressed blocks over - not decompressing them.
-  Whether this device can is a published core-optional feature, `textureCompressionBC`, and the
-  backend queries four device features today and not that one. **Querying it is a first step
-  that needs no capture**, and it decides whether a decoder is a requirement or a fallback.
+  Whether this device can is a published core-optional feature, `textureCompressionBC`, which the
+  backend now queries and the run report reflects (`compute.rs`). That first step - which needed no
+  capture - is done, and it decides per device whether a decoder is a requirement or a fallback.
 
 What waits behind the first half: every textured frame. D690 refuses a second texture and maps
 the one bound image by register identity precisely because there is nothing to resolve a

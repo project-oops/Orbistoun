@@ -89,6 +89,13 @@ pub enum Gap {
     /// the case forcing was added for: "the case that matters is when the implementation is
     /// yours and you suspect it" (D198, D625).
     Captured,
+    /// The guest handed a command buffer to the graphics driver.
+    ///
+    /// **Progress, not a wall.** Like [`Self::Captured`] it is an answer rather than a gap: a
+    /// guest that reaches a submission has built a real command stream, and the finding says what
+    /// is in it so the next work - translating the shaders its registers name, then a backend to
+    /// run them - is ranked rather than guessed at (3861).
+    Submitted,
 }
 
 impl Gap {
@@ -108,6 +115,7 @@ impl Gap {
             Self::AbiViolation => "crates/orbistoun-thunk, and how the guest is entered",
             Self::ShortRead => "crates/orbistoun-fs",
             Self::Captured => "the implementation you asked about",
+            Self::Submitted => "crates/orbistoun-gpu and its pipeline, then a backend crate",
         }
     }
 }
@@ -217,6 +225,7 @@ pub fn findings(trace: &CallTrace) -> Vec<Finding> {
     out.extend(spinning(trace));
     out.extend(abi_violation(trace));
     out.extend(short_reads(trace));
+    out.extend(submitted(trace));
     out.extend(faulted(trace));
     out.extend(unnamed(trace));
     out.extend(unimplemented(trace));
@@ -973,6 +982,42 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
     })
 }
 
+/// The first command buffer the guest handed to the graphics driver.
+///
+/// Progress rather than a wall: a guest that reaches a submission has built a real command stream,
+/// and this says what is in it so the next work is ranked rather than guessed at (3861). `None` for
+/// every run that has not got this far, which is all of them today - the corpus stalls before submit.
+fn submitted(trace: &CallTrace) -> Option<Finding> {
+    let submission = trace.submission.as_ref()?;
+    Some(Finding {
+        gap: Gap::Submitted,
+        confidence: Confidence::Certain,
+        subject: Some("sceAgcDriverSubmitDcb".to_owned()),
+        what: format!(
+            "the guest submitted a command buffer: {} packets, {} draws, {} shader candidates",
+            submission.packets, submission.draws, submission.shaders_found
+        ),
+        evidence: vec![
+            format!(
+                "{} register writes extracted from the stream",
+                submission.register_writes
+            ),
+            format!(
+                "{} of the addresses named resolved to a region the guest was given, {} did not (D101)",
+                submission.addresses_resolved, submission.addresses_unresolved
+            ),
+        ],
+        action: Some(
+            concat!(
+                "the first real graphics work: translate the shaders its registers name, then ",
+                "attach a backend to the run path so the stream can be rendered"
+            )
+            .to_owned(),
+        ),
+        weight: u64::try_from(submission.packets).unwrap_or(u64::MAX),
+    })
+}
+
 /// Named functions the guest used that nothing implements.
 ///
 /// **The most directly actionable category.** It names a function, says how much the guest
@@ -1169,7 +1214,7 @@ mod tests {
     };
     use crate::trace::{
         AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport,
-        ReadReport, Registers, TracedCall,
+        ReadReport, Registers, SubmissionSummary, TracedCall,
     };
 
     /// Registers with every field a distinct value well above the null page, so a test can zero
@@ -1194,6 +1239,44 @@ mod tests {
             r14: 0x400f,
             r15: 0x4010,
         }
+    }
+
+    /// **A submitted command buffer is a finding, and a run that never reached one is not.**
+    ///
+    /// The handover surfaced: a trace carrying a submission produces a `Gap::Submitted` finding
+    /// naming its packet, draw and shader-candidate counts; an ordinary run, whose `submission` is
+    /// `None`, produces none - which is every run today, so the negative is the one that must hold.
+    #[test]
+    fn a_submitted_command_buffer_is_a_finding_and_an_ordinary_run_is_not() {
+        // No submission: no finding. The corpus stalls before submit, so this is the common case.
+        assert!(
+            !findings(&empty()).iter().any(|f| f.gap == Gap::Submitted),
+            "a run that reached no submission produces no Submitted finding"
+        );
+
+        let mut trace = empty();
+        trace.submission = Some(SubmissionSummary {
+            packets: 40,
+            register_writes: 31,
+            draws: 2,
+            shaders_found: 3,
+            addresses_resolved: 2,
+            addresses_unresolved: 1,
+        });
+        let found = findings(&trace);
+        let submission = found
+            .iter()
+            .find(|f| f.gap == Gap::Submitted)
+            .expect("a submission produces a finding");
+        assert_eq!(submission.subject.as_deref(), Some("sceAgcDriverSubmitDcb"));
+        assert!(
+            submission.what.contains("40 packets")
+                && submission.what.contains("2 draws")
+                && submission.what.contains("3 shader candidates"),
+            "the finding names the counts: {}",
+            submission.what
+        );
+        assert_eq!(submission.weight, 40, "ranked by packet count");
     }
 
     /// **The register that was the null pointer is named, and the value that merely looked like
@@ -1284,6 +1367,7 @@ mod tests {
             total_calls: 0,
             distinct: 0,
             frames: 0,
+            submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
             tail: Vec::new(),
@@ -1906,6 +1990,7 @@ mod tests {
             total_calls: 2,
             distinct: 2,
             frames: 0,
+            submission: None,
             calls: vec![
                 CalledImport {
                     index: 0x81,

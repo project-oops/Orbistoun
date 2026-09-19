@@ -47,8 +47,10 @@
 //!
 //! # Status
 //!
-//! Declarations, the backend vocabulary, and packet-level instrumentation. Nothing is
-//! translated to Vulkan yet.
+//! Declarations, the backend vocabulary, and packet-level instrumentation. The command stream
+//! and shaders translate to backend-neutral render commands here; the sibling `orbistoun-gpu-vulkan`
+//! executes compute dispatches and draws on a real device (this crate names no graphics API,
+//! principle 12).
 
 mod backend;
 pub mod packet;
@@ -63,13 +65,17 @@ pub use backend::{
 };
 pub use packet::{Packet, PacketKind, PacketWalk, walk};
 pub use registers::{
-    BufferDescriptor, ColourTarget, ColourTargetExtent, DispatchCall, DrawCall, DrawCorrelation,
-    DrawKind, DrawOrDispatch, ImageDescriptor, RegisterWrite, Scissor, ShaderCandidate,
-    SwizzleMode, TargetMask, Vocabulary, VocabularyError, buffer_descriptor_at,
+    BlendControl, BlendFactor, BufferDescriptor, ColourTarget, ColourTargetExtent, CombineFunc,
+    CompareFunc, DepthControl, DispatchCall, DrawCall, DrawCorrelation, DrawKind, DrawOrDispatch,
+    ImageDescriptor, RegisterWrite, Scissor, ShaderCandidate, StencilControl, StencilOp,
+    SwizzleMode, TargetMask, Vocabulary, VocabularyError, blend_control_at, buffer_descriptor_at,
     colour_swizzle_mode_at, colour_target_at, colour_target_extent_at, correlate_draws,
-    decode_buffer_descriptor, decode_colour_swizzle_mode, decode_colour_target_extent,
-    decode_image_descriptor, decode_scissor, decode_swizzle_mode, decode_target_mask,
-    dispatch_calls, draw_calls, register_writes, scissor_at, shader_candidates, target_mask_at,
+    decode_blend_control, decode_blend_factor, decode_buffer_descriptor,
+    decode_colour_swizzle_mode, decode_colour_target_extent, decode_combine_func,
+    decode_compare_func, decode_depth_control, decode_image_descriptor, decode_scissor,
+    decode_stencil_control, decode_stencil_op, decode_swizzle_mode, decode_target_mask,
+    depth_control_at, dispatch_calls, draw_calls, register_writes, scissor_at, shader_candidates,
+    stencil_control_at, target_mask_at,
 };
 pub use render::{FrameOutcome, drive};
 pub use tiling::{

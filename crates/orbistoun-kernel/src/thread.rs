@@ -509,6 +509,7 @@ pub unsafe fn spawn(
     name: &str,
     requested_affinity: Affinity,
     requested_priority: i32,
+    requested_stack: u64,
 ) -> Result<ThreadHandle, SpawnError> {
     // The *host's* core count, deliberately, even though the guest was told the target's.
     // Folding a mask onto cores that do not exist here would place threads nowhere.
@@ -527,10 +528,17 @@ pub unsafe fn spawn(
     let body = move || {
         become_thread(handle);
         let base = stack_base_for(slot);
-        let Ok(stack) = orbistoun_mem::stack::GuestStack::reserve(
-            base,
-            orbistoun_mem::stack::DEFAULT_STACK_SIZE,
-        ) else {
+        // The requested size, capped to what fits this slot: the slots are
+        // `THREAD_STACK_SPACING` apart and a reservation adds a guard page below and a
+        // read-ahead page above, plus up to a page of rounding-up, so a size beyond the
+        // spacing less those three would run into the next thread's stack. A guest asking for
+        // more than a slot holds gets the largest that fits rather than an overrun.
+        let cap = THREAD_STACK_SPACING
+            .saturating_sub(orbistoun_mem::stack::GUARD_SIZE)
+            .saturating_sub(orbistoun_mem::stack::READAHEAD_GUARD)
+            .saturating_sub(orbistoun_mem::stack::GUARD_SIZE);
+        let Ok(stack) = orbistoun_mem::stack::GuestStack::reserve(base, requested_stack.min(cap))
+        else {
             // Reported rather than panicked: a thread that could not get a stack is a
             // thread that never ran, and the record says so.
             finish(handle);

@@ -1,0 +1,21 @@
+# A single vendor-library builder call, as a vocabulary check that is not the GL cube.
+#
+# `sceAgcDcbSetCxRegisterDirect(dcb, (0x12345678 << 32) | 0x200)` writes one SET_CONTEXT_REG packet -
+# header 0xc0016900, register offset 0x200, value 0x12345678 - twelve bytes. The bytes are measured
+# beside the builder in `tests/measured_builders.rs::set_context_register_matches_the_capture`.
+#
+# Unlike the GL cube captures (oops-sdk's own GL path, packet by packet), this is a vendor library
+# call that states its own register and value in its argument, so the expectation is what the call
+# was told to write - checked through `register_writes` and `data/packets.toml`, the decode the table
+# drives, rather than the emitter it was measured against.
+#
+# The decoded register is the SET_CONTEXT_REG base 0xA000 plus the offset 0x200 = 0xA200; the offset
+# 0x200 is what the call's packed argument carries.
+
+call  = "sceAgcDcbSetCxRegisterDirect"
+queue = "draw"
+note  = "one measured builder call: SET_CONTEXT_REG offset 0x200 = 0x12345678, 12 bytes (measured_builders.rs)"
+
+[[register]]
+register = 0xA200
+value    = 0x12345678

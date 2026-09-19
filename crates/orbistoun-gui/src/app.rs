@@ -1473,7 +1473,7 @@ const DOCS: &[oops_docs::Doc] = &[
     oops_docs::Doc::new(
         "graphics",
         "Graphics Settings",
-        "Vulkan 1.3 pipeline, RDNA2 shader lowering, and detiling",
+        "PM4 command-stream decode and shader translation to SPIR-V; presentation not implemented yet",
         include_str!("../../../docs/features/graphics.md"),
     ),
     oops_docs::Doc::new(

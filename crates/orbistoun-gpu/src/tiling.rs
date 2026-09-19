@@ -7,23 +7,43 @@
 //! built from linear data and corrupts every genuinely tiled surface (principle 3). So the swizzle
 //! here is not guessed - it is anchored to a hardware measurement.
 //!
-//! # Provenance: measured by obSCEne, at texel (15,15)
+//! # Provenance: one measured byte, and a swizzle software models agree on beyond it
 //!
-//! `known_by: measured`. obSCEne's draw oracle `166-agc/primitive-draw` (sweep `20260916-223136`)
-//! rendered one pixel into a `64KB_R_X` 32-bpp colour target and read its address back on hardware:
-//! `color-idx 0x43f`, tiled byte **4348**. The pixel's texel is fixed by the capture's own geometry,
-//! not assumed: the draw is a point (`VGT_GS_OUT_PRIM_TYPE` = POINTLIST, obSCEne `-c7f3`), its vertex
-//! is NDC `(-0.5, -0.5)`, and the viewport transform in the same stream (`PA_CL_VPORT_*` scale/offset
-//! = 32) carries that to screen corner `(16.0, 16.0)`, which a down-left rasteriser resolves to texel
-//! **`(15, 15)`**. So the measured fact is one texel→offset pair: `(15, 15)` → byte 4348, and the
-//! equation below reproduces it - `(15, 15)` is the only texel in the block it sends there.
+//! **One texel was read back from hardware, and no more.** obSCEne's draw oracle
+//! `166-agc/primitive-draw` (sweep `20260916-223136`) rendered one pixel into a `64KB_R_X` 32-bpp
+//! colour target and read a single address back: `color-idx 0x43f`, tiled byte **4348**. That is the
+//! one hardware fact. Its texel is fixed by the capture's own geometry, not assumed: the draw is a
+//! point (`VGT_GS_OUT_PRIM_TYPE` = POINTLIST), its vertex is NDC `(-0.5, -0.5)`, and the viewport
+//! transform in the same stream (`PA_CL_VPORT_*` scale/offset = 32) carries it to screen corner
+//! `(16.0, 16.0)`, which a down-left rasteriser resolves to texel **`(15, 15)`**.
 //!
-//! obSCEne is being extended to return the **whole** texel→offset table from one retiring draw (the
-//! render-path probe on request `-4d82`, filling the surface through the colour backend rather than a
-//! guest store, which stalls). This equation is the layout that sweep confirms; three independent
-//! tiler models already agree on it entry for entry, so it is the expected result, not a guess. When
-//! the table lands it is the acceptance check on every entry here, and the one measured today is
-//! `(15, 15)`.
+//! **Everything past that one byte is agreement among independent software tiler models, not a
+//! readback.** The equation below is derived to fit `(15, 15)` → 4348, and it agrees entry for entry
+//! with obSCEne's `agc_detile_pixel` (a `static inline` in `oops-sdk` that *computes* the offset). So
+//! a second point like `(32, 21)` → 2640 and the mapping being bijective over all 16,384 texels of
+//! the 128×128 block are things those models compute alike - real corroboration that the equation is
+//! right, but not a hardware measurement. obSCEne's `166-agc/tiling-swizzle` check submits no draw;
+//! its rows are that function's outputs, and where a resolution (`-db54`) called them "measured on
+//! hardware" it was quoting a host build's computation (worklog 674 carried that error in; this
+//! restates it). The honest ceiling is one texel read back and a swizzle two independent
+//! implementations (this one and obSCEne's) agree on across one block - which is why
+//! `SINGLE_BLOCK_EXTENT` stays at 128, where no readback has gone.
+//! The first real multi-texel readback on offer is the triangle record (512 drawn pixels, `-f432`),
+//! not yet in the tree.
+//!
+//! # Why only `64KB_R_X` at 32 bpp, and not `4KB_S` or the block-compressed formats
+//!
+//! Guest **colour targets** are `64KB_R_X` 32-bpp (obSCEne measured `cb0-tiling-mode 0x1b` on every
+//! draw), which is the mode a render pass reads back, and the only one a hardware measurement could
+//! reach: obSCEne established (`-6e0f`) that **no reachable AGC API exposes surface detiling on
+//! retail** - a compute `image_store` into a tiled surface faults the GPU pipe - so the swizzle was
+//! obtainable only by *rendering* into such a surface and reading it back, which works for a render
+//! target and not for a texture. `4KB_S` (a texture tiling) and the block-compressed layouts
+//! therefore have no measurement, and this project does not derive a swizzle from a manual: a wrong
+//! one passes every round-trip and linear test and corrupts only genuinely tiled surfaces (principle
+//! 3), so it is refused by name rather than guessed. They wait on a measurement, and are not needed
+//! before a backend samples textures at all. Block-compressed data needs no
+//! decode regardless - Vulkan consumes it natively (roadmap G15).
 
 use crate::registers::{
     ImageDescriptor, RegisterWrite, SwizzleMode, colour_swizzle_mode_at, colour_target_at,
@@ -38,8 +58,10 @@ use crate::registers::{
 /// [`detile_64kb_rx_bpp4`] refuses rather than models; the measured surface has `pipeBankXor` zero.
 ///
 /// The pattern is a set of `XOR`ed bit selections - each guest coordinate bit lands in a fixed output
-/// bit, the shape a hardware address equation takes. It reproduces obSCEne's measured anchor
-/// `(15, 15)` → byte 4348 (see the module docs).
+/// bit, the shape a hardware address equation takes. It is fitted to the one texel read back on
+/// hardware, `(15, 15)` → byte 4348, and reproduces what obSCEne's own tiler *computes* for other
+/// texels - e.g. `(32, 21)` → 2640 - agreeing with it as a bijection across all 16,384 texels of the
+/// 128x128 macro-tile. That is software-model agreement, not a second readback (see the module docs).
 #[must_use]
 pub fn tiled_byte_offset_64kb_rx_bpp4(x: u32, y: u32) -> u32 {
     let mut offset = 0;
@@ -81,6 +103,12 @@ pub enum DetileError {
         /// Words actually supplied.
         got_words: usize,
     },
+    /// The surface's format is not one the 32-bpp swizzle applies to - the element is a different
+    /// size, or a size this does not model - so detiling it would read across or within elements.
+    UnsupportedFormat {
+        /// The GFX10 `IMG_FORMAT` code the descriptor carried.
+        format: u32,
+    },
 }
 
 impl std::fmt::Display for DetileError {
@@ -96,6 +124,10 @@ impl std::fmt::Display for DetileError {
             } => write!(
                 f,
                 "tiled data is {got_words} words, swizzle needs {needed_words} to reach every texel"
+            ),
+            Self::UnsupportedFormat { format } => write!(
+                f,
+                "image format {format} is not a 32-bpp format the measured swizzle applies to"
             ),
         }
     }
@@ -151,15 +183,48 @@ pub fn detile_64kb_rx_bpp4(
 
 /// Detile the surface an [`ImageDescriptor`] names, given the descriptor's own words in guest memory.
 ///
-/// A thin wrapper over [`detile_64kb_rx_bpp4`] that takes the extent from the descriptor. It is only
-/// the 32-bpp `64KB_R_X` case today - the one obSCEne has measured - and the descriptor's format and
-/// tiling mode are the caller's to check before calling; a different format or mode is a different
-/// swizzle, not this one.
+/// Bytes per texel for a GFX10 `IMG_FORMAT` code, or `None` for one whose element size this does not
+/// model.
+///
+/// The codes are `GFX10_FORMAT_*` (oops-mesa `src/amd/registers/gfx10-rsrc.json`), whose names give
+/// the channel bit-widths and which that table lays out in ascending element size: `1..=6` are one
+/// byte (a single 8-bit channel), `7..=19` two (a 16-bit channel or `8_8`), `20..=61` four (`32`,
+/// `16_16`, `10_11_11`, `11_11_10`, `10_10_10_2`, `2_10_10_10`, `8_8_8_8`), `62..=71` eight, `72..=74`
+/// twelve, `75..=77` sixteen; `128`/`129`/`130` are the `8`/`8_8`/`8_8_8_8` sRGB variants (one, two,
+/// four). Every other code - the packed 16-bit, depth, subsampled, FMASK and block-compressed formats
+/// past 127 - is left `None` and refused rather than assigned a size from its name, since the detile
+/// only needs to tell the 32-bpp case apart from the rest and a wrong size there would mis-read every
+/// texel.
+fn element_bytes(format: u32) -> Option<u32> {
+    match format {
+        1..=6 | 128 => Some(1),   // single 8-bit channel, and 8_SRGB
+        7..=19 | 129 => Some(2),  // 16-bit or 8_8, and 8_8_SRGB
+        20..=61 | 130 => Some(4), // the 32-bpp block, and 8_8_8_8_SRGB
+        62..=71 => Some(8),
+        72..=74 => Some(12),
+        75..=77 => Some(16),
+        _ => None,
+    }
+}
+
+/// The element size the measured `64KB_R_X` swizzle is defined for: four bytes, 32 bpp.
+const MEASURED_ELEMENT_BYTES: u32 = 4;
+
+/// A thin wrapper over [`detile_64kb_rx_bpp4`] that takes the extent from the descriptor. It applies
+/// the 32-bpp `64KB_R_X` swizzle, so it refuses a format that is not 32 bpp ([`element_bytes`]); the
+/// tiling mode is still the caller's to confirm is `64KB_R_X`, since this reads the pixels directly
+/// rather than from a guest window.
 ///
 /// # Errors
 ///
-/// Propagates [`detile_64kb_rx_bpp4`]'s refusals.
+/// [`DetileError::UnsupportedFormat`] for a non-32-bpp format, else [`detile_64kb_rx_bpp4`]'s
+/// refusals.
 pub fn detile_image(descriptor: &ImageDescriptor, tiled: &[u32]) -> Result<Vec<u32>, DetileError> {
+    if element_bytes(descriptor.format) != Some(MEASURED_ELEMENT_BYTES) {
+        return Err(DetileError::UnsupportedFormat {
+            format: descriptor.format,
+        });
+    }
     detile_64kb_rx_bpp4(tiled, descriptor.width, descriptor.height)
 }
 
@@ -283,19 +348,26 @@ pub fn detile_colour_target(
 /// Detiles a texture out of a guest-memory window, from its decoded descriptor.
 ///
 /// The texture analog of [`detile_colour_target`]: an [`ImageDescriptor`] already carries the base,
-/// extent and tiling (`crate::registers::decode_image_descriptor`), so this is a thin call to
-/// [`detile_surface`]. It applies the 32-bpp `64KB_R_X` swizzle, so the caller must have checked the
-/// descriptor's format is a 32-bpp one - a different element size is a different swizzle, not this one.
+/// extent, format and tiling (`crate::registers::decode_image_descriptor`). It applies the 32-bpp
+/// `64KB_R_X` swizzle, so it refuses a descriptor whose format is not 32 bpp ([`element_bytes`])
+/// before touching the window - a different element size is a different swizzle, not this one - then
+/// hands the rest to [`detile_surface`].
 ///
 /// # Errors
 ///
-/// [`SurfaceError`]: `UnsupportedTiling` unless the descriptor's tiling is `64KB_R_X`, else the window
-/// and detile refusals. It never returns `Incomplete` - a descriptor always carries base and extent.
+/// [`SurfaceError::Detile`]`(`[`DetileError::UnsupportedFormat`]`)` for a non-32-bpp format;
+/// otherwise `UnsupportedTiling` unless the descriptor's tiling is `64KB_R_X`, else the window and
+/// detile refusals. It never returns `Incomplete` - a descriptor always carries base and extent.
 pub fn detile_texture(
     descriptor: &ImageDescriptor,
     guest: &[u32],
     window_base: u64,
 ) -> Result<Surface, SurfaceError> {
+    if element_bytes(descriptor.format) != Some(MEASURED_ELEMENT_BYTES) {
+        return Err(SurfaceError::Detile(DetileError::UnsupportedFormat {
+            format: descriptor.format,
+        }));
+    }
     detile_surface(
         descriptor.base,
         descriptor.width,
@@ -407,7 +479,7 @@ mod tests {
             base,
             width: 64,
             height: 64,
-            format: 0x0A,
+            format: 56, // GFX10_FORMAT_8_8_8_8_UNORM, a 32-bpp format
             tiling: SwizzleMode::Tiled64KbRX,
         };
         let mut guest = vec![0u32; 256 + 4096];
@@ -430,7 +502,7 @@ mod tests {
             base: 0x2_000e_0000,
             width: 64,
             height: 64,
-            format: 0x0A,
+            format: 56, // GFX10_FORMAT_8_8_8_8_UNORM, a 32-bpp format
             tiling: SwizzleMode::Linear,
         };
         assert_eq!(
@@ -439,16 +511,69 @@ mod tests {
         );
     }
 
-    /// **obSCEne measured texel (15,15) at byte 4348, and the equation puts it there.**
+    /// **A non-32-bpp texture is refused, not detiled with the 32-bpp swizzle.**
     ///
-    /// The one hardware anchor: `166-agc/primitive-draw` read `color-idx 0x43f` (byte 4348) for the
-    /// pixel its geometry pins to texel `(15,15)`. Made to fail against a linear layout (which puts
-    /// byte 4348 at pixel `(63,16)`) and against the withdrawn `(32,21)` reading.
+    /// The measured swizzle is a four-byte-element mapping, so a `16_16_16_16` (eight-byte) surface
+    /// would have every texel read across elements. The negative that makes the format check real:
+    /// without it this descriptor would detile as if it were 32 bpp. Refused before the window is even
+    /// touched, so a short slice cannot mask it.
     #[test]
-    fn the_measured_anchor_is_texel_fifteen_fifteen() {
-        assert_eq!(offset(15, 15), 4348, "obSCEne's measured -a1f7 pixel");
+    fn detile_texture_refuses_a_non_32_bpp_format() {
+        let descriptor = ImageDescriptor {
+            base: 0x2_000e_0000,
+            width: 64,
+            height: 64,
+            format: 71, // GFX10_FORMAT_16_16_16_16_FLOAT, eight bytes per texel
+            tiling: SwizzleMode::Tiled64KbRX,
+        };
+        assert_eq!(
+            detile_texture(&descriptor, &[0u32; 4096], 0x2_000e_0000),
+            Err(SurfaceError::Detile(DetileError::UnsupportedFormat {
+                format: 71
+            })),
+        );
+    }
+
+    /// **The element-size decode agrees with the cited `GFX10_FORMAT` table at each size boundary.**
+    ///
+    /// `oops-mesa src/amd/registers/gfx10-rsrc.json` lays the standard formats out in ascending
+    /// element size; this pins the boundaries the detile turns on - the 32-bpp block is `20..=61`,
+    /// with a two-byte format just below and an eight-byte one just above - and that a
+    /// block-compressed code is refused rather than sized.
+    #[test]
+    fn the_format_element_size_matches_the_cited_table() {
+        use super::element_bytes;
+        assert_eq!(element_bytes(56), Some(4), "8_8_8_8_UNORM");
+        assert_eq!(element_bytes(50), Some(4), "2_10_10_10_UNORM");
+        assert_eq!(element_bytes(36), Some(4), "10_11_11_FLOAT");
+        assert_eq!(element_bytes(19), Some(2), "8_8_SINT, just below the block");
+        assert_eq!(element_bytes(62), Some(8), "32_32_UINT, just above it");
+        assert_eq!(element_bytes(71), Some(8), "16_16_16_16_FLOAT");
+        assert_eq!(element_bytes(130), Some(4), "8_8_8_8_SRGB");
+        assert_eq!(element_bytes(169), None, "BC1_UNORM is refused, not sized");
+        assert_eq!(element_bytes(0), None, "INVALID is refused");
+    }
+
+    /// **The one measured byte, and the second point the software models agree on.**
+    ///
+    /// `(15,15)` → byte 4348 is the single texel read back on hardware (the point draw
+    /// `166-agc/primitive-draw`, sweep `20260916-223136`). `(32,21)` → byte 2640 is **not** a second
+    /// readback: it is what obSCEne's own tiler computes and this closed form, derived to fit the
+    /// measured byte, independently reproduces - software-model agreement (`166-agc/tiling-swizzle`),
+    /// not hardware. The assertions still pin both, because a swizzle wrong at either would break the
+    /// detile; they just do not claim two measurements. Also made to fail against a linear layout
+    /// (byte 4348 sits at `(63,16)` there).
+    #[test]
+    fn the_measured_byte_and_the_model_agreed_second_point() {
+        assert_eq!(offset(15, 15), 4348, "the one measured byte");
         assert_eq!(offset(15, 15), 0x10fc);
-        assert_ne!(offset(32, 21), 4348, "the withdrawn (32,21) reading");
+        assert_eq!(
+            offset(32, 21),
+            2640,
+            "the point obSCEne's tiler computes, reproduced"
+        );
+        assert_eq!(offset(32, 21), 0xa50);
+        assert_ne!(offset(32, 21), 4348, "and not 4348");
     }
 
     /// **The origin is byte 0 and the element's own two low bits are never swizzled.**
@@ -482,8 +607,8 @@ mod tests {
     /// **Detiling inverts the swizzle: a surface whose every texel carries its own `(x,y)` comes back
     /// row-major.**
     ///
-    /// This is exactly the probe design filed to obSCEne (`-4d82`): fill each texel with `(y<<16)|x`,
-    /// read the tiled bytes, and detiling must return the coordinates to their linear places. If the
+    /// A round-trip against a reference pattern: fill each texel with `(y<<16)|x`, place it at its
+    /// swizzled offset, and detiling must return the coordinates to their linear places. If the
     /// swizzle and its inverse disagreed anywhere, some texel would land at the wrong linear index.
     #[test]
     fn detile_returns_each_texel_to_its_linear_place() {

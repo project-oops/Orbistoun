@@ -92,8 +92,10 @@ use orbistoun_translate::{Strategy, translate_windowed};
 use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage};
 use crate::packet::{PacketWalk, walk};
 use crate::registers::{
-    ColourTargetExtent, DrawKind, Vocabulary, colour_target_extent_at, dispatch_calls, draw_calls,
-    register_writes, scissor_at, shader_candidates,
+    BlendControl, ColourTarget, ColourTargetExtent, DepthControl, DrawKind, StencilControl,
+    SwizzleMode, Vocabulary, blend_control_at, colour_swizzle_mode_at, colour_target_at,
+    colour_target_extent_at, depth_control_at, dispatch_calls, draw_calls, register_writes,
+    scissor_at, shader_candidates, stencil_control_at,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -355,6 +357,24 @@ pub struct Submission {
     /// attachment to - so it rides here rather than in [`Self::modules`], and the driver makes it
     /// resident the same way (D701).
     pub targets: BTreeMap<ResourceId, ColourTargetExtent>,
+    /// Colour target zero's full record - base address and extent - decoded from the stream
+    /// (`CB_COLOR0_BASE` + `ATTRIB2`, worklog 655). A backend needs the base to find the attachment in
+    /// guest memory; the extent it also holds mirrors the entry in [`Self::targets`]. `None` when the
+    /// stream set neither register.
+    pub colour_target: Option<ColourTarget>,
+    /// Colour target zero's tiling mode (`CB_COLOR0_ATTRIB3`'s `COLOR_SW_MODE`, worklog 657). A backend
+    /// detiles a `Tiled64KbRX` attachment and reads a `Linear` one straight. `None` when the stream set
+    /// no mode.
+    pub colour_target_tiling: Option<SwizzleMode>,
+    /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`, worklog 669). `None`
+    /// when the stream set none - a draw with no depth control has no depth test, not an assumed one.
+    pub depth_control: Option<DepthControl>,
+    /// The stencil operations a draw applies on each test outcome (`DB_STENCIL_CONTROL`, worklog 670).
+    /// `None` when the stream set none.
+    pub stencil_control: Option<StencilControl>,
+    /// Colour target zero's blend state (`CB_BLEND0_CONTROL`, worklog 671). `None` when the stream set
+    /// none.
+    pub blend_control: Option<BlendControl>,
     /// The guest-memory window this submission's shaders read, as words, read out of guest memory at
     /// the pipeline's window (D703). Frame-level rather than per-draw, because every module is
     /// compiled against one window (worklog 635). Empty when the window is not mapped - a stream
@@ -582,10 +602,10 @@ impl Pipeline {
 
         // **The colour target, before anything that draws into it.** A stream sizes its target with
         // a register write; decoding that (worklog 637) lets a backend allocate a real attachment
-        // rather than a guessed square. Emitted first, because it is state a draw reads. Only the
-        // dimensions are decoded - the target's guest address is not, because the register that
-        // carries it is disputed between the sources while the size register is corroborated by both
-        // (D702) - so a target is identified by its extent here.
+        // rather than a guessed square. Emitted first, because it is state a draw reads. The `targets`
+        // map is still keyed by extent - the size register is corroborated by both sources where the
+        // base once was not (D702) - but the base *is* decoded now (`CB_COLOR0_BASE`, worklog 655) and
+        // rides on `colour_target` below, so a backend can find the attachment in guest memory.
         if let Some(extent) = colour_target_extent_at(&writes) {
             let target = colour_target_id(extent);
             submission.targets.insert(target, extent);
@@ -594,6 +614,17 @@ impl Pipeline {
                 depth: None,
             });
         }
+
+        // The pipeline state a draw runs under, decoded from the same stream and carried for a backend
+        // to build its pipeline from: colour target zero's base and tiling (worklogs 655/657), and the
+        // depth, stencil and blend state (worklogs 669/670/671). Each is `None` when the stream set its
+        // register nowhere - the state is read, never assumed, so a draw with no depth control has no
+        // depth test rather than a default one.
+        submission.colour_target = colour_target_at(&writes);
+        submission.colour_target_tiling = colour_swizzle_mode_at(&writes);
+        submission.depth_control = depth_control_at(&writes);
+        submission.stencil_control = stencil_control_at(&writes);
+        submission.blend_control = blend_control_at(&writes);
 
         // The scissor a stream set, as a viewport the backend restricts a draw to (worklog 646). The
         // generic scissor's corners are decoded (register offsets and layout mined from a hardware

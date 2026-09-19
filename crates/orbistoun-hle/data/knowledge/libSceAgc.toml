@@ -470,21 +470,6 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
 [[function]]
-name = "sceAgcDriverSubmitDcb"
-purpose = """
-Submits a draw command buffer to the graphics hardware.
-
-**The capture point for the GPU work.** Its argument is a command buffer; intercepting
-one call yields a real packet stream, the registers a guest actually sets, and the
-addresses its shaders live at - none of which can be obtained any other way.
-"""
-found_by = "generated"
-known_by = "assumed"
-found_in = ["PPSA04263-app0"]
-found_on = "2026-08-19"
-note = "Nothing beyond the name is established. No guest has reached it."
-
-[[function]]
 name = "sceAgcInit"
 arity = 0
 purpose = "Initialises the current-generation graphics library. Attributed to the identifier three titles import first and stall inside."
@@ -538,6 +523,14 @@ edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-r
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-sh-reg-add-registers, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
 found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDcbWaitUntilSafeForRendering"
+purpose = "A wait/sync builder that, on retail, emits nothing into the command buffer."
+edge_cases = ["MEASURED LIBRARY NO-OP (obSCEne REQ-20260917T0740Z-4e91, sweeps 20260917-090300/101310). Its GetSize symbol (sceAgcDcbWaitUntilSafeForRenderingGetSize) is absent from libSceAgc, and the builder wrote 0 bytes and returned rc 0x0 on a bare writer (arg1 0 and 1) and on one prepared through sceAgcDcbResetQueue - empty-encoding true under every condition. So it is a genuine library-level no-op, distinct from a failed capture: contrast CbSetShRegistersDirect (partial 0 B with GetSize 0, a library-confirmed empty measurement) where this one has no GetSize at all. Worklog 665 refused it while its only measurement was the 35-builder sweep's fail (wrote 0), a probe failure; 4e91 replaced that, and agc_no_op_returns_ok answers the measured 0x0 and writes nothing (worklog 668)."]
+known_by = "measured"
+cites = "obSCEne REQ-20260917T0740Z-4e91, sweeps 20260917-090300/101310 (166-agc/dcb-wait-until-safe: GetSize resolved 0x0, bytes 0x0, rc 0x0, empty-encoding 0x1)."
+found_on = "2026-09-17"
 
 [[function]]
 name = "sceAgcSetShRegIndirectPatchSetAddress"

@@ -5,7 +5,7 @@
 # the list can only shrink, and it cannot quietly become permission - the same mechanism
 # the duplicate decision numbers and the line-continuation backlog use (D208).
 #
-# **It is currently empty, and what emptied it is worth knowing.**
+# **It currently holds two names, and what shrank it to them is worth knowing.**
 #
 # This file held 202 names for weeks, described as vendor symbols the grammar could not
 # spell - proved correct by hash collision, but not reproducible, so a slowly-shrinking

@@ -137,3 +137,54 @@ fn the_draw_registers_are_captured() {
         );
     }
 }
+
+/// **An indexed draw stream walks too: `DRAW_INDEX_2` after its index-width setup.**
+///
+/// 9a41's stream above issues `DRAW_INDEX_AUTO` (0x2d); a `sceAgcDcbDrawIndex` stream issues
+/// `DRAW_INDEX_2` (0x27) after a `SET_UCONFIG_REG_INDEX` (0x7a) that selects the index-buffer entry
+/// width. Both opcodes and the index-size selector are measured (`166-agc/dcb-draw-index`,
+/// `166-agc/dcb-set-index-size`); this confirms the command processor consumes such a stream whole,
+/// with the indexed draw recognised as a command rather than falling through as an unknown packet
+/// (6e78).
+#[test]
+fn an_indexed_draw_stream_walks_without_warnings() {
+    let mut s = Vec::new();
+    // SET_UCONFIG_REG_INDEX (opcode 0x7a, count 2): the measured index-width selector.
+    push(&mut s, 0xc001_7a00);
+    push(&mut s, 0x2000_0243);
+    push(&mut s, 0x0000_0401); // 0x400 | index_type 1
+    // DRAW_INDEX_2 (opcode 0x27, count 4): index buffer at 0x12345678, three indices.
+    push(&mut s, 0xc004_2700);
+    push(&mut s, 0x0000_0003); // max_size
+    push(&mut s, 0x1234_5678); // index base lo
+    push(&mut s, 0x0000_0000); // index base hi
+    push(&mut s, 0x0000_0003); // index_count
+    push(&mut s, 0x0000_0002); // initiator
+
+    let walk = walk(&s);
+    assert!(
+        walk.is_trustworthy(),
+        "desynchronised={} overran={} trailing={} - an indexed-draw opcode is unknown or mis-sized",
+        walk.desynchronised,
+        walk.overran,
+        walk.trailing_bytes,
+    );
+    let consumed: u32 = walk.packets.iter().map(|p| p.length).sum();
+    assert_eq!(
+        consumed as usize,
+        s.len(),
+        "the walk consumes the whole indexed-draw stream"
+    );
+    let opcodes: Vec<u8> = walk
+        .packets
+        .iter()
+        .filter_map(|p| match p.kind {
+            PacketKind::Command { opcode } => Some(opcode),
+            PacketKind::RegisterWrite { .. } | PacketKind::Filler | PacketKind::Reserved => None,
+        })
+        .collect();
+    assert!(
+        opcodes.contains(&0x27),
+        "DRAW_INDEX_2 (0x27) is recognised as a command: {opcodes:02x?}"
+    );
+}

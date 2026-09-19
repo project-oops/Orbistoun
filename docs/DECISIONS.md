@@ -726,6 +726,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D702 | [Render targets are identified by extent, not their disputed base address](decisions/D702-render-targets-are-identified-by-extent.md) | decided | 2026-09-16 |
 | 🟢 | D703 | [The guest-memory window is frame state the driver sets, seeded per draw, not a bound resource yet](decisions/D703-the-guest-memory-window-is-frame-state.md) | decided | 2026-09-16 |
 | 🟢 | D704 | [A scripted pad is a level held until the next step, and carries typed state rather than bytes](decisions/D704-a-scripted-pad-is-a-level-held-until.md) | decided | 2026-09-16 |
+| 🟡 | D705 | [driver-work completion is not posted until execution lands - the D560 flip twin, declined](decisions/D705-driver-work-completion-is-not-posted.md) | assumed | 2026-09-17 |
 
 | | meaning |
 |---|---|

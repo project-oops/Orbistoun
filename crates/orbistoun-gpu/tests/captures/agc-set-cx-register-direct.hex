@@ -1,0 +1,2 @@
+# agc-set-cx-register-direct: sceAgcDcbSetCxRegisterDirect(dcb, (0x12345678 << 32) | 0x200), little-endian dwords in order; the .toml beside it says what the call wrote.
+c0016900 00000200 12345678

@@ -16,7 +16,7 @@ assumptions = [
     "That the surplus registers carry nothing. It is measured across two runs of one build, which is this project's own standard for a measurement, and it is not a reading of the interface.",
 ]
 found_on = "2026-09-08"
-note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What has to be decided first is what completes driver work in an emulator with no GPU execution - the question D560 answered for flips and nobody has answered for this."
+note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What completes driver work in an emulator with no GPU execution - the question D560 answered for flips - is now decided in D705: nothing posts until execution lands (roadmap phase 6), so this stays unimplemented deliberately, and the run report names the resulting starvation rather than papering over it. D705 is `assumed` and retires when execution or obSCEne's 3423 (what the console posts) arrives."
 
 [[function]]
 name = "sceAgcDriverCreateQueue"
@@ -28,6 +28,19 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne 9a41, sweeps 20260911-* and 20260912-003916, section 166-agc/driver-create-queue."
 found_on = "2026-09-12"
+
+[[function]]
+name = "sceAgcDriverSubmitDcb"
+purpose = "Submits a draw command buffer to the graphics hardware - the handover from command building (libSceAgc) to the driver."
+edge_cases = [
+    "IMPLEMENTED (worklog 687): reads the 16-byte submit descriptor obSCEne measured ({gpu_addr: u64, size_dwords: u32, flags: u8, pad}, -1c97, sweep 20260917-124503), walks the command buffer it names through orbistoun_gpu::walk and the pipeline, and records a SubmissionReport - packets, register writes, draws, shader candidates - for the run report. This is the only point a real guest command stream enters the translator; no backend is attached, so it reports rather than renders (3861).",
+    "Returns 0x0, the rc-submit obSCEne measured on every 166-agc/driver-submit-* check and the primitive-draw submission (sweep 20260916-223136). It never fails on the guest's account: a null or absurd descriptor records nothing and still returns success, as the console's does.",
+    "Shader GPU addresses the stream names read back as unresolved rather than dereferenced. The command buffer is CPU-side memory the guest built and owns (identity mapping D014), but a GPU address goes to a backend that can map it, and the D101 GPU-vs-guest-address assumption is unsettled - so a submit reads only the one range the descriptor named.",
+    "No guest reaches this yet: the corpus stalls earlier (e.g. PPSA03416 blocks in sceKernelWaitEqueue on an unposted driver queue, D613). The report is exercised by tests and is ready for the first guest that arrives.",
+]
+known_by = "measured"
+cites = "obSCEne -1c97 (16-byte descriptor layout, sweep 20260917-124503) and rc-submit 0x0 across 166-agc/driver-submit-* (sweep 20260916-223136)."
+found_on = "2026-09-17"
 
 [[function]]
 name = "sceAgcDriverRegisterOwner"

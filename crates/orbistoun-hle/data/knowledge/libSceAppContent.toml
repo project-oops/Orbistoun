@@ -31,3 +31,18 @@ assumptions = [
 ]
 found_in = ["PPSA25872-app0"]
 found_on = "2026-09-12"
+
+[[function]]
+name = "sceAppContentTemporaryDataMount2"
+purpose = "Mounts the title's temporary-data area and fills the caller's mount-point out-parameter."
+edge_cases = [
+    "Answers 0, by analogy with the two other implemented app-content calls: the guest fails on the unimplemented placeholder, and a mount call proceeds on success. libSceAppContent is context-gated for obSCEne ('symbols not available in this context', the same gate sceAppContentInitialize hit), so nothing here measures the return.",
+    "It does NOT move Terminator's (PPSA25872) wall: the run after implementing it stops at the same int 0x41 assert (image+0x17554a3), reached through a different chain of unimplemented stubs (sceUserServiceGetAgeLevel and others) and an error-string format - a cause deeper than any one placeholder (worklog 673). This closes one honest gap, not that wall.",
+]
+known_by = "assumed"
+assumptions = [
+    "That the console returns 0. obSCEne cannot read libSceAppContent returns in a title context, and answering 0 is the honest resolution for a call the guest fails on when it gets the placeholder - the same terms as sceAppContentAppParamGetInt.",
+    "The mountPoint out-parameter is left unwritten, on the same terms as Initialize's boot out-parameter: nothing measured says the SceAppContentMountPoint layout or the path a temporary-data mount answers, and a fabricated path would be plausible output.",
+]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-09-17"

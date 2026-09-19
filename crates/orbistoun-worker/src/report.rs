@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // layer and both shims can see them. Only the producing side is here (D160).
 use orbistoun_report::trace::{
     AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport, Frame,
-    Quiet, ReadReport, Registers, TAIL_CALLS, TracedCall,
+    Quiet, ReadReport, Registers, SubmissionSummary, TAIL_CALLS, TracedCall,
 };
 
 /// How many regions can be named in a fault report.
@@ -1891,6 +1891,19 @@ pub fn collect_calls(module: &str, reached: &str) -> CallTrace {
     collect_with_fault(module, reached, None)
 }
 
+/// The report the AGC driver recorded for the last command buffer a guest submitted, summarised for
+/// the run report - or `None` if no guest reached a submission, which is every run today (3861).
+fn submission_summary() -> Option<SubmissionSummary> {
+    orbistoun_gpu::agc_driver::last_submission_report().map(|report| SubmissionSummary {
+        packets: report.packets,
+        register_writes: report.register_writes,
+        draws: report.draws,
+        shaders_found: report.shaders_found,
+        addresses_resolved: report.addresses_resolved,
+        addresses_unresolved: report.addresses_unresolved,
+    })
+}
+
 /// Collects the trace, recording where the guest died.
 pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>) -> CallTrace {
     // What the watched region became, printed here because this is the one point reached
@@ -1929,7 +1942,9 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         // Asked of the port table rather than counted from the rows above, because a
         // submission a port refused is still a call to something implemented and the rows
         // cannot tell the two apart (D558).
-        frames: orbistoun_video::frames_presented(),
+        frames: orbistoun_video::flips_accepted(),
+        // The first command buffer a guest handed to `sceAgcDriverSubmitDcb`, summarised (3861).
+        submission: submission_summary(),
         // **Recorded, not just printed.** These used to reach stderr at the end of a run and
         // go no further, so a guest that talks to the kernel by number left nothing behind for
         // the work list to rank - and that is how every open-toolchain payload works (D401).

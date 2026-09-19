@@ -359,9 +359,18 @@ Two NIDs the guest calls are named by nothing on either side - `0x53bbd82b51d172
 111 against both hashes and got no hit. Any new name the census reports, orbistoun can hash and
 place.
 
+**`0x7d86501b8094ef57` is settled (obSCEne `-7c21`, resolved 2026-09-17):** it is **not** an export
+of retail `libSceAgc.sprx` on FW 12.40 - runtime resolution fails (`skip`) across three sweeps
+(`20260917-124503`, `-143259`, `-160206`) - and a forward-hash search of 834,780 mined words produces
+it in neither byte order. So **no citable vendor name exists**; it is an unexported internal/private
+linkage. Orbistoun should stop treating it as a nameable hash: if a handler is ever wanted (it sits in
+the loop at the leading titles' `0xa8` wall, call shape `(ptr, ptr, 0, ptr, u32, u32)` with the
+command buffer in `arg1`), it must be dispatched by NID, not by a name that will never arrive.
+`0x53bbd82b51d172db` remains open.
+
 ### Free while the console is up
 
-Orbistoun's ask list is **744 open questions across 502 functions**, but only **143 distinct
+Orbistoun's ask list is **790 open questions across 502 functions**, but only **143 distinct
 premises**, and 28 of those carry 629 of the total. `orbistoun-cli questions --premises` ranks them
 by how much a single answer retires - which is the right order to spend a hardware day in.
 

@@ -790,6 +790,414 @@ pub fn target_mask_at(writes: &[RegisterWrite]) -> Option<TargetMask> {
     Some(decode_target_mask(value))
 }
 
+/// A depth or stencil comparison - the `CompareFrag` enum every test field in `DB_DEPTH_CONTROL`
+/// selects from.
+///
+/// Cited from oops-mesa `src/amd/registers/gfx103.json` (`CompareFrag`: `FRAG_NEVER` 0, `FRAG_LESS`
+/// 1, `FRAG_EQUAL` 2, `FRAG_LEQUAL` 3, `FRAG_GREATER` 4, `FRAG_NOTEQUAL` 5, `FRAG_GEQUAL` 6,
+/// `FRAG_ALWAYS` 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareFunc {
+    /// The test never passes.
+    Never,
+    /// Passes when the fragment value is less than the stored one.
+    Less,
+    /// Passes on equality.
+    Equal,
+    /// Passes when less than or equal.
+    LessEqual,
+    /// Passes when greater than.
+    Greater,
+    /// Passes on inequality.
+    NotEqual,
+    /// Passes when greater than or equal.
+    GreaterEqual,
+    /// The test always passes.
+    Always,
+}
+
+/// Decodes a three-bit `CompareFrag` field into its comparison.
+///
+/// The field is three bits, so masking to `0..8` makes the match total - every value is one of the
+/// eight comparisons, none reserved.
+#[must_use]
+pub fn decode_compare_func(field: u32) -> CompareFunc {
+    match field & 0x7 {
+        0 => CompareFunc::Never,
+        1 => CompareFunc::Less,
+        2 => CompareFunc::Equal,
+        3 => CompareFunc::LessEqual,
+        4 => CompareFunc::Greater,
+        5 => CompareFunc::NotEqual,
+        6 => CompareFunc::GreaterEqual,
+        _ => CompareFunc::Always,
+    }
+}
+
+/// `DB_DEPTH_CONTROL`, a context register: `SET_CONTEXT_REG` base `0xA000` plus offset `0x200`
+/// (register index `0xA200`). Cited from oops-mesa, not memory: `oops-mesa
+/// src/amd/registers/gfx103.json` maps `DB_DEPTH_CONTROL` at byte `165888` (`165888 / 4` = `0xA200`,
+/// context dword `0x200`) and defines its fields.
+const DB_DEPTH_CONTROL: u32 = 0xA200;
+
+/// The depth- and stencil-test state a draw runs under, decoded from `DB_DEPTH_CONTROL`.
+///
+/// What a host needs to configure a depth-stencil pipeline: whether each test is on, whether depth is
+/// written, and the comparison each uses. The two colour-write-on-depth-{fail,pass} interaction bits
+/// (30, 31) are a rarer feature and left undecoded here - this covers the test state, which is what a
+/// draw turns on.
+// Each bool is one of `DB_DEPTH_CONTROL`'s independent hardware enable bits, named rather than folded
+// into flags so a reader sees which test a value turned on; the "too many bools" lint does not fit a
+// register mirror.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthControl {
+    /// `Z_ENABLE` (bit 1): the depth test runs.
+    pub depth_test_enable: bool,
+    /// `Z_WRITE_ENABLE` (bit 2): a passing fragment updates the depth buffer.
+    pub depth_write_enable: bool,
+    /// `ZFUNC` (bits 4:6): how a fragment's depth is compared with the stored value.
+    pub depth_func: CompareFunc,
+    /// `DEPTH_BOUNDS_ENABLE` (bit 3): the depth-bounds test runs.
+    pub depth_bounds_test_enable: bool,
+    /// `STENCIL_ENABLE` (bit 0): the stencil test runs.
+    pub stencil_test_enable: bool,
+    /// `STENCILFUNC` (bits 8:10): the front-face stencil comparison.
+    pub stencil_func: CompareFunc,
+    /// `BACKFACE_ENABLE` (bit 7): back faces use their own stencil state rather than the front's.
+    pub backface_enable: bool,
+    /// `STENCILFUNC_BF` (bits 20:22): the back-face stencil comparison, used when `backface_enable`.
+    pub stencil_func_backface: CompareFunc,
+}
+
+/// Decodes `DB_DEPTH_CONTROL` into its depth- and stencil-test state.
+#[must_use]
+pub fn decode_depth_control(value: u32) -> DepthControl {
+    DepthControl {
+        depth_test_enable: (value >> 1) & 1 != 0,
+        depth_write_enable: (value >> 2) & 1 != 0,
+        depth_func: decode_compare_func(value >> 4),
+        depth_bounds_test_enable: (value >> 3) & 1 != 0,
+        stencil_test_enable: value & 1 != 0,
+        stencil_func: decode_compare_func(value >> 8),
+        backface_enable: (value >> 7) & 1 != 0,
+        stencil_func_backface: decode_compare_func(value >> 20),
+    }
+}
+
+/// The depth- and stencil-test state a submission set, from the live value of `DB_DEPTH_CONTROL`.
+///
+/// [`None`] when the stream never sets it - the test state is not a thing to assume, so an unset
+/// register is reported as absent rather than defaulted. Most-recent-write-wins.
+#[must_use]
+pub fn depth_control_at(writes: &[RegisterWrite]) -> Option<DepthControl> {
+    let value = writes
+        .iter()
+        .rev()
+        .find(|write| write.register == DB_DEPTH_CONTROL)?
+        .value;
+    Some(decode_depth_control(value))
+}
+
+/// A stencil operation - the `StencilOp` enum each of `DB_STENCIL_CONTROL`'s six fields selects.
+///
+/// What happens to a stencil value on each test outcome. Cited from oops-mesa
+/// `src/amd/registers/gfx103.json` (`StencilOp`: `STENCIL_KEEP` 0 .. `STENCIL_XNOR` 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StencilOp {
+    /// Keep the current value.
+    Keep,
+    /// Set to zero.
+    Zero,
+    /// Set to all-ones.
+    Ones,
+    /// Replace with the reference, and test.
+    ReplaceTest,
+    /// Replace with the reference.
+    ReplaceOp,
+    /// Increment, clamping at the maximum.
+    AddClamp,
+    /// Decrement, clamping at zero.
+    SubClamp,
+    /// Bitwise invert.
+    Invert,
+    /// Increment, wrapping.
+    AddWrap,
+    /// Decrement, wrapping.
+    SubWrap,
+    /// Bitwise AND with the reference.
+    And,
+    /// Bitwise OR.
+    Or,
+    /// Bitwise XOR.
+    Xor,
+    /// Bitwise NAND.
+    Nand,
+    /// Bitwise NOR.
+    Nor,
+    /// Bitwise XNOR.
+    Xnor,
+}
+
+/// Decodes a four-bit `StencilOp` field.
+///
+/// The field is four bits and every value `0..16` is defined, so masking makes the match total.
+#[must_use]
+pub fn decode_stencil_op(field: u32) -> StencilOp {
+    match field & 0xF {
+        0 => StencilOp::Keep,
+        1 => StencilOp::Zero,
+        2 => StencilOp::Ones,
+        3 => StencilOp::ReplaceTest,
+        4 => StencilOp::ReplaceOp,
+        5 => StencilOp::AddClamp,
+        6 => StencilOp::SubClamp,
+        7 => StencilOp::Invert,
+        8 => StencilOp::AddWrap,
+        9 => StencilOp::SubWrap,
+        10 => StencilOp::And,
+        11 => StencilOp::Or,
+        12 => StencilOp::Xor,
+        13 => StencilOp::Nand,
+        14 => StencilOp::Nor,
+        _ => StencilOp::Xnor,
+    }
+}
+
+/// `DB_STENCIL_CONTROL`, a context register: `SET_CONTEXT_REG` base `0xA000` plus offset `0x10B`
+/// (register index `0xA10B`). Cited from oops-mesa, not memory: `oops-mesa
+/// src/amd/registers/gfx103.json` maps `DB_STENCIL_CONTROL` at byte `164908` (`164908 / 4` = `0xA10B`)
+/// and defines its six four-bit `StencilOp` fields.
+const DB_STENCIL_CONTROL: u32 = 0xA10B;
+
+/// The stencil operations a draw applies on each test outcome, decoded from `DB_STENCIL_CONTROL`.
+///
+/// Front and back faces each carry three operations: what to do when the stencil test fails, when it
+/// passes and the depth test passes, and when it passes but the depth test fails. The back-face set
+/// applies only when `DB_DEPTH_CONTROL`'s back-face stencil is on ([`DepthControl::backface_enable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StencilControl {
+    /// `STENCILFAIL` (bits 0:3): front-face op when the stencil test fails.
+    pub fail_op: StencilOp,
+    /// `STENCILZPASS` (bits 4:7): front-face op when stencil and depth both pass.
+    pub depth_pass_op: StencilOp,
+    /// `STENCILZFAIL` (bits 8:11): front-face op when stencil passes but depth fails.
+    pub depth_fail_op: StencilOp,
+    /// `STENCILFAIL_BF` (bits 12:15): back-face op when the stencil test fails.
+    pub back_fail_op: StencilOp,
+    /// `STENCILZPASS_BF` (bits 16:19): back-face op when stencil and depth both pass.
+    pub back_depth_pass_op: StencilOp,
+    /// `STENCILZFAIL_BF` (bits 20:23): back-face op when stencil passes but depth fails.
+    pub back_depth_fail_op: StencilOp,
+}
+
+/// Decodes `DB_STENCIL_CONTROL` into its six stencil operations.
+#[must_use]
+pub fn decode_stencil_control(value: u32) -> StencilControl {
+    StencilControl {
+        fail_op: decode_stencil_op(value),
+        depth_pass_op: decode_stencil_op(value >> 4),
+        depth_fail_op: decode_stencil_op(value >> 8),
+        back_fail_op: decode_stencil_op(value >> 12),
+        back_depth_pass_op: decode_stencil_op(value >> 16),
+        back_depth_fail_op: decode_stencil_op(value >> 20),
+    }
+}
+
+/// The stencil operations a submission set, from the live value of `DB_STENCIL_CONTROL`.
+///
+/// [`None`] when the stream never sets it. Most-recent-write-wins.
+#[must_use]
+pub fn stencil_control_at(writes: &[RegisterWrite]) -> Option<StencilControl> {
+    let value = writes
+        .iter()
+        .rev()
+        .find(|write| write.register == DB_STENCIL_CONTROL)?
+        .value;
+    Some(decode_stencil_control(value))
+}
+
+/// A blend factor - the `BlendOp` enum each source/destination field of `CB_BLEND0_CONTROL` selects.
+///
+/// What a colour or alpha channel is multiplied by before the combine function. Cited from oops-mesa
+/// `src/amd/registers/gfx103.json` (`BlendOp`: `BLEND_ZERO` 0 .. `BLEND_ONE_MINUS_CONSTANT_ALPHA` 20).
+/// The field is five bits and `21..32` are reserved, carried as [`BlendFactor::Other`] rather than
+/// mapped to a defined factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendFactor {
+    /// Multiply by zero.
+    Zero,
+    /// Multiply by one.
+    One,
+    /// The source colour.
+    SrcColor,
+    /// One minus the source colour.
+    OneMinusSrcColor,
+    /// The source alpha.
+    SrcAlpha,
+    /// One minus the source alpha.
+    OneMinusSrcAlpha,
+    /// The destination alpha.
+    DstAlpha,
+    /// One minus the destination alpha.
+    OneMinusDstAlpha,
+    /// The destination colour.
+    DstColor,
+    /// One minus the destination colour.
+    OneMinusDstColor,
+    /// The source alpha, saturated.
+    SrcAlphaSaturate,
+    /// Both source alpha.
+    BothSrcAlpha,
+    /// Both inverse source alpha.
+    BothInvSrcAlpha,
+    /// The blend constant colour.
+    ConstantColor,
+    /// One minus the blend constant colour.
+    OneMinusConstantColor,
+    /// The second dual-source colour.
+    Src1Color,
+    /// One minus the second dual-source colour.
+    InvSrc1Color,
+    /// The second dual-source alpha.
+    Src1Alpha,
+    /// One minus the second dual-source alpha.
+    InvSrc1Alpha,
+    /// The blend constant alpha.
+    ConstantAlpha,
+    /// One minus the blend constant alpha.
+    OneMinusConstantAlpha,
+    /// A reserved encoding (`21..32`), kept raw rather than guessed.
+    Other(u32),
+}
+
+/// Decodes a five-bit `BlendOp` field into its blend factor.
+#[must_use]
+pub fn decode_blend_factor(field: u32) -> BlendFactor {
+    match field & 0x1F {
+        0 => BlendFactor::Zero,
+        1 => BlendFactor::One,
+        2 => BlendFactor::SrcColor,
+        3 => BlendFactor::OneMinusSrcColor,
+        4 => BlendFactor::SrcAlpha,
+        5 => BlendFactor::OneMinusSrcAlpha,
+        6 => BlendFactor::DstAlpha,
+        7 => BlendFactor::OneMinusDstAlpha,
+        8 => BlendFactor::DstColor,
+        9 => BlendFactor::OneMinusDstColor,
+        10 => BlendFactor::SrcAlphaSaturate,
+        11 => BlendFactor::BothSrcAlpha,
+        12 => BlendFactor::BothInvSrcAlpha,
+        13 => BlendFactor::ConstantColor,
+        14 => BlendFactor::OneMinusConstantColor,
+        15 => BlendFactor::Src1Color,
+        16 => BlendFactor::InvSrc1Color,
+        17 => BlendFactor::Src1Alpha,
+        18 => BlendFactor::InvSrc1Alpha,
+        19 => BlendFactor::ConstantAlpha,
+        20 => BlendFactor::OneMinusConstantAlpha,
+        other => BlendFactor::Other(other),
+    }
+}
+
+/// A blend combine function - the `CombFunc` enum `CB_BLEND0_CONTROL`'s colour and alpha combines
+/// select.
+///
+/// How the multiplied source and destination are combined. Cited from oops-mesa
+/// `src/amd/registers/gfx103.json` (`CombFunc`: `COMB_DST_PLUS_SRC` 0 .. `COMB_DST_MINUS_SRC` 4); the
+/// field is three bits and `5..8` are reserved, carried as [`CombineFunc::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombineFunc {
+    /// `dst + src` (additive blend).
+    DstPlusSrc,
+    /// `src - dst`.
+    SrcMinusDst,
+    /// `min(dst, src)`.
+    MinDstSrc,
+    /// `max(dst, src)`.
+    MaxDstSrc,
+    /// `dst - src`.
+    DstMinusSrc,
+    /// A reserved encoding (`5..8`), kept raw rather than guessed.
+    Other(u32),
+}
+
+/// Decodes a three-bit `CombFunc` field into its combine function.
+#[must_use]
+pub fn decode_combine_func(field: u32) -> CombineFunc {
+    match field & 0x7 {
+        0 => CombineFunc::DstPlusSrc,
+        1 => CombineFunc::SrcMinusDst,
+        2 => CombineFunc::MinDstSrc,
+        3 => CombineFunc::MaxDstSrc,
+        4 => CombineFunc::DstMinusSrc,
+        other => CombineFunc::Other(other),
+    }
+}
+
+/// `CB_BLEND0_CONTROL`, a context register: `SET_CONTEXT_REG` base `0xA000` plus offset `0x1E0`
+/// (register index `0xA1E0`). Cited from oops-mesa, not memory: `oops-mesa
+/// src/amd/registers/gfx103.json` maps `CB_BLEND0_CONTROL` at byte `165760` (`165760 / 4` = `0xA1E0`)
+/// and defines its fields.
+const CB_BLEND0_CONTROL: u32 = 0xA1E0;
+
+/// The colour-blend state for colour target zero, decoded from `CB_BLEND0_CONTROL`.
+///
+/// A source and destination factor and a combine function for colour, the same three for alpha, and
+/// the flags that turn blending on and let alpha use its own set. What a host needs to build a colour
+/// blend attachment. It is colour target zero only; targets `1..8` have their own `CB_BLENDn_CONTROL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendControl {
+    /// `COLOR_SRCBLEND` (bits 0:4): the source factor for colour.
+    pub color_src: BlendFactor,
+    /// `COLOR_COMB_FCN` (bits 5:7): how colour source and destination are combined.
+    pub color_combine: CombineFunc,
+    /// `COLOR_DESTBLEND` (bits 8:12): the destination factor for colour.
+    pub color_dst: BlendFactor,
+    /// `ALPHA_SRCBLEND` (bits 16:20): the source factor for alpha.
+    pub alpha_src: BlendFactor,
+    /// `ALPHA_COMB_FCN` (bits 21:23): how alpha source and destination are combined.
+    pub alpha_combine: CombineFunc,
+    /// `ALPHA_DESTBLEND` (bits 24:28): the destination factor for alpha.
+    pub alpha_dst: BlendFactor,
+    /// `SEPARATE_ALPHA_BLEND` (bit 29): alpha uses its own factors rather than colour's.
+    pub separate_alpha_blend: bool,
+    /// `ENABLE` (bit 30): blending runs for this target.
+    pub enable: bool,
+    /// `DISABLE_ROP3` (bit 31): the raster-op-3 path is off.
+    pub disable_rop3: bool,
+}
+
+/// Decodes `CB_BLEND0_CONTROL` into its colour and alpha blend state.
+#[must_use]
+pub fn decode_blend_control(value: u32) -> BlendControl {
+    BlendControl {
+        color_src: decode_blend_factor(value),
+        color_combine: decode_combine_func(value >> 5),
+        color_dst: decode_blend_factor(value >> 8),
+        alpha_src: decode_blend_factor(value >> 16),
+        alpha_combine: decode_combine_func(value >> 21),
+        alpha_dst: decode_blend_factor(value >> 24),
+        separate_alpha_blend: (value >> 29) & 1 != 0,
+        enable: (value >> 30) & 1 != 0,
+        disable_rop3: (value >> 31) & 1 != 0,
+    }
+}
+
+/// The blend state for colour target zero a submission set, from the live value of
+/// `CB_BLEND0_CONTROL`.
+///
+/// [`None`] when the stream never sets it. Most-recent-write-wins.
+#[must_use]
+pub fn blend_control_at(writes: &[RegisterWrite]) -> Option<BlendControl> {
+    let value = writes
+        .iter()
+        .rev()
+        .find(|write| write.register == CB_BLEND0_CONTROL)?
+        .value;
+    Some(decode_blend_control(value))
+}
+
 /// The register that carries colour buffer zero's tiling and layout attributes.
 ///
 /// `CB_COLOR0_ATTRIB3`, a context register: `SET_CONTEXT_REG` base `0xA000` plus offset `0x3B8`
@@ -1040,13 +1448,16 @@ mod tests {
             );
         }
     }
+    use super::{BlendFactor, CombineFunc, StencilOp};
     use super::{
-        BufferDescriptor, ColourTarget, ColourTargetExtent, DispatchCall, DrawKind, DrawOrDispatch,
-        ImageDescriptor, RegisterWrite, Scissor, SwizzleMode, Vocabulary, buffer_descriptor_at,
-        colour_swizzle_mode_at, colour_target_at, colour_target_extent_at, correlate_draws,
+        BufferDescriptor, ColourTarget, ColourTargetExtent, CompareFunc, DispatchCall, DrawKind,
+        DrawOrDispatch, ImageDescriptor, RegisterWrite, Scissor, SwizzleMode, Vocabulary,
+        blend_control_at, buffer_descriptor_at, colour_swizzle_mode_at, colour_target_at,
+        colour_target_extent_at, correlate_draws, decode_blend_control, decode_blend_factor,
         decode_buffer_descriptor, decode_colour_swizzle_mode, decode_colour_target_extent,
-        decode_image_descriptor, decode_scissor, decode_target_mask, dispatch_calls, draw_calls,
-        register_writes, scissor_at, shader_candidates, target_mask_at,
+        decode_combine_func, decode_depth_control, decode_image_descriptor, decode_scissor,
+        decode_stencil_control, decode_target_mask, depth_control_at, dispatch_calls, draw_calls,
+        register_writes, scissor_at, shader_candidates, stencil_control_at, target_mask_at,
     };
     use crate::packet::walk;
 
@@ -1602,6 +2013,132 @@ mod tests {
         assert!(
             target_mask_at(&[write(0xA000, 0x0000_000F)]).is_none(),
             "CB_TARGET_MASK was never written"
+        );
+    }
+
+    #[test]
+    fn the_depth_control_decodes_its_test_state() {
+        // Z on + write, ZFUNC LEQUAL(3); stencil on, front ALWAYS(7), back NOTEQUAL(5) with
+        // BACKFACE_ENABLE; depth-bounds off. STENCIL_ENABLE bit 0, Z_ENABLE 1, Z_WRITE 2, ZFUNC 4:6,
+        // BACKFACE 7, STENCILFUNC 8:10, STENCILFUNC_BF 20:22.
+        let dc = decode_depth_control(0x0050_07B7);
+        assert!(dc.depth_test_enable);
+        assert!(dc.depth_write_enable);
+        assert_eq!(dc.depth_func, CompareFunc::LessEqual);
+        assert!(!dc.depth_bounds_test_enable, "bit 3 was not set");
+        assert!(dc.stencil_test_enable);
+        assert_eq!(dc.stencil_func, CompareFunc::Always);
+        assert!(dc.backface_enable);
+        assert_eq!(dc.stencil_func_backface, CompareFunc::NotEqual);
+
+        // All-zero: every test off, every compare NEVER - decoded rather than assumed.
+        let off = decode_depth_control(0);
+        assert!(!off.depth_test_enable && !off.stencil_test_enable && !off.depth_write_enable);
+        assert_eq!(off.depth_func, CompareFunc::Never);
+    }
+
+    #[test]
+    fn the_depth_control_reads_the_live_register_and_is_absent_when_unset() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        // The last write to DB_DEPTH_CONTROL (0xA200) wins.
+        let writes = vec![
+            write(0xA200, 0x0000_0000),          // depth off...
+            write(0xA200, 0x0000_0002 | 0x0010), // ...then Z_ENABLE with ZFUNC LESS(1) before the draw
+        ];
+        let dc = depth_control_at(&writes).expect("set");
+        assert!(dc.depth_test_enable);
+        assert_eq!(dc.depth_func, CompareFunc::Less);
+        assert!(
+            depth_control_at(&[write(0xA000, 0x2)]).is_none(),
+            "DB_DEPTH_CONTROL was never written"
+        );
+    }
+
+    #[test]
+    fn the_stencil_control_decodes_its_six_operations() {
+        // A distinct op in each field, so a misplaced one fails. STENCILFAIL 0:3, STENCILZPASS 4:7,
+        // STENCILZFAIL 8:11, then the three back-face fields 12:15, 16:19, 20:23.
+        let sc = decode_stencil_control(0x00F5_1730);
+        assert_eq!(sc.fail_op, StencilOp::Keep, "STENCILFAIL = 0");
+        assert_eq!(sc.depth_pass_op, StencilOp::ReplaceTest, "STENCILZPASS = 3");
+        assert_eq!(sc.depth_fail_op, StencilOp::Invert, "STENCILZFAIL = 7");
+        assert_eq!(sc.back_fail_op, StencilOp::Zero, "STENCILFAIL_BF = 1");
+        assert_eq!(
+            sc.back_depth_pass_op,
+            StencilOp::AddClamp,
+            "STENCILZPASS_BF = 5"
+        );
+        assert_eq!(
+            sc.back_depth_fail_op,
+            StencilOp::Xnor,
+            "STENCILZFAIL_BF = 15"
+        );
+    }
+
+    #[test]
+    fn the_stencil_control_reads_the_live_register_and_is_absent_when_unset() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        // The last write to DB_STENCIL_CONTROL (0xA10B) wins.
+        let writes = vec![
+            write(0xA10B, 0x0000_0000), // all keep...
+            write(0xA10B, 0x0000_0001), // ...then STENCILFAIL = ZERO(1) before the draw
+        ];
+        let sc = stencil_control_at(&writes).expect("set");
+        assert_eq!(sc.fail_op, StencilOp::Zero);
+        assert_eq!(sc.depth_pass_op, StencilOp::Keep, "the rest stay at 0");
+        assert!(
+            stencil_control_at(&[write(0xA000, 0x1)]).is_none(),
+            "DB_STENCIL_CONTROL was never written"
+        );
+    }
+
+    #[test]
+    fn the_blend_control_decodes_its_factors_and_functions() {
+        // A distinct factor/function in each field so a misplaced one fails: colour SRC_ALPHA(4),
+        // MAX(3), ONE_MINUS_SRC_ALPHA(5); alpha ONE(1), DST_MINUS_SRC(4), ZERO(0); separate-alpha and
+        // enable on, ROP3 not disabled.
+        let bc = decode_blend_control(0x6081_0564);
+        assert_eq!(bc.color_src, BlendFactor::SrcAlpha);
+        assert_eq!(bc.color_combine, CombineFunc::MaxDstSrc);
+        assert_eq!(bc.color_dst, BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(bc.alpha_src, BlendFactor::One);
+        assert_eq!(bc.alpha_combine, CombineFunc::DstMinusSrc);
+        assert_eq!(bc.alpha_dst, BlendFactor::Zero);
+        assert!(bc.separate_alpha_blend);
+        assert!(bc.enable);
+        assert!(!bc.disable_rop3, "bit 31 was not set");
+
+        // Reserved encodings are kept raw, not mapped to a defined factor or function.
+        assert_eq!(decode_blend_factor(31), BlendFactor::Other(31));
+        assert_eq!(decode_combine_func(7), CombineFunc::Other(7));
+    }
+
+    #[test]
+    fn the_blend_control_reads_the_live_register_and_is_absent_when_unset() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        // The last write to CB_BLEND0_CONTROL (0xA1E0) wins.
+        let writes = vec![
+            write(0xA1E0, 0x0000_0000), // blend off...
+            write(0xA1E0, 0x4000_0000), // ...then ENABLE (bit 30) before the draw
+        ];
+        let bc = blend_control_at(&writes).expect("set");
+        assert!(bc.enable);
+        assert!(!bc.separate_alpha_blend, "bit 29 was not set");
+        assert!(
+            blend_control_at(&[write(0xA000, 0x4000_0000)]).is_none(),
+            "CB_BLEND0_CONTROL was never written"
         );
     }
 

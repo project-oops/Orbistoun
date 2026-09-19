@@ -288,6 +288,13 @@ pub fn step(finding: &Finding) -> Step {
                 target: bare(subject).to_owned(),
             },
         ),
+        Gap::Submitted => Step::Person {
+            why: concat!(
+                "a submission is progress, not a wall: what it names - shaders to translate, then ",
+                "a backend to run them - is graphics work a person schedules, not a step the loop ",
+                "can sweep"
+            ),
+        },
     }
 }
 

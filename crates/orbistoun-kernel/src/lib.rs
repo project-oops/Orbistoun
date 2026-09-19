@@ -1697,10 +1697,12 @@ pub fn equeue_summary() -> Option<String> {
     let named = queues
         .iter()
         .map(|q| {
-            // The starvation case is called out rather than left to arithmetic. A reader
-            // scanning a report should not have to notice that two numbers differ.
+            // The starvation case is called out rather than left to arithmetic, and now names the
+            // reason: a starved queue has no producer. The graphics queues that starve here wait on
+            // driver-work completion, which orbistoun does not post until it executes the work
+            // (D705) - so a reader learns why from the line rather than reaching for D615.
             let verdict = if q.waited > 0 && q.delivered == 0 {
-                "  <- waited on, never delivered"
+                "  <- waited on, never delivered: nothing produces its events; a graphics queue waits on driver-work completion, not posted yet (D705)"
             } else {
                 ""
             };
@@ -2239,18 +2241,24 @@ fn pthread_key_delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// state that looks deliberate and is not. What is honoured is what the arguments state
 /// directly.
 fn pthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (out, entry, argument, name) = (args[0], args[2], args[3], args[4]);
+    let (out, attr, entry, argument, name) = (args[0], args[1], args[2], args[3], args[4]);
     if out == 0 || entry == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     let name = read_name(name);
     let start = thread::Start { entry, argument };
+    // The attribute block the guest built through `scePthreadAttrSet*`, honoured where obSCEne
+    // measured that the console honours it (`031-stackattr`, REQ-...c2e9): a live thread read back
+    // the stack size and affinity a block asked for. This call had ignored `attr` entirely, so 125
+    // threads across four titles ran on the 8 MiB default with default affinity regardless of what
+    // their blocks set - see [`thread_attributes`] for which fields are read and which are not.
+    let (affinity, stack) = thread_attributes(attr);
 
     // SAFETY: `entry` is a guest address the guest itself is asking to have called, in a
     // fully relocated image - the same contract the real call has. The thread body runs
     // guest instructions, which is the entire purpose of this emulator, and it runs on a
     // stack of its own so an overrun hits a guard page rather than host frames.
-    let spawned = unsafe { thread::spawn(start, &name, thread::Affinity::default(), 0) };
+    let spawned = unsafe { thread::spawn(start, &name, affinity, 0, stack) };
 
     match spawned {
         Ok(handle) => {
@@ -2264,6 +2272,63 @@ fn pthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // whatever it was waiting for.
         Err(_) => u64::from(GuestError::Unimplemented.as_raw()),
     }
+}
+
+/// The affinity and stack size to spawn a thread with, decoded from a thread attribute block.
+///
+/// The pure half of [`thread_attributes`], so the field decisions can be tested without a guest
+/// memory to read them out of. `stack_field` and `affinity_field` are the raw stored values.
+///
+/// - **stack size:** a size the guest set is honoured, which is what obSCEne measured the console
+///   doing (`031-stackattr`, REQ-...c2e9: a block asking for `0x181000` produced a thread that ran
+///   on exactly `0x181000`). A block nothing set carries the fresh default
+///   ([`DEFAULT_ATTR_STACK_SIZE`], 64 KiB), and a size of `0` is POSIX's "use the default" - neither
+///   is honoured, because a fresh attribute is *not* measured to bound a real thread and 64 KiB is
+///   far below orbistoun's 8 MiB [`orbistoun_mem::stack::DEFAULT_STACK_SIZE`]; shrinking a working
+///   thread to it would invent an overflow the console does not have.
+/// - **affinity:** the mask is carried through, so a thread created from a block reads its affinity
+///   back through `scePthreadAttrGet` - the "stored, not applied" bargain
+///   [`pthread_attr_setaffinity`] already strikes, now reaching the thread record rather than
+///   stopping at the block.
+fn spawn_parameters(stack_field: u64, affinity_field: u64) -> (thread::Affinity, u64) {
+    let stack = if stack_field != 0 && stack_field != DEFAULT_ATTR_STACK_SIZE {
+        stack_field
+    } else {
+        orbistoun_mem::stack::DEFAULT_STACK_SIZE
+    };
+    (thread::Affinity(affinity_field), stack)
+}
+
+/// Reads the spawn parameters out of a guest thread attribute block, or the defaults for a null or
+/// unreadable one.
+///
+/// `attr` is the guest's `ScePthreadAttr` - a pointer to the handle [`pthread_attr_init`]
+/// substituted, so this reads orbistoun's own attribute object (its field constants), not the raw
+/// console layout. The decode is [`spawn_parameters`]; this only fetches the fields.
+///
+/// Two of the block's fields are deliberately not read:
+/// - **detach state** is not acted on, for the reason [`pthread_detach`] gives: every guest thread
+///   here is a host thread the runtime already reclaims when its body returns, so the detach promise
+///   is kept by construction and there is nothing to do with the state but store it for readback.
+/// - **priority** is not carried in the block on the console - obSCEne measured
+///   `scePthreadAttrSetschedparam` refusing on a retail attribute (`0x8002002d`, REQ-...c2e9) - so it
+///   is left unread here; a thread's priority arrives through `scePthreadSetprio`, not `attr`.
+fn thread_attributes(attr: u64) -> (thread::Affinity, u64) {
+    if attr == 0 {
+        return (
+            thread::Affinity::default(),
+            orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+        );
+    }
+    let Some(object) = attr_at(attr) else {
+        return (
+            thread::Affinity::default(),
+            orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+        );
+    };
+    let stack_field = read_word(object + ATTR_STACK_SIZE).unwrap_or(0);
+    let affinity_field = read_word(object + ATTR_AFFINITY).unwrap_or(0);
+    spawn_parameters(stack_field, affinity_field)
 }
 
 /// `scePthreadJoin(thread, value)`.
@@ -6753,6 +6818,38 @@ mod tests {
         let mut out = [0; GUEST_ARG_REGISTERS];
         out[..4].copy_from_slice(&values);
         out
+    }
+
+    /// **A set stack size and affinity are honoured; a fresh or zero size is not.**
+    ///
+    /// The decode `pthread_create` had been missing (REQ-...c2e9, obSCEne `031-stackattr`): it
+    /// ignored the attribute block, so every thread ran on the 8 MiB default with default affinity.
+    /// A console thread was measured running on exactly the `0x181000` its block asked for, so a set
+    /// size passes through; a fresh attribute's 64 KiB default and POSIX's `0` both fall back to the
+    /// working 8 MiB stack rather than shrink a thread to a size no measurement says bounds a real
+    /// one. The affinity mask is carried through so the thread record - and `scePthreadAttrGet` after
+    /// it - reads back what the block set. The fresh-attribute case is the negative that keeps the
+    /// honouring real: without it a passthrough of every value would pass this test too.
+    #[test]
+    fn a_set_stack_size_and_affinity_are_honoured_and_a_fresh_one_is_not() {
+        use super::thread::Affinity;
+        let default_stack = orbistoun_mem::stack::DEFAULT_STACK_SIZE;
+
+        assert_eq!(
+            super::spawn_parameters(0x0018_1000, 0x5),
+            (Affinity(0x5), 0x0018_1000),
+            "a size and affinity the guest set are passed through unchanged"
+        );
+        assert_eq!(
+            super::spawn_parameters(super::DEFAULT_ATTR_STACK_SIZE, 0),
+            (Affinity(0), default_stack),
+            "a fresh attribute's 64 KiB default is not honoured over the 8 MiB stack"
+        );
+        assert_eq!(
+            super::spawn_parameters(0, 0),
+            (Affinity(0), default_stack),
+            "a zero size falls back to the default rather than reserving nothing"
+        );
     }
 
     /// **A work-area size is something a caller can actually allocate.**

@@ -511,8 +511,9 @@ mod knowledge_tests {
     /// set, so that a library gaining an implementation fails until its entry is deleted,
     /// and one **losing its registration fails until an entry is added and justified**. Both
     /// directions are load-bearing (`docs/TESTING.md`).
-    // Empty, and that is the goal: every declared library now answers at least one call. Two
-    // entries retired together - `libSceGnmDriver` once translated its command streams entirely
+    // Twenty-three libraries serve nothing today, each with its reason below - the README's generated
+    // block reports the same, `149 across 23 libraries`. Two entries retired *from* here together -
+    // `libSceGnmDriver` once translated its command streams entirely
     // below the shim, but the dispatch builders (D427) answer calls here now; `libSceAudioOut` once
     // implemented nothing rather than fake sound, and still implements no *output*, but its init now
     // succeeds honestly (setting a subsystem up is not claiming a sound was made). A module that

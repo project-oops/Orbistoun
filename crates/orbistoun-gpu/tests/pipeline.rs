@@ -296,6 +296,76 @@ fn a_scissor_write_reaches_the_backend_as_set_viewport() {
     );
 }
 
+/// **A stream's pipeline state - colour-target base and tiling, and depth/stencil/blend - reaches the
+/// submission.**
+///
+/// `-73c3`: the colour-target base/tiling and depth/stencil/blend decodes (worklogs 655/657/669/670/671)
+/// had no consumer until `submit` carried them - a draw issued through the backend would have run with
+/// no depth test and no blend, into an attachment at the wrong address. This drives one stream setting
+/// all six registers and asserts the submission carries each decoded value, the same values
+/// `registers.rs`'s own tests pin.
+#[test]
+fn a_stream_sets_the_pipeline_state_the_submission_carries() {
+    use orbistoun_gpu::{BlendFactor, ColourTarget, CompareFunc, StencilOp, SwizzleMode};
+
+    // SET_CONTEXT_REG (0x69, count 1) writes, one per register, at their context-dword offsets:
+    // CB_COLOR0_BASE 0x318, ATTRIB2 0x3b0, ATTRIB3 0x3b8, DB_DEPTH_CONTROL 0x200,
+    // DB_STENCIL_CONTROL 0x10b, CB_BLEND0_CONTROL 0x1e0.
+    let header = (3u32 << 30) | ((2 - 1) << 16) | (0x69 << 8);
+    let words = [
+        header,
+        0x318,
+        0x0200_0e00, // base -> 0x2000e0000 (value << 8)
+        header,
+        0x3b0,
+        0x000f_c03f, // extent 64x64
+        header,
+        0x3b8,
+        0x08c6_c000, // tiling 64KB_R_X
+        header,
+        0x200,
+        0x0050_07b7, // depth: Z on+write, ZFUNC LEQUAL
+        header,
+        0x10b,
+        0x00f5_1730, // stencil ops
+        header,
+        0x1e0,
+        0x6081_0564, // blend: enable, colour SRC_ALPHA/ONE_MINUS_SRC_ALPHA
+    ];
+    let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+    let mut pipeline = pipeline();
+    let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory());
+
+    assert_eq!(
+        submission.colour_target,
+        Some(ColourTarget {
+            base: 0x2_000e_0000,
+            width: 64,
+            height: 64,
+        }),
+        "colour target zero's base and extent reach the submission"
+    );
+    assert_eq!(
+        submission.colour_target_tiling,
+        Some(SwizzleMode::Tiled64KbRX),
+        "and its tiling mode"
+    );
+
+    let depth = submission.depth_control.expect("depth control was set");
+    assert!(depth.depth_test_enable && depth.depth_write_enable);
+    assert_eq!(depth.depth_func, CompareFunc::LessEqual);
+
+    let stencil = submission.stencil_control.expect("stencil control was set");
+    assert_eq!(stencil.fail_op, StencilOp::Keep);
+    assert_eq!(stencil.depth_pass_op, StencilOp::ReplaceTest);
+
+    let blend = submission.blend_control.expect("blend control was set");
+    assert!(blend.enable);
+    assert_eq!(blend.color_src, BlendFactor::SrcAlpha);
+    assert_eq!(blend.color_dst, BlendFactor::OneMinusSrcAlpha);
+}
+
 /// **The guest-memory window is read out of guest memory and carried on the submission.**
 ///
 /// A frame's shaders fetch their vertices from the window (worklog 641); the frontend reads exactly

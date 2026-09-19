@@ -3197,6 +3197,7 @@ dependencies = [
  "orbistoun-env",
  "orbistoun-firmware",
  "orbistoun-fs",
+ "orbistoun-gpu",
  "orbistoun-hle",
  "orbistoun-input",
  "orbistoun-kernel",

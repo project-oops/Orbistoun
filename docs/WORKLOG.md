@@ -632,15 +632,79 @@ context cannot re-derive.
 | - | [615. Opening a directory returned ENOENT on Windows, and it walled Grand Theft Auto at `int 0x41`](worklog/615-opening-a-directory-failed-on-windows-and-walled-gta.md) |
 | - | [616. The whole `sceAgc*Patch*` family answers its measured 0x0, and the wall is now the builders](worklog/616-the-whole-agc-patch-family-answers-its-measured-0x0.md) |
 | - | [617. The untyped buffer family was two of eight, found the same way MTBUF was](worklog/617-the-untyped-buffer-family-was-two-of.md) |
-| - | [622. The tables gate caught the stale probe already and said the wrong thing about it](worklog/622-the-tables-gate-caught-the-stale-probe.md) |
-| - | [623. The four libraries in the stall finding are called zero times, and one excuse had rotted](worklog/623-the-four-libraries-in-the-stall-finding.md) |
 | - | [618. The a70f builder cluster wired, and the proof that PPSA02664's wall is not the placeholders](worklog/618-the-a70f-builder-cluster-wired-and-what-it-ruled-out.md) |
 | - | [619. The markers and WaitRegMem close the builder cluster, and going BACK confirms where the wall is](worklog/619-the-markers-and-waitregmem-close-the-cluster-and-confirm-the-wall.md) |
 | - | [620. Both `int 0x41` titles are il2cpp assertions, and the gate file opens are faithful - so the wall is a Unity invariant, not a value to name](worklog/620-both-int-0x41-titles-are-il2cpp-assertions-not-the-file-opens.md) |
 | - | [621. A null-ish fault in orbistoun's own code is the guest's libc pointer, not an "EMULATOR BUG"](worklog/621-a-null-ish-fault-in-orbistouns-code-is-the-guests-libc-pointer.md) |
+| - | [622. The tables gate caught the stale probe already and said the wrong thing about it](worklog/622-the-tables-gate-caught-the-stale-probe.md) |
+| - | [623. The four libraries in the stall finding are called zero times, and one excuse had rotted](worklog/623-the-four-libraries-in-the-stall-finding.md) |
 | - | [624. Case-sensitivity was a host leak, and why having the FreeBSD oracle did not prevent it](worklog/624-case-sensitivity-a-host-leak-and-why-the-oracle-was-not-the-gap.md) |
 | - | [625. Inferring import signatures from how the guest calls its own imports](worklog/625-inferring-import-signatures-from-how-the-guest-calls-them.md) |
 | - | [626. The fs host-leak audit, measured: two exotic leaks reproduce, and none is on the `0x41` titles' path](worklog/626-the-fs-host-leak-audit-is-measured-and-mostly-negative.md) |
 | - | [627. Nine decisions were written and never indexed, and the generator was one directory up](worklog/627-nine-decisions-were-written-and-never.md) |
+| - | [628. Indexed draws are decoded from their own measured body, not dropped for "separate state"](worklog/628-indexed-draws-are-decoded-from-their-own-body.md) |
+| - | [629. strftime gains the twelve-hour clock, the weekday numbers, and the C-locale forms](worklog/629-strftime-gains-the-twelve-hour-and-c-locale-specifiers.md) |
+| - | [630. The render executor's blocker is precise: the backend trait cannot reach a shader's bytes](worklog/630-the-render-executor-is-blocked-on-a-module-delivery-mechanism.md) |
+| - | [631. The resource-residency seam, and its shader arm: a translated module now loads on a real device](worklog/631-the-resource-residency-seam-and-its-shader-arm.md) |
+| - | [632. The thin driver, and the first command that actually executes: a compute dispatch runs through the backend](worklog/632-the-thin-driver-and-the-first-executed-command.md) |
+| - | [633. A compute dispatch runs against a resident guest buffer, and the throwaway width is gone for it](worklog/633-a-compute-dispatch-runs-against-a-resident-guest-buffer.md) |
+| - | [634. The V# decoder: the first piece of the frontend's guest-buffer decode](worklog/634-the-v-sharp-decoder-the-first-piece-of-the-frontend-buffer-decode.md) |
+| - | [635. Compute dispatches are decoded, and what the translator's memory model means for the V# work](worklog/635-compute-dispatches-are-decoded-and-the-frontend-buffer-model-is-a-window.md) |
+| - | [636. The first graphics frame through the executor: a bound vertex+fragment pipeline draws](worklog/636-the-first-graphics-frame-through-the-executor.md) |
+| - | [637. The colour target's dimensions are decoded from CB_COLOR0_ATTRIB2](worklog/637-the-colour-target-dimensions-are-decoded-from-cb-color0-attrib2.md) |
+| - | [638. A draw renders into the guest's target size, not the interim square](worklog/638-a-draw-renders-into-the-guest-s-target-size.md) |
+| - | [639. A draw issues the guest's decoded vertex count, not a fixed three](worklog/639-a-draw-issues-the-guest-s-vertex-count.md) |
+| - | [640. The executor draws a guest's mesh geometry, routed by the module not the command](worklog/640-the-executor-draws-a-guest-s-mesh-geometry.md) |
+| - | [641. The guest-memory window is fed from guest memory through the executor](worklog/641-the-guest-memory-window-is-fed-through-the-executor.md) |
+| - | [642. The image-descriptor (T#) decode: the first, measured piece of the texture path](worklog/642-the-image-descriptor-decode-the-first-piece-of-the-texture-path.md) |
+| - | [643. Indexed draws execute through the mesh path, refused only on a vertex pipeline](worklog/643-indexed-draws-execute-through-the-mesh-path.md) |
+| - | [644. SetViewport restricts a draw to its rectangle - the backend half of the viewport](worklog/644-set-viewport-restricts-a-draw-to-its-rectangle.md) |
+| - | [645. The guest-memory window is uploaded once and bound directly, not seeded per draw](worklog/645-the-guest-memory-window-is-bound-once-not-seeded-per-draw.md) |
+| - | [646. The viewport frontend decode: a stream's scissor reaches the backend as a SetViewport](worklog/646-the-viewport-frontend-decode-closes-the-viewport-path.md) |
+| - | [647. A compute dispatch reads back guest memory, where a guest's result lives](worklog/647-a-compute-dispatch-reads-back-guest-memory.md) |
+| - | [648. A whole frame composes through the driver: target, viewport, shaders, draw](worklog/648-a-whole-frame-composes-through-the-driver.md) |
+| - | [649. The texture detile is blocked on a disputed swizzle - do not implement it yet](worklog/649-the-texture-detile-is-blocked-on-a-disputed-swizzle.md) |
 | - | [650. The packed floats decode, and finding out cost a latent width-order bug](worklog/650-the-packed-floats-decode-and-finding.md) |
 | - | [651. The scripted pad exists, and it deliberately stops short of the byte it would be written into](worklog/651-the-scripted-pad-exists-and-it.md) |
+| - | [652. The emulator settles the swizzle dispute but does not measure it - the detile stays blocked](worklog/652-the-emulator-settles-the-swizzle-dispute-but-does-not-measure-it.md) |
+| - | [653. The texture detile lands, anchored on obSCEne's measured texel (15,15)](worklog/653-the-texture-detile-lands-anchored-on-obscenes-measured-texel.md) |
+| - | [654. A capture correlates each draw with the shaders live at it](worklog/654-a-capture-correlates-each-draw-with-the-shaders-live-at-it.md) |
+| - | [655. The colour target decode pairs its base and extent - the piece the detile needs](worklog/655-the-colour-target-decode-pairs-its-base-and-extent.md) |
+| - | [656. The colour write mask decodes; the tiling-mode citation turned out not to be solid](worklog/656-the-colour-write-mask-decodes-and-the-tiling-mode-citation-is-not-solid.md) |
+| - | [657. The tiling mode decodes - the citation held up, and the colour target is now fully described](worklog/657-the-tiling-mode-decodes-and-the-colour-target-is-now-fully-described.md) |
+| - | [658. The detile gets its consumer: a colour target out of guest memory](worklog/658-the-detile-gets-its-consumer-a-colour-target-out-of-guest-memory.md) |
+| - | [659. A texture declares its own tiling: the T# swizzle mode decodes](worklog/659-a-texture-declares-its-own-tiling-the-t-sharp-swizzle-mode-decodes.md) |
+| - | [660. detile_texture completes the texture detile side, sharing a core with the colour target](worklog/660-detile-texture-completes-the-texture-detile-side.md) |
+| - | [661. The packed float store lands, and its bits come back from the device](worklog/661-the-packed-float-store-lands-and-runs-on-the-device.md) |
+| - | [662. The AGC shader container note points at SELFish's clean-room home](worklog/662-the-agc-shader-container-note-points-at-selfishs-clean-room-home.md) |
+| - | [663. The AGC builder doc called two wired encoders "refused" - corrected, and 4059 closes](worklog/663-the-agc-builder-doc-called-two-wired-encoders-refused.md) |
+| - | [664. The prose gate caught two `\`-continued strings I introduced in tiling.rs](worklog/664-the-prose-gate-caught-two-offenders-i-introduced-in-tiling.md) |
+| - | [665. Two corpus-reached AGC builders `-4059` missed: `ResetQueue` wired, `WaitUntilSafeForRendering` refused](worklog/665-two-corpus-reached-agc-builders-one-wired-one-refused.md) |
+| - | [666. `pthread_create` honours the measured thread-attribute block](worklog/666-pthread-create-honours-the-measured-thread-attribute-block.md) |
+| - | [667. The texture detile refuses a non-32-bpp format instead of mis-tiling it](worklog/667-the-texture-detile-refuses-a-non-32-bpp-format.md) |
+| - | [668. `sceAgcDcbWaitUntilSafeForRendering` is wired as a measured no-op, reversing worklog 665's refusal](worklog/668-wait-until-safe-for-rendering-is-wired-as-a-measured-no-op.md) |
+| - | [669. `DB_DEPTH_CONTROL` decodes the depth- and stencil-test state](worklog/669-db-depth-control-decodes-the-depth-and-stencil-test-state.md) |
+| - | [670. `DB_STENCIL_CONTROL` completes the depth-stencil test/op state](worklog/670-db-stencil-control-completes-the-depth-stencil-state.md) |
+| - | [671. `CB_BLEND0_CONTROL` decodes the blend state, completing 6e78's decode side](worklog/671-cb-blend0-control-completes-6e78s-decode-side.md) |
+| - | [672. The leading titles' frontier after the AGC fix: a null object in command-buffer build](worklog/672-the-leading-titles-frontier-after-the-agc-fix-a-null-object-in-command-build.md) |
+| - | [673. `sceAppContentTemporaryDataMount2` answered, and a PPSA25872 regression to flag](worklog/673-app-content-temporary-data-mount2-and-a-ppsa25872-regression-flag.md) |
+| - | [674. The detile equation is hardware-validated on two points and a full-block bijection](worklog/674-the-detile-equation-is-hardware-validated-on-two-points-and-a-full-block-bijection.md) |
+| - | [675. The `Submission` carries the pipeline state its decodes produced](worklog/675-the-submission-carries-the-pipeline-state-its-decodes-produced.md) |
+| - | [676. The phase-6 roadmap no longer tells sessions to wait for arrived measurements](worklog/676-the-phase-6-roadmap-no-longer-tells-sessions-to-wait-for-arrived-measurements.md) |
+| - | [677. A vendor-library capture joins the packet-vocabulary check](worklog/677-a-vendor-library-capture-joins-the-packet-vocabulary-check.md) |
+| - | [678. `sceVideoOutRegisterBuffers` keeps the addresses a frame lives at](worklog/678-video-out-keeps-the-buffer-addresses-a-frame-lives-at.md) |
+| - | [679. The non-existent `sceAgcSubmitDcb` is corrected in shipped help text](worklog/679-the-non-existent-sceagcsubmitdcb-is-corrected-in-shipped-help-text.md) |
+| - | [680. Two "it is empty" comments corrected, and two implementations that had no knowledge entry](worklog/680-two-self-refuting-empty-comments-and-two-unrecorded-implementations.md) |
+| - | [681. The published rung legend names all seven rungs, and a flip counter stops calling itself presented](worklog/681-the-rung-legend-names-seven-and-a-flip-counter-stops-claiming-a-picture.md) |
+| - | [682. `compat markdown --check` — the two generated docs `status --check` never covered](worklog/682-compat-markdown-gains-a-check-arm-so-a-hand-edit-cannot-hide.md) |
+| - | [683. Eight doc claims corrected against the code they describe](worklog/683-eight-doc-claims-that-understated-the-code.md) |
+| - | [684. The two leading titles re-run under the current build — the wall holds, the answered count climbs](worklog/684-the-two-leading-titles-re-run-under-the-current-build.md) |
+| - | [685. The 166-agc draw and state packets decode, and an indexed-draw stream now walks in a test](worklog/685-the-166-agc-draw-and-state-packets-decode-and-an-indexed-draw-stream-walks.md) |
+| - | [686. The primitive-draw oracle is in the tree, and tiling.rs now detiles a whole console frame](worklog/686-the-primitive-draw-oracle-brought-in-and-detiled-against-a-console-frame.md) |
+| - | [687. The handover: `sceAgcDriverSubmitDcb` reads a guest command buffer, walks it, and reports](worklog/687-the-handover-a-guest-command-buffer-is-read-walked-and-reported.md) |
+| - | [688. The submission report reaches the run report](worklog/688-the-submission-report-reaches-the-run-report.md) |
+| - | [689. What completes driver work, decided: nothing yet, and the report now says why](worklog/689-what-completes-driver-work-decided-nothing-yet-and-the-report-says-why.md) |
+| - | [690. The detiling module, and why it models one mode and refuses the rest](worklog/690-the-detiling-module-and-why-it-models-one-mode.md) |
+| - | [691. The detile's provenance, corrected: one measured byte, not two points and a whole frame](worklog/691-the-detile-provenance-corrected-one-measured-byte-not-two-points-and-a-frame.md) |
+| - | [692. The handover resolves shader addresses against the guest's regions, and bounds-checks the descriptor](worklog/692-the-handover-resolves-shader-addresses-against-the-guests-regions.md) |
+| - | [693. Five statements the code beside them contradicted](worklog/693-five-statements-the-code-contradicted.md) |

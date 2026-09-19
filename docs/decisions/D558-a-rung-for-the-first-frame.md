@@ -42,7 +42,7 @@ counted.
 
 ## The count is a measurement, not a claim
 
-The promotion is driven by `orbistoun_video::frames_presented`, which reads the port table -
+The promotion is driven by `orbistoun_video::flips_accepted`, which reads the port table -
 **not** by counting calls to the submit function in the trace. A submission with a handle this
 process never issued is refused, and is still a call to something implemented; a report counting
 labels would credit a frame the guest never got.

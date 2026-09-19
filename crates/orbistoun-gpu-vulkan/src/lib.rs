@@ -645,8 +645,8 @@ impl RenderBackend for VulkanBackend {
                 },
                 true,
             ),
-            // The rest - indexed draws (needing the index buffer bound), render targets, viewport,
-            // clears - are refused by name, honestly (D010), until their execution lands.
+            // The rest - a `ClearColour` (awaiting its register oracle, D702) and a `Fence` - are
+            // refused by name, honestly (D010), until their execution lands.
             other => {
                 self.refused += 1;
                 Err(BackendError::Unsupported {

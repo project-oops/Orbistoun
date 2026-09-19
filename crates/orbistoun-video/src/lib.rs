@@ -92,6 +92,14 @@ mod port {
         /// How many flips have completed - the count `sceVideoOutGetFlipStatus` reports, and what
         /// a guest polls to learn a submitted flip has been picked up.
         pub flips: u64,
+        /// The guest addresses of the buffers registered against this port, in index order. Empty
+        /// until the guest registers a set. These are the frames themselves: a renderer needs an
+        /// address the guest agreed to write into, and framebuffer diffing needs bytes to read - both
+        /// live here (REQ-...6a86).
+        pub buffers: Vec<u64>,
+        /// The buffer index the guest last submitted a flip for, if any - which of [`Self::buffers`]
+        /// it last asked to present.
+        pub last_flip: Option<u64>,
     }
 
     /// Every port ever opened. Index plus [`FIRST`] is the handle; a closed one stays, so handles
@@ -218,19 +226,56 @@ fn video_out_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// The most buffers one registration binds. A display set is small - a handful of frames a guest
+/// cycles through - so a count beyond this is a garbage argument, and this bounds the read of the
+/// guest's address array rather than following an arbitrary count into unmapped memory. A defensive
+/// ceiling, not a hardware maximum.
+const MAX_REGISTERED_BUFFERS: usize = 16;
+
 /// `sceVideoOutRegisterBuffers(handle, index, addresses, count, attribute)`.
 ///
-/// Records how many buffers a port has been given and answers success. **Nothing is done
-/// with the addresses**, which is the honest state: there is no output surface, so a
-/// buffer registered here is a buffer nobody will read.
+/// Records the buffers a port has been given (their guest addresses, at the indices the guest names)
+/// and answers success. **The addresses are now kept** (REQ-...6a86): they are the frames, and a
+/// renderer needs an address the guest agreed to write into while framebuffer diffing needs bytes to
+/// read, so both come from here. `index` (`args[1]`) is where in the set they land; `addresses`
+/// (`args[2]`) is the array of `count` guest addresses.
 ///
-/// Answering success rather than refusing is a deliberate choice and a reversible one. A
-/// guest that cannot register buffers stops setting up its display; one that believes it
-/// can proceeds to submit flips, which is where the GPU layer will eventually be reached.
-/// Getting further is the point, and the alternative is a wall with nothing behind it.
+/// Answering success rather than refusing is a deliberate choice and a reversible one. A guest that
+/// cannot register buffers stops setting up its display; one that believes it can proceeds to submit
+/// flips, which is where the GPU layer will eventually be reached. A **null** address array is the one
+/// case refused: it registers buffers a renderer could never read, so it earns the video-out error
+/// rather than storing a row of zeros.
 fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (handle, count) = (args[0], args[3]);
-    match port::with(handle, |p| p.registered = count) {
+    let (handle, start_index, addresses, count) = (args[0], args[1], args[2], args[3]);
+    if addresses == 0 {
+        return video_error::INVALID_HANDLE;
+    }
+    let start = usize::try_from(start_index)
+        .unwrap_or(MAX_REGISTERED_BUFFERS)
+        .min(MAX_REGISTERED_BUFFERS);
+    let count = usize::try_from(count)
+        .unwrap_or(0)
+        .min(MAX_REGISTERED_BUFFERS - start);
+    let mut read = Vec::with_capacity(count);
+    for i in 0..count {
+        // SAFETY: `addresses` is the guest's array pointer under the identity mapping (D014); each
+        // buffer address is a quadword at `addresses + i * 8`, within the `count`-element array the
+        // guest declared. Unaligned because the guest guarantees no more than its own alignment.
+        let address = unsafe {
+            std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(
+                (addresses as usize).wrapping_add(i * 8),
+            ))
+        };
+        read.push(address);
+    }
+    match port::with(handle, |p| {
+        p.registered = args[3];
+        let end = start + read.len();
+        if p.buffers.len() < end {
+            p.buffers.resize(end, 0);
+        }
+        p.buffers[start..end].copy_from_slice(&read);
+    }) {
         Some(()) => OK,
         None => video_error::INVALID_HANDLE,
     }
@@ -247,13 +292,20 @@ fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// the count to move past what it was sees it move, and proceeds, rather than spinning on a frame
 /// that a real display would have shown and this one never will.
 ///
-/// `buffer_index`, `flip_mode` and `flip_arg` are accepted and not modelled: which buffer is shown
-/// and when are properties of a scanout that does not exist, and inventing a `flip_arg` echo nothing
-/// reads would be state carried for no reader. What advancing the count buys - the guest getting
-/// past its present loop - is the whole point (as with buffer registration above).
+/// `buffer_index` (`args[1]`) **is** recorded now, as the port's last-flipped index (REQ-...6a86): it
+/// is which of the registered buffers the guest last asked to present, and a renderer reads that one
+/// back. `flip_mode` and `flip_arg` stay unmodelled: when a flip is shown is a property of a scanout
+/// that does not exist, and inventing a `flip_arg` echo nothing reads would be state carried for no
+/// reader. What advancing the count buys - the guest getting past its present loop - is the whole
+/// point (as with buffer registration above).
 fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (handle, flip_arg) = (args[0], args[3]);
-    if port::with(handle, |p| p.flips += 1).is_none() {
+    let (handle, buffer_index, flip_arg) = (args[0], args[1], args[3]);
+    if port::with(handle, |p| {
+        p.flips += 1;
+        p.last_flip = Some(buffer_index);
+    })
+    .is_none()
+    {
         return video_error::INVALID_HANDLE;
     }
     // **And the completion is posted**, which is the half that was missing. A flip completing
@@ -477,7 +529,7 @@ fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// How many frames the guest has handed to the output layer.
+/// How many flips the guest has had accepted against a real port.
 ///
 /// # What this number is, and what it is not
 ///
@@ -491,7 +543,7 @@ fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// model `video_out_submit_flip` already documents. A guest that reaches this has got a frame
 /// to the layer that would present it, which is a distance, not a picture.
 #[must_use]
-pub fn frames_presented() -> u64 {
+pub fn flips_accepted() -> u64 {
     port::flips()
 }
 
@@ -549,7 +601,7 @@ mod tests {
     use super::{
         GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
         video_out_get_flip_status, video_out_get_resolution_status, video_out_is_flip_pending,
-        video_out_open, video_out_set_flip_rate, video_out_submit_flip,
+        video_out_open, video_out_register_buffers, video_out_set_flip_rate, video_out_submit_flip,
     };
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
@@ -562,6 +614,54 @@ mod tests {
     /// collide on ownership. `[user, bus, index, param]`; each test picks its own bus.
     fn open_on(bus: u64) -> u64 {
         video_out_open(&args([0, bus, 0, 0]))
+    }
+
+    /// **Registering buffers stores their addresses in order, and a flip records which one.**
+    ///
+    /// The whole of `-6a86`: a renderer needs an address the guest agreed to write into, and it was
+    /// being discarded. Three addresses at a known triple must come back in order, and the flip must
+    /// record the index it presented. The null-array case is the guard, watched failing: a guest that
+    /// registers "buffers" at address zero is refused rather than storing a row of zeros a renderer
+    /// would read as frames.
+    #[test]
+    fn registering_buffers_stores_their_addresses_and_a_flip_records_the_index() {
+        let handle = open_on(6);
+        assert!(handle >= port::FIRST, "a port opened");
+
+        // Guest memory is host memory (identity mapping), so this array's pointer is a guest address.
+        let addresses: [u64; 3] = [0x2_0000_0000, 0x2_0001_0000, 0x2_0002_0000];
+        let ptr = addresses.as_ptr() as u64;
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, ptr, 3])),
+            0,
+            "registering three buffers succeeds"
+        );
+        assert_eq!(
+            port::with(handle, |p| p.buffers.clone()).expect("the port"),
+            vec![0x2_0000_0000, 0x2_0001_0000, 0x2_0002_0000],
+            "the three addresses are stored in index order"
+        );
+
+        // A flip of buffer 2 records that index.
+        assert_eq!(video_out_submit_flip(&args([handle, 2, 0, 0])), 0);
+        assert_eq!(
+            port::with(handle, |p| p.last_flip).expect("the port"),
+            Some(2),
+            "the flip recorded which buffer it presented"
+        );
+
+        // A null address array is refused, not stored as zeros.
+        let before = port::with(handle, |p| p.buffers.clone()).expect("the port");
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, 0, 3])),
+            video_error::INVALID_HANDLE,
+            "a null address array is refused"
+        );
+        assert_eq!(
+            port::with(handle, |p| p.buffers.clone()).expect("the port"),
+            before,
+            "and it stored nothing"
+        );
     }
 
     /// **Nothing is ever pending, including straight after a submit.**

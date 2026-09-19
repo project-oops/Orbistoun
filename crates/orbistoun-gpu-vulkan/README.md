@@ -2,7 +2,9 @@
 
 Vulkan implementation of `orbistoun-gpu`'s `RenderBackend`.
 
-**Models:** nothing yet. Every command is refused with `Unsupported`.
+**Models:** compute dispatch, geometry and fragment draws (mesh or vertex), render-target
+selection, shader and buffer binding, and viewport - each executed against a real Vulkan device
+and read back. `ClearColour`, `Fence` and `present` are still refused with `Unsupported`.
 
 **Deliberately fakes:** nothing. A backend that returned `Ok` and drew nothing would
 be indistinguishable from a rendering bug, so refusals are explicit and name the
@@ -17,12 +19,14 @@ A second backend is a sibling crate, not surgery.
 translator emitted nothing" and "the translator emitted plenty and none of it landed"
 look identical from a black screen. The counter separates them.
 
-**Status:** the rendering backend is still a stub - every draw and present is refused by
-name. Roadmap phase 6.
+**Status:** draws and dispatches execute against a real device and the frame is read back;
+`ClearColour` (awaiting its register oracle, D702), `Fence` and `present` are still refused by
+name (D010). Roadmap phase 6 finishes it.
 
-What is *not* a stub is `compute`: a real Vulkan device, dispatching a translated shader
+The tightest check is `compute`: a real Vulkan device, dispatching a translated shader
 with known inputs and reading the buffer back, so a translation can be checked against
-what it was supposed to compute rather than merely validated as well-formed. That is why
+what it was supposed to compute rather than merely validated as well-formed - and a draw reads
+its frame back the same way (D701). That is why
 this crate depends on `ash` now, having deliberately not done so while nothing used
 Vulkan (D019).
 

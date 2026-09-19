@@ -17,6 +17,7 @@ orbistoun-proto = { workspace = true }
 orbistoun-shell = { workspace = true }
 orbistoun-report = { workspace = true }
 orbistoun-video = { workspace = true }
+orbistoun-gpu = { workspace = true }
 orbistoun-env = { workspace = true }
 orbistoun-paths = { workspace = true }
 orbistoun-abi = { workspace = true }

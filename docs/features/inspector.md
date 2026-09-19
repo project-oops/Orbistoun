@@ -20,7 +20,7 @@ Open the **Inspector** tab from the main emulation window (or press `Ctrl+I`).
 | 0002 | sceKernelAllocateDirectMemory | published| 0x00000000  | 0.12 ms       |
 | 0003 | sceKernelMapDirectMemory      | assumed  | 0x00000000  | 0.08 ms       |
 | 0004 | sceAgcDriverCreateQueue       | guest-observed | 0x00000000 | 0.45 ms  |
-| 0005 | sceAgcSubmitDcb               | measured | 0x00000000  | 0.22 ms       |
+| 0005 | sceAgcDriverSubmitDcb         | measured | 0x00000000  | 0.22 ms       |
 +-------------------------------------------------------------------------------+
 | [Pause Execution]   [Step Into]                                              |
 +-------------------------------------------------------------------------------+

@@ -2,8 +2,8 @@
 
 
 `orbistoun-gpu` + `orbistoun-gpu-vulkan` + `orbistoun-video`, and the GUI's output
-surface. A Vulkan device, swapchain, and enough command translation to service one
-flip.
+surface. A Vulkan device and enough command translation to service one flip - no
+swapchain, since D695 settled on a headless render read back to bytes (see below).
 
 This is also where D032's deferred cost comes due: output is produced in the worker
 while the window lives in the shim. **Settled by D695, and as neither of the two
@@ -14,8 +14,8 @@ the path `framebuffer.rs` already takes and `egui` already displays.
 That matters for the order of work here rather than only for the answer. The worry
 was that shared images would constrain device creation, queue ownership and image
 allocation from the first line, so it had to be decided before a renderer existed.
-It constrains none of them, so the device and swapchain work below can start without
-carrying it.
+It constrains none of them, so the device and command-translation work below can start
+without carrying it.
 
 **Observable result:** a window with something in it. Also the arrival of framebuffer
 diffing, the only cheap mechanical correctness oracle this project will ever have

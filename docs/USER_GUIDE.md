@@ -112,7 +112,7 @@ When running in debug mode, inspect live system calls and HLE resolutions as the
 | 0002 | sceKernelAllocateDirectMemory | published| 0x00000000  | 0.12 ms       |
 | 0003 | sceKernelMapDirectMemory      | assumed  | 0x00000000  | 0.08 ms       |
 | 0004 | sceAgcDriverCreateQueue       | guest-observed | 0x00000000 | 0.45 ms  |
-| 0005 | sceAgcSubmitDcb               | measured | 0x00000000  | 0.22 ms       |
+| 0005 | sceAgcDriverSubmitDcb         | measured | 0x00000000  | 0.22 ms       |
 +-------------------------------------------------------------------------------+
 | [Pause Execution]   [Step Into]                                              |
 +-------------------------------------------------------------------------------+
@@ -233,5 +233,5 @@ If you encounter an unhandled call or crash while testing:
   (`orbistoun-gpu-vulkan`) still refuses every draw and present call by name — see
   [graphics.md](features/graphics.md) — so no title produces a picture yet, only guest
   execution and (where wired up) GPU compute dispatch. Check the run's own log for whether
-  the title reached draw submissions (`sceAgcSubmitDcb`) even though nothing is shown.
+  the title reached draw submissions (`sceAgcDriverSubmitDcb`) even though nothing is shown.
 

@@ -795,6 +795,20 @@ fn prepare_diagnostics(
         build: env!("CARGO_PKG_VERSION").to_owned(),
     });
 
+    // Hand the graphics submit path the regions the guest can read, so a submitted command buffer
+    // and the shader addresses it names resolve against the guest's own allocated memory rather than
+    // being read blind - the difference between an unresolved count that measures D101 and one fixed
+    // at "all unresolved" (5bff). Set before the guest is entered, from the same map recorded above.
+    if let Ok(map) = orbistoun_kernel::direct::map().lock() {
+        orbistoun_gpu::agc_driver::set_guest_regions(
+            map.regions()
+                .iter()
+                .filter(|r| r.allocated)
+                .map(|r| (r.start, r.end))
+                .collect(),
+        );
+    }
+
     // Where the trace goes. Named after the module so a sweep over a directory of
     // titles leaves one file per title rather than each overwriting the last.
     if let Some(paths) = service.paths() {

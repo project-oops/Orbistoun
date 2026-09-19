@@ -10,12 +10,15 @@
 //!
 //! # Where these names come from
 //!
-//! **A real module's own import table.** PPSA02664's executable imports fifty-one names
-//! from `libSceAgc` and five from `libSceAgcDriver`; five further `libSceAgcDriver` names
-//! appear in the recorded corpus from other modules. Every name below is one of those.
-//! None is derived from a pattern and hoped to match - which is the same provenance
-//! `orbistoun-input` documents for `libScePad`, and the strongest available without a
-//! console.
+//! **Real import tables, and a few names a measurement added.** Most names below are read
+//! from a module's own import table: PPSA02664 imports fifty-one from `libSceAgc` and five
+//! from `libSceAgcDriver`, and other modules of the corpus name five more `libSceAgcDriver`
+//! functions. The rest are the shader-linkage builders - `sceAgcCreateShader` and the
+//! interpolant/prim-state set - added because obSCEne's `-e4f1`/`-9a41` requests measured them
+//! on hardware, not because they appear in that import table. So none is derived from a
+//! pattern and hoped to match: each is either imported by a real guest or measured on a
+//! console, the strongest provenance available here - the same `orbistoun-input` documents
+//! for `libScePad`.
 //!
 //! # Status: names confirmed, arities not
 //!
@@ -30,8 +33,9 @@
 //! for a command-buffer interface the arguments are buffer addresses and sizes, which is
 //! precisely what a trace of it is for.
 //!
-//! **Forty-four of the fifty-seven declared here are implemented; the rest are declarations.**
-//! What the declarations buy is that a guest reaching the graphics interface is **named and
+//! **Most of what is declared here is implemented; the rest are declarations** - the split is
+//! asserted in `tests/dcb_wiring.rs`, so the number lives in one place a prose comment cannot drift
+//! from. What the declarations buy is that a guest reaching the graphics interface is **named and
 //! counted** instead of vanishing into `unknown::`, and that the loud stub policy answers it
 //! rather than a placeholder a caller might read as a handle (D125).
 //!
@@ -569,6 +573,17 @@ fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `sceAgcDcbWaitUntilSafeForRendering(dcb, ...)` - a measured library-level no-op.
+///
+/// obSCEne re-probed it (REQ-...4e91, sweeps `20260917-090300`/`101310`): 0 bytes and `rc 0x0` under
+/// every condition (bare writer and one prepared through `sceAgcDcbResetQueue`), its `GetSize` symbol
+/// absent from `libSceAgc`, `empty-encoding` true. So it emits nothing and answers the measured `0x0`.
+/// It writes nothing and dereferences no argument, so a null handle needs no guard - the same terms as
+/// the patch family, though it is a wait/sync no-op rather than a patch.
+fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
 /// `sceAgcCbNop(cb)` - a header-only no-op. Measured whole: `166-agc/cb-nop`.
 ///
 /// The packet takes no arguments, so unlike the reservation skeletons this is the complete,
@@ -616,6 +631,17 @@ fn dcb_dma_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// cannot separate, so it is zeroed like the other skeletons (REQ-...a70f).
 fn dcb_set_base_indirect_args(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::set_base_indirect_args_skeleton())
+}
+
+/// `sceAgcDcbResetQueue(dcb, ...)` - reserve the measured 32-byte queue-reset writer-struct and hand
+/// back a real cursor.
+///
+/// Framing and extent measured (`166-agc/dcb-reset-queue`, sweep `20260910-174437`, REQ-...b7e4); the
+/// two marker-register values are address-shaped and left zero, on the skeleton discipline - see
+/// [`packet::build::reset_queue_skeleton`]. D559: PPSA02664 calls this on its writer before any other
+/// AGC use, so the reservation is what clears the wall the placeholder held.
+fn dcb_reset_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &packet::build::reset_queue_skeleton())
 }
 
 // The REQ-...a70f cluster, wired as reservation skeletons from the headers and extents obSCEne
@@ -778,10 +804,13 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// Eight of the command **builders** are now wired, through the writer handle in `arg0`: the
-/// encodings were measured first (worklog 534, implemented as pure encoders in
-/// [`crate::packet::build`]) and the handle layout that places them was guest-observed and then
-/// confirmed by the library's own behaviour - see the `dcb` module below, which is private.
+/// The command **builders** are wired through the writer handle in `arg0`: their encodings were
+/// measured (worklog 534 first, then extended across later sweeps) and implemented as pure encoders
+/// or measured reservation skeletons in [`crate::packet::build`], while the handle layout that places
+/// them was guest-observed and then confirmed by the library's own behaviour - see the `dcb` module
+/// below, which is private. The array below is the authoritative list; this prose does not restate
+/// its length, which would go stale as builders land (the count is pinned instead by
+/// `tests/dcb_wiring.rs`).
 ///
 /// **The two that worklog 536 refused on a single input each have since been measured across more
 /// inputs and wired**, so each is a builder that is right rather than a guess:
@@ -792,6 +821,21 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///   encodes the whole packet.
 /// - `sceAgcDcbSetIndexSize` - measured across eight argument pairs, enough to establish the mapping
 ///   `packet::build::set_index_size` uses rather than emit one measured packet for every call.
+///
+/// **`sceAgcDcbResetQueue` is wired as a measured reservation skeleton** (REQ-...b7e4): obSCEne
+/// measured its whole 32-byte writer-struct with zero arguments (`166-agc/dcb-reset-queue`), and
+/// [`packet::build::reset_queue_skeleton`] reproduces the framing - a NOP filler and two
+/// `SET_UCONFIG_REG` packets - while zeroing an address-shaped body a single zero-argument pass
+/// cannot separate from the probe's own writer-struct pointer. It is the first AGC call PPSA02664
+/// makes (D559), so the reservation clears a wall the placeholder held.
+///
+/// **`sceAgcDcbWaitUntilSafeForRendering` is wired as a measured no-op** (REQ-...4e91). Worklog 665
+/// refused it while its only measurement was the 35-builder sweep's `fail (wrote 0)` - a probe
+/// failure, not an empty encoding. The re-probe settled it: its `GetSize` symbol is absent from
+/// `libSceAgc`, and the builder wrote 0 bytes and returned `0x0` on a bare writer and on one prepared
+/// through `sceAgcDcbResetQueue` (sweeps `20260917-090300`/`101310`), `empty-encoding` true under
+/// every condition. So it is a library-level no-op, and [`agc_no_op_returns_ok`] answers the measured
+/// `0x0` and writes nothing - like the patch family, it dereferences nothing, so a null needs no guard.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceAgcCreateShader", create_shader),
@@ -816,6 +860,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcCbReleaseMem", cb_release_mem),
         ("sceAgcDcbDmaData", dcb_dma_data),
         ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
+        ("sceAgcDcbResetQueue", dcb_reset_queue),
+        ("sceAgcDcbWaitUntilSafeForRendering", agc_no_op_returns_ok),
         // The REQ-...a70f cluster, reservation skeletons from measured headers (sweep 203058).
         ("sceAgcCbDispatch", cb_dispatch),
         ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),

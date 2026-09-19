@@ -321,6 +321,11 @@ decisions() {
 generated_numbers() {
     step "the generated numbers blocks are current"
     must cargo run --quiet -p orbistoun-cli -- status --check
+    # The same mechanical fact for the other two generated docs `status --check` does not cover -
+    # COMPATIBILITY.md and docs/titles/ - which is how a hand-edit to one of them once went four
+    # days uncaught (17e5).
+    step "the generated compatibility table and pages are current"
+    must cargo run --quiet -p orbistoun-cli -- compat markdown --check
 }
 
 # --- prose -------------------------------------------------------------------

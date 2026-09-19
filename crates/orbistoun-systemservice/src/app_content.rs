@@ -62,10 +62,35 @@ fn app_param_get_int(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `sceAppContentTemporaryDataMount2(option, mountPoint)` - mounts the title's temporary-data area and
+/// fills `*mountPoint` with where it landed. Answers `0`.
+///
+/// **Guest-observed, the same context-gated ceiling as [`initialize`].** PPSA25872 (Terminator 2D, a
+/// Unity IL2CPP title) calls it, and unimplemented it answered the `0xf7ff0001` placeholder. obSCEne
+/// cannot measure `libSceAppContent` directly - its symbols are "not available in this context", the gate
+/// [`initialize`] and common-dialog also hit - so guest-observed is the ceiling and answering `0` is the
+/// honest resolution: a mount call fails on an error code and proceeds on success, and a placeholder is a
+/// lie either way. Implemented on the terms [`app_param_get_int`] states: answer honestly whether or not
+/// it is the call blocking the next wall.
+///
+/// **It is not, for this title, and that is recorded rather than glossed** (worklog 673): replacing the
+/// placeholder here did not move PPSA25872's wall. It still dies at the same `int 0x41` assert
+/// (image+0x17554a3) reached through a *different* chain of unimplemented stubs (`sceUserServiceGetAgeLevel`
+/// and others) and a string it formats about a failed lookup - a cause deeper than any one placeholder.
+/// This closes one honest gap; it does not clear that wall.
+///
+/// The `mountPoint` out-parameter is left unwritten, on the same terms as [`initialize`]'s `boot`:
+/// nothing measured says the `SceAppContentMountPoint` layout or the path a temporary-data mount answers,
+/// and a fabricated path would be the plausible output principle 3 refuses.
+fn temporary_data_mount2(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
 /// Implementations this module provides for `libSceAppContent`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceAppContentInitialize", initialize),
         ("sceAppContentAppParamGetInt", app_param_get_int),
+        ("sceAppContentTemporaryDataMount2", temporary_data_mount2),
     ]
 }

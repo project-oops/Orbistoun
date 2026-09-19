@@ -82,6 +82,11 @@ pub struct CallTrace {
     /// rather than a silence - the same rule the read and stack lines follow (D175).
     #[serde(default)]
     pub formats: FormatReport,
+    /// What the first command buffer the guest submitted to the graphics driver contained, if it
+    /// reached one. `None` until a guest hands a buffer to `sceAgcDriverSubmitDcb`; the corpus stalls
+    /// earlier today, so it is the first title to get this far that fills it (3861).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission: Option<SubmissionSummary>,
     /// What the guest was pointing at, for calls nothing implements.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dumps: Vec<ArgumentDump>,
@@ -584,6 +589,38 @@ pub struct FormatReport {
     /// The first conversion that could not be honoured, described.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub first_fault: String,
+}
+
+/// What the first command buffer a guest submitted turned out to contain.
+///
+/// A submission is the first real graphics measurement a title produces: the packets it built, the
+/// registers it set, the draws it asked for and the shader addresses it named. It belongs in the
+/// report beside the reach and call counts, not only in a trace, because it is the number that says
+/// where translation effort goes once a guest gets this far (3861). A summary rather than the whole
+/// `SubmissionReport`, because the report carries diagnostic vectors that are the translator's to read
+/// and not the run report's to serialise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubmissionSummary {
+    /// Packets the walk recognised in the submitted buffer.
+    pub packets: usize,
+    /// Register writes extracted from them.
+    pub register_writes: usize,
+    /// Draws the stream asked for (auto-indexed; an indexed draw's count is separate state).
+    pub draws: usize,
+    /// Shader addresses the register writes named.
+    pub shaders_found: usize,
+    /// Of the addresses a register named, how many fell in a region the guest was given.
+    ///
+    /// **D101's first route.** A GPU address the stream carries and a guest address are the same
+    /// number only if the assumption D101 leaves open holds; every address that resolves against the
+    /// guest's own regions is a data point that it did, here at least, and every one that does not is
+    /// a point against. Counted apart from the shader outcome, because an address can resolve and its
+    /// shader still fail to translate.
+    #[serde(default)]
+    pub addresses_resolved: usize,
+    /// Addresses a register named that fell in no region the guest was given.
+    #[serde(default)]
+    pub addresses_unresolved: usize,
 }
 
 /// What a run was subject to, as opposed to what it found.
@@ -1354,6 +1391,30 @@ mod syscall_record_tests {
         assert_eq!(back.syscalls[0].number, 649);
         assert_eq!(back.syscalls[0].first_argument, Some(2));
     }
+
+    /// A submission's resolved and unresolved address counts survive serialisation, so D101's first
+    /// route reaches a report a reader opens rather than only the process that measured it (5bff).
+    #[test]
+    fn a_submissions_resolved_counts_survive_the_round_trip() {
+        let mut trace: CallTrace = serde_json::from_str(
+            r#"{"module":"x","reached":"Entered","total_calls":0,"distinct":0,"calls":[]}"#,
+        )
+        .expect("parses");
+        trace.submission = Some(super::SubmissionSummary {
+            packets: 40,
+            register_writes: 31,
+            draws: 2,
+            shaders_found: 3,
+            addresses_resolved: 2,
+            addresses_unresolved: 1,
+        });
+        let text = serde_json::to_string(&trace).expect("serialises");
+        let back: CallTrace = serde_json::from_str(&text).expect("parses back");
+        let summary = back.submission.expect("the submission survives");
+        assert_eq!(summary.addresses_resolved, 2);
+        assert_eq!(summary.addresses_unresolved, 1);
+        assert_eq!(summary.shaders_found, 3);
+    }
 }
 
 #[cfg(test)]
@@ -1533,7 +1594,7 @@ mod tests {
     /// # What this cannot assert
     ///
     /// **That the count itself is honest**, which is the port table's property and is tested
-    /// where the table lives. If `frames_presented` ever counted refused submissions, this would
+    /// where the table lives. If `flips_accepted` ever counted refused submissions, this would
     /// pass and the rung would be wrong - which is exactly why the count is read from the port
     /// rather than from the call list this report already has.
     #[test]
@@ -1760,6 +1821,7 @@ mod tests {
             total_calls: calls,
             distinct,
             frames: 0,
+            submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
             tail: Vec::new(),

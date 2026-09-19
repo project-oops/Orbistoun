@@ -78,10 +78,10 @@ says which check failed, in which area, and what it wanted.
 **And it names something no title could have.** The probe's own run reports `libc::round`,
 `libc::sqrt`, `libc::pow` and `libc::trunc` as landing on stubs - while `037-math` passes all
 thirteen of its checks. Both are true: the probe reaches those functions through
-**`sceKernelDlsym`**, which is called seven times and which nothing implements, so a
-name looked up at run time resolves differently from the same name in the import table. That
-is a whole resolution path this project has never exercised, and it took a guest that asks
-for symbols by name to expose it.
+**`sceKernelDlsym`**, which is called seven times: a name looked up at run time lands on a
+stub while the same name resolves to a real implementation through the import table, so the two
+resolution paths disagree. That is a whole resolution path this project has never reconciled, and
+it took a guest that asks for symbols by name to expose it.
 
 **Every failure above is a fact about orbistoun, not about the platform.** The probe is a
 stand-in here, so none of it grades as a measurement of the hardware (D246) - what it grades
@@ -99,8 +99,8 @@ single-threaded startup.
 | Title | Reach | Imports | Calls | Standing | Ends |
 |---|---|---|---|---|---|
 | PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` |
-| PPSA02664-app0 | flipped | 222 | 418,426 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
-| PPSA03416-app0 | flipped | 222 | 470,422 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
+| PPSA03416-app0 | flipped | 222 | 470,421 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
+| PPSA02664-app0 | flipped | 222 | 418,425 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` |
 | PPSA25872-app0 | flipped | 192 | 339,539 | 100% | `image+0x3b383b` |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` |
@@ -178,10 +178,10 @@ threads - it is a question the run has to answer rather than an assumption. Phas
 
 | | |
 |---|---|
-| Functions declared / implemented | 965 / 761 |
+| Functions declared / implemented | 965 / 765 |
 | Declared in a library that serves nothing | 149 across 23 libraries - names written down, no implementation |
-| Recorded behaviours | 812 - 366 published, 79 measured, 75 guest-observed, 255 assumed |
-| Open questions a hardware probe could settle | 789 |
+| Recorded behaviours | 814 - 366 published, 81 measured, 75 guest-observed, 255 assumed |
+| Open questions a hardware probe could settle | 790 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

@@ -446,6 +446,28 @@ pub mod build {
         ]
     }
 
+    /// A `sceAgcDcbResetQueue` skeleton - the measured 32-byte writer-struct, every header kept, body
+    /// zero. Eight dwords: a NOP filler, then two `SET_UCONFIG_REG` packets.
+    ///
+    /// `sceAgcDcbResetQueue` writes 32 bytes on a caller-owned writer struct
+    /// (`166-agc/dcb-reset-queue`, sweep `20260910-174437`, REQ-...b7e4): `0xffff1000` (the same
+    /// empty-slot filler [`nop`] emits, whose `0x3fff` count is not a length), a four-dword
+    /// `SET_UCONFIG_REG` (`0xc0027904`) and a three-dword one (`MARKER_HEADER`), both to the
+    /// command-processor marker register `0x342`. obSCEne measured it with **zero arguments** (and
+    /// again with `0x400` in arg1, which changed nothing), so the two marker values it wrote -
+    /// `0xce200000` and `0xcea00000`, address-shaped and differing between the packets - are as likely
+    /// a pointer into obSCEne's own writer struct as a constant, and one zero-argument pass cannot
+    /// tell them apart. So the bodies are zeroed on the same skeleton discipline as [`marker_skeleton`]
+    /// and [`wait_reg_mem_skeleton`], which write these identical headers, and the headers are kept so
+    /// the reservation walks back to two packets and advances the cursor by the measured 32. The
+    /// reservation is the load-bearing part: D559 records PPSA02664 calling this on its writer twice
+    /// before any other AGC use, so a real cursor is what lets the title's first command-buffer setup
+    /// proceed past the placeholder an unwired builder handed it.
+    #[must_use]
+    pub fn reset_queue_skeleton() -> [u32; 8] {
+        [0xffff_1000, 0xc002_7904, 0, 0, 0, MARKER_HEADER, 0, 0]
+    }
+
     /// A `SET_CONTEXT_REG_INDIRECT` skeleton - the packet a guest patches with register data. Five
     /// dwords, 20 bytes.
     ///

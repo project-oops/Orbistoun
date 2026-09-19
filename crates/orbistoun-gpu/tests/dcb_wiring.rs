@@ -80,7 +80,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// A count rather than a list because the list below already pins the names: this pins the
 /// *size*, which is the thing the prose repeats and the list cannot catch.
 ///
-/// **Forty-four: the count moves as builders land (… -> 32 -> 41 -> 44), which is the point.**
+/// **Forty-six: the count moves as builders land (… -> 32 -> 41 -> 44 -> 45 -> 46), the point.**
 /// `rustfmt` wraps one entry - `sceAgcCbSetShRegisterRangeDirect` - onto its own line, so grepping
 /// the file for the handler pattern undercounts it, which is the same wrapping that twice made a
 /// registered handler look registered when it was not. Counting the built slice is the only count
@@ -90,7 +90,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        44,
+        46,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -266,6 +266,45 @@ fn the_markers_and_wait_reg_mem_reserve_their_measured_shapes() {
     );
 }
 
+/// `sceAgcDcbResetQueue` reserves its measured 32-byte writer-struct: a NOP filler, then two
+/// `SET_UCONFIG_REG` headers, all bodies zero (REQ-...b7e4). obSCEne measured it with zero arguments,
+/// and the two marker-register values it wrote are address-shaped, so the body is zeroed on the same
+/// skeleton discipline as the markers and `WaitRegMem` - and the argument in `arg1` must not leak in.
+#[test]
+fn dcb_reset_queue_reserves_its_measured_writer_struct_with_a_zero_body() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = 0x1111_1111; // must NOT appear in the packet
+
+    let at = w.cursor();
+    assert_eq!(
+        call("sceAgcDcbResetQueue", args),
+        at,
+        "returns the packet address"
+    );
+    assert_eq!(w.written(), 32, "the measured 32-byte writer-struct");
+    assert_eq!(
+        &w.bytes()[0..4],
+        &0xffff_1000u32.to_le_bytes(),
+        "the NOP filler leads the struct, as sceAgcCbNop emits it"
+    );
+    assert_eq!(
+        &w.bytes()[4..8],
+        &0xc002_7904u32.to_le_bytes(),
+        "the first SET_UCONFIG_REG header, count 2"
+    );
+    assert_eq!(
+        &w.bytes()[20..24],
+        &0xc001_7904u32.to_le_bytes(),
+        "the second SET_UCONFIG_REG header, count 1, at offset 20"
+    );
+    assert!(
+        w.bytes()[8..20].iter().all(|b| *b == 0) && w.bytes()[24..32].iter().all(|b| *b == 0),
+        "both bodies are zero, not a guessed encoding of the marker values"
+    );
+}
+
 /// The REQ-...a70f cluster each reserves its measured extent with its measured header and a zero
 /// body - a real cursor where the guest was getting a placeholder to memcpy through (worklog 618).
 /// The header is asserted little-endian so a wrong opcode or count cannot pass, and the argument in
@@ -331,6 +370,33 @@ fn every_patch_answers_the_measured_success_not_a_placeholder() {
             "{name} specifically not the placeholder the guest reads as a pointer"
         );
     }
+}
+
+/// `sceAgcDcbWaitUntilSafeForRendering` is a measured library no-op: it answers the measured `0x0`
+/// and writes nothing, on a real writer or none.
+///
+/// obSCEne re-probed it (REQ-...4e91): 0 bytes and `rc 0x0` under every condition, `GetSize` absent,
+/// `empty-encoding` true. Worklog 665 refused it while its only measurement was a failed capture; the
+/// successful re-probe replaced that with a library-confirmed empty encoding, so this pins that it now
+/// answers `0x0` rather than the placeholder and leaves the writer untouched.
+#[test]
+fn wait_until_safe_for_rendering_is_a_no_op_that_answers_zero() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    let rc = call("sceAgcDcbWaitUntilSafeForRendering", args);
+    assert_eq!(rc, 0, "the measured 0x0");
+    assert_ne!(rc, UNIMPLEMENTED, "not the placeholder");
+    assert_eq!(w.written(), 0, "a no-op writes no packet");
+
+    // A null handle is still 0x0 - it dereferences nothing.
+    assert_eq!(
+        call(
+            "sceAgcDcbWaitUntilSafeForRendering",
+            [0u64; GUEST_ARG_REGISTERS]
+        ),
+        0
+    );
 }
 
 /// `sceAgcDcbEventWrite(dcb, 62, 0)` writes the measured packet and advances the cursor by 8.

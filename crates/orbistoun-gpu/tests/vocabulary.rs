@@ -20,12 +20,12 @@
 //! asked for **and** the bytes it appended: the call states the answer, the bytes are the
 //! question.
 //!
-//! # An empty corpus is reported, not passed
+//! # A small corpus, and an empty one reported rather than passed
 //!
-//! There are no captures yet - they need a guest that reaches the graphics layer, which
-//! is the loader side's work. Until then this reports that it checked nothing, because
-//! "nothing to check" and "everything checks out" must never look the same. That is the
-//! same rule the device-dependent tests follow.
+//! The captures here each record what a library call asked for and the bytes it appended, and the
+//! suite checks the table against them. An empty corpus would report that it checked nothing,
+//! because "nothing to check" and "everything checks out" must never look the same - the same rule
+//! the device-dependent tests follow.
 
 mod common;
 
