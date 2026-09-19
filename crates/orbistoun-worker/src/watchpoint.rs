@@ -69,6 +69,10 @@ pub enum Kind {
 
 impl Kind {
     /// The `R/W` field the debug-control register wants.
+    ///
+    /// Only the Windows arming path writes a debug-control register, so this is dead weight
+    /// off Windows and gated to say so rather than left to read as unused.
+    #[cfg(windows)]
     const fn bits(self) -> u64 {
         match self {
             // Execute is `0b00`: the debug register breaks on an instruction fetch at the

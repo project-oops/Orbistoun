@@ -721,3 +721,7 @@ context cannot re-derive.
 | - | [704. Run records name the build that made them, and the stamp follows commits](worklog/704-run-records-name-their-build-and-the-stamp-follows-commits.md) |
 | - | [705. The SRT provenance seam its premise asks for is contradicted by measurement](worklog/705-the-srt-provenance-seam-is-contradicted-by-measurement.md) |
 | - | [706. The Escape Hatch: the four conditions an autonomous loop halts itself on](worklog/706-the-escape-hatch-the-loop-halts-itself-on.md) |
+| - | [707. The worker's host-only code no longer reads as dead off Windows](worklog/707-the-worker-host-only-code-no-longer-reads-as-dead-off-windows.md) |
+| - | [708. CI tests macOS as x86_64-apple-darwin, so the sysv64 wall stops walling it](worklog/708-ci-tests-macos-as-x86-64-not-aarch64.md) |
+| - | [709. Three unused dependencies removed, the machete lint job green](worklog/709-three-unused-dependencies-removed-machete-green.md) |
+| - | [710. The red CI is three root causes, not four - confirmed against the run logs](worklog/710-the-ci-failures-are-three-roots-not-four-confirmed-against-the-logs.md) |

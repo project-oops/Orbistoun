@@ -2682,6 +2682,10 @@ impl Control {
 /// everything it had already recorded.
 #[derive(Debug, Clone, Copy)]
 pub struct Stopper {
+    // Read only by the Windows `stop()`; off Windows there is no way to signal the process,
+    // so the identity is carried but unused. Precise about where it is dead rather than a
+    // blanket allow that would also hide it going unused on Windows.
+    #[cfg_attr(not(windows), allow(dead_code))]
     process_id: u32,
 }
 

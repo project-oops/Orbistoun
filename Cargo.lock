@@ -2741,7 +2741,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "tracing-subscriber",
  "winresource",
 ]
 
@@ -2787,7 +2786,6 @@ dependencies = [
 name = "orbistoun-firmware"
 version = "0.1.0"
 dependencies = [
- "orbistoun-core",
  "orbistoun-mem",
 ]
 
@@ -2859,7 +2857,6 @@ dependencies = [
  "orbistoun-input",
  "orbistoun-kernel",
  "orbistoun-loader",
- "orbistoun-nid",
  "orbistoun-paths",
  "orbistoun-probe",
  "orbistoun-proto",

@@ -43,7 +43,6 @@ orbistoun-translate = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 # Temp directories for the provenance guard tests: each writes a throwaway module

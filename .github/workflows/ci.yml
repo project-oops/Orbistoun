@@ -217,7 +217,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          # Guest code is x86-64 and runs natively; the ABI boundary is `extern "sysv64"`
+          # at ~28 sites with no architecture gate, so a native aarch64 build fails to
+          # *compile* with E0570, not at runtime. release.yml ships the macOS artifact as
+          # x86_64-apple-darwin for exactly this reason (D208, D706), so the test job builds
+          # and runs that same triple - the runner stays Apple Silicon and Rosetta runs the
+          # x86-64 test binaries. Gating the ABI so an aarch64 host could carry the
+          # analysis-only subset is the other answer, and it is 28 sites the project chose
+          # against.
+          - os: macos-latest
+            target: x86_64-apple-darwin
     # `bash` on every platform, not only the two where it is the default. The entry points
     # are bash scripts and `OOPS/bin/oops` has no extension, so under the Windows runner's
     # default PowerShell it is not an executable at all - it fails as an unrecognised
@@ -235,6 +247,16 @@ jobs:
         with:
           path: OOPS/orbistoun
       - uses: dtolnay/rust-toolchain@stable
+      # Only macOS sets a target: it cross-builds x86_64-apple-darwin (see the matrix
+      # comment) while the runner is aarch64. `CARGO_BUILD_TARGET` in the environment makes
+      # cargo and nextest target it without any change to the `oops test` verb, so the front
+      # door is the same on every OS. Skipped where `target` is empty (Linux, Windows), which
+      # build for their native host triple.
+      - name: Cross-target this OS, where it needs one
+        if: matrix.target != ''
+        run: |
+          rustup target add ${{ matrix.target }}
+          echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: OOPS/orbistoun

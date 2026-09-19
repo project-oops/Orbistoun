@@ -26,9 +26,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // The shapes this fills in live one layer down, in `orbistoun-report`, so the service
 // layer and both shims can see them. Only the producing side is here (D160).
 use orbistoun_report::trace::{
-    AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport, Frame,
-    Quiet, ReadReport, Registers, SubmissionSummary, TAIL_CALLS, TracedCall,
+    AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport, Quiet,
+    ReadReport, SubmissionSummary, TAIL_CALLS, TracedCall,
 };
+// `Frame` (stack-walk records) and `Registers` are consumed only by the Windows fault
+// reporter (`walk_frames`, `emit`, `describe_pointees`), all `#[cfg(windows)]`.
+#[cfg(windows)]
+use orbistoun_report::trace::{Frame, Registers};
 
 /// How many regions can be named in a fault report.
 const MAX_REGIONS: usize = 5;
@@ -417,6 +421,7 @@ pub fn describe_module(module: String) {
 /// A faulting handler can be re-entered - the report itself may fault, or the exception
 /// may be raised again as it unwinds - and a loop of half-written messages would bury
 /// the one that mattered.
+#[cfg(windows)]
 static REPORTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether `len` bytes at `address` can be read without faulting.
@@ -463,6 +468,7 @@ fn readable(address: u64, len: usize) -> bool {
 /// Away from Windows the fault reporter is not implemented at all, so nothing here is reached.
 /// Answering "not readable" keeps the byte windows empty rather than risking a second fault.
 #[cfg(not(windows))]
+#[cfg(windows)]
 const fn readable(_address: u64, _len: usize) -> bool {
     false
 }
@@ -550,6 +556,7 @@ fn host_module_of(address: u64) -> Option<(String, u64)> {
 
 /// Away from Windows nothing reaches the fault reporter, so no host module is ever named.
 #[cfg(not(windows))]
+#[cfg(windows)]
 const fn host_module_of(_address: u64) -> Option<(String, u64)> {
     None
 }
@@ -562,6 +569,7 @@ const fn host_module_of(_address: u64) -> Option<(String, u64)> {
 /// at the page boundary means it never reaches into a neighbour that may be unmapped, which is the
 /// one way reading an instruction could fault a second time. A null or wrapped pointer yields zero
 /// bytes rather than a guess.
+#[cfg(windows)]
 fn instruction_bytes(ip: u64) -> ([u8; 16], usize) {
     const PAGE: u64 = 0x1000;
     let mut out = [0_u8; 16];
@@ -590,6 +598,7 @@ fn instruction_bytes(ip: u64) -> ([u8; 16], usize) {
 /// Clamped to the **start** of the page `ip` sits in, the mirror of [`instruction_bytes`]'s clamp to
 /// the end: the whole window stays in the one mapped page, so reading it cannot fault, and a fault
 /// near a page boundary simply yields fewer bytes rather than reaching into a neighbour.
+#[cfg(windows)]
 fn bytes_before(ip: u64) -> ([u8; 48], usize) {
     const PAGE: u64 = 0x1000;
     let mut out = [0_u8; 48];
@@ -613,6 +622,7 @@ fn bytes_before(ip: u64) -> ([u8; 48], usize) {
 }
 
 /// Written explicitly so a report line is one line however the stream is buffered.
+#[cfg(windows)]
 const NEWLINE: &str = "
 ";
 
@@ -628,6 +638,7 @@ const NEWLINE: &str = "
 /// written answered the way it is designed to, and the guest believed it. The reader wants the
 /// import in the header - that is the function to implement - not a host stack trace of the
 /// emulator working correctly (D128, D154, D186, D299).
+#[cfg(windows)]
 fn note_placeholder_fault(line: &mut Line, what: &'static str, exact: bool) {
     line.text("  >> NOT AN EMULATOR BUG: this address is orbistoun's own `");
     line.text(what);
@@ -649,12 +660,14 @@ fn note_placeholder_fault(line: &mut Line, what: &'static str, exact: bool) {
 
 /// A fault address this far from zero or below is a null pointer plus a field offset, not an
 /// address the guest computed. Matches `orbistoun-report`'s `NEAR_NULL` (a page).
+#[cfg(windows)]
 const NEAR_NULL_FAULT: u64 = 0x1000;
 
 /// Whether a fault **in orbistoun's own code** is a null-ish pointer - the guest's, handed to a libc
 /// shim - rather than an emulator logic bug. Pure, so the threshold is tested without raising a real
 /// fault. Null plus a field offset below a page is a dereferenced null structure, not an address any
 /// running code computed.
+#[cfg(windows)]
 fn is_null_pointer_fault(faulting_address: u64) -> bool {
     faulting_address < NEAR_NULL_FAULT
 }
@@ -665,6 +678,7 @@ fn is_null_pointer_fault(faulting_address: u64) -> bool {
 /// faulted in this function" when it means "the emulator faulted, and this is the last thing
 /// the guest asked for". That misreading cost a whole investigation once, so it is spelled out:
 /// the function that actually faulted is in the host stack below, never the import above.
+#[cfg(windows)]
 fn note_emulator_fault(line: &mut Line) {
     line.text("  >> EMULATOR BUG: the fault is in orbistoun's OWN code, not the guest's - the");
     line.text(NEWLINE);
@@ -691,6 +705,7 @@ fn note_emulator_fault(line: &mut Line) {
 /// (worklog 611). Calling this "EMULATOR BUG" sends the reader to debug orbistoun's `memcpy`, which
 /// is correct, instead of the guest state that is not. Stated conditionally, because a null deref in
 /// orbistoun's *own* logic lands here too, and the host stack is what tells the two apart.
+#[cfg(windows)]
 fn note_null_pointer_to_libc(line: &mut Line) {
     line.text("  >> NULL-ISH ADDRESS IN OWN CODE: the instruction pointer is in orbistoun's code");
     line.text(NEWLINE);
@@ -722,6 +737,7 @@ fn note_null_pointer_to_libc(line: &mut Line) {
 /// handler; `None` otherwise, which is every case today, because the table is empty until obSCEne
 /// measures a vector (worklog 608). The resume point is set past the two-byte `int` before the
 /// handler runs, so a handler that touches nothing returns to the instruction after the trap.
+#[cfg(windows)]
 fn serviced_interrupt(
     opcode: &[u8],
     mut frame: orbistoun_kernel::interrupt::InterruptFrame,
@@ -745,6 +761,7 @@ fn serviced_interrupt(
 /// an instruction (or a misaligned SSE access) raises into an access violation at
 /// `0xffffffffffffffff`, which looks exactly like a guest dereferencing -1 and is not a pointer
 /// at all - a confusion that cost a dozen wrong eliminations before it was understood (D384).
+#[cfg(windows)]
 fn note_instruction_shape(line: &mut Line, opcode: &[u8], faulting_address: u64) {
     // A software interrupt carries its vector in the byte after `0xcd`, and that vector is the
     // whole actionable fact: it names which kernel entry the guest took and, therefore, exactly
@@ -879,6 +896,7 @@ fn note_instruction_shape(line: &mut Line, opcode: &[u8], faulting_address: u64)
     clippy::too_many_lines,
     reason = "one linear report builder; each block appends one labelled section and splitting them would scatter the fault report across functions for no reader's benefit"
 )]
+#[cfg(windows)]
 fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: Registers) {
     use std::io::Write as _;
 
@@ -1082,6 +1100,7 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
 /// asks, and a register that fails it is left out entirely rather than reported as unreadable -
 /// most of the sixteen hold scalars, and sixteen "not an address" lines would bury the two that
 /// are.
+#[cfg(windows)]
 fn describe_pointees(registers: &Registers) -> Vec<String> {
     if !orbistoun_thunk::ranges_known() {
         return Vec::new();
@@ -1137,6 +1156,7 @@ fn describe_pointees(registers: &Registers) -> Vec<String> {
 /// (otherwise the run is only the start of something longer and the text would be a fragment),
 /// and every character printable. `"None"` passes; a pointer that happens to begin `0x65 0x4e`
 /// does not.
+#[cfg(windows)]
 fn printable_text(bytes: &[u8]) -> Option<String> {
     let text: String = bytes
         .iter()
@@ -1714,6 +1734,7 @@ pub fn name_implementations(mut starts: Vec<(u64, &'static str)>) {
 /// honest: a fault inside a library routine the compiler inlined or called - a copy, a
 /// formatter - names the last implementation *before* it, which is a hint rather than a fact.
 /// A small offset is a strong hint; a large one is visibly not a match.
+#[cfg(windows)]
 fn own_code_site(address: u64) -> Option<(&'static str, u64)> {
     let starts = OWN_CODE.get()?;
     let index = starts
@@ -1792,6 +1813,7 @@ pub const MAX_FRAMES: usize = 12;
 /// **Every read is bounds-checked against the stack region** before it happens. This runs
 /// inside a fault handler, on a thread that has already faulted once; a second fault here
 /// would replace the report with silence.
+#[cfg(windows)]
 fn walk_frames(rbp: u64) -> Vec<Frame> {
     let mut frames = Vec::new();
     let mut current = rbp;
@@ -1849,6 +1871,7 @@ fn walk_frames(rbp: u64) -> Vec<Frame> {
 ///
 /// Allocation-free: the label is a `&'static str` out of the import table, because this
 /// runs before the part of the report that is allowed to allocate.
+#[cfg(windows)]
 fn inside_import_name(instruction_pointer: u64) -> Option<&'static str> {
     if locate(instruction_pointer).is_some() {
         return None;
@@ -2631,10 +2654,14 @@ pub fn install() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{Line, Region, describe_region, describe_unreadable, locate, published_envelope};
+    // The fault-report helpers below are a Windows-only subsystem (see the `#[cfg(windows)]`
+    // gating on their definitions), so their tests - and the imports those tests need - are
+    // gated too, or the Linux/macOS build reports them as unresolved imports and unused symbols.
+    #[cfg(windows)]
     use super::{
-        Line, Region, describe_region, describe_unreadable, is_null_pointer_fault, locate,
-        note_emulator_fault, note_instruction_shape, note_null_pointer_to_libc, published_envelope,
-        serviced_interrupt,
+        is_null_pointer_fault, note_emulator_fault, note_instruction_shape,
+        note_null_pointer_to_libc, serviced_interrupt,
     };
 
     /// **The flipped-buffer window is bounded to an allocated region, and refuses to leave it.**
@@ -2706,6 +2733,7 @@ mod tests {
     /// (a correct `memcpy`) instead of the upstream guest state. The threshold decides it, and a real
     /// guest address (well above a page) still reads as an emulator fault, so a genuine emulator bug
     /// is not relabelled away.
+    #[cfg(windows)] // exercises the Windows-only fault-report helpers
     #[test]
     fn a_null_ish_fault_in_own_code_is_the_guests_libc_pointer_not_an_emulator_bug() {
         // The classifier: null plus a field offset is the guest's pointer; a guest address is not.
@@ -2744,6 +2772,7 @@ mod tests {
     /// declines everything else.** The `CONTEXT` copy is trivial; this pins the part that could be
     /// wrong: which instructions count, where execution resumes, and that an unhandled vector is
     /// left for the fault report (worklog 608).
+    #[cfg(windows)] // exercises the Windows-only `serviced_interrupt` glue
     #[test]
     fn a_software_interrupt_with_a_handler_is_serviced_and_resumes_past_it() {
         use orbistoun_kernel::interrupt::{InterruptFrame, clear, install};
@@ -2803,6 +2832,7 @@ mod tests {
     /// framing - because a vector nobody has measured really might be a service to add. A `ud2` is
     /// checked to be a guest trap too, because conflating the two is how "orbistoun's gap" and "the
     /// guest aborted" get mistaken for each other.
+    #[cfg(windows)] // exercises the Windows-only `note_instruction_shape` helper
     #[test]
     fn a_software_interrupt_names_its_vector_and_its_measured_category() {
         // int 0x41: measured fatal, so a guest trap pointing upstream - not an entry to characterise.
@@ -2989,6 +3019,9 @@ pub(crate) fn opening_calls() {
 }
 #[cfg(test)]
 mod pointee_tests {
+    // `printable_text` is part of the Windows-only fault reporter, so its import and the test
+    // that uses it are gated; the breakpoint tests below are cross-platform and stay ungated.
+    #[cfg(windows)]
     use super::printable_text;
 
     /// A terminated run of printable characters is text; everything else is bytes.
@@ -3003,6 +3036,7 @@ mod pointee_tests {
     /// **What it cannot check:** that the guest meant the bytes as text. A four-byte integer
     /// whose bytes all happen to be printable and whose fifth byte is zero is indistinguishable
     /// from a short string, and this reports it as one.
+    #[cfg(windows)] // exercises the Windows-only `printable_text` helper
     #[test]
     fn only_terminated_printable_bytes_are_reported_as_text() {
         let mut label = [0_u8; 16];

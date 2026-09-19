@@ -13,5 +13,4 @@ description = "A skeleton of the console's firmware address space, for guests th
 workspace = true
 
 [dependencies]
-orbistoun-core = { workspace = true }
 orbistoun-mem = { workspace = true }

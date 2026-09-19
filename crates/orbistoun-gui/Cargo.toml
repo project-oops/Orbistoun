@@ -23,7 +23,6 @@ orbistoun-report = { workspace = true }
 orbistoun-proto = { workspace = true }
 orbistoun-worker = { workspace = true }
 orbistoun-env = { workspace = true }
-orbistoun-nid = { workspace = true }
 orbistoun-paths = { workspace = true }
 orbistoun-loader = { workspace = true }
 orbistoun-kernel = { workspace = true }
