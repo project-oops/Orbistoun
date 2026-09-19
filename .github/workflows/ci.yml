@@ -254,6 +254,11 @@ jobs:
       # build for their native host triple.
       - name: Cross-target this OS, where it needs one
         if: matrix.target != ''
+        # `working-directory` is load-bearing: orbistoun's rust-toolchain.toml pins 1.97.1, and
+        # rustup honours that file only when run inside the checkout. Run from the default dir,
+        # `rustup target add` adds the target to *stable* while the build runs under 1.97.1 with
+        # no std for it - `error[E0463]: can't find crate for core` (release.yml hit this too).
+        working-directory: OOPS/orbistoun
         run: |
           rustup target add ${{ matrix.target }}
           echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"

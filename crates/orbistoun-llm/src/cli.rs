@@ -258,6 +258,10 @@ fn find_claude() -> Option<PathBuf> {
 /// ordering - `2.1.9` sorts above `2.1.10` - and it is kept because the alternative is a
 /// version parser for a directory listing that has never had a two-digit patch component.
 /// Written down so the next person meets a note rather than a bug.
+///
+/// Windows-only: its one caller is the `#[cfg(target_os = "windows")]` launcher-discovery
+/// block above, and it looks for `claude.exe`, so off Windows it is dead - gated to say so.
+#[cfg(target_os = "windows")]
 fn newest_versioned(base: &Path) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(base)
         .ok()?
