@@ -37,6 +37,9 @@ guest_module! {
         "sceSystemServiceParamGetInt" => 2,
         "sceSystemServiceHideSplashScreen" => 0,
         "sceSystemServiceGetStatus" => 1,
+        // A system-flag setter, arity the trampoline's six because the real signature is
+        // unmeasured (D504); the handler reads none of it.
+        "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet" => 6,
     }
 }
 
@@ -182,6 +185,43 @@ fn user_service_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceUserServiceTerminate()`.
 fn user_service_terminate(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `sceErrorDialogInitialize()` - set up the system error-dialog subsystem.
+///
+/// An init that succeeds honestly: it answers `OK` (`0x0`), the way an SDK `*Initialize` does on its
+/// first call, without claiming a dialog was ever shown - the same reasoning that let
+/// `libSceAudioOut`'s init leave `SERVES_NOTHING` (setting a subsystem up is not claiming a sound was
+/// made). Unimplemented, it answered the loud placeholder to guests that call it (PPSA28061, worklog
+/// 756); the honest fill is the `OK` an init returns. Arity is the trampoline's 6, not a claim about
+/// the real signature (D504).
+fn error_dialog_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `sceSystemServiceHideSplashScreen()` - dismiss the boot splash once a title is ready to draw.
+///
+/// An action that succeeds honestly. On a console this tears down the boot-logo layer the system
+/// showed while the title loaded; nothing displays that layer through this path here, so "hide it"
+/// is a no-op that succeeds - the same shape [`sysmodule_unload_module`] states ("nothing was paged
+/// in, so nothing is paged out ... success"). It answers `OK`, writes nothing, and claims no
+/// framebuffer was touched. Unimplemented, it handed the loud placeholder to a guest that checks the
+/// return (PPSA04263, worklog 757); the honest fill is the `OK` the console answers. Arity zero is
+/// the declared shape (D167).
+fn hide_splash_screen(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `sceSystemServiceDisableNoticeScreenSkipFlagAutoSet()` - turn off a system flag's auto-set.
+///
+/// A setter, and a setter's contract is that the request was taken, not that a value was read back
+/// (D523). It disables the automatic setting of the notice-screen skip flag; orbistoun keeps no such
+/// flag, so there is nothing to toggle and nothing to write, and answering `OK` states the request
+/// was accepted without inventing a value. Unimplemented, it handed the loud placeholder to a guest
+/// that checks the return (PPSA04263, worklog 757). Arity is the trampoline's six, not a claim about
+/// the real signature (D504) - the handler reads none of its arguments.
+fn disable_notice_screen_skip_flag_auto_set(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
@@ -398,7 +438,13 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             user_service_get_login_user_id_list,
         ),
         ("sceUserServiceGetUserName", user_service_get_user_name),
+        ("sceErrorDialogInitialize", error_dialog_initialize),
         ("sceSystemServiceParamGetInt", param_get_int),
+        ("sceSystemServiceHideSplashScreen", hide_splash_screen),
+        (
+            "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet",
+            disable_notice_screen_skip_flag_auto_set,
+        ),
         ("sceSysmoduleLoadModule", sysmodule_load_module),
         ("sceSysmoduleUnloadModule", sysmodule_unload_module),
         ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
@@ -540,6 +586,7 @@ mod tests {
             .iter()
             .chain(super::user::MODULE.imports.iter())
             .chain(super::sysmodule::MODULE.imports.iter())
+            .chain(super::error_dialog::MODULE.imports.iter())
             .map(|i| i.name)
             .collect();
         for (name, _) in implementations() {
@@ -548,6 +595,31 @@ mod tests {
                 "{name} is implemented but not declared in guest_module!"
             );
         }
+    }
+
+    /// **The error-dialog init succeeds honestly.** It answers `OK`, not the loud placeholder a guest
+    /// would carry on as a status, and dereferences none of its arguments (worklog 756).
+    #[test]
+    fn error_dialog_initialize_answers_ok() {
+        let args = [0_u64; GUEST_ARG_REGISTERS];
+        assert_eq!(super::error_dialog_initialize(&args), super::OK);
+    }
+
+    /// **The two system-service actions succeed and write nothing.**
+    ///
+    /// Both are actions, not getters: hiding the splash and disabling a flag's auto-set take a
+    /// request and answer `OK`, the way [`super::sysmodule_unload_module`] does. The test carries
+    /// non-zero leftovers in every argument slot to prove neither reads one - a getter dressed as
+    /// an action would dereference one and fault, and returning `OK` for a value nobody wrote is
+    /// the failure this crate exists to prevent (worklog 757).
+    #[test]
+    fn the_system_service_actions_succeed_without_touching_their_arguments() {
+        let args = [0xDEAD_BEEF_u64; GUEST_ARG_REGISTERS];
+        assert_eq!(super::hide_splash_screen(&args), super::OK);
+        assert_eq!(
+            super::disable_notice_screen_skip_flag_auto_set(&args),
+            super::OK
+        );
     }
 
     #[test]

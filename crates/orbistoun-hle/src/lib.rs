@@ -338,7 +338,15 @@ impl Registry {
     /// implementation able to displace a stub without unregistering it first.
     pub fn register(&mut self, module: ModuleDesc) {
         for import in module.imports {
-            let nid = self.hasher.hash(import.name);
+            let nid = if let Some(hex) = import.name.strip_prefix("0x") {
+                if let Ok(raw) = u64::from_str_radix(hex, 16) {
+                    Nid::from_raw(raw)
+                } else {
+                    self.hasher.hash(import.name)
+                }
+            } else {
+                self.hasher.hash(import.name)
+            };
             self.by_nid.insert(
                 nid,
                 Resolved {
@@ -499,5 +507,22 @@ mod tests {
             r.resolve(hasher.hash("testOpen")).expect("declared").stub,
             StubReturn::Unimplemented
         );
+    }
+
+    #[test]
+    fn raw_hex_nid_symbols_resolve_by_raw_nid() {
+        guest_module! {
+            "libRaw" {
+                "0x7d86501b8094ef57" => 1,
+            }
+        }
+        let mut r = Registry::new(NidHasher::new(*b"test-suffix"), StubPolicy::default());
+        r.register(MODULE);
+        let found = r
+            .resolve(orbistoun_nid::Nid::from_raw(0x7d86_501b_8094_ef57))
+            .expect("raw nid declared");
+        assert_eq!(found.library, "libRaw");
+        assert_eq!(found.name, "0x7d86501b8094ef57");
+        assert_eq!(found.arity, 1);
     }
 }

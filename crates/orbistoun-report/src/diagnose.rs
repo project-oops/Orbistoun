@@ -322,6 +322,11 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
     // by some call, and this finds the most recent one whose return matches it (worklog 606).
     let source = pointer_source(trace, f.address, f.host_thread);
 
+    // **The copy that faulted reading its source, when the fault is one.** Read from the recorded
+    // argument, so a copy from a null-page source is named here rather than mis-read off the
+    // register dump (worklog 740). `None` for any fault that is not a byte copy reading its source.
+    let copy = copy_reading_fault(trace, f.address, f.host_thread);
+
     let mut evidence = vec![format!("{} {:#x} is {shape}", f.kind, f.address)];
     if let Some(c) = source {
         // The sound observation, stated as one and no more: this call's answer is the value the
@@ -339,6 +344,9 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
                 .map_or_else(|| "that".to_owned(), |r| format!("{r:#x}")),
         ));
     }
+    // The lead when a copy is the fault, from its recorded source - or nothing when no copy read
+    // there. Built in a helper so this body stays within the line lint (see `copy_source_lead`).
+    evidence.extend(copy_source_lead(copy, f.address));
     if let Some(r) = &f.registers {
         // Name the null base before the raw dump, so the one register that mattered is not left
         // for the reader to find by matching sixteen values against the address.
@@ -373,26 +381,41 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         // it does not - but stated as a lead with both readings, never a verdict, because the
         // immediately-preceding call answering the dereferenced value is a sound observation and
         // not a sound accusation (an implemented function answering zero is usually correct).
-        action: Some(source.map_or_else(
-            || {
+        action: Some(if let Some(c) = copy {
+            // A copy that faulted reading its source is a faithful primitive, not the gap. Route to
+            // whatever produced the source pointer and say so, so the reader does not "fix" memcpy -
+            // the confident-wrong turn a copy line invites (principle 3; a wall is orbistoun's).
+            format!(
                 concat!(
-                    "read the calls just before it and the arguments they were given - ",
-                    "the value that became this address was answered by one of them"
-                )
-                .to_owned()
-            },
-            |c| {
-                format!(
+                    "{} is a faithful byte copy - it moved what it was given. The gap is whatever ",
+                    "produced its source pointer {:#x}; read the calls on this thread before it for ",
+                    "the lookup or allocation that should have answered a valid pointer there, not ",
+                    "the copy itself"
+                ),
+                c.label, c.args[1],
+            )
+        } else {
+            source.map_or_else(
+                || {
                     concat!(
-                        "the guest used {}'s answer as a pointer without checking it. If {} ",
-                        "should answer a pointer here, it is the gap - implement or fix it; if ",
-                        "its answer is correct, the guest reached this path from an earlier ",
-                        "wrong value, so read the calls further back"
-                    ),
-                    c.label, c.label
-                )
-            },
-        )),
+                        "read the calls just before it and the arguments they were given - ",
+                        "the value that became this address was answered by one of them"
+                    )
+                    .to_owned()
+                },
+                |c| {
+                    format!(
+                        concat!(
+                            "the guest used {}'s answer as a pointer without checking it. If {} ",
+                            "should answer a pointer here, it is the gap - implement or fix it; if ",
+                            "its answer is correct, the guest reached this path from an earlier ",
+                            "wrong value, so read the calls further back"
+                        ),
+                        c.label, c.label
+                    )
+                },
+            )
+        }),
         // Weighted like `gave_up`, because they are the same class of statement: how the
         // run ended. Ranked below them it sat under findings about functions called twice,
         // which is the opposite of what a reader opening a failed run wants first.
@@ -727,13 +750,101 @@ fn gave_up(trace: &CallTrace) -> Option<Finding> {
 /// call still running, has none - and `-> ?` there would read as an answer of "unknown"
 /// where saying nothing is the honest thing (D459).
 fn traced_line(c: &TracedCall) -> String {
+    let operands = copy_operands(c);
     match c.returned {
         Some(ret) => format!(
-            "{}({:#x}) -> {ret:#x} from {:#x}",
+            "{}({:#x}){operands} -> {ret:#x} from {:#x}",
             c.label, c.args[0], c.from
         ),
-        None => format!("{}({:#x}) from {:#x}", c.label, c.args[0], c.from),
+        None => format!("{}({:#x}){operands} from {:#x}", c.label, c.args[0], c.from),
     }
+}
+
+/// The source and length a byte-copy call carries in `arg1`/`arg2`, which showing `arg0` alone
+/// hides - and which are the whole evidence when the copy is the fault.
+///
+/// A copy from a null (or near-null) source is this project's commonest graphics wall: a producer
+/// that should have filled a buffer left its pointer zero, and the copy faults reading it. `arg0`
+/// is the destination, valid by the time the copy runs; the fault is `arg1`, and a line that
+/// prints only the destination hides exactly the field that names the bug - as `libc::memcpy(0x…)
+/// from 0x…` did on PPSA02664's wall, where the source was `0x0` and the count `0xa8` all along.
+/// This is D570's case for a placeholder handed on as a *size*, applied to the copy family: show
+/// the operands so the null source is legible in the trace without a second run. It states values
+/// only, never a cause (principle 3).
+fn copy_operands(c: &TracedCall) -> String {
+    let label = c.label.as_str();
+    if is_source_copy(label) {
+        // arg1 = source (rsi), arg2 = length (rdx) - System V order (`ARGUMENT_REGISTERS`).
+        format!(" src {:#x} n {:#x}", c.args[1], c.args[2])
+    } else if label.contains("memset") {
+        // arg2 = length (rdx); arg1 is the fill byte, not a pointer, so it is not shown as one.
+        format!(" n {:#x}", c.args[2])
+    } else {
+        String::new()
+    }
+}
+
+/// Whether a call is a byte copy that **reads through a source pointer** in `arg1`.
+///
+/// `memcpy`/`memmove` do; `memset` does not - its `arg1` is a fill byte, so a copy-from-null
+/// check must not treat it as a pointer. Kept as one predicate so the operands line and the
+/// faulting-copy finder agree on what counts as a source copy.
+fn is_source_copy(label: &str) -> bool {
+    label.contains("memcpy") || label.contains("memmove")
+}
+
+/// The byte copy whose source range covers the faulting address - the copy that faulted reading
+/// its own source.
+///
+/// The faulting address is the copy's source pointer, or a byte into it, and that value was
+/// captured **at the call** in `arg1`. The mid-copy register dump is not: there `rdx` is memcpy's
+/// *remaining* count, which read as the length sent PPSA02664's null-source wall down eleven
+/// worklogs before the recorded argument was read instead (worklog 740). Matching the recorded
+/// source range `[src, src+n)` against the fault names the copy soundly - which call read there,
+/// not why the pointer was wrong (principle 3).
+///
+/// Most-recent-first on the faulting thread, so the copy that is still running - the one that
+/// faulted, recorded with no return - is the one found.
+fn copy_reading_fault(
+    trace: &CallTrace,
+    fault_address: u64,
+    host_thread: Option<u64>,
+) -> Option<&TracedCall> {
+    trace.tail.iter().rev().find(|c| {
+        host_thread.is_none_or(|t| c.thread == t)
+            && is_source_copy(&c.label)
+            // `src <= fault` then `fault - src < n`: the fault lies within this copy's source
+            // span, written to avoid the overflow a bare `src + n` risks near the top of the range.
+            && c.args[1] <= fault_address
+            && fault_address - c.args[1] < c.args[2]
+    })
+}
+
+/// The lead evidence line for a copy that faulted reading its source, or nothing when none did.
+///
+/// Split out of [`faulted`] so its body stays within the line lint, and so the arithmetic - where
+/// in the source the read landed, and whether the base is in the null page - sits beside the finder
+/// it reads from. Values and their arithmetic only; the cause (what left the source wrong) is the
+/// finding's action, never asserted here (principle 3).
+fn copy_source_lead(copy: Option<&TracedCall>, fault_address: u64) -> Option<String> {
+    let c = copy?;
+    let (src, n) = (c.args[1], c.args[2]);
+    let base = if src < NEAR_NULL {
+        format!(", whose base is in the null page (0x0 + {src:#x})")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        concat!(
+            ">> {label} faulted reading its source: given src {src:#x} n {n:#x}{base}; the ",
+            "faulting address is byte {byte:#x} into that source",
+        ),
+        label = c.label,
+        src = src,
+        n = n,
+        base = base,
+        byte = fault_address - src,
+    ))
 }
 
 /// The last few calls made on the thread a fault happened on.
@@ -1186,7 +1297,14 @@ fn unnamed(trace: &CallTrace) -> Vec<Finding> {
                 gap: Gap::Unnamed,
                 confidence: Confidence::Certain,
                 subject: Some(c.label.clone()),
-                what: format!("{} was called {} times and has no name", c.label, c.calls),
+                what: if c.implemented {
+                    format!(
+                        "{} was called {} times and has no name, though a handler answers it by NID",
+                        c.label, c.calls
+                    )
+                } else {
+                    format!("{} was called {} times and has no name", c.label, c.calls)
+                },
                 evidence: {
                     let mut evidence = vec![if shipped {
                         format!("{library} is a module this title ships, so the hash is the game's own symbol")
@@ -1204,7 +1322,16 @@ fn unnamed(trace: &CallTrace) -> Vec<Finding> {
                 // Names the commands, because "extend the vocabulary" is advice and a command
                 // is an action. `suggest` is mentioned rather than run: it is slow, optional,
                 // and nothing on this path should ever wait on a model.
-                action: Some(if shipped {
+                action: Some(if c.implemented {
+                    concat!(
+                        "nothing here blocks reach - orbistoun answers this by its NID and a ",
+                        "handler runs, so the missing name is documentation, not a gap, and the ",
+                        "vocabulary search is the wrong tool for it. A hash that never resolves to ",
+                        "a name is a title-private symbol or a vendor alias no derivation reaches, ",
+                        "and its knowledge entry is where it is recorded instead of the name table"
+                    )
+                    .to_owned()
+                } else if shipped {
                     concat!(
                         "do not search a vendor vocabulary for this - it is the title's own ",
                         "code, and the module exporting it is already placed and started, so ",
@@ -1230,7 +1357,7 @@ fn unnamed(trace: &CallTrace) -> Vec<Finding> {
 mod tests {
     use super::{
         Confidence, Gap, findings, looks_like_placeholder, marker, null_base_registers, source_of,
-        tagged_stub,
+        tagged_stub, traced_line,
     };
     use crate::trace::{
         AbiReport, ArgumentDump, CallTrace, CalledImport, Conditions, FaultSite, FormatReport,
@@ -1421,6 +1548,42 @@ mod tests {
         }
     }
 
+    /// **A byte copy's source and length are shown, because a copy from a null source is this
+    /// project's commonest wall and `arg0` alone hides it.** The destination is valid by the time
+    /// the copy runs; the fault is the source in `arg1`, so a line printing only `arg0` cannot show
+    /// the null that caused it - which is exactly what `libc::memcpy(0x…f070) from 0x…` did on
+    /// PPSA02664, whose source was `0x0` and count `0xa8` the whole time. Both directions: the copy
+    /// family gains the operands, and an ordinary call does not, so the extra text is confined to
+    /// where it is evidence (the D570 case for a placeholder handed on as a size).
+    #[test]
+    fn a_byte_copy_line_shows_its_source_and_length_so_a_copy_from_null_is_legible() {
+        let mut memcpy = call("libc::memcpy", 0x7400_0218_f070);
+        memcpy.args[1] = 0x0; // the null source - the bug
+        memcpy.args[2] = 0xa8; // the length that faulted
+        let line = traced_line(&memcpy);
+        assert!(
+            line.contains("src 0x0") && line.contains("n 0xa8"),
+            "a memcpy line must show its null source and length: {line}"
+        );
+
+        // An ordinary call keeps the short form, so the operands appear only where they are evidence.
+        let ordinary = call("libSceAgc::sceAgcDcbDrawIndexAuto", 0x7400_0218_7868);
+        assert!(
+            !traced_line(&ordinary).contains(" src "),
+            "a non-copy call must not grow copy operands: {}",
+            traced_line(&ordinary)
+        );
+
+        // memset carries a fill byte in arg1, not a pointer, so it shows the length and no source.
+        let mut memset = call("libc::memset", 0x6000_007f_bfe4);
+        memset.args[2] = 0x20;
+        let set = traced_line(&memset);
+        assert!(
+            set.contains("n 0x20") && !set.contains(" src "),
+            "memset shows its length but not a source pointer: {set}"
+        );
+    }
+
     /// **A captured-arguments finding answers a question, so it needs somebody to have asked.**
     ///
     /// Arguments are dumped for every unimplemented import as well, and the default condition
@@ -1488,6 +1651,15 @@ mod tests {
                 implemented: false,
                 shape: String::new(),
             },
+            // An unnamed hash orbistoun already answers by NID (the phantom GetSize): a name
+            // would document it, but it is not a reach gap, so it must not be sent to the search.
+            CalledImport {
+                index: 2,
+                label: "libSceAgc::0x7d86501b8094ef57".to_owned(),
+                calls: 2,
+                implemented: true,
+                shape: String::new(),
+            },
         ];
         trace.title_modules = vec!["PS5Util".to_owned()];
 
@@ -1514,6 +1686,21 @@ mod tests {
                 .as_deref()
                 .is_some_and(|a| a.contains("extend the candidate vocabulary")),
             "and a vendor library's unnamed hash still gets the search that can find it"
+        );
+
+        // The implemented one is answered by NID: it must not be told to search a vocabulary,
+        // because that is the advice a reader wastes time on for a call that already runs.
+        let handled = found
+            .iter()
+            .find(|f| f.subject.as_deref() == Some("libSceAgc::0x7d86501b8094ef57"))
+            .expect("an implemented unnamed hash still produces a finding");
+        assert!(
+            handled
+                .action
+                .as_deref()
+                .is_some_and(|a| !a.contains("extend the candidate vocabulary")
+                    && a.contains("answers this by its NID")),
+            "a call orbistoun already answers is not a vocabulary gap"
         );
     }
 
@@ -2050,6 +2237,97 @@ mod tests {
             orphan_action.contains("read the calls just before it")
                 && !orphan_action.contains("strlen"),
             "with no supplier the finding searches, and blames no unrelated call: {orphan_action}"
+        );
+    }
+
+    /// **A copy that faults reading its source is named as the fault, from the recorded argument -
+    /// and the memcpy is not blamed for it.**
+    ///
+    /// PPSA02664's wall is `read of 0xa8` inside a byte copy whose source pointer is `0xa8`, a
+    /// null-page pointer captured in `arg1` at the call - where the mid-copy register dump shows
+    /// only `rdx` as a *remaining* count, and reading that as the length cost the wall eleven
+    /// worklogs (740). The finding must name the copy from its recorded source, mark the null-page
+    /// base, and route the action to whatever produced the pointer, never to "fix memcpy" - which is
+    /// faithful. The negative half holds it to copies whose recorded source actually covers the
+    /// fault, so it is a range match and not "any memcpy in a faulting tail".
+    #[test]
+    fn a_copy_that_faults_reading_a_null_source_is_named_not_the_memcpy() {
+        let mut trace = empty();
+        trace.total_calls = 100;
+        let mut memcpy = call("libc::memcpy", 0x7400_0218_f070); // arg0 = destination, valid
+        memcpy.args[1] = 0xa8; // the null-page source - the fault
+        memcpy.args[2] = 0x50; // the length
+        trace.tail = vec![memcpy];
+        trace.fault = Some(FaultSite {
+            instruction: vec![0x48, 0x8b, 0x00], // an ordinary read, not a trap
+            thread: Some(1),
+            host_thread: Some(0),
+            pointees: Vec::new(),
+            kind: "read of".to_owned(),
+            address: 0xa8,
+            instruction_pointer: 0x4000_0000_42eb,
+            region: Some("VCRUNTIME140.dll".to_owned()),
+            offset: Some(0x1dc8d),
+            inside_import: None,
+            registers: None,
+            frames: Vec::new(),
+        });
+
+        let f = findings(&trace)
+            .into_iter()
+            .find(|f| f.gap == Gap::Faulted)
+            .expect("a fault finding");
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("memcpy") && e.contains("src 0xa8") && e.contains("null page")),
+            "the copy must be named as reading a null-page source: {:?}",
+            f.evidence
+        );
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("byte 0x0 into that source")),
+            "the read offset into the source is computed: {:?}",
+            f.evidence
+        );
+        let action = f.action.as_deref().unwrap_or("");
+        assert!(
+            action.contains("faithful byte copy") && action.contains("produced its source pointer"),
+            "the action routes to the source's producer, not the copy: {action}"
+        );
+
+        // A copy whose recorded source does not cover the fault is not named as reading it.
+        let mut valid = empty();
+        valid.total_calls = 100;
+        let mut good = call("libc::memcpy", 0x7400_0218_f068);
+        good.args[1] = 0x6000_007f_c2f8; // a valid stack source, nowhere near 0xa8
+        good.args[2] = 0x8;
+        valid.tail = vec![good];
+        valid.fault = Some(FaultSite {
+            instruction: vec![0x48, 0x8b, 0x00],
+            thread: Some(1),
+            host_thread: Some(0),
+            pointees: Vec::new(),
+            kind: "read of".to_owned(),
+            address: 0xa8,
+            instruction_pointer: 0x4000_0000_42eb,
+            region: Some("image".to_owned()),
+            offset: Some(0x10),
+            inside_import: None,
+            registers: None,
+            frames: Vec::new(),
+        });
+        let g = findings(&valid)
+            .into_iter()
+            .find(|f| f.gap == Gap::Faulted)
+            .expect("a fault finding");
+        assert!(
+            !g.evidence
+                .iter()
+                .any(|e| e.contains("faulted reading its source")),
+            "a copy whose source range misses the fault is not named as reading it: {:?}",
+            g.evidence
         );
     }
 

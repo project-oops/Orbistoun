@@ -50,6 +50,24 @@ pub enum Source {
         /// Which host gamepad, counting from zero.
         index: usize,
     },
+    /// Driven by a recorded script of timed pad states, read from a file.
+    ///
+    /// **The deterministic source, and the only one the headless worker can drive itself.**
+    /// [`Keyboard`](Self::Keyboard) and [`Gamepad`](Self::Gamepad) are live host input, which
+    /// reaches a run only through the GUI shim streaming it in as it happens - so a run with no
+    /// window, which is every compatibility run, can never press anything. A script is a pure
+    /// function of how long the run has been going ([`crate::script`]), sampled where the guest
+    /// asks, so the same file and the same guest give the same run. That is what makes a
+    /// compatibility result that got past a prompt mean anything (`REQ-20260915T0929Z-02a0`).
+    ///
+    /// The path is to a file of timed steps; the worker reads and validates it, because
+    /// deserialising a format is the caller's job and this crate carries no format dependency
+    /// (see [`crate::script`]). A path that does not resolve, or a script that does not
+    /// validate, fails the run rather than running an input nobody wrote (D153).
+    Script {
+        /// Where the script file is, resolved by the reader relative to the configuration.
+        path: String,
+    },
 }
 
 /// One way a key can push a stick.
@@ -366,6 +384,30 @@ mod tests {
         assert!(
             pads.ports[0].keys.contains_key(&Button::Shell),
             "the shell button is the one this exists to make pressable"
+        );
+    }
+
+    /// **A script-driven port survives the round trip through the configuration file.**
+    ///
+    /// The config file is where a compat run names an input script, so [`Source::Script`] has to
+    /// serialise and read back with its path intact. An internally-tagged enum with a struct
+    /// variant is the shape TOML is fussiest about, so the config schema is pinned by an actual
+    /// round trip rather than a hand-written shape that might not match the serialiser (D707).
+    #[test]
+    fn a_script_source_survives_the_config_round_trip() {
+        let mut pads = Pads::default();
+        pads.ports[0].source = Source::Script {
+            path: "inputs/press-start.toml".to_owned(),
+        };
+
+        let text = toml::to_string(&pads).expect("a script-sourced port serialises");
+        let back: Pads = toml::from_str(&text).expect("and reads back");
+        assert_eq!(
+            back.ports[0].source,
+            Source::Script {
+                path: "inputs/press-start.toml".to_owned()
+            },
+            "the source and its path came back unchanged, from:\n{text}"
         );
     }
 

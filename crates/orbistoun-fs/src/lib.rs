@@ -89,6 +89,7 @@ guest_module! {
         "sceKernelWrite" => 3,
         "sceKernelLseek" => 3,
         "sceKernelStat" => 2,
+        "sceKernelFstat" => 2,
         "sceKernelMkdir" => 2,
         // POSIX, and imported under its bare name: a guest asking how much room a mount has.
         "statfs" => 2,
@@ -518,6 +519,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         // The body is in `metadata`, beside the POSIX form it shares its success path with;
         // the name is declared here, so this is where it is offered (D525).
         ("sceKernelStat", metadata::kernel_stat),
+        ("sceKernelFstat", metadata::kernel_fstat),
         ("sceKernelDebugOutText", kernel_debug_out_text),
     ]
 }

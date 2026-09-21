@@ -28,7 +28,7 @@ If you are an AI coding agent, compiler architect, or low-level systems engineer
 
 ### The Current Reality
 - **Commercial Retail Games**: **Do not boot or display gameplay yet.** No emulator anywhere currently runs retail commercial PS5 titles.
-- **What Runs Today**: Self-contained homebrew (`gl-cube`), graphical test suites, and hardware conformance probes (`obSCEne`). All local test corpus executables load, link, resolve NIDs, and execute real native guest x86-64 machine code.
+- **What Runs Today**: Self-contained homebrew (`gl1-cube`), graphical test suites, and hardware conformance probes (`obSCEne`). All local test corpus executables load, link, resolve NIDs, and execute real native guest x86-64 machine code.
 
 ### Minimum System Requirements:
 - **OS**: Windows 10/11 (64-bit) or x86-64 Linux.
@@ -137,7 +137,7 @@ Inspect the native x86-64 host context and guest virtual memory layout:
 | RAX: 0000000000000000  RBX: 0000000800402000  RCX: 0000000000000038           |
 | RDX: 00007fffffffe120  RSI: 00007fffffffe100  RDI: 0000000800400000           |
 | RSP: 00007fffffffe0c0  RBP: 00007fffffffe0f0  R8 : 0000000000000000           |
-| RIP: 0000000000401140 (gl-cube.elf: main + 0x140)                             |
+| RIP: 0000000000401140 (gl1-cube.elf: main + 0x140)                            |
 |-------------------------------------------------------------------------------|
 | Virtual Memory Range:                                                         |
 |   0x0000000000400000 - 0x0000000000600000 : Main Executable (RX)              |

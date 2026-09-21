@@ -35,6 +35,18 @@ pub const APP_MOUNT: &str = "/app0";
 /// failure straight to `read` as though it were a descriptor (D250).
 pub const DATA_MOUNT: &str = "/data";
 
+/// Where a RAGE-engine title reads its built asset cache from.
+///
+/// A title whose content is a read-only [`APP_MOUNT`] routes its `rpf.cache` to the host device
+/// and opens `/host//ap/rpf.cache` - the doubled slash is the engine's own naive join, and the
+/// literal path is what the guest passes (measured, PPSA04263, worklog 758). The console serves
+/// it from the title's own storage, so [`mount_title`] layers the title directory here as well
+/// and the shipped `rpf.cache` answers the read with **no copied file**. This is not a per-title
+/// id special case (which belongs in the overrides layer): it is one engine's fixed cache path,
+/// and a title that never opens it resolves nothing here. The wall it clears is orbistoun's, not
+/// the title's - the file existed the whole time, at the title root (D709).
+pub const RAGE_HOST_APP_MOUNT: &str = "/host//ap";
+
 /// The mount table.
 fn mounts() -> &'static Mutex<BTreeMap<String, Vec<PathBuf>>> {
     static MOUNTS: OnceLock<Mutex<BTreeMap<String, Vec<PathBuf>>>> = OnceLock::new();
@@ -84,6 +96,10 @@ pub fn mount_title(module: &Path) {
         // title goes *over* the base: its own files answer first, and anything the console
         // provides is still there behind them (D269).
         layer(APP_MOUNT, directory.to_path_buf());
+        // The same directory under RAGE's host-device cache path, so a title that reads its
+        // built cache from `/host//ap/rpf.cache` finds the file it shipped rather than the
+        // ENOENT it aborts on (D709, worklog 758).
+        layer(RAGE_HOST_APP_MOUNT, directory.to_path_buf());
     }
 }
 
@@ -380,7 +396,7 @@ mod tests {
         );
     }
 
-    use super::{APP_MOUNT, clear, is_contained, mount, resolve};
+    use super::{APP_MOUNT, clear, is_contained, mount, mount_title, resolve};
 
     /// Mounts are process-global, so the tests that touch them set their own up and the
     /// assertions never depend on what another test left behind.
@@ -410,6 +426,30 @@ mod tests {
         assert_eq!(
             resolve("/app0/Textures/ui_assets.gnf"),
             Some(std::path::PathBuf::from("/titles/one").join("Textures/ui_assets.gnf"))
+        );
+    }
+
+    /// **A RAGE title finds its shipped cache at the host path it reads, from its own directory.**
+    ///
+    /// PPSA04263 opens `/host//ap/rpf.cache` (measured, doubled slash and all) and aborts on the
+    /// ENOENT when nothing serves it - the file it ships at the title root the whole time. Both
+    /// the host path and `/app0` must name that one shipped file, with no copy (D709, worklog 758).
+    #[test]
+    fn a_rage_title_reads_its_shipped_cache_from_the_host_app_path() {
+        let _guard = crate::exclusively();
+        clear();
+        mount_title(std::path::Path::new("/titles/gtav/eboot.bin"));
+
+        let shipped = std::path::PathBuf::from("/titles/gtav").join("rpf.cache");
+        assert_eq!(
+            resolve("/host//ap/rpf.cache"),
+            Some(shipped.clone()),
+            "the host cache path resolves into the title's own directory, not an ENOENT"
+        );
+        assert_eq!(
+            resolve("/app0/rpf.cache"),
+            Some(shipped),
+            "and it is the same shipped file /app0 names - one file, no copy"
         );
     }
 

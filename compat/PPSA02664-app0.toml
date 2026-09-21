@@ -4,22 +4,28 @@ name = "Alex Kidd in Miracle World DX"
 content_version = "01.004.000"
 master_version = "01.00"
 
+[hardware]
+does = "renders"
+attested_by = "operator"
+on = "2026-09-19"
+note = "runs on a real PS5; the CreateWorkload wall is orbistoun's gap, not the title's (D708)"
+
 [compat]
 
 [settings]
 
 [status]
 reach = "flipped"
-outcome = "VCRUNTIME140.dll+0x1dc8d"
-imports = 222
-calls = 418425
+outcome = "image+0x3f8f0"
+imports = 224
+calls = 418362
 standing = 100
 default_return = "unimplemented"
 frames = 1
 unanswered = 11
 limit_seconds = 20
-build = "0.1.0"
-measured_on = "2026-09-17"
+build = "v0.1.0 - 712d8c6-dirty"
+measured_on = "2026-09-21"
 
 [experiment]
 reach = "flipped"

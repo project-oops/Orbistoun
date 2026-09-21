@@ -60,6 +60,21 @@ socket, or know what machine it is reading about") and
 automated *implementation* proposer as `(no)` - not built.
 
 
+## The first rule: the title is not the bug (D708, D709)
+
+**Every title the operator provides works on real hardware. Every wall is orbistoun's.** The
+operator does not hand over broken titles, so "debug build", "devkit path", "faithful ENOENT",
+"the title's own assertion" are never reasons to stop - they are restatements of a symptom
+orbistoun has not yet explained. Reaching for the title's fault is the emulator's version of a
+stub that returns success: it looks like a finding and ends the work (D708, D709).
+
+And before instrumenting a fault, **check the cheap upstream fact it sits on.** A guest that
+faults after a failed `open` failed because orbistoun misrouted the path or did not serve the
+mount - until the file is shown absent from *the place the run actually reads*. That place is the
+resolved **data directory**, not the repo `titles/` stub; `orbistoun paths` prints it. PPSA04263
+cost weeks of downstream telemetry for one unchecked fact: `rpf.cache` existed at `/app0/rpf.cache`
+the whole time, and the guest was asking for it at an unserved `/host` mount (D709).
+
 ## Step by step
 
 ### Once, before anything

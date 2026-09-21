@@ -80,7 +80,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// A count rather than a list because the list below already pins the names: this pins the
 /// *size*, which is the thing the prose repeats and the list cannot catch.
 ///
-/// **Forty-six: the count moves as builders land (… -> 32 -> 41 -> 44 -> 45 -> 46), the point.**
+/// **Forty-nine: the count moves as builders land (… -> 32 -> 41 -> 44 -> 45 -> 46 -> 49), the point.**
 /// `rustfmt` wraps one entry - `sceAgcCbSetShRegisterRangeDirect` - onto its own line, so grepping
 /// the file for the handler pattern undercounts it, which is the same wrapping that twice made a
 /// registered handler look registered when it was not. Counting the built slice is the only count
@@ -90,7 +90,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        46,
+        49,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -530,4 +530,51 @@ fn a_null_handle_is_refused() {
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[1] = 62;
     assert_eq!(call("sceAgcDcbEventWrite", args), BAD_ARGUMENT);
+}
+
+/// `sceAgcDcbSetCxRegistersIndirect` writes the 20-byte skeleton with the confirmed format word.
+#[test]
+fn set_cx_registers_indirect_writes_measured_header_and_format() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+
+    let at = w.cursor();
+    assert_eq!(call("sceAgcDcbSetCxRegistersIndirect", args), at);
+    assert_eq!(w.written(), 20, "5 dwords / 20 bytes");
+    assert_eq!(
+        w.bytes(),
+        &[
+            0x00, 0x9f, 0x03, 0xc0, // dw0: header (opcode 0x9f, count 4)
+            0x00, 0x00, 0x00, 0x00, // dw1: mem_lo
+            0x00, 0x00, 0x00, 0x00, // dw2: mem_hi
+            0x00, 0x00, 0x00, 0x80, // dw3: format (data_format = 1, reg_offset = 0)
+            0x00, 0x00, 0x00, 0x00, // dw4: count
+        ],
+        "header 0xc0039f00, zeros, format 0x80000000, zero count"
+    );
+}
+
+/// The phantom `0x7d86501b8094ef57` query helper writes the workload size into `*arg0`.
+#[test]
+fn phantom_get_size_writes_workload_size() {
+    let mut size: u64 = 0;
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = std::ptr::addr_of_mut!(size) as u64;
+
+    assert_eq!(call("0x7d86501b8094ef57", args), 0);
+    assert_eq!(size, 0xa8, "workload buffer size is 168 (0xa8) bytes");
+}
+
+/// `sceAgcInit` (and alias `0x53bbd82b51d172db`) validates version 13 and returns 0.
+#[test]
+fn sce_agc_init_wired_and_validates_version() {
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[1] = 13;
+    assert_eq!(call("sceAgcInit", args), 0);
+    assert_eq!(call("0x53bbd82b51d172db", args), 0);
+
+    args[1] = 1;
+    assert_eq!(call("sceAgcInit", args), 0x8a6c_0004);
+    assert_eq!(call("0x53bbd82b51d172db", args), 0x8a6c_0004);
 }

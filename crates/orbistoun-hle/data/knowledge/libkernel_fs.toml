@@ -124,6 +124,19 @@ found_on = "2026-09-03"
 note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
+name = "sceKernelFstat"
+arity = 2
+purpose = "Reports what a guest is told about the file behind an open descriptor."
+edge_cases = [
+    "The vendor-named form of POSIX fstat. The success path and the struct stat generation are shared with fstat and sceKernelStat (D374, D525); only failure differs - POSIX answers -1, this answers a 0x8002_00xx vendor code. A descriptor with no open file behind it is EBADF; a buffer that cannot be written is EFAULT.",
+    "fstat and sceKernelStat were both served but this libkernel name was not wired, so a guest calling it read whatever its stack held where an unwritten struct stat should be - the D171 out-parameter failure.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-09-21"
+note = "PPSA04263 (Grand Theft Auto V) calls it by the libkernel name; wiring it to the existing fstat logic moved the run FURTHER (+6 calls, +1 import, worklog 761)."
+
+[[function]]
 name = "sceKernelWrite"
 arity = 3
 purpose = """

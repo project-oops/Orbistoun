@@ -14,6 +14,26 @@ In development builds this directory is added to the library paths by default, s
 shows up in the GUI alongside any other configured library. It is not a special case
 in the code: just another configured path.
 
+## Titles load from more than one place — this folder is not the only one
+
+**`orbistoun run <id>` resolves a title from the data directory, not from this repo
+folder.** The data directory is chosen at runtime by `orbistoun-paths`:
+
+- **portable mode** (a `.portable` sentinel beside the binary) → the data root sits
+  beside the binary;
+- **`ORBISTOUN_DATA_DIR`** → wherever it points;
+- otherwise → the current user's OS application-data location.
+
+Its `titles/<id>/` holds what an installed or `corpus sync`-ed title actually runs:
+the `eboot.bin`, the packaged asset archives, any generated caches, and the `fs/`
+overlay. This repo's `titles/` is a *separate* library path added only in development
+builds — so the same launcher can show both, and a title you ran may have its real
+content in the data directory rather than here.
+
+**So do not conclude a title's files are missing by searching this folder.** Run
+`bin/orbistoun paths` (or `orbistoun-cli paths`) to print every resolved location —
+including the data-directory `titles/` a run reads from — and look there.
+
 ## Why it is called `titles/`
 
 Not `games/`, `dumps/`, or `firmware/` - those path names are **banned by the

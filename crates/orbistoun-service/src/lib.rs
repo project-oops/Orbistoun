@@ -282,6 +282,47 @@ pub struct FileConfig {
     pub policy: StubPolicy,
 }
 
+/// Reads and validates the scripted pad a run's controller configuration names, if any.
+///
+/// **Why this lives here rather than in `orbistoun-input`.** [`orbistoun_input::script`]
+/// carries the [`Script`](orbistoun_input::script::Script) type and refuses a script that does
+/// not describe a run that could happen, but deliberately depends on no file format - so
+/// turning bytes on disk into a script is the caller's job, and this crate, which already owns
+/// the configuration and parses TOML, is that caller.
+///
+/// Returns the first port driven by a script (`None` when none is), as the resolved path and
+/// the validated script. A relative path is taken against `base`, which is the directory the
+/// configuration was read from, so `path = "inputs/press-start.toml"` sits beside `config.toml`.
+///
+/// # Errors
+///
+/// When the file cannot be read, does not parse as a script, or names a run that could not
+/// happen - each fails the run rather than proceeding on an input nobody wrote (D153).
+pub fn scripted_pad(
+    pads: &orbistoun_input::Pads,
+    base: &Path,
+) -> Result<Option<(PathBuf, orbistoun_input::script::Script)>, String> {
+    let Some(path) = pads.ports.iter().find_map(|port| match &port.source {
+        orbistoun_input::Source::Script { path } => Some(path.as_str()),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let resolved = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        base.join(path)
+    };
+    let text = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("reading input script {}: {e}", resolved.display()))?;
+    let script: orbistoun_input::script::Script = toml::from_str(&text)
+        .map_err(|e| format!("parsing input script {}: {e}", resolved.display()))?;
+    script
+        .validate()
+        .map_err(|e| format!("input script {}: {e}", resolved.display()))?;
+    Ok(Some((resolved, script)))
+}
+
 /// Where the library is, and how a run from it behaves.
 ///
 /// Persisted rather than defaulted each launch, because the default is a *relative* path.
@@ -437,6 +478,14 @@ pub struct ServiceConfig {
     /// (D053), so surveying works without either. The database only supplies
     /// *human-readable* names for hashes.
     pub symbol_db: Option<SymbolDbFile>,
+    /// The controllers this run presents, and what drives each.
+    ///
+    /// Carried so the worker can start a script-driven port playing at guest entry: a script
+    /// is the one input source a run with no window can drive itself, sampled as a pure
+    /// function of run time rather than pushed from a shim (D707,
+    /// [`orbistoun_input::script`]). Live sources (keyboard, gamepad) reach a run through the
+    /// GUI streaming them in and never through here.
+    pub pads: orbistoun_input::Pads,
 }
 
 impl Default for ServiceConfig {
@@ -449,6 +498,7 @@ impl Default for ServiceConfig {
             entry_settings: orbistoun_loader::process::EntrySettings::default(),
             paths: None,
             symbol_db: None,
+            pads: orbistoun_input::Pads::default(),
         }
     }
 }
@@ -463,6 +513,7 @@ pub struct Service {
     symbols: Option<SymbolDb>,
     paths: Option<orbistoun_paths::Paths>,
     entry_settings: orbistoun_loader::process::EntrySettings,
+    pads: orbistoun_input::Pads,
 }
 
 /// Where regions handed to a guest by policy start.
@@ -853,6 +904,7 @@ impl Service {
             suffix_len: config.nid_suffix.len(),
             symbols,
             paths: config.paths,
+            pads: config.pads,
         }
     }
 
@@ -954,6 +1006,11 @@ impl Service {
     /// How the guest's entry point is presented.
     pub const fn entry_settings(&self) -> &orbistoun_loader::process::EntrySettings {
         &self.entry_settings
+    }
+
+    /// The controllers this run presents, and what drives each.
+    pub const fn pads(&self) -> &orbistoun_input::Pads {
+        &self.pads
     }
 
     /// Every runnable title under `root`.
@@ -2409,6 +2466,11 @@ impl Service {
 
     /// Resolves a symbol name to the NID this service would look it up by.
     pub fn nid_for(&self, symbol: &str) -> Nid {
+        if let Some(hex) = symbol.strip_prefix("0x") {
+            if let Ok(raw) = u64::from_str_radix(hex, 16) {
+                return Nid::from_raw(raw);
+            }
+        }
         self.hasher.hash(symbol)
     }
 }
@@ -2459,7 +2521,74 @@ type TitleBinding = (
 
 #[cfg(test)]
 mod tests {
-    use super::{LibrarySettings, Path, Service, ServiceConfig, slot_ranges};
+    use super::{LibrarySettings, Path, Service, ServiceConfig, scripted_pad, slot_ranges};
+    use orbistoun_input::{Pads, Source};
+
+    /// A `Pads` with one port driven by a script at `name`, for exercising [`scripted_pad`].
+    fn pads_playing(name: &str) -> Pads {
+        let mut pads = Pads::default();
+        pads.ports[0].source = Source::Script {
+            path: name.to_owned(),
+        };
+        pads
+    }
+
+    /// **A run with no scripted port installs nothing**, so a keyboard or gamepad run is left
+    /// exactly as it was - the loader only speaks up when a script is named.
+    #[test]
+    fn no_scripted_port_is_no_script() {
+        let found = scripted_pad(&Pads::default(), Path::new(".")).expect("the default is fine");
+        assert!(found.is_none(), "a keyboard-only run names no script");
+    }
+
+    /// **A named script is read relative to the configuration and validated before the run.**
+    #[test]
+    fn a_named_script_is_read_relative_to_the_config() {
+        let dir = tempfile::tempdir().expect("a temp config directory");
+        std::fs::write(
+            dir.path().join("press-start.toml"),
+            "[[step]]\nat_ms = 500\nbuttons = [\"start\"]\n\n[[step]]\nat_ms = 700\nbuttons = []\n",
+        )
+        .expect("the script file is written");
+
+        let (resolved, script) = scripted_pad(&pads_playing("press-start.toml"), dir.path())
+            .expect("a valid script loads")
+            .expect("the scripted port is found");
+        assert_eq!(resolved, dir.path().join("press-start.toml"));
+        assert_eq!(script.len(), 2, "both steps are read");
+    }
+
+    /// **A script file that is not there fails the run** rather than starting one with no input
+    /// while the configuration says there should be some (D153).
+    #[test]
+    fn a_missing_script_file_fails_the_run() {
+        let dir = tempfile::tempdir().expect("a temp config directory");
+        let why = scripted_pad(&pads_playing("absent.toml"), dir.path())
+            .expect_err("a missing file is refused");
+        assert!(
+            why.contains("absent.toml"),
+            "the error names the file: {why}"
+        );
+    }
+
+    /// **A script that does not describe a run that could happen fails the run**, carrying
+    /// [`orbistoun_input::script`]'s own refusal out to where a person reads it, rather than
+    /// silently playing a truncated or reordered version of it.
+    #[test]
+    fn an_invalid_script_fails_the_run() {
+        let dir = tempfile::tempdir().expect("a temp config directory");
+        std::fs::write(
+            dir.path().join("backwards.toml"),
+            "[[step]]\nat_ms = 700\n\n[[step]]\nat_ms = 500\n",
+        )
+        .expect("the script file is written");
+        let why = scripted_pad(&pads_playing("backwards.toml"), dir.path())
+            .expect_err("steps out of order are refused");
+        assert!(
+            why.contains("backwards.toml") && why.contains("after"),
+            "the error names the file and the reason: {why}"
+        );
+    }
 
     /// **The main executable owns slot zero**, whatever else is loaded beside it.
     ///

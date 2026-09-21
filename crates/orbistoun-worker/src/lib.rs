@@ -28,6 +28,7 @@ use orbistoun_proto::{Event, Outcome, PROTOCOL_VERSION, Phase, Request, check_ve
 pub mod experiment;
 pub mod fault;
 pub mod frame_region;
+pub mod render;
 pub mod report;
 pub mod session;
 pub mod tls_backstop;
@@ -716,6 +717,13 @@ fn place_and_relocate<W: Write>(
         fill_runtime_globals(&image, bytes, service.entry_settings());
     }
 
+    // A script-driven pad, if this run's controllers name one, starts playing now - the last
+    // step before entry, so its clock is the run's own (D707). A malformed script ends the run
+    // here rather than entering on an input nobody wrote.
+    if let Err(why) = install_scripted_input(service) {
+        return halt(output, Phase::Linked, format!("{summary}; {why}"));
+    }
+
     enter(
         output,
         &image,
@@ -1101,6 +1109,7 @@ pub fn serve_as_worker_process() -> Result<(), String> {
         thread_settings: file.threads,
         memory_settings: with_shape_diagnostic(file.memory),
         stub_policy: policy,
+        pads: file.pads,
         ..orbistoun_service::ServiceConfig::default()
     });
     let stdout = io::stdout();
@@ -2430,6 +2439,38 @@ fn start_placed_modules_if_asked() {
     );
 }
 
+/// Starts a script-driven pad playing, if the run's controller configuration names one.
+///
+/// **Called at the entry path, not at process start**, so the script's clock (`at_ms` is
+/// milliseconds from the start of the run) begins as the guest is entered rather than while the
+/// title is still being placed and linked - which for a large title is seconds apart (D707).
+///
+/// A run with no scripted port installs nothing and a fresh worker process holds no prior
+/// script, so a keyboard or gamepad run is untouched. Reading or validating a named script that
+/// fails ends the run with the reason rather than entering on an input nobody wrote (D153).
+///
+/// # Errors
+///
+/// When the configured script cannot be read, parsed, or validated.
+fn install_scripted_input(service: &Service) -> Result<(), String> {
+    let Some(paths) = service.paths() else {
+        return Ok(());
+    };
+    let config = paths.config_file();
+    let base = config.parent().unwrap_or_else(|| Path::new("."));
+    let Some((path, script)) = orbistoun_service::scripted_pad(service.pads(), base)? else {
+        return Ok(());
+    };
+    let steps = script.len();
+    orbistoun_input::script::install(script);
+    let _ = writeln!(
+        io::stderr(),
+        "orbistoun: playing input script {} ({steps} step(s)) on player 1",
+        path.display()
+    );
+    Ok(())
+}
+
 fn enter<W: Write>(
     output: &mut W,
     image: &Image,
@@ -2573,6 +2614,11 @@ fn enter<W: Write>(
     // Persisted on the ordinary path as well, so a guest that stops by itself is
     // recorded exactly as fully as one that had to be stopped.
     report::what_the_guest_asked_for();
+    // **The renderer, on the run path** (-36c0, D695). If the guest handed over a command buffer,
+    // drive it to a headless graphics backend now the guest has returned - a real submission
+    // reaching a real backend rather than only a report. No title submits before faulting yet, so
+    // this establishes the route; the fault and time-limit paths gain the same call when one does.
+    render::render_and_log_last_submission();
     let trace = report::collect_calls(module, "Entered");
     report::persist(&trace);
 

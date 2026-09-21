@@ -71,6 +71,7 @@ use orbistoun_hle::guest_module;
 
 guest_module! {
     "libSceAgc" {
+        "0x7d86501b8094ef57" => 1,
         "sceAgcAcbAcquireMem" => 6,
         "sceAgcAcbDispatchIndirect" => 6,
         "sceAgcAcbDmaData" => 6,
@@ -126,6 +127,8 @@ guest_module! {
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate" => 6,
         "sceAgcGetRegisterDefaults2" => 6,
         "sceAgcGetRegisterDefaults2Internal" => 6,
+        "0x53bbd82b51d172db" => 2,
+        "sceAgcInit" => 2,
         "sceAgcQueueEndOfPipeActionPatchAddress" => 6,
         "sceAgcSetCxRegIndirectPatchAddRegisters" => 6,
         "sceAgcSetCxRegIndirectPatchSetAddress" => 6,
@@ -221,7 +224,9 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // (obSCEne 166-agc/create-shader):
     // - +0x08: pointer to sub-table at header + off_8 + 8 (measured 0x7eeffb5a0 with off_8=0xd8)
     // - +0x10: bytecode pointer (arg2)
-    // - +0x20, +0x28, +0x30: relative sub-object offsets relocated to header pointers
+    // - +0x18..+0x38: the group-pointer array; each slot holding a relative offset is relocated to a
+    //   header pointer (measured on the middle three, generalised to the array under the guard - see
+    //   the loop below and worklog 748)
     // - Sub-table entries at sub_table[0..5]: relative offsets relocated to header pointers
     // Note: +0x50 and other fields are asset metadata (e.g. counts) and are not touched.
     unsafe { poke_u64(header.wrapping_add(0x10), bytecode) };
@@ -247,9 +252,17 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     }
 
-    for &offset in &[0x20, 0x28, 0x30] {
-        // SAFETY: `offset` is one of 0x20/0x28/0x30, inside the guest-owned header object whose
-        // measured extent is 0x130 bytes.
+    // The five group-pointer slots at +0x18..+0x38 (the array the guest walks with stride 8,
+    // worklog 748). The measured shader (obSCEne 166-agc/create-shader) populated only the middle
+    // three, so the list was those; but a field that holds a relative offset *must* be relocated to
+    // become a valid pointer, and the guard below relocates exactly those and skips the rest. So
+    // scanning the whole array preserves the measured three-of-five behaviour (the endpoints were 0
+    // there, and 0 is skipped) and also handles headers that populate the endpoints - PPSA02664's,
+    // whose +0x18 holds a raw 0xa8 the walk dies on when it is left un-relocated (worklog 748). Not
+    // a value guessed: an offset in a pointer slot is a pointer-in-waiting, relocated or wrong.
+    for &offset in &[0x18, 0x20, 0x28, 0x30, 0x38] {
+        // SAFETY: `offset` is one of 0x18..0x38, inside the guest-owned header object whose measured
+        // extent is 0x130 bytes.
         let rel = unsafe { peek_u64(header.wrapping_add(offset)) };
         if rel != 0 && rel < 0x1000 {
             // SAFETY: the same field just read, written back as an absolute pointer.
@@ -584,6 +597,41 @@ fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Non-export inline query helper (`0x7d86501b8094ef57`).
+///
+/// Disassembly of the call site at `0x4000000435b5` in PPSA02664 (Alex Kidd in Miracle World,
+/// worklog 725) reads as a `GetSize`: `arg0` is a pointer to an out-parameter where a byte size is
+/// written, which the caller aligns up to 8 (`add rbx, 7; and rbx, ~7`) and passes to buffer
+/// allocators.
+///
+/// The value written, `0xa8` (168), is **guest-observed, not a measured return.** It is the size the
+/// guest's `memcpy` reads at the wall this path dies on - the `+0xa8` read through a null pointer. On
+/// retail this NID is not exported: obSCEne `e245` and sweep `20260920-110931` (`166-agc/cb-unnamed-ef57`)
+/// both measured its import slot binding null and the call never being made (`call-executed 0x0`,
+/// `slot-is-null`), so there is no hardware return to measure. `0xa8` is the best-available stand-in
+/// for the size the title's own inlined helper computes, and worklog 725 showed planting it does not
+/// by itself clear the wall - it is a plausible value, held as such, not a fix dressed as one.
+fn agc_phantom_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let out = args[0];
+    if out != 0 {
+        // SAFETY: `out` is the guest-supplied out-parameter stack slot (worklog 725),
+        // eight bytes long and aligned to hold the workload size.
+        unsafe { poke_u64(out, 0xa8) };
+    }
+    OK
+}
+
+/// `sceAgcInit(state, version)` (and alias NID `0x53bbd82b51d172db`).
+///
+/// Measured on live PS5 console hardware (FW 12.40, REQ-20260920T1425Z-a3f0, check `166-agc/init`):
+/// - Version 13 (0xd) returns `0x0` (OK).
+/// - Every other version returns `0x8a6c0004` (`SCE_AGC_ERROR_INVALID_VERSION`).
+/// - Writes 0 bytes to `arg0` (extent 0, changed 0, across sentinels and descriptors).
+fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let version = args[1] as u32;
+    if version == 13 { OK } else { 0x8a6c_0004 }
+}
+
 /// `sceAgcCbNop(cb)` - a header-only no-op. Measured whole: `166-agc/cb-nop`.
 ///
 /// The packet takes no arguments, so unlike the reservation skeletons this is the complete,
@@ -838,6 +886,7 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `0x0` and writes nothing - like the patch family, it dereferences nothing, so a null needs no guard.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("0x7d86501b8094ef57", agc_phantom_get_size),
         ("sceAgcCreateShader", create_shader),
         ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
         ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
@@ -928,6 +977,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceAgcDcbDrawIndex", dcb_draw_index),
         ("sceAgcDcbSetIndexSize", dcb_set_index_size),
+        ("0x53bbd82b51d172db", agc_init),
+        ("sceAgcInit", agc_init),
     ]
 }
 
@@ -994,6 +1045,62 @@ mod tests {
             header + 0xe0 + 0x48,
             "sub-table[1] is relocated relative to sub_table"
         );
+    }
+
+    /// **Every group-pointer slot that holds a relative offset is relocated, not just the middle
+    /// three.** The measured shader populated `+0x20/+0x28/+0x30`; a Unity header like PPSA02664's
+    /// populates the whole `+0x18..+0x38` array, and a slot left with its raw offset (`+0x18`'s `0xa8`)
+    /// is the pointer the workload walk dies reading (worklog 748). The guard relocates exactly the
+    /// slots holding offsets, so a populated endpoint is fixed up and an empty one (0) is left alone.
+    #[test]
+    fn create_shader_relocates_every_populated_group_slot() {
+        let mut slot: u64 = 0;
+        let mut object = [0u8; 0x130];
+        object[0x8..0x10].copy_from_slice(&0xd8u64.to_le_bytes());
+        // The full group array populated, endpoints included (PPSA02664's shape).
+        object[0x18..0x20].copy_from_slice(&0xa8u64.to_le_bytes());
+        object[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
+        object[0x28..0x30].copy_from_slice(&0x38u64.to_le_bytes());
+        object[0x30..0x38].copy_from_slice(&0x60u64.to_le_bytes());
+        object[0x38..0x40].copy_from_slice(&0x58u64.to_le_bytes());
+
+        let header = object.as_mut_ptr() as u64;
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = std::ptr::addr_of_mut!(slot) as u64;
+        args[1] = header;
+        args[2] = 0x4000_0000_1234u64;
+        assert_eq!(create_shader(&args), OK);
+
+        let read_u64 = |off: usize| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&object[off..off + 8]);
+            u64::from_le_bytes(b)
+        };
+        // The endpoints the old three-entry list left raw are now absolute pointers.
+        assert_eq!(read_u64(0x18), header + 0xa8, "+0x18 endpoint is relocated");
+        assert_eq!(read_u64(0x38), header + 0x58, "+0x38 endpoint is relocated");
+        // The middle three still relocate as before.
+        assert_eq!(read_u64(0x20), header + 0x70);
+        assert_eq!(read_u64(0x28), header + 0x38);
+        assert_eq!(read_u64(0x30), header + 0x60);
+
+        // An empty slot (0) is left alone, not turned into `header + 0` - the guard, not a field list,
+        // is what keeps the measured three-of-five behaviour for a header without endpoint offsets.
+        let mut empty = [0u8; 0x130];
+        empty[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
+        let header2 = empty.as_mut_ptr() as u64;
+        let mut args2 = [0u64; GUEST_ARG_REGISTERS];
+        args2[0] = std::ptr::addr_of_mut!(slot) as u64;
+        args2[1] = header2;
+        args2[2] = 0x1234u64;
+        assert_eq!(create_shader(&args2), OK);
+        let read2 = |off: usize| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&empty[off..off + 8]);
+            u64::from_le_bytes(b)
+        };
+        assert_eq!(read2(0x18), 0, "an empty +0x18 is not turned into header+0");
+        assert_eq!(read2(0x38), 0, "an empty +0x38 is not turned into header+0");
     }
 
     /// **A null out-parameter is refused, not dereferenced.** The guest's own wrapper answers
@@ -1101,5 +1208,32 @@ mod tests {
             0xabcd_ffe0,
             "the other bits still preserved"
         );
+    }
+
+    /// **The phantom `0x7d86501b8094ef57` writes workload size 168 (0xa8) bytes into `*arg0`.**
+    #[test]
+    fn phantom_get_size_writes_workload_size() {
+        let mut slot: u64 = 0;
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = std::ptr::addr_of_mut!(slot) as u64;
+
+        assert_eq!(agc_phantom_get_size(&args), OK);
+        assert_eq!(slot, 0xa8);
+    }
+
+    /// `sceAgcInit` returns 0 for version 13, and 0x8a6c0004 for other versions.
+    #[test]
+    fn agc_init_validates_version_and_touches_no_state() {
+        let mut buf = [0x55u8; 64];
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = buf.as_mut_ptr() as u64;
+        args[1] = 13;
+
+        assert_eq!(agc_init(&args), OK);
+        assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
+
+        args[1] = 12;
+        assert_eq!(agc_init(&args), 0x8a6c_0004);
+        assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
     }
 }

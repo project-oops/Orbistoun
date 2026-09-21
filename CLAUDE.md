@@ -78,7 +78,7 @@ pointers as counts, a progress verdict naming a cause it had not measured, and a
 conclusion drawn because a fault moved. Every one *reported more than its measurement
 supported*, which is the same failure the principle already forbids one level down.
 
-Three rules fall out of it, and each is cheap:
+Four rules fall out of it, and each is cheap:
 
 - **A guard is not finished until somebody has made it fail.** Every one of the first
   three would have been caught by writing the negative test. A guard nobody has watched
@@ -90,6 +90,17 @@ Three rules fall out of it, and each is cheap:
   It needs a second observation, of a different kind, saying what the guest did with it.
   `orbistoun-env` records which diagnostics intervene and the run report says so
   (D224, D226, D227).
+- **A wall is orbistoun's until hardware proves it the title's.** "It is the title's
+  fault" - a debug build, an unfinished path, a phantom symbol - is the most seductive
+  wrong conclusion there is, because it moves the wall out of scope and ends the work,
+  and a session reached for it twice on a title that renders on a console. The default
+  attribution of any guest fault is orbistoun's missing or wrong HLE; blaming the title's
+  own code needs a hardware observation that the same path fails the same way there. A
+  guest `TODO:` print, an import orbistoun cannot resolve, and an obSCEne "not exported on
+  FW *n*" are **not** that evidence - the first is benign logging, the other two are
+  orbistoun's HLE gap or a firmware/SDK-era question. The compat record's `[hardware]`
+  attestation carries the ground truth and the run report frames every fault by it
+  (D708).
 
 Counting successes is not checking for failures: assert on the failure, never on the
 count of passes.

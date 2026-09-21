@@ -91,3 +91,24 @@ name = "sceAgcDriverRegisterDefaultOwner"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
 note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceAgcDriverSetTFRing"
+purpose = "Configures the tessellation-factor ring for the graphics driver - GPU-driver setup Unity runs while bringing its device up, on PPSA02664's CreateWorkload path."
+edge_cases = [
+    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): libSceAgcDriver does not export it and dynamic resolution by name and NID both fail - the same status as sceAgcDriverAddEqEvent and every other function on PPSA02664's CreateWorkload path (worklog 723, six for six). It is an AGC SDK inline helper this build emitted out-of-line, so there is no export to measure and orbistoun must synthesise it in HLE.",
+    "Unity consumes its return: forcing it to 0x0 moved PPSA02664's run backwards into a different placeholder-as-address fault (worklog 722), so a guessed return is wrong (D708) and the real one is unmeasurable. Synthesis is the guest-oracle route, not a measurement.",
+]
+known_by = "measured"
+cites = "obSCEne c9e2, sweep 20260920-082906, reports/hardware/20260920-082906-eboot.obs.log:3782-3789 and :10398-10405 (export census + dynamic lookup, both fail)."
+found_on = "2026-09-20"
+
+[[function]]
+name = "sceAgcDriverSetHsOffchipParam"
+purpose = "Configures the hull-shader off-chip LDS parameter for the graphics driver - GPU-driver setup on the same CreateWorkload path."
+edge_cases = [
+    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): same status and reason as sceAgcDriverSetTFRing and sceAgcDriverAddEqEvent - an out-of-line SDK inline with no export to measure, to be synthesised in HLE (worklog 723).",
+]
+known_by = "measured"
+cites = "obSCEne c9e2, sweep 20260920-082906, reports/hardware/20260920-082906-eboot.obs.log:3782-3789 and :10398-10405."
+found_on = "2026-09-20"

@@ -76,3 +76,41 @@ SYS_sceKernelVirtualQuery = 603
 SYS_sceKernelAllocateDirectMemory = 572
 SYS_sceKernelMapDirectMemory = 573
 SYS_sceKernelReleaseDirectMemory = 574
+
+# The kernel-log write, by number. A guest can reach the operator log by name through
+# `sceKernelDebugOutText` or by this raw syscall - the one-function-two-answers shape D632/D641
+# found for the resolver (`sceKernelDlsym`) and the memory query (`sceKernelVirtualQuery`).
+#
+# **Watched, with the operation it performs described.** A guest we wrote - the `dist` homebrew
+# payload (oops-apps), built on the obSCEne/oops runtime - issues syscall 601 with first argument
+# 7, recorded in its trace as an unserved direct call through the syscall gadget. What the number
+# does is legible from the argument and from this project's own sibling source: obSCEne's
+# `src/probe/runtime.c` and `src/probe/sections/posix.c` issue `obs_invoke_syscall(601, 7, buf,
+# 0, …)` in three places, all as their raw log-write channel - posix.c even labels it
+# `sys_call(SYS_klog, 7, marker_klog, …)`. So the first argument is an operation selector, `7`
+# writes the NUL-terminated string at the second argument to the log, and success is any
+# non-negative return (obSCEne does `if (n >= 0) return len`).
+#
+# The number was found in the aggregate census a `run` prints, which totals every module's trace,
+# so it first read as the title being run rather than as the payload that actually issued it - a
+# reminder that a direct syscall in that census belongs to whichever guest's trace carried it,
+# not to whichever title the command named (worklog 727).
+#
+# **Served by the same function `sceKernelDebugOutText` is** (see that call's `SPELT_DIFFERENTLY`
+# binding). That function writes the string at the second argument and ignores the first, which
+# for the log call is a channel and for this is the selector - the same argument position,
+# ignored the same way. The write (selector 7) is therefore served exactly; a selector other
+# than 7 is not distinguished, which is the one simplification here, and it is the same one the
+# log call already makes for its channel. Success is a plain 0, within the non-negative band
+# obSCEne's caller accepts; the exact value the target answers is unmeasured, so 0 rather than a
+# guessed byte count.
+#
+# **FreeBSD's 601 is `pdwait`, which is why it is here and not harvested.** The generated
+# `abi-constants.toml` carries `SYS_pdwait = 601` from the FreeBSD header; the vendor kernel
+# repurposes the number, so the harvested value is the wrong one for this target and this table -
+# "numbers the target has that FreeBSD does not" - is exactly where the corrected one belongs.
+#
+# Provenance: guest-observed, corroborated in this project's own sibling source. The number and
+# its argument were read from a running title's syscall trace; the operation was read from
+# obSCEne's own runtime, which is citable rather than inferred. See D641 for the same basis.
+SYS_vendor_klog = 601

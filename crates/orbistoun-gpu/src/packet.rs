@@ -480,17 +480,19 @@ pub mod build {
     /// the patch's target address and the guest's own `memcpy` land in real command-buffer memory
     /// rather than on the loud placeholder a missing builder answers (worklog 553).
     ///
-    /// The four body dwords are zeroed rather than guessed. A single before/after cannot say which
-    /// argument becomes which dword, and writing obSCEne's captured values would encode obSCEne's
-    /// arguments into the guest's stream. The header is a valid, self-describing `SET_*_INDIRECT`
-    /// packet of the right length either way, which is all the reservation needs.
+    /// The header (0xc0039f00), extent (20 bytes / 5 dwords) and format word (0x80000000 in dw3:
+    /// data_format bit 31 = 1 offset_and_data, reg_offset = 0) are measured against live hardware
+    /// (obSCEne sweep 20260920-110931, reports/hardware/20260920-110931-eboot.obs.log, check
+    /// 166-agc/patch-cx-registers-indirect - cited to the log rows, which obSCEne's worklog carries no
+    /// resolution for). dw1-dw2 hold the base GPU VA (amended by sceAgcSetCxRegIndirectPatchSetAddress);
+    /// dw4 holds the register count (incremented by sceAgcSetCxRegIndirectPatchAddRegisters).
     #[must_use]
     pub fn set_cx_registers_indirect_skeleton() -> [u32; 5] {
         [
             command_header(measured::SET_CONTEXT_REG_INDIRECT, 4),
             0,
             0,
-            0,
+            0x8000_0000,
             0,
         ]
     }

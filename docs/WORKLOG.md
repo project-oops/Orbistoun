@@ -728,3 +728,60 @@ context cannot re-derive.
 | - | [711. The first green push was incomplete - two more roots the run surfaced](worklog/711-the-first-green-push-was-incomplete-two-more-roots-from-the-run.md) |
 | - | [712. The mesh output assembles the primitive the stream set, not always a triangle](worklog/712-the-mesh-output-assembles-the-primitive-the-stream-set.md) |
 | - | [713. The point record renders pixel-exact as a point, and the assumption is now measured](worklog/713-the-point-record-renders-pixel-exact-as-a-point.md) |
+| - | [714. A real submission reaches a constructed backend on the run path](worklog/714-a-real-submission-reaches-a-constructed-backend-on-the-run-path.md) |
+| - | [715. The rendered frame crosses the 7f1b route, end to end](worklog/715-the-rendered-frame-crosses-the-7f1b-route.md) |
+| - | [716. PPSA02664, hardened to a sharper diagnosis: the null is not the import's return](worklog/716-ppsa02664-hardened-to-a-sharper-diagnosis-the-null-is-not-the-imports-return.md) |
+| - | [717. The NID mining method is validated, and PPSA02664's producer stays unnamed everywhere reachable](worklog/717-the-nid-mining-method-is-validated-and-ppsa02664s-producer-is-unnamed-everywhere-reachable.md) |
+| - | [718. The scripted-input route reaches a run, and a played script is counted](worklog/718-the-scripted-input-route-reaches-a-run-and-is-counted.md) |
+| - | [719. PPSA02664's wall is external data, confirmed against obSCEne's delivered measurements](worklog/719-ppsa02664s-wall-is-external-data-confirmed-against-obscenes-delivered-measurements.md) |
+| - | [720. PPSA02664's CreateWorkload: TODO marker in the guest, but the title runs on hardware](worklog/720-ppsa02664s-createworkload-is-todo-marked-in-the-titles-own-code.md) |
+| - | [721. A wall is orbistoun's until hardware proves it the title's](worklog/721-a-wall-is-orbistouns-until-hardware-proves-it-the-titles.md) |
+| - | [722. The candidate-causes list pays off; return-forcing the graphics stubs is ruled out](worklog/722-the-candidate-causes-list-pays-off-return-forcing-ruled-out.md) |
+| - | [723. Six for six: PPSA02664's CreateWorkload path is all out-of-line SDK inlines](worklog/723-six-for-six-the-createworkload-path-is-all-out-of-line-sdk-inlines.md) |
+| - | [724. A guest-memory peek at a fault, and what it immediately found](worklog/724-a-guest-memory-peek-at-a-fault-and-what-it-immediately-found.md) |
+| - | [725. Tracing the null container: the phantom is a GetSize, not the producer](worklog/725-tracing-the-null-container-the-phantom-is-a-getsize-not-the-producer.md) |
+| - | [726. Ingesting a6aa: the indirect-register packet is measured in shape, not yet in body](worklog/726-ingesting-a6aa-the-indirect-register-packet-is-measured-in-shape-not-yet-in-body.md) |
+| - | [727. Serving the klog syscall, and fixing the census that misattributed it](worklog/727-serving-the-klog-syscall-and-fixing-the-census-that-misattributed-it.md) |
+| - | [728. Correcting a dangling citation and an over-claimed phantom size](worklog/728-correcting-a-fabricated-citation-and-an-over-claimed-phantom-size.md) |
+| - | [729. The null-slot theory, tested and disproven: the phantom must stay callable](worklog/729-the-null-slot-theory-tested-and-disproven-the-phantom-must-stay-callable.md) |
+| - | [730. The fault report learns to read heap objects, and the null container is a zeroed allocation](worklog/730-the-fault-report-learns-to-read-heap-objects-and-the-null-container-is-a-zeroed-allocation.md) |
+| - | [731. Mapping the CreateWorkload path: AGC-driver calls ruled out, sceAgcInit is load-bearing](worklog/731-mapping-the-createworkload-path-agc-driver-calls-ruled-out-sceagcinit-is-load-bearing.md) |
+| - | [732. The flagged AGC-driver setters: verified unimplementable as 0x0, held for a3f0](worklog/732-the-flagged-agc-driver-setters-verified-unimplementable-as-0x0-held-for-a3f0.md) |
+| - | [733. The run report stops sending handled calls to a vocabulary search](worklog/733-the-run-report-stops-sending-handled-calls-to-a-vocabulary-search.md) |
+| - | [734. libSceAmpr ruled out as the wall cause: the apr path is not the graphics path](worklog/734-libsceampr-ruled-out-as-the-wall-cause-the-apr-path-is-not-the-graphics-path.md) |
+| - | [735. authoritative measurement of sceagcinit clears a3f0 and confirms createworkload wall](worklog/735-authoritative-measurement-of-sceagcinit.md) |
+| - | [736. Verifying the concurrent sceAgcInit work, and clearing the gate it left red](worklog/736-verifying-the-concurrent-sceagcinit-work-and-clearing-the-gate-it-left-red.md) |
+| - | [737. The caller of 0x42d90 found: the memcpy is gated, and the container field is at +0x3c8](worklog/737-the-caller-of-0x42d90-found-the-memcpy-is-gated-and-the-container-field-is-at-0x3c8.md) |
+| - | [738. The null container is a descriptor data pointer, and 0x42d90 is a reusable copier](worklog/738-the-null-container-is-a-descriptor-data-pointer-and-0x42d90-is-a-reusable-copier.md) |
+| - | [739. The descriptor comes from a collection, and the copy pattern repeats](worklog/739-the-descriptor-comes-from-a-collection-and-the-copy-pattern-repeats.md) |
+| - | [740. The fault source is a null-base offset, not a count — and the trace now shows copy operands](worklog/740-the-fault-source-is-a-null-base-offset-not-a-count-and-the-trace-now-shows-copy-operands.md) |
+| - | [741. A copy from a null source is now a named fault finding, not just a trace operand](worklog/741-a-copy-from-a-null-source-is-now-a-named-fault-finding-not-just-a-trace-operand.md) |
+| - | [742. The improved report shows the register-group loop, and clears the AGC patch call of the null](worklog/742-the-improved-report-shows-the-register-group-loop-and-clears-the-agc-patch-call-of-the-null.md) |
+| - | [743. An indirect peek breaks the ASLR barrier, and reads the fault's heap objects](worklog/743-an-indirect-peek-breaks-the-aslr-barrier-and-reads-the-fault-s-heap-objects.md) |
+| - | [744. The descriptor access pattern, confirmed from live bytes — and the limit of hand-decode](worklog/744-the-descriptor-access-pattern-confirmed-from-live-bytes-and-the-limit-of-hand-decode.md) |
+| - | [745. A disassembler corrects the wall: the src is a stored `0xa8`, not a null-container read](worklog/745-a-disassembler-corrects-the-wall-the-src-is-a-stored-0xa8-not-a-null-container-read.md) |
+| - | [746. The phantom is a DMA-packet sizer, ruled out as the fault's source](worklog/746-the-phantom-is-a-dma-packet-sizer-ruled-out-as-the-faults-source.md) |
+| - | [747. The faulting descriptor is a "1234" shader header with two unrelocated fields](worklog/747-the-faulting-descriptor-is-a-1234-shader-header-with-two-raw-relative-fields.md) |
+| - | [748. The wall is a relocation-only bug — the group 0 register data is present, only its pointer is raw](worklog/748-the-wall-is-a-relocation-only-bug-the-group-0-register-data-is-present.md) |
+| - | [749. Two routes to the relocation loop close, pointing at the shader asset](worklog/749-two-routes-to-the-relocation-loop-close-pointing-at-the-shader-asset.md) |
+| - | [750. Consolidating the wall — a Unity shader relocation short by two, and what is left to do](worklog/750-consolidating-the-wall-a-unity-shader-relocation-short-by-two-and-what-is-left.md) |
+| - | [751. create_shader relocates the full group array under the guard](worklog/751-create-shader-relocates-the-full-group-array-under-the-guard.md) |
+| - | [752. The probe question that checks the create_shader fix](worklog/752-the-probe-question-that-checks-the-create-shader-fix.md) |
+| - | [753. The title is heavily threaded, so the determinism path closes — and an oracle opens](worklog/753-the-title-is-heavily-threaded-so-determinism-closes-and-an-oracle-opens.md) |
+| - | [754. The oracle consulted — a related but unsolved Unity shader fault, and what it is worth](worklog/754-the-oracle-consulted-a-related-but-unsolved-unity-shader-fault.md) |
+| - | [755. The phantom's return gates the register-group path, and confirms the relocation wall](worklog/755-the-phantom-return-gates-the-register-group-path-and-confirms-the-relocation-wall.md) |
+| - | [756. Error-dialog init is served, and the stale surfaces are regenerated](worklog/756-error-dialog-init-is-served-and-the-stale-surfaces-are-regenerated.md) |
+| - | [757. Two system-service actions are served, and a shared-static test race is closed](worklog/757-two-system-service-actions-are-served-and-a-shared-static-test-race-is-closed.md) |
+| - | [758. GTAV's rpf.cache was misrouted, not missing - serving it clears the int 0x41 wall](worklog/758-gtav-s-rpf-cache-was-misrouted-not-missing-and-serving-it-moves-the-wall.md) |
+| - | [759. GTA's next wall is a null-vtable virtual call, not the mutex the report guessed](worklog/759-gta-s-next-wall-is-a-null-vtable-virtual-call-not-the-mutex-the-report-guessed.md) |
+| - | [760. GTA's null-vtable is a static constructor that never runs - narrowed to init or relocation](worklog/760-gta-s-null-vtable-is-a-static-ctor-that-never-runs-narrowed-to-init-or-relocation.md) |
+| - | [761. sceKernelFstat was unwired, and GTA's null-vtable is a runtime-init short-circuit](worklog/761-sce-kernel-fstat-was-unwired-and-the-null-vtable-is-a-runtime-init-short-circuit.md) |
+| - | [762. The null-vtable gate hunt rules out three stubs and points at startup construction](worklog/762-the-null-vtable-gate-hunt-rules-out-three-stubs-and-points-at-startup-construction.md) |
+| - | [763. No stub gates GTA's object construction - the null-vtable is a non-stub startup value](worklog/763-no-stub-gates-gta-s-object-construction-the-null-vtable-is-a-non-stub-startup-value.md) |
+| - | [764. The ctor hunt lands - the null-vtable is an unconstructed global handler the title itself null-guards](worklog/764-the-ctor-hunt-lands-the-null-vtable-is.md) |
+| - | [765. GTA's stale handler field is a static-init relocation the redirect-registration never overwrote; init-array is the axis and GetProcParam is the next gap](worklog/765-gta-s-stale-handler-field-is-a-static.md) |
+| - | [766. The eboot has no init-array, so 765's axis was wrong; the redirect is runtime input-init that runs after the poll, and the trigger is the real question](worklog/766-the-eboot-has-no-init-array-so-765-s.md) |
+| - | [767. GTA polls input without opening a pad; the handler bring-up has one caller, an input-manager-init that never runs before the poll](worklog/767-gta-polls-input-without-opening-a-pad.md) |
+| - | [768. GTA's input-manager-init is never entered, not a thread race; it is upstream-gated by int 0x41 resource checks, so the wall is a startup-reachability problem to bank while the loop broadens](worklog/768-gta-s-input-manager-init-is-never.md) |
+| - | [769. The retail frontier survey: every title is at a hard wall; PPSA28061 needs sceAgcGetRegisterDefaults2 measured, so an obSCEne request is filed](worklog/769-the-retail-frontier-survey-every-title.md) |
+| - | [770. PPSA02664 and PPSA03416 share a clean AGC-descriptor wall the frontier hid as a VCRUNTIME diagnostic artifact; the root NID is unnamed and a trace is requested](worklog/770-ppsa02664-and-ppsa03416-share-a-clean.md) |

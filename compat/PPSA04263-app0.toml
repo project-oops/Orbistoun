@@ -10,15 +10,15 @@ master_version = "01.00"
 
 [status]
 reach = "entered"
-outcome = "image+0x196b91a"
-imports = 71
-calls = 30262
+outcome = "image+0x19676d7"
+imports = 75
+calls = 30460
 standing = 100
 default_return = "unimplemented"
-unanswered = 7
+unanswered = 5
 limit_seconds = 20
-build = "0.1.0"
-measured_on = "2026-09-15"
+build = "v0.1.0 - 712d8c6-dirty"
+measured_on = "2026-09-21"
 
 [experiment]
 reach = "entered"

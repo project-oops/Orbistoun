@@ -411,6 +411,16 @@ mod tests {
 mod active_tests {
     use super::{Script, clear, install, poll};
     use crate::pad::Button;
+    use std::sync::{Mutex, PoisonError};
+
+    /// Serialises the tests that share the process-wide `ACTIVE` script.
+    ///
+    /// `ACTIVE` is a static, so two of these running at once install over each other - one test's
+    /// `clear` landing between another's `install` and `poll` - and fail for a reason that has
+    /// nothing to do with what they check, which reddened the gate once. Each holds this from its
+    /// first `clear` through its last assertion, so no other interleaves; poisoning is recovered
+    /// from so one test's panic does not strand the rest.
+    static SERIAL: Mutex<()> = Mutex::new(());
 
     /// Reads and checks a script the way a caller would.
     fn script(text: &str) -> Script {
@@ -419,13 +429,9 @@ mod active_tests {
         script
     }
 
-    /// **The serialised half**, because these tests share one process-wide script.
-    ///
-    /// `ACTIVE` is a static, so two of these running at once would install over each other and
-    /// fail for a reason that has nothing to do with what they check. They run as one test
-    /// rather than pretending to be independent.
     #[test]
     fn an_installed_script_is_sampled_and_a_cleared_one_is_not() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         clear();
         assert!(
             poll().is_none(),
@@ -463,6 +469,7 @@ mod active_tests {
     /// `Script::at` directly, so an `install` that lost the start instant would fail here.
     #[test]
     fn a_step_in_the_future_has_not_happened_yet() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         clear();
         install(script("[[step]]\nat_ms = 3600000\nbuttons = [\"start\"]\n"));
         let sampled = poll().expect("an installed script samples");

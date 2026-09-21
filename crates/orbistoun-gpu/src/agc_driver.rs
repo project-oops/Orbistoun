@@ -8,7 +8,7 @@
 //! Names, provenance and the arity caveat are as [`super::agc`] states them - read out of
 //! real import tables, with arities deliberately unestablished.
 
-use crate::pipeline::{GuestMemory, Pipeline, Queue, SubmissionReport};
+use crate::pipeline::{GuestMemory, Pipeline, Queue, Submission, SubmissionReport};
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 use orbistoun_hle::guest_module;
 use orbistoun_translate::{Fidelity, Strategy, Width};
@@ -164,9 +164,10 @@ impl GuestMemory for MappedRegions {
     }
 }
 
-/// The last submission a guest handed to `sceAgcDriverSubmitDcb`, for the run report to read.
-fn last_submission() -> &'static Mutex<Option<SubmissionReport>> {
-    static LAST: OnceLock<Mutex<Option<SubmissionReport>>> = OnceLock::new();
+/// The last submission a guest handed to `sceAgcDriverSubmitDcb`, held whole so the worker can both
+/// read its report and drive its commands to a backend (D695, `-36c0`).
+fn last_submission() -> &'static Mutex<Option<Submission>> {
+    static LAST: OnceLock<Mutex<Option<Submission>>> = OnceLock::new();
     LAST.get_or_init(|| Mutex::new(None))
 }
 
@@ -176,7 +177,20 @@ fn last_submission() -> &'static Mutex<Option<SubmissionReport>> {
 /// title produces, and it belongs beside the reach and import counts rather than only in a trace.
 #[must_use]
 pub fn last_submission_report() -> Option<SubmissionReport> {
-    last_submission().lock().ok().and_then(|slot| slot.clone())
+    last_submission()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|s| s.report.clone()))
+}
+
+/// The whole of the most recent submission - its commands and modules, not only its report - so the
+/// worker can drive it to a constructed backend (`-36c0`). `None` until a guest submits one.
+#[must_use]
+pub fn take_last_submission() -> Option<Submission> {
+    last_submission()
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
 }
 
 /// Reads the 16-byte submit descriptor (`{gpu_addr: u64, size_dwords: u32, flags: u8, pad}`, obSCEne
@@ -225,18 +239,18 @@ fn submit_dcb(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // report shows the submit happened and read nothing (5bff).
     let Some(bytes) = memory.read(gpu_addr, length).map(<[u8]>::to_vec) else {
         if let Ok(mut slot) = last_submission().lock() {
-            *slot = Some(SubmissionReport::default());
+            *slot = Some(Submission::default());
         }
         return SUBMIT_OK;
     };
-    let report = Pipeline::new(Strategy::Predicated {
+    let submission = Pipeline::new(Strategy::Predicated {
         fidelity: Fidelity::Lane,
         width: Width::default(),
     })
-    .map(|mut pipeline| pipeline.submit(&bytes, Queue::Draw, &[], &memory).report)
+    .map(|mut pipeline| pipeline.submit(&bytes, Queue::Draw, &[], &memory))
     .unwrap_or_default();
     if let Ok(mut slot) = last_submission().lock() {
-        *slot = Some(report);
+        *slot = Some(submission);
     }
     SUBMIT_OK
 }

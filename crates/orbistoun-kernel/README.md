@@ -7,8 +7,7 @@ spine.
 attributes, and semaphores - fifteen functions with real behaviour behind them.
 
 **Deliberately fakes:** the rest of the pthread surface, and everything about
-scheduling. A guest has never called `scePthreadCreate` yet, so the threading path is
-written and unexercised.
+scheduling.
 
 **Design note.** FreeBSD is the reference. The target kernel is
 FreeBSD-derived and a large fraction of libkernel is POSIX with the vendor naming, so most

@@ -1,6 +1,33 @@
 library = "libSceAgc"
 
 [[function]]
+name = "0x7d86501b8094ef57"
+arity = 1
+purpose = "Query helper that reads as a GetSize for the indirect-register workload buffer - it writes a byte size to an out-param the caller then aligns and allocates against (worklog 725)."
+edge_cases = [
+    "GUEST-OBSERVED SIZE, not a measured return. Called at PPSA02664 0x4000000435b5 with arg0 an out-parameter stack pointer; the caller rounds the value up to 8 (add rbx, 7; and rbx, ~7) and passes it to buffer allocators (worklog 725). orbistoun writes 168 (0xa8) into *arg0 and returns 0x0. That 0xa8 is the size the guest's memcpy reads at the wall this path dies on - the +0xa8 read through a null pointer - so it is the best-available stand-in, NOT a hardware measurement of this call. worklog 725 showed that planting this size does not by itself clear the wall.",
+    "NON-EXPORT NID. Imported directly as raw hex NID 0x7d86501b8094ef57 with no declared C export. obSCEne e245 (REQ-20260919T0121Z-e245) and sweep 20260920-110931 (check 166-agc/cb-unnamed-ef57) measured a *bare synthetic* import of it binding null on retail - but note the sweep's probe did not then call it: call-executed 0x0, reason slot-is-null, because obSCEne's probe null-checks before calling. That is the probe's caution, not the platform refusing the call.",
+    "MUST STAY CALLABLE - the null-slot theory is disproven (worklog 729). It was tempting to match e245's null binding and bind this NID to 0x0, on the theory PPSA02664 would then take a fallback. Tested by binding it 0x0 in the executable's relocation, PPSA02664 faulted EARLIER, instruction-fetch-from-0x0, verdict BACK: it calls the slot with no null-check of its own. So on hardware PPSA02664's slot is NOT the bare null e245 measured - it reaches this size through working code (the SDK helper, inlined or otherwise available to it), and orbistoun answering the call with a size is what keeps it on the path it takes on hardware. Unregistering the handler entirely (slot left a placeholder) left the fault unchanged; only 0x0 moved it, and it moved it backwards. The wall is downstream of this call, not at it.",
+]
+known_by = "guest-observed"
+cites = "PPSA02664 fault and call site 0x4000000435b5, worklog 725 (0xa8 is guest-observed); worklog 729 (null-slot test: binding 0x0 faults BACK, so the slot must stay callable); obSCEne e245 (REQ-20260919T0121Z-e245) and sweep 20260920-110931, reports/hardware/20260920-110931-eboot.obs.log, check 166-agc/cb-unnamed-ef57 (a bare synthetic import binds null; obSCEne's probe null-checks before calling)."
+found_on = "2026-09-20"
+
+[[function]]
+name = "0x53bbd82b51d172db"
+arity = 2
+purpose = "Alias NID for sceAgcInit(state, version), imported directly by retail titles (including PPSA02664 and PPSA28061)."
+edge_cases = [
+    "ALIAS NID FOR sceAgcInit. The standard name sceAgcInit hashes to 0x916dc62dbed07cf8, but published identifier tables list 0x53bbd82b51d172db as an alias for this library's initialization gate. Real titles import this raw identifier.",
+    "RETURN AND VERSION GATE MEASURED (obSCEne b7e4, sweep 20260915-125124). Validates version: returns 0x0 for version 13 and 0x8a6c0004 for all other versions.",
+    "ARG0 IS UNTOUCHED BY HARDWARE (obSCEne a3f0, sweep 20260920, check 166-agc/init). Extent = 0, changed = 0, touches 0 bytes at arg0.",
+]
+known_by = "published"
+cites = "SELFish REQ-20260909T1250Z-1f74; obSCEne b7e4 (sweep 20260915-125124); obSCEne REQ-20260920T1425Z-a3f0 (sweep 20260920 live console, check 166-agc/init)"
+found_in = ["PPSA02664-app0", "PPSA28061-app0"]
+found_on = "2026-09-20"
+
+[[function]]
 name = "sceAgcAcbAcquireMem"
 purpose = "Writes a cache-acquire packet into an asynchronous-compute command buffer."
 edge_cases = [
@@ -363,12 +390,12 @@ found_on = "2026-09-14"
 name = "sceAgcDcbSetCxRegistersIndirect"
 purpose = "Writes a packet whose register values are pointed to rather than carried inline."
 edge_cases = [
-    "THE PRODUCER OF THE PATCH FAMILY, and the wall for the two furthest retail titles. Called once by PPSA02664, whose return is then passed as arg0 to sceAgcSetCxRegIndirectPatchAddRegisters thirty-two times. Unimplemented, it answers the 0xf7ff0001 placeholder, and the guest carries that into every patch call as a packet address.",
-    "NOT IMPLEMENTABLE YET, and the reason is worth stating rather than rediscovering. Its encoding is unmeasured: obSCEne measured sceAgcDcbSetCxRegistersIndirectGetSize but never the packet, and all twenty sceAgc*Patch* symbols are absent from every census it has run. Emitting a packet here would mean inventing both its body and what the patch functions do to it - two guesses stacked, where the second is invisible because it amends the first.",
+    "FIELD LAYOUT MEASURED on hardware (obSCEne sweep 20260920-110931, reports/hardware/20260920-110931-eboot.obs.log, check 166-agc/patch-cx-registers-indirect - cited to the log rows, which are the record: obSCEne's worklog carries no resolution for the sweep, so the request id it ran under is not used here): dw0 header 0xc0039f00 (opcode 0x9f, count 4 dwords, 20 bytes total); dw1-dw2 the 64-bit base GPU address sceAgcSetCxRegIndirectPatchSetAddress writes (0x0 in the probe); dw3 0x80000000 (reg-offset/format word, data_format bit 31 set); dw4 register count (0x38b0 in the probe, incremented in place by sceAgcSetCxRegIndirectPatchAddRegisters, which raised the low byte 0xb0->0xb1 for one added register). Workload memory is untouched by the producer or either patch (changed-after-set-addr 0x0, changed-after-add2 0x0); the register data is populated caller-side.",
+    "PRODUCER ATTRIBUTION, re-read (worklog 724). An earlier note called this 'the producer of the patch family, whose return is passed to sceAgcSetCxRegIndirectPatchAddRegisters 32x' - read off a static file-offset disassembly that ORBISTOUN_PEEK later proved wrong (the SELF wrapper shifts where the bytes land). The producer the patch family actually consumes is the unnamed libSceAgc::0x7d86501b8094ef57 (a distinct NID, a GetSize that writes a byte size into an out-param), entangled with this named builder in the same indirect-register flow but not the same call. That NID is a non-export and stays unmeasurable; this named function is measurable and now measured in its structure.",
 ]
-known_by = "guest-observed"
-cites = "PPSA02664-app0 run 2026-09-14, call trace; obSCEne sweep 20260914-100833 measured its GetSize only."
-found_on = "2026-09-14"
+known_by = "measured"
+cites = "obSCEne sweep 20260920-110931, reports/hardware/20260920-110931-eboot.obs.log, check 166-agc/patch-cx-registers-indirect; a6aa, sweep 20260915-125124, reports/hardware/20260915-125124-eboot.obs.log, check 166-agc/dcb-set-cx-registers-indirect."
+found_on = "2026-09-15"
 
 [[function]]
 name = "sceAgcDcbSetIndexBuffer"
@@ -471,16 +498,18 @@ found_on = "2026-08-19"
 
 [[function]]
 name = "sceAgcInit"
-arity = 0
-purpose = "Initialises the current-generation graphics library. Attributed to the identifier three titles import first and stall inside."
+arity = 2
+purpose = "Initialises the current-generation graphics library. sceAgcInit(state, version): validates version and gates every later AGC call. Attributed to the identifier three titles import first and stall inside."
 edge_cases = [
     "**The identifier a real title imports is 0x53bbd82b51d172db (orbistoun spelling), and this name does not hash to it.** The hash of this name is 0x916dc62dbed07cf8. The published tables list BOTH identifiers against this one name, so the second is an alias no derivation can reach - which is why 30,184 names and 3.9 billion generated candidates never explained it.",
     "**known_by is published, and that is the ceiling on it.** The attribution is external; this project cannot confirm it the way it confirms every other name, because confirmation here means the hash reproducing and this one demonstrably does not. It is recorded so a reader meeting the bare hash knows what it is believed to be and exactly how much that is worth.",
     "**The systematic shape matters more than the single name.** Of 116 published libSceAgc identifiers, 108 reproduce and 8 do not; five of the 8 are a second identifier on a name whose first one reproduces. So this library carries a class of alias identifiers, and a future unnameable hash here should be checked against that pattern before a word list is extended.",
     "PPSA28061 stops inside this library's initialisation; PPSA02664 and PPSA03416 call it, pass it, reach flipped, and fault later in command-buffer construction (the 0xa8 null object, worklogs 672/684). All three import and exercise the library, which corroborates the attribution semantically without confirming it.",
+    "RETURN AND VERSION GATE MEASURED (obSCEne b7e4, sweep 20260915-125124). sceAgcInit(state, v) returns 0x0 for v = 13 and 0x8a6c0004 (SCE_AGC_ERROR_INVALID_VERSION) for every other version; 13 is the only version retail FW 12.40 accepts. And it gates the library: sceAgcCreateShader called before sceAgcInit faults (SIGSEGV). So the arity is 2, not 0 - a state buffer at arg0 and a version at arg1 - and the identity attribution being published does not make the behaviour unmeasured, because obSCEne calls the canonical export through the SDK.",
+    "ARG0 IS UNTOUCHED BY HARDWARE (obSCEne a3f0, sweep 20260920, check 166-agc/init). Probe of sceAgcInit(state, 13) across 1024-byte 0xAA sentinels, PPSA02664 descriptor pattern, and pointer-to-pointer confirmed extent = 0, changed = 0, and out-ptr-valid = 0, with rc-null = 0x0. sceAgcInit does not populate a context buffer at arg0; it is a pure library version initialization gate.",
 ]
 known_by = "published"
-cites = "SELFish REQ-20260909T1250Z-1f74, resolved 2026-09-09: five independent published identifier tables (SharpEMU, SharpEMU-aerolib, aerolib.csv, craziiEmu, fpPS4) carried in obSCEne data/mined-names.txt"
+cites = "SELFish REQ-20260909T1250Z-1f74; obSCEne b7e4 (sweep 20260915-125124); obSCEne REQ-20260920T1425Z-a3f0 (sweep 20260920 live console, check 166-agc/init: extent 0, changed 0, rc-sentinel 0x0, rc-desc 0x0, rc-null 0x0, v=13 -> 0x0)"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-09"
 

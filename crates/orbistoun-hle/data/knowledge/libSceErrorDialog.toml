@@ -4,4 +4,4 @@ library = "libSceErrorDialog"
 name = "sceErrorDialogInitialize"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Implemented (worklog 756) as an honest init: answers OK (0x0), the way an SDK *Initialize does on its first call, without claiming a dialog was ever shown - the same reasoning that let libSceAudioOut's init leave SERVES_NOTHING. known_by: assumed - the OK return is the near-universal *Initialize convention, not a hardware measurement; retire it against an obSCEne probe of this export if one is run. Handler: crates/orbistoun-systemservice/src/lib.rs error_dialog_initialize. Writes nothing and dereferences no argument, so no argument guard is needed."

@@ -2,15 +2,48 @@ library = "libSceSystemService"
 
 [[function]]
 name = "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet"
-found_in = ["PPSA02664-app0"]
+arity = 6
+purpose = """
+Turns off the automatic setting of the notice-screen skip flag. Implemented 2026-09-21 as a
+setter that succeeds: a setter's contract is that the request was taken, not that a value was read
+back (D523). Orbistoun keeps no such flag, so there is nothing to toggle and nothing to write.
+"""
+returns = "status"
+edge_cases = [
+    "Answers OK and writes nothing - it is an action, not a getter, so no out-pointer is touched and no value is invented.",
+    "Unimplemented, it handed the loud placeholder (0xf7ff_0001) to a guest that checks the return; the honest fill is the OK the console answers (PPSA04263).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "That the call succeeds with OK. Nothing on the target has confirmed it; a probe of the real return retires this.",
+    "Arity is the trampoline's six, not a measured signature (D504). The handler reads none of its arguments, so the count only shapes the trace.",
+]
+found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceSystemServiceHideSplashScreen"
-found_in = ["PPSA02664-app0"]
+arity = 0
+purpose = """
+Dismisses the boot splash once a title is ready to draw. Implemented 2026-09-21 as an action that
+succeeds honestly: on a console it tears down the boot-logo layer shown while the title loaded, and
+nothing displays that layer through this path here, so hiding it is a no-op that succeeds - the same
+shape sceSysmoduleUnloadModule states.
+"""
+returns = "status"
+edge_cases = [
+    "Answers OK, writes nothing, and claims no framebuffer was touched.",
+    "Unimplemented, it handed the loud placeholder (0xf7ff_0001) to a guest that checks the return; the honest fill is the OK the console answers (PPSA04263).",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "That the call succeeds with OK. Nothing on the target has confirmed it; a probe of the real return retires this.",
+]
+found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Name and arity zero confirmed by hash against a real import (D167)."
 
 [[function]]
 name = "sceSystemServiceParamGetInt"

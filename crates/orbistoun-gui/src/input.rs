@@ -64,11 +64,15 @@ impl Reader {
             .iter()
             .map(|port| match port.source {
                 Source::Keyboard => ctx.input(|input| keyboard(input, port)),
-                // A port with nothing driving it, and a port set to a gamepad this build
-                // cannot read, are the same to a title: a pad nobody is touching. They are
-                // not the same to a person, which is why the settings pane distinguishes
-                // them and this does not have to.
-                Source::Empty | Source::Gamepad { .. } => PadState::neutral(),
+                // A port with nothing driving it, a port set to a gamepad this build cannot
+                // read, and a port driven by a script are all the same to this live reader: a
+                // pad it is not feeding. The script is sampled in the worker as a pure function
+                // of run time, not pushed from here, so there is nothing for the window to read
+                // (`orbistoun_input::script`, D707). They are not the same to a person, which is
+                // why the settings pane distinguishes them and this does not have to.
+                Source::Empty | Source::Gamepad { .. } | Source::Script { .. } => {
+                    PadState::neutral()
+                }
             })
             .collect();
 

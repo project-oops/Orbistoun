@@ -328,32 +328,67 @@ fn lstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     stat(args)
 }
 
+/// What an open descriptor's host metadata says, in the [`Facts`] this module writes.
+///
+/// Shared by [`fstat`] and [`kernel_fstat`] so the `struct stat` a descriptor is described by stays
+/// one decision, exactly as the path forms share [`facts_of`] (D374, D525).
+fn facts_from_descriptor(data: &std::fs::Metadata) -> Facts {
+    let modified = data
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or((0, 0), |d| (d.as_secs(), d.subsec_nanos()));
+    Facts {
+        mode: if data.is_dir() {
+            S_IFDIR | DIRECTORY_MODE
+        } else {
+            S_IFREG | FILE_MODE
+        },
+        size: data.len(),
+        modified,
+    }
+}
+
 /// `fstat(fd, buffer)` - the same, by descriptor.
 ///
 /// Reference: POSIX.1-2008 `fstat(2)`.
 fn fstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(facts) = crate::descriptor::facts(args[0]).map(|data| {
-        let modified = data
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or((0, 0), |d| (d.as_secs(), d.subsec_nanos()));
-        Facts {
-            mode: if data.is_dir() {
-                S_IFDIR | DIRECTORY_MODE
-            } else {
-                S_IFREG | FILE_MODE
-            },
-            size: data.len(),
-            modified,
-        }
-    }) else {
+    let Some(facts) = crate::descriptor::facts(args[0])
+        .as_ref()
+        .map(facts_from_descriptor)
+    else {
         return FAILED;
     };
     if write_stat(args[1], facts) {
         OK
     } else {
         FAILED
+    }
+}
+
+/// `sceKernelFstat(fd, buffer)` - the vendor-named form of [`fstat`].
+///
+/// The same relationship to `fstat` that [`kernel_stat`] has to `stat` (D525): the success path and
+/// the `struct stat` it writes are shared through [`facts_from_descriptor`], and only failure
+/// differs. POSIX answers `-1`; a `sceKernel*` call answers a vendor `0x8002_00xx` code - a
+/// descriptor with no open file behind it is `EBADF`, a buffer that cannot be written is `EFAULT`.
+///
+/// `fstat` and `sceKernelStat` were both already served, but this libkernel name was not wired, so
+/// the guest that called it read whatever its stack held where an unwritten `struct stat` should be
+/// - the D171 failure this crate exists to close, and PPSA04263 is one such caller (worklog 761).
+pub(crate) fn kernel_fstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(facts) = crate::descriptor::facts(args[0])
+        .as_ref()
+        .map(facts_from_descriptor)
+    else {
+        return u64::from(
+            orbistoun_core::GuestError::vendor(orbistoun_core::errno::BAD_DESCRIPTOR).as_raw(),
+        );
+    };
+    if write_stat(args[1], facts) {
+        OK
+    } else {
+        u64::from(orbistoun_core::GuestError::vendor(orbistoun_core::errno::FAULT).as_raw())
     }
 }
 
@@ -540,6 +575,31 @@ mod tests {
 
     fn path(text: &str) -> std::ffi::CString {
         std::ffi::CString::new(text).expect("a path")
+    }
+
+    /// **sceKernelFstat answers a vendor code, not POSIX -1, when the descriptor is bad.**
+    ///
+    /// The D525 distinction the crate exists to keep: POSIX `fstat` answers `-1`, a `sceKernel*` call
+    /// answers a `0x8002_00xx` vendor code, and a guest testing for a negative 32-bit vendor error
+    /// never matches `-1` (`0xffff_ffff_ffff_ffff`). Asserted on the failure, because that is the only
+    /// thing that differs between the two forms - the success path they share is exercised elsewhere.
+    #[test]
+    fn kernel_fstat_answers_a_vendor_code_on_a_bad_descriptor() {
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = u64::MAX; // no open file behind this descriptor
+        let answer = super::kernel_fstat(&args);
+        assert_ne!(
+            answer,
+            super::FAILED,
+            "not the POSIX -1 a sceKernel* caller never matches"
+        );
+        assert_eq!(
+            answer,
+            u64::from(
+                orbistoun_core::GuestError::vendor(orbistoun_core::errno::BAD_DESCRIPTOR).as_raw()
+            ),
+            "EBADF in the vendor 0x8002_00xx family"
+        );
     }
 
     /// **The vendor form succeeds like the POSIX one and fails differently**, which is the

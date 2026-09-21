@@ -75,7 +75,7 @@ Orbistoun is developed as a sibling under the [OOPS meta-repository](../README.m
 ```
 
 ### 2. Run a Title
-To run a title (for example, [`gl-cube`](../oops-apps/src/gl-cube)):
+To run a title (for example, [`gl1-cube`](../oops-apps/src/oops-gl/gl1-cube)):
 ```bash
 ./bin/orbistoun run GLCB00001
 ```
@@ -104,10 +104,10 @@ command produces will be wrong within a week, so this block is spliced in by
 
 | | |
 |---|---|
-| Functions declared / implemented | 967 / 765 |
-| Declared in a library that serves nothing | 149 across 23 libraries - names written down, no implementation |
-| Recorded behaviours | 815 - 366 published, 82 measured, 75 guest-observed, 255 assumed |
-| Open questions a hardware probe could settle | 790 |
+| Functions declared / implemented | 972 / 772 |
+| Declared in a library that serves nothing | 148 across 22 libraries - names written down, no implementation |
+| Recorded behaviours | 820 - 367 published, 85 measured, 76 guest-observed, 257 assumed |
+| Open questions a hardware probe could settle | 793 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

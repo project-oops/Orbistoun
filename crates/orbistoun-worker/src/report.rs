@@ -621,6 +621,167 @@ fn bytes_before(ip: u64) -> ([u8; 48], usize) {
     (out, len)
 }
 
+/// Reads up to `len` bytes of guest memory at `addr`, clamped to the one page `addr` sits in so the
+/// read cannot cross into an unmapped neighbour, and only when [`readable`] confirms the range is
+/// committed.
+///
+/// Allocates, so it runs only in the post-message part of [`emit`], never on the no-alloc path.
+/// Empty when nothing there is readable, which is the honest answer for a wild address.
+#[cfg(windows)]
+fn read_window(addr: u64, len: usize) -> Vec<u8> {
+    const PAGE: u64 = 0x1000;
+    if addr == 0 || len == 0 {
+        return Vec::new();
+    }
+    let to_page_end = (PAGE - (addr & (PAGE - 1))) as usize;
+    let take = len.min(to_page_end);
+    if !readable(addr, take) {
+        return Vec::new();
+    }
+    // SAFETY: `readable` has confirmed `take` bytes at `addr` are committed and readable, and `take`
+    // is clamped to the remainder of the one page `addr` sits in, so the slice cannot cross into an
+    // unmapped neighbour. Read once into an owned buffer; the borrow does not escape the call.
+    let src = unsafe { std::slice::from_raw_parts(addr as *const u8, take) };
+    src.to_vec()
+}
+
+/// Parses a byte length written in hex (`0x…`) or decimal; the reader for a `+len` suffix.
+#[cfg(windows)]
+fn parse_len(text: &str) -> Option<usize> {
+    let text = text.trim();
+    let n = match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+        None => text.parse::<u64>().ok()?,
+    };
+    usize::try_from(n).ok()
+}
+
+/// Parses `<addr>[+len]` - the address in hex (with or without `0x`), the optional length after `+`
+/// (default 0x100).
+#[cfg(windows)]
+fn parse_addr_len(text: &str) -> Option<(u64, usize)> {
+    let (addr_part, len) = match text.split_once('+') {
+        Some((a, l)) => (a.trim(), parse_len(l).unwrap_or(0x100)),
+        None => (text.trim(), 0x100),
+    };
+    let addr = u64::from_str_radix(addr_part.strip_prefix("0x").unwrap_or(addr_part), 16).ok()?;
+    Some((addr, len))
+}
+
+/// Parses an indirect window spec `[<slot>][+len]` - a hex address in brackets, the optional length
+/// after the closing bracket (default 0x100). Returns the **slot** address (where a pointer lives) and
+/// the length; the caller dereferences the slot at fault time and dumps what it points to.
+///
+/// This is the answer to the ASLR barrier a heap object presents (worklog 743): its address is
+/// re-randomised every run, so naming it in a static spec is useless, but the **stack slot** that
+/// holds its pointer sits at a fixed base and does not move. Naming the slot reaches the object across
+/// runs where naming the object cannot. `None` when the brackets are absent or malformed, so a plain
+/// `<addr>+len` falls through to [`parse_addr_len`].
+#[cfg(windows)]
+fn parse_indirect(text: &str) -> Option<(u64, usize)> {
+    let (slot_part, rest) = text.trim().strip_prefix('[')?.split_once(']')?;
+    let len = match rest.trim() {
+        "" => 0x100,
+        r => parse_len(r.strip_prefix('+')?)?,
+    };
+    let slot_part = slot_part.trim();
+    let slot = u64::from_str_radix(slot_part.strip_prefix("0x").unwrap_or(slot_part), 16).ok()?;
+    Some((slot, len))
+}
+
+/// Dumps the guest-memory windows `ORBISTOUN_DUMP` asks for, as a hexdump, after a fault.
+///
+/// The point is the code around a fault that sits in a **runtime mapping** rather than a placed
+/// module: the ELF on disk does not locate those bytes, so no static disassembly of the file reaches
+/// them, and the only way to read them is out of the live process at the fault (worklog 724). `caller`
+/// resolves to the window ending at the faulting call site - the first stack frame's return address,
+/// which is where the guest code that faulted actually is (the fault instruction pointer is usually
+/// orbistoun's own libc). `<addr>[+len]` dumps a fixed range. Each row is address-prefixed so the
+/// bytes feed straight into a disassembler. It reads and prints only; it changes nothing the guest
+/// sees, which is why `ORBISTOUN_DUMP` observes rather than intervenes.
+#[cfg(windows)]
+fn dump_at_fault() {
+    use std::io::Write as _;
+
+    let Ok(spec) = std::env::var(orbistoun_env::PEEK.name) else {
+        return;
+    };
+    let mut err = std::io::stderr();
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (start, len, note) = if let Some(rest) = part.strip_prefix("caller") {
+            let len = rest.strip_prefix('+').and_then(parse_len).unwrap_or(0x100);
+            // The **recorded** return address of the last call, not a frame-pointer walk: a guest
+            // built without frame pointers (this one) has an `rbp` that is not a frame link, so the
+            // walk lands in data. `RecordedCall::from` is captured at the call site and is the
+            // address the guest returns into - one past the call that faulted (D-thunk dispatch).
+            let return_address = orbistoun_thunk::last_call().map_or(0, |call| call.from);
+            if return_address == 0 {
+                let _ = writeln!(
+                    err,
+                    "orbistoun: ORBISTOUN_PEEK caller - no recorded call to take a return address from"
+                );
+                continue;
+            }
+            // End the window at the call site, so the instructions that set up the call's registers
+            // are the part that is captured rather than whatever follows the return.
+            let before = 0xC0_u64.min(len as u64);
+            (
+                return_address.saturating_sub(before),
+                len,
+                " (ending at the faulting call site)".to_owned(),
+            )
+        } else if let Some((slot, len)) = parse_indirect(part) {
+            // Dereference the pointer at the slot and dump what it points to. The slot is stable
+            // (a fixed stack base), the target is not (ASLR'd heap), so this reads an object no
+            // static address could name across runs (worklog 743).
+            let ptr = read_window(slot, 8);
+            if ptr.len() < 8 {
+                let _ = writeln!(
+                    err,
+                    "orbistoun: ORBISTOUN_DUMP indirect [{slot:#x}] - {}",
+                    describe_unreadable(slot)
+                );
+                continue;
+            }
+            let target = u64::from_le_bytes(ptr[..8].try_into().expect("8 bytes read"));
+            (target, len, format!(" via [{slot:#x}] -> {target:#x}"))
+        } else if let Some((addr, len)) = parse_addr_len(part) {
+            (addr, len, String::new())
+        } else {
+            let _ = writeln!(
+                err,
+                "orbistoun: ORBISTOUN_DUMP {part:?} is not `caller`, `<addr>[+len]` or `[<slot>][+len]`"
+            );
+            continue;
+        };
+        let bytes = read_window(start, len);
+        if bytes.is_empty() {
+            let _ = writeln!(
+                err,
+                "orbistoun: ORBISTOUN_DUMP {start:#x} - {}",
+                describe_unreadable(start)
+            );
+            continue;
+        }
+        let _ = writeln!(
+            err,
+            "orbistoun: ORBISTOUN_DUMP {:#x}..{:#x} ({} bytes){note}:",
+            start,
+            start + bytes.len() as u64,
+            bytes.len(),
+        );
+        for (row, chunk) in bytes.chunks(16).enumerate() {
+            let mut hex = String::with_capacity(chunk.len() * 3);
+            for &b in chunk {
+                hex.push(char::from(b"0123456789abcdef"[(b >> 4) as usize]));
+                hex.push(char::from(b"0123456789abcdef"[(b & 0xf) as usize]));
+                hex.push(' ');
+            }
+            let _ = writeln!(err, "  {:#010x}  {hex}", start + (row * 16) as u64);
+        }
+    }
+}
+
 /// Written explicitly so a report line is one line however the stream is buffered.
 #[cfg(windows)]
 const NEWLINE: &str = "
@@ -1010,6 +1171,13 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     let _ = std::io::stderr().write_all(line.as_bytes());
     let _ = std::io::stderr().flush();
 
+    // **Guest memory dumped at the fault, if asked (`ORBISTOUN_DUMP`).** After the no-alloc message
+    // and in the same allocating context as the trace below - it reads its own env var, allocates
+    // for the hex, and reads guest memory the readable-checked way the byte windows above do. The
+    // point is the code around a fault in a *runtime mapping*, which no static disassembly of the
+    // module file reaches (worklog 724).
+    dump_at_fault();
+
     // **The host stack, but only when the fault is ours.**
     //
     // The lines above are allocation-free and are out of the door before this runs, because
@@ -1096,10 +1264,16 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
 /// shims churn, which filled the recorder with host sites and never showed the guest's access
 /// (D522).
 ///
-/// **Readable is asked, never assumed.** `is_mapped` is the same question the argument dumper
-/// asks, and a register that fails it is left out entirely rather than reported as unreadable -
-/// most of the sixteen hold scalars, and sixteen "not an address" lines would bury the two that
-/// are.
+/// **Readable is asked, never assumed - and asked two ways.** A register points either into one of
+/// the published guest ranges (`is_mapped`, the same question the argument dumper asks) or at host
+/// memory this run allocated for the guest that no published range covers - an `orbistoun-libc` heap
+/// result, which is where a guest's own C++ objects live. The first is read directly; the second is
+/// VirtualQuery-checked and page-clamped, the same guard `ORBISTOUN_PEEK` reads a fault window under
+/// (worklog 724), and a genuinely wild value reads back empty and is dropped. A register holding a
+/// scalar is still left out, because a small integer is not a readable address either way - so the
+/// two lines that point at objects are not buried under sixteen "not an address" ones. This is what
+/// made the object behind PPSA02664's null container visible: it sat on the heap, off every published
+/// range, so `is_mapped` alone printed it as a bare number (worklog 730).
 #[cfg(windows)]
 fn describe_pointees(registers: &Registers) -> Vec<String> {
     if !orbistoun_thunk::ranges_known() {
@@ -1107,17 +1281,29 @@ fn describe_pointees(registers: &Registers) -> Vec<String> {
     }
     let mut out = Vec::new();
     for (name, value) in registers.named() {
-        if value == 0 || !orbistoun_thunk::is_mapped(value) {
+        if value == 0 {
             continue;
         }
-        let Ok(at) = usize::try_from(value) else {
-            continue;
+        let bytes: Vec<u8> = if orbistoun_thunk::is_mapped(value) {
+            let Ok(at) = usize::try_from(value) else {
+                continue;
+            };
+            // SAFETY: `is_mapped` says this address is inside a region this run published as
+            // readable, and sixteen bytes from it stay inside it - the ranges are page-granular
+            // and no published range is shorter than that.
+            let b: [u8; 16] = unsafe {
+                std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<[u8; 16]>(at))
+            };
+            b.to_vec()
+        } else {
+            // Not in a published range, but perhaps a heap allocation this run handed the guest.
+            // `read_window` VirtualQuery-checks and page-clamps, and returns empty for a genuinely
+            // wild address - which is the honest skip for a scalar or a bad pointer.
+            read_window(value, 16)
         };
-        // SAFETY: `is_mapped` says this address is inside a region this run published as
-        // readable, and sixteen bytes from it stay inside it - the ranges are page-granular
-        // and no published range is shorter than that.
-        let bytes: [u8; 16] =
-            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<[u8; 16]>(at)) };
+        if bytes.is_empty() {
+            continue;
+        }
         let hex = bytes
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -2661,8 +2847,38 @@ mod tests {
     #[cfg(windows)]
     use super::{
         is_null_pointer_fault, note_emulator_fault, note_instruction_shape,
-        note_null_pointer_to_libc, serviced_interrupt,
+        note_null_pointer_to_libc, parse_addr_len, parse_indirect, serviced_interrupt,
     };
+
+    /// **The indirect peek names a slot, not the object.** A heap object's address is ASLR'd, so a
+    /// static spec can only name the fixed stack slot that holds its pointer; `[<slot>]` parses to the
+    /// slot and a length for the caller to dereference at fault time. Both directions: the bracket form
+    /// yields the slot, and a plain `<addr>+len` does not parse as indirect - it falls through to
+    /// `parse_addr_len` - so the two forms stay distinct and malformed brackets dereference nothing.
+    #[cfg(windows)]
+    #[test]
+    fn an_indirect_peek_parses_the_slot_and_leaves_direct_specs_alone() {
+        // A bracketed slot with an explicit length, and with the default length when none is given.
+        assert_eq!(
+            parse_indirect("[0x6000007fc0b8]+0x80"),
+            Some((0x6000_007f_c0b8, 0x80))
+        );
+        assert_eq!(
+            parse_indirect("[0x6000007fc0b8]"),
+            Some((0x6000_007f_c0b8, 0x100))
+        );
+        // A plain direct spec is not indirect (no brackets), so it is left to `parse_addr_len`, which
+        // does accept it - the two forms do not overlap.
+        assert_eq!(parse_indirect("0x6000007fc0b8+0x80"), None);
+        assert_eq!(
+            parse_addr_len("0x6000007fc0b8+0x80"),
+            Some((0x6000_007f_c0b8, 0x80))
+        );
+        // Malformed brackets do not parse as indirect, so the caller reports the spec rather than
+        // dereferencing junk: no closing bracket, and trailing text that is not a `+len`.
+        assert_eq!(parse_indirect("[0x10"), None);
+        assert_eq!(parse_indirect("[0x10]garbage"), None);
+    }
 
     /// **The flipped-buffer window is bounded to an allocated region, and refuses to leave it.**
     ///

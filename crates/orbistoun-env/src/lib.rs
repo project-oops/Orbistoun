@@ -612,6 +612,22 @@ pub const MAP: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Peek at a window of guest memory at a fault, so runtime-mapped code no static disassembly
+/// reaches can be pulled out and read.
+///
+/// `caller` dumps the window ending at the faulting call site (the first stack frame's return
+/// address), which is where the guest code that faulted actually is; `<addr>[+len]` dumps a fixed
+/// range. It only reads - it changes nothing the guest sees - so it observes rather than intervenes.
+/// (Distinct from [`DUMP`], which dumps an import's *arguments*.)
+pub const PEEK: Var = Var {
+    name: "ORBISTOUN_PEEK",
+    kind: Kind::Diagnostic,
+    summary: "hex-dump guest memory at a fault - `caller` for the faulting call site, or `<addr>[+len]`",
+    example: "caller",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
 /// Which shape of physical memory map the guest is shown.
 ///
 /// # Why this is a diagnostic and the map itself is a setting
@@ -752,6 +768,7 @@ pub const REGISTRY: &[Var] = &[
     MAP_SHAPE,
     WRITE,
     RETURN,
+    PEEK,
     MARK_QUERY,
 ];
 
@@ -832,6 +849,7 @@ mod tests {
         super::MAP_SHAPE,
         super::WRITE,
         super::RETURN,
+        super::PEEK,
         super::MARK_QUERY,
         super::WATCHPOINT,
     ];

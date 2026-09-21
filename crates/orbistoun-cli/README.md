@@ -74,5 +74,5 @@ plus its `guest_module!` declaration. It used to be a `build_registry` function 
 crate; a shim holding that list was the drift principle 13 exists to stop.
 
 **Status:** every command above works. `session` has never been run against real
-hardware, because there is none yet - `probe` reads its transcripts and is exercised
+hardware - `probe` reads transcripts rather than driving a target, and is exercised
 against recorded ones.

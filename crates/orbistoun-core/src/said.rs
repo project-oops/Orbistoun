@@ -123,6 +123,18 @@ pub fn lines() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, PoisonError};
+
+    /// Serialises the tests that write the process-wide ring and then assert on its tail.
+    ///
+    /// The ring is one static shared by the whole test binary, so two writers running in parallel
+    /// let one test's lines land in the other's tail - which is exactly what reddened the gate once
+    /// (`["cut off here", "finished"]` read back where `["beta", "alpha"]` was expected, worklog
+    /// 757). Each writer holds this from its `note` through its assertion so no other writer
+    /// interleaves; a silent reader cannot corrupt a tail, so it takes no lock. Poisoning is
+    /// recovered from because a panic in one test must not strand the others.
+    static RING_WRITERS: Mutex<()> = Mutex::new(());
+
     /// **A guest that said nothing has said nothing**, rather than one empty line.
     ///
     /// The negative case, because a report that always shows one blank entry teaches a reader
@@ -141,6 +153,7 @@ mod tests {
     /// What goes in comes out, split on newlines.
     #[test]
     fn what_a_guest_says_comes_back_as_lines() {
+        let _writers = RING_WRITERS.lock().unwrap_or_else(PoisonError::into_inner);
         super::note(b"alpha\nbeta\n");
         let lines = super::lines();
         let tail: Vec<&String> = lines.iter().rev().take(2).collect();
@@ -151,6 +164,7 @@ mod tests {
     /// the most interesting thing it will ever say.
     #[test]
     fn an_unterminated_last_line_survives() {
+        let _writers = RING_WRITERS.lock().unwrap_or_else(PoisonError::into_inner);
         super::note(b"finished\ncut off here");
         let lines = super::lines();
         assert_eq!(

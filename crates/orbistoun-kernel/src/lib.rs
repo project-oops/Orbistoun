@@ -6820,6 +6820,20 @@ mod tests {
         out
     }
 
+    /// Serialises the tests that mutate the process-global noted-regions list
+    /// ([`super::note_region`]/[`super::clear_noted_regions`]). cargo runs a crate's tests in
+    /// parallel over one process, so without this one test's `clear` wipes another's `note`
+    /// between that test's `note` and its assertion - which is exactly how
+    /// `a_noted_region_is_found_and_a_gap_is_not` saw its base go missing. Only the two writers
+    /// take it, because they are the only callers that clear. The lock guards the sequence, not
+    /// a value; poison is recovered so a panicking holder does not cascade into the other test.
+    fn noted_regions_serial() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// **A set stack size and affinity are honoured; a fresh or zero size is not.**
     ///
     /// The decode `pthread_create` had been missing (REQ-...c2e9, obSCEne `031-stackattr`): it
@@ -7065,6 +7079,7 @@ mod tests {
     /// them the way a lookup against the runtime map alone did (D446).
     #[test]
     fn a_noted_region_is_found_and_a_gap_is_not() {
+        let _serial = noted_regions_serial();
         super::clear_noted_regions();
         super::note_region(0x4000_0040_0000, 0x10_0000);
         // Inside, at the low edge, and one before the high edge: all held.
@@ -7927,6 +7942,7 @@ mod tests {
     /// ends on a trap (D577).
     #[test]
     fn a_noted_region_can_be_re_protected_and_a_gap_cannot() {
+        let _serial = noted_regions_serial();
         let base = RANGE.take();
         let len = orbistoun_core::GUEST_PAGE_SIZE * 4;
 

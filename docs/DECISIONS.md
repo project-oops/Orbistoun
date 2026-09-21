@@ -728,6 +728,9 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D704 | [A scripted pad is a level held until the next step, and carries typed state rather than bytes](decisions/D704-a-scripted-pad-is-a-level-held-until.md) | decided | 2026-09-16 |
 | 🟡 | D705 | [driver-work completion is not posted until execution lands - the D560 flip twin, declined](decisions/D705-driver-work-completion-is-not-posted.md) | assumed | 2026-09-17 |
 | 🟡 | D706 | [CI tests macOS as x86_64-apple-darwin, matching release.yml, not by gating 28 sysv64 sites](decisions/D706-ci-tests-macos-as-x86-64-apple-darwin.md) | assumed | 2026-09-19 |
+| 🟡 | D707 | [scripted pad input is a config source, read from a file and installed at entry](decisions/D707-scripted-pad-input-is-a-config-source.md) | assumed | 2026-09-19 |
+| 🟡 | D708 | [a wall is orbistoun's until hardware proves it the title's](decisions/D708-a-wall-is-orbistoun-s-until-hardware.md) | assumed | 2026-09-19 |
+| ⚪ | D709 | [user-provided retail titles are always working; never blame the title](decisions/D709-user-provided-retail-titles-are-always.md) | accepted | 2026-09-21 |
 
 | | meaning |
 |---|---|

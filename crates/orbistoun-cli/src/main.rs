@@ -5346,6 +5346,55 @@ fn record_compat(path: &std::path::Path, trace: &orbistoun_report::trace::CallTr
             println!("  could not record {title}: {e:#}");
         }
     }
+
+    // **Whose gap is this?** A run that faulted gets the attribution framed by the hardware ground
+    // truth, at the fault, so a session reads the default - orbistoun's - before reaching for the
+    // seductive conclusion that the title itself is at fault (D708). The record was just loaded and
+    // written by `keep_status`; re-reading it is cheap and keeps this independent of that path.
+    if trace.fault.is_some() {
+        let file = load_compat(dir, &title).unwrap_or_default();
+        println!();
+        for line in file.fault_attribution() {
+            println!("  {line}");
+        }
+
+        // **What orbistoun stubbed on the way here - the candidate causes, named.** The
+        // upstream-divergence reading should be the default, not something dug for by hand: each of
+        // these is a place orbistoun handed the guest a placeholder instead of a real answer, and
+        // any could be what steered it into the wall (D708). Most-called first, capped so a long
+        // tail does not bury the head.
+        let stubbed = trace.stubbed_imports();
+        if !stubbed.is_empty() {
+            println!();
+            println!(
+                "  orbistoun answered these with placeholders this run - candidate causes, a real answer may avoid it:"
+            );
+            for import in stubbed.iter().take(8) {
+                let shape = if import.shape.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", import.shape)
+                };
+                println!("    {} x{}{}", import.label, import.calls, shape);
+            }
+            if stubbed.len() > 8 {
+                println!(
+                    "    ... and {} more (`./bin/orbistoun questions` ranks them all)",
+                    stubbed.len() - 8
+                );
+            }
+        }
+
+        // **The guest's own log lines are the title's output, not evidence of incompleteness.** A
+        // `TODO:` marker in the guest's logging is the title printing its own note; shipping titles
+        // carry them, and reading one as an unfinished code path is how a wall gets misattributed to
+        // the title (D708).
+        println!();
+        println!(
+            "  the guest's own log lines above are the title's output, not orbistoun's; a TODO:/todo:"
+        );
+        println!("  marker among them is the title's own note, not a sign its code is unfinished.");
+    }
 }
 
 /// Whether a run reached less than the record it is being compared against.
@@ -6403,32 +6452,48 @@ fn calls_by_function() -> std::collections::BTreeMap<String, (u64, usize)> {
 ///
 /// Ranked by **how many runs asked**, not by how often. The recorder is a bitmap and knows only
 /// that a number came up; a call count would be a number nobody measured.
-fn report_kernel_calls(
-    kernel: &std::collections::BTreeMap<u64, (usize, Option<String>, Option<u64>)>,
-) {
+/// What the census has gathered about one direct syscall number: how many runs asked, the name
+/// where one is known, the first argument, and the set of guests that issued it. The last is what
+/// keeps a number attributed to the guest whose trace carried it rather than the title just run.
+type KernelCall = (
+    usize,
+    Option<String>,
+    Option<u64>,
+    std::collections::BTreeSet<String>,
+);
+
+fn report_kernel_calls(kernel: &std::collections::BTreeMap<u64, KernelCall>) {
     let unserved: Vec<_> = kernel
         .iter()
-        .filter(|(_, (_, name, _))| name.is_none())
+        .filter(|(_, (_, name, _, _))| name.is_none())
         .collect();
     if unserved.is_empty() {
         return;
     }
 
     let mut ranked = unserved;
-    ranked.sort_unstable_by_key(|(number, (runs, _, _))| (std::cmp::Reverse(*runs), **number));
+    ranked.sort_unstable_by_key(|(number, (runs, _, _, _))| (std::cmp::Reverse(*runs), **number));
 
     println!(
         "
 {} system call(s) asked for directly that nothing here implements",
         ranked.len()
     );
-    println!("{:>6}  {:>5}  FIRST ARGUMENT", "CALL", "RUNS");
-    for (number, (runs, _, argument)) in &ranked {
+    // **`ASKED BY` names the guest, not the title just run.** This census totals every module's
+    // trace, so a number here belongs to whichever guest's trace carried it - reading it as the
+    // title the command named is how syscall 601 was twice taken for a retail title's wall when
+    // it was a homebrew payload's log write (worklog 727).
+    println!(
+        "{:>6}  {:>5}  {:<14}  ASKED BY",
+        "CALL", "RUNS", "FIRST ARGUMENT"
+    );
+    for (number, (runs, _, argument, who)) in &ranked {
         // The argument is shown because for a call nobody can name it is most of what there is
         // to go on - a number alone says which entry to write, and the argument starts to say
         // what it is for.
         let argument = argument.map_or_else(|| "-".to_owned(), |a| format!("{a:#x}"));
-        println!("{number:>6}  {runs:>5}  {argument}");
+        let who = who.iter().cloned().collect::<Vec<_>>().join(", ");
+        println!("{number:>6}  {runs:>5}  {argument:<14}  {who}");
     }
 }
 
@@ -6633,6 +6698,27 @@ fn is_our_guest(module: &str) -> bool {
         .any(|part| ours.contains(&part))
 }
 
+/// A short, recognisable name for the guest a trace came from.
+///
+/// The directory the eboot sits in, which is the title id for a retail title (`PPSA02664-app0`)
+/// and the payload name for one of ours (`dist`). Used to say **which guest** asked for a direct
+/// syscall in the census, so a number there is read against the guest that issued it rather than
+/// against whichever title the `run` command happened to name - the aggregate census totals every
+/// module's trace, and a syscall in it need not belong to the title just run (worklog 727).
+fn guest_label(module: &str) -> String {
+    let parts: Vec<&str> = module
+        .split(['/', std::path::MAIN_SEPARATOR])
+        .filter(|p| !p.is_empty())
+        .collect();
+    match parts.as_slice() {
+        // The eboot's parent directory is the recognisable name; the file itself is always
+        // `eboot.bin`, which names nothing.
+        [.., parent, _file] => (*parent).to_owned(),
+        [only] => (*only).to_owned(),
+        _ => module.to_owned(),
+    }
+}
+
 /// One ranked import table, printed with the share each row is of its own group.
 ///
 /// **Shares are within the group, deliberately.** A row's percentage of a corpus that mixes our
@@ -6683,8 +6769,7 @@ fn cmd_worklist(top: usize) {
     // bitmap: it knows a number was asked for, not how many times. Ranking these by call volume
     // would mean inventing the volume, so they rank by **how many runs wanted them** - which is
     // a fact, and is the right question anyway for something that blocks a payload outright.
-    let mut kernel: std::collections::BTreeMap<u64, (usize, Option<String>, Option<u64>)> =
-        std::collections::BTreeMap::new();
+    let mut kernel: std::collections::BTreeMap<u64, KernelCall> = std::collections::BTreeMap::new();
     let mut modules = 0;
 
     for entry in entries.flatten() {
@@ -6711,7 +6796,9 @@ fn cmd_worklist(top: usize) {
             entry.1 += 1;
         }
         for asked in &trace.syscalls {
-            let seen = kernel.entry(asked.number).or_insert((0_usize, None, None));
+            let seen = kernel
+                .entry(asked.number)
+                .or_insert_with(|| (0, None, None, std::collections::BTreeSet::new()));
             seen.0 += 1;
             if seen.1.is_none() {
                 seen.1.clone_from(&asked.name);
@@ -6719,6 +6806,7 @@ fn cmd_worklist(top: usize) {
             if seen.2.is_none() {
                 seen.2 = asked.first_argument;
             }
+            seen.3.insert(guest_label(&trace.module));
         }
     }
 
@@ -8802,6 +8890,32 @@ mod tests {
         ] {
             assert!(!super::is_our_guest(module), "{module} is not ours");
         }
+    }
+
+    /// **A direct syscall is labelled by the guest that issued it, not the title just run.**
+    ///
+    /// This is the guard on the census misattribution worklog 727 records: syscall 601 was a
+    /// homebrew payload's log write, read twice as a retail title's wall because the aggregate
+    /// census does not say whose trace a number came from. `guest_label` is what now says it, so
+    /// the case that matters is the *probe* path resolving to the payload name (`dist`) - never to
+    /// the title the command happened to name.
+    #[test]
+    fn a_guest_is_labelled_by_its_own_eboot_directory() {
+        // The payload that actually issues syscall 601 - it must read as `dist`, not as any title.
+        assert_eq!(
+            super::guest_label("/build/oops-apps/home/dist/eboot.bin"),
+            "dist"
+        );
+        // A retail title reads as its own id, from the same rule.
+        assert_eq!(
+            super::guest_label("titles/PPSA02664-app0/eboot.bin"),
+            "PPSA02664-app0"
+        );
+        // Windows separators, as a real trace on this platform records them.
+        assert_eq!(
+            super::guest_label("C:\\x\\oops-apps\\home\\dist\\eboot.bin"),
+            "dist"
+        );
     }
 
     /// A status carrying only the two fields the rule reads.

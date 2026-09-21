@@ -18,6 +18,9 @@ orbistoun-shell = { workspace = true }
 orbistoun-report = { workspace = true }
 orbistoun-video = { workspace = true }
 orbistoun-gpu = { workspace = true }
+# The worker opens the graphics device and drives a captured submission to it (D695, -36c0);
+# orbistoun-gpu deliberately has no graphics-runtime dependency, so the backend lives here.
+orbistoun-gpu-vulkan = { workspace = true }
 orbistoun-env = { workspace = true }
 orbistoun-paths = { workspace = true }
 orbistoun-abi = { workspace = true }
@@ -42,6 +45,9 @@ serde_json = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 orbistoun-overrides = { workspace = true }
+# The -36c0 render test builds a submission from a captured DCB, which needs the translation
+# strategy the pipeline is constructed with.
+orbistoun-translate = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }

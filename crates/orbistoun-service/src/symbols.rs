@@ -198,6 +198,14 @@ pub(crate) fn resolvable() -> Vec<(&'static str, Resolvable)> {
 const SPELT_DIFFERENTLY: &[(&str, &str)] = &[
     // FreeBSD's own underscored spelling for the call `sysctl(3)` wraps.
     ("SYS___sysctl", "sysctl"),
+    // The vendor kernel-log write (601), served by the same function the named
+    // `sceKernelDebugOutText` is. Both write the string at the second argument to the operator
+    // log and ignore the first argument - the log call ignores its channel, and this ignores its
+    // operation selector, which is `7` (write) in every use observed. A guest that logs by the
+    // raw number instead of the name - as our homebrew payloads do through the obSCEne runtime -
+    // is then served rather than answered ENOSYS, the same one-function-two-answers binding D641
+    // gave `sceKernelVirtualQuery`.
+    ("SYS_vendor_klog", "sceKernelDebugOutText"),
     // **The two exits, and neither needs an entry here.** The process one is spelt `SYS__exit`
     // in FreeBSD's table - entry 1 is the raw `_exit`, not the `exit(3)` wrapper - so stripping
     // `SYS_` already yields the name `orbistoun-libc` answers to. An entry reading `SYS_exit`
@@ -283,7 +291,11 @@ pub(crate) fn all(hasher: &NidHasher) -> Vec<DeclaredSymbol> {
             m.imports.iter().map(move |i| DeclaredSymbol {
                 library: m.name.to_owned(),
                 symbol: i.name.to_owned(),
-                nid: hasher.hash(i.name).as_raw(),
+                nid: if let Some(hex) = i.name.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16).unwrap_or_else(|_| hasher.hash(i.name).as_raw())
+                } else {
+                    hasher.hash(i.name).as_raw()
+                },
                 arity: i.arity,
                 implemented: attached.contains(i.name),
             })
@@ -377,6 +389,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is {number}"));
             assert_eq!(bound.0, name, "{number} must perform {name}");
         }
+    }
+
+    /// **The vendor kernel-log write (601) binds, through the vendor table and a rename.**
+    ///
+    /// Unlike the header-derived numbers above, 601 comes from `vendor-syscalls.toml` and reaches
+    /// its function through a `SPELT_DIFFERENTLY` rename to `sceKernelDebugOutText`. Both steps are
+    /// silent when they fail - a missing constant or a dead rename just leaves the number answering
+    /// `ENOSYS` forever, which is the state this replaced. So the binding is pinned here: a guest
+    /// that logs by raw syscall (our homebrew payloads do, through the obSCEne runtime) is served,
+    /// not dropped.
+    #[test]
+    fn the_vendor_klog_syscall_binds_to_the_log_write() {
+        let table = super::syscalls();
+        let bound = table
+            .get(&601)
+            .expect("syscall 601 must bind rather than answer ENOSYS");
+        assert_eq!(
+            bound.0, "sceKernelDebugOutText",
+            "601 writes the operator log, the same function the named call does"
+        );
     }
 
     /// **Every rename names a constant that exists.**
@@ -475,8 +507,14 @@ mod tests {
             .into_iter()
             .map(|(name, _)| name);
         for name in integer.chain(floating) {
+            let nid = if let Some(hex) = name.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16)
+                    .map_or_else(|_| hasher.hash(name), orbistoun_nid::Nid::from_raw)
+            } else {
+                hasher.hash(name)
+            };
             assert!(
-                registry.resolve(hasher.hash(name)).is_some(),
+                registry.resolve(nid).is_some(),
                 "{name} is implemented, but no module declaring it reaches the registry"
             );
         }
@@ -511,13 +549,15 @@ mod knowledge_tests {
     /// set, so that a library gaining an implementation fails until its entry is deleted,
     /// and one **losing its registration fails until an entry is added and justified**. Both
     /// directions are load-bearing (`docs/TESTING.md`).
-    // Twenty-three libraries serve nothing today, each with its reason below - the README's generated
-    // block reports the same, `149 across 23 libraries`. Two entries retired *from* here together -
+    // Twenty-two libraries serve nothing today, each with its reason below - the README's generated
+    // block reports the same, `148 across 22 libraries`. Three entries have retired *from* here -
     // `libSceGnmDriver` once translated its command streams entirely
     // below the shim, but the dispatch builders (D427) answer calls here now; `libSceAudioOut` once
     // implemented nothing rather than fake sound, and still implements no *output*, but its init now
-    // succeeds honestly (setting a subsystem up is not claiming a sound was made). A module that
-    // genuinely serves nothing goes back here with its reason.
+    // succeeds honestly (setting a subsystem up is not claiming a sound was made); and
+    // `libSceErrorDialog`'s `sceErrorDialogInitialize` now answers that same honest init `OK`, on the
+    // same reasoning (worklog 756). A module that genuinely serves nothing goes back here with its
+    // reason.
     const SERVES_NOTHING: &[(&str, &str)] = &[
         (
             "libSceAjm",
@@ -577,10 +617,6 @@ mod knowledge_tests {
         ),
         (
             "libSceCoredump",
-            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceErrorDialog",
             "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (

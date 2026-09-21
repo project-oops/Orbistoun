@@ -100,11 +100,11 @@ single-threaded startup.
 |---|---|---|---|---|---|
 | PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` |
 | PPSA03416-app0 | flipped | 222 | 470,421 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
-| PPSA02664-app0 | flipped | 222 | 418,425 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
+| PPSA02664-app0 | flipped | 222 | 418,346 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` |
 | PPSA25872-app0 | flipped | 192 | 339,539 | 100% | `image+0x3b383b` |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` |
-| PPSA04263-app0 | entered | 71 | 30,262 | 100% | `image+0x196b91a` |
+| PPSA04263-app0 | entered | 75 | 30,460 | 100% | `image+0x19676d7` |
 | PPSA21564-app0 | entered | 57 | 500,260 | 100% | `the title's own modules+0x7af792` |
 | PPSA28061-app0 | entered | 47 | 933 | 94% | `image+0x43c4` |
 | dist | entered | 0 | 0 | 100% | `0x1` |
@@ -151,7 +151,7 @@ construction and are not comparable with the table above:
 
 **"Standing" is the number to read, not "calls".** It is the share of calls answered by a
 real implementation rather than a placeholder, and it exists because a call count rises when
-stubs start lying (D181). PPSA04263's ninety-nine million calls are one function in a loop;
+stubs start lying (D181). PPSA04263's calls are almost all one function in a loop;
 PPSA28061's nine hundred are the interesting ones.
 
 Two titles print their own diagnostics through an implemented `printf`, which is how four
@@ -178,10 +178,10 @@ threads - it is a question the run has to answer rather than an assumption. Phas
 
 | | |
 |---|---|
-| Functions declared / implemented | 967 / 765 |
-| Declared in a library that serves nothing | 149 across 23 libraries - names written down, no implementation |
-| Recorded behaviours | 815 - 366 published, 82 measured, 75 guest-observed, 255 assumed |
-| Open questions a hardware probe could settle | 790 |
+| Functions declared / implemented | 972 / 772 |
+| Declared in a library that serves nothing | 148 across 22 libraries - names written down, no implementation |
+| Recorded behaviours | 820 - 367 published, 85 measured, 76 guest-observed, 257 assumed |
+| Open questions a hardware probe could settle | 793 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

@@ -981,6 +981,20 @@ impl CallTrace {
         self.calls.iter().filter(|c| !c.implemented).count()
     }
 
+    /// The distinct imports the guest called that landed on a placeholder, most-called first.
+    ///
+    /// **The candidate causes of a fault, named.** When a run dies, the honest first question is
+    /// what orbistoun answered wrongly on the way there (D708), and every one of these is a place
+    /// orbistoun handed the guest a placeholder instead of a real answer - any of which could be
+    /// what steered it into the wall. Ordered by call count so the ones the guest leaned on hardest
+    /// sort to the top.
+    pub fn stubbed_imports(&self) -> Vec<&CalledImport> {
+        let mut stubbed: Vec<&CalledImport> =
+            self.calls.iter().filter(|c| !c.implemented).collect();
+        stubbed.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.label.cmp(&b.label)));
+        stubbed
+    }
+
     /// What share of the run rested on stubs, as a percentage.
     ///
     /// Zero when nothing was called, rather than a division by zero - a run that made no

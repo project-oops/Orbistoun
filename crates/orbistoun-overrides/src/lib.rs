@@ -870,6 +870,42 @@ impl Title {
     }
 }
 
+/// What a real console does with this title, attested from outside orbistoun.
+///
+/// Ground truth orbistoun cannot measure itself: somebody ran the title on hardware and said what
+/// they saw. Recorded so a session that hits a wall reads it before reaching for the seductive,
+/// work-stopping conclusion that the *title* is at fault. A fault in a title known to render on
+/// hardware is orbistoun's gap to close, and the burden of blaming the title's own code is a
+/// hardware observation of the same failure - which a guest `TODO` print is not (D708).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hardware {
+    /// What it does on a real console, in plain words - `renders`, `boots to menu`, `plays`, or a
+    /// specific failure. Free text, not a measured rung: this is somebody's observation, and the
+    /// point of it is that it exists and says whether the title itself is sound.
+    pub does: String,
+    /// Who says so - `operator`, or an obSCEne / probe id.
+    pub attested_by: String,
+    /// When, so a stale attestation can be re-checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// Anything worth carrying - the console firmware, how it was seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Hardware {
+    /// Whether this attestation says the title is sound on hardware (it does *something* real),
+    /// rather than recording a hardware failure. A blank `does` is treated as no claim.
+    #[must_use]
+    pub fn is_sound_on_hardware(&self) -> bool {
+        let does = self.does.trim().to_ascii_lowercase();
+        !does.is_empty()
+            && !does.contains("fault")
+            && !does.contains("crash")
+            && !does.contains("fail")
+    }
+}
+
 /// One override file, as it appears on disk.
 ///
 /// `BTreeMap` throughout so serialisation is deterministic: run reports are diffed
@@ -883,6 +919,13 @@ pub struct OverrideFile {
     /// different answers (D660).
     #[serde(default, skip_serializing_if = "Title::is_empty")]
     pub title: Title,
+    /// What a real console does with this title, attested from outside orbistoun (D708).
+    ///
+    /// Absent means nobody has said - and the run report then defaults a fault to orbistoun's gap
+    /// and says the hardware status is unknown, rather than letting a session guess the title is
+    /// broken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<Hardware>,
     /// Compatibility entries, keyed by behaviour name.
     #[serde(default)]
     pub compat: BTreeMap<String, CompatEntry>,
@@ -921,6 +964,47 @@ impl OverrideFile {
     /// Serialises to TOML.
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
+    }
+
+    /// How to frame a fault this title just hit: whose gap it is, by the hardware ground truth
+    /// (D708).
+    ///
+    /// Always leads with orbistoun as the default owner of a fault, because it is the incomplete
+    /// party and the title is a thing that ran on a console. A `[hardware]` attestation that the
+    /// title is sound makes that unambiguous; an absent one still defaults to orbistoun and says
+    /// the status is unknown rather than letting a reader assume the title is broken. This is the
+    /// tool half of the doctrine - the principle in `CLAUDE.md` is what stops the mistake, this
+    /// puts the ground truth in front of the reader at the moment of the fault.
+    #[must_use]
+    pub fn fault_attribution(&self) -> Vec<String> {
+        let mut lines = vec![
+            "whose gap is this? orbistoun's, by default (D708): a work-in-progress HLE faulted a"
+                .to_owned(),
+            "  title that ships and runs on a console. Blaming the title's own code needs a hardware"
+                .to_owned(),
+            "  observation of the same failure - a guest TODO print or an unresolved import is not it."
+                .to_owned(),
+        ];
+        lines.push(match &self.hardware {
+            None => {
+                "  hardware: unknown - nobody has attested what a console does with this title."
+                    .to_owned()
+            }
+            Some(hw) if hw.is_sound_on_hardware() => format!(
+                "  hardware: {} on a console ({}{}) - so this fault is orbistoun's to close.",
+                hw.does,
+                hw.attested_by,
+                hw.on
+                    .as_deref()
+                    .map(|d| format!(", {d}"))
+                    .unwrap_or_default(),
+            ),
+            Some(hw) => format!(
+                "  hardware: a console also {} ({}) - the title's own code may be in play here.",
+                hw.does, hw.attested_by,
+            ),
+        });
+        lines
     }
 }
 
@@ -1063,10 +1147,75 @@ impl Resolved {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompatEntry, CompatKind, DELIBERATE_EXIT, Layer, OverrideFile, Reach, Resolved, Row,
-        Status, Value, frontier, render_markdown,
+        CompatEntry, CompatKind, DELIBERATE_EXIT, Hardware, Layer, OverrideFile, Reach, Resolved,
+        Row, Status, Value, frontier, render_markdown,
     };
     use std::collections::BTreeMap;
+
+    /// **A fault in a title known-good on hardware is framed as orbistoun's, and a title with no
+    /// attestation still defaults to orbistoun rather than to the title's fault (D708).**
+    ///
+    /// The whole point of the mechanism: it must never let a reader conclude the title is broken
+    /// off an absent attestation. The negative case - unknown hardware - is the one that matters,
+    /// so it is asserted, not just the happy path.
+    #[test]
+    fn fault_attribution_defaults_to_orbistoun_and_reads_the_hardware_ground_truth() {
+        let text = |file: &OverrideFile| file.fault_attribution().join("\n");
+
+        // Sound on hardware: unambiguously orbistoun's to close.
+        let sound = OverrideFile {
+            hardware: Some(Hardware {
+                does: "renders".to_owned(),
+                attested_by: "operator".to_owned(),
+                on: Some("2026-09-19".to_owned()),
+                note: None,
+            }),
+            ..OverrideFile::default()
+        };
+        let said = text(&sound);
+        assert!(said.contains("orbistoun's"), "leads with orbistoun: {said}");
+        assert!(
+            said.contains("renders on a console") && said.contains("orbistoun's to close"),
+            "a sound attestation makes it orbistoun's: {said}"
+        );
+
+        // No attestation: still orbistoun by default, and says the status is unknown - never
+        // "the title is broken".
+        let unknown = OverrideFile::default();
+        let said = text(&unknown);
+        assert!(
+            said.contains("orbistoun's, by default"),
+            "unknown still defaults to orbistoun: {said}"
+        );
+        assert!(said.contains("hardware: unknown"), "and says so: {said}");
+        assert!(
+            !said.to_ascii_lowercase().contains("title is broken")
+                && !said.to_ascii_lowercase().contains("debug build"),
+            "must not suggest the title is at fault: {said}"
+        );
+
+        // A hardware *failure* is the only case that opens the title's own code to suspicion.
+        let broken = Hardware {
+            does: "faults at boot".to_owned(),
+            attested_by: "operator".to_owned(),
+            on: None,
+            note: None,
+        };
+        assert!(
+            !broken.is_sound_on_hardware(),
+            "a hardware fault is not soundness"
+        );
+        assert!(
+            Hardware {
+                does: "renders".to_owned(),
+                attested_by: "operator".to_owned(),
+                on: None,
+                note: None,
+            }
+            .is_sound_on_hardware(),
+            "rendering is soundness"
+        );
+    }
 
     fn file(
         settings: &[(&str, Value)],
@@ -1272,6 +1421,7 @@ reason = "..."
         }
         let f = OverrideFile {
             title: super::Title::default(),
+            hardware: None,
             compat: BTreeMap::new(),
             settings,
             status: None,
