@@ -53,3 +53,34 @@ faithful transcript of it (which the empty diff proves).
 The container image is a convenience for running LLVM, not a source of truth about the target -
 the bytes it produces are checked against the committed fixtures before anything is trusted, and
 correcting a decode is still done from the published ISA, never by reading LLVM's tables (D085).
+
+## Amendment, 2026-09-21: the collection moved to clang 21 and this pin did not
+
+**Still LLVM 18. Deliberately, and this section exists so that nobody has to work out whether it
+was an oversight.**
+
+On 2026-09-21 the collection's *build* compiler moved from clang 18 to clang 21 (`oops-mesa#D013`),
+which changed `oops-mesa/toolchain/Dockerfile`, `obscene`, `oops-apps` and the documents that
+described the pin. `silkeh/clang:18` in the procedure above was not swept along with them.
+
+**Because it is not the same kind of pin.** A build compiler is asked to produce a working
+binary, and any version that manages it is doing its job. This one is asked to reproduce
+*specific bytes* that are already committed, so the version is part of the expected output
+rather than a means to it. The two happened to be the same number until today; that was a
+coincidence of scheduling, not a constraint, and the sentence above about the image matching
+the collection's compiler was never the reason for choosing 18.
+
+The evidence that the distinction is real is already in this entry: **18.1.8 and 19.1.7 disagree
+about `arith.ll`** - `s[0:3]` against `s[6:7]`, `0xf4080002` against `0xf4080003` - because the
+kernarg segment base moved between two *adjacent* releases with nothing about the source or the
+target changing. Three majors is not a safer distance than one. A regen under 21 would churn
+every compute fixture, and the churn would be indistinguishable from a real result, which is the
+failure the whole entry is written against.
+
+**What would justify moving it** is a reason of its own: a fixture that LLVM 18 cannot assemble,
+or a decode LLVM 18 gets wrong. Neither is true today. If it happens, the move is a fixture regen
+reviewed as its own change, on its own evidence, with the byte diff read rather than skimmed -
+not a line in somebody else's toolchain bump.
+
+So: `orbistoun` is the one member of the collection that `OOPS/tools/check-toolchain.sh`
+deliberately does not check, and this is the reasoning that gate points at.
