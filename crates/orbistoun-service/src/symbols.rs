@@ -150,6 +150,10 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     // `sceAppContentInitialize` (guest-observed 0) and `sceAppContentAppParamGetInt` (placeholder
     // int, as sceSystemServiceParamGetInt), which PPSA25872's libil2cpp fails on otherwise (D680).
     all.extend_from_slice(orbistoun_systemservice::app_content::implementations());
+    // libSceCoredump: a title's crash-handler registration, accepted with 0 - orbistoun catches
+    // guest faults itself and never coredumps, so the handler is never invoked, but the registration
+    // succeeds rather than answering the placeholder a caller reads as a failure (worklog 798).
+    all.extend_from_slice(orbistoun_systemservice::coredump::implementations());
     all
 }
 
@@ -549,14 +553,15 @@ mod knowledge_tests {
     /// set, so that a library gaining an implementation fails until its entry is deleted,
     /// and one **losing its registration fails until an entry is added and justified**. Both
     /// directions are load-bearing (`docs/TESTING.md`).
-    // Twenty-two libraries serve nothing today, each with its reason below - the README's generated
-    // block reports the same, `148 across 22 libraries`. Three entries have retired *from* here -
+    // Twenty-one libraries serve nothing today, each with its reason below - the README's generated
+    // block reports the same, `147 across 21 libraries`. Four entries have retired *from* here -
     // `libSceGnmDriver` once translated its command streams entirely
     // below the shim, but the dispatch builders (D427) answer calls here now; `libSceAudioOut` once
     // implemented nothing rather than fake sound, and still implements no *output*, but its init now
-    // succeeds honestly (setting a subsystem up is not claiming a sound was made); and
+    // succeeds honestly (setting a subsystem up is not claiming a sound was made);
     // `libSceErrorDialog`'s `sceErrorDialogInitialize` now answers that same honest init `OK`, on the
-    // same reasoning (worklog 756). A module that genuinely serves nothing goes back here with its
+    // same reasoning (worklog 756); and `libSceCoredump` accepts a crash-handler registration with `0`
+    // (worklog 798). A module that genuinely serves nothing goes back here with its
     // reason.
     const SERVES_NOTHING: &[(&str, &str)] = &[
         (
@@ -614,10 +619,6 @@ mod knowledge_tests {
         (
             "libSceSsl",
             "declared as 10 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceCoredump",
-            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceJson2",
@@ -707,7 +708,7 @@ mod knowledge_tests {
     ///
     /// Two other numbers describe this same set and **neither one was wrong**, which is why
     /// the drift was invisible: the guard above checks membership rather than size, and
-    /// README's `149 across 23 libraries` is counted from the declarations themselves in
+    /// README's `147 across 21 libraries` is counted from the declarations themselves in
     /// `orbistoun-cli`, so it never read this string at all. A transcribed number with two
     /// correct derived neighbours is the easiest kind to leave rotting (D085's rule, one
     /// level down: if it can be derived, do not also write it down unchecked).

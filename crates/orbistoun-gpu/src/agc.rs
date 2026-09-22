@@ -125,6 +125,7 @@ guest_module! {
         "sceAgcDcbWriteData" => 6,
         "sceAgcDmaDataPatchSetDstAddressOrOffset" => 6,
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate" => 6,
+        "sceAgcGetIsTrinityMode" => 0,
         "sceAgcGetRegisterDefaults2" => 6,
         "sceAgcGetRegisterDefaults2Internal" => 6,
         "0x53bbd82b51d172db" => 2,
@@ -632,6 +633,27 @@ fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if version == 13 { OK } else { 0x8a6c_0004 }
 }
 
+/// `sceAgcGetIsTrinityMode()` - whether the GPU is the later generation's faster revision.
+///
+/// The graphics-side twin of `sceKernelIsNeoMode` (which the kernel answers from the presented
+/// machine): "Trinity" is obSCEne's own axis name for the faster Prospero revision, beside `orbis`,
+/// `neo` and `prospero`, so this asks "is this the Pro variant of this generation?". Answered from
+/// the presented machine (D394/D397), so a run presenting a base console gets `0` and one presenting
+/// the faster revision gets `1`, without a hardcode either way.
+///
+/// **Arity 0, answered in the register**, on the `sceKernelIsNeoMode` precedent and the same
+/// stale-argument reading that `sceAgcGetRegisterDefaults2` needed: the trace's `(ptr, ptr, ...)`
+/// shape is leftover registers, not a call that fills an out-parameter. **`known_by = assumed`**: it
+/// is the presented machine reported through a plausible SDK spelling, not a measured return - a
+/// non-zero placeholder here tells a base console it is the faster revision and can send it down a
+/// path that expects hardware it does not have, which is the danger this removes.
+fn get_is_trinity_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    u64::from(
+        orbistoun_core::machine::presented().platform()
+            == orbistoun_core::machine::Platform::Trinity,
+    )
+}
+
 /// `sceAgcCbNop(cb)` - a header-only no-op. Measured whole: `166-agc/cb-nop`.
 ///
 /// The packet takes no arguments, so unlike the reservation skeletons this is the complete,
@@ -979,6 +1001,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDcbSetIndexSize", dcb_set_index_size),
         ("0x53bbd82b51d172db", agc_init),
         ("sceAgcInit", agc_init),
+        ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
     ]
 }
 
@@ -1235,5 +1258,28 @@ mod tests {
         args[1] = 12;
         assert_eq!(agc_init(&args), 0x8a6c_0004);
         assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
+    }
+
+    /// `sceAgcGetIsTrinityMode` answers from the presented machine: a base console is not the
+    /// faster revision, so it is `0` - the value that keeps a base guest off the Pro-only path.
+    ///
+    /// Reads the process default (a retail base console, [`machine::presented`]) rather than
+    /// presenting one, so it does not race the process-global other tests may set.
+    #[test]
+    fn get_is_trinity_mode_is_false_on_a_base_console() {
+        let args = [0u64; GUEST_ARG_REGISTERS];
+        let base = orbistoun_core::machine::Machine::default();
+        assert_ne!(
+            base.platform(),
+            orbistoun_core::machine::Platform::Trinity,
+            "the default machine is a base console"
+        );
+        // Only assert the base answer when nothing has presented the faster revision, so a run
+        // that set the global to Trinity does not make this read as a failure.
+        if orbistoun_core::machine::presented().platform()
+            != orbistoun_core::machine::Platform::Trinity
+        {
+            assert_eq!(get_is_trinity_mode(&args), 0);
+        }
     }
 }

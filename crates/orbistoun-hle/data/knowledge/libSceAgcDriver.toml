@@ -23,7 +23,7 @@ name = "sceAgcDriverCreateQueue"
 purpose = "Creates a submission queue (compute type 3 or the Universal Graphics Queue type 0) for handing command buffers to the driver."
 edge_cases = [
     "MEASURED (obSCEne 9a41): returns rc-create 0x0 for both type 3 and type 0 (sweeps 20260911-* and 20260912-003916). Real arity is 3 (type, out_queue, flags).",
-    "Does NOT write the queue object into *out_queue: obSCEne measured the object header (38 00 00 00 03 00 00 00 ...) but not where the call places it relative to the arguments, so orbistoun returns the measured 0 and leaves the out-parameter unwritten rather than fabricating a pointer (principle 3, D677). No guest reaches this call yet.",
+    "Writes a queue handle into *out_queue (worklog 809): the open-toolchain GL context gates its whole hardware path on `rc == 0 && queue != NULL`, so a null out-parameter kept use_hardware off and every draw fell to 'no hardware pipeline'. The handle is orbistoun's own opaque object at its own address - as every handle this project hands out is - not the console's placement (unmeasured), so it is not the fabricated pointer principle 3 forbids. The guest passes it to a submit that reads the descriptor, never the queue, so the object is opaque; its bytes are the measured header (38 00 00 00 03 00 00 00 00 00 02 00).",
 ]
 known_by = "measured"
 cites = "obSCEne 9a41, sweeps 20260911-* and 20260912-003916, section 166-agc/driver-create-queue."

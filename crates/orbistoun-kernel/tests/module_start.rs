@@ -177,9 +177,10 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
 /// against zero reads a placeholder as "the affinity was refused", which is a lie in the
 /// direction that stops a guest (D125, D523).
 ///
-/// It does **not** assert that any affinity was applied - nothing here pins a thread and the
-/// implementation says so. A test that checked a mask came back would be checking a promise
-/// orbistoun has not made, and there is no `scePthreadGetaffinity` to check it with.
+/// It does **not** assert that any affinity was *applied* - nothing here pins a thread and the
+/// implementation says so. The set-then-get below shows why a mask coming back would not check that
+/// anyway: `scePthreadGetaffinity` reads the thread's creation-time `requested_affinity`, and the
+/// running-thread setter drops (D523), so what the getter answers is not what the setter was handed.
 #[test]
 fn setting_a_threads_affinity_is_accepted_rather_than_refused() {
     let mut regs = [0_u64; GUEST_ARG_REGISTERS];
@@ -197,6 +198,23 @@ fn setting_a_threads_affinity_is_accepted_rather_than_refused() {
     assert!(
         answer & 0x8000_0000 == 0,
         "and it must not answer a vendor-shaped error either: {answer:#x}"
+    );
+
+    // And reading it straight back does not return what was just set. `scePthreadGetaffinity`
+    // answers the thread's creation-time `requested_affinity`, not what a running-thread
+    // `scePthreadSetaffinity` was handed - that setter drops (D523). For a handle no thread was
+    // registered under, the getter reads zero ("anywhere"), so the `0x1ffb` set above is not
+    // observable here - which is the honest limit the doc states rather than a mask promise.
+    let mut mask = 0_u64;
+    regs[1] = std::ptr::addr_of_mut!(mask) as u64;
+    assert_eq!(
+        implementation("scePthreadGetaffinity")(&regs),
+        0,
+        "the getter answers success, not a placeholder"
+    );
+    assert_eq!(
+        mask, 0,
+        "the running-thread set dropped (D523), so the get reads the default, not 0x1ffb"
     );
 }
 

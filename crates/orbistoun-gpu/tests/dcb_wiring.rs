@@ -80,7 +80,9 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// A count rather than a list because the list below already pins the names: this pins the
 /// *size*, which is the thing the prose repeats and the list cannot catch.
 ///
-/// **Forty-nine: the count moves as builders land (… -> 32 -> 41 -> 44 -> 45 -> 46 -> 49), the point.**
+/// **Fifty: the count moves as handlers land (… -> 41 -> 44 -> 45 -> 46 -> 49 -> 50), the point.**
+/// The fiftieth is not a builder but a capability query, `sceAgcGetIsTrinityMode` (worklog 788) -
+/// `implementations()` is the whole wired set, builders and queries alike, which is what this counts.
 /// `rustfmt` wraps one entry - `sceAgcCbSetShRegisterRangeDirect` - onto its own line, so grepping
 /// the file for the handler pattern undercounts it, which is the same wrapping that twice made a
 /// registered handler look registered when it was not. Counting the built slice is the only count
@@ -90,7 +92,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        49,
+        50,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"

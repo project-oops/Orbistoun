@@ -39,15 +39,46 @@ guest_module! {
 /// `166-agc/driver-create-queue` and `166-agc/primitive-draw` both record `rc-create 0x0` (sweeps
 /// `20260911-*` and `20260912-003916`, the latter answering 9a41).
 ///
-/// **What it deliberately does not do:** write the queue object into `*out_queue`. obSCEne measured
-/// the object's header (`38 00 00 00 03 00 00 00 00 00 02 00 ...`) but not *where* the call places
-/// it relative to the arguments - the `3c5e`-style pointer-distance measurement create-shader has,
-/// this call does not yet. Fabricating a pointer into `*out_queue` is the plausible-output failure
-/// principle 3 forbids, so the return is honest and the out-parameter waits on that measurement. No
-/// guest reaches this call today (the corpus stalls earlier, at `sceAgcDriverRegisterOwner`), so the
-/// accept-and-return is exercised by tests and by obSCEne's rc check, not by a guest dereference yet.
-fn create_queue(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// **And it hands back a queue handle** in `*out_queue`. It did not until a guest needed one: the
+/// open-toolchain GL context gates its entire hardware path on `if (rc == 0 && queue != NULL)`, so a
+/// null out-parameter left `use_hardware` off and every draw fell to *no hardware pipeline: nothing
+/// is drawn* (the cube, worklog 809). The handle is orbistoun's own opaque object at orbistoun's own
+/// address, the way every handle this project hands out is - a video-out port, a file descriptor -
+/// and **not** the fabricated hardware pointer principle 3 forbids, which would be inventing where the
+/// console places the object. The guest holds the handle and passes it back to a submit that reads
+/// the descriptor, never the queue, so the object is opaque here; its bytes are the header obSCEne
+/// measured, so a guest that validates the handle finds a real object rather than zeros.
+fn create_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let out_queue = args[1];
+    if out_queue != 0
+        && let Ok(dest) = usize::try_from(out_queue)
+    {
+        let handle = queue_object();
+        // SAFETY: `out_queue` is the guest's own `void**` under the identity mapping (D014) - the
+        // stack local it passed for the answer - so the eight-byte handle written there is in bounds
+        // and owned by the guest for the duration of the call.
+        unsafe {
+            std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(dest), handle);
+        }
+    }
     0
+}
+
+/// The opaque queue object orbistoun hands a guest, one per process, its address written into
+/// `*out_queue` by [`create_queue`].
+///
+/// A single leaked block: the guest keeps the pointer for as long as it runs and never frees it, so a
+/// per-call object would leak the same way with nothing gained. Filled with the header obSCEne
+/// measured for `166-agc/driver-create-queue` (`38 00 00 00 03 00 00 00 00 00 02 00`); the current
+/// guest passes the handle only to a submit that reads the descriptor, so the bytes go unread, but a
+/// measured header is a better answer than zeros to a guest that reads them.
+fn queue_object() -> u64 {
+    static QUEUE: OnceLock<u64> = OnceLock::new();
+    *QUEUE.get_or_init(|| {
+        let mut object = vec![0u8; 64];
+        object[..12].copy_from_slice(&[0x38, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x02, 0]);
+        Box::leak(object.into_boxed_slice()).as_ptr() as usize as u64
+    })
 }
 
 /// `SCE_AGC_ERROR_RESOURCE_REGISTRATION_NOT_SUPPORTED`.
@@ -281,9 +312,42 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 #[cfg(test)]
 mod tests {
     use super::{
-        GUEST_ARG_REGISTERS, SUBMIT_OK, last_submission_report, set_guest_regions, submit_dcb,
+        GUEST_ARG_REGISTERS, SUBMIT_OK, create_queue, last_submission_report, set_guest_regions,
+        submit_dcb,
     };
     use std::sync::{Mutex, PoisonError};
+
+    /// **CreateQueue returns the measured success code and hands back a non-null queue handle.**
+    ///
+    /// The GL context gates its whole hardware path on `rc == 0 && queue != NULL`; leaving the
+    /// out-parameter null kept `use_hardware` off and every draw fell to "no hardware pipeline". So
+    /// the handle must be written, non-null, and the same object each call (one process-wide block).
+    #[test]
+    fn create_queue_hands_back_a_non_null_handle() {
+        let mut queue_out: u64 = 0;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[1] = std::ptr::addr_of_mut!(queue_out) as usize as u64;
+
+        assert_eq!(create_queue(&args), 0, "the measured success code");
+        assert_ne!(
+            queue_out, 0,
+            "and a non-null handle the guest can gate its hardware path on"
+        );
+
+        let first = queue_out;
+        queue_out = 0;
+        assert_eq!(create_queue(&args), 0);
+        assert_eq!(queue_out, first, "the same object every call");
+
+        // A null out-parameter is tolerated - the call still returns success, writing nothing.
+        let mut null_args = [0_u64; GUEST_ARG_REGISTERS];
+        null_args[1] = 0;
+        assert_eq!(
+            create_queue(&null_args),
+            0,
+            "a null out-parameter is harmless"
+        );
+    }
 
     /// These tests share the process-global region and last-submission stores, so they run one at a
     /// time. A poisoned lock is recovered rather than cascading a panic across the others.

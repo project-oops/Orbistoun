@@ -314,6 +314,20 @@ pub struct FunctionKnowledge {
     /// returning a handle - which the guest then dereferences (D125).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<Returns>,
+    /// A block of guest memory to reserve and hand this function, and how it arrives.
+    ///
+    /// **Why this ships here and [`Self::returns`] does not need to.** A return *kind* picks a
+    /// scalar an unimplemented stub answers - null, zero - and the dispatcher can decide that at
+    /// the call. A region is not a value: the service has to reserve guest address space
+    /// *before* the guest starts and then hand the base back, because a trampoline on the
+    /// guest's stack is the wrong layer to allocate from (D300). So a function that answers a
+    /// pointer to memory it owns - `sceAgcGetRegisterDefaults2` returns a defaults descriptor the
+    /// caller dereferences at `+0x38` - records that here, and the knowledge file is the shipped,
+    /// `assumed` home for it rather than the per-machine `learned.toml`, which only a measurement
+    /// writes. The reserved region is fresh and therefore zero-filled, which is the answer for a
+    /// descriptor whose count field a guest reads and then loops over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<crate::StubRegion>,
     /// The arguments, in register order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<Argument>,
@@ -428,6 +442,9 @@ impl FunctionKnowledge {
             && self.purpose.is_empty()
             && self.arguments.is_empty()
             && self.edge_cases.is_empty()
+            // A region is a behaviour: the service reserves memory and hands it back, which is a
+            // claim about what the function does and so has to carry a provenance like any other.
+            && self.region.is_none()
     }
 
     /// Whether this entry makes a claim about behaviour that provenance has to account
@@ -992,6 +1009,38 @@ impl Knowledge {
             .count()
     }
 
+    /// The regions this knowledge base ships, as a policy to fold **under** a person's.
+    ///
+    /// **The shipped, `assumed` counterpart to `learned.policy()`.** A measurement writes a
+    /// region into the per-machine `learned.toml`; a function that answers a pointer to memory
+    /// it owns but that no probe can call - an inline AGC non-export - has no measurement and so
+    /// needs a home that ships. That home is the knowledge file, and this is how its regions
+    /// reach the dispatcher, carrying each entry's own `known_by` so a run resting on one is
+    /// accounted for exactly as a learned region is (never mistaken for evidence, D557).
+    ///
+    /// `default_return` is untouched here for the same reason it is in `learned.policy()`: it
+    /// governs every function this base says nothing about, and `absorb` never takes it.
+    #[must_use]
+    pub fn region_policy(&self) -> crate::StubPolicy {
+        let mut regions = BTreeMap::new();
+        let mut known = BTreeMap::new();
+        for function in self.by_name.values() {
+            if let Some(region) = function.region {
+                regions.insert(function.name.clone(), region);
+                known.insert(
+                    function.name.clone(),
+                    function.known_by.unwrap_or(Oracle::Assumed),
+                );
+            }
+        }
+        crate::StubPolicy {
+            default_return: crate::StubReturn::Unimplemented,
+            overrides: std::collections::HashMap::new(),
+            regions: regions.into_iter().collect(),
+            known: known.into_iter().collect(),
+        }
+    }
+
     /// Every separate thing this project admits it is guessing at.
     ///
     /// **The number to watch.** It is expected to go *up* as more is written down - an
@@ -1212,6 +1261,55 @@ mod tests {
         assert!(
             k.understood() > 0,
             "at least one entry should say more than a name"
+        );
+    }
+
+    #[test]
+    fn a_declared_region_reaches_the_policy_and_a_status_kind_does_not() {
+        // Made to fail on purpose against the negative half: a `returns` kind is a scalar the
+        // dispatcher answers at the call, not a block of memory to reserve, so it must not turn
+        // into a region that quietly allocates address space.
+        let file = KnowledgeFile::parse(
+            r#"
+            [[function]]
+            name = "answers_a_descriptor"
+            purpose = "returns a pointer to memory it owns"
+            region = { via = "return", bytes = 256 }
+            known_by = "assumed"
+
+            [[function]]
+            name = "answers_a_status"
+            arity = 1
+            returns = "status"
+            known_by = "assumed"
+            "#,
+        )
+        .expect("parse");
+        let mut k = Knowledge::default();
+        k.absorb("libTest", &file);
+
+        // A region is a behaviour claim, and the entry says how it is known, so it is admissible.
+        assert!(
+            k.provenance_faults().is_empty(),
+            "{:?}",
+            k.provenance_faults()
+        );
+
+        let policy = k.region_policy();
+        let region = policy
+            .regions
+            .get("answers_a_descriptor")
+            .expect("the declared region ships");
+        assert_eq!(region.bytes, 256);
+        assert_eq!(region.via, crate::Delivery::Return);
+        assert_eq!(
+            policy.known.get("answers_a_descriptor").copied(),
+            Some(Oracle::Assumed),
+            "carrying its provenance so a run resting on it is never counted as evidence"
+        );
+        assert!(
+            !policy.regions.contains_key("answers_a_status"),
+            "a returns-kind is a scalar answer, not a region to reserve"
         );
     }
 

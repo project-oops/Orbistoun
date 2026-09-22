@@ -119,6 +119,10 @@ guest_module! {
         // Seven arguments in truth; the seventh is a name this trampoline cannot reach,
         // which costs a label in a trace and nothing else.
         "sceKernelMapNamedDirectMemory" => 6,
+        // Three: the entry array, how many entries, and where to write how many were mapped.
+        // The console's batch direct-memory map; our own SDK's display init calls it with
+        // sixteen 2 MiB entries to bring up the scanout surface (agc_display.c).
+        "sceKernelBatchMap" => 3,
         // One: a size-prefixed out-structure. It refuses on retail (`0x8002_0006`) because the AGC
         // resource-registration subsystem it depends on is stubbed there (obSCEne 7b3c, D642/D643).
         "sceKernelMapperGetParam" => 1,
@@ -221,6 +225,7 @@ guest_module! {
         // attribute form has it - a subject and a mask - and PPSA02664 passes a small
         // bitmask in the second register across 62 calls, with leftovers after it (D523).
         "scePthreadSetaffinity" => 2,
+        "scePthreadGetaffinity" => 2,
         "scePthreadAttrSetschedpolicy" => 2, "scePthreadAttrSetinheritsched" => 2,
         "scePthreadAttrSetaffinity" => 2, "scePthreadAttrSetguardsize" => 2,
         // The platform's asynchronous file path, and the wall PPSA03416 dies behind. Unity's
@@ -1483,6 +1488,113 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !write_word(out, base) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
+    if let Ok(mut mapped) = physical_mappings().lock() {
+        mapped.insert(physical, base);
+    }
+    OK
+}
+
+/// `sceKernelBatchMap(entries, count, completed)` - maps a run of direct-memory pieces in one call.
+///
+/// # Why a display needs it
+///
+/// It is how a scanout surface is brought up: the AGC display init allocates one physical block
+/// with `sceKernelAllocateMainDirectMemory` and then batch-maps sixteen 2 MiB pages of it into the
+/// GPU virtual range, at the addresses it will render to. Until this landed the whole call fell on
+/// a stub, so the map failed, and the display reported itself not ready one step before any pixel
+/// (the open-toolchain cube, worklog 806).
+///
+/// Every entry names **where** it wants the memory (`vaddr`), **which** physical offset (`paddr`),
+/// **how much** (`len`) and its **protection** (`prot`). So unlike the "anywhere" named map, a
+/// batch entry is placed at exactly the vaddr it asks for and never relocated.
+///
+/// # The entry layout
+///
+/// `entries` points at `count` records of the console's descriptor: `vaddr` (8), `paddr` (8),
+/// `len` (8), `prot` (1) with three bytes of padding, `flags` (4) - 32 bytes each. `completed`
+/// receives how many were mapped, so a caller can tell a partial map from a total failure; the
+/// call answers `0` when every entry succeeded and the kernel's error otherwise.
+fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// Bytes one `obs_batch_map_entry` occupies: `vaddr`(8) `paddr`(8) `len`(8) `prot`(1)+pad(3)
+    /// `flags`(4).
+    const ENTRY_SIZE: u64 = 32;
+
+    if !direct::configured().map_direct_memory {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let (entries, count, completed) = (args[0], args[1], args[2]);
+    if entries == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+
+    let mut done: u64 = 0;
+    let mut outcome = OK;
+    for index in 0..count {
+        let Some(entry) = index
+            .checked_mul(ENTRY_SIZE)
+            .and_then(|offset| entries.checked_add(offset))
+        else {
+            outcome = u64::from(GuestError::InvalidArgument.as_raw());
+            break;
+        };
+        let (Some(vaddr), Some(paddr), Some(len), Some(prot_word)) = (
+            read_word(entry),
+            read_word(entry.wrapping_add(8)),
+            read_word(entry.wrapping_add(16)),
+            read_word(entry.wrapping_add(24)),
+        ) else {
+            outcome = u64::from(GuestError::InvalidArgument.as_raw());
+            break;
+        };
+        // `prot` is the low byte of the word at offset 24; the three padding bytes and the four
+        // `flags` bytes follow it and are not read - nothing measured varies on them.
+        let placed = map_direct_at(vaddr, paddr, len, prot_word & 0xff);
+        if placed != OK {
+            outcome = placed;
+            break;
+        }
+        done += 1;
+    }
+    // **Written whatever the outcome.** The count is how a caller tells a partial map from a total
+    // failure, so a stopped batch must still say how far it got - our own SDK reads it back.
+    let _ = write_word(completed, done);
+    outcome
+}
+
+/// Maps `len` bytes of physical memory `physical` at the exact guest virtual address `base` with
+/// `prot`, recording the mapping and its physical alias.
+///
+/// The placement half of a direct-memory map, at a named address that is never relocated. It is
+/// the shared shape of [`map_named_direct_memory_inner`], which adds the "anywhere" search, the
+/// already-mapped-return and the `void**` protocol on top; a batch entry needs none of those,
+/// because it always names its own address. Answers `OK` or a [`GuestError`] raw code.
+fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
+    if base == 0 || len == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let align = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
+    let (Some(base), Some(len)) = (
+        checked_next_multiple_of(base, align),
+        checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE),
+    ) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    let protection = protection_from_guest(prot);
+    let Ok(mut space) = mappings().lock() else {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    // Reserve-then-map, the same as the named map: a range the guest already reserved is
+    // re-protected in place rather than reserved a second time (D459).
+    let placed = if space.owns(base, len) {
+        space.protect(base, len, protection)
+    } else {
+        space.reserve(base, len, protection).map(|_| ())
+    };
+    if placed.is_err() {
+        return u64::from(GuestError::NoMemory.as_raw());
+    }
+    drop(space);
+    mapping_placed(base, len, protection, true);
     if let Ok(mut mapped) = physical_mappings().lock() {
         mapped.insert(physical, base);
     }
@@ -5162,6 +5274,28 @@ fn pthread_setaffinity(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `scePthreadGetaffinity(thread, mask)` - reads back the affinity recorded for a thread.
+///
+/// **The read [`pthread_setaffinity`]'s own note (D523) said would need the per-thread record the
+/// moment a title asked for one - and PPSA04263 does.** It answers from the record orbistoun already
+/// keeps: the `requested_affinity` captured when the thread was created (the attribute form stores it,
+/// D523). A mask of zero is the guest's own convention for "anywhere" ([`thread::Affinity::is_unset`]),
+/// so a thread that pinned nothing, or one orbistoun holds no record for - the main thread, or one made
+/// before this ran - reads back zero, which is that "anywhere", not an error.
+///
+/// **It returns what was asked, not what the host scheduler did** - the effective mask under the default
+/// `Observe` policy is always zero (D150), and handing that back would tell a guest its own request was
+/// discarded. The running-thread setter still drops (D523), so a set-then-get on a live thread reads the
+/// creation-time value; that is the documented limit, not a new one, and no title observed reads one back
+/// after setting it on a running thread.
+fn pthread_getaffinity(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mask = thread::record(args[0]).map_or(0, |record| record.requested_affinity.0);
+    if args[1] == 0 || !write_word(args[1], mask) {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// `scePthreadAttrSetguardsize(attr, size)` - stored, so a later get reads it back.
 fn pthread_attr_setguardsize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     attr_set(args, ATTR_GUARD_SIZE)
@@ -6258,6 +6392,7 @@ const TABLE: &[(&str, GuestFn)] = &[
         allocate_main_direct_memory,
     ),
     ("sceKernelMapNamedDirectMemory", map_named_direct_memory),
+    ("sceKernelBatchMap", batch_map),
     ("sceKernelMapperGetParam", mapper_get_param),
     ("scePthreadCreate", pthread_create),
     ("scePthreadJoin", pthread_join),
@@ -6470,6 +6605,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadAttrSetschedparam", pthread_attr_setschedparam),
     ("scePthreadAttrGetschedparam", pthread_attr_getschedparam),
     ("scePthreadSetaffinity", pthread_setaffinity),
+    ("scePthreadGetaffinity", pthread_getaffinity),
     ("scePthreadAttrSetschedpolicy", pthread_attr_setschedpolicy),
     (
         "scePthreadAttrSetinheritsched",
@@ -6832,6 +6968,51 @@ mod tests {
         SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `scePthreadGetaffinity` reads back the mask a thread was recorded with; an unknown handle
+    /// is "anywhere" (zero), not an error; a null out-parameter is refused.
+    ///
+    /// Watched failing on the middle case: a getter that answered from an empty lookup with a wrong
+    /// error code would read as a scheduling failure to a guest that tests the return (D523's hazard,
+    /// one call over).
+    #[test]
+    fn getaffinity_reads_back_the_recorded_mask() {
+        let handle = super::thread::register(
+            "affine",
+            super::thread::Affinity(0b1010),
+            0,
+            super::thread::AffinityPolicy::Observe,
+            4,
+        )
+        .expect("the thread table accepted a registration");
+        let mut out = [0_u64; 1];
+        let dst = out.as_mut_ptr() as u64;
+
+        assert_eq!(
+            super::pthread_getaffinity(&args([handle, dst, 0, 0])),
+            super::OK
+        );
+        assert_eq!(
+            out[0], 0b1010,
+            "the recorded requested affinity is read back"
+        );
+
+        out[0] = 0x99;
+        assert_eq!(
+            super::pthread_getaffinity(&args([0xdead_beef, dst, 0, 0])),
+            super::OK
+        );
+        assert_eq!(
+            out[0], 0,
+            "a handle with no record is anywhere, not an error"
+        );
+
+        assert_ne!(
+            super::pthread_getaffinity(&args([handle, 0, 0, 0])),
+            super::OK,
+            "a null out-parameter is refused"
+        );
     }
 
     /// **A set stack size and affinity are honoured; a fresh or zero size is not.**

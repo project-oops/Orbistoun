@@ -78,6 +78,39 @@ pub const fn handed_base() -> u64 {
     FIRMWARE_BASE + FIRMWARE_SIZE / 2
 }
 
+/// The console's own libkernel base, where a freestanding first-party payload calls its syscall
+/// gadget when it cannot resolve libkernel by name.
+///
+/// # Why this address is not this project's to choose
+///
+/// [`FIRMWARE_BASE`] is a home of the project's own picking. This one is the **console's**. The
+/// first-party SDK routes every syscall through a gadget inside libkernel - the raw `syscall`
+/// instruction ten bytes into `getpid` - to satisfy the platform's direct-syscall mitigation. When
+/// the runtime cannot look that gadget up (no handoff block, no resolvable `getpid`), it falls back
+/// to a hardcoded address: libkernel loads at `0x8_0000_0000`, `getpid` sits at vaddr `0x4e0`, and
+/// the syscall instruction is `getpid + 0xa`, so the runtime issues `callq *0x8000004ea` for every
+/// system call. That address is baked into the guest; nothing this project hands it changes it.
+///
+/// So this project maps a page here and puts a trampoline into this run's syscall gadget at
+/// [`CONSOLE_SYSCALL_GADGET_VADDR`], the same way [`FIRMWARE_BASE`] answers a payload's firmware
+/// arithmetic with mapped memory: the guest's `callq *0x8000004ea` dispatches and returns rather
+/// than faulting on an unmapped instruction fetch. The base is quoted, not invented, so the guest's
+/// own arithmetic lands on something honest.
+pub const CONSOLE_SYSCALL_GADGET_BASE: u64 = 0x0000_0008_0000_0000;
+
+/// Where the syscall gadget sits within the console's libkernel page: `getpid` (`0x4e0`) plus ten,
+/// where the raw `syscall` instruction is, which is the address a first-party payload calls.
+///
+/// The current-generation offset. An earlier generation places `getpid` at `0x5b0`, so its gadget
+/// is `+0x5ba`; a payload built for it would fall back there instead, and would be served by
+/// placing the same trampoline at that offset. Only the offset a run's guest actually reaches is
+/// mapped, so this is the one exercised value rather than both.
+pub const CONSOLE_SYSCALL_GADGET_VADDR: u64 = 0x4ea;
+
+/// How much is mapped for it: one 16 KiB page, the console's page size, far more than a trampoline
+/// at [`CONSOLE_SYSCALL_GADGET_VADDR`] needs and small enough that reserving it costs nothing.
+pub const CONSOLE_SYSCALL_GADGET_SIZE: u64 = 0x4000;
+
 /// The skeleton firmware image: a mapped region, and a record of what has been reached in it.
 #[derive(Debug)]
 pub struct Firmware {
@@ -468,6 +501,84 @@ pub fn is_firmware_address(address: u64) -> bool {
         .is_ok_and(|held| held.as_ref().is_some_and(|f| f.contains(address)))
 }
 
+/// The console syscall-gadget page this process holds, once reserved.
+///
+/// Separate from [`cell`] because it is a different region at a different base, reserved on its own
+/// terms - a run serves the gadget whether or not it presents the firmware skeleton, because a
+/// freestanding payload reaches the gadget without reaching the rest of the image.
+fn console_gadget_cell() -> &'static Mutex<Option<Firmware>> {
+    static CELL: OnceLock<Mutex<Option<Firmware>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Reserves the console syscall-gadget page and writes `trampoline` at
+/// [`CONSOLE_SYSCALL_GADGET_VADDR`].
+///
+/// `trampoline` is the run's own bytes - a jump into this process's syscall gadget - built by the
+/// caller and passed in, so this crate stays free of any dependency on the gadget's owner, exactly
+/// as [`place_export`] takes finished thunk bytes rather than knowing how to make them.
+///
+/// Idempotent: a second call rewrites the trampoline in the page already mapped, so a caller need
+/// not track whether it was the one to reserve it.
+///
+/// # Errors
+///
+/// Propagates a reservation failure from [`Firmware::reserve_at`], or refuses a trampoline that
+/// would run past the page - either is the caller passing the wrong bytes, not a runtime condition.
+pub fn present_console_gadget(trampoline: &[u8]) -> Result<(), MemError> {
+    let mut held = console_gadget_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.is_none() {
+        *held = Some(Firmware::reserve_at(
+            CONSOLE_SYSCALL_GADGET_BASE,
+            CONSOLE_SYSCALL_GADGET_SIZE,
+        )?);
+    }
+    let Some(page) = held.as_ref() else {
+        return Err(MemError::HostRefused(
+            "no console gadget page is reserved".to_owned(),
+        ));
+    };
+    let at = CONSOLE_SYSCALL_GADGET_BASE.saturating_add(CONSOLE_SYSCALL_GADGET_VADDR);
+    let end = at.saturating_add(trampoline.len() as u64);
+    if at < page.base() || end > page.end() {
+        return Err(MemError::HostRefused(format!(
+            "the console syscall gadget at {at:#x} would fall outside its page"
+        )));
+    }
+    let Ok(dest) = usize::try_from(at) else {
+        return Err(MemError::HostRefused(
+            "gadget address does not fit".to_owned(),
+        ));
+    };
+    // SAFETY: `at`..`end` was just checked to lie inside the page this process reserved
+    // read-write-execute, and `trampoline` is a valid slice for its own length. The page outlives
+    // the run, so the guest may fetch from it for as long as it executes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            trampoline.as_ptr(),
+            std::ptr::with_exposed_provenance_mut::<u8>(dest),
+            trampoline.len(),
+        );
+    }
+    Ok(())
+}
+
+/// The address a first-party payload calls its syscall gadget at: the base plus the gadget vaddr.
+#[must_use]
+pub const fn console_gadget_address() -> u64 {
+    CONSOLE_SYSCALL_GADGET_BASE + CONSOLE_SYSCALL_GADGET_VADDR
+}
+
+/// Whether the console syscall-gadget page has been reserved in this process.
+#[must_use]
+pub fn is_console_gadget_present() -> bool {
+    console_gadget_cell()
+        .lock()
+        .is_ok_and(|held| held.is_some())
+}
+
 /// The offset of an address within the reserved skeleton, or `None`.
 ///
 /// What a fault reporter calls to turn a raw address into "firmware+0x2885e00" - the phrase that
@@ -537,6 +648,48 @@ mod tests {
         assert!(!fw.contains(base + len), "one past the end is outside");
         assert_eq!(fw.offset_of(base + len), None, "and has no offset");
         assert!(!fw.contains(base - 1), "one before the start is outside");
+    }
+
+    /// The console gadget page reserves, holds the trampoline it was handed, and reads it back.
+    ///
+    /// The whole point of the region: a first-party payload's `callq *console_gadget_address()`
+    /// must reach real bytes this run wrote, not an unmapped fault. So place a real 13-byte
+    /// trampoline shape and read it back from the gadget address, and confirm the page and its
+    /// address agree with the constants.
+    #[test]
+    fn the_console_gadget_page_holds_the_trampoline_it_was_given() {
+        use super::{
+            CONSOLE_SYSCALL_GADGET_BASE, CONSOLE_SYSCALL_GADGET_VADDR, console_gadget_address,
+            is_console_gadget_present, present_console_gadget,
+        };
+        // `mov r11, imm64; jmp r11` - the exact shape a run writes, so this exercises the real
+        // trampoline bytes rather than a placeholder.
+        let trampoline: [u8; 13] = [
+            0x49, 0xBB, 0xEF, 0xBE, 0xAD, 0xDE, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE3,
+        ];
+        present_console_gadget(&trampoline).expect("the console gadget page reserves and places");
+        assert!(
+            is_console_gadget_present(),
+            "the page reports itself present"
+        );
+        assert_eq!(
+            console_gadget_address(),
+            CONSOLE_SYSCALL_GADGET_BASE + CONSOLE_SYSCALL_GADGET_VADDR,
+            "the address a payload calls is the base plus the gadget vaddr"
+        );
+        let at = usize::try_from(console_gadget_address()).expect("the gadget address fits");
+        // SAFETY: `present_console_gadget` reserved this page read-write-execute and wrote the
+        // trampoline at exactly this address, so reading the same 13 bytes back is in bounds.
+        let read_back = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::with_exposed_provenance::<u8>(at),
+                trampoline.len(),
+            )
+        };
+        assert_eq!(
+            read_back, &trampoline,
+            "the trampoline reads back byte for byte"
+        );
     }
 
     /// The libkernel exports table loads from the measured data file and parses correctly.

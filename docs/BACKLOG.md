@@ -44,6 +44,7 @@ Committed work is in [ROADMAP.md](ROADMAP.md); rejected directions are in
 | ⚪ | [Previous-generation container support](backlog/034-previous-generation-container-support.md) | no marker |
 | ⚪ | [Resolved since this list was written](backlog/035-resolved-since-this-list-was-written.md) | no marker |
 | ⚪ | [The names sweep records the path it was given](backlog/036-the-names-sweep-records-the-path-it-was-given.md) | no marker |
+| ⚪ | [Run the oops-mesa / oops-gl cube apps as a fully-owned baseline and tracer target](backlog/037-oops-mesa-gl-cube-apps-as-a-fully-owned-baseline.md) | no marker |
 
 | | meaning |
 |---|---|

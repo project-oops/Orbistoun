@@ -71,6 +71,26 @@ mod video_error {
     pub(super) const ALREADY_OPEN: u64 = 0x8029_0009;
 }
 
+/// The shape of a registered buffer set, decoded from its attribute block.
+///
+/// A flipped buffer is an address; reading its bytes as an image needs its extent, format and
+/// tiling, and that is what a guest wrote into the attribute block with
+/// `sceVideoOutSetBufferAttribute2` before registering it. The
+/// values sit at the offsets obSCEne `-83df` measured on hardware; pitch (offsets `0x0`, `0x8`,
+/// `0x14`) read zero in both measured passes and is deliberately absent here rather than assigned a
+/// byte nobody identified. Zeroed until a set is registered with a filled block.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferShape {
+    /// Tiling mode: `0` tiled, `1` linear (attribute offset `0x4`).
+    pub tiling: u32,
+    /// Width in pixels (attribute offset `0xc`).
+    pub width: u32,
+    /// Height in pixels (attribute offset `0x10`).
+    pub height: u32,
+    /// Pixel format (attribute offset `0x20`).
+    pub format: u64,
+}
+
 /// Display ports the guest can open.
 ///
 /// A handle is an index into this, offset so zero is never a valid one - callers test a
@@ -108,6 +128,11 @@ mod port {
         /// (REQ-...9b1f) cannot read a flipped buffer's bytes without knowing its extent and layout,
         /// and that is what this points at. Zero until a set is registered.
         pub attribute: u64,
+        /// The buffer set's shape - extent, format and tiling - decoded from the attribute block at
+        /// register time (REQ-...a6b3). The pointer above is where it was read from; this is what a
+        /// `presented` rung reads without dereferencing it again. Zeroed until a set with a filled
+        /// attribute block is registered.
+        pub shape: super::BufferShape,
         /// The buffer index the guest last submitted a flip for, if any - which of [`Self::buffers`]
         /// it last asked to present.
         pub last_flip: Option<u64>,
@@ -127,15 +152,15 @@ mod port {
         last_flipped_handle().store(handle, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// For the port that last flipped, the guest address of the buffer it presented and the
-    /// `attribute` pointer registered with it - `(address, attribute)` - or `None` if none has
-    /// flipped, or the flipped index has no registered buffer.
-    pub(super) fn last_flipped_buffer() -> Option<(u64, u64)> {
+    /// For the port that last flipped, the guest address of the buffer it presented and the decoded
+    /// [`BufferShape`](super::BufferShape) registered with it - `(address, shape)` - or `None` if
+    /// none has flipped, or the flipped index has no registered buffer.
+    pub(super) fn last_flipped_buffer() -> Option<(u64, super::BufferShape)> {
         let handle = last_flipped_handle().load(std::sync::atomic::Ordering::Relaxed);
         with(handle, |p| {
             let index = usize::try_from(p.last_flip?).ok()?;
             let address = p.buffers.get(index).copied()?;
-            Some((address, p.attribute))
+            Some((address, p.shape))
         })
         .flatten()
     }
@@ -291,36 +316,177 @@ fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if addresses == 0 {
         return video_error::INVALID_HANDLE;
     }
+    // v1 hands a raw `void*[]` at arg2: one guest address every eight bytes.
+    let read = read_buffer_addresses(addresses, clamp_count(start_index, count), 8);
+    register_buffer_set(handle, start_index, &read, count, attribute)
+}
+
+/// `sceVideoOutRegisterBuffers2(handle, _, _, buffers, count, attribute, ...)`.
+///
+/// The v2 registration, and **not** the v1 shape one handler could serve for both. Where v1 hands a
+/// raw `void*[]` of addresses at arg2, v2 hands an array of `SceVideoOutBuffer` structs at **arg3** -
+/// `{ data, metadata, reserved[2] }`, 32 bytes each, the buffer's address in `data` at offset 0 -
+/// with the count at arg4 and the attribute at arg5, and arg2 zero. Binding both to
+/// `video_out_register_buffers` read that zero arg2 as the address array and refused the call with
+/// `INVALID_HANDLE`, so an open-toolchain display - which registers this way - got a non-zero `rrc`,
+/// set its error, and reported itself *not ready* one call before it would have gone ready (the
+/// cube, worklog 808). This reads the addresses from the struct array's `data` fields.
+fn video_out_register_buffers2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, start_index, buffers, count, attribute) =
+        (args[0], args[1], args[3], args[4], args[5]);
+    if buffers == 0 {
+        return video_error::INVALID_HANDLE;
+    }
+    // v2 hands a `SceVideoOutBuffer[]`: the address is the `data` field at the start of each 32-byte
+    // struct, so the stride is the struct size and the address sits at its offset zero.
+    let read = read_buffer_addresses(
+        buffers,
+        clamp_count(start_index, count),
+        SCE_VIDEO_OUT_BUFFER_SIZE,
+    );
+    register_buffer_set(handle, start_index, &read, count, attribute)
+}
+
+/// Bytes one `SceVideoOutBuffer` occupies: `{ data, metadata, reserved[2] }`, the buffer's address
+/// in `data` at offset 0 (agc_display.c).
+const SCE_VIDEO_OUT_BUFFER_SIZE: u64 = 32;
+
+/// How many buffers a register call maps, clamped so a guest cannot ask this to read past the end of
+/// its own set or the port's capacity.
+fn clamp_count(start_index: u64, count: u64) -> usize {
     let start = usize::try_from(start_index)
         .unwrap_or(MAX_REGISTERED_BUFFERS)
         .min(MAX_REGISTERED_BUFFERS);
-    let count = usize::try_from(count)
+    usize::try_from(count)
         .unwrap_or(0)
-        .min(MAX_REGISTERED_BUFFERS - start);
-    let mut read = Vec::with_capacity(count);
-    for i in 0..count {
-        // SAFETY: `addresses` is the guest's array pointer under the identity mapping (D014); each
-        // buffer address is a quadword at `addresses + i * 8`, within the `count`-element array the
-        // guest declared. Unaligned because the guest guarantees no more than its own alignment.
-        let address = unsafe {
-            std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(
-                (addresses as usize).wrapping_add(i * 8),
-            ))
-        };
-        read.push(address);
-    }
+        .min(MAX_REGISTERED_BUFFERS.saturating_sub(start))
+}
+
+/// Reads `count` buffer addresses from a guest array at `array`, one every `stride` bytes with the
+/// address at each element's start - a raw `void*[]` (stride 8) for `RegisterBuffers`, or a
+/// `SceVideoOutBuffer[]` (stride 32, address in `data` at offset 0) for `RegisterBuffers2`.
+fn read_buffer_addresses(array: u64, count: usize, stride: u64) -> Vec<u64> {
+    (0..count)
+        .map(|i| read_guest_u64(array.wrapping_add(i as u64 * stride)))
+        .collect()
+}
+
+/// Records a registered buffer set against `handle`: the addresses from `start_index`, the count on
+/// the port, and the shape decoded from `attribute`. The shared body of both register entry points,
+/// which differ only in how the guest hands over the addresses.
+fn register_buffer_set(
+    handle: u64,
+    start_index: u64,
+    addresses: &[u64],
+    count_field: u64,
+    attribute: u64,
+) -> u64 {
+    let start = usize::try_from(start_index)
+        .unwrap_or(MAX_REGISTERED_BUFFERS)
+        .min(MAX_REGISTERED_BUFFERS);
+    // Decode the block the attribute pointer describes now, while the guest still holds it, into the
+    // extent, format and tiling a flipped buffer needs (REQ-...a6b3). A zero pointer, or a block a
+    // guest never filled, decodes to a zeroed shape rather than a fault.
+    let shape = decode_attribute(attribute);
     match port::with(handle, |p| {
-        p.registered = args[3];
+        p.registered = count_field;
         p.attribute = attribute;
-        let end = start + read.len();
+        p.shape = shape;
+        let end = (start + addresses.len()).min(MAX_REGISTERED_BUFFERS);
         if p.buffers.len() < end {
             p.buffers.resize(end, 0);
         }
-        p.buffers[start..end].copy_from_slice(&read);
+        p.buffers[start..end].copy_from_slice(&addresses[..end - start]);
     }) {
         Some(()) => OK,
         None => video_error::INVALID_HANDLE,
     }
+}
+
+/// Reads the little-endian `u32` a guest wrote at `addr` under the identity mapping (D014).
+fn read_guest_u32(addr: u64) -> u32 {
+    // SAFETY: `addr` is a guest address under the identity mapping; the four bytes there are the
+    // guest's own attribute block, which it owns for the duration of the call. Unaligned, because a
+    // guest guarantees no more than its own alignment (as `video_out_register_buffers` reads).
+    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(addr as usize)) }
+}
+
+/// Reads the little-endian `u64` a guest wrote at `addr` under the identity mapping (D014).
+fn read_guest_u64(addr: u64) -> u64 {
+    // SAFETY: as [`read_guest_u32`], for the eight bytes of a `u64` field.
+    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(addr as usize)) }
+}
+
+/// Writes `value` as a little-endian `u32` into the guest block at `addr` under the identity
+/// mapping (D014).
+fn write_guest_u32(addr: u64, value: u32) {
+    // SAFETY: `addr` is within the guest's own 80-byte attribute block, which it owns for the
+    // duration of the call; a `u32` store there stays inside the measured extent. Unaligned, as a
+    // guest guarantees no more than its own alignment.
+    unsafe {
+        std::ptr::write_unaligned(
+            std::ptr::with_exposed_provenance_mut::<u32>(addr as usize),
+            value,
+        );
+    }
+}
+
+/// Writes `value` as a little-endian `u64` into the guest block at `addr` under the identity
+/// mapping (D014).
+fn write_guest_u64(addr: u64, value: u64) {
+    // SAFETY: as [`write_guest_u32`], for the eight bytes of a `u64` field.
+    unsafe {
+        std::ptr::write_unaligned(
+            std::ptr::with_exposed_provenance_mut::<u64>(addr as usize),
+            value,
+        );
+    }
+}
+
+/// Decodes the shape a guest wrote into an attribute block with
+/// [`sceVideoOutSetBufferAttribute2`](video_out_set_buffer_attribute2), at the offsets obSCEne
+/// `-83df` measured. A zero pointer yields a zeroed [`BufferShape`].
+fn decode_attribute(attribute: u64) -> BufferShape {
+    if attribute == 0 {
+        return BufferShape::default();
+    }
+    BufferShape {
+        tiling: read_guest_u32(attribute + 0x4),
+        width: read_guest_u32(attribute + 0xc),
+        height: read_guest_u32(attribute + 0x10),
+        format: read_guest_u64(attribute + 0x20),
+    }
+}
+
+/// `sceVideoOutSetBufferAttribute2(attr, pixelformat, tiling, width, height, option, [dcc_control,
+/// dcc_clear_color])`.
+///
+/// Fills the caller's attribute block with the buffer set's shape, at the offsets obSCEne `-83df`
+/// measured on hardware: tiling at `0x4`, width at `0xc`, height at `0x10`, option at `0x18`,
+/// format at `0x20`. It writes **only** those, and only the bytes each occupies - the pitch bytes
+/// (`0x0`, `0x8`, `0x14`) read zero in both measured passes and are left untouched rather than
+/// assigned a meaning nobody measured, and nothing past the measured 80-byte extent is touched.
+///
+/// The DCC fields (`0x28`, `0x30`) are the seventh and eighth arguments, which arrive on the guest
+/// stack past the six registers the trampoline captures, so they too are left as the caller had
+/// them. The values a `presented` rung needs - extent, format, tiling - are all in the six, so
+/// this decodes to a usable shape without them.
+///
+/// This is what `-420c` deferred: it kept the attribute pointer without decoding, because the
+/// layout was unmeasured. It is measured now, so `video_out_register_buffers` decodes the block a
+/// flip presents, and `last_flipped_buffer` answers a frame's extent instead of a bare pointer.
+fn video_out_set_buffer_attribute2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (attr, pixelformat, tiling, width, height, option) =
+        (args[0], args[1], args[2], args[3], args[4], args[5]);
+    if attr == 0 {
+        return video_error::INVALID_HANDLE;
+    }
+    write_guest_u32(attr + 0x4, tiling as u32);
+    write_guest_u32(attr + 0xc, width as u32);
+    write_guest_u32(attr + 0x10, height as u32);
+    write_guest_u64(attr + 0x18, option);
+    write_guest_u64(attr + 0x20, pixelformat);
+    OK
 }
 
 /// `sceVideoOutSubmitFlip(handle, buffer_index, flip_mode, flip_arg)`.
@@ -592,14 +758,16 @@ pub fn flips_accepted() -> u64 {
 }
 
 /// For the port that last completed a flip, the guest address of the buffer it presented and the
-/// `attribute` pointer registered with those buffers - `(address, attribute)`.
+/// decoded [`BufferShape`] registered with those buffers - `(address, shape)`.
 ///
 /// This is what a `presented` rung reads (REQ-...9b1f): the address is where the frame's bytes are,
-/// and the attribute describes their format, extent and tiling, without which the bytes cannot be
-/// read as an image. `None` until a guest has submitted a flip against a port whose flipped index has
-/// a registered buffer - which is every run today, since none gets this far.
+/// and the shape gives their extent, format and tiling, without which the bytes cannot be read as an
+/// image or even sized. The shape was decoded at register time from the attribute block the guest
+/// filled with `sceVideoOutSetBufferAttribute2`, so a reader here need not dereference a guest
+/// pointer again (REQ-...a6b3). `None` until a guest has submitted a flip against a port whose
+/// flipped index has a registered buffer.
 #[must_use]
-pub fn last_flipped_buffer() -> Option<(u64, u64)> {
+pub fn last_flipped_buffer() -> Option<(u64, BufferShape)> {
     port::last_flipped_buffer()
 }
 
@@ -612,7 +780,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceVideoOutOpen", video_out_open),
         ("sceVideoOutClose", video_out_close),
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),
-        ("sceVideoOutRegisterBuffers2", video_out_register_buffers),
+        ("sceVideoOutRegisterBuffers2", video_out_register_buffers2),
+        (
+            "sceVideoOutSetBufferAttribute2",
+            video_out_set_buffer_attribute2,
+        ),
         ("sceVideoOutSubmitFlip", video_out_submit_flip),
         ("sceVideoOutAddFlipEvent", video_out_add_flip_event),
         ("sceVideoOutConfigureOutput", video_out_configure_output),
@@ -655,9 +827,10 @@ mod tests {
         );
     }
     use super::{
-        GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
+        BufferShape, GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
         video_out_get_flip_status, video_out_get_resolution_status, video_out_is_flip_pending,
-        video_out_open, video_out_register_buffers, video_out_set_flip_rate, video_out_submit_flip,
+        video_out_open, video_out_register_buffers, video_out_register_buffers2,
+        video_out_set_buffer_attribute2, video_out_set_flip_rate, video_out_submit_flip,
     };
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
@@ -675,37 +848,131 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// **The registered attribute is kept, and the last-flipped buffer and its attribute read back.**
+    /// **The attribute block fills, decodes, and its shape reads back through the flipped buffer.**
     ///
-    /// 420c: a `presented` rung (9b1f) needs the flipped frame's address *and* its attribute (format,
-    /// extent, tiling). Registering a set with an attribute pointer in `arg4` and flipping one records
-    /// both, and `last_flipped_buffer` returns the flipped buffer's address paired with that attribute.
+    /// a6b3, subsuming 420c: `sceVideoOutSetBufferAttribute2` writes the buffer's shape into the
+    /// caller's block at the offsets obSCEne `-83df` measured; `video_out_register_buffers` decodes
+    /// it and keeps both the pointer and the shape; and `last_flipped_buffer` answers the flipped
+    /// address paired with that shape - extent, format and tiling - instead of a bare pointer. Two
+    /// passes, the two `-83df` ran: 1920x1080 tiled and 3840x2160 linear. And a byte past the 80 the
+    /// call writes is left exactly as it was, because the call touches only the measured extent.
     #[test]
-    fn the_attribute_is_kept_and_the_flipped_buffer_reads_back() {
+    fn the_attribute_block_fills_decodes_and_reads_back_its_shape() {
         let _guard = serial();
-        // Bus 5: the already-open refusal test holds bus 7 open for the whole run, so this must
-        // not share it or the open is refused in a parallel suite (buses 1/3/4/6/7 are taken).
+
+        // A real 256-byte block the guest "owns": the fill writes into it and the decode reads from
+        // it, both by its real address under the identity mapping. Pre-poisoned so an untouched byte
+        // is recognisable.
+        let mut block = [0x5a_u8; 256];
+        let attr = block.as_mut_ptr() as usize as u64;
+        let format = 0x8000_0000_0000_0000_u64;
+
+        // Fill: 1920x1080, tiled (0), the cube's own format. args[4] height, args[5] option.
+        let mut fill = args([attr, format, 0, 1920]);
+        fill[4] = 1080;
+        assert_eq!(
+            video_out_set_buffer_attribute2(&fill),
+            0,
+            "the attribute block is filled"
+        );
+
+        // Bus 5: buses 1/3/4/6/7 are taken by tests that hold a port open, so this and its second
+        // pass (bus 8) pick their own to avoid the already-open refusal in a parallel suite.
         let handle = open_on(5);
         let addresses: [u64; 3] = [0x2_0100_0000, 0x2_0101_0000, 0x2_0102_0000];
-        let attribute = 0x2_0900_0000_u64;
-        let mut a = args([handle, 0, addresses.as_ptr() as u64, 3]);
-        a[4] = attribute;
+        let mut reg = args([handle, 0, addresses.as_ptr() as u64, 3]);
+        reg[4] = attr;
         assert_eq!(
-            video_out_register_buffers(&a),
+            video_out_register_buffers(&reg),
             0,
-            "registered with an attribute"
+            "registered with the filled attribute"
         );
         assert_eq!(
             port::with(handle, |p| p.attribute).expect("the port"),
-            attribute,
-            "the attribute pointer is kept on the port"
+            attr,
+            "the attribute pointer is still kept on the port"
         );
 
         assert_eq!(video_out_submit_flip(&args([handle, 1, 0, 0])), 0);
         assert_eq!(
             super::last_flipped_buffer(),
-            Some((0x2_0101_0000, attribute)),
-            "the flipped buffer's address and its attribute read back together"
+            Some((
+                0x2_0101_0000,
+                BufferShape {
+                    tiling: 0,
+                    width: 1920,
+                    height: 1080,
+                    format,
+                },
+            )),
+            "the flipped buffer's address and decoded shape read back together"
+        );
+
+        // A byte outside the 80 the call writes is unchanged - still the poison it was set to.
+        assert_eq!(
+            block[0xa0], 0x5a,
+            "a byte past the written extent is untouched"
+        );
+
+        // Second pass: 3840x2160, linear (1), on a fresh block and port.
+        let mut block2 = [0x5a_u8; 256];
+        let attr2 = block2.as_mut_ptr() as usize as u64;
+        let format2 = 0x1_u64;
+        let mut fill2 = args([attr2, format2, 1, 3840]);
+        fill2[4] = 2160;
+        assert_eq!(video_out_set_buffer_attribute2(&fill2), 0);
+
+        let handle2 = open_on(8);
+        let addresses2: [u64; 2] = [0x2_0200_0000, 0x2_0201_0000];
+        let mut reg2 = args([handle2, 0, addresses2.as_ptr() as u64, 2]);
+        reg2[4] = attr2;
+        assert_eq!(video_out_register_buffers(&reg2), 0);
+        assert_eq!(video_out_submit_flip(&args([handle2, 0, 0, 0])), 0);
+        assert_eq!(
+            super::last_flipped_buffer(),
+            Some((
+                0x2_0200_0000,
+                BufferShape {
+                    tiling: 1,
+                    width: 3840,
+                    height: 2160,
+                    format: format2,
+                },
+            )),
+            "linear 4K reads back width 3840, height 2160, tiling 1"
+        );
+    }
+
+    /// **RegisterBuffers2 reads addresses from the `SceVideoOutBuffer` struct array, not v1's args.**
+    ///
+    /// The v2 call hands an array of 32-byte `SceVideoOutBuffer` structs (address in `data` at offset
+    /// 0) at arg3, the count at arg4 and the attribute at arg5 - and a zero at arg2, where v1 keeps
+    /// its address array. Binding both entry points to one handler read that zero arg2 as the
+    /// addresses and refused the call, which is why the open-toolchain display never went ready. This
+    /// registers through the struct array and checks the `data` addresses come back in order.
+    #[test]
+    fn register_buffers2_reads_addresses_from_the_struct_array() {
+        let _guard = serial();
+        let handle = open_on(9);
+        // Two SceVideoOutBuffer structs laid out as [data, metadata, reserved0, reserved1] each; only
+        // the data field - the first quadword of each 32-byte struct - is read.
+        let structs: [u64; 8] = [0x2_0300_0000, 0, 0, 0, 0x2_0301_0000, 0, 0, 0];
+        let buffers = structs.as_ptr() as usize as u64;
+
+        let mut a = [0_u64; GUEST_ARG_REGISTERS];
+        a[0] = handle; // arg2 stays zero, exactly as the SDK calls it
+        a[3] = buffers;
+        a[4] = 2;
+        // arg5 (attribute) zero: decode yields a zeroed shape without a fault.
+        assert_eq!(
+            video_out_register_buffers2(&a),
+            0,
+            "registered through the struct array rather than refused on a zero arg2"
+        );
+        assert_eq!(
+            port::with(handle, |p| p.buffers.clone()).expect("the port"),
+            vec![0x2_0300_0000, 0x2_0301_0000],
+            "the two data addresses read back in order"
         );
     }
 

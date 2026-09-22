@@ -25,6 +25,7 @@ because two were the two anybody remembers.
 | Base | Constant | Owner | What lives there |
 |---|---|---|---|
 | `0x0000_0000_6000_0000` | `TRIAL_REGION_BASE` | `orbistoun-turn` | A trial region, for a change the loop tries without a person |
+| `0x0000_0008_0000_0000` | `CONSOLE_SYSCALL_GADGET_BASE` | `orbistoun-firmware` | The console's own libkernel base - not this project's to choose - where a first-party payload calls its hardcoded syscall gadget at `+0x4ea` |
 | `0x0000_00F0_0000_0000` | `FIRMWARE_BASE` | `orbistoun-firmware` | The firmware skeleton - deliberately recognisable as firmware on sight |
 | `0x0000_4000_0000_0000` | `DEFAULT_MODULE_BASE` | `orbistoun-worker` | A module that links at zero |
 | `0x0000_4800_0000_0000` | `TITLE_MODULE_BASE` | `orbistoun-worker` | The modules a title ships with itself |
@@ -56,6 +57,12 @@ for by name belongs elsewhere; anything orbistoun made up belongs here.
 **Everything else is spaced a tebibyte apart**, which is far more room than any of them uses
 and is the reason a new base has always fitted so far. Keep it: the spacing is what makes the
 overlap check meaningful, and a region that grows is cheaper than one that has to move.
+
+The one exception is `CONSOLE_SYSCALL_GADGET_BASE` at `0x0000_0008_0000_0000`. It is not a base
+this project chose - it is the console's own libkernel base, quoted because a first-party payload
+issues `callq *0x8000004ea` for every system call and nothing this project hands it changes that
+address. It still clears the four-gibibyte check by thirty, so the overlap test stays meaningful;
+it just does not sit on the tebibyte grid, because it was never ours to place.
 
 ## The reservation failures at `POLICY_REGION_BASE` are expected, and were already explained
 

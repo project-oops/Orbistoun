@@ -1,6 +1,6 @@
 PPSA99980              flipped    246 imports (212 answered)     444296 calls  100% standing   ran to the time limit
-PPSA03416-app0         flipped    222 imports (213 answered)     470421 calls  100% standing   VCRUNTIME140.dll+0x1dc8d
-PPSA02664-app0         flipped    222 imports (212 answered)     418346 calls  100% standing   VCRUNTIME140.dll+0x1dc8d
+PPSA03416-app0         flipped    224 imports (216 answered)     470362 calls  100% standing   image+0x3f8f0
+PPSA02664-app0         flipped    224 imports (213 answered)     418362 calls  100% standing   image+0x3f8f0
 obscene                flipped    193 imports (180 answered)     280274 calls  100% standing   ran to the time limit
 PPSA25872-app0         flipped    192 imports (178 answered)     339539 calls  100% standing   image+0x3b383b
 obscene-payload        flipped    187 imports (177 answered)       4914 calls  100% standing   0x5e2d

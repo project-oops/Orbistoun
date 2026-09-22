@@ -497,6 +497,57 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
 [[function]]
+name = "sceAgcGetIsTrinityMode"
+arity = 0
+purpose = "Reports whether the GPU is the later generation's faster revision (obSCEne axis name 'trinity', beside orbis/neo/prospero). The graphics-side twin of sceKernelIsNeoMode: sceAgcGetIsTrinityMode() -> bool."
+edge_cases = [
+    "ANSWERED FROM THE PRESENTED MACHINE, not hardcoded (D394/D397): 1 when the run presents the faster Prospero revision (platform 'trinity'), 0 for a base console. PPSA28061 runs as prospero/cex/base, so it gets 0.",
+    "ARITY 0, ANSWERED IN THE REGISTER. The census infers (ptr, ptr, u32, 0, 0, u32) but those are leftover registers, the same stale-argument reading sceAgcGetRegisterDefaults2 needed - this is a capability query returning a bool in rax, on the sceKernelIsNeoMode precedent (which is arity 0). A non-zero placeholder here tells a base console it is the faster revision and can send it down a Pro-only path it cannot complete; 0 keeps it on the base path.",
+    "REACHED via PPSA28061's eboot after the register-defaults descriptors were answered (worklog 787). It is a real AGC export (name from module-strings, not an inline NID), so obSCEne can confirm the rc and whether it fills any out-parameter by calling it on base and Pro hardware - assumed until then.",
+]
+known_by = "assumed"
+found_by = "static"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-09-22"
+assumptions = [
+    "That it takes no arguments and returns the mode in the register (no out-parameter fill), on the sceKernelIsNeoMode precedent - a hardware call would confirm the shape.",
+]
+
+[[function]]
+name = "sceAgcGetRegisterDefaults2"
+purpose = "Returns a pointer to a GPU context-register reset-defaults descriptor for a register set, which the caller searches by register id. sceAgcGetRegisterDefaults2(set_id) -> descriptor*."
+region = { via = "return", bytes = 256 }
+edge_cases = [
+    "RETURN CONTRACT, decoded from PPSA28061's call site (eboot image+0x10b9e0). The function answers a pointer the caller dereferences as a descriptor: it reads count at +0x38 (u32), and only when that is non-zero reads records* at +0x30 and walks a table of 12-byte {id:u32, value:u64} records looking for register id 0xe24f806d. The placeholder-as-pointer fault this replaces was a read of +0x38 through orbistoun's 0xf7ff0001 stub answer.",
+    "NO OUTPUT BUFFER - the descriptor is library-owned. The caller sets only edi=set_id before the call (PPSA28061 image+0x10eb44: `mov edi, 0xd; call`), leaving the other argument registers stale; the report's inferred (u32, ptr, ptr...) arity is those leftovers, not real arguments. So the function returns storage it owns, and orbistoun reserves a zeroed region (via = return) and hands the base back rather than filling a caller buffer. A fresh reservation reads as zero, which is the whole of the answer here.",
+    "count = 0 IS A GRACEFUL, TITLE-DESIGNED PATH, not a fake success. With count == 0 the caller takes its own `je` branch (image+0x10b9ef -> 0x10ba2b), writes -1 (unset) into ~90 register-default slots at image+0x1f5a88.. and continues (jmp image+0x10cbc3); it applies no override for 0xe24f806d and proceeds. That is a real answer the title is built to handle - no default for that register - distinct from the placeholder pointer that crashes. The alternative, a records table for set 0xd containing 0xe24f806d's default, is a later sourced step (registers.rs is packet decode, not reset defaults).",
+    "NON-EXPORT, so no probe can call it (worklog 769): the size 256 and the count-zero answer are assumed, not measured. The size is deliberately a number in a file - the descriptor header the caller touches is small (+0x30, +0x38) and a fresh page covers it - and can be changed and re-run without a rebuild.",
+]
+known_by = "assumed"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-09-21"
+assumptions = [
+    "That register set 0xd has no default worth returning for 0xe24f806d, modelled as count = 0 - the honest floor. A hardware or reference-emulator source for the set-0xd defaults table would replace it with a populated descriptor.",
+    "That 256 bytes covers everything the caller reads through the returned pointer; only +0x30 and +0x38 are seen at the decoded call site.",
+]
+
+[[function]]
+name = "sceAgcGetRegisterDefaults2Internal"
+purpose = "Inner variant of sceAgcGetRegisterDefaults2: returns a pointer to a register reset-defaults descriptor for a register set, searched by the caller for a different register id. sceAgcGetRegisterDefaults2Internal(set_id) -> descriptor*."
+region = { via = "return", bytes = 256 }
+edge_cases = [
+    "SAME RETURN CONTRACT AS sceAgcGetRegisterDefaults2, one register apart. Decoded from PPSA28061's call site (eboot image+0x10ebc0): the guest reads count at +0x38 (u32), and only when non-zero reads records* at +0x30 and walks 12-byte {id:u32, value:u64} records - here searching for register id 0x6ac156ef (the outer variant searched 0xe24f806d). The run reaches this call immediately after the outer variant's count-zero descriptor was accepted (worklog 787), which is what confirmed the two share a shape.",
+    "NO OUTPUT BUFFER - library-owned storage, so orbistoun answers it with a reserved zeroed region (via = return) rather than filling a caller buffer, exactly as the outer variant. count = 0 is the graceful path: the caller takes its `je` branch (image+0x10ebcf -> 0x10ec0b), writes -1 (unset) into its register-default slots at image+0x1f6150.. and continues, applying no override for 0x6ac156ef.",
+    "NON-EXPORT, no probe can call it: the size 256 and count-zero answer are assumed, not measured, and a sourced defaults table for the set is the later step.",
+]
+known_by = "assumed"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-09-21"
+assumptions = [
+    "That register set 0xd has no default worth returning for 0x6ac156ef, modelled as count = 0. A sourced set-0xd defaults table would replace it with a populated descriptor.",
+]
+
+[[function]]
 name = "sceAgcInit"
 arity = 2
 purpose = "Initialises the current-generation graphics library. sceAgcInit(state, version): validates version and gates every later AGC call. Attributed to the identifier three titles import first and stall inside."

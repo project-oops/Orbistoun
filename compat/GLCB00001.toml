@@ -1,0 +1,24 @@
+[title]
+id = "GLCB00001"
+name = "GL1 Cube"
+content_version = "01.00"
+master_version = "01.00"
+
+[compat]
+
+[settings]
+
+[experiment]
+reach = "flipped"
+outcome = "ran to the time limit"
+imports = 21
+calls = 150996
+standing = 100
+default_return = "unimplemented"
+overrides = 2
+propping = 2
+frames = 12556
+unanswered = 3
+limit_seconds = 20
+build = "v0.1.0 - cb409d0-dirty"
+measured_on = "2026-09-22"

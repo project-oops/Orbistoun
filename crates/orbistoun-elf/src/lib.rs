@@ -467,27 +467,72 @@ impl<'a> Container<'a> {
             if ph.p_type.get() != PT_DYNAMIC {
                 continue;
             }
-            let at = if self.wrapper.is_some() {
-                // A descriptor table says which header owns which run of file, so the
-                // ambiguity below does not arise and the wrapper is authoritative.
-                match self.vaddr_to_offset(whole, ph.vaddr.get())? {
-                    Some(at) => at,
-                    None => return Ok(None),
-                }
-            } else {
-                match usize::try_from(ph.offset.get()) {
-                    Ok(at) => at,
-                    Err(_) => return Ok(None),
-                }
-            };
             let size = usize::try_from(ph.filesz.get()).unwrap_or(0);
-            // Bounds-checked against the file: a header may describe more than the file
-            // holds, and a truncated container reads as "cannot locate that" rather than as
-            // a panic.
-            let Some(end) = at.checked_add(size) else {
-                return Ok(None);
+            // The address route, the way a header with a real virtual address is read. A
+            // descriptor table makes the wrapper authoritative; a bare ELF reads its own
+            // file offset. Bounds-checked against the file: a header may describe more than
+            // the file holds, and that reads as "cannot locate that" rather than a panic.
+            let at = if self.wrapper.is_some() {
+                self.vaddr_to_offset(whole, ph.vaddr.get())?
+            } else {
+                usize::try_from(ph.offset.get()).ok()
             };
-            return Ok(whole.get(at..end));
+            let by_vaddr =
+                at.and_then(|at| at.checked_add(size).and_then(|end| whole.get(at..end)));
+
+            // **A module built the platform's way defeats the address route (D247).** It
+            // carries its dynamic table *inside* `PT_SCE_DYNLIBDATA` and gives the segment a
+            // virtual address of zero, which collides with the first `PT_LOAD` - so the
+            // address above lands on code and the table reads as absent though it is present.
+            // When the addressed bytes are not a usable table, locate it by file offset
+            // within the segment whose data actually contains it. Retail titles keep a real
+            // address here and never reach this branch.
+            let usable = |bytes: &[u8]| dynamic::DynamicInfo::parse(bytes).is_usable();
+            if self.wrapper.is_some() && !by_vaddr.is_some_and(usable) {
+                if let Some(bytes) = self.dynamic_bytes_by_offset(whole, ph.offset.get(), size)? {
+                    if usable(bytes) {
+                        return Ok(Some(bytes));
+                    }
+                }
+            }
+            // The addressed bytes even when unusable, so the caller answers "lacks a string
+            // table" against a located table rather than "could not be located".
+            return Ok(by_vaddr);
+        }
+        Ok(None)
+    }
+
+    /// The dynamic table located by **file offset** rather than address, for a module that
+    /// carries it inside `PT_SCE_DYNLIBDATA` with a zero virtual address (D247).
+    ///
+    /// Its own program header owns no descriptor run, so its bytes sit inside the enclosing
+    /// segment's - the one whose file range covers the dynamic offset and does carry a
+    /// descriptor. Mirrors [`Self::vaddr_to_offset`]'s outward walk, keyed on the file offset
+    /// the address route could not trust.
+    fn dynamic_bytes_by_offset<'b>(
+        &self,
+        whole: &'b [u8],
+        dyn_offset: u64,
+        size: usize,
+    ) -> Result<Option<&'b [u8]>, ElfError> {
+        let Some(wrapper) = self.wrapper else {
+            return Ok(None);
+        };
+        for (outer_index, outer) in self.program_headers()?.iter().enumerate() {
+            let obase = outer.offset.get();
+            let osize = outer.filesz.get();
+            if osize == 0 || dyn_offset < obase || dyn_offset >= obase.saturating_add(osize) {
+                continue;
+            }
+            for seg in wrapper.segments(whole)? {
+                if seg.has_data() && seg.program_header_index() == outer_index {
+                    let within = usize::try_from(dyn_offset - obase).unwrap_or(usize::MAX);
+                    let start = seg.range().start.saturating_add(within);
+                    return Ok(start
+                        .checked_add(size)
+                        .and_then(|end| whole.get(start..end)));
+                }
+            }
         }
         Ok(None)
     }
@@ -558,11 +603,30 @@ impl<'a> Container<'a> {
     /// virtual addresses, so without it they cannot be resolved at all (D247).
     pub fn vendor_data_offset(&self, whole: &[u8]) -> Result<Option<usize>, ElfError> {
         const PT_SCE_DYNLIBDATA: u32 = 0x6100_0000;
-        for ph in self.program_headers()? {
+        for (index, ph) in self.program_headers()?.iter().enumerate() {
             if ph.p_type.get() != PT_SCE_DYNLIBDATA {
                 continue;
             }
-            let at = usize::try_from(ph.offset.get()).unwrap_or(0);
+            // In a wrapper container the header's own file offset is a logical inner-ELF
+            // offset - for a properly-built module it lands past the end of the file - and
+            // the segment's bytes actually sit in the descriptor block the wrapper assigns
+            // to this header. The vendor tags are offsets relative to the start of that
+            // data, so that block's start is the base they are measured from (D247).
+            let at = if let Some(wrapper) = self.wrapper {
+                let mut found = None;
+                for seg in wrapper.segments(whole)? {
+                    if seg.has_data() && seg.program_header_index() == index {
+                        found = Some(seg.range().start);
+                        break;
+                    }
+                }
+                match found {
+                    Some(at) => at,
+                    None => return Ok(None),
+                }
+            } else {
+                usize::try_from(ph.offset.get()).unwrap_or(0)
+            };
             // Bounds-checked here rather than at each use: an offset past the end of the
             // file would otherwise become three separate confusing failures downstream.
             return Ok((at <= whole.len()).then_some(at));

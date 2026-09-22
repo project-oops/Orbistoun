@@ -99,8 +99,8 @@ single-threaded startup.
 | Title | Reach | Imports | Calls | Standing | Ends |
 |---|---|---|---|---|---|
 | PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` |
-| PPSA03416-app0 | flipped | 222 | 470,421 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
-| PPSA02664-app0 | flipped | 222 | 418,346 | 100% | `VCRUNTIME140.dll+0x1dc8d` |
+| PPSA03416-app0 | flipped | 224 | 470,362 | 100% | `image+0x3f8f0` |
+| PPSA02664-app0 | flipped | 224 | 418,362 | 100% | `image+0x3f8f0` |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` |
 | PPSA25872-app0 | flipped | 192 | 339,539 | 100% | `image+0x3b383b` |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` |
@@ -115,10 +115,11 @@ construction and are not comparable with the table above:
 - **BFpilot_v0.4.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **BackPork_0.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **CheatRunner_v0.17** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **GLCB00001** reached 21 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **Lapy-JB-Daemon_v1.2** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **PPSA02664-app0** reached 215 imports, ending at `image+0x42c76`, with 2 functions answered by name
 - **PPSA03416-app0** reached 39 imports, ending at `image+0xb14be3`, with 1 function answered by name
-- **PPSA04263-app0** reached 72 imports, ending at `image+0x196b91a`, with 1 function answered by name
+- **PPSA04263-app0** reached 75 imports, ending at `image+0x19676d7`, with 2 functions answered by name
 - **PPSA21564-app0** reached 55 imports, ending at `image+0x11ccd`, with 1 function answered by name
 - **PPSA25872-app0** reached 56 imports, ending at `image+0x7b594e`, with 1 function answered by name
 - **PPSA28061-app0** reached 60 imports, ending at `the guest called abort`, with 1 function answered by name
@@ -167,10 +168,15 @@ four titles (PPSA02664 33, PPSA03416 33, PPSA25872 44, PPSA04263 15), each spawn
 thread. The attribute block those calls pass is now honoured for the fields obSCEne measured the
 console honours - stack size and affinity (REQ-...c2e9).
 
-The three current walls (the `Ends` column above) sit *past* thread creation, so whether they
-are threading problems or phase 4 completion problems is no longer settled by an absence of
-threads - it is a question the run has to answer rather than an assumption. Phase 6's contents
-(shader decode and translation) are being built ahead of the spine in parallel.
+The six commercial titles' walls (the `Ends` column above) all sit *past* thread creation, and
+the survey that mapped them (worklog 776, closed at worklog 796) answers what that means rather
+than leaving it open: every one is in startup or command-buffer construction, none is a missing
+named import implementable in one step, and none is a threading problem - the threads run, so
+their absence is not the cause. Worklog 796 closed the last non-tracer avenue by byte-scanning
+PPSA04263's whole executable segment for a static reference to its un-constructed object and
+finding none, so the walls are reached by computed dispatch, which an execution/branch tracer
+would attribute. Phase 6's contents (shader decode and translation) are being built ahead of the
+spine in parallel.
 
 ## Numbers, measured rather than estimated
 
@@ -178,10 +184,10 @@ threads - it is a question the run has to answer rather than an assumption. Phas
 
 | | |
 |---|---|
-| Functions declared / implemented | 972 / 772 |
-| Declared in a library that serves nothing | 148 across 22 libraries - names written down, no implementation |
-| Recorded behaviours | 820 - 367 published, 85 measured, 76 guest-observed, 257 assumed |
-| Open questions a hardware probe could settle | 793 |
+| Functions declared / implemented | 975 / 777 |
+| Declared in a library that serves nothing | 147 across 21 libraries - names written down, no implementation |
+| Recorded behaviours | 824 - 367 published, 85 measured, 77 guest-observed, 262 assumed |
+| Open questions a hardware probe could settle | 800 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
@@ -215,18 +221,21 @@ export list, and that list in the `std::__1` inline namespace an LLVM target wou
 report hits. The unnamed imports are not C++ symbols, which eliminates a class rather than
 naming one (worklog 595).
 
-## The three walls
+## The walls, and the eliminations behind them
 
-**One of these has since been passed twice over** - PPSA02664 and PPSA03416 now flip a frame,
-have moved past the AGC patch family too, and stop at a null-object read in command-buffer
-construction (the `0xa8` wall) - so read this section as one live wall (PPSA28061) and one
-record of walls that were. The entries stay because the eliminations in them cost days and are not
-repeatable for free.
+**All six commercial titles are at live walls now**, and the survey that mapped them (worklog 776,
+closed at worklog 796) carries the exact site of each: PPSA04263 at `image+0x19676d7`, PPSA25872 at
+`image+0x17554a3`, PPSA02664 and PPSA03416 at `image+0x3f8f0`, PPSA28061 at `image+0x10b9e9` (moved
+twice from its older site by worklog 787), and PPSA21564 at `the title's own modules+0x7af792`.
+PPSA02664/PPSA03416 flip a frame and stop at a null store in command-buffer construction that
+worklog 790 traced to a Unity workload-array element buffer (`array[1]+0x18`) - **not** the
+descriptor out-parameter the older entries below reach for. Read the per-title entries that follow
+as the **record of the eliminations** that got here - each cost days and is not repeatable for
+free - rather than as the current sites, which the `Ends` column and `compat/` carry.
 
-As it stood, **both of the first two pointed at the same thing**, reached from opposite
-directions: an **out-parameter nobody wrote**. That convergence was worth more than either
-result alone, and it was a measurement rather than a reading - each step below eliminated a
-class by running something, not by arguing about it (D217).
+Those eliminations were measurements, not readings: each step below ruled out a class by running
+something, not by arguing about it (D217) - including that the first two walls once pointed at the
+same out-parameter nobody wrote, reached from opposite directions.
 
 - **PPSA28061, `image+0x43c4`.** A null dereference after ten textures load correctly. Nine
   attempts. The full register set - visible since D230, captured all along - says `rbx` holds

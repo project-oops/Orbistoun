@@ -2,6 +2,12 @@ library = "libSceCoredump"
 
 [[function]]
 name = "sceCoredumpRegisterCoredumpHandler"
-found_in = ["PPSA02664-app0"]
+purpose = "Registers a title's own crash handler so it is told about its faults. sceCoredumpRegisterCoredumpHandler(handler, ...)."
+edge_cases = [
+    "ACCEPTED with 0, on the same terms as sceAppContentTemporaryDataMount2 and scePthreadSetaffinity (D523): orbistoun catches guest faults itself and does not coredump, so the registered handler is never invoked - but the registration succeeds, which is what the caller tests. The placeholder it answered unimplemented (0xf7ff0001) is a negative code that reads as a failed registration and may make a title log or refuse; 0 is the honest answer that the registration was taken.",
+    "The return is a status tested against zero, not a handler id the caller dereferences, so nothing is fabricated. arity is the trampoline's full 6, not an established argument count.",
+]
+known_by = "assumed"
+found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Implemented 2026-09-22 (worklog 798): accepted honestly, the accept pattern D523/worklog 673 set."

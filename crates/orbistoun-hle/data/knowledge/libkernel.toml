@@ -879,6 +879,48 @@ kind = "usize"
 note = "zero means no preference"
 
 [[function]]
+name = "sceKernelBatchMap"
+arity = 3
+purpose = """
+Maps a run of direct-memory pieces in one call: `entries` points at `count` descriptors, each
+naming a virtual address, a physical offset, a length and a protection, and `completed` receives
+how many were mapped.
+
+Implemented as the placement half of sceKernelMapNamedDirectMemory applied to every entry at the
+exact address it names - a batch entry is never relocated, because it says where it wants the
+memory. It is how a scanout surface is brought up: the open-toolchain display init allocates one
+physical block and batch-maps sixteen 2 MiB pages of it into the GPU virtual range, and until this
+landed the whole call fell on a stub, so the display reported itself not ready one step before any
+pixel (GLCB00001, worklog 806).
+"""
+returns = "status"
+edge_cases = [
+    "The entry descriptor is 32 bytes: vaddr (8), paddr (8), len (8), prot (1) with three bytes of padding, flags (4). Only the low byte of the prot word is read; the padding and flags are not, because nothing exercised varies on them.",
+    "`completed` is written whatever the outcome, so a caller can tell a partial map from a total failure. A batch stops at the first entry that cannot be placed and reports how many preceded it.",
+    "Each entry is placed at the exact vaddr it names and never relocated, unlike the 'anywhere' named map. Physical memory is not aliased across two simultaneous mappings - the same limit the named map carries.",
+]
+found_by = "static"
+known_by = "guest-observed"
+assumptions = ["Argument layout and the 32-byte entry descriptor are established from our own SDK's display init and the one guest that exercised it; the return convention is inferred from the family and the caller's expectation, not measured on hardware."]
+found_in = ["GLCB00001"]
+found_on = "2026-09-22"
+
+[[function.arguments]]
+name = "entries"
+kind = "ptr"
+note = "array of 32-byte descriptors, each vaddr, paddr, len, prot with three bytes of padding, flags"
+
+[[function.arguments]]
+name = "count"
+kind = "u32"
+note = "how many entries to map"
+
+[[function.arguments]]
+name = "completed"
+kind = "ptr"
+note = "receives how many entries were mapped, whatever the outcome"
+
+[[function]]
 name = "sceKernelMapperGetParam"
 arity = 1
 purpose = "Fills a caller-provided structure with the mapper's parameters. The name is confirmed by hash, not read off a header: the console's kernel export table places this hash at libkernel+0x31d60 and this project's firmware layout names that offset, and sceKernelMapperGetParam hashes to 0x04df812afad225d7 exactly (D642)."
@@ -1560,9 +1602,17 @@ note = "thread name; cosmetic, read bounded to 64 bytes"
 
 [[function]]
 name = "scePthreadGetaffinity"
-found_in = ["PPSA02664-app0"]
+arity = 2
+purpose = "Reads back the CPU affinity mask a thread was created with. scePthreadGetaffinity(thread, *mask)."
+edge_cases = [
+    "Answers from the per-thread record orbistoun keeps: the requested_affinity captured when the thread was created (the attribute form stores it, D523). Returns what was asked, not the effective mask the policy produced - under the default Observe policy the effective mask is always zero (D150), and handing that back would tell a guest its own request was discarded.",
+    "A mask of zero is the guest's convention for 'anywhere', so a thread that pinned nothing, or a handle orbistoun holds no record for (the main thread, or one made before this was implemented), reads back zero rather than an error code - a wrong error here reads as a scheduling failure to a guest that tests the return (D523).",
+    "The running-thread scePthreadSetaffinity still drops (D523), so a set-then-get on a live thread reads the creation-time value; that is the documented limit, not a new one, and no title observed reads one back after setting it on a running thread. arity 2 - a thread and a mask out-parameter; args beyond are leftovers.",
+]
+known_by = "assumed"
+found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Implemented 2026-09-22 (worklog 797): the read D523 anticipated, now that PPSA04263 asks for it."
 
 [[function]]
 name = "scePthreadGetschedparam"

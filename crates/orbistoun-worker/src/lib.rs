@@ -1040,6 +1040,14 @@ pub fn serve_as_worker_process() -> Result<(), String> {
         .map_err(|e| format!("reading what was learned: {e}"))?;
     let mut policy = file.policy;
     policy.absorb(learned.policy());
+    // **And the regions the shipped knowledge base declares, under both of the above.** A
+    // `returns` kind ships in the knowledge file and is applied at the call; a region cannot be,
+    // because the service has to reserve the memory before the guest starts (D300). So a function
+    // that answers a pointer to a descriptor it owns - an inline AGC non-export no probe can call,
+    // measured nowhere - records the region in its knowledge entry, and this is where that reaches
+    // the dispatcher. Absorbed last so a person's file and this machine's own measurement both win
+    // over a shipped assumption.
+    policy.absorb(orbistoun_hle::knowledge::Knowledge::builtin().region_policy());
 
     // **What the console is set to, reaching the guest at last.** `console::configure` was
     // written and never called, so every setting a person chose in the shell stopped at the
@@ -1095,6 +1103,46 @@ pub fn serve_as_worker_process() -> Result<(), String> {
                 orbistoun_firmware::FIRMWARE_BASE,
                 orbistoun_firmware::handed_base()
             );
+        }
+    }
+    // **The console's own syscall gadget, served whether or not a firmware is presented.** A
+    // first-party payload routes every system call through a gadget inside libkernel, and when it
+    // cannot resolve that gadget by name it falls back to a hardcoded address
+    // (`orbistoun_firmware::console_gadget_address`). A proper module reaches that path during its
+    // own startup - the open-toolchain cube issues its first `klog` there - so this is not tied to
+    // the firmware skeleton the elfldr payloads need, and is set up unconditionally. Placing a
+    // trampoline into this run's syscall gadget there turns the guest's `callq *<gadget>` into a
+    // dispatch-and-return instead of a fault on an unmapped instruction fetch. One page, and a
+    // reservation failure is reported and not fatal: the run proceeds as before, the call faulting
+    // exactly as it did.
+    {
+        let dispatch: unsafe extern "sysv64" fn(*const u64) -> u64 =
+            orbistoun_thunk::syscall::orbistoun_syscall_dispatch;
+        match orbistoun_abi::enter::syscall_gadget(
+            dispatch as *const () as usize as u64,
+            orbistoun_thunk::syscall::SAVED,
+        ) {
+            Some(gadget) => {
+                let trampoline = compact_trampoline(gadget);
+                if let Err(e) = orbistoun_firmware::present_console_gadget(&trampoline) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "orbistoun: could not serve the console syscall gadget: {e} - a payload's fallback syscall path will fault as unmapped"
+                    );
+                } else {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "orbistoun: console syscall gadget served at {:#x}",
+                        orbistoun_firmware::console_gadget_address()
+                    );
+                }
+            }
+            None => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "orbistoun: no syscall gadget built, cannot serve the console gadget address"
+                );
+            }
         }
     }
     orbistoun_core::machine::present(settings.machine.clone());

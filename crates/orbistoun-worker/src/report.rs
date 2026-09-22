@@ -2170,7 +2170,9 @@ fn flipped_frame_written() -> bool {
     /// show at its start, small enough to read cheaply off the report path.
     const WINDOW: u64 = 4096;
 
-    let Some((address, _attribute)) = orbistoun_video::last_flipped_buffer() else {
+    // The decoded shape is available here now (REQ-...a6b3) and is what REQ-...5e82 will size this
+    // read from; today the head window below is still a fixed page.
+    let Some((address, _shape)) = orbistoun_video::last_flipped_buffer() else {
         return false;
     };
     let Ok(map) = orbistoun_kernel::direct::map().lock() else {

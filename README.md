@@ -104,10 +104,10 @@ command produces will be wrong within a week, so this block is spliced in by
 
 | | |
 |---|---|
-| Functions declared / implemented | 972 / 772 |
-| Declared in a library that serves nothing | 148 across 22 libraries - names written down, no implementation |
-| Recorded behaviours | 820 - 367 published, 85 measured, 76 guest-observed, 257 assumed |
-| Open questions a hardware probe could settle | 793 |
+| Functions declared / implemented | 975 / 777 |
+| Declared in a library that serves nothing | 147 across 21 libraries - names written down, no implementation |
+| Recorded behaviours | 824 - 367 published, 85 measured, 77 guest-observed, 262 assumed |
+| Open questions a hardware probe could settle | 800 |
 | Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
