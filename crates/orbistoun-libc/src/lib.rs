@@ -2970,6 +2970,25 @@ fn set_errno(value: i64) {
     };
 }
 
+/// Turns a vendor-encoded failure into the POSIX one: `errno` set, `-1` returned.
+///
+/// **Measured, for the POSIX-named exports** (obSCEne REQ-20260914T1110Z-9b12): `open` of a missing
+/// path answered `-1` with `errno = ENOENT`, and `close(-1)` answered `-1` with `errno = EBADF` -
+/// not the `0x8002_0000 | errno` their vendor-named twins return. A POSIX name that delegates to its
+/// twin passes the twin's answer through here (worklog 875). Anything that is not a vendor error
+/// code - a success, a count, a descriptor - is returned unchanged.
+#[must_use]
+pub fn posix_failure(answer: u64) -> u64 {
+    /// The vendor error family: `0x8002_0000 | errno`.
+    const VENDOR: u64 = 0x8002_0000;
+    if answer & !0xFF == VENDOR {
+        set_errno(i64::try_from(answer & 0xFF).unwrap_or(0));
+        FAILED
+    } else {
+        answer
+    }
+}
+
 /// What a failing call answers, as the guest reads it.
 ///
 /// `-1` in a 32-bit register. Written out rather than converted, because `From` is not

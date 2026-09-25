@@ -95,18 +95,16 @@ found_on = "2026-08-29"
 [[function]]
 name = "close"
 arity = 1
-purpose = "The POSIX spelling of `sceKernelClose`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `sceKernelClose`, failing the POSIX way."
 returns = "status"
 edge_cases = [
-    "Delegates to `sceKernelClose`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
-    "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
+    "Served by `sceKernelClose`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+    "FAILS THE POSIX WAY, MEASURED (obSCEne REQ-20260914T1110Z-9b12): close(-1) answered -1 with errno = EBADF (9), where the vendor twin answers 0x8002_0009. The twin's vendor code is translated - errno set, -1 returned (worklog 875).",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -389,18 +387,16 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "open"
 arity = 3
-purpose = "The POSIX spelling of `sceKernelOpen`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `sceKernelOpen`, failing the POSIX way."
 returns = "handle"
 edge_cases = [
-    "Delegates to `sceKernelOpen`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
-    "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
+    "Served by `sceKernelOpen`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+    "FAILS THE POSIX WAY, MEASURED (obSCEne REQ-20260914T1110Z-9b12): open of a missing path answered -1 with errno = ENOENT (2), not the vendor 0x8002_0002. The twin's vendor code is translated - errno set, -1 returned (worklog 875).",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2928,18 +2924,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "read"
 arity = 3
-purpose = "The POSIX spelling of `sceKernelRead`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `sceKernelRead`, failing the POSIX way."
 returns = "count"
 edge_cases = [
-    "Delegates to `sceKernelRead`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
-    "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
+    "Served by `sceKernelRead`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+    "A failure is translated to -1 with errno set, the convention obSCEne measured for open and close through their POSIX names (REQ-20260914T1110Z-9b12, worklog 875).",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
+    "That read fails like open and close, its measured siblings among the POSIX file calls - inferred, not provoked on hardware for read itself.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -3145,11 +3140,11 @@ found_on = "2026-08-29"
 [[function]]
 name = "write"
 arity = 3
-purpose = "The POSIX spelling of `sceKernelWrite`, and the same function pointer. Declared 2026-08-29."
+purpose = "The POSIX spelling of `sceKernelWrite`, failing the POSIX way."
 returns = "count"
 edge_cases = [
-    "Delegates to `sceKernelWrite`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "Served by `sceKernelWrite`; the arguments are that function's, and its knowledge entry is the one that describes them.",
+    "A failure is translated to -1 with errno set, the convention obSCEne measured for open and close through their POSIX names (REQ-20260914T1110Z-9b12, worklog 875); that write follows its siblings is inferred.",
     "Seventeen of the twenty-five open-toolchain payloads import it - the POSIX spelling only. A server writes its output through this, so without it a payload that has accepted a connection has nothing to say on it.",
 ]
 found_by = "static"

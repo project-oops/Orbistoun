@@ -191,7 +191,7 @@ spine in parallel.
 | Functions declared / implemented | 982 / 784 |
 | Declared in a library that serves nothing | 147 across 21 libraries - names written down, no implementation |
 | Recorded behaviours | 830 - 368 published, 87 measured, 78 guest-observed, 265 assumed |
-| Open questions a hardware probe could settle | 806 |
+| Open questions a hardware probe could settle | 804 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

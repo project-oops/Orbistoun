@@ -888,3 +888,5 @@ context cannot re-derive.
 | - | [871. Watchpoints follow every guest thread](worklog/871-watchpoints-follow-every-guest-thread.md) |
 | - | [872. sceAgcCreateShader relocates every offset self-relative, as the console does](worklog/872-sce-agc-create-shader-relocates-self-relative.md) |
 | - | [873. Execute breakpoints report their own hits](worklog/873-execute-breakpoints-report-their-own-hits.md) |
+| - | [874. sceAgcCreateShader patches the program address; the APR resolve stops at its first miss](worklog/874-create-shader-patches-the-program-address.md) |
+| - | [875. The POSIX file calls fail the POSIX way](worklog/875-posix-file-calls-fail-the-posix-way.md) |

@@ -795,15 +795,75 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
     serving.extend_from_slice(orbistoun_fs::select::implementations());
     serving.extend_from_slice(orbistoun_fs::ifaddrs::implementations());
     serving.extend_from_slice(orbistoun_fs::metadata::implementations());
+    let found = |vendor: &str| {
+        serving
+            .iter()
+            .find(|(name, _)| *name == vendor)
+            .map(|(_, function)| *function)
+    };
+    let _ = FILE_TWINS.set(FILE_CALLS.map(|(_, vendor, _)| found(vendor)));
     DELEGATED
         .iter()
         .filter_map(|(posix, vendor)| {
-            serving
+            // The file calls fail the POSIX way, so they are served by a wrapper that translates
+            // their twin's vendor code; everything else is the twin's own pointer.
+            let translating = FILE_CALLS
                 .iter()
-                .find(|(name, _)| name == vendor)
-                .map(|(_, function)| (*posix, *function))
+                .find(|(name, _, _)| name == posix)
+                .map(|(_, _, wrapper)| *wrapper);
+            match translating {
+                Some(wrapper) => found(vendor).map(|_| (*posix, wrapper)),
+                None => found(vendor).map(|function| (*posix, function)),
+            }
         })
         .collect()
+}
+
+/// The POSIX file calls whose failures are reported the POSIX way: `-1` with `errno` set.
+///
+/// **Measured for `open` and `close`** (obSCEne REQ-20260914T1110Z-9b12: a missing path answered
+/// `-1`, `errno = ENOENT`; `close(-1)` answered `-1`, `errno = EBADF`). `read` and `write` are the
+/// same family of POSIX-named exports and take the same convention, which is inferred rather than
+/// measured (worklog 875).
+const FILE_CALLS: [(&str, &str, GuestFn); 4] = [
+    ("open", "sceKernelOpen", posix_open),
+    ("close", "sceKernelClose", posix_close),
+    ("read", "sceKernelRead", posix_read),
+    ("write", "sceKernelWrite", posix_write),
+];
+
+/// The vendor twin each of [`FILE_CALLS`] delegates to, found once at registration.
+static FILE_TWINS: std::sync::OnceLock<[Option<GuestFn>; 4]> = std::sync::OnceLock::new();
+
+/// Calls file twin `index` and reports its failure the POSIX way.
+fn file_call(index: usize, args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    let twin = FILE_TWINS.get().and_then(|twins| twins[index]);
+    match twin {
+        Some(twin) => orbistoun_libc::posix_failure(twin(args)),
+        // Unreachable - a wrapper is registered only when its twin was found - and answered with
+        // the project's placeholder rather than an errno picked for it.
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// `open(path, flags, mode)`, failing the POSIX way.
+fn posix_open(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    file_call(0, args)
+}
+
+/// `close(fd)`, failing the POSIX way.
+fn posix_close(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    file_call(1, args)
+}
+
+/// `read(fd, buf, n)`, failing the POSIX way.
+fn posix_read(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    file_call(2, args)
+}
+
+/// `write(fd, buf, n)`, failing the POSIX way.
+fn posix_write(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    file_call(3, args)
 }
 
 #[cfg(test)]
@@ -828,6 +888,33 @@ mod tests {
             "these delegations name functions nothing implements: {missing:?}"
         );
         assert_eq!(served.len(), super::DELEGATED.len());
+    }
+
+    /// **`close(-1)` fails the POSIX way**: `-1`, with `errno` set to `EBADF` - what the console
+    /// answered through the POSIX name (obSCEne REQ-20260914T1110Z-9b12), where the vendor twin
+    /// answers `0x8002_0009`.
+    #[test]
+    fn a_posix_file_call_fails_with_errno_not_a_vendor_code() {
+        /// `EBADF`, from FreeBSD `sys/sys/errno.h` - the value the console reported.
+        const EBADF: i32 = 9;
+        let served = super::implementations();
+        let close = served
+            .iter()
+            .find(|(name, _)| *name == "close")
+            .map(|(_, f)| *f)
+            .expect("close is served");
+        let mut args = [0u64; orbistoun_core::GUEST_ARG_REGISTERS];
+        args[0] = u64::from(u32::MAX);
+        assert_eq!(close(&args), 0xFFFF_FFFF, "-1 in a 32-bit register");
+        let errno_at = orbistoun_libc::implementations()
+            .into_iter()
+            .find(|(name, _)| *name == "__error")
+            .map(|(_, f)| f(&[0; orbistoun_core::GUEST_ARG_REGISTERS]))
+            .expect("__error is served");
+        // SAFETY: `__error` answers the address of this thread's `errno`, a live `i32`.
+        let errno =
+            unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<i32>(errno_at as usize)) };
+        assert_eq!(errno, EBADF);
     }
 
     /// Every served name is also declared, or it can never be reached.
