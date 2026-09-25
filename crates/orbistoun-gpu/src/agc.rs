@@ -1069,9 +1069,21 @@ mod tests {
         // hardware wrote back `header + 0x90` and `header + 0x60` - each field's own address plus
         // its offset (worklog 872). This test once asserted `header + 0x70`: the belief, not the
         // capture.
-        assert_eq!(read_u64(0x20), header + 0x20 + 0x70, "+0x20 is self-relative");
-        assert_eq!(read_u64(0x28), header + 0x28 + 0x38, "+0x28 is self-relative");
-        assert_eq!(read_u64(0x30), header + 0x30 + 0x60, "+0x30 is self-relative");
+        assert_eq!(
+            read_u64(0x20),
+            header + 0x20 + 0x70,
+            "+0x20 is self-relative"
+        );
+        assert_eq!(
+            read_u64(0x28),
+            header + 0x28 + 0x38,
+            "+0x28 is self-relative"
+        );
+        assert_eq!(
+            read_u64(0x30),
+            header + 0x30 + 0x60,
+            "+0x30 is self-relative"
+        );
         assert_eq!(
             read_u64(0xe0),
             header + 0xe0 + 0x38,
@@ -1114,8 +1126,16 @@ mod tests {
             u64::from_le_bytes(b)
         };
         // The endpoints the old three-entry list left raw are now absolute pointers.
-        assert_eq!(read_u64(0x18), header + 0x18 + 0xa8, "+0x18 endpoint is relocated");
-        assert_eq!(read_u64(0x38), header + 0x38 + 0x58, "+0x38 endpoint is relocated");
+        assert_eq!(
+            read_u64(0x18),
+            header + 0x18 + 0xa8,
+            "+0x18 endpoint is relocated"
+        );
+        assert_eq!(
+            read_u64(0x38),
+            header + 0x38 + 0x58,
+            "+0x38 endpoint is relocated"
+        );
         // The middle three, self-relative like the endpoints.
         assert_eq!(read_u64(0x20), header + 0x20 + 0x70);
         assert_eq!(read_u64(0x28), header + 0x28 + 0x38);
