@@ -148,7 +148,7 @@ There is no schedule. Each of these is triggered by something, not by a clock.
 
 ```bash
 # What does this module need, without running it?
-orbistoun-cli imports titles/SOME-TITLE/eboot.bin
+orbistoun-cli imports <library>/SOME-TITLE/eboot.bin   # <library>: `orbistoun-cli paths`
 
 # Work out names for hashes nothing can name yet. A directory is ONE search over the
 # whole corpus, not one per module - and it is the only form that can find a name lying

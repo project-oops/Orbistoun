@@ -824,3 +824,59 @@ context cannot re-derive.
 | - | [807. `sceVideoOutSetBufferAttribute2` is implemented, the registered block is decoded into a flipped buffer's shape, and inbox request `-a6b3` is closed — the first rendering-cluster request the fully-owned cube drove to resolution](worklog/807-videoout-set-buffer-attribute2-implemented-closes-req-a6b3.md) |
 | - | [808. `sceVideoOutRegisterBuffers2` gets its own handler — it reads a `SceVideoOutBuffer` array, not v1's raw addresses — and the cube's display goes ready: it enters its 3D render loop and reaches `flipped`, 32,988 calls up from 28](worklog/808-register-buffers2-struct-array-cube-reaches-flipped.md) |
 | - | [809. `sceAgcDriverCreateQueue` hands the guest a queue handle, so the cube turns on its hardware pipeline and runs the real draw path — 150,996 calls, and the wall moves from "no hardware pipeline" to an unnamed submit hash](worklog/809-agc-create-queue-hands-a-handle-cube-turns-on-hardware.md) |
+| - | [810. Neverball (`NVRB00001`) joins the corpus as the second fully-owned baseline — a real game that boots in-game on hardware — and its first run reaches `flipped` with 7,242 frames](worklog/810-neverball-joins-the-corpus-as-a-fully-owned-game-baseline.md) |
+| - | [811. The clock and call-budget endings now report what the guest asked for — and Neverball's data wall names itself: `/app0/./data`](worklog/811-the-clock-and-budget-endings-report-what-the-guest-asked-for.md) |
+| - | [812. A `.` path component names the directory it sits in, so Neverball finds its own data: 55 files open, the title music and level geometry load, and the event-pump spin gives way to real painting](worklog/812-a-dot-component-names-its-own-directory-and-neverball-loads-its-data.md) |
+| - | [813. `sceAgcDriverSubmitCommandBuffer` is named and implemented, and both fully-owned baselines move to the wall that was always there: the guest waits for a GPU completion orbistoun cannot yet produce — verdict BACK, kept on purpose](worklog/813-submit-command-buffer-named-and-the-wall-moves-to-gpu-completion.md) |
+| - | [814. A submission reaches the backend on the endings a stalled guest actually takes — and the cube's clear self-test walks to zero packets, so the first blocker to execution is that orbistoun cannot see the command buffer, not speed](worklog/814-a-stalled-guest-submission-reaches-the-backend-and-walks-to-nothing.md) |
+| - | [815. A submit reads guest memory as the run stands, not as it stood at entry — and the cube's clear self-test walks from 0 packets to 192](worklog/815-a-submit-reads-guest-memory-live-and-the-cube-s-clear-walks-to-192-packets.md) |
+| - | [816. The command processor's memory work executes at submit, and the GL clear self-test passes on both baselines — every pixel matched, the fence written by work that ran — verdict FURTHER](worklog/816-the-command-processor-executes-its-memory-work-and-the-clear-self-test-passes.md) |
+| - | [817. Syscalls save their registers to the calling thread's own stack, not one shared buffer — the race that nulled libvorbis's table is gone, and Neverball's audio thread streams the title music](worklog/817-syscalls-save-to-the-calling-thread-s-stack-and-neverball-s-audio-thread-lives.md) |
+| - | [818. The backend's refusals are tallied by reason and the run report says why a shader did not translate — Neverball's 450 refused draws are one untranslated fragment shader, stopped at one unnamed opcode](worklog/818-a-refusal-says-its-reason-and-a-shader-that-did-not-translate-says-why.md) |
+| - | [819. `s_wqm_b32` and eleven more of the textured pixel shader's opcodes are named by the reference, whole-quad mode translates for 32 lanes, and Neverball's fragment shader now translates to its last seven words](worklog/819-s-wqm-b32-and-eleven-more-named-and-the-textured-shader-translates-to-its-export.md) |
+| - | [820. The half-float pack and the compressed export translate, and Neverball's first frame reaches the backend whole — 454 commands carried out, none refused, a 1920x1080 frame](worklog/820-the-half-float-pack-and-the-compressed-export-translate-and-neverball-s-first-frame-draws.md) |
+| - | [821. The rendered frame is written, not dropped — `REQ-...1f07` closed — and the first frames both fully-owned baselines produce are uniformly black](worklog/821-the-rendered-frame-is-written-not-dropped-and-both-baselines-draw-black.md) |
+| - | [822. A frame's draws accumulate on their target instead of each starting from black — and a full census shows the baselines' draws cover no pixel at all](worklog/822-a-frame-s-draws-accumulate-on-their-target-and-the-baselines-draws-cover-nothing.md) |
+| - | [823. The render log lists a submission's commands — and a live submission's shaders have no window onto their own vertices, so every triangle collapses](worklog/823-the-render-log-lists-a-submission-s-commands-and-a-live-submission-has-no-window-onto-its-vertices.md) |
+| - | [824. A live submission's window is placed at the base its vertex shader forms, and the cube draws its first pixels — a Gouraud-shaded face, 114,282 of them](worklog/824-the-window-is-placed-from-the-vertex-shader-and-the-cube-draws-its-first-face.md) |
+| - | [825. Each draw carries its own user data — the cube's twelve per-draw vertex positions in its buffer and its texture table reach the command list; the backend refuses them by name until a shader reads them](worklog/825-each-draw-carries-its-own-user-data-to-the-command-list.md) |
+| - | [826. Translated shaders read their user data at entry and the backend pushes it per draw — the cube draws all twelve faces, and Neverball's draws cover the screen](worklog/826-shaders-read-their-user-data-and-the-cube-draws-all-twelve-faces.md) |
+| - | [827. The textures a submission's draws name are measured — Neverball's title screen names one, a 16x128 linear RGBA8 image, which needs no detiling to bind](worklog/827-the-textures-a-submission-names-are-measured-and-neverball-s-is-one-linear-rgba8-image.md) |
+| - | [828. Each draw samples the guest's own texture — Neverball's screen goes from the default white to a colour of its own, and the next wall is the blend state no draw applies](worklog/828-each-draw-samples-its-own-texture-and-neverball-s-screen-turns-from-white-to-its-own-colour.md) |
+| - | [829. The guest's blend state is applied per draw — and Neverball's one-colour frame turns out not to be a blending artefact](worklog/829-the-guest-s-blend-state-is-applied-per-draw-and-neverball-s-one-colour-is-not-a-blending-artefact.md) |
+| - | [830. Neverball's first frame is its space background, rendered correctly — the one colour is the asset's own, and the wall moves from rendering to the frame after it](worklog/830-neverball-s-first-frame-is-its-space-background-rendered-correctly.md) |
+| - | [831. Whole-surface 64KB_R_X tiling, both directions, on a display-size hardware readback](worklog/831-whole-surface-64kb-r-x-tiling-on-a-measured-readback.md) |
+| - | [832. Draws run at submit and are written back into the guest's target, and both baselines reach their next frame](worklog/832-draws-run-at-submit-and-are-written-back-and-both-baselines-reach-their-next-frame.md) |
+| - | [833. An invented mip level lost the device, and Neverball draws five frames of its title scene](worklog/833-an-invented-mip-level-lost-the-device-and-neverball-draws-five-frames-of-its-title-scene.md) |
+| - | [834. The output clamp translates by the stage's DX10_CLAMP mode, and Neverball draws thirteen frames](worklog/834-the-output-clamp-translates-by-the-stage-s-dx10-clamp-mode-and-neverball-draws-thirteen-frames.md) |
+| - | [835. Each draw binds the shader in force at its own packet](worklog/835-each-draw-binds-the-shader-in-force-at-its-own-packet.md) |
+| - | [836. The vertex program is read from PGM_LO_ES, and Neverball's spikes are gone](worklog/836-the-vertex-program-is-read-from-pgm-lo-es-and-neverball-s-spikes-are-gone.md) |
+| - | [837. The guest's viewport transform is applied, and a GL frame is many submissions](worklog/837-the-guest-s-viewport-transform-is-applied-and-a-gl-frame-is-many-submissions.md) |
+| - | [838. Host reads come from cached memory, and a submission draws four times faster](worklog/838-host-reads-come-from-cached-memory-and-a-submission-draws-four-times-faster.md) |
+| - | [839. Draws land on a resident attachment](worklog/839-draws-land-on-a-resident-attachment.md) |
+| - | [840. Two textures per draw, and Neverball's title and menu render](worklog/840-two-textures-per-draw-and-neverball-s-title-and-menu-render.md) |
+| - | [841. The running title is shown in the window](worklog/841-the-running-title-is-shown-in-the-window.md) |
+| - | [842. SeaShell lists the library and launches from it](worklog/842-seashell-lists-the-library-and-launches-from-it.md) |
+| - | [843. Draws reuse their pipelines and stop waiting per draw](worklog/843-draws-reuse-their-pipelines-and-stop-waiting-per-draw.md) |
+| - | [844. A performance overlay, and what it found](worklog/844-a-performance-overlay-and-what-it-found.md) |
+| - | [845. The frame stays on the device until the flip](worklog/845-the-frame-stays-on-the-device-until-the-flip.md) |
+| - | [846. Every oops-apps app is in the corpus](worklog/846-every-oops-app-is-in-the-corpus.md) |
+| - | [847. A window ring, and the GPU's own clock](worklog/847-a-window-ring-and-the-gpu-s-own-clock.md) |
+| - | [848. An orphaned worker ends with its parent](worklog/848-an-orphaned-worker-ends-with-its.md) |
+| - | [849. A DMA that reads a pending target writes it back first](worklog/849-a-dma-that-reads-a-pending-target-writes-it-back-first.md) |
+| - | [850. Lazy readback copies](worklog/850-lazy-readback-copies.md) |
+| - | [851. One device thread, and write-watched guest memory](worklog/851-one-device-thread-and-write-watched-guest-memory.md) |
+| - | [852. Where the time goes, measured, and draws batched](worklog/852-where-the-time-goes-measured-and-draws-batched.md) |
+| - | [853. Decodes kept by their bytes, and a sweep that stops allocating](worklog/853-decodes-kept-by-their-bytes-and-a-sweep.md) |
+| - | [854. Neverball from three frames a second to ten](worklog/854-neverball-from-three-frames-a-second-to.md) |
+| - | [855. Flipped frames written back when read, and shown from the device](worklog/855-flipped-frames-written-back-when-read.md) |
+| - | [856. A colour target write-protected while trusted unchanged](worklog/856-a-colour-target-write-protected-while.md) |
+| - | [857. A uniform target skips its detile, and the window is compared, not hashed](worklog/857-a-uniform-target-skips-its-detile-and.md) |
+| - | [858. The per-submission line behind ORBISTOUN_TRACE_SUBMITS](worklog/858-the-per-submission-line-behind.md) |
+| - | [859. Pad input recorded and replayed by flips, and faults name their page's protection](worklog/859-pad-input-recorded-and-replayed-by.md) |
+| - | [860. A direct-memory alias forgotten with its memory, and the in-game crash](worklog/860-a-direct-memory-alias-forgotten-with.md) |
+| - | [861. Input capture and playback on the toolbar, never automatic](worklog/861-input-capture-and-playback-on-the.md) |
+| - | [862. A signed-off capture takes Neverball in-game headless](worklog/862-a-signed-off-capture-takes-neverball-in.md) |
+| - | [863. A cleared target seeded on the device](worklog/863-a-cleared-target-seeded-on-the.md) |
+| - | [864. Neverball plays, staged with a writable /app0](worklog/864-neverball-plays-staged-with-a-writable.md) |
+| - | [865. Neverball ran four times fast in the window](worklog/865-neverball-ran-four-times-fast-in-the.md) |

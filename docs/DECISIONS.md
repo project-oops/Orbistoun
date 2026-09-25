@@ -731,6 +731,20 @@ the project; the conversation that produced these decisions is not.
 | 🟡 | D707 | [scripted pad input is a config source, read from a file and installed at entry](decisions/D707-scripted-pad-input-is-a-config-source.md) | assumed | 2026-09-19 |
 | 🟡 | D708 | [a wall is orbistoun's until hardware proves it the title's](decisions/D708-a-wall-is-orbistoun-s-until-hardware.md) | assumed | 2026-09-19 |
 | ⚪ | D709 | [user-provided retail titles are always working; never blame the title](decisions/D709-user-provided-retail-titles-are-always.md) | accepted | 2026-09-21 |
+| 🟡 | D710 | [command-processor memory packets execute at submit, stopping at the first packet that needs the GPU](decisions/D710-command-processor-memory-packets.md) | assumed | 2026-09-24 |
+| 🟡 | D711 | [a live submission's memory window is placed at the constant 64-bit base its vertex shader forms](decisions/D711-a-live-submission-s-memory-window-is.md) | assumed | 2026-09-24 |
+| 🟡 | D712 | [a submission's draws run at submit, together, into a target they can be written back to](decisions/D712-a-submission-s-draws-run-at-submit.md) | assumed | 2026-09-24 |
+| 🟡 | D713 | [pad fields are placed by the SDK layout titles navigate with on hardware](decisions/D713-pad-fields-are-placed-by-the-sdk-layout.md) | assumed | 2026-09-24 |
+| 🟢 | D714 | [a drawn colour target is written back at the flip, not after every submission](decisions/D714-a-drawn-colour-target-is-written-back.md) | decided | 2026-09-24 |
+| 🟡 | D715 | [a worker whose control channel closes ends its process](decisions/D715-a-worker-whose-control-channel-closes.md) | assumed | 2026-09-24 |
+| 🟢 | D716 | [a fragment module simulates one lane, and a known exec mask emits only the lanes it runs](decisions/D716-a-fragment-module-simulates-one-lane.md) | decided | 2026-09-24 |
+| 🟢 | D717 | [a copy out of a colour target on the device is carried out when its destination is first touched](decisions/D717-a-copy-out-of-a-colour-target-on-the.md) | decided | 2026-09-24 |
+| 🟢 | D718 | [consecutive guest draws that share their state are one host mesh dispatch](decisions/D718-consecutive-guest-draws-that-share.md) | decided | 2026-09-25 |
+| 🟡 | D719 | [a flipped frame reaches guest memory when something reads it](decisions/D719-a-flipped-frame-reaches-guest-memory.md) | assumed | 2026-09-25 |
+| 🟡 | D720 | [a colour target is write-protected while it is trusted unchanged](decisions/D720-a-colour-target-is-write-protected.md) | assumed | 2026-09-25 |
+| 🟢 | D721 | [pad input is recorded and replayed against the guest's flips](decisions/D721-pad-input-is-recorded-and-replayed.md) | decided | 2026-09-25 |
+| 🟢 | D722 | [a title's /app0 is writable by where it is staged, not what it ships](decisions/D722-a-title-s-app0-is-writable-by-where-it.md) | decided | 2026-09-25 |
+| 🟡 | D723 | [a played window reads the host clock](decisions/D723-a-played-window-reads-the-host.md) | assumed | 2026-09-25 |
 
 | | meaning |
 |---|---|

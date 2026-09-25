@@ -117,6 +117,7 @@ construction and are not comparable with the table above:
 - **CheatRunner_v0.17** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **GLCB00001** reached 21 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **Lapy-JB-Daemon_v1.2** reached 0 imports, ending at `0x1`, with 1 function answered by name
+- **NVRB00001** reached 49 imports, ending at `spent its call budget`, with 2 functions answered by name
 - **PPSA02664-app0** reached 215 imports, ending at `image+0x42c76`, with 2 functions answered by name
 - **PPSA03416-app0** reached 39 imports, ending at `image+0xb14be3`, with 1 function answered by name
 - **PPSA04263-app0** reached 75 imports, ending at `image+0x19676d7`, with 2 functions answered by name
@@ -184,11 +185,11 @@ spine in parallel.
 
 | | |
 |---|---|
-| Functions declared / implemented | 975 / 777 |
+| Functions declared / implemented | 976 / 778 |
 | Declared in a library that serves nothing | 147 across 21 libraries - names written down, no implementation |
-| Recorded behaviours | 824 - 367 published, 85 measured, 77 guest-observed, 262 assumed |
-| Open questions a hardware probe could settle | 800 |
-| Symbol database | 30184 names - 714 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
+| Recorded behaviours | 825 - 367 published, 85 measured, 78 guest-observed, 262 assumed |
+| Open questions a hardware probe could settle | 801 |
+| Symbol database | 30186 names - 716 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
 

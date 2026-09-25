@@ -152,9 +152,9 @@ local pass implies a CI pass; the reverse does not hold.
 
 ## Running a title
 
-Building is not the same as having something to run. `run` needs a guest module under
-`titles/`, and **nothing in that directory is ever tracked** - not now and not later. With
-none present, everything that describes what orbistoun *knows* still works:
+Building is not the same as having something to run. `run` needs a title in the title library -
+the one shared `titles/` under the data directory (`orbistoun-cli paths`), outside this
+repository. With none present, everything that describes what orbistoun *knows* still works:
 
 ```bash
 ./bin/orbistoun cli symbols      # every system-library function declared

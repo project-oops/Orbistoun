@@ -15,7 +15,7 @@ should not be here.
 
 ```mermaid
 flowchart TD
-    A["a title's eboot.bin, in titles/"] --> B["./bin/orbistoun run TITLE"]
+    A["a title's eboot.bin, in the title library"] --> B["./bin/orbistoun run TITLE"]
     B --> C["list what the module imports<br/>- by 64-bit hash, not by name"]
     C --> D{"does the hash<br/>have a name?"}
     D -- yes --> G
@@ -71,7 +71,7 @@ stub that returns success: it looks like a finding and ends the work (D708, D709
 And before instrumenting a fault, **check the cheap upstream fact it sits on.** A guest that
 faults after a failed `open` failed because orbistoun misrouted the path or did not serve the
 mount - until the file is shown absent from *the place the run actually reads*. That place is the
-resolved **data directory**, not the repo `titles/` stub; `orbistoun paths` prints it. PPSA04263
+resolved **data directory**; `orbistoun paths` prints it. PPSA04263
 cost weeks of downstream telemetry for one unchecked fact: `rpf.cache` existed at `/app0/rpf.cache`
 the whole time, and the guest was asking for it at an unserved `/host` mount (D709).
 
@@ -79,8 +79,9 @@ the whole time, and the guest was asking for it at an unserved `/host` mount (D7
 
 ### Once, before anything
 
-1. You put a title's `eboot.bin` under `titles/` - nothing there is ever tracked by this
-   repository, and nothing needs to be.
+1. You put a title's directory in the title library - the one shared `titles/` under the data
+   directory that every OOPS tool reads (`orbistoun-cli paths` prints it), outside this
+   repository.
 
 ### Then, every turn
 

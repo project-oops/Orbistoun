@@ -32,7 +32,6 @@ docs/roadmap/   One file per phase, likewise
 tools/          Offline generators, mostly for the shader work - see tools/README.md
 compat/         Per-title compatibility records - what we learned, always tracked
 symbols/        Symbol databases produced by the name search - ours, so tracked
-titles/         Guest modules - never tracked, and nothing here ever will be
 frontend/web/   Static landing page; no build step
 assets/         Logo and shared images
 .githooks/      Pre-push static-analysis gate

@@ -4,7 +4,7 @@ Welcome to the **Orbistoun** user and tester guide.
 
 This guide provides practical instructions for **players, compatibility testers, and homebrew developers** running titles, configuring controllers, navigating the GUI, and reporting execution traces.
 
-If you are an AI coding agent, compiler architect, or low-level systems engineer seeking virtual memory address maps, Vulkan translation pipelines, ABI bridge definitions, or decision records, see the **[Technical Reference](README.md)**, **[ADDRESS_MAP.md](ADDRESS_MAP.md)**, and **[THE_LOOP.md](THE_LOOP.md)** instead.
+For the address maps, the GPU/Vulkan translation pipeline, the ABI bridge and the decision records, see the **[Technical Reference](README.md)**, **[ADDRESS_MAP.md](ADDRESS_MAP.md)** and **[THE_LOOP.md](THE_LOOP.md)**.
 
 ---
 
@@ -55,7 +55,7 @@ OOPS_LOG=trace orbistoun-cli run C:\Games\GLCB00001\eboot.bin
 ```
 
 From a source checkout, `./bin/orbistoun run <title-id>` is the development wrapper: it
-resolves a title id under `titles/`, rebuilds, refreshes names if stale, and runs it in one
+resolves a title id in the title library (`orbistoun-cli paths`), rebuilds, refreshes names if stale, and runs it in one
 step — see [WORKFLOW.md](WORKFLOW.md).
 
 ---
