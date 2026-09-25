@@ -23,15 +23,15 @@ measured_on = "2026-09-13"
 
 [experiment]
 reach = "flipped"
-outcome = "image+0x3b383b"
-imports = 197
-calls = 339541
+outcome = "the title's own modules+0xe3b20"
+imports = 211
+calls = 404117
 standing = 100
 default_return = "unimplemented"
 overrides = 2
 propping = 2
 frames = 1
-unanswered = 11
+unanswered = 13
 limit_seconds = 20
-build = "v0.1.0 - 8b8f25e-dirty"
+build = "v0.1.0 - e3c30cc-dirty"
 measured_on = "2026-09-25"
