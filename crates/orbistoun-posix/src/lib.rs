@@ -62,6 +62,10 @@ guest_module! {
         "pthread_mutexattr_setprotocol" => 2,
         "pthread_mutexattr_settype" => 2,
         "pthread_self" => 0,
+        // `(thread, policy, const struct sched_param *)` in both spellings, so they delegate:
+        // PPSA04263 imports the setter here and it answered a placeholder (worklog 869).
+        "pthread_getschedparam" => 3,
+        "pthread_setschedparam" => 3,
         "read" => 3,
         // Measured, not assumed: seventeen of the twenty-five open-toolchain payloads
         // import it, and it is the POSIX spelling of a call this project already serves.
@@ -374,6 +378,8 @@ const DELEGATED: &[(&str, &str)] = &[
     ),
     ("pthread_mutexattr_settype", "scePthreadMutexattrSettype"),
     ("pthread_self", "scePthreadSelf"),
+    ("pthread_getschedparam", "scePthreadGetschedparam"),
+    ("pthread_setschedparam", "scePthreadSetschedparam"),
     ("read", "sceKernelRead"),
     ("write", "sceKernelWrite"),
     // **Two entries where the two names are the same**, and that is not a mistake. These

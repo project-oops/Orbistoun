@@ -883,3 +883,4 @@ context cannot re-derive.
 | - | [866. A guest's first argument names its module under /app0, not the host path](worklog/866-a-guest-s-first-argument-names-its-module.md) |
 | - | [867. PPSA25872's trap traced to the APR resolve's unfilled size](worklog/867-ppsa25872-s-trap-traced-to-the-apr-resolve-s.md) |
 | - | [868. sceKernelVirtualQuery answers the whole 72-byte structure the console writes](worklog/868-sce-kernel-virtual-query-answers-the-whole.md) |
+| - | [869. pthread_setschedparam and pthread_getschedparam served under their POSIX names](worklog/869-pthread-setschedparam-served-under-its-posix.md) |
