@@ -1256,6 +1256,94 @@ fn dump_arguments(index: u64, args: *const u64) {
     }
 }
 
+/// How many of the most recent calls to a named import keep their caller's stack.
+///
+/// **The most recent, not the first.** Argument dumps keep an import's first calls, because
+/// that is when a constant can be told from an out-parameter. The question this answers is
+/// *who made the call that went wrong*, and that is usually the last one: PPSA25872's
+/// thirty-fifth reservation was the bad one, after thirty-four good ones (worklog 867).
+const CALLER_STACKS: usize = 4;
+
+/// Stack words kept per call, from the return address up.
+///
+/// Four kibibytes: an allocator's frames alone took half a kibibyte in the chain this was built
+/// for, and the caller that chose the size sat above them (worklog 867). Return addresses are
+/// picked out by the report, which knows where guest code lies; this layer only copies.
+pub const CALLER_STACK_WORDS: usize = 512;
+
+/// The ring of captured stacks, and which call each belongs to (sequence, import index + 1).
+static CALLER_STACK_DATA: [[AtomicU64; CALLER_STACK_WORDS]; CALLER_STACKS] =
+    [const { [const { AtomicU64::new(0) }; CALLER_STACK_WORDS] }; CALLER_STACKS];
+static CALLER_STACK_CALL: [(AtomicU64, AtomicU64); CALLER_STACKS] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; CALLER_STACKS];
+/// The next ring slot to write.
+static CALLER_STACK_NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// Copies the caller's stack, from its return address up, for a call to an import named with
+/// `ORBISTOUN_DUMP`.
+///
+/// **An observation, not a walk.** No frame pointer is followed, so a function that keeps none
+/// costs nothing here; the words are copied as they are and the report says which of them are
+/// addresses in guest code. A stale word from an older frame can look like a return address, and
+/// the report says so rather than presenting the list as a call chain.
+///
+/// Only a span [`readable_span`] vouches for is read, so this cannot fault inside the emulator;
+/// allocation-free, because it runs on the guest's stack (D381).
+fn capture_caller_stack(sequence: u64, index: u64, entry_rsp: u64) {
+    let bytes = (CALLER_STACK_WORDS * 8) as u64;
+    if entry_rsp == 0 || !readable_span(entry_rsp, bytes) {
+        return;
+    }
+    let slot = (CALLER_STACK_NEXT.fetch_add(1, Ordering::Relaxed) as usize) % CALLER_STACKS;
+    // Cleared first so a reader never pairs this call with the previous occupant's words.
+    CALLER_STACK_CALL[slot].1.store(0, Ordering::Relaxed);
+    for (word, cell) in CALLER_STACK_DATA[slot].iter().enumerate() {
+        let at = entry_rsp + (word as u64) * 8;
+        // SAFETY: `readable_span` established that `bytes` from `entry_rsp` lie inside a range
+        // this process mapped, and `at` is within that span and eight-byte aligned relative to
+        // it, so the unaligned read of one word is in bounds and cannot fault.
+        let value = unsafe {
+            std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at as usize))
+        };
+        cell.store(value, Ordering::Relaxed);
+    }
+    CALLER_STACK_CALL[slot].0.store(sequence, Ordering::Relaxed);
+    // Written last: a populated marker always has its words behind it.
+    CALLER_STACK_CALL[slot]
+        .1
+        .store(index.wrapping_add(1), Ordering::Relaxed);
+}
+
+/// A captured caller stack: which call it was, and the words from its return address up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerStack {
+    /// The call's position in the global order.
+    pub sequence: u64,
+    /// Which import was called - an index into the table.
+    pub index: u32,
+    /// The stack as the guest left it at the call, word 0 being the return address.
+    pub words: Vec<u64>,
+}
+
+/// The caller stacks captured this run, oldest first.
+#[must_use]
+pub fn caller_stacks() -> Vec<CallerStack> {
+    let mut out: Vec<CallerStack> = CALLER_STACK_CALL
+        .iter()
+        .zip(&CALLER_STACK_DATA)
+        .filter_map(|((sequence, marker), data)| {
+            let index = marker.load(Ordering::Relaxed).checked_sub(1)?;
+            Some(CallerStack {
+                sequence: sequence.load(Ordering::Relaxed),
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                words: data.iter().map(|w| w.load(Ordering::Relaxed)).collect(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|stack| stack.sequence);
+    out
+}
+
 /// Every argument dump taken this run.
 pub fn argument_dumps() -> Vec<ArgumentDump> {
     let mut out = Vec::new();
@@ -1652,6 +1740,9 @@ unsafe extern "sysv64" fn on_guest_call(
     // different one. Somebody who names an import is asking about that import (D623).
     if is_forced(index as usize) || (handler.is_none() && !anything_forced()) {
         dump_arguments(index, args);
+    }
+    if is_forced(index as usize) {
+        capture_caller_stack(sequence, index, entry_rsp);
     }
 
     // After the dump, deliberately: the dump must record what the guest passed, not what

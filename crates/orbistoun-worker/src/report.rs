@@ -781,6 +781,52 @@ fn dump_at_fault() {
     }
 }
 
+/// The most recent calls to each import named with `ORBISTOUN_DUMP`, with the guest-code addresses
+/// found on the caller's stack at each (worklog 867).
+///
+/// **Candidates, not a call chain.** Words are copied from the return address up and those that
+/// land in guest code are listed; with no frame pointer followed, a stale word from an older frame
+/// qualifies too, and the line says so. Word 0 is the return address itself, so the first entry is
+/// always exact.
+#[cfg(windows)]
+fn caller_stacks_at_fault() {
+    use std::io::Write as _;
+
+    let stacks = orbistoun_thunk::caller_stacks();
+    if stacks.is_empty() {
+        return;
+    }
+    let mut err = std::io::stderr();
+    for stack in stacks {
+        let label = label_of(stack.index as usize).unwrap_or("unknown");
+        let code: Vec<String> = stack
+            .words
+            .iter()
+            .enumerate()
+            .filter_map(|(word, &value)| {
+                let (region, offset) = locate(value)?;
+                is_code_region(region).then(|| format!("+{:#x}: {region}+{offset:#x}", word * 8))
+            })
+            .collect();
+        let _ = writeln!(
+            err,
+            "orbistoun: caller stack of call {} to {label} (code addresses on the stack, return address first; later ones may be stale): {}",
+            stack.sequence,
+            if code.is_empty() {
+                "none".to_owned()
+            } else {
+                code.join(", ")
+            }
+        );
+    }
+}
+
+/// Whether a region named by [`locate`] holds guest code: the image or the title's own modules.
+fn is_code_region(region: &str) -> bool {
+    region == REGION_NAMES[Region::Image.slot()]
+        || region == REGION_NAMES[Region::TitleModules.slot()]
+}
+
 /// Written explicitly so a report line is one line however the stream is buffered.
 #[cfg(windows)]
 const NEWLINE: &str = "
@@ -1288,6 +1334,7 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // point is the code around a fault in a *runtime mapping*, which no static disassembly of the
     // module file reaches (worklog 724).
     dump_at_fault();
+    caller_stacks_at_fault();
 
     // **The host stack, but only when the fault is ours.**
     //

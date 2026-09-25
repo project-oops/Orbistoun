@@ -44,16 +44,16 @@ pub mod dispatch;
 pub mod syscall;
 
 pub use dispatch::{
-    ArgumentDump, DUMP_BYTES, ForcedWrite, GuestFn, Plant, Pointing, RecordedCall, SHAPE_OTHER,
-    SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO, abi_conformance, arg_shapes, argument_dumps,
-    call_counts, classify_arg, current_call, current_thread, describe_shape, dropped_ranges,
-    dumps_dropped, entry_alignment_conforms, forced_return_count, forced_write_counts, host_thread,
-    implemented_count, implemented_count_within, install_call_budget, install_float_handlers,
-    install_forced_dumps, install_forced_returns, install_forced_writes, install_handlers,
-    install_policy_returns, install_policy_writes, install_readable_ranges, install_stub_returns,
-    install_writable_ranges, is_implemented, is_mapped, last_call, note_readable_range,
-    opening_calls, opening_sequence, ranges_known, readable_span, recorded_calls, stack_arguments,
-    total_calls,
+    ArgumentDump, CallerStack, DUMP_BYTES, ForcedWrite, GuestFn, Plant, Pointing, RecordedCall,
+    SHAPE_OTHER, SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO, abi_conformance, arg_shapes,
+    argument_dumps, call_counts, caller_stacks, classify_arg, current_call, current_thread,
+    describe_shape, dropped_ranges, dumps_dropped, entry_alignment_conforms, forced_return_count,
+    forced_write_counts, host_thread, implemented_count, implemented_count_within,
+    install_call_budget, install_float_handlers, install_forced_dumps, install_forced_returns,
+    install_forced_writes, install_handlers, install_policy_returns, install_policy_writes,
+    install_readable_ranges, install_stub_returns, install_writable_ranges, is_implemented,
+    is_mapped, last_call, note_readable_range, opening_calls, opening_sequence, ranges_known,
+    readable_span, recorded_calls, stack_arguments, total_calls,
 };
 
 use orbistoun_mem::{AddressSpace, MemError, Protection};

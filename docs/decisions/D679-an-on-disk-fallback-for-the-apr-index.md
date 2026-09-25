@@ -46,3 +46,15 @@ Terminator's real wall is the `int 0x41` guest assert, preceded by error-message
 `strlen`), cause not yet identified - it needs its own investigation (what sets the error flag the
 assert tests, `test byte [rax+0x30],0x10; je; int 0x41`), independent of APR. The APR out-param slot
 layout (D592) is still the honest report-not-guess it was before this.
+
+## Corrected 2026-09-25: the trap is APR's, and this experiment could not have shown it
+
+Worklog 867 traced the `int 0x41` return address by return address. A stream's length method
+returns the unfilled size slot of this resolve, which holds a leftover stack address. The title then
+reserves a string that long (`sceKernelReserveVirtualRange`, `0x600000800000` bytes), is refused, and
+traps. So the resolve **is** in the fault chain.
+
+The negative result above is explained by how it wrote: `answer_resolve` stores **four bytes** into
+each slot. A 64-bit size slot keeps the upper half of the old stack address, so the "answered" size
+was still about `0x6000_0000_000d`, and all six permutations failed identically. The decision not to
+ship a guessed layout stands. The layout is now requested from hardware (REQ-20260925T1834Z-a7e2).
