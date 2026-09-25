@@ -224,6 +224,15 @@ static EXEC_REGS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// How many times any execute breakpoint fired, which says whether the first hit was the only
 /// one - a function called once versus a hot one.
 static EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Where each execute slot was armed, kept after the slot disarms so it can still be reported.
+static EXEC_SLOT_AT: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
+/// How many times each execute slot fired, across every thread it was armed on.
+///
+/// **Per slot, not one total.** The summary used to print the total beside the first hit's
+/// address, so `0x10` "hit 2 times" when `0x10` and `0xb2` had each hit once, and a bisection of
+/// PPSA04263's constructor list read every run as "only the first entry ran" (worklog 873).
+static EXEC_SLOT_HITS: [AtomicU64; MAX_WATCHPOINTS] =
+    [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 
 /// Records an execute-breakpoint hit: counts it, and on the first snapshots the registers the
 /// instruction was about to run with.
@@ -268,6 +277,9 @@ fn remember(requests: &[Request]) {
         ARMED_ADDRESS[slot].store(request.address, Ordering::Relaxed);
         ARMED_LENGTH[slot].store(request.length, Ordering::Relaxed);
         ARMED_EXECUTE[slot].store(u64::from(request.kind == Kind::Execute), Ordering::Relaxed);
+        if request.kind == Kind::Execute {
+            EXEC_SLOT_AT[slot].store(request.address, Ordering::Relaxed);
+        }
     }
 }
 
@@ -367,7 +379,8 @@ pub fn sites() -> Vec<String> {
     let mut lines = Vec::new();
     for (slot, armed_at) in ARMED_ADDRESS.iter().enumerate() {
         let address = armed_at.load(Ordering::Relaxed);
-        if address == 0 {
+        // Execute slots report through `execute_snapshot`, with their own counts.
+        if address == 0 || ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
             continue;
         }
         let tag = slot as u64 + 1;
@@ -472,15 +485,22 @@ fn execute_snapshot() -> Vec<String> {
         r14: EXEC_REGS[14].load(Ordering::Relaxed),
         r15: EXEC_REGS[15].load(Ordering::Relaxed),
     };
-    let count = EXEC_COUNT.load(Ordering::Relaxed);
-    let mut lines = vec![format!(
-        concat!(
-            "  execute breakpoint at {} hit {} time(s); registers the first time (arguments in ",
-            "rdi, rsi, rdx, rcx, r8, r9):"
-        ),
-        located(rip.wrapping_sub(1)),
-        count
-    )];
+    // One line per execute breakpoint, with its own count - a breakpoint that never fired says so.
+    let mut lines: Vec<String> = EXEC_SLOT_AT
+        .iter()
+        .zip(&EXEC_SLOT_HITS)
+        .filter_map(|(at, hits)| {
+            let at = at.load(Ordering::Relaxed);
+            (at != 0).then(|| match hits.load(Ordering::Relaxed) {
+                0 => format!("  execute breakpoint at {}: never hit", located(at)),
+                n => format!("  execute breakpoint at {} hit {n} time(s)", located(at)),
+            })
+        })
+        .collect();
+    lines.push(format!(
+        "  registers at the first execute hit anywhere, {} (arguments in rdi, rsi, rdx, rcx, r8, r9):",
+        located(rip.wrapping_sub(1))
+    ));
     lines.extend(
         registers
             .lines()
@@ -616,18 +636,26 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
     let mut ours = false;
     let mut disarm = 0;
     for (slot, address) in ARMED_ADDRESS.iter().enumerate() {
-        if fired >> slot & 1 == 0 || address.load(Ordering::Relaxed) == 0 {
+        if fired >> slot & 1 == 0 {
+            continue;
+        }
+        if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
+            // Execute: counted against its own slot, the first hit anywhere snapshots the state
+            // the instruction was entered with, and the slot disarms on the thread that hit it -
+            // a one-shot per thread, so the instruction runs and the guest carries on. The slot
+            // stays known, because every guest thread carries these (worklog 871) and a hit on a
+            // second thread is still ours to count, not a stranger's exception.
+            ours = true;
+            EXEC_SLOT_HITS[slot].fetch_add(1, Ordering::Relaxed);
+            note_execute(after, registers);
+            disarm |= 1 << (slot * 2);
+            continue;
+        }
+        if address.load(Ordering::Relaxed) == 0 {
             continue;
         }
         ours = true;
-        if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
-            // Execute: snapshot the state the instruction was entered with, then mark the slot
-            // for disarming and forget it, so this is a one-shot - the instruction runs, the
-            // guest carries on, and neither a later trap nor the summary sees it twice.
-            note_execute(after, registers);
-            disarm |= 1 << (slot * 2);
-            address.store(0, Ordering::Relaxed);
-        } else if record(slot, after) {
+        if record(slot, after) {
             announce(slot, after);
         }
     }
@@ -922,6 +950,45 @@ mod tests {
         // A stray length is overridden rather than refused: the mode has only one.
         let anyway = parse("0x1000+8:x").expect("length is ignored for execute, not an error");
         assert_eq!(anyway[0].length, 1);
+    }
+
+    /// **Each execute breakpoint is counted against itself.** Two slots fire, one of them twice (a
+    /// second thread), and the counts come back per slot - not as one total beside the first
+    /// address, which read a bisection's four hits as "only the first ran" (worklog 873).
+    #[test]
+    fn execute_hits_are_counted_per_breakpoint() {
+        use super::{EXEC_SLOT_HITS, Registers, Request, attribute, execute_snapshot, remember};
+        use core::sync::atomic::Ordering;
+        remember(&[
+            Request {
+                address: 0x4000_0000_0010,
+                length: 1,
+                kind: Kind::Execute,
+            },
+            Request {
+                address: 0x4000_0000_00b2,
+                length: 1,
+                kind: Kind::Execute,
+            },
+        ]);
+        for hits in &EXEC_SLOT_HITS {
+            hits.store(0, Ordering::Relaxed);
+        }
+        let registers = Registers::default();
+        assert_eq!(attribute(0b01, 0x4000_0000_0010, &registers), (true, 0b01));
+        assert_eq!(
+            attribute(0b10, 0x4000_0000_00b2, &registers),
+            (true, 0b0100)
+        );
+        assert_eq!(
+            attribute(0b10, 0x4000_0000_00b2, &registers),
+            (true, 0b0100)
+        );
+        assert_eq!(EXEC_SLOT_HITS[0].load(Ordering::Relaxed), 1);
+        assert_eq!(EXEC_SLOT_HITS[1].load(Ordering::Relaxed), 2);
+        let lines = execute_snapshot().join("\n");
+        assert!(lines.contains("0x400000000010") && lines.contains("hit 1 time(s)"));
+        assert!(lines.contains("0x4000000000b2") && lines.contains("hit 2 time(s)"));
     }
 
     /// **An execute breakpoint encodes as R/W=00, LEN=00** - the part of the control word a

@@ -887,3 +887,4 @@ context cannot re-derive.
 | - | [870. The APR resolve answers its measured contract, and PPSA25872 moves](worklog/870-the-apr-resolve-answers-its-measured-contract.md) |
 | - | [871. Watchpoints follow every guest thread](worklog/871-watchpoints-follow-every-guest-thread.md) |
 | - | [872. sceAgcCreateShader relocates every offset self-relative, as the console does](worklog/872-sce-agc-create-shader-relocates-self-relative.md) |
+| - | [873. Execute breakpoints report their own hits](worklog/873-execute-breakpoints-report-their-own-hits.md) |
