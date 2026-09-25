@@ -115,15 +115,18 @@ construction and are not comparable with the table above:
 - **BFpilot_v0.4.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **BackPork_0.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **CheatRunner_v0.17** reached 0 imports, ending at `0x1`, with 1 function answered by name
-- **GLCB00001** reached 21 imports, ending at `ran to the time limit`, with 2 functions answered by name
+- **GLCB00001** reached 32 imports, ending at `ran to the time limit`, with 2 functions answered by name
+- **GLPB00001** reached 20 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **Lapy-JB-Daemon_v1.2** reached 0 imports, ending at `0x1`, with 1 function answered by name
-- **NVRB00001** reached 49 imports, ending at `spent its call budget`, with 2 functions answered by name
+- **NVPT00001** reached 49 imports, ending at `spent its call budget`, with 2 functions answered by name
+- **NVRB00001** reached 56 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **PPSA02664-app0** reached 215 imports, ending at `image+0x42c76`, with 2 functions answered by name
 - **PPSA03416-app0** reached 39 imports, ending at `image+0xb14be3`, with 1 function answered by name
 - **PPSA04263-app0** reached 75 imports, ending at `image+0x19676d7`, with 2 functions answered by name
 - **PPSA21564-app0** reached 55 imports, ending at `image+0x11ccd`, with 1 function answered by name
 - **PPSA25872-app0** reached 56 imports, ending at `image+0x7b594e`, with 1 function answered by name
 - **PPSA28061-app0** reached 60 imports, ending at `the guest called abort`, with 1 function answered by name
+- **SCSH00001** reached 40 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **ShadowMountPlus_1.6beta16** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **WebKit-Autoloader-Installer_v0.4.0** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **elfldr_v0.26** reached 0 imports, ending at `0x1`, with 1 function answered by name
@@ -185,11 +188,11 @@ spine in parallel.
 
 | | |
 |---|---|
-| Functions declared / implemented | 976 / 778 |
+| Functions declared / implemented | 980 / 782 |
 | Declared in a library that serves nothing | 147 across 21 libraries - names written down, no implementation |
-| Recorded behaviours | 825 - 367 published, 85 measured, 78 guest-observed, 262 assumed |
-| Open questions a hardware probe could settle | 801 |
-| Symbol database | 30186 names - 716 from this repository, 29453 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
+| Recorded behaviours | 829 - 368 published, 85 measured, 79 guest-observed, 264 assumed |
+| Open questions a hardware probe could settle | 805 |
+| Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
 
