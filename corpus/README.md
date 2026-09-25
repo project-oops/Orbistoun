@@ -64,3 +64,13 @@ profile (not a diagnostic), these records will differentiate on their own. See D
 
 The bytes live in `titles/`; the knowledge lives here and in `compat/`. That is what lets a
 finding travel when the guest cannot.
+
+## Input scripts
+
+`input/` holds pad scripts that take a title past its menus (D721): captures made with the GUI's
+"capture input", timed in the guest's own flips, each signed off by watching it played back in the
+GUI (`orbistoun-gui --title <id> --playback <file>`). A run plays one with
+`./bin/orbistoun run <id> -- --input corpus/input/<file>`, so a headless test reaches the part of a
+title a person would have to walk it to.
+
+- `NVRB00001-into-game.toml` - Neverball, from its title menu into the first level.

@@ -1,6 +1,6 @@
 [title]
-id = "GLCB00001"
-name = "GL1 Cube"
+id = "NVRB00001"
+name = "Neverball"
 content_version = "01.00"
 master_version = "01.00"
 
@@ -11,14 +11,14 @@ master_version = "01.00"
 [experiment]
 reach = "flipped"
 outcome = "ran to the time limit"
-imports = 32
-calls = 3435713
+imports = 56
+calls = 381472349
 standing = 100
 default_return = "unimplemented"
 overrides = 2
 propping = 2
-frames = 975
-unanswered = 8
-limit_seconds = 40
+frames = 5866
+unanswered = 9
+limit_seconds = 150
 build = "v0.1.0 - 1771866-dirty"
-measured_on = "2026-09-24"
+measured_on = "2026-09-25"

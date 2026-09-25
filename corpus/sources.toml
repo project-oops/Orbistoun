@@ -128,9 +128,13 @@ sources = [
     "../obscene/build/prospero",
     "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-prospero.zip",
 ]
+archive = true
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
-asset = []
+
+[[source.asset]]
+file = "obscene-probe-prospero.zip"
+sha256 = "4a16cd9664b6cb43831adc2fd2d1c69905921ed24a658ced4a9380bed3f090e9"
 
 [[source]]
 name = "obscene-probe-prospero-payload"
@@ -142,7 +146,10 @@ sources = [
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
-asset = []
+
+[[source.asset]]
+file = "obscene-probe-prospero.elf"
+sha256 = "5fa2c1c7c9ee05d2efeb1621e16485aebf4093aa0e52ada193da0c56a2268d37"
 
 [[source]]
 name = "obscene-probe-orbis-native"
@@ -152,6 +159,7 @@ sources = [
     "../obscene/build/orbis",
     "https://github.com/project-oops/obSCEne/releases/download/latest-main/obscene-probe-orbis.zip",
 ]
+archive = true
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
 asset = []
@@ -166,16 +174,414 @@ sources = [
 ]
 licence = "same suite (D043); our own accuracy probe, not third-party"
 cite = "https://github.com/project-oops/obSCEne"
+
+[[source.asset]]
+file = "obscene-probe-orbis.pkg"
+sha256 = "a5fc41cd1cd8515c4135867752fe58fbdc7c70e019d0cc4ec1a3f06f92be2f75"
+
+[[source]]
+name = "ARMA00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/armagetron-advanced/dist/armagetron-advanced-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/armagetron-advanced-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
 asset = []
 
 [[source]]
-name = "oops-apps-sceshell"
+name = "CRFT00001"
 target = "titles"
 kind = "local"
-path = "../oops-apps/src/sceshell/build/title/SCSH00001"
+sources = [
+    "../oops-apps/src/oops-titles/craft/dist/craft-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/craft-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+asset = []
+
+[[source]]
+name = "ETXR00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/extreme-tux-racer/dist/extreme-tux-racer-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/extreme-tux-racer-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "extreme-tux-racer-title-prospero.zip"
+sha256 = "5b5a4f8dd604bfe57854717c56607d8ce3b85b6f1299c793a11379c99b69a05d"
+
+[[source]]
+name = "MDEM00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/mesa-demos/dist/mesa-demos-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/mesa-demos-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the demos are Mesa's, under their own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "mesa-demos-title-prospero.zip"
+sha256 = "6967f0b1cf4dcbd6a0dd581bb2096276db8de102956c2b2cdcbe5bc3600047ba"
+
+[[source]]
+name = "NVRB00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/neverball/dist/neverball-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/neverball-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "neverball-title-prospero.zip"
+sha256 = "981bd65ad8d588e516a7d2e9fe9683ecc0127edf66d0b82e112d741d8c588df6"
+
+[[source]]
+name = "NVPT00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/neverputt/dist/neverputt-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/neverputt-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "neverputt-title-prospero.zip"
+sha256 = "7ac23e31bc9402e1adc51528d29964a4252a16f3d1ed836deb3275628b74d45c"
+
+[[source]]
+name = "RTRA00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/retroarch/dist/retroarch-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/retroarch-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the program is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+asset = []
+
+[[source]]
+name = "STUX00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/supertux/dist/supertux-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/supertux-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+asset = []
+
+[[source]]
+name = "STKT00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/supertuxkart/dist/supertuxkart-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/supertuxkart-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+asset = []
+
+[[source]]
+name = "CXTH00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/cxx-throw/dist/cxx-throw-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/cxx-throw-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+asset = []
+
+[[source]]
+name = "GALR00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/gallery/dist/gallery-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/gallery-title-prospero.zip",
+]
+archive = true
 licence = "same suite (D043); our own application, not third-party"
 cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
-file = "eboot.bin"
-sha256 = "cf3715c8554528c78fbd6620d31922f3433fe209cc0d18185a1434c19ba6aaff"
+file = "gallery-title-prospero.zip"
+sha256 = "0a23755c50cb6b2a829b9a129dd754b9ec07ca40c70c36d5954b815cc9740ff9"
+
+[[source]]
+name = "NETT00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/net-tool/dist/net-tool-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/net-tool-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "net-tool-title-prospero.zip"
+sha256 = "9a62e80d5a08846d2c4e541eec43b55cf18c6f84bd9b970e3b4382ffd7e8d57d"
+
+[[source]]
+name = "OPSY00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/oopsy-daisy/dist/oopsy-daisy-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/oopsy-daisy-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "oopsy-daisy-title-prospero.zip"
+sha256 = "8aafc23f1400fea353ed4173e03808029421003297e4dd290a7eb7528c029244"
+
+[[source]]
+name = "PADV00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/pad-viz/dist/pad-viz-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/pad-viz-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "pad-viz-title-prospero.zip"
+sha256 = "15532e7bf9a97f7559870fa4677f215034ccd3b9103fd1f81eb975f91bfb5b82"
+
+[[source]]
+name = "SCSH00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/seashell/dist/seashell-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/seashell-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "seashell-title-prospero.zip"
+sha256 = "aa49f5541283af7d676c797ea25777b6bd9250a3b2b06100226ca74e55b642ff"
+
+[[source]]
+name = "GLCB00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-gl/gl1-cube/dist/gl1-cube-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/gl1-cube-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "gl1-cube-title-prospero.zip"
+sha256 = "77288d658455703f1c47fe3c8c8a37443a66d5ee2c774ca3b16f44702b3e78a3"
+
+[[source]]
+name = "GLPB00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-gl/gl1-probe/dist/gl1-probe-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/gl1-probe-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "gl1-probe-title-prospero.zip"
+sha256 = "c1ed66cf69dbb83f8bc2bc281ababa15737ad3a4dc768e4f00df508ffa1621ba"
+
+[[source]]
+name = "GLTC00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-gl/gl2-cube/dist/gl2-cube-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/gl2-cube-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "gl2-cube-title-prospero.zip"
+sha256 = "c2b2549d47c6b240ad46978f275cd6cfe0576fc2ce57fff383b9ab2528f9345f"
+
+[[source]]
+name = "GLTP00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-gl/gl2-probe/dist/gl2-probe-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/gl2-probe-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "gl2-probe-title-prospero.zip"
+sha256 = "b187cd9db1144022d029f3b288953e33b94dfb1ded5e03b28b8a51579d2ac678"
+
+[[source]]
+name = "GCTS00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-mesa/gl-cts/dist/gl-cts-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/gl-cts-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the conformance suite is Khronos's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "gl-cts-title-prospero.zip"
+sha256 = "c4e9bc129cc7d383f891d03d2a23598229422bb6219d3e3105db9554bbad5f5a"
+
+[[source]]
+name = "MCUB00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-mesa/mesa-cube/dist/mesa-cube-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/mesa-cube-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "mesa-cube-title-prospero.zip"
+sha256 = "5a6051d6a796f01d8f4eb3129151f9e296ebb1c26083a9cf71f0c922ed6ab6dd"
+
+[[source]]
+name = "DRIP00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-mesa/mesa-dri-probe/dist/dri-probe-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/mesa-dri-probe-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "dri-probe-title-prospero.zip"
+sha256 = "aaad33e50e55bad637227e4ac94280239b8e203acce3d898f3d59aaf8a4e1bb0"
+
+[[source]]
+name = "MESA00001"
+target = "titles"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-mesa/mesa-winsys-probe/dist/mesa-probe-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/mesa-winsys-probe-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own test title, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "mesa-probe-title-prospero.zip"
+sha256 = "75c4623cd5e1d82d0ed9f0c504a2bb232ef3e56aa3138d51a1d8d229d907ca0a"
+
+[[source]]
+name = "pltauth-patch"
+target = "payloads"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-payloads/pltauth-patch/dist/pltauth-patch-prospero.elf",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/pltauth-patch-prospero.elf",
+]
+licence = "same suite (D043); our own payload, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "pltauth-patch-prospero.elf"
+sha256 = "b13761bafa215a0ce0b97638ed9de24f38f97e0e61196ca665365535aee08f0b"
+
+[[source]]
+name = "porthole"
+target = "payloads"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-payloads/porthole/dist/porthole-prospero.elf",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/porthole-prospero.elf",
+]
+licence = "same suite (D043); our own payload, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+asset = []
+
+[[source]]
+name = "sandbox-daemon"
+target = "payloads"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-payloads/sandbox-daemon/dist/sandbox-daemon-prospero.elf",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/sandbox-daemon-prospero.elf",
+]
+licence = "same suite (D043); our own payload, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "sandbox-daemon-prospero.elf"
+sha256 = "2806212bd6aeb172400198316b5df3d2451525756648ccc18dca85f6c1841204"
+
+[[source]]
+name = "tracer"
+target = "payloads"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-payloads/tracer/dist/tracer-prospero.elf",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/tracer-prospero.elf",
+]
+licence = "same suite (D043); our own payload, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "tracer-prospero.elf"
+sha256 = "5931eaedc1748f9238556aec5a7e5df001e78a4a9b2a2b1a3ecdeef32e02bc39"

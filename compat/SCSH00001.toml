@@ -1,24 +1,25 @@
 [title]
-id = "GLCB00001"
-name = "GL1 Cube"
+id = "SCSH00001"
+name = "SeaShell"
 content_version = "01.00"
 master_version = "01.00"
 
 [compat]
 
 [settings]
+filesystem_view = "system"
 
 [experiment]
 reach = "flipped"
 outcome = "ran to the time limit"
-imports = 32
-calls = 3435713
+imports = 40
+calls = 19685
 standing = 100
 default_return = "unimplemented"
 overrides = 2
 propping = 2
-frames = 975
-unanswered = 8
+frames = 1504
+unanswered = 15
 limit_seconds = 40
-build = "v0.1.0 - 1771866-dirty"
+build = "v0.1.0 - d1502d2"
 measured_on = "2026-09-24"
