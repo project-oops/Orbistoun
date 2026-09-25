@@ -23,13 +23,14 @@ measured_on = "2026-09-13"
 
 [experiment]
 reach = "entered"
-outcome = "image+0x7b594e"
-imports = 56
-calls = 39929
-standing = 8
+outcome = "image+0x17554a3"
+imports = 155
+calls = 321979
+standing = 100
 default_return = "unimplemented"
-overrides = 1
-propping = 1
-limit_seconds = 8
-build = "0.1.0"
-measured_on = "2026-09-01"
+overrides = 2
+propping = 2
+unanswered = 1
+limit_seconds = 20
+build = "v0.1.0 - 34ff307-dirty"
+measured_on = "2026-09-25"

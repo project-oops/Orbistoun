@@ -881,3 +881,5 @@ context cannot re-derive.
 | - | [864. Neverball plays, staged with a writable /app0](worklog/864-neverball-plays-staged-with-a-writable.md) |
 | - | [865. Neverball ran four times fast in the window](worklog/865-neverball-ran-four-times-fast-in-the.md) |
 | - | [866. A guest's first argument names its module under /app0, not the host path](worklog/866-a-guest-s-first-argument-names-its-module.md) |
+| - | [867. PPSA25872's trap traced to the APR resolve's unfilled size](worklog/867-ppsa25872-s-trap-traced-to-the-apr-resolve-s.md) |
+| - | [868. sceKernelVirtualQuery answers the whole 72-byte structure the console writes](worklog/868-sce-kernel-virtual-query-answers-the-whole.md) |

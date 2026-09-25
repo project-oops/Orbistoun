@@ -29,14 +29,15 @@ measured_on = "2026-09-21"
 
 [experiment]
 reach = "flipped"
-outcome = "image+0x42c76"
-imports = 215
-calls = 420776
+outcome = "image+0x3f8f0"
+imports = 224
+calls = 418369
 standing = 100
 default_return = "unimplemented"
 overrides = 2
 propping = 2
 frames = 1
-limit_seconds = 25
-build = "0.1.0"
-measured_on = "2026-09-04"
+unanswered = 9
+limit_seconds = 20
+build = "v0.1.0 - 97b4e29"
+measured_on = "2026-09-25"

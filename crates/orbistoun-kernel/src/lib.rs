@@ -1442,6 +1442,27 @@ fn forget_mapped(address: u64, len: u64) {
     if let Ok(mut mapped) = physical_mappings().lock() {
         mapped.retain(|_, &mut (base, _)| base < address || base - address >= len);
     }
+    if let Ok(mut reserved) = reservations().lock() {
+        reserved.retain(|&(base, _)| base < address || base - address >= len);
+    }
+    if let Ok(mut flexible) = flexible_mappings().lock() {
+        flexible.retain(|&base| base < address || base - address >= len);
+    }
+    if let Ok(mut requested) = requested_protections().lock() {
+        requested.retain(|&(base, _, _)| base < address || base - address >= len);
+    }
+}
+
+/// Ranges `sceKernelReserveVirtualRange` handed out, as `(base, len)`.
+///
+/// **A reservation is address space, not memory**, and a guest asks which it has. orbistoun
+/// reserves and backs in one step, so its address space alone cannot tell a reservation from a
+/// mapping - and answering a fresh reservation as committed read-write memory made the Unity titles
+/// skip the direct-memory allocate-and-map that fills it (worklog 868). A range here that no
+/// direct mapping has been placed in is answered uncommitted and inaccessible.
+fn reservations() -> &'static Mutex<Vec<(u64, u64)>> {
+    static RESERVED: OnceLock<Mutex<Vec<(u64, u64)>>> = OnceLock::new();
+    RESERVED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn map_named_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -1577,6 +1598,7 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     drop(space);
     mapping_placed(base, len, protection, requested != 0);
+    note_requested_protection(base, len, prot);
 
     if !write_word(out, base) {
         return u64::from(GuestError::InvalidArgument.as_raw());
@@ -1688,6 +1710,7 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
     }
     drop(space);
     mapping_placed(base, len, protection, true);
+    note_requested_protection(base, len, prot);
     if let Ok(mut mapped) = physical_mappings().lock() {
         mapped.insert(physical, (base, len));
     }
@@ -4360,6 +4383,7 @@ pub fn mmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     drop(space);
     mapping_placed(base, len, protection, addr != 0);
+    note_requested_protection(base, len, prot);
     base
 }
 
@@ -4431,6 +4455,9 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         protection,
         hint != 0 && Some(base) == checked_next_multiple_of(hint, align),
     );
+    if let Ok(mut reserved) = reservations().lock() {
+        reserved.push((base, len));
+    }
     // The reserved base, written back through the `void **` the guest passed - the documented shape,
     // status returned separately as success.
     if write_word(addr_out, base) {
@@ -4454,21 +4481,221 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceVideoOutGetResolutionStatus` writes only the fields it can cite. An address in no region is
 /// answered with the code the console answers for one, not a fabricated mapping.
 fn virtual_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (addr, info) = (args[0], args[2]);
+    let (addr, info, size) = (args[0], args[2], args[3]);
     let vendor = |errno| u64::from(GuestError::vendor(errno).as_raw());
     if info == 0 {
         return vendor(orbistoun_core::errno::INVALID);
     }
-    // Both the runtime mappings and the regions the loader/worker noted (the image, the stack,
-    // the TLS block), so a guest querying its own code or stack is answered rather than refused.
-    let Some((start, end)) = region_containing(addr) else {
-        return vendor(orbistoun_core::errno::NO_ENTRY);
+    // **An address in no region is `EACCES`, not `ENOENT`.** Measured: obSCEne's
+    // `020-memory/virtual-query-unmapped` queried `0x720000240000` with flags 0 and the console
+    // answered `0x8002000d` (REQ-20260914T1110Z-9b12, worklog 868).
+    let Some(region) = query_region(addr) else {
+        return vendor(orbistoun_core::errno::DENIED);
     };
-    if write_word(info, start) && write_word(info + 8, end) {
+    // The whole structure, zeros included, as the console writes it: the probe pre-filled 72
+    // bytes with `0xAA` and every one changed. A field left as the caller prepared it is a value
+    // the console never hands back.
+    let encoded = region.encode();
+    let len = usize::try_from(size).map_or(encoded.len(), |s| s.min(encoded.len()));
+    if write_block(info, &encoded[..len]) {
         OK
     } else {
         vendor(orbistoun_core::errno::INVALID)
     }
+}
+
+/// How many bytes `SceKernelVirtualQueryInfo` is: measured, the console's `extent` for all three
+/// regions obSCEne queried (REQ-20260914T1110Z-9b12).
+const VIRTUAL_QUERY_INFO_BYTES: usize = 72;
+
+/// Where each field of `SceKernelVirtualQueryInfo` sits, from the console's own bytes.
+///
+/// Measured in obSCEne's `020-memory/virtual-query-{mapped,text,stack}`: start and end at 0 and 8,
+/// a direct mapping's physical offset at 0x10 (`0x2a20000` for its mapping, 0 for code and stack),
+/// the protection as a 32-bit value at 0x18 (3 for read-write, 4 for execute-only text), a 32-bit
+/// memory type at 0x1c (0 in all three), a flag byte at 0x20, and a NUL-terminated name from 0x21.
+mod vq {
+    pub(super) const START: usize = 0x00;
+    pub(super) const END: usize = 0x08;
+    pub(super) const OFFSET: usize = 0x10;
+    pub(super) const PROTECTION: usize = 0x18;
+    pub(super) const FLAGS: usize = 0x20;
+    pub(super) const NAME: usize = 0x21;
+    /// The name's room: from 0x21 to the end of the structure, keeping its terminator.
+    pub(super) const NAME_BYTES: usize = super::VIRTUAL_QUERY_INFO_BYTES - NAME;
+
+    /// The flag bits, read off three measured regions: text `0x11`, a direct mapping `0x12`, the
+    /// main stack `0x15`. Committed is set on all three; direct only on the direct mapping; stack
+    /// only on the stack; and flexible on the two that are not direct.
+    pub(super) const FLEXIBLE: u8 = 0x01;
+    pub(super) const DIRECT: u8 = 0x02;
+    pub(super) const STACK: u8 = 0x04;
+    pub(super) const COMMITTED: u8 = 0x10;
+}
+
+/// What `sceKernelVirtualQuery` reports about one region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueryRegion {
+    start: u64,
+    end: u64,
+    /// A direct mapping's physical offset; zero otherwise, as measured for code and stack.
+    offset: u64,
+    /// CPU read 1, write 2, execute 4 - the values the console reported (3 and 4).
+    protection: u32,
+    flags: u8,
+    /// The console's name for the region, where one was measured; empty otherwise.
+    name: &'static str,
+}
+
+impl QueryRegion {
+    /// The 72 bytes the console writes, zero wherever this region has nothing to say.
+    fn encode(&self) -> [u8; VIRTUAL_QUERY_INFO_BYTES] {
+        let mut out = [0_u8; VIRTUAL_QUERY_INFO_BYTES];
+        out[vq::START..vq::START + 8].copy_from_slice(&self.start.to_le_bytes());
+        out[vq::END..vq::END + 8].copy_from_slice(&self.end.to_le_bytes());
+        out[vq::OFFSET..vq::OFFSET + 8].copy_from_slice(&self.offset.to_le_bytes());
+        out[vq::PROTECTION..vq::PROTECTION + 4].copy_from_slice(&self.protection.to_le_bytes());
+        out[vq::FLAGS] = self.flags;
+        let name = self.name.as_bytes();
+        let n = name.len().min(vq::NAME_BYTES - 1);
+        out[vq::NAME..vq::NAME + n].copy_from_slice(&name[..n]);
+        out
+    }
+}
+
+/// The protection each guest range was last *asked* for, as `(base, len, prot)`, newest last.
+///
+/// **What the guest asked, not what orbistoun granted.** `protection_from_guest` grants read with
+/// write and keeps an unasked-for range readable, because the host needs it; answering a query with
+/// that grant told the guest a range was already set up that it had not set up, and it skipped the
+/// `sceKernelMprotect` that sets it up (worklog 868).
+fn requested_protections() -> &'static Mutex<Vec<(u64, u64, u64)>> {
+    static REQUESTED: OnceLock<Mutex<Vec<(u64, u64, u64)>>> = OnceLock::new();
+    REQUESTED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Records the protection a guest asked for over `[base, base + len)`.
+fn note_requested_protection(base: u64, len: u64, prot: u64) {
+    if let Ok(mut requested) = requested_protections().lock() {
+        requested
+            .retain(|&(b, l, _)| !(b >= base && b.saturating_add(l) <= base.saturating_add(len)));
+        requested.push((base, len, prot));
+    }
+}
+
+/// The protection last asked for over the range holding `addr`.
+fn requested_protection(addr: u64) -> Option<u64> {
+    let requested = requested_protections().lock().ok()?;
+    requested
+        .iter()
+        .rev()
+        .find(|&&(base, len, _)| addr >= base && addr < base.saturating_add(len))
+        .map(|&(_, _, prot)| prot)
+}
+
+/// The console's protection field for a range asked for with `prot`: the request, as asked.
+///
+/// Measured for CPU bits - a read-write mapping reported 3, execute-only text 4. **Guest-observed
+/// for the GPU bits above them:** PPSA25872's allocator queries a committed range and compares
+/// this field with the `0xf2` it wants (CPU write plus GPU read and write), calling
+/// `sceKernelMprotect` only when they differ (`image+0x1ae28b4`, worklog 868). A field holding
+/// CPU bits alone could never equal `0xf2`, so the console must hand the full request back.
+const fn reported_protection(prot: u64) -> u32 {
+    prot as u32
+}
+
+/// Whether a region starting at `start` is a reservation `sceKernelReserveVirtualRange` made.
+fn is_reservation(start: u64) -> bool {
+    reservations()
+        .lock()
+        .is_ok_and(|reserved| reserved.iter().any(|&(base, _)| base == start))
+}
+
+/// The console's protection value for a region's access.
+const fn query_protection(protection: orbistoun_mem::Protection) -> u32 {
+    (protection.read as u32) | ((protection.write as u32) << 1) | ((protection.execute as u32) << 2)
+}
+
+/// Describes the region holding `addr`, from every place one is recorded.
+///
+/// **What is measured and what is not, field by field.** A direct mapping (one this crate
+/// aliased to a physical offset) is answered in full, as `020-memory/virtual-query-mapped` was:
+/// its offset, its protection, direct and committed, and the name `anon` a mapping given none
+/// carries. The main stack is answered as `virtual-query-stack` was. Any other mapping this crate
+/// placed is flexible memory, and gets its protection and the flexible and committed bits - the
+/// bits are the measured ones, their application to flexible mappings is read off the text and
+/// stack samples rather than measured on one. Regions the loader noted (the image, modules) and
+/// thread stacks are answered with their bounds and zeros: their per-segment protection and names
+/// are not measured here, and zero is what the console writes where it has nothing to say.
+fn query_region(addr: u64) -> Option<QueryRegion> {
+    let within = |base: u64, len: u64| addr >= base && addr < base.saturating_add(len);
+    if let Ok(space) = mappings().lock() {
+        if let Some(region) = space.regions().iter().find(|r| within(r.base, r.len)) {
+            let (start, end) = (region.base, region.base.saturating_add(region.len));
+            // What the guest asked for, where the console's answer to that is measured; 0 where
+            // nothing was asked or the answer is not measured - never orbistoun's own grant.
+            let protection = requested_protection(addr).map_or(0, reported_protection);
+            let direct = physical_mappings().lock().ok().and_then(|mapped| {
+                mapped
+                    .iter()
+                    .find(|&(_, &(base, len))| within(base, len))
+                    .map(|(&physical, &(base, _))| physical + start.saturating_sub(base))
+            });
+            let flexible = flexible_mappings()
+                .lock()
+                .is_ok_and(|bases| bases.contains(&start));
+            return Some(match direct {
+                Some(offset) if !flexible => QueryRegion {
+                    start,
+                    end,
+                    offset,
+                    protection,
+                    flags: vq::DIRECT | vq::COMMITTED,
+                    name: "anon",
+                },
+                // A reservation nothing has been mapped into: address space only - no access, not
+                // committed. Inferred from what reserving means and from the guest, which fills
+                // such a range only when the query says it is empty (worklog 868); not measured.
+                _ if !flexible && is_reservation(start) => QueryRegion {
+                    start,
+                    end,
+                    offset: 0,
+                    protection: 0,
+                    flags: 0,
+                    name: "",
+                },
+                _ => QueryRegion {
+                    start,
+                    end,
+                    offset: 0,
+                    protection,
+                    flags: vq::FLEXIBLE | vq::COMMITTED,
+                    name: "",
+                },
+            });
+        }
+    }
+    if let Some(&(base, len)) = STACK_SPAN.get() {
+        if within(base, len) {
+            return Some(QueryRegion {
+                start: base,
+                end: base.saturating_add(len),
+                offset: 0,
+                protection: query_protection(orbistoun_mem::Protection::READ_WRITE),
+                flags: vq::FLEXIBLE | vq::STACK | vq::COMMITTED,
+                name: "main stack",
+            });
+        }
+    }
+    let (start, end) = region_containing(addr)?;
+    Some(QueryRegion {
+        start,
+        end,
+        offset: 0,
+        protection: 0,
+        flags: 0,
+        name: "",
+    })
 }
 
 /// `sceKernelSetVirtualRangeName(start, len, name)` - attaches a debug name to a virtual range.
@@ -4549,7 +4776,10 @@ fn mprotect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     if let Some(outcome) = owned {
         return match outcome {
-            Ok(()) => OK,
+            Ok(()) => {
+                note_requested_protection(addr, len, prot);
+                OK
+            }
             // The range is this crate's own and the host still refused it.
             Err(_) => vendor(orbistoun_core::errno::INVALID),
         };
@@ -4674,8 +4904,19 @@ fn map_flexible_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // `available` for memory the guest never received.
     if result == OK {
         direct::record_flexible_map(len);
+        // Mapped through the direct path, and still flexible memory to a query (worklog 868).
+        if let (Some(base), Ok(mut flexible)) = (read_word(out), flexible_mappings().lock()) {
+            flexible.push(base);
+        }
     }
     result
+}
+
+/// Bases of mappings `sceKernelMapFlexibleMemory` made: placed through the direct path, so its
+/// alias table holds them too, and answered to a query as flexible memory rather than direct.
+fn flexible_mappings() -> &'static Mutex<Vec<u64>> {
+    static FLEXIBLE: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
+    FLEXIBLE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// `scePthreadAttrInit(attr)` - allocates a thread attribute object.
@@ -7384,6 +7625,92 @@ mod tests {
         assert!(
             !super::is_guest_writable(base, 0x100),
             "a noted region carries no protection, so no write is vouched for"
+        );
+    }
+
+    /// Hex to bytes, for the console's own records.
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// **The encoder writes the console's bytes, byte for byte.** Two of obSCEne's hardware records
+    /// (`020-memory/virtual-query-mapped` and `-stack`, REQ-20260914T1110Z-9b12), rebuilt from the
+    /// fields orbistoun knows and compared whole - so a field at the wrong offset, a wrong width or
+    /// an unzeroed tail fails here rather than in a title.
+    #[test]
+    fn a_query_encodes_what_the_console_wrote() {
+        let mapped = super::QueryRegion {
+            start: 0x2_0085_0000,
+            end: 0x2_0086_0000,
+            offset: 0x2a2_0000,
+            protection: 3,
+            flags: super::vq::DIRECT | super::vq::COMMITTED,
+            name: "anon",
+        };
+        let console = hex(concat!(
+            "00008500020000000000860002000000",
+            "0000a202000000000300000000000000",
+            "12616e6f6e0000000000000000000000",
+            "00000000000000000000000000000000",
+            "0000000000000000"
+        ));
+        assert_eq!(mapped.encode().to_vec(), console);
+
+        let stack = super::QueryRegion {
+            start: 0x7_eedf_c000,
+            end: 0x7_eeff_c000,
+            offset: 0,
+            protection: 3,
+            flags: super::vq::FLEXIBLE | super::vq::STACK | super::vq::COMMITTED,
+            name: "main stack",
+        };
+        let console = hex(concat!(
+            "00c0dfee0700000000c0ffee07000000",
+            "00000000000000000300000000000000",
+            "156d61696e20737461636b0000000000",
+            "00000000000000000000000000000000",
+            "0000000000000000"
+        ));
+        assert_eq!(stack.encode().to_vec(), console);
+    }
+
+    /// **A fresh reservation is answered uncommitted and inaccessible.** The Unity allocator tests
+    /// the committed bit (`0x10` at `+0x20`) and fills an uncommitted range with direct memory;
+    /// answering orbistoun's reserve-and-back as committed made it skip the fill (worklog 868).
+    #[test]
+    fn a_fresh_reservation_is_not_committed() {
+        let mut slot: u64 = 0;
+        let out = std::ptr::from_mut(&mut slot) as usize as u64;
+        assert_eq!(
+            super::reserve_virtual_range(&[out, 0x10_0000, 0, 0x4_0000, 0, 0]),
+            super::OK
+        );
+        let region = super::query_region(slot).expect("the reservation is a region");
+        let bytes = region.encode();
+        assert_eq!(
+            bytes[super::vq::FLAGS] & super::vq::COMMITTED,
+            0,
+            "not committed"
+        );
+        assert_eq!(
+            &bytes[super::vq::PROTECTION..super::vq::PROTECTION + 4],
+            &[0; 4]
+        );
+        assert_eq!(region.start, slot);
+    }
+
+    /// **An address in no region is `EACCES`**, the code the console answered for
+    /// `0x720000240000` (obSCEne `020-memory/virtual-query-unmapped`).
+    #[test]
+    fn a_query_of_nothing_is_refused_as_the_console_refuses_it() {
+        let mut info = [0_u8; super::VIRTUAL_QUERY_INFO_BYTES];
+        let at = std::ptr::from_mut(&mut info[0]) as usize as u64;
+        assert_eq!(
+            super::virtual_query(&args([0x0000_0000_0001_0000, 0, at, 72])),
+            u64::from(super::GuestError::vendor(orbistoun_core::errno::DENIED).as_raw())
         );
     }
 

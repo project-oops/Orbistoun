@@ -1182,13 +1182,14 @@ purpose = "Describes the mapping that holds an address, so a guest can bound it 
 returns = "status"
 edge_cases = [
     "Stubbed, it answered a placeholder and the guest read a mapping that was not there, computing a bad address and writing through it - the D125 shape, and the wall past sceKernelReserveVirtualRange for the titles measured.",
-    "Answers where the containing region starts and ends, at offsets 0 and 8. The rest of SceKernelVirtualQueryInfo - a protection, a type, a name - is left as the caller prepared it, exactly as sceVideoOutGetResolutionStatus writes only the fields it can cite.",
-    "An address in no region is answered with the code the console answers for one, not a fabricated mapping.",
+    "SceKernelVirtualQueryInfo is 72 bytes and the console writes all of them, zeros included: start +0x00, end +0x08, a direct mapping's physical offset +0x10, protection (u32) +0x18 - 3 read-write, 4 execute-only text - memory type (u32) +0x1c, a flag byte +0x20 (flexible 0x01, direct 0x02, stack 0x04, committed 0x10), and a NUL-terminated name from +0x21 (`anon`, `executable`, `main stack`).",
+    "An address in no region, queried with flags 0, is answered 0x8002000d (EACCES) - measured at 0x720000240000.",
 ]
-known_by = "assumed"
-assumptions = ["That the start and end are the first two fields, at offsets 0 and 8. The remaining layout of SceKernelVirtualQueryInfo has no lawful source here, which is why nothing past them is written."]
+known_by = "measured"
+cites = "obSCEne hardware run 20260923-dcb-extent-eboot.obs.log, 020-memory/virtual-query-{mapped,text,stack,unmapped} (REQ-20260914T1110Z-9b12)"
+partial = "Direct mappings and the main stack are answered in full, as measured. The protection is the one the guest asked for (measured for CPU bits; PPSA25872 compares it with a GPU-bit request of 0xf2, so the console returns the full value - guest-observed). A reservation nothing is mapped into is answered uncommitted with no protection - the Unity allocator tests the committed bit (0x10 at +0x20) and fills an uncommitted range, which is what reserving means; not measured on hardware. A flexible mapping gets the flexible and committed bits, applied from the text and stack samples. Regions the loader noted (the image, modules) and thread stacks get their bounds and zeros - orbistoun notes the image whole where the console answers per segment. The flags argument is not modelled; every measured query passed 0."
 found_on = "2026-09-01"
-note = "Finds the region containing the queried address in the same address space mmap and the reservation use, writing start and end (offsets 0 and 8). An address in no region gets the console's not-found code."
+note = "Answers the whole 72-byte structure from the region holding the address (worklog 868)."
 
 [[function]]
 name = "sceKernelWaitEqueue"
