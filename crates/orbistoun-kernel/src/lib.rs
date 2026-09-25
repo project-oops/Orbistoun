@@ -7078,6 +7078,12 @@ fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             }
             paths.push(path);
         }
+        // **The first unresolved path ends the call** and every later slot is left as the caller
+        // prepared it - measured with a two-path call whose second entry kept its signature bytes
+        // (obSCEne REQ-20260925T2130Z-e61a, worklog 874).
+        if answer.is_none() {
+            break;
+        }
     }
     apr::note_resolved(paths);
     if all_resolved {
@@ -7662,6 +7668,32 @@ mod tests {
         assert_eq!(&sizes[8..], &[0xb2; 24]);
         assert_eq!(&statuses[..4], &[0; 4]);
         assert_eq!(&statuses[4..], &[0xc3; 28]);
+    }
+
+    /// **The first unresolved path ends the call**: in a two-path call the second entry's slots keep
+    /// what the caller put there (obSCEne REQ-20260925T2130Z-e61a).
+    #[test]
+    fn an_unresolved_path_leaves_the_later_slots_untouched() {
+        let (first, second) = (b"/app0/missing-one\0", b"/app0/missing-two\0");
+        let pointers = [
+            first.as_ptr() as usize as u64,
+            second.as_ptr() as usize as u64,
+        ];
+        let (mut ids, mut sizes, mut statuses) = ([0xa1_u8; 8], [0xb2_u8; 16], [0xc3_u8; 8]);
+        let at = |b: &mut [u8]| b.as_mut_ptr() as usize as u64;
+        let answer = super::apr_resolve_filepaths(&[
+            pointers.as_ptr() as usize as u64,
+            2,
+            at(&mut ids),
+            at(&mut sizes),
+            at(&mut statuses),
+            0,
+        ]);
+        assert_eq!(answer, u64::from(u32::MAX));
+        assert_eq!(&ids[..4], &[0xff; 4], "the first entry is answered");
+        assert_eq!(&ids[4..], &[0xa1; 4], "the second is untouched");
+        assert_eq!(&sizes[8..], &[0xb2; 8]);
+        assert_eq!(&statuses[4..], &[0xc3; 4]);
     }
 
     /// **A fresh reservation is answered uncommitted and inaccessible.** The Unity allocator tests

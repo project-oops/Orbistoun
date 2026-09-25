@@ -279,7 +279,44 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             unsafe { poke_u64(field, field.wrapping_add(rel)) };
         }
     }
+    // SAFETY: `+0x20` is inside the guest-owned header object (extent 0x130), read after the loop
+    // above relocated it.
+    let registers = unsafe { peek_u64(header.wrapping_add(0x20)) };
+    // SAFETY: `registers` points into the same guest-owned header object - the relocation above
+    // made it a pointer into it - and `patch_program_address` writes only its first four dwords.
+    unsafe { patch_program_address(registers, bytecode) };
     OK
+}
+
+/// Writes the program's address into the shader's register descriptor, as the console does.
+///
+/// **Measured (obSCEne REQ-20260925T2056Z-5d19).** The descriptor `+0x20` points at is
+/// `{reg, value, reg + 1, value}`, the program-address register pair. The console wrote
+/// `payload >> 8` into its second dword - the two bytes a relocation model could not account for -
+/// and wrote nothing when the first dword named no register (stages 4 and 5). The high half,
+/// `payload >> 40` into the fourth dword, is the same pair's other register: Mesa programs it as
+/// `address32_hi >> 8` (`ac_cmdbuf.c:318-324`), and it read zero on the probe only because its
+/// payload sat below 2^40 (worklog 874).
+///
+/// # Safety
+///
+/// `registers`, when non-zero, must address sixteen writable bytes of guest memory.
+unsafe fn patch_program_address(registers: u64, payload: u64) {
+    if registers == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees sixteen readable bytes at `registers`.
+    if unsafe { peek_u32(registers) } == 0 {
+        return;
+    }
+    // SAFETY: as above, writable; the second and fourth dwords of the descriptor.
+    unsafe {
+        poke_u32(registers.wrapping_add(4), (payload >> 8) as u32);
+    }
+    // SAFETY: as above.
+    unsafe {
+        poke_u32(registers.wrapping_add(12), (payload >> 40) as u32);
+    }
 }
 
 /// Reads a little-endian dword from guest memory at `at`, under the identity mapping (D014).
@@ -1158,6 +1195,63 @@ mod tests {
         };
         assert_eq!(read2(0x18), 0, "an empty +0x18 is not turned into header+0");
         assert_eq!(read2(0x38), 0, "an empty +0x38 is not turned into header+0");
+    }
+
+    /// **The console's full byte diff, replayed** (obSCEne REQ-20260925T2056Z-5d19): the register
+    /// descriptor at `+0x90` gets the program address in its second (and fourth) dword, the five
+    /// sub-table entries land at `+0x118` then `+0x130` four times, and a descriptor naming no
+    /// register (stages 4 and 5) is left alone.
+    #[test]
+    fn create_shader_matches_the_consoles_byte_diff() {
+        let run = |reg: u32| {
+            let mut slot: u64 = 0;
+            let mut object = [0u8; 0x130];
+            object[0x08..0x10].copy_from_slice(&0xd8u64.to_le_bytes());
+            object[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
+            object[0x28..0x30].copy_from_slice(&0x38u64.to_le_bytes());
+            object[0x90..0x94].copy_from_slice(&reg.to_le_bytes());
+            object[0x98..0x9c].copy_from_slice(&reg.wrapping_add(1).to_le_bytes());
+            for (i, rel) in [0x38u64, 0x48, 0x40, 0x38, 0x30].iter().enumerate() {
+                object[0xe0 + i * 8..0xe8 + i * 8].copy_from_slice(&rel.to_le_bytes());
+            }
+            let header = object.as_mut_ptr() as u64;
+            let payload = 0x4000_0072_6600u64;
+            let mut args = [0u64; GUEST_ARG_REGISTERS];
+            args[0] = std::ptr::addr_of_mut!(slot) as u64;
+            args[1] = header;
+            args[2] = payload;
+            assert_eq!(create_shader(&args), OK);
+            (object, header, payload)
+        };
+        let dword = |o: &[u8; 0x130], at: usize| {
+            u32::from_le_bytes([o[at], o[at + 1], o[at + 2], o[at + 3]])
+        };
+        let qword = |o: &[u8; 0x130], at: usize| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&o[at..at + 8]);
+            u64::from_le_bytes(b)
+        };
+
+        let (object, header, payload) = run(0x2c8c);
+        assert_eq!(qword(&object, 0x20), header + 0x90);
+        assert_eq!(
+            dword(&object, 0x94),
+            (payload >> 8) as u32,
+            "sh[1] = payload >> 8"
+        );
+        assert_eq!(
+            dword(&object, 0x9c),
+            (payload >> 40) as u32,
+            "sh[3] = payload >> 40"
+        );
+        assert_eq!(qword(&object, 0xe0), header + 0x118);
+        for entry in [0xe8, 0xf0, 0xf8, 0x100] {
+            assert_eq!(qword(&object, entry), header + 0x130, "entry at {entry:#x}");
+        }
+
+        let (unregistered, _, _) = run(0);
+        assert_eq!(dword(&unregistered, 0x94), 0, "no register named, no patch");
+        assert_eq!(dword(&unregistered, 0x9c), 0);
     }
 
     /// **A null out-parameter is refused, not dereferenced.** The guest's own wrapper answers

@@ -286,6 +286,7 @@ purpose = "Turns guest paths into the identifiers and sizes the asynchronous fil
 returns = "status"
 edge_cases = [
     "MEASURED (obSCEne REQ-20260925T1834Z-a7e2, signature-filled buffers): arg2 receives a u32 id per entry, arg3 a u64 size per entry, arg4 a u32 status per entry; arg5 is an input that may be null and is never written. An unresolvable path gets id 0xffffffff, size 0, status 0, and the call returns -1.",
+    "MEASURED (obSCEne REQ-20260925T2130Z-e61a): only /app0/... paths are valid (anything else is EINVAL in the kernel log); a multi-path call stops at its first unresolved entry and leaves the later slots as the caller prepared them; and a title without a mounted package filesystem gets the unresolved answer for every path, so no probe can show a real id.",
     "An unwritten size slot is not harmless: PPSA25872's stream read one as its file length - a leftover stack address - and reserved a string that long, then trapped (worklog 867). D679's four-byte writes into the eight-byte size slot left the same upper half.",
 ]
 partial = "A path the title's own index names (D591) resolves to the index's id and size with status 0 and a 0 return; every other path gets the measured unresolved answer. What a successful resolve of a path outside an index returns on hardware - the id, the status, the return value - is not measured, and orbistoun synthesises no id for it."
