@@ -22,15 +22,16 @@ build = "0.1.0"
 measured_on = "2026-09-13"
 
 [experiment]
-reach = "entered"
-outcome = "image+0x17554a3"
-imports = 155
-calls = 321979
+reach = "flipped"
+outcome = "image+0x3b383b"
+imports = 197
+calls = 339541
 standing = 100
 default_return = "unimplemented"
 overrides = 2
 propping = 2
-unanswered = 1
+frames = 1
+unanswered = 11
 limit_seconds = 20
-build = "v0.1.0 - 34ff307-dirty"
+build = "v0.1.0 - 8b8f25e-dirty"
 measured_on = "2026-09-25"

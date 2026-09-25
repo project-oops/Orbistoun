@@ -124,7 +124,7 @@ construction and are not comparable with the table above:
 - **PPSA03416-app0** reached 224 imports, ending at `image+0x3f8f0`, with 2 functions answered by name
 - **PPSA04263-app0** reached 78 imports, ending at `image+0x19676d7`, with 2 functions answered by name
 - **PPSA21564-app0** reached 57 imports, ending at `the title's own modules+0x7af792`, with 2 functions answered by name
-- **PPSA25872-app0** reached 155 imports, ending at `image+0x17554a3`, with 2 functions answered by name
+- **PPSA25872-app0** reached 197 imports, ending at `image+0x3b383b`, with 2 functions answered by name
 - **PPSA28061-app0** reached 60 imports, ending at `the guest called abort`, with 1 function answered by name
 - **SCSH00001** reached 40 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **ShadowMountPlus_1.6beta16** reached 0 imports, ending at `0x1`, with 1 function answered by name
@@ -190,7 +190,7 @@ spine in parallel.
 |---|---|
 | Functions declared / implemented | 982 / 784 |
 | Declared in a library that serves nothing | 147 across 21 libraries - names written down, no implementation |
-| Recorded behaviours | 830 - 368 published, 86 measured, 79 guest-observed, 265 assumed |
+| Recorded behaviours | 830 - 368 published, 87 measured, 78 guest-observed, 265 assumed |
 | Open questions a hardware probe could settle | 806 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 

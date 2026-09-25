@@ -282,15 +282,16 @@ note = "destination for the chosen physical address"
 [[function]]
 name = "sceKernelAprResolveFilepathsToIdsAndFileSizes"
 arity = 6
-purpose = "Turns guest paths into whatever identifiers and sizes the asynchronous file path works in."
+purpose = "Turns guest paths into the identifiers and sizes the asynchronous file path works in: (paths, count, u32 *ids, u64 *sizes, u32 *statuses, options)."
 returns = "status"
-partial = "Reports and refuses. It reads the path array the guest passed and prints it, then answers the placeholder - nothing is filled in, because which argument receives the identifiers and which the sizes has not been established."
-known_by = "guest-observed"
-assumptions = [
-    "Arity six is the trampoline's full capture rather than a claim: the first two arguments are established as an array of path pointers and a count, and the rest are three adjacent four-byte stack slots that are out-parameters of some order.",
-    "Filling one would hand the guest a size where it expects an identifier, which is the plausible answer principle 3 refuses. Planting distinct markers in all three and forcing success changed nothing the run could see: the guest submits its command buffer either way.",
+edge_cases = [
+    "MEASURED (obSCEne REQ-20260925T1834Z-a7e2, signature-filled buffers): arg2 receives a u32 id per entry, arg3 a u64 size per entry, arg4 a u32 status per entry; arg5 is an input that may be null and is never written. An unresolvable path gets id 0xffffffff, size 0, status 0, and the call returns -1.",
+    "An unwritten size slot is not harmless: PPSA25872's stream read one as its file length - a leftover stack address - and reserved a string that long, then trapped (worklog 867). D679's four-byte writes into the eight-byte size slot left the same upper half.",
 ]
-found_in = ["PPSA03416-app0"]
+partial = "A path the title's own index names (D591) resolves to the index's id and size with status 0 and a 0 return; every other path gets the measured unresolved answer. What a successful resolve of a path outside an index returns on hardware - the id, the status, the return value - is not measured, and orbistoun synthesises no id for it."
+known_by = "measured"
+cites = "obSCEne hardware run task-81926.log, 040-file/apr-resolve-filepaths (REQ-20260925T1834Z-a7e2)"
+found_in = ["PPSA03416-app0", "PPSA25872-app0"]
 found_on = "2026-09-08"
 
 [[function]]

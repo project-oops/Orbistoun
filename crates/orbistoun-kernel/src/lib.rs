@@ -7030,60 +7030,62 @@ fn read_path(address: u64) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// `sceKernelAprResolveFilepathsToIdsAndFileSizes(paths, count, ...)` - reported, not answered.
+/// `sceKernelAprResolveFilepathsToIdsAndFileSizes(paths, count, ids, sizes, statuses, options)`.
 ///
-/// # What is established and what is not
+/// # The contract, measured
 ///
-/// **Established**: the guest passes an array of pointers and a count, and this is the first
-/// call of the platform's asynchronous file path. The array's first entry is a path string a
-/// `memcpy` put there a few calls earlier.
+/// obSCEne called it on hardware with each out-array pre-filled with its own signature
+/// (REQ-20260925T1834Z-a7e2): `ids` is `u32` per entry, `sizes` is `u64` per entry, `statuses`
+/// is `u32` per entry, and `options` is an input that may be null and is never written. For a path
+/// that does not resolve the console writes id `0xffffffff`, size 0 and status 0, and the call
+/// returns -1.
 ///
-/// **Not established**: which of the remaining arguments receives the ids, which the sizes, and
-/// what an id is. Three of them are adjacent four-byte stack slots, which says they are
-/// out-parameters and says nothing about their order - and filling the wrong one would hand the
-/// guest a size where it expects an identifier, which is the plausible answer principle 3
-/// exists to refuse.
+/// **Every entry is written, at its measured width.** Leaving a slot as the caller prepared it
+/// is what stopped PPSA25872: its stream read an unwritten size slot, got a stack address, and
+/// reserved a string that long (worklog 867). The width was the other half - D679's experiment
+/// wrote four bytes into the eight-byte size slot and kept the stack address's upper half.
 ///
-/// So it answers the placeholder and prints what it was given. A wall this project can see the
-/// inputs of is worth more than one it has guessed the outputs of (D587).
+/// # What resolves
+///
+/// A path the title's own index names (D591) resolves to the index's identifier and size. Every
+/// other path gets the measured unresolved answer: orbistoun has no source for the identifier a
+/// console hands out for a file outside an index, and a synthesised one is the guess D679
+/// declined. What a *successful* resolve of such a path returns on hardware - its id, its status,
+/// the return value - is not measured.
 fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (array, count) = (args[0], args[1]);
-    let paths: Vec<String> = (0..count.min(MOST_PATHS_REPORTED))
-        .filter_map(|i| read_word(array + i * 8))
-        .map(read_path)
-        .filter(|p| !p.is_empty())
-        .collect();
-    apr::note_resolved(paths.clone());
-    // **The index the title ships is the source of truth, and it is consulted here.** Three
-    // sessions of planting markers in these out-parameters were asking the guest a question the
-    // title had already answered on disk (D591). What is still unmeasured is which argument
-    // takes the identifier and which the size, so the answers are reported and the placeholder
-    // is still returned - writing one into a slot picked by guesswork is the plausible answer
-    // this project refuses (D592).
-    let mut answered = false;
-    for path in &paths {
-        match apr::look_up(path) {
-            Some((id, size)) => {
-                eprintln!("orbistoun:   the index has {path} as entry {id}, {size} byte(s)");
-                answered |= answer_resolve(args, id, size);
+    let (array, count, ids, sizes, statuses) = (args[0], args[1], args[2], args[3], args[4]);
+    let mut paths = Vec::new();
+    let mut all_resolved = true;
+    for entry in 0..count {
+        let path = read_word(array + entry * 8)
+            .map(read_path)
+            .unwrap_or_default();
+        let answer = apr::look_up(&path);
+        let (id, size) = answer.map_or((u32::MAX, 0), |(id, size)| (id as u32, size));
+        all_resolved &= answer.is_some();
+        // Written per entry: arrays of `count` elements at their measured widths.
+        let _ = write_int(ids + entry * 4, id);
+        let _ = write_word(sizes + entry * 8, size);
+        let _ = write_int(statuses + entry * 4, 0);
+        if entry < MOST_PATHS_REPORTED {
+            match answer {
+                Some((id, size)) => {
+                    eprintln!("orbistoun:   the index has {path} as entry {id}, {size} byte(s)");
+                }
+                None => {
+                    eprintln!("orbistoun:   the index does not name {path}; answered unresolved");
+                }
             }
-            None => eprintln!("orbistoun:   the index does not name {path}"),
+            paths.push(path);
         }
     }
-    if answered {
-        return OK;
-    }
-    if paths.is_empty() {
-        eprintln!(
-            "orbistoun: the guest asked the asynchronous file path to resolve {count} path(s), and none could be read"
-        );
+    apr::note_resolved(paths);
+    if all_resolved {
+        OK
     } else {
-        eprintln!(
-            "orbistoun: the guest asked the asynchronous file path to resolve {count} path(s): {}",
-            paths.join(", ")
-        );
+        // `-1`, as the console answered for a path it could not resolve.
+        u64::from(u32::MAX)
     }
-    u64::from(GuestError::Unimplemented.as_raw())
 }
 
 /// How many paths one call reports.
@@ -7233,48 +7235,6 @@ fn deliver_resolved_file(buffer: u64) {
     }
 }
 
-/// Writes the identifier and size the index gave into the arguments a run names.
-///
-/// # Why this is an experiment rather than an implementation
-///
-/// The index says **what** the answers are (D591) and nothing says **where** they go. Three
-/// arguments point at adjacent four-byte slots on the guest's stack, which establishes that they
-/// are out-parameters and establishes nothing about their order - and writing a size where the
-/// guest expects an identifier is the plausible answer principle 3 exists to refuse.
-///
-/// So the assignment is named by `ORBISTOUN_APR_ANSWER`, as two digits: the argument that takes
-/// the identifier, then the one that takes the size. `24` writes the identifier through `arg2`
-/// and the size through `arg4`. Six permutations, one boot each, against an oracle sharper than
-/// any this wall has had: the title stops saying *"Unknown error occurred while loading"* when
-/// it is right (D592).
-///
-/// Answers whether anything was written, because a run that named a slot the guest did not pass
-/// has planted nothing and must not report success.
-fn answer_resolve(args: &[u64; GUEST_ARG_REGISTERS], id: u64, size: u64) -> bool {
-    let Some(spec) = orbistoun_env::APR_ANSWER.get() else {
-        return false;
-    };
-    let mut digits = spec.chars().filter_map(|c| c.to_digit(10));
-    let (Some(for_id), Some(for_size)) = (digits.next(), digits.next()) else {
-        eprintln!("orbistoun: ORBISTOUN_APR_ANSWER wants two argument numbers, like 23");
-        return false;
-    };
-    let mut wrote = false;
-    for (slot, value) in [(for_id, id), (for_size, size)] {
-        let Some(at) = args.get(slot as usize).copied() else {
-            continue;
-        };
-        // Four bytes, because the slots are four apart: an eight-byte write would take the
-        // neighbouring out-parameter with it, which is the mistake D210 and D272 both record.
-        if at != 0 && write_int(at, value as u32) {
-            wrote = true;
-        }
-    }
-    if wrote {
-        eprintln!("orbistoun:   answered id through arg{for_id} and size through arg{for_size}");
-    }
-    wrote
-}
 #[cfg(test)]
 mod tests {
 
@@ -7675,6 +7635,33 @@ mod tests {
             "0000000000000000"
         ));
         assert_eq!(stack.encode().to_vec(), console);
+    }
+
+    /// **An unresolvable path is answered as the console answered it, at the measured widths.**
+    /// obSCEne's signature fill (REQ-20260925T1834Z-a7e2), rebuilt: the id slot gets four bytes
+    /// of `0xff`, the size slot all eight bytes zeroed, the status slot four zero bytes, nothing
+    /// past any of them, and the call returns -1.
+    #[test]
+    fn an_unresolved_path_fills_every_slot_at_its_measured_width() {
+        let path = b"/app0/not-in-any-index.json\0";
+        let pointers = [path.as_ptr() as usize as u64];
+        let (mut ids, mut sizes, mut statuses) = ([0xa1_u8; 32], [0xb2_u8; 32], [0xc3_u8; 32]);
+        let at = |b: &mut [u8; 32]| std::ptr::from_mut(&mut b[0]) as usize as u64;
+        let answer = super::apr_resolve_filepaths(&[
+            pointers.as_ptr() as usize as u64,
+            1,
+            at(&mut ids),
+            at(&mut sizes),
+            at(&mut statuses),
+            0,
+        ]);
+        assert_eq!(answer, u64::from(u32::MAX), "-1, as the console answered");
+        assert_eq!(&ids[..4], &[0xff; 4]);
+        assert_eq!(&ids[4..], &[0xa1; 28]);
+        assert_eq!(&sizes[..8], &[0; 8], "all eight bytes of the size");
+        assert_eq!(&sizes[8..], &[0xb2; 24]);
+        assert_eq!(&statuses[..4], &[0; 4]);
+        assert_eq!(&statuses[4..], &[0xc3; 28]);
     }
 
     /// **A fresh reservation is answered uncommitted and inaccessible.** The Unity allocator tests

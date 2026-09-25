@@ -511,20 +511,6 @@ pub const TRACE_FORMAT: Var = Var {
     effect: Effect::Observes,
 };
 
-/// Which arguments of the asynchronous path's resolve call take the identifier and the size.
-///
-/// Two digits: the argument that receives the identifier, then the one that receives the size.
-/// The index says what the answers are and nothing says where they go, so the assignment is
-/// named by a run and graded by the guest - six permutations, one boot each (D592).
-pub const APR_ANSWER: Var = Var {
-    name: "ORBISTOUN_APR_ANSWER",
-    kind: Kind::Diagnostic,
-    summary: "which arguments of the asynchronous path's resolve call take the identifier and the size, as two digits - the index says what the answers are and nothing says where they go",
-    example: "23",
-    read_by: "orbistoun-kernel",
-    effect: Effect::Intervenes,
-};
-
 /// Deliver the file the asynchronous file path resolved, into the buffer its command header
 /// names.
 ///
@@ -811,7 +797,6 @@ pub const REGISTRY: &[Var] = &[
     TRACE_MAPS,
     TRACE_CALLS,
     APR_DELIVER,
-    APR_ANSWER,
     TRACE_FORMAT,
     CLOCK,
     RUNTIME_GLOBALS,
@@ -897,7 +882,6 @@ mod tests {
         super::TRACE_MAPS,
         super::TRACE_CALLS,
         super::APR_DELIVER,
-        super::APR_ANSWER,
         super::TRACE_FORMAT,
         super::CLOCK,
         super::RUNTIME_GLOBALS,
