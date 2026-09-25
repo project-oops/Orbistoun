@@ -1098,6 +1098,14 @@ fn prepare_diagnostics(
 /// and a setting that could disagree with them would be a setting able to lie. Anything
 /// not derivable is `extra_auxiliary`, which is for trying a value rather than for
 /// restating one.
+/// The first argument a guest is started with: its module's name under `/app0`, which is where the
+/// title's own files are mounted. Only the file name of the host path, whichever separator it
+/// uses - the host directory is a fact about this machine, never something a console would pass.
+fn guest_argument_zero(module: &str) -> String {
+    let name = module.rsplit(['/', '\\']).next().unwrap_or(module);
+    format!("{}/{name}", orbistoun_fs::mount::APP_MOUNT)
+}
+
 fn write_process_image(
     image: &Image,
     stack: &GuestStack,
@@ -1137,7 +1145,11 @@ fn write_process_image(
         // The module's own name, which is what a program expects to find in the first
         // argument. Not the host path: that is a fact about this machine, and a guest
         // printing it would be printing something no console ever would.
-        arguments: vec![format!("/app0/{module}")],
+        //
+        // `module` is the host path the run was given, so it is cut to its file name here: the
+        // whole path went in, and a Unity title printed `Arg 0 = /app0/C:\...\eboot.bin` - a host
+        // directory inside the guest's own argument vector (worklog 866).
+        arguments: vec![guest_argument_zero(module)],
         environment: settings.environment.clone(),
         auxiliary,
     };
@@ -3773,6 +3785,24 @@ mod tests {
             staged: false,
         }]);
         assert!(matches!(events.as_slice(), [Event::Failed { .. }]));
+    }
+
+    /// **A guest's first argument names its module under `/app0`, never the host path.** A Unity
+    /// title printed the whole host directory back when the full path went in (worklog 866).
+    #[test]
+    fn argument_zero_is_the_module_under_app0() {
+        assert_eq!(
+            super::guest_argument_zero(r"C:\library\PPSA03416-app0/eboot.bin"),
+            "/app0/eboot.bin"
+        );
+        assert_eq!(
+            super::guest_argument_zero(r"D:\t\x\eboot.bin"),
+            "/app0/eboot.bin"
+        );
+        assert_eq!(
+            super::guest_argument_zero("/lib/t/game.elf"),
+            "/app0/game.elf"
+        );
     }
 
     /// **Only where a module lies, or the run's own flag, makes it staged (D722).** A library
