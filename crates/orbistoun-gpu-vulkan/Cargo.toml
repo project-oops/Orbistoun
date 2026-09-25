@@ -16,6 +16,8 @@ workspace = true
 orbistoun-gpu = { workspace = true }
 ash = { workspace = true }
 thiserror = { workspace = true }
+# A batch's draw words, written into the mapped draw-data buffer as bytes (D718).
+zerocopy = { workspace = true }
 
 [dev-dependencies]
 orbistoun-spirv = { workspace = true }

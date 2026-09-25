@@ -355,6 +355,9 @@ pub struct Translated {
     /// translator does not know what device this will run on, and inventing a default
     /// would produce a module that is silently wrong on half of them.
     pub required_subgroup: Option<u32>,
+    /// The textures the module samples, in binding order, and where each one's descriptor came from
+    /// (worklog 840). Empty for a module that samples nothing and for every model but the wavefront.
+    pub textures: Vec<wavefront::TextureSource>,
 }
 
 impl Translated {
@@ -510,6 +513,32 @@ pub fn translate_windowed_primitive(
     primitive: wavefront::MeshPrimitive,
     window: wavefront::Window,
 ) -> Result<Translated, TranslateError> {
+    translate_with_user_data(
+        decode,
+        encodings,
+        strategy,
+        (stage, primitive),
+        window,
+        wavefront::UserData::default(),
+    )
+}
+
+/// As [`translate_windowed_primitive`], for a module that reads its stage's user data at entry from
+/// the push-constant block a draw supplies (worklog 826). A graphics stage is always the wavefront
+/// model, which is the one that reads it.
+///
+/// # Errors
+///
+/// Whatever the translation refuses, and a stage taking more user-data words than its share of
+/// the block.
+pub fn translate_with_user_data(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    strategy: Strategy,
+    (stage, primitive): (wavefront::Stage, wavefront::MeshPrimitive),
+    window: wavefront::Window,
+    user_data: wavefront::UserData,
+) -> Result<Translated, TranslateError> {
     let Strategy::Predicated { fidelity, width } = strategy else {
         return Err(TranslateError::StrategyNotImplemented(strategy));
     };
@@ -571,11 +600,17 @@ pub fn translate_windowed_primitive(
                 instructions,
                 warnings,
                 required_subgroup: None,
+                textures: Vec::new(),
             })
         }
         Fidelity::Wavefront => {
-            let (module, instructions) = wavefront::translate_for_primitive(
-                decode, encodings, width, stage, primitive, window,
+            let (module, instructions, textures) = wavefront::translate_with_user_data(
+                decode,
+                encodings,
+                width,
+                (stage, primitive),
+                window,
+                user_data,
             )?;
             Ok(Translated {
                 module,
@@ -584,6 +619,7 @@ pub fn translate_windowed_primitive(
                 instructions,
                 warnings,
                 required_subgroup: None,
+                textures,
             })
         }
         Fidelity::Subgroup => {
@@ -596,6 +632,7 @@ pub fn translate_windowed_primitive(
                 instructions,
                 warnings,
                 required_subgroup: Some(required_subgroup),
+                textures: Vec::new(),
             })
         }
         // `resolve` turns Auto into something concrete, so reaching here would mean it
@@ -612,6 +649,76 @@ mod tests {
     use super::{Fidelity, Strategy, TranslateError, Warning, Width, translate};
     use crate::predicated::MEMORY_WORDS;
     use crate::wavefront::Window;
+
+    /// **A module that reads user data declares the push-constant block; one that reads none does
+    /// not; a stage wanting more than its share is refused** (worklog 826).
+    ///
+    /// `s_endpgm` alone, translated for a fragment stage three ways. With two words the module holds
+    /// an `OpVariable` in the `PushConstant` storage class; with none it holds no such variable and is
+    /// word for word what it was; with seventeen - more than a stage's sixteen - it is refused, rather
+    /// than truncated to a shader that reads zero where a word never arrived.
+    #[test]
+    fn user_data_declares_the_block_only_when_read_and_refuses_too_much() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let decode = decode_program(&0xBF81_0000u32.to_le_bytes(), &encodings, &operands);
+        let strategy = Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::default(),
+        };
+        let with = |count| {
+            super::translate_with_user_data(
+                &decode,
+                &encodings,
+                strategy,
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    first_register: 0,
+                    count,
+                    block_offset: 16,
+                    dx10_clamp: None,
+                },
+            )
+        };
+        // `OpVariable` is opcode 59; its storage class is its fourth word.
+        let push_variables = |module: &[u32]| {
+            let mut at = 5;
+            let mut found = 0;
+            while at < module.len() {
+                let length = (module[at] >> 16) as usize;
+                if module[at] & 0xffff == 59 && module.get(at + 3) == Some(&9) {
+                    found += 1;
+                }
+                at += length.max(1);
+            }
+            found
+        };
+        let reading = with(2).expect("two words translate");
+        assert_eq!(push_variables(&reading.module), 1, "one block, declared");
+        let plain = with(0).expect("no words translate");
+        assert_eq!(
+            push_variables(&plain.module),
+            0,
+            "no block when nothing is read"
+        );
+        let unchanged = super::translate_windowed_primitive(
+            &decode,
+            &encodings,
+            strategy,
+            Stage::Fragment,
+            MeshPrimitive::default(),
+            Window::default(),
+        )
+        .expect("translates");
+        assert_eq!(
+            plain.module, unchanged.module,
+            "and word for word as before"
+        );
+        assert!(with(17).is_err(), "more than a stage's share is refused");
+    }
 
     /// **A length that is not a power of two is refused, not rounded.**
     ///

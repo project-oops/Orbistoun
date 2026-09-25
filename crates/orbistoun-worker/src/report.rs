@@ -499,7 +499,7 @@ const fn readable(_address: u64, _len: usize) -> bool {
 /// Runs after the fault rather than inside the handler, on the same terms as the call trace
 /// below it: this allocates, and by then the process is only assembling its report.
 #[cfg(windows)]
-fn host_module_of(address: u64) -> Option<(String, u64)> {
+pub(crate) fn host_module_of(address: u64) -> Option<(String, u64)> {
     use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
     use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
 
@@ -556,8 +556,7 @@ fn host_module_of(address: u64) -> Option<(String, u64)> {
 
 /// Away from Windows nothing reaches the fault reporter, so no host module is ever named.
 #[cfg(not(windows))]
-#[cfg(windows)]
-const fn host_module_of(_address: u64) -> Option<(String, u64)> {
+pub(crate) const fn host_module_of(_address: u64) -> Option<(String, u64)> {
     None
 }
 
@@ -1048,6 +1047,107 @@ fn note_instruction_shape(line: &mut Line, opcode: &[u8], faulting_address: u64)
     }
 }
 
+/// The host's view of the page holding `address` - protection, state, kind, region - and every
+/// recent change orbistoun's page guards made to it, oldest first (worklog 859).
+#[cfg(windows)]
+fn note_page(line: &mut Line, address: u64) {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_FREE, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE,
+        MEMORY_BASIC_INFORMATION, PAGE_NOACCESS, PAGE_READONLY, VirtualQuery,
+    };
+    let protection_name = |protection: u32| match protection {
+        PAGE_NOACCESS => "no access",
+        PAGE_READONLY => "read-only",
+        0x04 => "read-write",
+        0x20 => "execute-read",
+        0x40 => "execute-read-write",
+        _ => "other",
+    };
+    let mut info = MEMORY_BASIC_INFORMATION {
+        BaseAddress: std::ptr::null_mut(),
+        AllocationBase: std::ptr::null_mut(),
+        AllocationProtect: 0,
+        PartitionId: 0,
+        RegionSize: 0,
+        State: 0,
+        Protect: 0,
+        Type: 0,
+    };
+    // SAFETY: querying any address is safe; the structure is the size passed and outlives the call.
+    let answered = unsafe {
+        VirtualQuery(
+            std::ptr::with_exposed_provenance::<core::ffi::c_void>(
+                usize::try_from(address).unwrap_or(0),
+            ),
+            &raw mut info,
+            size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    line.text("  page ").hex(address & !0xfff).text(": ");
+    if answered == 0 {
+        line.text("the host would not describe it").text(NEWLINE);
+    } else {
+        let state = match info.State {
+            MEM_COMMIT => "committed",
+            MEM_RESERVE => "reserved, not committed",
+            MEM_FREE => "free - nothing mapped",
+            _ => "unknown state",
+        };
+        let kind = match info.Type {
+            MEM_MAPPED => "mapped view",
+            MEM_PRIVATE => "private",
+            MEM_IMAGE => "image",
+            _ => "",
+        };
+        line.text(state).text(" ").text(kind);
+        if info.State == MEM_COMMIT {
+            line.text(", ")
+                .text(protection_name(info.Protect))
+                .text(" (")
+                .hex(u64::from(info.Protect))
+                .text(")");
+        }
+        line.text(", region ")
+            .hex(info.BaseAddress as u64)
+            .text("+")
+            .hex(info.RegionSize as u64)
+            .text(NEWLINE);
+    }
+    let mut changes = [crate::page_guard::Change::default(); 6];
+    match crate::page_guard::changes_touching(address, &mut changes) {
+        None => {
+            line.text("  orbistoun's page-guard history was busy and could not be read")
+                .text(NEWLINE);
+        }
+        Some(0) => {
+            line.text(
+                "  orbistoun's page guards never changed this page (of their latest 256 changes)",
+            )
+            .text(NEWLINE);
+        }
+        Some(count) => {
+            line.text("  orbistoun's page guards changed this page, oldest first:")
+                .text(NEWLINE);
+            for change in &changes[..count] {
+                line.text("    #")
+                    .hex(change.sequence)
+                    .text(" ")
+                    .hex(change.base)
+                    .text("+")
+                    .hex(change.len)
+                    .text(" to ")
+                    .text(protection_name(change.to))
+                    .text(if change.ok {
+                        ""
+                    } else {
+                        " - refused by the host"
+                    })
+                    .text(NEWLINE);
+            }
+        }
+    }
+}
+
 /// Emits one fault report.
 ///
 /// Shared by both platforms so the wording, and the region attribution, cannot drift
@@ -1170,6 +1270,17 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
 
     let _ = std::io::stderr().write_all(line.as_bytes());
     let _ = std::io::stderr().flush();
+
+    // **The faulting page as the host holds it, and what this process did to its protection**
+    // (worklog 859): a page left inaccessible or read-only by orbistoun's own guards (D717, D719,
+    // D720) and a page the guest never had look alike from the fault alone. Its own line, still
+    // allocation-free.
+    if faulting_address != u64::MAX {
+        let mut page = Line::new();
+        note_page(&mut page, faulting_address);
+        let _ = std::io::stderr().write_all(page.as_bytes());
+        let _ = std::io::stderr().flush();
+    }
 
     // **Guest memory dumped at the fault, if asked (`ORBISTOUN_DUMP`).** After the no-alloc message
     // and in the same allocating context as the trace below - it reads its own env var, allocates
@@ -1774,6 +1885,31 @@ mod imp {
             return CONTINUE_EXECUTION;
         }
 
+        // **A read or write of a deferred copy's destination carries the copy out** (worklog 850,
+        // D717): the command processor's copy of a colour target was left waiting, its destination
+        // guarded, and this is the first touch - by the guest or by host code on its behalf. The
+        // bytes the console's copy would have left there are written, the pages made accessible
+        // again, and the access runs as though they had been there all along. Parameter zero is the
+        // access kind (0 read, 1 write; 8, an execute, is never ours), parameter one the address.
+        // **A write to a protected colour target marks it written** (D720): its pages were read-only
+        // while it was trusted unchanged, and this write is what makes it not. They get their
+        // protection back and the write runs. Asked first, so a range this once released and still
+        // remembered as resolved below can never answer for pages protected again since.
+        if code == ACCESS_VIOLATION
+            && count >= 2
+            && parameters[0] == 1
+            && orbistoun_gpu::agc_driver::written_at(parameters[1] as u64)
+        {
+            return CONTINUE_EXECUTION;
+        }
+        if code == ACCESS_VIOLATION
+            && count >= 2
+            && matches!(parameters[0], 0 | 1)
+            && orbistoun_gpu::agc_driver::carry_out_at(parameters[1] as u64)
+        {
+            return CONTINUE_EXECUTION;
+        }
+
         // **A software interrupt with a registered handler is serviced, not reported.** A guest
         // reaching the kernel by `int n` raises a general-protection fault the host delivers as an
         // access violation (at `0xffff...`, D384), and orbistoun has no interrupt handling beyond
@@ -2110,6 +2246,12 @@ fn submission_summary() -> Option<SubmissionSummary> {
         shaders_found: report.shaders_found,
         addresses_resolved: report.addresses_resolved,
         addresses_unresolved: report.addresses_unresolved,
+        shaders_translated: report.shaders_translated,
+        shader_failures: report
+            .failures
+            .iter()
+            .map(|f| format!("{} at {:#x}: {}", f.stage, f.address, f.reason))
+            .collect(),
     })
 }
 
@@ -2664,7 +2806,17 @@ pub fn start_time_limit(seconds: u64, module: String) {
         let quiet = wait_watching_for_silence(seconds);
         note_quiet(quiet);
         note_ended_by(orbistoun_report::trace::RAN_TO_LIMIT);
+        // The same reporters every other ending runs - the syscall census, the paths the
+        // guest asked for and the paths it opened. A guest that plays until the clock stops
+        // it is exactly the one whose file traffic matters, and this ending printed none of
+        // it (worklog 811; the fourth miss of D387's shape).
+        what_the_guest_asked_for();
         let trace = collect_calls(&module, "Entered");
+        // A guest that submitted and then waited out the clock - both fully-owned baselines, on a
+        // fence nothing writes - still made a submission, and it reaches the backend here as it
+        // would on the ordinary return (worklog 814). After the trace, because rendering *takes*
+        // the submission and the trace's submission summary reads it.
+        crate::render::render_and_log_last_submission();
         // Persisted *before* the summary is printed and before the process ends. A
         // guest that had to be stopped is exactly the case where the trace matters
         // most, and exactly the case where nothing else will get a chance to save it.
@@ -2781,7 +2933,12 @@ pub fn start_call_budget(budget: u64, module: String) {
 fn on_budget_reached() {
     let module = BUDGET_MODULE.get().map_or("", String::as_str);
     note_ended_by(orbistoun_report::trace::SPENT_THE_BUDGET);
+    // As the clock ending: every reporter, through the one function that names them. This
+    // runs once, at the end, after the last call the budget allows, so the allocation it
+    // makes is the same trade `collect_calls` below already makes (worklog 811).
+    what_the_guest_asked_for();
     let trace = collect_calls(module, "Entered");
+    crate::render::render_and_log_last_submission();
     persist(&trace);
     // Not "after N calls": the count is already the second half of that line, and saying
     // it twice reads as two different numbers that happen to agree.
@@ -3439,6 +3596,55 @@ mod host_module_tests {
             other.abs_diff(here),
             "offsets keep the distance the addresses had"
         );
+    }
+
+    /// **A fault report says whose protection a page has** (worklog 859): a page this process
+    /// guarded is named no-access and its guard listed; the same page released reads read-write,
+    /// guard and release both listed; a page no guard touched says so.
+    #[test]
+    fn a_fault_report_names_a_page_guards_protection_and_history() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        let text = |address| {
+            let mut line = super::Line::new();
+            super::note_page(&mut line, address);
+            String::from_utf8_lossy(line.as_bytes()).into_owned()
+        };
+        // SAFETY: a fresh page at an address of the host's choosing, released below.
+        let page = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                0x1000,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            )
+        };
+        assert!(!page.is_null());
+        let base = page as usize as u64;
+        // A page no guard is ever put on - this test's own stack - is said to be untouched. (The
+        // page allocated above may not be: the host reuses addresses, and another test in this
+        // process may have guarded the same range before it was freed and handed out again.)
+        let on_stack = 0u64;
+        let untouched = text(std::ptr::from_ref(&on_stack) as usize as u64);
+        assert!(
+            untouched.contains("read-write") && untouched.contains("never changed this page"),
+            "{untouched}"
+        );
+        let had = crate::page_guard::guard(base, 0x1000).expect("guarded");
+        let guarded = text(base);
+        assert!(
+            guarded.contains("committed private, no access") && guarded.contains(" to no access"),
+            "{guarded}"
+        );
+        assert!(crate::page_guard::release(base, 0x1000, had));
+        let released = text(base);
+        assert!(
+            released.contains(", read-write") && released.contains(" to read-write"),
+            "{released}"
+        );
+        // SAFETY: the page is this test's and nothing refers to it now.
+        unsafe { VirtualFree(page, 0, MEM_RELEASE) };
     }
 
     /// **Nothing is invented for an address that is in no module.**

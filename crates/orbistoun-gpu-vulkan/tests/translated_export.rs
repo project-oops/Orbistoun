@@ -44,8 +44,10 @@ fn export_shader(colour: [f32; 4]) -> Vec<u8> {
         bytes.extend(word.to_le_bytes());
         bytes.extend(component.to_bits().to_le_bytes());
     }
-    // `exp mrt0 v0, v1, v2, v3` - target zero, four sources one byte each.
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    // `exp mrt0 v0, v1, v2, v3` - target zero, all four channels enabled (`EN`, bits 0-3), four
+    // sources one byte each. `EN` was zero here until worklog 820 made an export that enables no
+    // channel write nothing, which is what it does on the hardware.
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0302_0100u32.to_le_bytes());
     // `s_endpgm`.
     bytes.extend(0xBF81_0000u32.to_le_bytes());

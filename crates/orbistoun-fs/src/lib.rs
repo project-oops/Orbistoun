@@ -19,6 +19,7 @@
 pub mod amprindex;
 pub mod descriptor;
 pub mod device;
+pub mod dirent;
 pub mod escape;
 pub mod fcntl;
 pub mod filesystem;
@@ -93,6 +94,11 @@ guest_module! {
         "sceKernelMkdir" => 2,
         // POSIX, and imported under its bare name: a guest asking how much room a mount has.
         "statfs" => 2,
+        // Reading a directory through its descriptor (worklog 842): the POSIX name with the
+        // current record layout, and the vendor pair with the FreeBSD 11 one.
+        "getdirentries" => 4,
+        "sceKernelGetdirentries" => 4,
+        "sceKernelGetdents" => 3,
         "sceKernelDebugOutText" => 2,
     }
 }
@@ -305,7 +311,7 @@ fn kernel_mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
     if mount::is_writable(&path) {
-        if let Some(host) = mount::resolve(&path) {
+        if let Some(host) = mount::resolve_for_create(&path) {
             return match std::fs::create_dir_all(&host) {
                 Ok(()) => OK,
                 // A real host failure - out of space, a name clash with a file - is denied

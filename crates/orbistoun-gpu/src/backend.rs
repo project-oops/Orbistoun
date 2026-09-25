@@ -55,6 +55,18 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// How many user-data registers a shader stage has: `SPI_SHADER_USER_DATA_*_0` through `_31`
+/// (`src/amd/registers/gfx103.json` in the collection's Mesa tree).
+pub const USER_DATA_WORDS: usize = 32;
+
+/// Words in the push-constant block a backend supplies each draw's user data through (worklog 826):
+/// sixteen per stage, vertex first. The translator reads the same layout; a test in `pipeline.rs`
+/// pins the two numbers equal, because they live in crates that must not import each other's.
+pub const USER_DATA_BLOCK_WORDS: usize = 32;
+
+/// Where a stage's words start in the block, vertex then fragment.
+pub const USER_DATA_BLOCK_OFFSETS: [usize; 2] = [0, 16];
+
 /// One thing the guest asked the GPU to do.
 ///
 /// Grows as the translator recognises more of the command stream. Each variant should
@@ -94,6 +106,48 @@ pub enum RenderCommand {
     },
     /// Restrict rasterisation to a rectangle.
     SetViewport(Rect),
+    /// The transform from clip space to the target's pixels for the draws that follow, as the
+    /// stream's `PA_CL_VPORT_*` registers stand at them (worklog 837). Its y scale is negative for a
+    /// GL guest, whose NDC `+y` is up.
+    SetViewportTransform(crate::registers::ViewportTransform),
+    /// The user-data words a stage's shader starts with, for the draws that follow (worklog 825).
+    ///
+    /// A guest hands each draw its own values - the GL cube passes its vertex offset this way, a
+    /// different one per draw, and its pixel shader the address of its texture descriptors - through
+    /// `SPI_SHADER_USER_DATA_*` register writes, and the hardware loads them into scalar registers
+    /// before the shader's first instruction. Emitted before a draw whenever a stage's words changed.
+    SetUserData {
+        /// The stage whose shader receives them.
+        stage: ShaderStage,
+        /// Every user-data register of that stage, in order; zero where the stream wrote none.
+        words: [u32; USER_DATA_WORDS],
+    },
+    /// Colour target zero's blend state for the draws that follow, as the stream's
+    /// `CB_BLEND0_CONTROL` stands at them (`REQ-...2ea9`, worklog 829).
+    ///
+    /// Emitted before a draw whenever the register's value in force changed. A translucent quad and
+    /// the opaque geometry before it are the same kind of draw with different blend state, so this is
+    /// per-draw state, not frame state.
+    SetBlend(crate::registers::BlendControl),
+    /// The texture the draws that follow sample, as linear `Rgba8` texels (worklog 828).
+    ///
+    /// Read out of guest memory from the image descriptor the draw's pixel shader names - only when
+    /// its layout is one read exactly (linear, `8_8_8_8_UNORM`, 2D); otherwise no command is emitted
+    /// and the backend's default texture stays bound.
+    BindTexture {
+        /// Which of the fragment module's textures this is (worklog 840): 0 for the first it
+        /// samples, 1 for a second.
+        slot: u32,
+        /// Texels, row-major and tightly packed, each the guest's four bytes in memory order - shared,
+        /// so a texture bound for many draws is read and held once (worklog 844).
+        texels: std::sync::Arc<[u32]>,
+        /// [`crate::content_hash`] of the texels, taken once as they were read.
+        hash: u64,
+        /// Width in texels.
+        width: u32,
+        /// Height in texels.
+        height: u32,
+    },
     /// Clear a colour target.
     ClearColour {
         /// Target to clear.

@@ -213,6 +213,9 @@ tokenizers = "0.22"
 # No default features: the archive is stored/deflate and the compression zoo is weight
 # for nothing.
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# A title package too large for the suite's zip step ships as a plain tar (worklog 846); no default
+# features, so no extended-attribute support is pulled in for archives that carry none.
+tar = { version = "0.4", default-features = false }
 
 # Test-only: temp directories for the portable containment test.
 tempfile = "3"

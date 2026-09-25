@@ -6,8 +6,30 @@
 //! frontend's, decoded from the guest's own stream, so a backend stays a recorder and the loop
 //! lives here (D701) rather than inside every backend.
 
-use crate::backend::{BackendError, RenderBackend, Resource};
+use crate::backend::{
+    BackendError, RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage,
+};
 use crate::pipeline::Submission;
+
+/// A command's variant name, for naming the one a device error came from without printing its
+/// payload (a `BindTexture` carries every texel).
+const fn command_name(command: &RenderCommand) -> &'static str {
+    match command {
+        RenderCommand::SetRenderTargets { .. } => "SetRenderTargets",
+        RenderCommand::BindShader { .. } => "BindShader",
+        RenderCommand::BindBuffer { .. } => "BindBuffer",
+        RenderCommand::SetViewport(_) => "SetViewport",
+        RenderCommand::SetViewportTransform(_) => "SetViewportTransform",
+        RenderCommand::SetUserData { .. } => "SetUserData",
+        RenderCommand::SetBlend(_) => "SetBlend",
+        RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::ClearColour { .. } => "ClearColour",
+        RenderCommand::Draw { .. } => "Draw",
+        RenderCommand::DrawIndexed { .. } => "DrawIndexed",
+        RenderCommand::Dispatch { .. } => "Dispatch",
+        RenderCommand::Fence { .. } => "Fence",
+    }
+}
 
 /// The result of driving one submission through a backend.
 ///
@@ -15,7 +37,7 @@ use crate::pipeline::Submission;
 /// the backend carried out, and how many it refused - which is a gap it named honestly (D010),
 /// not a failure. A frame where `refused` is high and `executed` low is a backend that has not
 /// grown the arm the guest needs yet, and the count says so rather than a black screen.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FrameOutcome {
     /// Resources made resident for this frame.
     pub resident: usize,
@@ -23,6 +45,12 @@ pub struct FrameOutcome {
     pub executed: usize,
     /// Commands the backend refused as unsupported - a named gap, not an error.
     pub refused: usize,
+    /// Why, by the name each refusal carried, with how many times, most frequent first.
+    ///
+    /// **A count names no work; the names do.** Every `Unsupported` carries the command it refused,
+    /// and dropping it left "450 refused" as the whole of what Neverball's first draw submission said
+    /// (worklog 818).
+    pub refusals: Vec<(&'static str, usize)>,
     /// Whether the frame was presented.
     pub presented: bool,
 }
@@ -59,15 +87,66 @@ pub fn drive(
 
     // The frame's guest-memory window, before the commands that read it. Frame-level state, set once
     // (D703): a shader fetches its vertices from it, so it has to be in place before a draw runs.
-    backend.set_guest_memory(&submission.guest_memory);
+    crate::perf::span(crate::perf::Span::GuestWindow, || {
+        backend.set_guest_memory(&submission.guest_memory);
+    });
 
-    for command in &submission.commands {
-        match backend.execute(command) {
+    let mut refusals = std::collections::BTreeMap::<&'static str, usize>::new();
+    // The shaders bound at each command, so a device error names the draw that raised it and the
+    // modules it ran (worklog 833) rather than only that something on the device failed.
+    let mut bound: Vec<(ShaderStage, ResourceId)> = Vec::new();
+    // And the inputs it ran with: each stage's user data and the texture's extent.
+    let mut inputs: Vec<(ShaderStage, Vec<u32>)> = Vec::new();
+    let mut texture = None;
+    for (index, command) in submission.commands.iter().enumerate() {
+        match command {
+            RenderCommand::BindShader { stage, shader } => {
+                bound.retain(|(s, _)| s != stage);
+                bound.push((*stage, *shader));
+            }
+            RenderCommand::SetUserData { stage, words } => {
+                let used = words
+                    .iter()
+                    .rposition(|&w| w != 0)
+                    .map_or(0, |last| last + 1);
+                inputs.retain(|(s, _)| s != stage);
+                inputs.push((*stage, words[..used].to_vec()));
+            }
+            RenderCommand::BindTexture { width, height, .. } => texture = Some((*width, *height)),
+            _ => {}
+        }
+        let span = if matches!(
+            command,
+            RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. }
+        ) {
+            crate::perf::Span::DrawCommand
+        } else {
+            crate::perf::Span::StateCommand
+        };
+        match crate::perf::span(span, || backend.execute(command)) {
             Ok(()) => outcome.executed += 1,
-            Err(BackendError::Unsupported { .. }) => outcome.refused += 1,
+            Err(BackendError::Unsupported { command }) => {
+                outcome.refused += 1;
+                *refusals.entry(command).or_default() += 1;
+            }
+            Err(BackendError::Device(message)) => {
+                let shown = match command {
+                    RenderCommand::BindTexture { .. } => command_name(command).to_owned(),
+                    other => format!("{other:?}"),
+                };
+                return Err(BackendError::Device(format!(
+                    "command {index} of {} ({shown}), shaders {bound:?}, user data {inputs:x?}, texture {texture:?}: {message}",
+                    submission.commands.len(),
+                )));
+            }
             Err(other) => return Err(other),
         }
     }
+    outcome.refusals = refusals.into_iter().collect();
+    // Most frequent first, the name breaking ties so two drives of one submission read the same.
+    outcome
+        .refusals
+        .sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
     outcome.presented = backend.present().is_ok();
     Ok(outcome)
@@ -109,6 +188,7 @@ mod tests {
                 resident: 1,
                 executed: 2,
                 refused: 0,
+                refusals: Vec::new(),
                 presented: true,
             }
         );
@@ -208,8 +288,10 @@ mod tests {
                 resident: 1,
                 executed: 0,
                 refused: 2,
+                refusals: vec![("everything", 2)],
                 presented: false,
-            }
+            },
+            "and each refusal is tallied under the name it carried"
         );
     }
 

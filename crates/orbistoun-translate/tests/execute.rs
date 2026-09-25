@@ -521,6 +521,30 @@ fn float_addition_produces_the_right_bits() {
     );
 }
 
+/// **Two floats pack into one register as halves, the first source low** (worklog 820).
+///
+/// The pixel shader's export packs `(r, g)` and `(b, a)` this way. 1.0 is `0x3c00` and 2.0 is
+/// `0x4000` as halves, both exact, so the packed word is `0x4000_3c00` whatever the rounding -
+/// and swapping the halves, or converting instead of narrowing, gives a different word.
+#[test]
+fn two_floats_pack_into_one_register_as_halves() {
+    if !device_or_skip("two_floats_pack_into_one_register_as_halves") {
+        return;
+    }
+    let registers = run(&[
+        v_mov_code(0, INLINE_ONE),
+        v_mov_code(1, INLINE_TWO),
+        vop2_vv("v_cvt_pkrtz_f16_f32_e32", 2, 0, 1),
+        s_endpgm(),
+    ]);
+    assert_eq!(
+        vector(&registers, 2),
+        0x4000_3c00,
+        "half 1.0 low, half 2.0 high; got {:#x}",
+        vector(&registers, 2)
+    );
+}
+
 #[test]
 fn float_multiplication_produces_the_right_bits() {
     if !device_or_skip("float_multiplication_produces_the_right_bits") {
@@ -1583,6 +1607,64 @@ fn a_comparison_can_leave_some_lanes_active_and_others_not() {
     }
 }
 
+/// Each lane stores its own index to its own word, under an execution mask set by
+/// `mask_program` - the shape of a primitive shader's `s_mov_b32 exec_lo, 7`.
+fn stores_under_mask(mask_program: &[u32]) -> Vec<u32> {
+    let mut program: Vec<u32> = mask_program.to_vec();
+    program.extend(lane_index_into(0));
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.extend(global_store(1, 0));
+    program.push(s_endpgm());
+    program
+}
+
+/// The translated module's length in words.
+fn module_words(words: &[u32]) -> usize {
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let strategy = Strategy::Predicated {
+        fidelity: Fidelity::Wavefront,
+        width: Width::default(),
+    };
+    translate(&decoded, &table, strategy)
+        .expect("translate")
+        .module
+        .len()
+}
+
+#[test]
+fn a_mask_known_at_translation_emits_only_the_lanes_it_runs() {
+    // Worklog 848. `s_mov_b32 exec_lo, <constant>` leaves the mask known until the block ends, so
+    // a lane whose bit is clear emits no write at all and one whose bit is set writes without a
+    // select. The device run pins that both are still right: lanes 0 and 2 store, no other lane
+    // does. The length pins that the known path is the one that ran - the same stores with the
+    // mask arriving through a register would pass the device check too.
+    let known = stores_under_mask(&[s_mov_exec(128 + 5)]);
+    let via_register = stores_under_mask(&[s_mov_b64(0, 128 + 5), s_mov_exec(0)]);
+    let (known_words, register_words) = (module_words(&known), module_words(&via_register));
+    assert!(
+        known_words * 2 < register_words,
+        "a known mask should emit well under half the code: {known_words} words against {register_words}"
+    );
+
+    if !device_or_skip("a_mask_known_at_translation_emits_only_the_lanes_it_runs") {
+        return;
+    }
+    for program in [&known, &via_register] {
+        let (_, memory) = run_memory(Fidelity::Wavefront, program);
+        for lane in 0..64usize {
+            let expected = if 0b101u64 >> lane & 1 != 0 {
+                lane as u32
+            } else {
+                0
+            };
+            assert_eq!(memory[lane], expected, "lane {lane}; memory was {memory:?}");
+        }
+    }
+}
+
 /// A SOPP branch: opcode at bit 16, signed dword offset in the low half.
 fn branch(name: &str, offset: i16) -> u32 {
     head(name) | u32::from(offset as u16)
@@ -2017,6 +2099,111 @@ fn a_modifier_that_is_not_translated_is_refused() {
             "the error should name the modifier, got: {error}"
         );
     }
+}
+
+/// Runs a program through the wavefront model with a `DX10_CLAMP` mode given, as a stage's
+/// `RSRC1` gives it (worklog 834).
+fn run_with_dx10_clamp(dx10_clamp: bool, words: &[u32]) -> Vec<u32> {
+    use orbistoun_translate::wavefront::{MeshPrimitive, Stage, UserData, Window};
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &table,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::default(),
+        },
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            dx10_clamp: Some(dx10_clamp),
+            ..UserData::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("translate: {e}"));
+    dispatch(&translated.module, OBSERVED, MEMORY_WORDS, [1, 1, 1])
+        .expect("dispatch")
+        .observed
+}
+
+#[test]
+fn the_output_clamp_holds_a_float_result_to_the_unit_range() {
+    // `clamp(x, 0.0, 1.0)` folded into the instruction producing `x` - Neverball's pixel shaders
+    // carry it (worklog 834). Above one comes back one, below zero comes back zero, inside is
+    // untouched; and a NaN is zero under DX10_CLAMP and passes through without it.
+    const CLAMP: u32 = 1 << 15;
+    if !device_or_skip("the_output_clamp_holds_a_float_result_to_the_unit_range") {
+        return;
+    }
+    let clamped_add = |dst: u32, source: u32, addend: u32| {
+        let mut encoded = vop3("v_add_f32_e64", dst, [vgpr_code(source), addend, 0], 0, 0);
+        encoded[0] |= CLAMP;
+        encoded
+    };
+    let mut program = vec![v_mov_code(0, F_2), v_mov_code(1, F_MINUS_2)];
+    program.extend(v_mov_literal(2, 0xBF00_0000)); // -0.5
+    program.extend(v_mov_literal(3, BITS_QUIET_NAN));
+    program.extend(clamped_add(4, 0, F_1)); // 2 + 1 = 3 -> 1
+    program.extend(clamped_add(5, 1, F_1)); // -2 + 1 = -1 -> 0
+    program.extend(clamped_add(6, 2, F_1)); // -0.5 + 1 = 0.5 -> 0.5
+    program.extend(clamped_add(7, 3, F_1)); // NaN + 1 = NaN
+    program.push(s_endpgm());
+
+    let with = run_with_dx10_clamp(true, &program);
+    assert_eq!(vector(&with, 4), BITS_1, "above the range clamps to one");
+    assert_eq!(vector(&with, 5), 0, "below the range clamps to zero");
+    assert_eq!(
+        vector(&with, 6),
+        0x3F00_0000,
+        "inside the range is untouched"
+    );
+    assert_eq!(vector(&with, 7), 0, "DX10_CLAMP turns a NaN into zero");
+
+    let without = run_with_dx10_clamp(false, &program);
+    assert_eq!(vector(&without, 4), BITS_1);
+    let nan = vector(&without, 7);
+    assert!(
+        nan & 0x7F80_0000 == 0x7F80_0000 && nan & 0x007F_FFFF != 0,
+        "without DX10_CLAMP a NaN passes through, got {nan:#x}"
+    );
+}
+
+#[test]
+fn a_clamp_on_a_result_it_does_not_clamp_is_refused() {
+    // The clamp is applied only to a 32-bit float arithmetic result. On a per-lane select (and on an
+    // integer, where the bit saturates) it is refused by name, even with the stage's mode known.
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    // v_cndmask_b32_e64 v1, v0, 1.0, vcc - vcc is scalar code 106.
+    let mut encoded = vop3("v_cndmask_b32_e64", 1, [vgpr_code(0), F_1, 106], 0, 0);
+    encoded[0] |= 1 << 15;
+    let bytes: Vec<u8> = [encoded[0], encoded[1], s_endpgm()]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let error = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &table,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::default(),
+        },
+        (
+            orbistoun_translate::wavefront::Stage::Compute,
+            orbistoun_translate::wavefront::MeshPrimitive::default(),
+        ),
+        orbistoun_translate::wavefront::Window::default(),
+        orbistoun_translate::wavefront::UserData {
+            dx10_clamp: Some(true),
+            ..orbistoun_translate::wavefront::UserData::default()
+        },
+    )
+    .expect_err("a clamp on a select must be refused");
+    assert!(error.to_string().contains("does not clamp"), "got: {error}");
 }
 
 #[test]
@@ -4778,6 +4965,33 @@ fn whole_quad_mode_leaves_an_empty_mask_empty() {
         u32::MAX,
         "registers were {registers:?}"
     );
+}
+
+/// `s_wqm_b32 sDst, <source code>`.
+fn s_wqm32(dst: u32, source_code: u32) -> u32 {
+    head("s_wqm_b32") | (dst << 16) | source_code
+}
+
+/// **The 32-lane form lights whole quads in one register** (worklog 819).
+///
+/// The GL context's textured pixel shader enters whole-quad mode with `s_wqm_b32 exec_lo,
+/// exec_lo`, and Neverball's first frame could not translate it. Same three cases as the 64-bit
+/// form: one bit lights its quad, a bit in the second quad lights that quad and not the first,
+/// and nothing stays nothing.
+#[test]
+fn whole_quad_mode_32_lights_the_quad_of_every_set_bit_and_nothing_else() {
+    if !device_or_skip("whole_quad_mode_32_lights_the_quad_of_every_set_bit_and_nothing_else") {
+        return;
+    }
+    for (seed, expected) in [(1_u32, 0b1111_u32), (16, 0b1111_0000), (0, 0)] {
+        let program = [s_mov_b64(0, 128 + seed), s_wqm32(2, 0), s_endpgm()];
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        assert_eq!(
+            scalar(&registers, 2),
+            expected,
+            "seed {seed:#b}; registers were {registers:?}"
+        );
+    }
 }
 
 /// `ds_write_b32 vAddr, vData offset:N`.

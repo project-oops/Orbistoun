@@ -20,6 +20,9 @@ orbistoun-translate = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 thiserror = { workspace = true }
+zerocopy = { workspace = true }
+# Whether guest memory was written since a point, asked of the host (worklog 851).
+orbistoun-mem = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

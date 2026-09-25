@@ -117,6 +117,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_or_b64",
     "s_sub_i32",
     "s_waitcnt",
+    "s_wqm_b32",
     "s_wqm_b64",
     "s_xor_b32",
     "v_add_co_u32",
@@ -131,6 +132,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_lt_u32_e32",
     "v_cndmask_b32_e64",
     "v_cos_f32_e32",
+    "v_cvt_pkrtz_f16_f32_e32",
     "v_div_fixup_f32",
     "v_fmac_f32_e32",
     "v_div_scale_f32",
@@ -378,7 +380,7 @@ pub fn touches_mask(instruction: &Instruction, name: &str) -> bool {
     // Whole quad mode operates on a sixty-four-bit lane mask, so it needs a model with
     // one. Its operands may be ordinary register pairs, so the operand check below cannot
     // see it.
-    let whole_quad = name == "s_wqm_b64";
+    let whole_quad = matches!(name, "s_wqm_b64" | "s_wqm_b32");
 
     // The local data share is storage the lanes of a wavefront share. A model with one
     // lane per invocation would give each its own, so a shader using it to exchange
@@ -567,11 +569,31 @@ pub trait Model {
     /// The encoding table, for naming an instruction's family.
     fn encodings(&self) -> &EncodingTable;
 
+    /// The shader's `DX10_CLAMP` mode (`SPI_SHADER_PGM_RSRC1` bit 21): whether an output clamp turns
+    /// a NaN into zero. `None` - the default, and every model given no `RSRC1` - refuses a clamped
+    /// instruction rather than choosing an answer for it (worklog 834).
+    fn dx10_clamp(&self) -> Option<bool> {
+        None
+    }
+
     /// How many lanes this model emits code for.
     ///
     /// One where an invocation *is* a lane; the full wavefront where one invocation
     /// simulates all of them.
     fn lanes(&self) -> u32;
+
+    /// Whether `lane` may be active here. `false` only where the execution mask is known at
+    /// translation time and has the lane's bit clear, so an instruction whose only effect is a
+    /// masked write can emit nothing for that lane - exactly what the hardware does with it.
+    ///
+    /// The default knows nothing, so every lane may run.
+    fn lane_may_run(&self, _lane: u32) -> bool {
+        true
+    }
+
+    /// Control has reached the start of a guest block, which more than one place may branch to,
+    /// so anything this model inferred from the instructions before it no longer holds.
+    fn enter_block(&mut self) {}
 
     /// A constant of the given value, declared once however often it is used.
     fn constant(&mut self, value: u32) -> Id;
@@ -1395,6 +1417,28 @@ pub trait Model {
         b.function(op::BITCAST, &[u32_type.0, bits.0, widened.0]);
         bits
     }
+
+    /// Narrows a register's float to a half and returns the half's sixteen bits, zero-extended.
+    ///
+    /// The inverse of [`Self::half_to_float_bits`], through the same IEEE conversion
+    /// (`OpFConvert`) rather than a bit-twiddle, so overflow, denormals and NaNs are the
+    /// device's. See `pack_halves` for the rounding this does not promise.
+    fn float_bits_to_half(&mut self, bits: Id) -> Id {
+        let u32_type = self.u32_type();
+        let f32_type = self.f32_type();
+        let f16_type = self.f16_type();
+        let u16_type = self.u16_type();
+        let b = self.builder();
+        let float = b.id();
+        b.function(op::BITCAST, &[f32_type.0, float.0, bits.0]);
+        let half = b.id();
+        b.function(op::FCONVERT, &[f16_type.0, half.0, float.0]);
+        let narrowed = b.id();
+        b.function(op::BITCAST, &[u16_type.0, narrowed.0, half.0]);
+        let widened = b.id();
+        b.function(op::UCONVERT, &[u32_type.0, widened.0, narrowed.0]);
+        widened
+    }
 }
 
 /// A destination and two sources, in the order the specification prints them.
@@ -1722,7 +1766,7 @@ fn mesh_vertex_export<M: Model + ?Sized>(
     sources: [&Operand; 4],
     location: Option<u32>,
 ) -> Result<(), TranslateError> {
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let mut components = [Id(0); 4];
         for (slot, source) in sources.into_iter().enumerate() {
             let bits = model.read_source(instruction, source, lane)?;
@@ -1772,7 +1816,7 @@ fn mesh_primitive_export<M: Model + ?Sized>(
     // a fact (principle 1).
     let count = model.mesh_primitive().indices() as usize;
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let word = model.read_source(instruction, packed, lane)?;
         let mask = model.constant((1 << INDEX_BITS) - 1);
         let mut indices = Vec::with_capacity(count);
@@ -1800,6 +1844,14 @@ fn mesh_primitive_export<M: Model + ?Sized>(
 /// translated onto the same attachment and appearing to work (D553).
 const MRT0: i64 = 0;
 
+/// An export's `COMPR` bit, in its first word: the sources carry packed halves
+/// (`aco_assembler.cpp:1001` in the collection's Mesa tree).
+const EXPORT_COMPRESSED: u32 = 1 << 10;
+
+/// An export's `EN` field, bits 0-3: which of the four channels it writes
+/// (`aco_assembler.cpp:1005`).
+const EXPORT_ENABLE_MASK: u32 = 0xf;
+
 /// `exp` - hands four registers to a render target.
 ///
 /// # What is translated
@@ -1814,10 +1866,11 @@ const MRT0: i64 = 0;
 /// - **A module with no colour output.** A compute dispatch has nowhere to export to. That is
 ///   the whole reason [`Model::colour_output`] exists and defaults to `None`.
 /// - **Any target but `mrt0`.** See [`MRT0`].
-/// - **The compressed and done bits, and the write mask**, which live in the instruction's
-///   first word and are not among the operands the decoder solved. Nothing here reads them, so
-///   nothing here may claim to honour them - a shader exporting two half-packed channels would
-///   otherwise be translated as though it exported four whole ones.
+/// - **A write mask narrower than all four channels.** The mask and the compressed bit live in
+///   the instruction's first word rather than among the operands the decoder solved; both are
+///   read from there (worklog 820). A compressed export is unpacked from its two half-packed
+///   sources; a partial mask is refused, because storing a whole `vec4` would overwrite channels
+///   the guest meant to keep. `done` and `vm` change nothing a single-export translation does.
 fn export<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -1870,12 +1923,48 @@ fn export<M: Model + ?Sized>(
         });
     }
 
+    // Every channel, no channel, or this refuses (`EN`, bits 0-3, `aco_assembler.cpp:1005`). No
+    // channel is an export that writes nothing - a shader that raises one only to end the wave,
+    // or one whose colour went to a storage image instead - so nothing is stored; before worklog
+    // 820 this stored a whole vec4 there too. A partial mask leaves channels the target keeps,
+    // and storing a whole vec4 would overwrite them.
+    let enabled = instruction.word & EXPORT_ENABLE_MASK;
+    if enabled == 0 {
+        return Ok(());
+    }
+    if enabled != EXPORT_ENABLE_MASK {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a colour export that enables fewer than all four channels is not translated",
+        });
+    }
+
     let mut components = Vec::with_capacity(4);
-    for source in [a, b, c, d] {
-        // Lane zero: one fragment is one pixel, and the wavefront model's lanes are pixels a
-        // rasteriser assigns rather than anything this translation chooses.
-        let bits = model.read_source(instruction, source, 0)?;
-        components.push(model.as_float(bits).0);
+    if instruction.word & EXPORT_COMPRESSED != 0 {
+        // **Compressed**: two registers of two halves each - (r, g) in the first source, (b, a)
+        // in the second, low half first, as `v_cvt_pkrtz_f16_f32` packed them; the third and
+        // fourth sources are unused (`aco_select_ps_epilog.cpp:170-185`). Read as four whole
+        // floats, which is what this did until worklog 820, a compressed export writes two
+        // packed bit patterns as red and green and whatever sat in two other registers as blue
+        // and alpha.
+        let mask = model.constant(0xffff);
+        let sixteen = model.constant(16);
+        for source in [a, b] {
+            let packed = model.read_source(instruction, source, 0)?;
+            let low = model.binary(op::BITWISE_AND, packed, mask);
+            let high = model.binary(op::SHIFT_RIGHT_LOGICAL, packed, sixteen);
+            for half in [low, high] {
+                let bits = model.half_to_float_bits(half);
+                components.push(model.as_float(bits).0);
+            }
+        }
+    } else {
+        for source in [a, b, c, d] {
+            // Lane zero: one fragment is one pixel, and the wavefront model's lanes are pixels a
+            // rasteriser assigns rather than anything this translation chooses.
+            let bits = model.read_source(instruction, source, 0)?;
+            components.push(model.as_float(bits).0);
+        }
     }
 
     let builder = model.builder();
@@ -1885,6 +1974,15 @@ fn export<M: Model + ?Sized>(
     builder.function(op::COMPOSITE_CONSTRUCT, &construct);
     builder.function(op::STORE, &[colour.0, value.0]);
     Ok(())
+}
+
+/// The lanes an instruction whose only effect is a masked write emits code for: every lane but
+/// those the model knows are inactive (worklog 854). An instruction that writes a **mask** loops
+/// over every lane instead, because its answer for an inactive lane is a bit someone reads.
+fn running_lanes<M: Model + ?Sized>(model: &M) -> Vec<u32> {
+    (0..model.lanes())
+        .filter(|&lane| model.lane_may_run(lane))
+        .collect()
 }
 
 /// which is far harder to find than a translator that stops and names what it hit.
@@ -1957,6 +2055,10 @@ pub fn instruction<M: Model + ?Sized>(
         // of the corresponding four in the source is set - so a derivative computed
         // across a quad has all four pixels live even where only one is covered.
         "s_wqm_b64" => whole_quad_mode(model, instruction),
+        // s_wqm_b32: the same for a 32-lane wavefront, whose mask is one register - how the
+        // GL context's textured pixel shader enters whole-quad mode for its sample
+        // (`s_wqm_b32 exec_lo, exec_lo`, worklog 819).
+        "s_wqm_b32" => whole_quad_mode_32(model, instruction),
 
         // The 64-bit scalar logic, which is how a guest computes a mask: narrow it by
         // anding with a comparison result, widen it by oring, and take the lanes an
@@ -2024,7 +2126,7 @@ pub fn instruction<M: Model + ?Sized>(
                 });
             };
             let one = model.constant(ONE_F32);
-            for lane in 0..model.lanes() {
+            for lane in running_lanes(model) {
                 let value = model.read_source(instruction, source, lane)?;
                 let quotient = model.f32_binary(op::FDIV, one, value);
                 model.write_vector_lane(u32::from(*register), lane, quotient);
@@ -2041,7 +2143,7 @@ pub fn instruction<M: Model + ?Sized>(
                     detail: "v_mov_b32 destination is not a vector register",
                 });
             };
-            for lane in 0..model.lanes() {
+            for lane in running_lanes(model) {
                 let value = model.read_source(instruction, source, lane)?;
                 model.write_vector_lane(u32::from(*register), lane, value);
             }
@@ -2062,6 +2164,10 @@ pub fn instruction<M: Model + ?Sized>(
         // every real shader - clamp and saturate are a min of a max - so they are the first
         // extended pair wired up now that the emitter can import the set.
         "v_max_f32_e32" | "v_min_f32_e32" => float_min_max(model, instruction, name),
+
+        // Two floats packed into one register as halves - how a pixel shader prepares the
+        // compressed export an 8_8_8_8 target takes on this part (worklog 820).
+        "v_cvt_pkrtz_f16_f32_e32" => pack_halves(model, instruction),
 
         // Unary vector float ALU and transcendentals: square root, reciprocal square root,
         // sin, cos, base-2 exp, and base-2 log (worklog 525).
@@ -2141,7 +2247,7 @@ fn mask_bit_count<M: Model + ?Sized>(
         });
     };
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let mask_value = model.read_source(instruction, mask, lane)?;
         let base = model.read_source(instruction, addend, lane)?;
 
@@ -2200,7 +2306,7 @@ fn short_form_arithmetic<M: Model + ?Sized>(
     };
     let register = u32::from(*register);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let lhs = model.read_source(instruction, first, lane)?;
         let rhs = model.read_source(instruction, second, lane)?;
         let value = match name {
@@ -2272,11 +2378,48 @@ fn float_min_max<M: Model + ?Sized>(
     } else {
         GLSL_FMIN
     };
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let lhs = model.read_source(instruction, first, lane)?;
         let rhs = model.read_source(instruction, second, lane)?;
         let value = model.f32_ext_binary(extended, lhs, rhs);
         model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_cvt_pkrtz_f16_f32`: two floats, each narrowed to a half, packed low then high.
+///
+/// The first source lands in bits 0-15 and the second in bits 16-31 - the order ACO relies on
+/// when it packs `(r, g)` and `(b, a)` for an FP16 colour export
+/// (`aco_select_ps_epilog.cpp:170-178` in the collection's Mesa tree).
+///
+/// **The rounding is assumed, and named.** The instruction rounds toward zero; the narrowing here
+/// is `OpFConvert`, whose rounding the device chooses and which is round-to-nearest-even on every
+/// driver this has run on. The two differ by at most one unit in the last place of a half, which is
+/// far below an eight-bit colour channel's resolution but is not nothing, so it is not claimed to
+/// be exact.
+fn pack_halves<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, first, second) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a half-pack's destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let low = model.read_source(instruction, first, lane)?;
+        let high = model.read_source(instruction, second, lane)?;
+        let low = model.float_bits_to_half(low);
+        let high = model.float_bits_to_half(high);
+        let sixteen = model.constant(16);
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
+        let packed = model.binary(op::BITWISE_OR, low, high);
+        model.write_vector_lane(register, lane, packed);
     }
     model.count();
     Ok(())
@@ -2330,7 +2473,7 @@ fn float_unary<M: Model + ?Sized>(
             });
         }
     };
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let operand = model.read_source(instruction, source, lane)?;
         let argument = if revolutions {
             let turn = model.constant(TWO_PI_F32);
@@ -2498,6 +2641,8 @@ fn carry_arithmetic<M: Model + ?Sized>(
 
     let zero = model.constant(0);
     let mut mask = (zero, zero);
+    // Every lane, not only the running ones: the carry is a mask, and what it holds for an
+    // inactive lane is this translation's existing answer, which skipping would change.
     for lane in 0..model.lanes() {
         let left = model.read_source(instruction, first, lane)?;
         let right = model.read_source(instruction, second, lane)?;
@@ -2598,7 +2743,7 @@ fn long_form_arithmetic<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    let modifiers = Modifiers::read(
+    let modifiers = Modifiers::read_allowing_clamp(
         instruction,
         has_scalar_destination(model.encodings(), instruction),
     )?;
@@ -2611,6 +2756,33 @@ fn long_form_arithmetic<M: Model + ?Sized>(
     let register = u32::from(*register);
     let sources: Vec<Operand> = instruction.operands[1..].to_vec();
 
+    // The output clamp: applied to a 32-bit float result in a stage whose NaN rule is known, and
+    // refused by name everywhere else (worklog 834).
+    let clamp = if modifiers.clamp {
+        if name == CNDMASK || name == "v_div_fmas_f32" || !result_is_f32(name) {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "this instruction clamps a result this translation does not clamp - on an ",
+                    "integer the flag saturates, and on a select or a scaled multiply-add it is ",
+                    "not translated"
+                ),
+            });
+        }
+        let Some(nan_to_zero) = model.dx10_clamp() else {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "this instruction clamps its result to [0, 1], and what that does to a NaN ",
+                    "is the stage's DX10_CLAMP mode, which this translation was not given"
+                ),
+            });
+        };
+        Some(nan_to_zero)
+    } else {
+        None
+    };
+
     if name == CNDMASK {
         return select_per_lane(model, instruction, register, &sources, modifiers);
     }
@@ -2618,17 +2790,49 @@ fn long_form_arithmetic<M: Model + ?Sized>(
         return division_fmas(model, instruction, register, &sources, modifiers);
     }
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let mut read = Vec::with_capacity(sources.len());
         for (index, source) in sources.iter().enumerate() {
             let raw = model.read_source(instruction, source, lane)?;
             read.push(apply_modifiers(model, raw, modifiers, index));
         }
         let value = combine(model, instruction, name, &read)?;
+        let value = match clamp {
+            Some(nan_to_zero) => clamp_unit(model, value, nan_to_zero),
+            None => value,
+        };
         model.write_vector_lane(register, lane, value);
     }
     model.count();
     Ok(())
+}
+
+/// Whether a long-form vector instruction's result is a 32-bit float, from its name: an `_f32`
+/// operation that is not a comparison, and - for a conversion `v_cvt_<to>_<from>` - one converting
+/// *to* `f32`. `v_cvt_i32_f32` ends in `_f32` and produces an integer; `v_cvt_pkrtz_f16_f32` packs
+/// halves (worklog 834).
+fn result_is_f32(name: &str) -> bool {
+    let base = name.strip_suffix("_e64").unwrap_or(name);
+    if base.starts_with("v_cmp") || !base.ends_with("_f32") {
+        return false;
+    }
+    base.strip_prefix("v_cvt_")
+        .is_none_or(|conversion| conversion.starts_with("f32_"))
+}
+
+/// The output clamp on a 32-bit float result: `[0, 1]`, and a NaN either zero (`DX10_CLAMP` set) or
+/// passed through (clear) - the rule the stage's `RSRC1` names (worklog 834).
+///
+/// `FMin`/`FMax` alone are undefined on a NaN in GLSL.std.450, so the NaN takes its own select and
+/// the min/max only ever sees an ordered value.
+fn clamp_unit<M: Model + ?Sized>(model: &mut M, value: Id, nan_to_zero: bool) -> Id {
+    let zero = model.constant(0);
+    let one = model.constant(0x3F80_0000);
+    let above = model.f32_ext_binary(GLSL_FMAX, value, zero);
+    let clamped = model.f32_ext_binary(GLSL_FMIN, above, one);
+    let nan = float_is(model, op::IS_NAN, value);
+    let for_nan = if nan_to_zero { zero } else { value };
+    pick(model, nan, for_nan, clamped)
 }
 
 /// Chooses between two 32-bit values on a boolean, without branching.
@@ -2809,7 +3013,7 @@ fn division_fmas<M: Model + ?Sized>(
     // than nearly so.
     let scale = model.constant(0x4F80_0000);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let a = model.read_source(instruction, first, lane)?;
         let a = apply_modifiers(model, a, modifiers, 0);
         let b = model.read_source(instruction, second, lane)?;
@@ -2974,6 +3178,7 @@ fn division_scale<M: Model + ?Sized>(
     // overwritten in full.
     let mut halves = (zero, zero);
 
+    // Every lane: this writes a mask as well as values (see `carry_arithmetic`).
     for lane in 0..model.lanes() {
         let scaled_input = model.read_source(instruction, first, lane)?;
         let scaled_input = apply_modifiers(model, scaled_input, modifiers, 0);
@@ -3113,7 +3318,7 @@ fn select_per_lane<M: Model + ?Sized>(
     };
     let (low, high) = sixty_four_bit_source(model, instruction, mask)?;
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let clear = model.read_source(instruction, when_clear, lane)?;
         let set = model.read_source(instruction, when_set, lane)?;
         let clear = apply_modifiers(model, clear, modifiers, 0);
@@ -3490,6 +3695,7 @@ fn compare<M: Model + ?Sized>(
 
     let zero = model.constant(0);
     let mut halves = (zero, zero);
+    // Every lane: the answer is a mask (see `carry_arithmetic`).
     for lane in 0..model.lanes() {
         let left = model.read_source(instruction, first, lane)?;
         let right = model.read_source(instruction, second, lane)?;
@@ -3763,7 +3969,7 @@ fn local_share<M: Model + ?Sized>(
     };
     let register = u32::from(*register);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let base = model.read_source(instruction, address, lane)?;
         let byte_offset = model.constant(offset);
         let byte_address = model.add(base, byte_offset);
@@ -4333,7 +4539,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
     let element_bytes = total_bits.div_ceil(8);
     let element_words = total_bits.div_ceil(32);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let scalar_offset = model.read_source(instruction, soffset, lane)?;
         let (vindex, voffset) = match (idxen, offen) {
             (false, false) => (None, None),
@@ -4552,7 +4758,7 @@ fn buffer_access<M: Model + ?Sized>(
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let scalar_offset = model.read_source(instruction, soffset, lane)?;
 
         // With both modifiers the address register is a *pair*: the index first, then the
@@ -4856,7 +5062,7 @@ fn image_sample<M: Model + ?Sized>(
     let zero = model.constant(0);
     let constant_level = model.as_float(zero);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         // Two dimensions, from consecutive registers - the dimensionality field was checked
         // above, so the count is not in doubt here.
         let u = model.read_source(instruction, &Operand::Vector(address_of(address)), lane)?;
@@ -4984,7 +5190,7 @@ fn image_store<M: Model + ?Sized>(
     let stored = model.storage_image(descriptor).map_err(refuse)?;
     let zero = model.constant(0);
 
-    for lane in 0..model.lanes() {
+    for lane in running_lanes(model) {
         let u = model.read_source(instruction, &Operand::Vector(address_of(address)), lane)?;
         let v = model.read_source(instruction, &Operand::Vector(address_of(address + 1)), lane)?;
 
@@ -5062,7 +5268,7 @@ fn flat_memory<M: Model + ?Sized>(
                     detail: "a flat load runs past the end of the vector register file",
                 });
             }
-            for lane in 0..model.lanes() {
+            for lane in running_lanes(model) {
                 let address = model.flat_address(instruction, vaddr, base, lane)?;
                 for word in 0..words {
                     // Consecutive words, so consecutive addresses. Stepped by address
@@ -5095,7 +5301,7 @@ fn flat_memory<M: Model + ?Sized>(
                     detail: "a flat store reads past the end of the vector register file",
                 });
             }
-            for lane in 0..model.lanes() {
+            for lane in running_lanes(model) {
                 let address = model.flat_address(instruction, vaddr, base, lane)?;
                 for word in 0..words {
                     let stepped = step_address(model, address, word);
@@ -5173,6 +5379,36 @@ fn whole_quad_mode<M: Model + ?Sized>(
     }
     model.write_scalar(register, low);
     model.write_scalar(register + 1, high);
+    model.count();
+    Ok(())
+}
+
+/// Translates `s_wqm_b32`: whole quad mode on a 32-lane mask.
+///
+/// One register rather than a pair, so one [`quad_expand`] and the destination rules
+/// `s_mov_b32` has: `exec_lo` or `vcc_lo` sets that mask's low half, anything else must be
+/// a scalar register. The GL context's textured pixel shader runs it on `exec_lo` itself so
+/// the helper pixels of every covered quad execute the sample and its derivatives exist
+/// (oops-sdk `tools/shader/tex-prolog.s`; worklog 819).
+fn whole_quad_mode_32<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let value = model.read_source(instruction, source, 0)?;
+    let expanded = quad_expand(model, value);
+    if let Some(mask) = mask_destination(destination) {
+        write_mask_low(model, mask, expanded)?;
+        model.count();
+        return Ok(());
+    }
+    let Operand::Scalar(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_wqm_b32 destination is neither a scalar register nor a lane mask",
+        });
+    };
+    model.write_scalar(u32::from(*register), expanded);
     model.count();
     Ok(())
 }

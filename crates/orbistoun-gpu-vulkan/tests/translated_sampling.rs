@@ -86,7 +86,7 @@ fn sampling_shader(opcode: u32) -> Vec<u8> {
         bytes.extend(word.to_le_bytes());
     }
     // exp mrt0 v4, v5, v6, v7
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0706_0504u32.to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());
     bytes
@@ -313,7 +313,7 @@ fn fetching_shader(x: u32, y: u32) -> Vec<u8> {
     // 16 divided by four. No sampler field, which is the whole difference from a sample.
     bytes.extend(((4 << 8) | ((IMAGE_DESCRIPTOR / 4) << 16)).to_le_bytes());
     // exp mrt0 v4, v5, v6, v7
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0706_0504u32.to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());
     bytes
@@ -462,7 +462,7 @@ fn levelled_shader(level: u32) -> Vec<u8> {
     // Opcode 36 is the levelled sample.
     bytes.extend((0xF000_0000u32 | (36 << 18) | (0xF << 8) | TWO_DIMENSIONAL).to_le_bytes());
     bytes.extend(mimg_operands(0, 4, IMAGE_DESCRIPTOR, SAMPLER_DESCRIPTOR).to_le_bytes());
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0706_0504u32.to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());
     bytes
@@ -573,9 +573,84 @@ fn a_second_texture_is_refused_rather_than_guessed() {
     let TranslateError::Unsupported { detail, .. } = error else {
         panic!("refused for the wrong reason: {error:?}");
     };
+    // Two textures bind (worklog 840), but only where each one's descriptor is found in the
+    // descriptor table; neither is here, so which is which cannot be told.
     assert!(
-        detail.contains("more than one texture"),
+        detail.contains("reads two textures"),
         "refused, but not for naming two textures: {detail}"
+    );
+}
+
+/// **Two textures whose descriptors come from the descriptor table translate, each at its own
+/// binding and offset** (worklog 840): the open-toolchain GL context's second texture unit loads
+/// its image descriptor from `+0x40` of the table `s[0:1]` points at, where the first loads from
+/// `+0x00` (oops-sdk `tex-prolog2.s`). Sampled second-unit first, as that prolog does, so slot 0
+/// is the `+0x40` texture.
+#[test]
+fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
+    use orbistoun_translate::wavefront::{MeshPrimitive, TextureSource, UserData};
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load_x8 = |dst: u32, offset: u32| {
+        let (family, opcode) = encodings
+            .find_by_name("s_load_dwordx8")
+            .expect("the target has s_load_dwordx8");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        // Destination at bit 6, the base pair s[0:1] halved at bit 0, the byte offset after.
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    let second_unit = 20;
+    for word in s_load_x8(second_unit, 0x40)
+        .into_iter()
+        .chain(s_load_x8(IMAGE_DESCRIPTOR, 0x00))
+    {
+        bytes.extend(word.to_le_bytes());
+    }
+    let words = image_sample_words(39);
+    let from_second = (words[1] & !(0x1F << 16)) | ((second_unit / 4) << 16);
+    for word in [words[0], from_second, words[0], words[1], 0xBF81_0000] {
+        bytes.extend(word.to_le_bytes());
+    }
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("two textures from the table translate");
+    assert_eq!(
+        translated.textures,
+        [
+            TextureSource {
+                slot: 0,
+                table_offset: Some(0x40)
+            },
+            TextureSource {
+                slot: 1,
+                table_offset: Some(0x00)
+            },
+        ]
     );
 }
 

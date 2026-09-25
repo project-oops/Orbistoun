@@ -41,10 +41,13 @@ orbistoun-service = { workspace = true }
 orbistoun-systemservice = { workspace = true }
 orbistoun-thunk = { workspace = true }
 serde_json = { workspace = true }
+# Frames move between word and byte views of the same pixels without a copy through an iterator.
+zerocopy = { workspace = true }
+# A title's `filesystem_view` setting, merged from its shipped record and the user's file.
+orbistoun-overrides = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-orbistoun-overrides = { workspace = true }
 # The -36c0 render test builds a submission from a captured DCB, which needs the translation
 # strategy the pipeline is constructed with.
 orbistoun-translate = { workspace = true }

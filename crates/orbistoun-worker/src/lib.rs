@@ -25,9 +25,12 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use orbistoun_proto::codec::{read_message, write_message};
 use orbistoun_proto::{Event, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
+pub mod device_thread;
 pub mod experiment;
 pub mod fault;
 pub mod frame_region;
+pub mod page_guard;
+pub mod profile;
 pub mod render;
 pub mod report;
 pub mod session;
@@ -64,23 +67,38 @@ pub const WORKER_FLAG: &str = "--worker";
 /// [`Request::Shell`] is applied *on that thread*, because it needs no reply: it changes
 /// session state and raises events into a queue the guest drains. Everything else is
 /// forwarded here, so the output stream keeps exactly one writer.
+///
+/// # When the input ends without a `Shutdown`
+///
+/// `on_hangup` is called, on the reading thread, when the stream ends without a
+/// [`Request::Shutdown`] before it. The only peer is [`WorkerHandle`], which holds the pipe
+/// open until it sends `Shutdown`, so an end without one means the peer is gone (D715).
+/// It is called on the reading thread and not left to this loop because this loop may be
+/// inside a guest that never returns, and would never see the channel close.
 pub fn serve<R: BufRead + Send + 'static, W: Write>(
     input: R,
     mut output: W,
     service: &Service,
+    on_hangup: impl FnOnce() + Send + 'static,
 ) -> io::Result<()> {
     let (sender, receiver) = std::sync::mpsc::channel::<io::Result<Request>>();
     let reader = std::thread::spawn(move || {
         let mut input = input;
         loop {
             match read_message::<_, Request>(&mut input) {
-                Ok(None) => return,
+                Ok(None) => {
+                    on_hangup();
+                    return;
+                }
                 // Answered here and not forwarded. The main loop may be inside the guest,
                 // which is the whole point of the arrangement.
                 Ok(Some(Request::Shell { action })) => shell_action(action),
                 // Same reason, more so: input arrives while a run is in flight or not at
                 // all. It replies with nothing, so the output stream keeps one writer.
                 Ok(Some(Request::Input { pads })) => orbistoun_input::latest::arrived(&pads),
+                // The toolbar's input capture and playback (D721), mid-run, with no reply.
+                Ok(Some(Request::CaptureInput { to })) => capture_input(to.as_deref()),
+                Ok(Some(Request::PlayInput { script })) => play_input(script.as_deref()),
                 Ok(Some(request)) => {
                     let last = matches!(request, Request::Shutdown);
                     if sender.send(Ok(request)).is_err() || last {
@@ -160,12 +178,18 @@ fn serve_requests<W: Write>(
                 symbols_db,
                 limit_seconds,
                 call_budget,
+                input_script,
+                capture_input: armed_capture,
+                staged,
             } => {
                 // A title exists from here, so a shell action arriving now has something to
                 // act on. Before this point there is nothing to interrupt, and a request
                 // that arrives early is refused and counted rather than queued for a title
                 // that may never start.
                 session::begin();
+                *run_input_script() = input_script;
+                *run_capture_input() = armed_capture;
+                RUN_STAGED.store(staged, std::sync::atomic::Ordering::Relaxed);
                 let ran = run_guest(
                     &mut output,
                     service,
@@ -177,12 +201,20 @@ fn serve_requests<W: Write>(
                     },
                 );
                 session::end();
+                *run_input_script() = None;
+                *run_capture_input() = None;
+                RUN_STAGED.store(false, std::sync::atomic::Ordering::Relaxed);
+                capture_input(None);
+                play_input(None);
                 ran?;
             }
             // Answered on the reading thread, which is the entire reason that thread
             // exists. Spelled out rather than caught by a wildcard so that adding a
             // request later is a compile error here instead of a silent drop.
-            Request::Shell { .. } | Request::Input { .. } => {
+            Request::Shell { .. }
+            | Request::Input { .. }
+            | Request::CaptureInput { .. }
+            | Request::PlayInput { .. } => {
                 unreachable!("answered on the reading thread as they arrive")
             }
             Request::Shutdown => return Ok(()),
@@ -331,6 +363,18 @@ fn run_guest<W: Write>(
 /// Every failure below funnels through here so no branch can quietly return without a
 /// verdict - a silent stop is indistinguishable from a guest that ran and did nothing
 /// (D010).
+/// Renders the guest's last submission and, when it produced a frame, emits the frame's descriptor.
+///
+/// Only the ordinary-return path calls this: it owns the protocol stream, so the descriptor crosses
+/// it as an `Event::Frame` for a running shim (`REQ-...1f07`, worklog 821). The endings that stop the
+/// process from their own thread call `render::render_and_log_last_submission` alone.
+fn render_and_emit_frame<W: Write>(output: &mut W) -> io::Result<()> {
+    match render::render_and_log_last_submission() {
+        Some(frame) => write_message(output, &frame),
+        None => Ok(()),
+    }
+}
+
 fn halt<W: Write>(output: &mut W, reached: Phase, reason: String) -> io::Result<()> {
     write_message(
         output,
@@ -381,12 +425,114 @@ fn install_filesystem(module: &str) {
         Some("ephemeral") => orbistoun_fs::sandbox::Retention::Ephemeral,
         _ => orbistoun_fs::sandbox::Retention::Retain,
     };
+    // **Which tree the title sees is a named per-title setting** (`filesystem_view`, shipped in its
+    // compat record or set in the user's override file), never a check on the id. A launcher opts
+    // out of its sandbox: it writes into the console's one shared overlay and sees the library at
+    // /user/app, as a system application does on the device (worklog 842).
+    let settings = orbistoun_overrides::Resolved::for_run(&title, &paths.overrides_dir());
+    let system = settings.text(orbistoun_overrides::FILESYSTEM_VIEW)
+        == Some(orbistoun_overrides::FILESYSTEM_VIEW_SYSTEM);
+    let overlay = if system {
+        paths.console_overlay_dir()
+    } else {
+        paths.title_overlay_dir(&title)
+    };
+    let origin = origin_of(
+        Path::new(module),
+        &paths.staged_titles_dir(),
+        RUN_STAGED.load(std::sync::atomic::Ordering::Relaxed),
+    );
     orbistoun_fs::sandbox::establish(
         &paths.filesystem_dir(),
-        &paths.title_overlay_dir(&title),
+        &overlay,
         Path::new(module),
+        &origin,
         retention,
     );
+    if system {
+        orbistoun_fs::sandbox::expose_library(
+            &paths.filesystem_dir(),
+            &installed_titles(&paths.titles_dir()),
+        );
+    }
+}
+
+/// Whether the current run asked to be staged (`Request::Run::staged`), set from its request and
+/// cleared as it ends.
+static RUN_STAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where a module's title is stored, which decides whether its `/app0` is writable (D722).
+///
+/// **Staged** when its directory lies directly under the library's staging tree, or when the run
+/// asked for it; an image otherwise. Only the path decides - never anything the title ships. The
+/// staged id is the directory's name, which is what it is staged under on the console.
+fn origin_of(module: &Path, staging: &Path, asked: bool) -> orbistoun_fs::sandbox::Origin {
+    let directory = module.parent();
+    let id = directory
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned());
+    let under = |candidate: &Path| {
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        candidate.parent().map(canonical) == Some(canonical(staging))
+    };
+    match (directory, id) {
+        (Some(directory), Some(id)) if asked || under(directory) => {
+            orbistoun_fs::sandbox::Origin::Staged { id }
+        }
+        _ => orbistoun_fs::sandbox::Origin::Image,
+    }
+}
+
+/// Each installed title in the library as `(title id, its directory)`: a directory with an entry
+/// module and a declared id. A payload folder with no `param.json` is not an installed title, on a
+/// console or here.
+fn installed_titles(library: &Path) -> Vec<(String, std::path::PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(library) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|directory| {
+            directory
+                .join(orbistoun_service::TITLE_ENTRY_FILE)
+                .is_file()
+        })
+        .filter_map(|directory| {
+            let id = orbistoun_service::read_title_metadata(&directory)?.title_id;
+            (!id.is_empty()).then_some((id, directory))
+        })
+        .collect()
+}
+
+/// Connects what a running guest shows and asks for to the front end.
+fn install_presentation() {
+    // The draws, carried out at submit and written back where the guest reads them, so the fence
+    // after them retires from work that ran (worklog 832).
+    orbistoun_gpu::agc_driver::install_draw_executor(render::execute_draws);
+    // And read back when the drawn frame is written into guest memory - at the flip by default, or
+    // after every submission when `ORBISTOUN_TARGET_WRITEBACK=submit` asks (D714).
+    orbistoun_gpu::agc_driver::install_frame_reader(render::read_frame);
+    orbistoun_gpu::agc_driver::set_write_back_at_flip(
+        orbistoun_env::TARGET_WRITEBACK.get().as_deref() != Some("submit"),
+    );
+    // A submission's finer spans, when asked for (worklog 852).
+    orbistoun_gpu::perf::set_detail(orbistoun_env::PERF_DETAIL.get().as_deref() == Some("1"));
+    // A copy out of a colour target still on the device, carried out when its destination is first
+    // touched (worklog 850, D717); the fault handler that notices the touch is `report`'s.
+    orbistoun_gpu::agc_driver::install_lazy_copies(orbistoun_gpu::agc_driver::LazyCopies {
+        snapshot: render::keep_frame_on_device,
+        take: render::take_snapshot,
+        discard: render::discard_snapshot,
+        replace: render::replace_snapshot,
+        guard: page_guard::guard,
+        protect_writes: page_guard::protect_writes,
+        release: page_guard::release,
+    });
+    // Every flip, shown as it is presented (worklog 841).
+    orbistoun_video::install_flip_observer(render::present_flip);
+    // A launcher's request to start another title, which the front end carries out (worklog 842).
+    orbistoun_systemservice::launch::install_launch_observer(render::request_launch);
 }
 
 /// Tells the guest-OS layer what this process actually laid out.
@@ -820,6 +966,12 @@ fn prepare_diagnostics(
                 .collect(),
         );
     }
+    // And the live answer for everything the guest maps after this point - a GL context's command
+    // buffer among it (worklog 815).
+    orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
+    // And where the command processor may write - a fill, a copy, a fence (worklog 816).
+    orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
+    install_presentation();
 
     // Where the trace goes. Named after the module so a sweep over a directory of
     // titles leaves one file per title rather than each overwriting the last.
@@ -830,6 +982,9 @@ fn prepare_diagnostics(
                 .join(orbistoun_report::trace::trace_file_name(module)),
         );
         report::describe_module(module.to_owned());
+        // A rendered frame's region goes beside the trace, where the shim reads it back (D695,
+        // `REQ-...1f07`).
+        render::frames_to(paths.traces_dir());
     }
 
     // Names for the stubs, so a call trace says which function the guest wanted rather
@@ -1160,12 +1315,48 @@ pub fn serve_as_worker_process() -> Result<(), String> {
         pads: file.pads,
         ..orbistoun_service::ServiceConfig::default()
     });
-    let stdout = io::stdout();
     // The handle rather than a lock on it. Reading happens on its own thread now, and a
     // `StdinLock` holds a `MutexGuard` - which is deliberately not `Send`, so a lock taken
     // here could never get there. Nothing is given up: this process is the only reader.
-    serve(BufReader::new(io::stdin()), stdout.lock(), &service)
-        .map_err(|e| format!("worker loop: {e}"))
+    //
+    // **And stdout unlocked too** (worklog 841): a presented frame is announced from the thread
+    // that flips it, mid-run, which a lock held for the whole run would block for good. Each
+    // message is written in one call (`write_message`), and `Stdout` locks per call, so two
+    // writers interleave only between whole lines.
+    render::stream_events_to(|event| {
+        let _ = write_message(&mut io::stdout(), event);
+    });
+    serve(
+        BufReader::new(io::stdin()),
+        io::stdout(),
+        &service,
+        end_orphaned_worker,
+    )
+    .map_err(|e| format!("worker loop: {e}"))
+}
+
+/// Exit status of a worker that ended because its parent went away (D715).
+///
+/// Nobody reads it, because the parent is the process that would. It is not 0 because the run
+/// was abandoned, not finished, and a person reading an exit log should see that.
+pub const EXIT_ORPHANED: i32 = 3;
+
+/// Ends a worker whose control channel closed without a `Shutdown` (D715).
+///
+/// **The whole process, not just the run.** The run is on another thread, inside guest machine
+/// code that may never return, and nothing can unwind it from outside. Ending the process is
+/// what [`Stopper`] already does for a stop button (D032). A run's trace is written as it goes,
+/// so ending here keeps everything recorded so far.
+///
+/// Before this, a worker whose parent had gone kept running the guest with nobody to report to.
+/// One was found an hour after its window closed, still holding the release executable open so
+/// the next build could not replace it.
+fn end_orphaned_worker() {
+    let _ = writeln!(
+        io::stderr(),
+        "orbistoun: worker: the control channel closed without a shutdown - the parent is gone, ending this worker and any run in it"
+    );
+    std::process::exit(EXIT_ORPHANED);
 }
 
 /// What relocation did, for the run summary.
@@ -2464,6 +2655,13 @@ fn arm_diagnostics(
     Ok(experiments)
 }
 
+/// What runs just before the guest's entry when asked: the placed modules' initialisers, and the
+/// sampler that says where the entering thread spends its time (worklog 852).
+fn before_entry_if_asked() {
+    start_placed_modules_if_asked();
+    profile::watch_this_thread("guest main");
+}
+
 /// Runs every placed module's initialisers, when `ORBISTOUN_START_MODULES` asks for it.
 ///
 /// # Why it says what it is about to do
@@ -2501,12 +2699,27 @@ fn start_placed_modules_if_asked() {
 ///
 /// When the configured script cannot be read, parsed, or validated.
 fn install_scripted_input(service: &Service) -> Result<(), String> {
-    let Some(paths) = service.paths() else {
-        return Ok(());
+    // A flip-keyed script counts the guest's own flips (D721), whichever run it is.
+    orbistoun_input::script::install_flip_clock(orbistoun_video::flips_accepted);
+    // A capture asked for before the launch starts here, with the run (D721).
+    let armed = run_capture_input().clone();
+    if let Some(to) = armed {
+        capture_input(Some(&to));
+    }
+    // The run's own script first (D721), then one the configuration names.
+    let named = run_input_script().clone();
+    let chosen = match named {
+        Some(path) => Some((path.clone(), orbistoun_service::read_pad_script(&path)?)),
+        None => match service.paths() {
+            Some(paths) => {
+                let config = paths.config_file();
+                let base = config.parent().unwrap_or_else(|| Path::new("."));
+                orbistoun_service::scripted_pad(service.pads(), base)?
+            }
+            None => None,
+        },
     };
-    let config = paths.config_file();
-    let base = config.parent().unwrap_or_else(|| Path::new("."));
-    let Some((path, script)) = orbistoun_service::scripted_pad(service.pads(), base)? else {
+    let Some((path, script)) = chosen else {
         return Ok(());
     };
     let steps = script.len();
@@ -2517,6 +2730,97 @@ fn install_scripted_input(service: &Service) -> Result<(), String> {
         path.display()
     );
     Ok(())
+}
+
+/// The pad script the current run asked for itself (D721), set from its request and cleared as it
+/// ends.
+fn run_input_script() -> std::sync::MutexGuard<'static, Option<std::path::PathBuf>> {
+    static NAMED: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+    NAMED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A capture asked for before the run started, begun at its entry (D721).
+fn run_capture_input() -> std::sync::MutexGuard<'static, Option<std::path::PathBuf>> {
+    static ARMED: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+    ARMED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The file input is being captured to (D721).
+fn capture_file() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
+    static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+    FILE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// **Captures what the guest reads from its pad into `to`, or stops with `None`** - only when asked
+/// (D721): the toolbar's "capture input", or `Request::Run::capture_input`. A step is appended and
+/// flushed as each change happens, so a run ending in a fault leaves the capture whole. Its flips
+/// count from now. A file that cannot be opened is said, and nothing is captured.
+fn capture_input(to: Option<&Path>) {
+    orbistoun_input::script::stop_recording();
+    *capture_file() = None;
+    let Some(path) = to else {
+        return;
+    };
+    let opened = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::File::create(path));
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(e) => {
+            let _ = writeln!(
+                io::stderr(),
+                "orbistoun: input is not captured - {}: {e}",
+                path.display()
+            );
+            return;
+        }
+    };
+    let _ = writeln!(
+        file,
+        "# The pad as the title read it, a step per change, timed in its own flips (D721)."
+    );
+    *capture_file() = Some(file);
+    orbistoun_input::script::record(|step| {
+        if let Some(file) = capture_file().as_mut() {
+            let _ = file.write_all(orbistoun_service::pad_script_step(step).as_bytes());
+            let _ = file.flush();
+        }
+    });
+    let _ = writeln!(
+        io::stderr(),
+        "orbistoun: capturing input to {}",
+        path.display()
+    );
+}
+
+/// **Plays the pad script `script` from now, or stops with `None`** (D721) - the toolbar's
+/// "playback input" while a title runs. A script that cannot be read or does not validate is said,
+/// and nothing plays.
+fn play_input(script: Option<&Path>) {
+    let Some(path) = script else {
+        orbistoun_input::script::clear();
+        return;
+    };
+    match orbistoun_service::read_pad_script(path) {
+        Ok(script) => {
+            let steps = script.len();
+            orbistoun_input::script::install(script);
+            let _ = writeln!(
+                io::stderr(),
+                "orbistoun: playing input script {} ({steps} step(s)) on player 1",
+                path.display()
+            );
+        }
+        Err(why) => {
+            let _ = writeln!(io::stderr(), "orbistoun: input is not played - {why}");
+        }
+    }
 }
 
 fn enter<W: Write>(
@@ -2642,7 +2946,7 @@ fn enter<W: Write>(
     // the loader placed and resolved imports against is never loaded by name and so never
     // started. Here, after protection and after the float environment, because a constructor
     // is guest code and this is the last point before the guest's own entry (D520).
-    start_placed_modules_if_asked();
+    before_entry_if_asked();
 
     if entry_settings.convention == process::Convention::Process {
         // SAFETY: the image is fully relocated - checked above - and its text was made
@@ -2664,10 +2968,12 @@ fn enter<W: Write>(
     report::what_the_guest_asked_for();
     // **The renderer, on the run path** (-36c0, D695). If the guest handed over a command buffer,
     // drive it to a headless graphics backend now the guest has returned - a real submission
-    // reaching a real backend rather than only a report. No title submits before faulting yet, so
-    // this establishes the route; the fault and time-limit paths gain the same call when one does.
-    render::render_and_log_last_submission();
+    // reaching a real backend rather than only a report. The time-limit and call-budget endings make
+    // the same call (worklog 814). **After the trace is collected**: rendering *takes* the
+    // submission, and the trace's submission summary reads it - rendered first, the summary was
+    // always empty.
     let trace = report::collect_calls(module, "Entered");
+    render_and_emit_frame(output)?;
     report::persist(&trace);
 
     let calls = orbistoun_thunk::total_calls();
@@ -2738,6 +3044,32 @@ impl Control {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         write_message(&mut *stdin, &Request::Shell { action })
+    }
+
+    /// Starts capturing the title's pad input into `to`, or stops with `None` (D721).
+    ///
+    /// # Errors
+    ///
+    /// When the pipe is gone.
+    pub fn capture_input(&self, to: Option<std::path::PathBuf>) -> io::Result<()> {
+        let mut stdin = self
+            .stdin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        write_message(&mut *stdin, &Request::CaptureInput { to })
+    }
+
+    /// Starts playing the pad script `script` from now, or stops with `None` (D721).
+    ///
+    /// # Errors
+    ///
+    /// When the pipe is gone.
+    pub fn play_input(&self, script: Option<std::path::PathBuf>) -> io::Result<()> {
+        let mut stdin = self
+            .stdin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        write_message(&mut *stdin, &Request::PlayInput { script })
     }
 
     /// Sends what the pads are doing, as a title is allowed to see them.
@@ -2923,10 +3255,25 @@ impl WorkerHandle {
     /// Terminal means [`Event::SurveyComplete`], [`Event::Terminated`], or
     /// [`Event::Failed`] - anything that ends the exchange.
     pub fn request(&mut self, request: &Request) -> io::Result<Vec<Event>> {
+        self.request_streaming(request, |_| {})
+    }
+
+    /// [`Self::request`], handing each event to `on_event` as it arrives (worklog 841) - so a front
+    /// end shows a presented frame while the run is still going rather than after it ends.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::request`].
+    pub fn request_streaming(
+        &mut self,
+        request: &Request,
+        mut on_event: impl FnMut(&Event),
+    ) -> io::Result<Vec<Event>> {
         self.send(request)?;
         let mut events = Vec::new();
         let mut verdict = false;
         while let Some(event) = self.next_event()? {
+            on_event(&event);
             let terminal = matches!(
                 event,
                 Event::SurveyComplete(_) | Event::Terminated { .. } | Event::Failed { .. }
@@ -3266,19 +3613,59 @@ mod tests {
     /// Drives `serve` over in-memory pipes, so the protocol loop is tested with no
     /// process involved at all.
     fn exchange(requests: &[Request]) -> Vec<Event> {
+        exchange_noting_hangup(requests).0
+    }
+
+    /// [`exchange`], also answering whether `serve` reported a hangup.
+    fn exchange_noting_hangup(requests: &[Request]) -> (Vec<Event>, bool) {
         let mut input = Vec::new();
         for r in requests {
             write_message(&mut input, r).expect("encode");
         }
+        let hung_up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let noted = std::sync::Arc::clone(&hung_up);
         let mut output = Vec::new();
-        serve(BufReader::new(Cursor::new(input)), &mut output, &service()).expect("serve");
+        serve(
+            BufReader::new(Cursor::new(input)),
+            &mut output,
+            &service(),
+            move || noted.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect("serve");
 
         let mut reader = BufReader::new(Cursor::new(output));
         let mut events = Vec::new();
         while let Some(e) = read_message::<_, Event>(&mut reader).expect("decode") {
             events.push(e);
         }
-        events
+        (events, hung_up.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// **A stream that ends without a `Shutdown` is a hangup (D715).**
+    ///
+    /// The worker ends its process on a hangup, which is what stops a guest from outliving the
+    /// window that launched it. If this stopped firing, an orphaned worker would keep running
+    /// its guest and holding the executable open.
+    #[test]
+    fn an_input_that_ends_without_a_shutdown_is_a_hangup() {
+        let (events, hung_up) = exchange_noting_hangup(&[Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        }]);
+        assert!(matches!(events[..], [Event::Hello { .. }]), "{events:?}");
+        assert!(hung_up, "the peer went away and serve did not say so");
+    }
+
+    /// **And a `Shutdown` is not one.** The ordinary end must not reach the orphan exit, or every
+    /// clean shutdown would leave with the orphan status.
+    #[test]
+    fn a_shutdown_is_not_a_hangup() {
+        let (_, hung_up) = exchange_noting_hangup(&[
+            Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+            Request::Shutdown,
+        ]);
+        assert!(!hung_up, "a clean shutdown was reported as a hangup");
     }
 
     #[test]
@@ -3341,6 +3728,35 @@ mod tests {
         assert!(exchange(&[]).is_empty());
     }
 
+    /// **Input is captured only when asked, and a capture is a script that reads back** (D721):
+    /// with no capture asked for, what the guest reads goes nowhere; asked, it lands in the named
+    /// file as it happens; stopped, nothing more is written.
+    #[test]
+    fn input_is_captured_only_when_asked_and_reads_back_as_a_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input").join("capture.toml");
+        let mut pressed = orbistoun_input::PadState::default();
+        pressed.set(orbistoun_input::Button::South, true);
+
+        super::capture_input(None);
+        orbistoun_input::script::delivered(&pressed);
+        assert!(!path.exists(), "nothing asked, nothing captured");
+
+        super::capture_input(Some(&path));
+        orbistoun_input::script::delivered(&orbistoun_input::PadState::default());
+        orbistoun_input::script::delivered(&pressed);
+        super::capture_input(None);
+        orbistoun_input::script::delivered(&orbistoun_input::PadState::default());
+
+        let script = orbistoun_service::read_pad_script(&path).expect("a capture is a script");
+        assert_eq!(
+            script.len(),
+            2,
+            "one step per change while capturing, none after"
+        );
+        assert!(script.at(u64::MAX).is_down(orbistoun_input::Button::South));
+    }
+
     #[test]
     fn a_missing_guest_is_a_request_failure_not_a_halted_run() {
         // The distinction matters to anything reading the stream: `Failed` means the
@@ -3352,8 +3768,45 @@ mod tests {
             symbols_db: None,
             limit_seconds: None,
             call_budget: None,
+            input_script: None,
+            capture_input: None,
+            staged: false,
         }]);
         assert!(matches!(events.as_slice(), [Event::Failed { .. }]));
+    }
+
+    /// **Only where a module lies, or the run's own flag, makes it staged (D722).** A library
+    /// title beside the staging tree, or one nested deeper inside it, is an image.
+    #[test]
+    fn a_title_is_staged_by_where_it_lies() {
+        use orbistoun_fs::sandbox::Origin;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let titles = dir.path();
+        let staging = orbistoun_paths::staged_under(titles);
+        for d in [staging.join("NVRB00001"), titles.join("PPSA00001")] {
+            std::fs::create_dir_all(&d).expect("mkdir");
+        }
+        let staged = Origin::Staged {
+            id: "NVRB00001".to_owned(),
+        };
+        assert_eq!(
+            super::origin_of(&staging.join("NVRB00001/eboot.bin"), &staging, false),
+            staged
+        );
+        assert_eq!(
+            super::origin_of(&titles.join("PPSA00001/eboot.bin"), &staging, false),
+            Origin::Image
+        );
+        assert_eq!(
+            super::origin_of(&staging.join("NVRB00001/sub/eboot.bin"), &staging, false),
+            Origin::Image,
+            "the title's own directory must be the staged one"
+        );
+        assert_eq!(
+            super::origin_of(&titles.join("NVRB00001/eboot.bin"), &staging, true),
+            staged,
+            "--staged stages a loose build"
+        );
     }
 
     #[test]
@@ -3369,6 +3822,9 @@ mod tests {
             symbols_db: None,
             limit_seconds: None,
             call_budget: None,
+            input_script: None,
+            capture_input: None,
+            staged: false,
         }]);
         let reached: Vec<_> = events
             .iter()

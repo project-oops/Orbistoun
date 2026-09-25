@@ -132,6 +132,8 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     // libSceAgcDriver: `sceAgcDriverCreateQueue` accepts the Type 0/3 queue and returns success (9a41).
     all.extend_from_slice(orbistoun_gpu::agc_driver::implementations());
     all.extend_from_slice(orbistoun_fs::implementations());
+    // Reading a directory through its descriptor, by the system-call names (worklog 842).
+    all.extend_from_slice(orbistoun_fs::dirent::implementations());
     // The socket calls in their vendor spelling. The bodies are `orbistoun-fs`'s; this crate
     // declares `libSceNet` and encodes a failure the way that library numbers one (D667).
     all.extend_from_slice(orbistoun_net::implementations());
@@ -142,6 +144,8 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_input::mouse::implementations());
     all.extend_from_slice(orbistoun_audio::implementations());
     all.extend_from_slice(orbistoun_systemservice::implementations());
+    // A launcher's request to start another title, handed to whoever owns the run (worklog 842).
+    all.extend_from_slice(orbistoun_systemservice::launch::implementations());
     // libSceCommonDialog: `sceCommonDialogInitialize` answers 0, the guest-observed init the three
     // retail Unity titles need to get past their first wall (D678); registered here beside its
     // declaration rather than folded into the crate root's slice, as the Agc modules are.
@@ -210,6 +214,10 @@ const SPELT_DIFFERENTLY: &[(&str, &str)] = &[
     // is then served rather than answered ENOSYS, the same one-function-two-answers binding D641
     // gave `sceKernelVirtualQuery`.
     ("SYS_vendor_klog", "sceKernelDebugOutText"),
+    // The FreeBSD 11 directory reads, served by the vendor names that write the same records
+    // (worklog 842): a launcher lists `/user/app` by the raw numbers, 196 then 272.
+    ("SYS_freebsd11_getdirentries", "sceKernelGetdirentries"),
+    ("SYS_freebsd11_getdents", "sceKernelGetdents"),
     // **The two exits, and neither needs an entry here.** The process one is spelt `SYS__exit`
     // in FreeBSD's table - entry 1 is the raw `_exit`, not the `exit(3)` wrapper - so stripping
     // `SYS_` already yields the name `orbistoun-libc` answers to. An entry reading `SYS_exit`

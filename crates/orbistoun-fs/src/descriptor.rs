@@ -108,7 +108,13 @@ pub fn open(guest_path: &str) -> Option<u64> {
         return None;
     };
     crate::opened::note(guest_path);
-    insert_file(file)
+    let is_directory = host.is_dir();
+    let fd = insert_file(file)?;
+    // A directory's listing, for a guest that reads it through the descriptor (worklog 842).
+    if is_directory {
+        crate::dirent::note_directory(fd, guest_path);
+    }
+    Some(fd)
 }
 
 /// Opens `host` for reading, whether it is a file **or a directory**.
@@ -148,10 +154,7 @@ fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// Refused outside `/data`. The separation is the whole decision: storage the installation
 /// owns is a guest's to write, and the title directory is not (D250).
 pub fn create(guest_path: &str) -> Option<u64> {
-    if !crate::mount::is_writable(guest_path) {
-        return None;
-    }
-    let host = crate::mount::resolve(guest_path)?;
+    let host = crate::mount::resolve_for_create(guest_path)?;
     if let Some(parent) = host.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -746,6 +749,7 @@ pub fn close(fd: u64) -> bool {
     // What was set on this number, forgotten with it - a descriptor that comes back around
     // must not inherit the last one's flags (D385).
     crate::fcntl::forget(fd);
+    crate::dirent::forget(fd);
     if is_standard(fd) {
         return true;
     }

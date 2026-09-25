@@ -16,10 +16,17 @@
 //!
 //! # What is applied and what is refused
 //!
-//! `neg` and `abs` are applied - they are per-source, common, and cheap. `clamp` and the
-//! output multiplier are **refused**, because implementing them wrongly is worse than
-//! not implementing them and neither has appeared in a fixture yet. An instruction
-//! carrying one is an error naming it, never a silent drop.
+//! `neg` and `abs` are applied - they are per-source, common, and cheap. The output
+//! multiplier is **refused**, because implementing it wrongly is worse than not implementing
+//! it and it has not appeared in a guest yet. An instruction carrying one is an error naming
+//! it, never a silent drop.
+//!
+//! `clamp` is **read, and applied only where its meaning is known** (worklog 834): on a
+//! long-form instruction whose result is a 32-bit float, in a stage whose `DX10_CLAMP` mode is
+//! known, it clamps the result to `[0, 1]`. That is how a compiler folds GLSL's
+//! `clamp(x, 0.0, 1.0)` into the instruction producing `x`, and Neverball's pixel shaders do. On
+//! an integer result the same bit saturates instead, and on every other path it is still refused
+//! by name.
 
 use orbistoun_shader::Instruction;
 
@@ -49,6 +56,9 @@ pub struct Modifiers {
     pub negate: [bool; 3],
     /// Per-source absolute value, in operand order.
     pub absolute: [bool; 3],
+    /// The output clamp. Only [`Modifiers::read_allowing_clamp`] reports it; [`Modifiers::read`]
+    /// refuses it.
+    pub clamp: bool,
 }
 
 impl Modifiers {
@@ -66,6 +76,28 @@ impl Modifiers {
         instruction: &Instruction,
         has_scalar_destination: bool,
     ) -> Result<Self, TranslateError> {
+        Self::read_with(instruction, has_scalar_destination, false)
+    }
+
+    /// Reads the modifiers as [`Modifiers::read`] does, but reports the clamp flag in
+    /// [`Modifiers::clamp`] instead of refusing it - for the one caller that applies it or refuses
+    /// it itself, knowing the instruction's result type and the stage's mode (worklog 834).
+    ///
+    /// # Errors
+    ///
+    /// A non-zero output multiplier.
+    pub fn read_allowing_clamp(
+        instruction: &Instruction,
+        has_scalar_destination: bool,
+    ) -> Result<Self, TranslateError> {
+        Self::read_with(instruction, has_scalar_destination, true)
+    }
+
+    fn read_with(
+        instruction: &Instruction,
+        has_scalar_destination: bool,
+        allow_clamp: bool,
+    ) -> Result<Self, TranslateError> {
         // A short-form instruction has no second word and carries no modifiers. Absent
         // is the same as none here, which is the one place in this crate where that is
         // true - the flags genuinely do not exist in the short encoding.
@@ -73,7 +105,8 @@ impl Modifiers {
             return Ok(Self::default());
         };
 
-        if instruction.word & (1 << CLAMP_SHIFT) != 0 {
+        let clamp = instruction.word & (1 << CLAMP_SHIFT) != 0;
+        if clamp && !allow_clamp {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: concat!(
@@ -94,7 +127,10 @@ impl Modifiers {
             });
         }
 
-        let mut modifiers = Self::default();
+        let mut modifiers = Self {
+            clamp,
+            ..Self::default()
+        };
         for source in 0..3 {
             let bit = u32::try_from(source).unwrap_or(0);
             // Negate is in the second word for both sub-encodings; absolute exists in

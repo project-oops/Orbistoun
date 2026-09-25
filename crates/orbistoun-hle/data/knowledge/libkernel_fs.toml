@@ -177,3 +177,37 @@ note = "guest memory, read only"
 name = "length"
 kind = "usize"
 note = "bytes to take"
+
+[[function]]
+name = "getdirentries"
+arity = 4
+purpose = "Reads a directory's entries through its descriptor, as FreeBSD 12's `struct dirent` records (64-bit inode, name at 24, records rounded to 8). System call 554."
+returns = "count"
+edge_cases = [
+    "The entries are the listing `opendir` gives the same path - mount points first, then the host's own files - taken when the directory is opened (worklog 842).",
+    "A buffer too small for the next whole record fails rather than writing part of one.",
+    "`*basep` receives the position the read started at; zero bytes answered is the end.",
+]
+known_by = "published"
+cites = "FreeBSD `getdirentries(2)` and `sys/sys/dirent.h` (FreeBSD 12): `struct dirent` with a 64-bit `d_fileno`, `d_off`, `d_reclen`, `d_type`, `d_namlen` and the name, each record padded to 8 bytes by `_GENERIC_DIRSIZ`."
+assumptions = ["That the console writes this record layout for 554. It is FreeBSD's (`sys/sys/dirent.h`); a guest that parses both layouts, as the launcher that first called it does, would not show the difference."]
+found_on = "2026-09-24"
+
+[[function]]
+name = "sceKernelGetdirentries"
+arity = 4
+purpose = "Reads a directory's entries through its descriptor, as FreeBSD 11's `struct dirent` records (32-bit inode, name at 8, records rounded to 4). Also serves system call 196, `freebsd11_getdirentries`."
+returns = "count"
+edge_cases = ["As `getdirentries`, with the older record layout."]
+known_by = "assumed"
+assumptions = ["That the vendor name writes the FreeBSD 11 records, as the numbered call it shares a body with does. Inferred from the name and the kernel's age; no hardware read has compared them."]
+found_on = "2026-09-24"
+
+[[function]]
+name = "sceKernelGetdents"
+arity = 3
+purpose = "As `sceKernelGetdirentries`, with no position out. Also serves system call 272, `freebsd11_getdents`."
+returns = "count"
+known_by = "assumed"
+assumptions = ["As `sceKernelGetdirentries`."]
+found_on = "2026-09-24"

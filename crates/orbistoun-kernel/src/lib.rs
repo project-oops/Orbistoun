@@ -1284,6 +1284,73 @@ fn region_covering(base: u64, len: u64) -> Option<(u64, u64)> {
     let region = region_containing(base)?;
     range_within(base, len, region).then_some(region)
 }
+
+/// Whether `[base, base + len)` is guest memory the guest can read **right now** - one region wholly
+/// covering it, from every place a region is recorded, and a runtime mapping only if its protection
+/// allows reads.
+///
+/// **Live, not a snapshot.** The graphics submit path used to read a region list the worker took
+/// before entering the guest, so a command buffer the guest built in direct memory it mapped later -
+/// every GL context's, which allocates after entry - fell outside every region and walked to zero
+/// packets (worklog 814). This answers from the tables as they stand when it is asked (worklog 815).
+#[must_use]
+pub fn is_guest_readable(base: u64, len: u64) -> bool {
+    guest_range_allows(base, len, false)
+}
+
+/// Whether `[base, base + len)` is guest memory the guest can **write** right now - a runtime
+/// mapping wholly covering it whose protection allows writes.
+///
+/// Narrower than [`is_guest_readable`] on purpose: the noted regions (the image, TLS) and the stacks
+/// carry no protection here, and the image's text is not writable, so a write is vouched for only
+/// where the mapping itself says so. The graphics command processor writes guest memory through this -
+/// a fill, a copy, a fence (worklog 816) - and a write into a read-only page would fault the host on
+/// the guest's behalf.
+#[must_use]
+pub fn is_guest_writable(base: u64, len: u64) -> bool {
+    guest_range_allows(base, len, true)
+}
+
+/// **Adjacent runtime mappings count as one range.** A guest that batch-maps a surface in 2 MiB
+/// pieces - the SDK's scanout buffers are sixteen of them end to end - holds one continuous span, and
+/// an 8 MiB fill of a 1080p target crosses four; requiring a single region refused it (worklog 816).
+/// Only regions that *touch* are joined, each must grant the access, and a gap anywhere refuses the
+/// whole range, which is the rule `region_covering` protects (D446).
+fn guest_range_allows(base: u64, len: u64, write: bool) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let end = base.saturating_add(len);
+    if let Ok(space) = mappings().lock()
+        && space
+            .regions()
+            .iter()
+            .any(|r| base >= r.base && base < r.base.saturating_add(r.len))
+    {
+        let mut cursor = base;
+        while cursor < end {
+            let Some(region) = space
+                .regions()
+                .iter()
+                .find(|r| cursor >= r.base && cursor < r.base.saturating_add(r.len))
+            else {
+                return false;
+            };
+            let allowed = if write {
+                region.protection.write
+            } else {
+                region.protection.read
+            };
+            if !allowed {
+                return false;
+            }
+            cursor = region.base.saturating_add(region.len);
+        }
+        return true;
+    }
+    !write && region_covering(base, len).is_some()
+}
+
 /// The next address to place a mapping at.
 ///
 /// Bump-allocated and never reused. A guest that unmaps and remaps would otherwise be
@@ -1349,9 +1416,32 @@ fn next_mapping_base(len: u64) -> u64 {
 /// This is not full aliasing: two *simultaneous* mappings of one physical range still get
 /// one address rather than two, which would need a shared memory object rather than a
 /// reservation. It is the case that actually occurs.
-fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, u64>> {
-    static MAPPED: OnceLock<Mutex<std::collections::BTreeMap<u64, u64>>> = OnceLock::new();
+///
+/// **An entry lives only as long as both halves of it do** (worklog 860). Each holds the
+/// address *and the length* mapped. It is forgotten when the physical memory is released or the
+/// mapping unmapped, and a map asking for more than the entry covers is not the same mapping.
+/// A stale entry once answered a `0x40000` map of reallocated physical memory with a `0x10000`
+/// mapping from before its release, and Neverball's `memset` of the new buffer walked off the end
+/// into a free page.
+fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, (u64, u64)>> {
+    static MAPPED: OnceLock<Mutex<std::collections::BTreeMap<u64, (u64, u64)>>> = OnceLock::new();
     MAPPED.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Forgets every alias whose physical offset lies in `[start, start + len)` - the memory was
+/// released, so a later allocation of it is new memory with nothing to keep (worklog 860).
+fn forget_physical(start: u64, len: u64) {
+    if let Ok(mut mapped) = physical_mappings().lock() {
+        mapped.retain(|&physical, _| physical < start || physical - start >= len);
+    }
+}
+
+/// Forgets every alias whose mapping starts in `[address, address + len)` - the guest unmapped it
+/// (worklog 860).
+fn forget_mapped(address: u64, len: u64) {
+    if let Ok(mut mapped) = physical_mappings().lock() {
+        mapped.retain(|_, &mut (base, _)| base < address || base - address >= len);
+    }
 }
 
 fn map_named_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -1388,10 +1478,13 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
     // Already mapped? Then the guest gets the address it had, and its data with it. The
     // physical offset is the identity of the memory; the virtual address is just where it
-    // is currently reachable.
+    // is currently reachable. **Only if that mapping covers what is asked for** (worklog 860): a
+    // longer map is not the same mapping, and answering it with the shorter one leaves the rest
+    // of what the guest was promised unmapped.
     if let Ok(mapped) = physical_mappings().lock() {
-        if let Some(existing) = mapped.get(&physical) {
-            let existing = *existing;
+        if let Some(&(existing, existing_len)) = mapped.get(&physical)
+            && existing_len >= len
+        {
             drop(mapped);
             return if write_word(out, existing) {
                 OK
@@ -1489,7 +1582,7 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     if let Ok(mut mapped) = physical_mappings().lock() {
-        mapped.insert(physical, base);
+        mapped.insert(physical, (base, len));
     }
     OK
 }
@@ -1596,7 +1689,7 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
     drop(space);
     mapping_placed(base, len, protection, true);
     if let Ok(mut mapped) = physical_mappings().lock() {
-        mapped.insert(physical, base);
+        mapped.insert(physical, (base, len));
     }
     OK
 }
@@ -4206,6 +4299,8 @@ fn release_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::Unimplemented.as_raw());
     };
     if guard.release(start, len) {
+        drop(guard);
+        forget_physical(start, len);
         OK
     } else {
         u64::from(GuestError::InvalidArgument.as_raw())
@@ -4229,6 +4324,10 @@ fn munmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // once at load and hands out pieces of it; releasing a piece back to the host would
     // put a hole in an address space the guest still believes is contiguous. Recorded as
     // an assumption rather than implied by this answering success (D273).
+    //
+    // What *is* torn down is the alias: a later map of the same physical memory is a new
+    // mapping, not this one handed back (worklog 860).
+    forget_mapped(address, len);
     OK
 }
 
@@ -7255,6 +7354,39 @@ mod tests {
         assert_eq!(scratch, [0; 4], "and none of them wrote through it");
     }
 
+    /// **Readability is answered live, and only for a range one region wholly covers.** A region
+    /// noted after the question was first asked is found the next time - the property the submit
+    /// path needs for a command buffer mapped after entry (worklog 815) - and a range that starts
+    /// inside a region and runs off its end is not readable.
+    #[test]
+    fn readability_is_answered_from_the_tables_as_they_stand() {
+        let _serial = noted_regions_serial();
+        super::clear_noted_regions();
+        let (base, len) = (0x4000_0060_0000_u64, 0x1_0000_u64);
+        assert!(!super::is_guest_readable(base, 0x100), "nothing there yet");
+        super::note_region(base, len);
+        assert!(
+            super::is_guest_readable(base, 0x100),
+            "noted afterwards, answered now"
+        );
+        assert!(
+            super::is_guest_readable(base + len - 4, 4),
+            "the last word is inside"
+        );
+        assert!(
+            !super::is_guest_readable(base + len - 4, 8),
+            "running off the end is not covered"
+        );
+        assert!(
+            !super::is_guest_readable(base, 0),
+            "an empty range is not a read"
+        );
+        assert!(
+            !super::is_guest_writable(base, 0x100),
+            "a noted region carries no protection, so no write is vouched for"
+        );
+    }
+
     /// A region the worker notes - the image, or a stack - is found by [`super::region_containing`],
     /// so `sceKernelVirtualQuery` answers for the guest's own code and stack rather than refusing
     /// them the way a lookup against the runtime map alone did (D446).
@@ -7460,6 +7592,55 @@ mod tests {
         assert_eq!(read_back, 0x1234);
     }
 
+    /// **Mappings that touch are one range; a gap or a read-only piece refuses a write across them.**
+    ///
+    /// The SDK maps its scanout surface as sixteen 2 MiB pieces end to end, and a fill of a 1080p
+    /// target crosses four; a single-region rule refused it (worklog 816). Two writable 64 KiB pieces
+    /// placed back to back, then a read-only one: a write across the first two is allowed, across into
+    /// the third is not (though a read is), and past the third - a gap - nothing is.
+    #[test]
+    fn adjacent_mappings_are_one_range_and_a_gap_or_a_read_only_piece_is_not() {
+        let base = 0x6f00_0000_0000_u64;
+        let piece = 0x1_0000_u64;
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        assert_eq!(
+            super::map_direct_at(base, 0x7_0000_0000, piece, 3),
+            super::OK
+        );
+        assert_eq!(
+            super::map_direct_at(base + piece, 0x7_0001_0000, piece, 3),
+            super::OK
+        );
+        assert_eq!(
+            super::map_direct_at(base + 2 * piece, 0x7_0002_0000, piece, 1),
+            super::OK
+        );
+
+        assert!(
+            super::is_guest_writable(base + piece - 8, 16),
+            "a write straddling two writable pieces"
+        );
+        assert!(
+            super::is_guest_writable(base, 2 * piece),
+            "both pieces whole"
+        );
+        assert!(
+            !super::is_guest_writable(base + 2 * piece - 8, 16),
+            "into the read-only piece"
+        );
+        assert!(
+            super::is_guest_readable(base, 3 * piece),
+            "all three are readable"
+        );
+        assert!(
+            !super::is_guest_readable(base, 3 * piece + 8),
+            "past the last piece is a gap"
+        );
+    }
+
     #[test]
     fn different_physical_ranges_never_share_an_address() {
         direct::configure(direct::Settings {
@@ -7512,6 +7693,68 @@ mod tests {
         // SAFETY: as above - the same live mapping.
         let read_back = unsafe { std::ptr::read_volatile(again as usize as *const u64) };
         assert_eq!(read_back, 0xFEED_FACE, "and the data survived");
+    }
+
+    /// **An alias does not outlive its memory, and does not stand in for a longer map**
+    /// (worklog 860). Neverball released a 64 KiB span, allocated `0x40000` at the same physical
+    /// offset, and was handed the old 64 KiB mapping - its `memset` faulted on the free page after
+    /// it. Here: a longer map of a still-mapped offset is a mapping of the whole length; a
+    /// released offset maps afresh; an unmapped one too.
+    #[test]
+    fn an_alias_is_forgotten_with_its_memory_and_never_answers_a_longer_map() {
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let map = |physical: u64, len: u64| {
+            let mut at = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = std::ptr::addr_of_mut!(at) as usize as u64;
+            args[1] = len;
+            args[2] = 3;
+            args[4] = physical;
+            assert_eq!(super::map_named_direct_memory(&args), 0, "maps");
+            at
+        };
+        let writable_to = |base: u64, len: u64| {
+            // SAFETY: the last word of a range the map above answered as mapped read-write.
+            unsafe { std::ptr::write_volatile((base + len - 8) as usize as *mut u64, 1) };
+        };
+
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 0x4_0000;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+
+        let short = map(physical, 0x1_0000);
+        let long = map(physical, 0x4_0000);
+        writable_to(long, 0x4_0000);
+        assert_eq!(
+            map(physical, 0x1_0000),
+            long,
+            "the longer one now covers it"
+        );
+
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = physical;
+        args[1] = 0x4_0000;
+        assert_eq!(super::release_direct_memory(&args), 0, "released");
+        let after_release = map(physical, 0x1_0000);
+        assert_ne!(
+            after_release, long,
+            "released memory is not the old mapping"
+        );
+        assert_ne!(after_release, short);
+
+        args[0] = after_release;
+        args[1] = 0x1_0000;
+        assert_eq!(super::munmap(&args), 0);
+        assert_ne!(
+            map(physical, 0x1_0000),
+            after_release,
+            "an unmapped alias is not handed back"
+        );
     }
 
     #[test]

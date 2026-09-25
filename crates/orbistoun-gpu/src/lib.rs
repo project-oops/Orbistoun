@@ -53,29 +53,157 @@
 //! principle 12).
 
 mod backend;
+pub mod cp;
 pub mod packet;
+pub mod perf;
 pub mod pipeline;
 pub mod registers;
 mod render;
 pub mod tiling;
 
+/// A content hash of guest words - what a shader or texture is, for recognising it again
+/// (worklogs 843, 844).
+///
+/// **A fast hash, not a keyed one**: nothing here is adversarial - a guest cannot choose its way into a
+/// collision that matters to it - and the standard library's hasher, built to resist one, cost more
+/// than the draws whose textures it hashed. Two words at a time, multiplied and mixed; every word and
+/// the length feed it, so an equal hash means equal words to within the same 64-bit chance any content
+/// key has.
+#[must_use]
+pub fn content_hash(words: &[u32]) -> u64 {
+    let mut hasher = ContentHasher::new(words.len());
+    for word in words {
+        hasher.word(*word);
+    }
+    hasher.finish()
+}
+
+/// [`content_hash`], fed a piece at a time - so words that are not contiguous, a pitched texture's
+/// rows, hash where they lie, to the same value their gathered copy would (worklog 851).
+#[derive(Debug, Clone, Copy)]
+pub struct ContentHasher {
+    hash: u64,
+    pending: Option<u32>,
+}
+
+impl ContentHasher {
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    /// A hasher for `words` words in all.
+    #[must_use]
+    pub const fn new(words: usize) -> Self {
+        Self {
+            hash: (words as u64).wrapping_mul(Self::K),
+            pending: None,
+        }
+    }
+
+    /// Feeds one word.
+    pub const fn word(&mut self, word: u32) {
+        match self.pending.take() {
+            None => self.pending = Some(word),
+            Some(first) => {
+                let pair = first as u64 | ((word as u64) << 32);
+                self.hash = (self.hash ^ pair).wrapping_mul(Self::K).rotate_left(29);
+            }
+        }
+    }
+
+    /// Feeds little-endian words; a trailing partial word is ignored.
+    pub fn bytes(&mut self, bytes: &[u8]) {
+        let mut rest = &bytes[..bytes.len() - bytes.len() % 4];
+        // A word left over from the last piece completes its pair first; then eight bytes at a time.
+        if self.pending.is_some()
+            && let Some((w, after)) = rest.split_first_chunk::<4>()
+        {
+            self.word(u32::from_le_bytes(*w));
+            rest = after;
+        }
+        let mut pairs = rest.chunks_exact(8);
+        for p in &mut pairs {
+            let pair = u64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]);
+            self.hash = (self.hash ^ pair).wrapping_mul(Self::K).rotate_left(29);
+        }
+        for w in pairs.remainder().chunks_exact(4) {
+            self.word(u32::from_le_bytes([w[0], w[1], w[2], w[3]]));
+        }
+    }
+
+    /// The hash.
+    #[must_use]
+    pub const fn finish(self) -> u64 {
+        let mut hash = self.hash;
+        if let Some(last) = self.pending {
+            hash = (hash ^ last as u64).wrapping_mul(Self::K).rotate_left(29);
+        }
+        hash ^ (hash >> 32)
+    }
+}
+
+#[cfg(test)]
+mod content_hash_tests {
+    use super::{ContentHasher, content_hash};
+
+    /// The hash as it was computed before [`ContentHasher`] existed - the oracle the streaming form
+    /// must agree with, because the backend keys uploaded textures by it.
+    fn original(words: &[u32]) -> u64 {
+        const K: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut hash = (words.len() as u64).wrapping_mul(K);
+        let mut pairs = words.chunks_exact(2);
+        for pair in &mut pairs {
+            let word = u64::from(pair[0]) | (u64::from(pair[1]) << 32);
+            hash = (hash ^ word).wrapping_mul(K).rotate_left(29);
+        }
+        if let [last] = pairs.remainder() {
+            hash = (hash ^ u64::from(*last)).wrapping_mul(K).rotate_left(29);
+        }
+        hash ^ (hash >> 32)
+    }
+
+    /// **Streaming gives the same hash however the words are split** (worklog 851): whole, word by
+    /// word, and as rows of odd widths fed as bytes, for even and odd totals.
+    #[test]
+    fn streaming_matches_the_original_however_it_is_fed() {
+        for total in [0usize, 1, 2, 7, 64, 99] {
+            let words: Vec<u32> = (0..total as u32)
+                .map(|i| i.wrapping_mul(0x0101_0101) ^ 0xdead_beef)
+                .collect();
+            assert_eq!(content_hash(&words), original(&words), "{total} words");
+            for row in [1usize, 3, 5] {
+                let mut hasher = ContentHasher::new(total);
+                for chunk in words.chunks(row) {
+                    let bytes: Vec<u8> = chunk.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    hasher.bytes(&bytes);
+                }
+                assert_eq!(
+                    hasher.finish(),
+                    original(&words),
+                    "{total} words in rows of {row}"
+                );
+            }
+        }
+        assert_ne!(content_hash(&[1, 2]), content_hash(&[2, 1]));
+    }
+}
+
 pub use backend::{
     BackendError, RecordingBackend, Rect, RenderBackend, RenderCommand, Resource, ResourceId,
-    ShaderStage,
+    ShaderStage, USER_DATA_BLOCK_OFFSETS, USER_DATA_BLOCK_WORDS, USER_DATA_WORDS,
 };
 pub use packet::{Packet, PacketKind, PacketWalk, walk};
 pub use registers::{
     BlendControl, BlendFactor, BufferDescriptor, ColourTarget, ColourTargetExtent, CombineFunc,
     CompareFunc, DepthControl, DispatchCall, DrawCall, DrawCorrelation, DrawKind, DrawOrDispatch,
     ImageDescriptor, PrimitiveTopology, RegisterWrite, Scissor, ShaderCandidate, StencilControl,
-    StencilOp, SwizzleMode, TargetMask, Vocabulary, VocabularyError, blend_control_at,
-    buffer_descriptor_at, colour_swizzle_mode_at, colour_target_at, colour_target_extent_at,
-    correlate_draws, decode_blend_control, decode_blend_factor, decode_buffer_descriptor,
-    decode_colour_swizzle_mode, decode_colour_target_extent, decode_combine_func,
-    decode_compare_func, decode_depth_control, decode_image_descriptor, decode_primitive_topology,
-    decode_scissor, decode_stencil_control, decode_stencil_op, decode_swizzle_mode,
-    decode_target_mask, depth_control_at, dispatch_calls, draw_calls, primitive_topology_at,
-    register_writes, scissor_at, shader_candidates, stencil_control_at, target_mask_at,
+    StencilOp, SwizzleMode, TargetMask, ViewportTransform, Vocabulary, VocabularyError,
+    blend_control_at, buffer_descriptor_at, colour_swizzle_mode_at, colour_target_at,
+    colour_target_extent_at, correlate_draws, decode_blend_control, decode_blend_factor,
+    decode_buffer_descriptor, decode_colour_swizzle_mode, decode_colour_target_extent,
+    decode_combine_func, decode_compare_func, decode_depth_control, decode_image_descriptor,
+    decode_primitive_topology, decode_scissor, decode_stencil_control, decode_stencil_op,
+    decode_swizzle_mode, decode_target_mask, depth_control_at, dispatch_calls, draw_calls,
+    primitive_topology_at, register_writes, scissor_at, shader_candidates, stencil_control_at,
+    target_mask_at,
 };
 pub use render::{FrameOutcome, drive};
 pub use tiling::{

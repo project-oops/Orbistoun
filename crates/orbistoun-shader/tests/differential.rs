@@ -164,6 +164,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "primitive",
         "the NGG vertex program's prefetch, nop, send-message, shift and carry-add",
     ),
+    (
+        "texture",
+        "the textured pixel shader's whole-quad mode, branches, compares and conversions",
+    ),
 ];
 
 #[test]

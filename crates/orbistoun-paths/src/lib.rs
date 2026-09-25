@@ -104,6 +104,9 @@ pub mod dirs {
     /// entries look like installed titles, and a shell listing the library showed them as such
     /// (D661).
     pub const PAYLOADS: &str = "payloads";
+    /// The console's own writable storage, as a system application sees it: one tree shared by
+    /// everything run with the system filesystem view, rather than one sandbox per title.
+    pub const CONSOLE: &str = "console";
     /// Installable packages, before anything installs them.
     ///
     /// The input side of installation: what a package manager would list and offer to install.
@@ -164,6 +167,20 @@ fn is_truthy(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Where the console stages homebrew, as path components: `/data/homebrew` (D722). Inside the
+/// titles library it is the same components, so a staged title's host path mirrors its guest one.
+pub const STAGING: [&str; 2] = ["data", "homebrew"];
+
+/// The staging root under a titles library `titles` - [`STAGING`] joined on. What
+/// [`Paths::staged_titles_dir`] answers, and what a caller holding only a library root (a
+/// `--titles` override, a test) asks.
+#[must_use]
+pub fn staged_under(titles: &Path) -> PathBuf {
+    STAGING
+        .iter()
+        .fold(titles.to_path_buf(), |path, part| path.join(part))
 }
 
 /// A resolved, confined set of writable locations.
@@ -336,6 +353,13 @@ impl Paths {
         self.data_root.join(dirs::TITLES)
     }
 
+    /// Where homebrew is **staged** inside the titles library - the console's
+    /// `/data/homebrew/<id>`, one directory per title, as `pros restore` stages one (D722). A title
+    /// launched from here has a writable `/app0`, as it does on the console.
+    pub fn staged_titles_dir(&self) -> PathBuf {
+        staged_under(&self.titles_dir())
+    }
+
     /// Where raw executables live, run directly rather than installed.
     pub fn payloads_dir(&self) -> PathBuf {
         self.data_root.join(dirs::PAYLOADS)
@@ -360,6 +384,14 @@ impl Paths {
         // hardware is this directory, with no translation: the guest's path is the format both
         // sides already speak.
         self.shared.title_dir(title).join("fs")
+    }
+
+    /// The overlay a title run with the system filesystem view writes into.
+    ///
+    /// One for the whole console, because that is what a system application has: a launcher's
+    /// settings under `/data` are the device's, not a sandbox that vanishes with its own title.
+    pub fn console_overlay_dir(&self) -> PathBuf {
+        self.data_root.join(dirs::CONSOLE)
     }
 
     /// Where one title's save states are kept.
@@ -414,6 +446,7 @@ impl Paths {
             (dirs::TITLES, self.titles_dir()),
             (dirs::PAYLOADS, self.payloads_dir()),
             (dirs::PACKAGES, self.packages_dir()),
+            (dirs::CONSOLE, self.console_overlay_dir()),
         ]
     }
 
@@ -660,12 +693,13 @@ mod tests {
             p.titles_dir(),
             p.payloads_dir(),
             p.packages_dir(),
+            p.console_overlay_dir(),
         ] {
             assert!(all.contains(&d), "{d:?} missing from all_dirs()");
         }
         assert_eq!(
             all.len(),
-            9,
+            10,
             "a location was added without updating the test"
         );
         // **The three library roots are siblings, and separate ones.** They hold different kinds

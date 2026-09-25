@@ -429,20 +429,41 @@ fn opendir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(guest) = crate::read_guest_path(args[0]) else {
         return 0;
     };
+    let Some(entries) = listing(&guest) else {
+        crate::wanted::note(&guest);
+        return 0;
+    };
+    let handle = crate::open::fresh_handle();
+    let Ok(mut open) = directories().lock() else {
+        return 0;
+    };
+    open.insert(
+        handle,
+        Directory {
+            remaining: entries.into_iter(),
+            entry: vec![0_u8; Layout::configured().dirent_len()],
+        },
+    );
+    handle
+}
+
+/// A guest directory's entries, `(name, is a directory)`, `.` and `..` first - or `None` when the
+/// guest path is no directory here. The one listing `opendir` and `getdirentries` both read
+/// (worklog 842), so a directory cannot list differently through the two.
+pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
     // **The mount points first, then the host's own entries.** A path can be both: a mount
     // at `/system_data/priv` makes `/system_data` a directory that no host holds, and if
     // something is *also* mounted at `/system_data` its files belong in the same listing.
-    let mut below = crate::mount::mounts_under(&guest);
-    if crate::device::is_directory(&guest) {
+    let mut below = crate::mount::mounts_under(guest);
+    if crate::device::is_directory(guest) {
         below.extend(crate::device::in_directory());
     } else if guest.replace('\\', "/").trim_end_matches('/') == "/" {
         // `/dev` exists because a device is in it, which nothing else knows.
         below.push(crate::device::DIRECTORY.trim_start_matches('/').to_owned());
     }
-    let host = crate::mount::resolve_existing(&guest).filter(|path| path.is_dir());
+    let host = crate::mount::resolve_existing(guest).filter(|path| path.is_dir());
     if below.is_empty() && host.is_none() {
-        crate::wanted::note(&guest);
-        return 0;
+        return None;
     }
 
     let mut entries: Vec<(String, bool)> = Vec::new();
@@ -466,19 +487,7 @@ fn opendir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             entries.push((name, directory));
         }
     }
-
-    let handle = crate::open::fresh_handle();
-    let Ok(mut open) = directories().lock() else {
-        return 0;
-    };
-    open.insert(
-        handle,
-        Directory {
-            remaining: entries.into_iter(),
-            entry: vec![0_u8; Layout::configured().dirent_len()],
-        },
-    );
-    handle
+    Some(entries)
 }
 
 /// `readdir(handle)` - the next entry, or null at the end.

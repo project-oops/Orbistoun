@@ -188,6 +188,9 @@ pub enum DispatchError {
     /// No queue family supports compute.
     #[error("no compute queue family on the selected device")]
     NoComputeQueue,
+    /// The draw asks for state this cannot build exactly - named, not approximated (worklog 829).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 /// Reports whether compute can be dispatched here.
@@ -293,8 +296,7 @@ fn build_pipeline(
     module: &[u32],
     buffer: vk::Buffer,
     size: vk::DeviceSize,
-    memory_buffer: vk::Buffer,
-    memory_size: vk::DeviceSize,
+    (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
 ) -> Result<BoundPipeline, DispatchError> {
     let shader_info = vk::ShaderModuleCreateInfo::default().code(module);
     // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an
@@ -360,7 +362,7 @@ fn build_pipeline(
         .range(size)];
     let memory_info = [vk::DescriptorBufferInfo::default()
         .buffer(memory_buffer)
-        .offset(0)
+        .offset(memory_offset)
         .range(memory_size)];
     let writes = [
         vk::WriteDescriptorSet::default()
@@ -402,16 +404,22 @@ pub struct Output {
 /// Extracted because it is done once per buffer and the unsafe reasoning is identical
 /// each time - repeating it invites the two copies to drift, and a `// SAFETY:` comment
 /// that no longer describes its block is worse than none.
-fn read_back(
+pub(crate) fn read_back(
     device: &ash::Device,
-    memory: vk::DeviceMemory,
-    size: vk::DeviceSize,
-    words: usize,
+    buffer: &DispatchBuffer,
 ) -> Result<Vec<u32>, DispatchError> {
-    // SAFETY: the memory is host-visible, was allocated with exactly `size` bytes, and
-    // is not currently mapped.
-    let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
-        .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
+    let (memory, words) = (buffer.memory, buffer.words);
+    // SAFETY: the memory is host-visible, holds `size` bytes from `offset` - the buffer's own, or
+    // one slot of the window ring (worklog 847) - and is not currently mapped.
+    let mapped = unsafe {
+        device.map_memory(
+            memory,
+            buffer.offset,
+            buffer.size,
+            vk::MemoryMapFlags::empty(),
+        )
+    }
+    .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
     let mut out = vec![0u32; words];
     // SAFETY: the mapping covers `words` whole `u32`s, the destination has exactly that
     // capacity, and the two cannot overlap - one is device memory and the other a fresh
@@ -643,6 +651,9 @@ pub(crate) struct DispatchBuffer {
     pub memory: vk::DeviceMemory,
     pub size: vk::DeviceSize,
     pub words: usize,
+    /// Where the `words` start within the buffer - one slot of the window ring (worklog 847); zero
+    /// for a buffer that is the words and nothing else.
+    pub offset: vk::DeviceSize,
 }
 
 /// Records and runs one compute dispatch against two caller-owned buffers, and reads both back.
@@ -666,8 +677,7 @@ fn dispatch_core(
         module,
         binding0.buffer,
         binding0.size,
-        binding1.buffer,
-        binding1.size,
+        (binding1.buffer, binding1.offset, binding1.size),
     )?;
     let pipeline = bound.pipeline;
     let pipeline_layout = bound.layout;
@@ -723,8 +733,8 @@ fn dispatch_core(
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
 
     // ---- read back -----------------------------------------------------------
-    let observed = read_back(device, binding0.memory, binding0.size, binding0.words)?;
-    let guest_memory = read_back(device, binding1.memory, binding1.size, binding1.words)?;
+    let observed = read_back(device, binding0)?;
+    let guest_memory = read_back(device, binding1)?;
 
     // ---- release (everything but the buffers) --------------------------------
     // SAFETY: every handle below was created here on this device, is not in use - the queue has
@@ -787,12 +797,14 @@ pub fn dispatch(
         memory,
         size,
         words,
+        offset: 0,
     };
     let binding1 = DispatchBuffer {
         buffer: memory_buffer,
         memory: memory_memory,
         size: memory_size,
         words: memory_words,
+        offset: 0,
     };
 
     // On an error the buffers leak with everything else - the successful-path-only release this
@@ -877,6 +889,7 @@ pub(crate) fn dispatch_reading_window(
         memory: scratch_memory,
         size,
         words: observation_words,
+        offset: 0,
     };
 
     let result = dispatch_core(device, queue, family, module, &observation, window, groups);

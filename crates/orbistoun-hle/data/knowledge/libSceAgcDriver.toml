@@ -43,6 +43,22 @@ cites = "obSCEne -1c97 (16-byte descriptor layout, sweep 20260917-124503) and rc
 found_on = "2026-09-17"
 
 [[function]]
+name = "sceAgcDriverSubmitCommandBuffer"
+arity = 2
+purpose = "Submits a draw command buffer to a named queue - the same handover as sceAgcDriverSubmitDcb, with the queue handle first."
+edge_cases = [
+    "IMPLEMENTED (worklog 813): the open-toolchain SDK's GL context and draw path call this first as (queue, desc) and fall back to sceAgcDriverSubmitDcb only when it does not resolve. The queue is orbistoun's own opaque handle from sceAgcDriverCreateQueue; the 16-byte descriptor in argument one is walked exactly as SubmitDcb walks its argument zero.",
+    "Unnamed until worklog 813 (NID 0x145f597e80e9876f): it landed on the loud stub, whose placeholder the GL context read as 'the driver refused the command buffer', failing the hardware clear self-test and stopping every draw.",
+    "Returning success exposes the next gap: the guest then polls a fence the stream's RELEASE_MEM should write (0xbeefcafe plus a timestamp), and orbistoun performs no release-memory write, so each submit waits out the guest's own bound.",
+]
+known_by = "guest-observed"
+assumptions = [
+    "That this entry point answers the same 0x0 obSCEne measured for sceAgcDriverSubmitDcb. obSCEne's arm2-submit-shape rows record an arity of 2 and no fence argument, which agrees with the guest's call, but no rc was measured for this symbol.",
+]
+found_in = ["GLCB00001", "NVRB00001"]
+found_on = "2026-09-24"
+
+[[function]]
 name = "sceAgcDriverRegisterOwner"
 purpose = "Registers a resource-registration owner - part of the AGC toolkit resource-registration subsystem."
 edge_cases = [

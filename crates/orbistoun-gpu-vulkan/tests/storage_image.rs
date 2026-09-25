@@ -142,7 +142,10 @@ fn storing_shader(x: u32, y: u32) -> Vec<u8> {
     // registers for a coordinate with one (worklog 576).
     bytes.extend((0xF000_0000u32 | (8 << 18) | (0xF << 8) | (1 << 3)).to_le_bytes());
     bytes.extend(((4 << 8) | ((IMAGE_DESCRIPTOR / 4) << 16)).to_le_bytes());
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    // `exp mrt0` with all four channels enabled (`EN`, bits 0-3). It was `0xF800_0000` - enabling
+    // none - which a translator ignoring the mask stored anyway, so this test passed on the
+    // behaviour worklog 820 removed: an export that enables nothing writes nothing.
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0706_0504u32.to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());
     bytes
@@ -219,4 +222,20 @@ fn the_storage_binding_a_module_declares_is_the_one_the_harness_fills() {
         orbistoun_spirv::STORAGE_IMAGE_BINDING,
         "a module writes one binding and the harness fills another"
     );
+}
+
+/// **A mesh module reads its draw data where, and in the shape, the harness writes it** (D718): the
+/// binding, the words per draw and the draws per dispatch live in both crates, and a mismatch would
+/// hand a workgroup another draw's words.
+#[test]
+fn the_draw_data_a_module_reads_is_laid_out_as_the_harness_writes_it() {
+    use orbistoun_gpu_vulkan::framebuffer::{
+        DRAW_DATA_BINDING, DRAW_DATA_MOST_DRAWS, DRAW_DATA_STRIDE_WORDS,
+    };
+    assert_eq!(DRAW_DATA_BINDING, orbistoun_spirv::DRAW_DATA_BINDING);
+    assert_eq!(
+        DRAW_DATA_STRIDE_WORDS,
+        orbistoun_spirv::DRAW_DATA_STRIDE_WORDS
+    );
+    assert_eq!(DRAW_DATA_MOST_DRAWS, orbistoun_spirv::DRAW_DATA_MOST_DRAWS);
 }

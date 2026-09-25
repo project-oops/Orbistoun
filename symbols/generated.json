@@ -18342,6 +18342,7 @@
     "__elf_phdr_match_addr",
     "__eqdf2",
     "__eqsf2",
+    "__errno",
     "__error",
     "__extendsfdf2",
     "__fe_dfl_env",
@@ -18612,6 +18613,7 @@
     "_readdir_unlocked",
     "_readv",
     "_reclaim_telldir",
+    "_recv",
     "_recvfrom",
     "_recvmsg",
     "_rtld_addr_phdr",
@@ -20837,6 +20839,7 @@
     "sceAgcDcbRewind",
     "sceAgcDcbRewindGetSize",
     "sceAgcDcbSetBaseIndirectArgs",
+    "sceAgcDcbSetCfRegisterDirect",
     "sceAgcDcbSetCfRegisterRangeDirect",
     "sceAgcDcbSetCxRegisterDirect",
     "sceAgcDcbSetCxRegistersIndirect",
@@ -20848,6 +20851,7 @@
     "sceAgcDcbSetMarker",
     "sceAgcDcbSetNumInstances",
     "sceAgcDcbSetPredication",
+    "sceAgcDcbSetShRegisterDirect",
     "sceAgcDcbSetShRegistersIndirect",
     "sceAgcDcbSetUcRegisterDirect",
     "sceAgcDcbSetUcRegisterDirectGetSize",
@@ -20861,6 +20865,7 @@
     "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
     "sceAgcDriverAddEqEvent",
     "sceAgcDriverDeleteEqEvent",
+    "sceAgcDriverDestroyQueue",
     "sceAgcDriverGetDefaultOwner",
     "sceAgcDriverGetResourceName",
     "sceAgcDriverGetResourceRegistrationMaxNameLength",
@@ -20872,6 +20877,7 @@
     "sceAgcDriverSetHsOffchipParam",
     "sceAgcDriverSetTFRing",
     "sceAgcDriverSubmitAcb",
+    "sceAgcDriverSubmitCommandBuffer",
     "sceAgcDriverSubmitDcb",
     "sceAgcDriverSubmitMultiDcbs",
     "sceAgcDriverUnknown_KRzWekV120",
@@ -140230,6 +140236,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "__errno": {
+      "found": "static",
+      "by": "module-strings",
+      "from": "titles/NETT00001/eboot.bin",
+      "on": "2026-09-24"
+    },
     "__error": {
       "found": "published-standard",
       "list": "crates/orbistoun-names/data/standard.txt",
@@ -141838,6 +141850,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "_recv": {
+      "found": "affixed",
+      "seed": "recv",
+      "rule": "_*",
+      "on": "2026-09-24"
     },
     "_recvfrom": {
       "found": "static",
@@ -154966,6 +154984,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceAgcDcbSetCfRegisterDirect": {
+      "found": "static",
+      "by": "module-strings",
+      "from": "titles/obscene-probe-prospero-native/eboot.bin",
+      "on": "2026-09-24"
+    },
     "sceAgcDcbSetCfRegisterRangeDirect": {
       "found": "static",
       "by": "module-strings",
@@ -155031,6 +155055,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceAgcDcbSetShRegisterDirect": {
+      "found": "static",
+      "by": "module-strings",
+      "from": "titles/obscene-probe-prospero-native/eboot.bin",
+      "on": "2026-09-24"
     },
     "sceAgcDcbSetShRegistersIndirect": {
       "found": "static",
@@ -155110,6 +155140,12 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceAgcDriverDestroyQueue": {
+      "found": "generated",
+      "pattern": "prefix-module-object-verb-object",
+      "index": 20280990,
+      "on": "2026-09-24"
+    },
     "sceAgcDriverGetDefaultOwner": {
       "found": "static",
       "by": "module-strings",
@@ -155175,6 +155211,12 @@
       "pattern": "prefix-module-verb-object",
       "index": 267285,
       "on": "2026-08-20"
+    },
+    "sceAgcDriverSubmitCommandBuffer": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 36379320,
+      "on": "2026-09-24"
     },
     "sceAgcDriverSubmitDcb": {
       "found": "generated",
@@ -155401,7 +155443,7 @@
     "sceAjmBatchCancel": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 439170,
+      "index": 443550,
       "on": "2026-08-24"
     },
     "sceAjmBatchErrorDump": {
@@ -155413,7 +155455,7 @@
     "sceAjmBatchInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 439515,
+      "index": 443895,
       "on": "2026-08-24"
     },
     "sceAjmBatchJobClearContext": {
@@ -155491,7 +155533,7 @@
     "sceAjmBatchStart": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 439920,
+      "index": 444300,
       "on": "2026-08-24"
     },
     "sceAjmBatchStartBuffer": {
@@ -155503,7 +155545,7 @@
     "sceAjmBatchWait": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 440145,
+      "index": 444525,
       "on": "2026-08-24"
     },
     "sceAjmDecAt9ParseConfigData": {
@@ -155539,13 +155581,13 @@
     "sceAjmInstanceCreate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 506055,
+      "index": 511530,
       "on": "2026-08-24"
     },
     "sceAjmInstanceDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 506085,
+      "index": 511560,
       "on": "2026-08-24"
     },
     "sceAjmInstanceExtend": {
@@ -157639,7 +157681,7 @@
     "sceAudioOut2Initialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 1174260,
+      "index": 1186305,
       "on": "2026-08-24"
     },
     "sceAudioOut2LoContextGetQueueLevel": {
@@ -170755,7 +170797,7 @@
     "sceHttp2CreateTemplate": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4683630,
+      "index": 4732170,
       "on": "2026-08-24"
     },
     "sceHttp2DeleteCookieBox": {
@@ -170773,7 +170815,7 @@
     "sceHttp2DeleteTemplate": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4686525,
+      "index": 4735095,
       "on": "2026-08-24"
     },
     "sceHttp2GetAllResponseHeaders": {
@@ -171241,7 +171283,7 @@
     "sceHttpCreateEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4470555,
+      "index": 4516890,
       "on": "2026-08-24"
     },
     "sceHttpCreateRequest": {
@@ -171343,7 +171385,7 @@
     "sceHttpDestroyEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4476345,
+      "index": 4522740,
       "on": "2026-08-24"
     },
     "sceHttpGetAcceptEncodingGZIPEnabled": {
@@ -171709,7 +171751,7 @@
     "sceHttpUnsetEpoll": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 4632675,
+      "index": 4680690,
       "on": "2026-08-25"
     },
     "sceHttpUriBuild": {
@@ -173335,7 +173377,7 @@
     "sceKernelCreateSema": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 6162630,
+      "index": 6226485,
       "on": "2026-09-08"
     },
     "sceKernelDebugAcquireAndUpdateDebugRegister": {
@@ -175267,7 +175309,7 @@
     "sceKernelPollSema": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 6235005,
+      "index": 6299610,
       "on": "2026-08-24"
     },
     "sceKernelPread": {
@@ -175939,7 +175981,7 @@
     "sceKernelWaitEqueue": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 6332070,
+      "index": 6397695,
       "on": "2026-08-24"
     },
     "sceKernelWaitEventFlag": {
@@ -176329,7 +176371,7 @@
     "sceLibcMspaceCreate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6445335,
+      "index": 6512130,
       "on": "2026-08-24"
     },
     "sceLibcMspaceCreateForMonoMutex": {
@@ -176341,13 +176383,13 @@
     "sceLibcMspaceDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6445365,
+      "index": 6512160,
       "on": "2026-08-24"
     },
     "sceLibcMspaceFree": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 6445545,
+      "index": 6512340,
       "on": "2026-08-24"
     },
     "sceLibcMspaceGetAddressRanges": {
@@ -180187,13 +180229,13 @@
     "sceNetEpollDestroy": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7446195,
+      "index": 7523940,
       "on": "2026-08-24"
     },
     "sceNetEpollWait": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 7447050,
+      "index": 7524795,
       "on": "2026-08-24"
     },
     "sceNetErrnoLoc": {
@@ -182071,7 +182113,7 @@
     "sceNpCommerceDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 8071665,
+      "index": 8155980,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogInitializeInternal": {
@@ -182083,13 +182125,13 @@
     "sceNpCommerceDialogOpen": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 8071770,
+      "index": 8156085,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 8072175,
+      "index": 8156490,
       "on": "2026-08-24"
     },
     "sceNpCommerceDialogUpdateStatus": {
@@ -182479,7 +182521,7 @@
     "sceNpGameIntentReceiveIntent": {
       "found": "generated",
       "pattern": "prefix-module-verb-learned",
-      "index": 8790375,
+      "index": 8881470,
       "on": "2026-08-24"
     },
     "sceNpGameIntentTerminate": {
@@ -194401,7 +194443,7 @@
     "sceRudpRead": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 9532,
+      "index": 9605,
       "on": "2026-08-25"
     },
     "sceRudpSetEventHandler": {
@@ -194425,13 +194467,13 @@
     "sceRudpTerminate": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 9552,
+      "index": 9625,
       "on": "2026-08-25"
     },
     "sceRudpWrite": {
       "found": "generated",
       "pattern": "prefix-learned-verb",
-      "index": 9562,
+      "index": 9635,
       "on": "2026-08-25"
     },
     "sceS3dConversionClose": {
@@ -194677,7 +194719,7 @@
     "sceSaveDataDialogClose": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 12086730,
+      "index": 12212655,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogGetResult": {
@@ -194695,7 +194737,7 @@
     "sceSaveDataDialogInitialize": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 12087030,
+      "index": 12212955,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogIsReadyToDisplay": {
@@ -194707,7 +194749,7 @@
     "sceSaveDataDialogOpen": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 12087135,
+      "index": 12213060,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogProgressBarInc": {
@@ -194725,7 +194767,7 @@
     "sceSaveDataDialogTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 12087540,
+      "index": 12213465,
       "on": "2026-08-24"
     },
     "sceSaveDataDialogUpdateStatus": {
@@ -206251,7 +206293,7 @@
     "sceVoiceChatTerminate": {
       "found": "generated",
       "pattern": "prefix-module-learned-verb",
-      "index": 15241140,
+      "index": 15399915,
       "on": "2026-08-24"
     },
     "sceVoiceConnectIPortToOPort": {

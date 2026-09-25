@@ -196,6 +196,61 @@ pub const SANDBOX: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// When a drawn colour target is written back into guest memory (D714).
+///
+/// `flip` (the default) keeps the frame on the device across a frame's submissions and writes it back
+/// when the guest flips, or before a submission draws into another target. `submit` writes it back
+/// after every submission, as before - the choice for a guest that reads its own target between
+/// submissions, which `flip` would show the last flipped frame.
+pub const TARGET_WRITEBACK: Var = Var {
+    name: "ORBISTOUN_TARGET_WRITEBACK",
+    kind: Kind::Setting,
+    summary: "flip (default) writes a drawn target back at the flip; submit writes it back after every submission",
+    example: "submit",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Sample where the guest's main thread is, about once a millisecond, and print the counts every
+/// few seconds (worklog 852).
+pub const PROFILE: Var = Var {
+    name: "ORBISTOUN_PROFILE",
+    kind: Kind::Diagnostic,
+    summary: "1 samples the guest's main and device threads and prints where they spend their time; a larger number shows that many places",
+    example: "40",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Measure a submission's finer spans and print them once a second (worklog 852).
+///
+/// The always-on phases say which part of a frame is slow; these say which part of a submission is,
+/// across its thread hand-offs and the command processor's own steps. Off by default, costing a
+/// relaxed load per span; a verbosity level of the logging service once there is one.
+pub const PERF_DETAIL: Var = Var {
+    name: "ORBISTOUN_PERF_DETAIL",
+    kind: Kind::Diagnostic,
+    summary: "1 prints each submission span's time once a second, beside the perf phases",
+    example: "1",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Each submission the executor carried out, a line apiece (worklog 858).
+///
+/// A GL title submits fifty times a frame, and a line for each was ~2% of a Neverball second
+/// spent writing what nobody reads. Refusals and failures are said whether or not this is set -
+/// a draw that did not run is never quiet. A verbosity level of the logging service once there is
+/// one.
+pub const TRACE_SUBMITS: Var = Var {
+    name: "ORBISTOUN_TRACE_SUBMITS",
+    kind: Kind::Diagnostic,
+    summary: "1 prints a line for every submission whose draws ran - refusals are printed regardless",
+    example: "1",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
 /// How long a guest is allowed to run, for the shell script's `run` verb.
 ///
 /// Declared here although no Rust reads it: this list is what a person consults and what
@@ -733,6 +788,10 @@ pub const REGISTRY: &[Var] = &[
     PORTABLE_MODE,
     DATA_DIR,
     SANDBOX,
+    TARGET_WRITEBACK,
+    PERF_DETAIL,
+    TRACE_SUBMITS,
+    PROFILE,
     LIMIT,
     COMMIT,
     LLM_API_KEY,
@@ -815,6 +874,10 @@ mod tests {
         super::PORTABLE_MODE,
         super::DATA_DIR,
         super::SANDBOX,
+        super::TARGET_WRITEBACK,
+        super::PERF_DETAIL,
+        super::TRACE_SUBMITS,
+        super::PROFILE,
         super::LIMIT,
         super::COMMIT,
         super::LLM_API_KEY,

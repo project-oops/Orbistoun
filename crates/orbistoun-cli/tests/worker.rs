@@ -63,6 +63,9 @@ fn a_missing_guest_crosses_the_boundary_as_a_request_failure() {
             limit_seconds: Some(5),
             call_budget: None,
             path: "no/such/guest".into(),
+            input_script: None,
+            capture_input: None,
+            staged: false,
         })
         .expect("request");
     assert!(

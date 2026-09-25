@@ -199,9 +199,7 @@ mod tests {
     /// half of the same hazard is closed by taking from this crate's own range rather than
     /// from a bare constant - see `crate::test_bases`.
     fn unique_base() -> u64 {
-        use crate::test_bases::{Range, crates};
-        static RANGE: Range = Range::nth(crates::MEM);
-        RANGE.take()
+        crate::unique_test_base()
     }
 
     #[test]

@@ -51,6 +51,20 @@ pub(crate) struct InFlight {
     last_sent: std::cell::RefCell<Option<Vec<orbistoun_input::PadState>>>,
     /// Kept once received, so repeated actions do not race an empty channel.
     control_held: std::cell::RefCell<Option<orbistoun_worker::Control>>,
+    /// Each frame the guest presents, as it is presented (worklog 841).
+    frames: Receiver<egui::ColorImage>,
+    /// Each title the guest asked the system to start (worklog 842).
+    launches: Receiver<String>,
+    /// Where each second of the run went (worklog 844).
+    perf: Receiver<orbistoun_proto::PerfReport>,
+}
+
+/// Where a run's live events go as they arrive: presented frames, titles the guest asked to start,
+/// and where its time went.
+struct Live {
+    frames: std::sync::mpsc::Sender<egui::ColorImage>,
+    launches: std::sync::mpsc::Sender<String>,
+    perf: std::sync::mpsc::Sender<orbistoun_proto::PerfReport>,
 }
 
 impl InFlight {
@@ -78,6 +92,30 @@ impl InFlight {
         }
     }
 
+    /// The newest frame the guest has presented since the last call, if any - older ones that
+    /// arrived in between are skipped, because only the newest is worth showing.
+    pub(crate) fn latest_frame(&self) -> Option<egui::ColorImage> {
+        let mut latest = None;
+        while let Ok(frame) = self.frames.try_recv() {
+            latest = Some(frame);
+        }
+        latest
+    }
+
+    /// The newest time breakdown the worker has streamed since the last call, if any.
+    pub(crate) fn latest_perf(&self) -> Option<orbistoun_proto::PerfReport> {
+        self.perf.try_iter().last()
+    }
+
+    /// The title the guest last asked the system to start, if it asked since the last call.
+    pub(crate) fn requested_launch(&self) -> Option<String> {
+        let mut latest = None;
+        while let Ok(title_id) = self.launches.try_recv() {
+            latest = Some(title_id);
+        }
+        latest
+    }
+
     /// Terminates the run.
     ///
     /// The result still arrives through the channel: the worker dies, the request fails,
@@ -100,6 +138,24 @@ impl InFlight {
             .borrow()
             .as_ref()
             .is_some_and(|control| control.shell(action).is_ok())
+    }
+
+    /// Starts capturing what the running title reads from its pad into `to`, or stops with
+    /// `None` (D721). Answers whether it could be sent.
+    pub(crate) fn capture_input(&self, to: Option<std::path::PathBuf>) -> bool {
+        self.control_held
+            .borrow()
+            .as_ref()
+            .is_some_and(|control| control.capture_input(to).is_ok())
+    }
+
+    /// Starts playing the pad script `script` on the running title from now, or stops with
+    /// `None` (D721). Answers whether it could be sent.
+    pub(crate) fn play_input(&self, script: Option<std::path::PathBuf>) -> bool {
+        self.control_held
+            .borrow()
+            .as_ref()
+            .is_some_and(|control| control.play_input(script).is_ok())
     }
 
     /// Tells the running title what the pads are doing.
@@ -129,26 +185,44 @@ impl InFlight {
 ///
 /// `limit` is in seconds; zero asks for no limit, which is the same explicit choice the
 /// CLI offers rather than a magic sentinel.
+/// What a run does with pad input beyond the window's own (D721): a script to play from its entry,
+/// and a file to capture into from its entry - each chosen on the toolbar before the launch.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RunInput {
+    /// The pad script to play.
+    pub(crate) play: Option<std::path::PathBuf>,
+    /// The script file to capture into.
+    pub(crate) capture: Option<std::path::PathBuf>,
+}
+
 pub(crate) fn start(
     module: &std::path::Path,
     limit: u64,
     budget: u64,
     traces_dir: std::path::PathBuf,
+    input: RunInput,
 ) -> InFlight {
     let (sender, receiver) = channel();
     let (stop_sender, stopper) = channel();
     let (control_sender, control) = channel();
+    let (frame_sender, frames) = channel();
+    let (launch_sender, launches) = channel();
+    let (perf_sender, perf) = channel();
+    let live = Live {
+        frames: frame_sender,
+        launches: launch_sender,
+        perf: perf_sender,
+    };
     let name = module.to_string_lossy().into_owned();
     let for_thread = module.to_path_buf();
 
     std::thread::spawn(move || {
         let finished = execute(
             &for_thread,
-            limit,
-            budget,
+            (limit, budget, input),
             &traces_dir,
-            &stop_sender,
-            &control_sender,
+            (&stop_sender, &control_sender),
+            &live,
         );
         // A failed send means the window closed while the guest was running, which is a
         // normal thing for a person to do and not worth reporting.
@@ -163,17 +237,22 @@ pub(crate) fn start(
         control,
         control_held: std::cell::RefCell::new(None),
         last_sent: std::cell::RefCell::new(None),
+        frames,
+        launches,
+        perf,
     }
 }
 
 /// Runs one guest and gathers everything worth showing.
 fn execute(
     module: &std::path::Path,
-    limit: u64,
-    budget: u64,
+    (limit, budget, input): (u64, u64, RunInput),
     traces_dir: &std::path::Path,
-    stop_sender: &std::sync::mpsc::Sender<orbistoun_worker::Stopper>,
-    control_sender: &std::sync::mpsc::Sender<orbistoun_worker::Control>,
+    (stop_sender, control_sender): (
+        &std::sync::mpsc::Sender<orbistoun_worker::Stopper>,
+        &std::sync::mpsc::Sender<orbistoun_worker::Control>,
+    ),
+    live: &Live,
 ) -> Finished {
     let mut worker = match orbistoun_worker::WorkerHandle::spawn_self() {
         Ok(worker) => worker,
@@ -189,12 +268,37 @@ fn execute(
     // reason traces are kept at all.
     let before = orbistoun_report::trace::load_previous(traces_dir, module);
 
-    let events = worker.request(&orbistoun_proto::Request::Run {
-        path: module.to_path_buf(),
-        symbols_db: None,
-        limit_seconds: (limit > 0).then_some(limit),
-        call_budget: (budget > 0).then_some(budget),
-    });
+    // Each presented frame goes to the window as it arrives (worklog 841); a region that cannot be
+    // read is skipped - the next flip brings another.
+    let events = worker.request_streaming(
+        &orbistoun_proto::Request::Run {
+            path: module.to_path_buf(),
+            symbols_db: None,
+            limit_seconds: (limit > 0).then_some(limit),
+            call_budget: (budget > 0).then_some(budget),
+            // The window's own pads drive a GUI run; a script or a capture only when the toolbar
+            // asked for one before the launch (D721).
+            input_script: input.play,
+            capture_input: input.capture,
+            // A library title's storage is known from where it lies (D722); the window launches
+            // only library titles, so it never asks.
+            staged: false,
+        },
+        |event| match event {
+            orbistoun_proto::Event::Frame { .. } => {
+                if let Ok(image) = crate::frame::frame_image(traces_dir, event) {
+                    let _ = live.frames.send(image);
+                }
+            }
+            orbistoun_proto::Event::LaunchApp { title_id } => {
+                let _ = live.launches.send(title_id.clone());
+            }
+            orbistoun_proto::Event::Perf(report) => {
+                let _ = live.perf.send(report.clone());
+            }
+            _ => {}
+        },
+    );
     let events = match events {
         Ok(events) => events.iter().map(|e| describe(e, traces_dir)).collect(),
         Err(e) => return failed(format!("driving the worker: {e}")),

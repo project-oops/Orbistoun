@@ -59,6 +59,10 @@ mod imp {
         PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualProtect,
     };
 
+    /// `MEM_WRITE_WATCH`, `0x200000` - `windows-sys` declares it under `Win32_System_SystemServices`
+    /// (`SystemServices/mod.rs:2702` in 0.61.2), a feature this crate does not otherwise need.
+    const MEM_WRITE_WATCH: u32 = 0x0020_0000;
+
     /// Maps our protection model onto the platform's.
     ///
     /// **Execute is never dropped, and never implies "no access".** Real guest text
@@ -93,10 +97,12 @@ mod imp {
         // existing reservation, which is the property this whole function depends on -
         // so a conflict surfaces as null rather than as evicted memory.
         let got = unsafe {
+            // Write-watched, so what has been written since a point can be asked of the host
+            // rather than found by comparing every byte (`crate::watch`, worklog 851).
             VirtualAlloc(
                 addr as *const core::ffi::c_void,
                 size,
-                MEM_RESERVE | MEM_COMMIT,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
                 protection_flags(p),
             )
         };

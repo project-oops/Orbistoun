@@ -45,12 +45,19 @@ const FAILED: u64 = -1_i64 as u64;
 ///
 /// Both gates in one place, because they are one question - *may this call touch this path* -
 /// and splitting them is how one caller comes to check only the first.
+///
+/// The top layer's copy, copied up from a lower layer first when that is the only one, so a write
+/// never lands in the base tree or a staged title's library files (D722).
 fn writable_host_path(address: u64) -> Option<std::path::PathBuf> {
     let guest = crate::read_guest_path(address)?;
-    if !mount::is_writable(&guest) {
-        return None;
-    }
-    mount::resolve(&guest)
+    mount::resolve_for_write(&guest)
+}
+
+/// The host path a guest may create, remove or rename a name at: the top layer's, and only while no
+/// lower layer also holds the name, because removing it there would need a whiteout (D722).
+fn removable_host_path(address: u64) -> Option<std::path::PathBuf> {
+    let guest = crate::read_guest_path(address)?;
+    mount::resolve_for_removal(&guest)
 }
 
 /// Asking whether a path may be written, as a guest spells it.
@@ -79,7 +86,7 @@ fn answered(worked: bool) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `mkdir(2)`.
 fn mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = writable_host_path(args[0]) else {
+    let Some(host) = removable_host_path(args[0]) else {
         return FAILED;
     };
     answered(std::fs::create_dir(host).is_ok())
@@ -93,7 +100,7 @@ fn mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `rmdir(2)`.
 fn rmdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = writable_host_path(args[0]) else {
+    let Some(host) = removable_host_path(args[0]) else {
         return FAILED;
     };
     answered(std::fs::remove_dir(host).is_ok())
@@ -107,7 +114,7 @@ fn rmdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `unlink(2)`.
 fn unlink(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = writable_host_path(args[0]) else {
+    let Some(host) = removable_host_path(args[0]) else {
         return FAILED;
     };
     if host.is_dir() {
@@ -124,7 +131,7 @@ fn unlink(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: ISO C `remove`; POSIX.1-2008 `remove(3)`.
 fn remove(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = writable_host_path(args[0]) else {
+    let Some(host) = removable_host_path(args[0]) else {
         return FAILED;
     };
     let worked = if host.is_dir() {
@@ -143,7 +150,8 @@ fn remove(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `rename(2)`.
 fn rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (Some(from), Some(to)) = (writable_host_path(args[0]), writable_host_path(args[1])) else {
+    let (Some(from), Some(to)) = (removable_host_path(args[0]), removable_host_path(args[1]))
+    else {
         return FAILED;
     };
     answered(std::fs::rename(from, to).is_ok())

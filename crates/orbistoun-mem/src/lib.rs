@@ -31,6 +31,16 @@ pub mod blocks;
 pub mod platform;
 pub mod stack;
 pub mod test_bases;
+pub mod watch;
+
+/// A base no other test in this crate gets: one range for the crate, one cursor for every test
+/// module that takes from it (D399).
+#[cfg(test)]
+pub(crate) fn unique_test_base() -> u64 {
+    use test_bases::{Range, crates};
+    static RANGE: Range = Range::nth(crates::MEM);
+    RANGE.take()
+}
 
 pub use platform::{Reservation, allocation_granularity};
 

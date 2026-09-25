@@ -174,6 +174,11 @@ name = "s_mov_b64"
 
 [[mnemonic]]
 family = "SOP1"
+opcode = 9
+name = "s_wqm_b32"
+
+[[mnemonic]]
+family = "SOP1"
 opcode = 10
 name = "s_wqm_b64"
 
@@ -181,6 +186,11 @@ name = "s_wqm_b64"
 family = "SOP2"
 opcode = 2
 name = "s_add_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 14
+name = "s_and_b32"
 
 [[mnemonic]]
 family = "SOP2"
@@ -236,6 +246,11 @@ name = "s_nop"
 family = "SOPP"
 opcode = 1
 name = "s_endpgm"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 2
+name = "s_branch"
 
 [[mnemonic]]
 family = "SOPP"
@@ -299,6 +314,11 @@ name = "v_mov_b32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 7
+name = "v_cvt_u32_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 37
 name = "v_exp_f32_e32"
 
@@ -339,6 +359,11 @@ name = "v_add_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 4
+name = "v_sub_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 5
 name = "v_subrev_f32_e32"
 
@@ -369,6 +394,11 @@ name = "v_lshlrev_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 27
+name = "v_and_b32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 40
 name = "v_add_co_ci_u32_e32"
 
@@ -376,6 +406,11 @@ name = "v_add_co_ci_u32_e32"
 family = "VOP2"
 opcode = 43
 name = "v_fmac_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 47
+name = "v_cvt_pkrtz_f16_f32_e32"
 
 [[mnemonic]]
 family = "VOP3"
@@ -411,3 +446,33 @@ name = "v_div_fmas_f32"
 family = "VOPC"
 opcode = 1
 name = "v_cmp_lt_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 2
+name = "v_cmp_eq_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 3
+name = "v_cmp_le_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 4
+name = "v_cmp_gt_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 6
+name = "v_cmp_ge_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 13
+name = "v_cmp_neq_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 197
+name = "v_cmp_ne_u32_e32"

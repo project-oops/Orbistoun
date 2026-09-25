@@ -237,11 +237,10 @@ pub const STATE_BYTES: usize = 120;
 /// not committing to one: a guest asking what the pad is doing when nothing is touching it
 /// gets exactly what a console gives it.
 ///
-/// **What this cannot do is report input**, and that is the limit to say out loud rather than
-/// paper over. Mapping orbistoun's live pad state onto these bytes needs the field offsets,
-/// and those are the part that is inferred - so `latest` stays unread and the transport D345
-/// built stays unconsumed until a run with a button held settles where the bits go. Filed as
-/// obscene REQ-20260910T0650Z-d1c4.
+/// **Input is placed over it by [`record`]**, at the positions the collection's SDK reads on
+/// hardware (D713) - evidence from titles that navigate with a pad, not from this image. Every
+/// byte the SDK does not place keeps its measured value here. A byte-level measurement of a held
+/// button is still asked for (obscene REQ-20260910T0650Z-d1c4) and would confirm or replace them.
 ///
 /// Reference: obSCEne `100-input/read-extent` and `100-input/batched-read`, title leg of
 /// sweep 20260909-110725, `title/unknown-gpu`.
@@ -259,9 +258,115 @@ pub const AT_REST: &[u8; STATE_BYTES] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
+
+/// Where each button's bit is in the record's button word (D713).
+///
+/// The collection's SDK's bits (`oops-sdk/include/oops/input.h`), which titles built on it read on
+/// a console with a pad. `Select` as the touchpad is the weakest entry: nothing here has exercised
+/// it. `Shell` has no bit - a title never sees it (D326).
+const fn record_bit(button: Button) -> u32 {
+    match button {
+        Button::L3 => 1 << 1,
+        Button::R3 => 1 << 2,
+        Button::Start => 1 << 3,
+        Button::Up => 1 << 4,
+        Button::Right => 1 << 5,
+        Button::Down => 1 << 6,
+        Button::Left => 1 << 7,
+        Button::L2 => 1 << 8,
+        Button::R2 => 1 << 9,
+        Button::L1 => 1 << 10,
+        Button::R1 => 1 << 11,
+        Button::North => 1 << 12,
+        Button::East => 1 << 13,
+        Button::South => 1 << 14,
+        Button::West => 1 << 15,
+        Button::Select => 1 << 20,
+        Button::Shell => 0,
+    }
+}
+
+/// Every button, for walking the state into the word.
+const BUTTONS: [Button; 17] = [
+    Button::South,
+    Button::East,
+    Button::West,
+    Button::North,
+    Button::L1,
+    Button::R1,
+    Button::L2,
+    Button::R2,
+    Button::L3,
+    Button::R3,
+    Button::Up,
+    Button::Down,
+    Button::Left,
+    Button::Right,
+    Button::Select,
+    Button::Start,
+    Button::Shell,
+];
+
+/// An axis in `-1.0..=1.0` as the record's byte: 0 at one extreme, 0x80 at centre, 0xFF at the
+/// other.
+fn axis_byte(value: f32) -> u8 {
+    let scaled = (value.clamp(-1.0, 1.0) + 1.0) * 127.5;
+    // In 0..=255 by the clamp, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = scaled.round().min(255.0) as u8;
+    byte
+}
+
+/// A pad's state as the 120-byte record a read writes (D713): the measured at-rest image, with
+/// the fields the SDK places - buttons at 0, sticks at 4 and 6, triggers at 8, connected at 76 -
+/// written from `state`.
+#[must_use]
+pub fn record(state: &PadState) -> [u8; STATE_BYTES] {
+    let mut bytes = *AT_REST;
+    let word = BUTTONS
+        .iter()
+        .filter(|&&b| state.is_down(b))
+        .fold(0_u32, |word, &b| word | record_bit(b));
+    bytes[0..4].copy_from_slice(&word.to_le_bytes());
+    bytes[4] = axis_byte(state.sticks[0].x);
+    bytes[5] = axis_byte(state.sticks[0].y);
+    bytes[6] = axis_byte(state.sticks[1].x);
+    bytes[7] = axis_byte(state.sticks[1].y);
+    // A trigger's 0..=1 onto the stick scale's upper half and past it: 0 at rest, 0xFF held.
+    bytes[8] = axis_byte(state.triggers[0] * 2.0 - 1.0);
+    bytes[9] = axis_byte(state.triggers[1] * 2.0 - 1.0);
+    bytes[76] = 1;
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Button, PadState, TRIGGER_THRESHOLD};
+
+    /// **A quiet pad is the at-rest image with only the connected flag changed; a press lands on
+    /// the SDK's bit** (D713). Cross is bit 14, the d-pad's down bit 6 - what a launcher confirms
+    /// and moves with.
+    #[test]
+    fn a_record_places_the_state_where_the_sdk_reads_it() {
+        let quiet = super::record(&PadState::neutral());
+        let mut expected = *super::AT_REST;
+        expected[76] = 1;
+        assert_eq!(quiet, expected);
+
+        let mut pad = PadState::neutral();
+        pad.set(Button::South, true);
+        pad.set(Button::Down, true);
+        pad.set(Button::Shell, true);
+        pad.sticks[0].x = -1.0;
+        pad.triggers[1] = 1.0;
+        let bytes = super::record(&pad);
+        assert_eq!(
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            (1 << 14) | (1 << 6),
+            "cross and down, and never the shell's own button"
+        );
+        assert_eq!((bytes[4], bytes[5], bytes[9]), (0x00, 0x80, 0xFF));
+    }
 
     /// A neutral pad is quiet, not absent.
     #[test]

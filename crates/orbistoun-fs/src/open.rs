@@ -183,10 +183,7 @@ pub fn open(guest_path: &str) -> Option<FileHandle> {
 ///
 /// `None` when the path is under no mount, climbs out of one, or is not writable.
 pub fn create(guest_path: &str) -> Option<FileHandle> {
-    if !crate::mount::is_writable(guest_path) {
-        return None;
-    }
-    let host = crate::mount::resolve(guest_path)?;
+    let host = crate::mount::resolve_for_create(guest_path)?;
     if let Some(parent) = host.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

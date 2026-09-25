@@ -1023,7 +1023,7 @@ hooks() {
 # to catch - so the only supported way to add one is to make the generator produce it,
 # by extending crates/orbistoun-names/data/vendor.toml (D074).
 #
-# Modules live under titles/, which is gitignored, so this cannot run in CI and is not
+# Modules live in the shared title library, outside the repository, so this cannot run in CI and is not
 # meant to. What CI checks is the *audit*: that every name already committed re-derives
 # from this repository alone, which needs no module at all.
 names() {
@@ -1033,7 +1033,7 @@ names() {
 
     mkdir -p symbols
     if [ -z "$(titles_root)" ]; then
-        warn "no titles/ directory and no built library - nothing to search against"
+        warn "no built library to read the title library from - nothing to search against"
         warn "the generator produces candidate names; confirming one needs a real"
         warn "import table to collide with. See docs/PROVENANCE.md."
         return 0
@@ -1082,7 +1082,7 @@ names() {
 
 # The audit CI runs, without needing a guest module.
 #
-# Separate from `names` because `names` needs material under titles/ and this does not -
+# Separate from `names` because `names` needs material in the title library and this does not -
 # it only reads what is already committed. WORKFLOW.md claimed this was part of `check`
 # for some time before it was, which is the sort of claim a document should not be able
 # to make on its own (D208).
@@ -1223,7 +1223,7 @@ doctor() {
 ' "$(basename "$(dirname "$module")")"
     done
     if [ "$titles" -eq 0 ]; then
-        printf '  none     nothing under titles/
+        printf '  none     nothing in the title library (orbistoun-cli paths)
 '
         printf '           Not a fault. Everything except running a guest still works,
 '
@@ -1245,7 +1245,7 @@ doctor() {
         printf '  ./bin/orbistoun run <title>    the debug loop - see docs/WORKFLOW.md
 '
     else
-        printf '  put a title under titles/, then ./bin/orbistoun run <title>
+        printf '  put a title in the library (orbistoun-cli paths), then ./bin/orbistoun run <title>
 '
     fi
 }
@@ -1278,14 +1278,10 @@ symbols_stale() {
 #
 # Takes an id because that is what a person has: they know which title they are chasing,
 # not where its executable sits inside the layout.
-# The directory to search for guest modules: `titles/` while it holds any, else the tool's
-# own library. One rule for every verb that walks the corpus, so `run`, `names` and `sweep`
-# cannot disagree about where it is - which they did, silently, once `titles/` was empty.
+# The directory to search for guest modules: the one shared library under the data
+# directory, which every OOPS tool reads. One rule for every verb that walks the corpus, so
+# `run`, `names` and `sweep` cannot disagree about where it is.
 titles_root() {
-    local module
-    for module in titles/*/eboot.bin; do
-        [ -e "$module" ] && { printf 'titles'; return 0; }
-    done
     library_dir
 }
 
@@ -1307,8 +1303,10 @@ resolve_module() {
     fi
     local library
     library="$(library_dir)"
-    for candidate in titles/"$wanted"/eboot.bin titles/"$wanted"*/eboot.bin \
-                     ${library:+"$library/$wanted"/eboot.bin "$library/$wanted"*/eboot.bin}; do
+    # A staged title first: the same title staged and as an image is run staged, as the library
+    # lists it (D722).
+    local staged="${library:+$library/data/homebrew}"
+    for candidate in ${staged:+"$staged/$wanted"/eboot.bin} ${library:+"$library/$wanted"/eboot.bin "$library/$wanted"*/eboot.bin}; do
         if [ -f "$candidate" ]; then
             printf '%s' "$candidate"
             return 0
@@ -1322,12 +1320,12 @@ resolve_module() {
 list_titles() {
     local found=0 library
     library="$(library_dir)"
-    for module in titles/*/eboot.bin ${library:+"$library"/*/eboot.bin}; do
+    for module in ${library:+"$library"/*/eboot.bin "$library"/data/homebrew/*/eboot.bin}; do
         [ -e "$module" ] || continue
         found=1
         printf '  %s\n' "$(basename "$(dirname "$module")")"
     done
-    [ "$found" -eq 0 ] && printf '  (none - put a title directory under titles/, or run orbistoun-cli corpus sync)\n'
+    [ "$found" -eq 0 ] && printf '  (none - put a title directory in the library (orbistoun-cli paths), or run orbistoun-cli corpus sync)\n'
     return 0
 }
 
@@ -1383,8 +1381,11 @@ $(list_titles)"
     step "running $module (limit ${ORBISTOUN_LIMIT:-20}s)"
     # Failure is the expected outcome for a long time yet, and a guest that faults has
     # still produced a trace - which is the point of the run.
+    # Anything after the title goes to the run itself - `-- --input <script>` plays a pad script
+    # (D721) - as the usage line has always said.
+    if [ "${1:-}" = "--" ]; then shift; fi
     ./target/release/orbistoun-cli --symbols-db "$SYMBOLS_DB" \
-        run "$module" --limit "${ORBISTOUN_LIMIT:-20}" || true
+        run "$module" --limit "${ORBISTOUN_LIMIT:-20}" "$@" || true
 
     step "what this guest asked for"
     ./target/release/orbistoun-cli worklist --top 15

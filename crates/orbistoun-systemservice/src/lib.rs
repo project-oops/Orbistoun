@@ -24,6 +24,7 @@ pub mod common_dialog;
 pub mod coredump;
 pub mod error_dialog;
 pub mod json2;
+pub mod launch;
 pub mod msg_dialog;
 pub mod remoteplay;
 pub mod save_data;
@@ -37,6 +38,8 @@ guest_module! {
         "sceSystemServiceParamGetInt" => 2,
         "sceSystemServiceHideSplashScreen" => 0,
         "sceSystemServiceGetStatus" => 1,
+        // title id, argv, parameter block - the shape the launcher that first called it passes.
+        "sceSystemServiceLaunchApp" => 3,
         // A system-flag setter, arity the trampoline's six because the real signature is
         // unmeasured (D504); the handler reads none of it.
         "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet" => 6,

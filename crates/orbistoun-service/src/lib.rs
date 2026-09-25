@@ -313,14 +313,34 @@ pub fn scripted_pad(
     } else {
         base.join(path)
     };
-    let text = std::fs::read_to_string(&resolved)
-        .map_err(|e| format!("reading input script {}: {e}", resolved.display()))?;
+    let script = read_pad_script(&resolved)?;
+    Ok(Some((resolved, script)))
+}
+
+/// Reads, parses and validates the pad script at `path` - one a run names itself (D721), or one
+/// the configuration names.
+///
+/// # Errors
+///
+/// When the file cannot be read, does not parse as a script, or names a run that could not
+/// happen (D153).
+pub fn read_pad_script(path: &Path) -> Result<orbistoun_input::script::Script, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading input script {}: {e}", path.display()))?;
     let script: orbistoun_input::script::Script = toml::from_str(&text)
-        .map_err(|e| format!("parsing input script {}: {e}", resolved.display()))?;
+        .map_err(|e| format!("parsing input script {}: {e}", path.display()))?;
     script
         .validate()
-        .map_err(|e| format!("input script {}: {e}", resolved.display()))?;
-    Ok(Some((resolved, script)))
+        .map_err(|e| format!("input script {}: {e}", path.display()))?;
+    Ok(script)
+}
+
+/// One recorded step, as the `[[step]]` table a script file holds (D721) - appended to a recording
+/// as it happens, so the file reads back as a script however the run ended.
+#[must_use]
+pub fn pad_script_step(step: &orbistoun_input::script::Step) -> String {
+    let body = toml::to_string(step).unwrap_or_default();
+    format!("\n[[step]]\n{body}")
 }
 
 /// Where the library is, and how a run from it behaves.
@@ -398,8 +418,13 @@ impl Default for LibrarySettings {
             // told about, rather than a path that means something different per launch.
             root: "titles".to_owned(),
             // Matched to the CLI's, so a run launched from either shim is comparable.
-            run_limit_seconds: 20,
-            run_call_budget: 20_000_000,
+            // No limit: a title launched from a front end is being played, and a clock that ends it
+            // after twenty seconds reads as a crash (worklog 842). The CLI's own loop sets its
+            // limit per run (`ORBISTOUN_LIMIT`), so a sweep keeps its backstop.
+            run_limit_seconds: 0,
+            // No budget either, for the same reason: a title that calls freely (Neverball makes
+            // ~100,000 imports a second) would be stopped mid-play (worklog 842).
+            run_call_budget: 0,
             // The list, and deliberately: this is the view the emulator is worked on
             // through, and somebody who has not asked for anything else wants a table of
             // imports far more often than a wall of tiles.
@@ -1029,18 +1054,29 @@ impl Service {
             // only question the reader has.
             ServiceError::Serialise(format!("cannot read library at {}: {e}", root.display()))
         })?;
-        let mut found: Vec<TitleEntry> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let directory = entry.path();
-                let module = directory.join(TITLE_ENTRY_FILE);
-                module.is_file().then(|| TitleEntry {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    module,
-                    metadata: read_title_metadata(&directory),
-                })
-            })
-            .collect();
+        // **Staged titles too, and they win.** The library's `data/homebrew` tree holds titles
+        // staged as the console stages homebrew (D722); one also present as an image is the same
+        // title, and the staged copy is the one its storage makes writable.
+        let staged = std::fs::read_dir(orbistoun_paths::staged_under(root))
+            .into_iter()
+            .flatten();
+        let mut by_name = std::collections::BTreeMap::new();
+        for entry in entries.flatten().chain(staged.flatten()) {
+            let directory = entry.path();
+            let module = directory.join(TITLE_ENTRY_FILE);
+            if module.is_file() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                by_name.insert(
+                    name.clone(),
+                    TitleEntry {
+                        name,
+                        module,
+                        metadata: read_title_metadata(&directory),
+                    },
+                );
+            }
+        }
+        let mut found: Vec<TitleEntry> = by_name.into_values().collect();
         found.sort();
         Ok(found)
     }

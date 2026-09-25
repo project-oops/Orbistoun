@@ -31,6 +31,7 @@ mod capture;
 mod frame;
 mod icons;
 mod input;
+mod perf_overlay;
 mod prefs;
 mod probe;
 mod run;
@@ -58,6 +59,16 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // **A played window reads the host clock** unless somebody chose otherwise (D723). The
+    // logical clock (D582) makes a measured run repeat, and it does so by advancing a step per
+    // reading - so a guest thread that spins on its counter makes game time race ahead of the
+    // person holding the pad. Set here, before any worker exists, because each worker inherits it.
+    if std::env::var_os(orbistoun_env::CLOCK.name).is_none() {
+        // SAFETY: no worker or guest thread exists yet, and nothing started so far reads the
+        // environment concurrently; the spawned workers inherit it at their start.
+        unsafe { std::env::set_var(orbistoun_env::CLOCK.name, "host") };
+    }
+
     // Read before the window exists, so a contradictory command line is a message in the
     // terminal that launched it rather than a window that opened somewhere unexplained.
     // The stored default is read here too - it lives beside the library root, because both
@@ -73,6 +84,13 @@ fn main() -> eframe::Result<()> {
             std::process::exit(2);
         }
     };
+    // `--playback <file>`: captured input armed for the first launch, as if chosen from the
+    // toolbar's "playback input" before pressing launch (D721) - with `--title`, a capture
+    // played back where somebody can watch it.
+    let playback = std::env::args()
+        .skip_while(|argument| argument != "--playback")
+        .nth(1)
+        .map(std::path::PathBuf::from);
 
     let mut viewport = egui::ViewportBuilder::default()
         // Large by default: the point of this window is showing a ranked import list
@@ -119,7 +137,9 @@ fn main() -> eframe::Result<()> {
             // To the terminal as well as the window, so it is answerable without opening
             // anything - which is what makes it usable as a measurement rather than a label.
             eprintln!("orbistoun: renderer: {renderer}");
-            Ok(Box::new(app::App::new(start, renderer)))
+            Ok(Box::new(
+                app::App::new(start, renderer).arm_playback(playback),
+            ))
         }),
     )
 }

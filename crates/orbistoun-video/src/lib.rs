@@ -518,6 +518,13 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // Record which port flipped, so a reader of the presented frame does not have to guess (9b1f).
     port::note_flipped(handle);
+    // **The frame the guest presents, shown** (worklog 841): the installed observer is handed the
+    // buffer it asked to scan out, which is what a display would show now.
+    if let Some(observe) = FLIP_OBSERVER.get()
+        && let Some((address, shape)) = last_flipped_buffer()
+    {
+        observe(address, shape);
+    }
     // **And the completion is posted**, which is the half that was missing. A flip completing
     // with nobody told is how PPSA02664 came to call `sceKernelWaitEqueue` 839 times against a
     // queue nothing ever delivered to: it registered a flip event, submitted, and waited on a
@@ -769,6 +776,18 @@ pub fn flips_accepted() -> u64 {
 #[must_use]
 pub fn last_flipped_buffer() -> Option<(u64, BufferShape)> {
     port::last_flipped_buffer()
+}
+
+/// What sees each presented frame: the flipped buffer's guest address and shape, handed over as the
+/// guest submits the flip (worklog 841). Installed by whoever can show a frame - the worker, which
+/// streams it to a front end - so this crate names no display of its own (principle 12).
+pub type FlipObserver = fn(u64, BufferShape);
+
+static FLIP_OBSERVER: std::sync::OnceLock<FlipObserver> = std::sync::OnceLock::new();
+
+/// Installs the observer every flip is shown to. First install wins.
+pub fn install_flip_observer(observer: FlipObserver) {
+    let _ = FLIP_OBSERVER.set(observer);
 }
 
 /// Implementations this crate provides, by symbol name.

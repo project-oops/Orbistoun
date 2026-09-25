@@ -1120,6 +1120,27 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
 /// every run that has not got this far, which is all of them today - the corpus stalls before submit.
 fn submitted(trace: &CallTrace) -> Option<Finding> {
     let submission = trace.submission.as_ref()?;
+    let mut evidence = vec![
+        format!(
+            "{} register writes extracted from the stream",
+            submission.register_writes
+        ),
+        format!(
+            "{} of the addresses named resolved to a region the guest was given, {} did not (D101)",
+            submission.addresses_resolved, submission.addresses_unresolved
+        ),
+        format!(
+            "{} of {} shader candidates translated to a module a backend can bind",
+            submission.shaders_translated, submission.shaders_found
+        ),
+    ];
+    // Why each one that did not - the reason a draw arrives at the backend with nothing bound.
+    evidence.extend(
+        submission
+            .shader_failures
+            .iter()
+            .map(|failure| format!("did not translate: {failure}")),
+    );
     Some(Finding {
         gap: Gap::Submitted,
         confidence: Confidence::Certain,
@@ -1128,16 +1149,7 @@ fn submitted(trace: &CallTrace) -> Option<Finding> {
             "the guest submitted a command buffer: {} packets, {} draws, {} shader candidates",
             submission.packets, submission.draws, submission.shaders_found
         ),
-        evidence: vec![
-            format!(
-                "{} register writes extracted from the stream",
-                submission.register_writes
-            ),
-            format!(
-                "{} of the addresses named resolved to a region the guest was given, {} did not (D101)",
-                submission.addresses_resolved, submission.addresses_unresolved
-            ),
-        ],
+        evidence,
         action: Some(
             concat!(
                 "the first real graphics work: translate the shaders its registers name, then ",
@@ -1417,6 +1429,10 @@ mod tests {
             shaders_found: 3,
             addresses_resolved: 2,
             addresses_unresolved: 1,
+            shaders_translated: 1,
+            shader_failures: vec![
+                "pixel at 0x1000: an opcode the translator has no rule for".to_owned(),
+            ],
         });
         let found = findings(&trace);
         let submission = found
@@ -1424,6 +1440,21 @@ mod tests {
             .find(|f| f.gap == Gap::Submitted)
             .expect("a submission produces a finding");
         assert_eq!(submission.subject.as_deref(), Some("sceAgcDriverSubmitDcb"));
+        // Why a draw has nothing bound is named, not left as a count (worklog 818).
+        assert!(
+            submission
+                .evidence
+                .iter()
+                .any(|e| e.contains("1 of 3 shader candidates translated")),
+            "{:?}",
+            submission.evidence
+        );
+        assert!(
+            submission.evidence.iter().any(|e| e
+                == "did not translate: pixel at 0x1000: an opcode the translator has no rule for"),
+            "{:?}",
+            submission.evidence
+        );
         assert!(
             submission.what.contains("40 packets")
                 && submission.what.contains("2 draws")

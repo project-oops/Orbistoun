@@ -21,6 +21,9 @@ Two failure policies worth knowing:
   turn a recoverable problem into a lost session.
 - **A version mismatch does end it.** Continuing would parse every later message
   against the wrong contract, which is far harder to diagnose than a refusal.
+- **A control channel that closes without a `Shutdown` ends the process** (D715). The
+  parent is gone, so there is nobody to report to. The worker exits with `EXIT_ORPHANED`
+  even when a guest is running, so it cannot outlive the window that launched it.
 
 **Testability.** `serve` takes a reader and writer rather than reaching for real stdio,
 so the whole protocol loop runs over in-memory pipes with no process spawned. Spawning

@@ -145,6 +145,7 @@ pub fn emit<M: Model + ?Sized>(
     let mut translated = 0usize;
     for (index, block) in blocks.iter().enumerate() {
         model.builder().function(op::LABEL, &[arms[index].0]);
+        model.enter_block();
         let before = model.instructions();
         for instruction in &decode.instructions[block.first..block.end] {
             // The terminating branch itself emits nothing here - where it goes is the
@@ -278,7 +279,16 @@ fn branch_condition_value<M: Model + ?Sized>(
     };
 
     let (low, high) = model.read_lane_mask(name)?;
-    let any = model.binary(op::BITWISE_OR, low, high);
+    // Only the lanes this model simulates. A one-lane fragment module's mask can carry bits for
+    // lanes it does not have - an all-ones entry mask, a whole-quad expansion - and none of them
+    // is a pixel this invocation computes, so "is any lane live" is asked of the ones it does.
+    let lanes = model.lanes();
+    let any = if lanes < 32 {
+        let existing = model.constant((1 << lanes) - 1);
+        model.binary(op::BITWISE_AND, low, existing)
+    } else {
+        model.binary(op::BITWISE_OR, low, high)
+    };
     let zero = model.constant(0);
     let bool_type = model.bool_type();
     let u32_type = model.u32_type();

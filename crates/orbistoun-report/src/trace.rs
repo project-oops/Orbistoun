@@ -611,8 +611,9 @@ pub struct FormatReport {
 /// report beside the reach and call counts, not only in a trace, because it is the number that says
 /// where translation effort goes once a guest gets this far (3861). A summary rather than the whole
 /// `SubmissionReport`, because the report carries diagnostic vectors that are the translator's to read
-/// and not the run report's to serialise.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// and not the run report's to serialise - with one exception, the shader failures, carried as text
+/// because they are the reason a draw has nothing bound (worklog 818).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubmissionSummary {
     /// Packets the walk recognised in the submitted buffer.
     pub packets: usize,
@@ -634,6 +635,17 @@ pub struct SubmissionSummary {
     /// Addresses a register named that fell in no region the guest was given.
     #[serde(default)]
     pub addresses_unresolved: usize,
+    /// Of the shader addresses named, how many produced a module a backend can bind.
+    #[serde(default)]
+    pub shaders_translated: usize,
+    /// Every shader that did not translate, as `stage at address: reason`.
+    ///
+    /// **The line that says why a draw has nothing bound.** Both fully-owned baselines resolved both
+    /// their shader addresses and translated neither, and the run report said only "2 shader
+    /// candidates" - so a backend refusing every draw for want of shaders read as a backend gap
+    /// rather than the translation gap it was (worklog 818).
+    #[serde(default)]
+    pub shader_failures: Vec<String>,
 }
 
 /// What a run was subject to, as opposed to what it found.
@@ -1441,6 +1453,8 @@ mod syscall_record_tests {
             shaders_found: 3,
             addresses_resolved: 2,
             addresses_unresolved: 1,
+            shaders_translated: 0,
+            shader_failures: vec!["vertex at 0x2000: why".to_owned()],
         });
         let text = serde_json::to_string(&trace).expect("serialises");
         let back: CallTrace = serde_json::from_str(&text).expect("parses back");

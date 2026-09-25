@@ -692,6 +692,12 @@ extern "sysv64" fn report_gadget_call(index: u64, saved: *const u64) -> u64 {
     0
 }
 
+/// The words a syscall gadget saves: the number and the six argument registers.
+pub const SYSCALL_SAVED_WORDS: usize = 7;
+
+/// The stack frame those words occupy, rounded up to keep `rsp` sixteen-byte aligned.
+const SYSCALL_FRAME_BYTES: u8 = 64;
+
 /// The bytes of a syscall gadget: the registers a syscall reads, and the ones it keeps.
 ///
 /// # The convention, which is not a function's
@@ -730,20 +736,30 @@ extern "sysv64" fn report_gadget_call(index: u64, saved: *const u64) -> u64 {
 /// So the gadget aligns the stack itself, keeps the old one in `rbp` - callee-saved in both
 /// conventions, so the dispatcher gives it back - and restores it before returning.
 ///
+/// # The save area, which is the calling thread's own
+///
+/// The registers are saved into a frame carved out of **the calling thread's stack**, below the
+/// aligned `rsp`, and the dispatcher is handed its address. They used to go to one fixed buffer
+/// shared by every thread - a stated limit, "nothing measured does it" - until Neverball's audio
+/// thread and its main thread both issued syscalls at once: one thread's `mmap` read the other's
+/// registers, asked for a length that was a stack address, was refused, and `malloc` handed
+/// libvorbis a null table it then wrote through. It happened on some runs and not others, which is
+/// the signature of exactly this race (worklog 817).
+///
 /// ```text
-/// mov r11, imm64      the save buffer
-/// mov [r11+0],  rax   the number, then the six the convention passes
-/// mov [r11+8],  rdi
-/// mov [r11+16], rsi
-/// mov [r11+24], rdx
-/// mov [r11+32], r10
-/// mov [r11+40], r8
-/// mov [r11+48], r9
 /// push rdi rsi rdx r8 r9 r10     what a syscall would have preserved
 /// push rbp                       the guest's, and what the alignment is remembered in
 /// mov rbp, rsp
 /// and rsp, -16                   whatever the guest was on, this is aligned
-/// mov rdi, imm64                 the buffer, as the dispatcher's only argument
+/// sub rsp, FRAME                 this thread's save area, still aligned
+/// mov [rsp+0],  rax              the number, then the six the convention passes
+/// mov [rsp+8],  rdi
+/// mov [rsp+16], rsi
+/// mov [rsp+24], rdx
+/// mov [rsp+32], r10
+/// mov [rsp+40], r8
+/// mov [rsp+48], r9
+/// mov rdi, rsp                   the save area, as the dispatcher's only argument
 /// mov r11, imm64
 /// call r11                       a call, not a jump: there is unwinding to do
 /// mov rsp, rbp                   back to the guest's stack, however it was aligned
@@ -751,21 +767,8 @@ extern "sysv64" fn report_gadget_call(index: u64, saved: *const u64) -> u64 {
 /// pop r10 r9 r8 rdx rsi rdi      in reverse
 /// ret                            with the answer in rax, as the instruction leaves it
 /// ```
-fn syscall_gadget_code(buffer: u64, dispatch: u64) -> Vec<u8> {
+fn syscall_gadget_code(dispatch: u64) -> Vec<u8> {
     let mut code = Vec::with_capacity(96);
-    code.extend_from_slice(&[0x49, 0xBB]);
-    code.extend_from_slice(&buffer.to_le_bytes());
-    for (rex, modrm, disp) in [
-        (0x49_u8, 0x43_u8, 0_u8), // rax - the number
-        (0x49, 0x7B, 8),          // rdi
-        (0x49, 0x73, 16),         // rsi
-        (0x49, 0x53, 24),         // rdx
-        (0x4D, 0x53, 32),         // r10, where a syscall's fourth argument lives
-        (0x4D, 0x43, 40),         // r8
-        (0x4D, 0x4B, 48),         // r9
-    ] {
-        code.extend_from_slice(&[rex, 0x89, modrm, disp]);
-    }
     // push rdi / rsi / rdx / r8 / r9 / r10
     code.extend_from_slice(&[0x57, 0x56, 0x52]);
     code.extend_from_slice(&[0x41, 0x50, 0x41, 0x51, 0x41, 0x52]);
@@ -775,9 +778,22 @@ fn syscall_gadget_code(buffer: u64, dispatch: u64) -> Vec<u8> {
     code.extend_from_slice(&[0x55]);
     code.extend_from_slice(&[0x48, 0x89, 0xE5]);
     code.extend_from_slice(&[0x48, 0x83, 0xE4, 0xF0]);
-    // mov rdi, imm64 / mov r11, imm64 / call r11
-    code.extend_from_slice(&[0x48, 0xBF]);
-    code.extend_from_slice(&buffer.to_le_bytes());
+    // sub rsp, FRAME - a multiple of sixteen, so the alignment just made survives it
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, SYSCALL_FRAME_BYTES]);
+    // mov [rsp+disp8], reg - ModRM mod=01 rm=100 (a SIB byte follows), SIB 0x24 (base rsp)
+    for (rex, modrm, disp) in [
+        (0x48_u8, 0x44_u8, 0_u8), // rax - the number
+        (0x48, 0x7C, 8),          // rdi
+        (0x48, 0x74, 16),         // rsi
+        (0x48, 0x54, 24),         // rdx
+        (0x4C, 0x54, 32),         // r10, where a syscall's fourth argument lives
+        (0x4C, 0x44, 40),         // r8
+        (0x4C, 0x4C, 48),         // r9
+    ] {
+        code.extend_from_slice(&[rex, 0x89, modrm, 0x24, disp]);
+    }
+    // mov rdi, rsp / mov r11, imm64 / call r11
+    code.extend_from_slice(&[0x48, 0x89, 0xE7]);
     code.extend_from_slice(&[0x49, 0xBB]);
     code.extend_from_slice(&dispatch.to_le_bytes());
     code.extend_from_slice(&[0x41, 0xFF, 0xD3]);
@@ -795,16 +811,18 @@ fn syscall_gadget_code(buffer: u64, dispatch: u64) -> Vec<u8> {
 /// `dispatch` is what performs the call - passed in rather than named here, because the table
 /// it dispatches through belongs to a crate this one does not depend on.
 ///
-/// **One buffer, and that is a stated limit.** Two guest threads issuing syscalls at the same
-/// instant would overwrite each other's registers. Nothing measured does it, the payloads
-/// reaching this are single-threaded at the point they reach it, and a per-thread buffer is
-/// the fix when something does.
+/// **Each call saves into its own thread's stack**, so two guest threads issuing syscalls at the
+/// same instant no longer overwrite each other's registers (worklog 817). `saved_registers` is how
+/// many words the dispatcher reads; the frame holds [`SYSCALL_SAVED_WORDS`], and a dispatcher that
+/// wants more is refused here rather than handed a frame too small for it.
 pub fn syscall_gadget(dispatch: u64, saved_registers: usize) -> Option<u64> {
     use std::sync::OnceLock;
     static GADGET: OnceLock<Option<u64>> = OnceLock::new();
+    if saved_registers > SYSCALL_SAVED_WORDS {
+        return None;
+    }
     *GADGET.get_or_init(|| {
-        let saved: &'static mut [u64] = Box::leak(vec![0_u64; saved_registers].into());
-        let code = syscall_gadget_code(saved.as_ptr() as u64, dispatch);
+        let code = syscall_gadget_code(dispatch);
         let buffer = crate::exec::ExecutableBuffer::new(&code).ok()?;
         Some(Box::leak(Box::new(buffer)).address())
     })
@@ -1346,20 +1364,9 @@ mod tests {
     /// and a Rust call does not.
     #[test]
     fn a_syscall_gadget_reads_r10_and_preserves_what_a_syscall_preserves() {
-        let code = super::syscall_gadget_code(0x1000, 0x2000);
-        assert_eq!(&code[..2], &[0x49, 0xBB], "mov r11, imm64");
-        assert_eq!(&code[2..10], &0x1000_u64.to_le_bytes(), "the save buffer");
-
-        let stores = &code[10..38];
-        assert_eq!(&stores[0..4], &[0x49, 0x89, 0x43, 0], "mov [r11+0], rax");
+        let code = super::syscall_gadget_code(0x2000);
         assert_eq!(
-            &stores[16..20],
-            &[0x4D, 0x89, 0x53, 32],
-            "mov [r11+32], r10 - the fourth argument, not rcx"
-        );
-
-        assert_eq!(
-            &code[38..47],
+            &code[0..9],
             &[0x57, 0x56, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52],
             "push rdi rsi rdx r8 r9 r10 - what a syscall would have preserved"
         );
@@ -1367,26 +1374,75 @@ mod tests {
         // pointer it keeps rather than a call site a compiler wrote, so the stack it arrives
         // on is whatever the guest was using - `ftpsrv` arrives eight off, and the
         // dispatcher's `movaps` then faults on its own frame.
-        assert_eq!(code[47], 0x55, "push rbp - the guest's, and the old rsp");
-        assert_eq!(&code[48..51], &[0x48, 0x89, 0xE5], "mov rbp, rsp");
+        assert_eq!(code[9], 0x55, "push rbp - the guest's, and the old rsp");
+        assert_eq!(&code[10..13], &[0x48, 0x89, 0xE5], "mov rbp, rsp");
         assert_eq!(
-            &code[51..55],
+            &code[13..17],
             &[0x48, 0x83, 0xE4, 0xF0],
             "and rsp, -16 - aligned whatever it was"
         );
-        assert_eq!(&code[55..57], &[0x48, 0xBF], "mov rdi, imm64");
-        assert_eq!(&code[65..67], &[0x49, 0xBB], "mov r11, imm64");
-        assert_eq!(&code[75..78], &[0x41, 0xFF, 0xD3], "call r11, not a jump");
-        assert_eq!(&code[78..81], &[0x48, 0x89, 0xEC], "mov rsp, rbp");
-        assert_eq!(code[81], 0x5D, "pop rbp - the guest's own value back");
         assert_eq!(
-            &code[82..91],
+            &code[17..21],
+            &[0x48, 0x83, 0xEC, 0x40],
+            "sub rsp, 64 - this thread's save area, a multiple of sixteen"
+        );
+        let stores = &code[21..56];
+        assert_eq!(
+            &stores[0..5],
+            &[0x48, 0x89, 0x44, 0x24, 0],
+            "mov [rsp], rax"
+        );
+        assert_eq!(
+            &stores[20..25],
+            &[0x4C, 0x89, 0x54, 0x24, 32],
+            "mov [rsp+32], r10 - the fourth argument, not rcx"
+        );
+        assert_eq!(
+            &code[56..59],
+            &[0x48, 0x89, 0xE7],
+            "mov rdi, rsp - the save area"
+        );
+        assert_eq!(&code[59..61], &[0x49, 0xBB], "mov r11, imm64");
+        assert_eq!(&code[61..69], &0x2000_u64.to_le_bytes(), "the dispatcher");
+        assert_eq!(&code[69..72], &[0x41, 0xFF, 0xD3], "call r11, not a jump");
+        assert_eq!(&code[72..75], &[0x48, 0x89, 0xEC], "mov rsp, rbp");
+        assert_eq!(code[75], 0x5D, "pop rbp - the guest's own value back");
+        assert_eq!(
+            &code[76..85],
             &[0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x5E, 0x5F],
             "pop r10 r9 r8 rdx rsi rdi - in reverse"
         );
         assert_eq!(
-            code[91], 0xC3,
+            code[85], 0xC3,
             "ret, with the answer where the instruction leaves it"
+        );
+    }
+
+    /// **No two threads share a save area** (worklog 817).
+    ///
+    /// The race that nulled libvorbis's table needed a fixed address both threads wrote to. The
+    /// gadget now names exactly one absolute address - the dispatcher - and every store goes
+    /// through `rsp`, the calling thread's own stack.
+    #[test]
+    fn the_gadget_saves_through_the_callers_stack_and_names_no_buffer() {
+        let code = super::syscall_gadget_code(0x2000);
+        let absolutes = code.windows(2).filter(|w| *w == [0x49, 0xBB]).count()
+            + code.windows(2).filter(|w| *w == [0x48, 0xBF]).count();
+        assert_eq!(
+            absolutes, 1,
+            "one imm64 - the dispatcher - and no save buffer"
+        );
+        for store in code[21..56].chunks(5) {
+            assert_eq!(
+                &store[1..4],
+                &[0x89, store[2], 0x24],
+                "every save is [rsp+disp]"
+            );
+        }
+        assert_eq!(
+            super::syscall_gadget(0x2000, super::SYSCALL_SAVED_WORDS + 1),
+            None,
+            "a dispatcher wanting more than the frame holds is refused"
         );
     }
 
@@ -1398,7 +1454,7 @@ mod tests {
     /// `movaps` stores depend on (D384).
     #[test]
     fn the_gadget_aligns_whatever_stack_it_was_entered_on() {
-        let code = super::syscall_gadget_code(0x1000, 0x2000);
+        let code = super::syscall_gadget_code(0x2000);
         let mask = code
             .windows(4)
             .position(|w| w == [0x48, 0x83, 0xE4, 0xF0])
@@ -1424,9 +1480,9 @@ mod tests {
     /// The pushes and the pops must match, or the guest returns to rubble.
     #[test]
     fn the_gadget_restores_exactly_what_it_saved() {
-        let code = super::syscall_gadget_code(0x1000, 0x2000);
-        let pushes = &code[38..47];
-        let pops = &code[82..91];
+        let code = super::syscall_gadget_code(0x2000);
+        let pushes = &code[0..9];
+        let pops = &code[76..85];
         // Six registers each way: three one-byte forms and three two-byte extended ones.
         assert_eq!(pushes.len(), pops.len());
         // The extended registers are pushed low-to-high and popped high-to-low.

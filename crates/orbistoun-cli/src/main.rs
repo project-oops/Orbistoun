@@ -120,6 +120,15 @@ enum Command {
         /// e.g. `prospero-cex-12.40`, the measured reference target. Omit to use `shell.toml`.
         #[arg(long)]
         profile: Option<String>,
+        /// Play this pad script on player 1 instead of any the configuration names (D721) - a
+        /// test's own input, or a recording of an earlier run replayed.
+        #[arg(long)]
+        input: Option<std::path::PathBuf>,
+        /// Run a loose build as a staged title, as though it lay under the library's
+        /// `data/homebrew` tree: its `/app0` is writable through the title's overlay (D722). A
+        /// module that does lie there is staged without asking.
+        #[arg(long, alias = "homebrew")]
+        staged: bool,
     },
     /// Find out which handoff fields a guest's runtime actually uses.
     ///
@@ -782,9 +791,9 @@ enum CorpusAction {
         /// The manifest to read and pin into.
         #[arg(long, default_value = "corpus/sources.toml")]
         manifest: std::path::PathBuf,
-        /// Where guest bytes land. Gitignored; never tracked.
-        #[arg(long, default_value = "titles")]
-        titles: std::path::PathBuf,
+        /// Where guest bytes land. Omit for the shared title library (`orbistoun-cli paths`).
+        #[arg(long)]
+        titles: Option<std::path::PathBuf>,
     },
     /// Sync, then run every guest and record what it reached to `compat/`.
     Run {
@@ -794,9 +803,9 @@ enum CorpusAction {
         /// The manifest to read.
         #[arg(long, default_value = "corpus/sources.toml")]
         manifest: std::path::PathBuf,
-        /// Where guest bytes land.
-        #[arg(long, default_value = "titles")]
-        titles: std::path::PathBuf,
+        /// Where guest bytes land. Omit for the shared title library (`orbistoun-cli paths`).
+        #[arg(long)]
+        titles: Option<std::path::PathBuf>,
         /// Seconds each guest may run before it is stopped and reported.
         #[arg(long, default_value_t = DEFAULT_GUEST_LIMIT_SECONDS)]
         limit: u64,
@@ -1305,7 +1314,8 @@ fn cmd_run(
     limit: u64,
     calls: u64,
     profile: Option<&str>,
-    symbols_db: Option<&std::path::Path>,
+    (symbols_db, input): (Option<&std::path::Path>, Option<&std::path::Path>),
+    staged: bool,
 ) -> Result<()> {
     set_profile_for_run(profile)?;
     let mut worker =
@@ -1326,6 +1336,10 @@ fn cmd_run(
             // sentinel: an unlimited run is a deliberate choice, not a default.
             limit_seconds: (limit > 0).then_some(limit),
             call_budget: (calls > 0).then_some(calls),
+            // Absolute, because the worker resolves nothing against this process's directory.
+            input_script: input.map(std::path::absolute).transpose()?,
+            capture_input: None,
+            staged,
         })
         .context("driving the worker")?;
 
@@ -1477,6 +1491,9 @@ fn run_quietly(path: &std::path::Path, limit: u64) -> Result<()> {
             symbols_db: None,
             limit_seconds: (limit > 0).then_some(limit),
             call_budget: None,
+            input_script: None,
+            capture_input: None,
+            staged: false,
         })
         .context("driving the worker")?;
     worker.shutdown().context("shutting the worker down")
@@ -1876,7 +1893,17 @@ fn collect_modules(root: &std::path::Path, found: &mut Vec<std::path::PathBuf>) 
 /// argument, a Windows separator - would otherwise produce two records that look like two
 /// different modules. One of those is already in the database: a tab-completed path left
 /// `titles/PPSA21564-app0//eboot.bin` on a hundred names.
+///
+/// **Relative to the title library, never absolute** (worklog 847): a module in the shared library
+/// is recorded as `titles/<id>/...`, the form every record has always had. Once the repository's own
+/// `titles/` folder went, the library was reached by its absolute path - a home directory - and that
+/// went into the tracked database verbatim.
 fn record_path(path: &std::path::Path) -> String {
+    let library = library_or(None);
+    let path = path.strip_prefix(&library).map_or_else(
+        |_| path.to_path_buf(),
+        |inside| std::path::Path::new("titles").join(inside),
+    );
     let text = path.display().to_string().replace('\\', "/");
     let mut out = String::with_capacity(text.len());
     let mut last_was_slash = false;
@@ -3459,7 +3486,9 @@ fn apply_patches(
     let before = if let Some(path) = &probe {
         Some(probe_score(&binary, path, paths.data_root())?)
     } else {
-        println!("  no conformance probe at {PROBE_MODULE}; grading on the corpus alone");
+        println!(
+            "  no conformance probe ({PROBE_TITLE}) in the title library; grading on the corpus alone"
+        );
         None
     };
 
@@ -3694,12 +3723,22 @@ fn corpus_titles() -> Vec<std::path::PathBuf> {
 ///
 /// **A title like any other**, so the gate needs no special path handling and a machine without
 /// it is not broken - it simply cannot grade anything that asks to be graded, and says so.
-const PROBE_MODULE: &str = "titles/obscene/eboot.bin";
+const PROBE_TITLE: &str = "PPSA99980";
 
-/// The probe, if this machine has one.
+/// The probe, if this machine's shared title library has it.
 fn probe_module() -> Option<std::path::PathBuf> {
-    let path = std::path::PathBuf::from(PROBE_MODULE);
+    let path = library_or(None)
+        .join(PROBE_TITLE)
+        .join(orbistoun_service::TITLE_ENTRY_FILE);
     path.exists().then_some(path)
+}
+
+/// `given`, or the one shared title library every OOPS tool reads (`orbistoun-cli paths`).
+fn library_or(given: Option<&std::path::Path>) -> std::path::PathBuf {
+    given.map_or_else(
+        || orbistoun_paths::Paths::resolve().titles_dir(),
+        std::path::Path::to_path_buf,
+    )
 }
 
 /// Runs the conformance probe and reads what it graded.
@@ -4762,6 +4801,7 @@ fn cmd_corpus_sync(
     let client = orbistoun_corpus::client()?;
     let mut pinned = false;
     let mut mismatches = 0usize;
+    let mut unavailable: Vec<String> = Vec::new();
     for src in &mut m.source {
         if only.is_some_and(|s| s != src.name) {
             continue;
@@ -4772,7 +4812,18 @@ fn cmd_corpus_sync(
         // so a caller overriding one overrides all three consistently.
         let into = beside_target(titles, src.target);
         println!("{}: -> {}", src.name, src.target.label());
-        for o in src.sync(root, &into, &client)? {
+        // **One source that cannot be fetched does not stop the rest** - an app nobody has built
+        // or released yet is listed so it arrives the moment either exists. It is said, counted and
+        // fails the sync at the end, after every source that could come has come.
+        let outcomes = match src.sync(root, &into, &client) {
+            Ok(outcomes) => outcomes,
+            Err(e) => {
+                println!("  unavailable {e:#}");
+                unavailable.push(src.name.clone());
+                continue;
+            }
+        };
+        for o in outcomes {
             let tag = match &o.state {
                 orbistoun_corpus::State::PinnedNew => "pinned",
                 orbistoun_corpus::State::Verified => "verified",
@@ -4811,6 +4862,13 @@ fn cmd_corpus_sync(
             mismatches
         );
     }
+    if !unavailable.is_empty() {
+        anyhow::bail!(
+            "{} source(s) had no origin that answered: {}",
+            unavailable.len(),
+            unavailable.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -4834,6 +4892,7 @@ fn beside_target(titles: &std::path::Path, target: orbistoun_corpus::Target) -> 
         orbistoun_corpus::Target::Titles => titles.to_path_buf(),
         orbistoun_corpus::Target::Payloads => beside(titles, orbistoun_paths::dirs::PAYLOADS),
         orbistoun_corpus::Target::Packages => beside(titles, orbistoun_paths::dirs::PACKAGES),
+        orbistoun_corpus::Target::Staged => orbistoun_paths::staged_under(titles),
     }
 }
 
@@ -4861,7 +4920,7 @@ fn cmd_corpus_run(
             // the honest default-entry baseline. When the elfldr handoff becomes the default
             // entry for payload-shaped guests, these records reflect the progress a diagnostic
             // handoff run shows today (see D411).
-            cmd_run(&path, limit, calls, profile, None)?;
+            cmd_run(&path, limit, calls, profile, (None, None), false)?;
         }
     }
     Ok(())
@@ -6531,7 +6590,11 @@ fn cmd_worklist_static(service: &Service, top: usize) {
     // is impossible on its face, which is the kind a report must not print (principle 3).
     let mut missing_names: BTreeMap<Origin, BTreeSet<String>> = BTreeMap::new();
 
-    for entry in std::fs::read_dir("titles").into_iter().flatten().flatten() {
+    for entry in std::fs::read_dir(library_or(None))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let module = entry.path().join("eboot.bin");
         if !module.is_file() {
             continue;
@@ -7557,12 +7620,15 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             limit,
             calls,
             profile,
+            input,
+            staged,
         } => cmd_run(
             &path,
             limit,
             calls,
             profile.as_deref(),
-            cli.symbols_db.as_deref(),
+            (cli.symbols_db.as_deref(), input.as_deref()),
+            staged,
         )?,
         Command::Handoff {
             ref path,
@@ -7616,7 +7682,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
                 source,
                 manifest,
                 titles,
-            } => cmd_corpus_sync(manifest, titles, source.as_deref())?,
+            } => cmd_corpus_sync(manifest, &library_or(titles.as_deref()), source.as_deref())?,
             CorpusAction::Run {
                 source,
                 manifest,
@@ -7626,7 +7692,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
                 profile,
             } => cmd_corpus_run(
                 manifest,
-                titles,
+                &library_or(titles.as_deref()),
                 source.as_deref(),
                 *limit,
                 *calls,

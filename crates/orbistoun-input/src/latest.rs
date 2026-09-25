@@ -59,6 +59,13 @@ pub fn port(index: usize) -> PadState {
     lock().get(index).copied().unwrap_or_else(PadState::neutral)
 }
 
+/// What one port is doing, **only when something has said** - the window or a script. `None`
+/// means no pad state has ever arrived, and a read then answers the measured at-rest image rather
+/// than a pad claiming to be connected (D713).
+pub fn delivered(index: usize) -> Option<PadState> {
+    (ARRIVED.load(Ordering::Relaxed) > 0).then(|| port(index))
+}
+
 /// How many updates arrived, and how many were read.
 ///
 /// **The gap is the point.** Until a layout is measured the read count stays at zero however
@@ -98,6 +105,17 @@ fn lock() -> std::sync::MutexGuard<'static, Vec<PadState>> {
 }
 
 #[cfg(test)]
+/// Forgets every port and every arrival, so a test can start from a machine nobody has touched.
+#[cfg(test)]
+pub(crate) fn forget() {
+    lock().clear();
+    ARRIVED.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) use tests::exclusively;
+
+#[cfg(test)]
 mod tests {
     use crate::pad::{Button, PadState};
 
@@ -111,7 +129,7 @@ mod tests {
     /// Fifth appearance of this hazard, after `orbistoun-abi`'s shared array, D323's fixed
     /// addresses, the `.bss` fill cache and the format-fault counter. Where the shared thing
     /// *is* what is under test, a lock is the fix; where it is not, passing it is (D372).
-    fn exclusively() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn exclusively() -> std::sync::MutexGuard<'static, ()> {
         static PORT_TABLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         PORT_TABLE
             .lock()

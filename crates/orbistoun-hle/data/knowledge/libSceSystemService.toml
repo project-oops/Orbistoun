@@ -158,3 +158,18 @@ found_by = "generated"
 known_by = "assumed"
 assumptions = ["Nothing on the target has confirmed this; the service is presented as a single signed-in user."]
 found_on = "2026-08-25"
+
+[[function]]
+name = "sceSystemServiceLaunchApp"
+arity = 3
+purpose = "Asks the system to start another title by id. The request is handed to whoever owns the run - the worker streams it to the front end, which ends this run and starts the title, as the console suspends the caller and brings the title up (worklog 842)."
+returns = "status"
+edge_cases = [
+    "Answers OK once the request is handed on; the guest carries on until its run is ended, as a suspended caller would.",
+    "No title id (a null or empty string) answers the invalid-argument placeholder, not a vendor code: the console's own error for it is unmeasured.",
+    "`argv` and the parameter block are not read - the title starts as any other launch of it does.",
+]
+known_by = "guest-observed"
+found_in = ["SCSH00001"]
+assumptions = ["That OK is what the console answers for an accepted request. The launcher that first called it logs the return and treats non-zero as a failure; no hardware read has recorded the value."]
+found_on = "2026-09-24"

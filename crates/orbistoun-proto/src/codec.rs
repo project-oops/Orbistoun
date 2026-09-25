@@ -19,13 +19,16 @@ use serde::de::DeserializeOwned;
 /// Flushing per message is deliberate: an unflushed final message before a crash is
 /// exactly the one worth having.
 pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io::Result<()> {
-    let line = serde_json::to_string(message).map_err(io::Error::other)?;
+    let mut line = serde_json::to_string(message).map_err(io::Error::other)?;
     debug_assert!(
         !line.contains('\n'),
         "serialised message contained a raw newline, which would corrupt framing"
     );
+    // The line and its terminator in **one** write: a writer shared between threads (the
+    // worker's stdout, which a presented frame is announced on mid-run) then interleaves
+    // only between whole messages, never inside one.
+    line.push('\n');
     writer.write_all(line.as_bytes())?;
-    writer.write_all(b"\n")?;
     writer.flush()
 }
 

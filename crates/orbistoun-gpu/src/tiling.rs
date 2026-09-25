@@ -27,9 +27,14 @@
 //! hardware" it was quoting a host build's computation (worklog 674 carried that error in; this
 //! restates it). The honest ceiling is one texel read back and a swizzle two independent
 //! implementations (this one and obSCEne's) agree on across one block - which is why
-//! `SINGLE_BLOCK_EXTENT` stays at 128, where no readback has gone.
-//! The first real multi-texel readback on offer is the triangle record (512 drawn pixels, `-f432`),
-//! not yet in the tree.
+//! `SINGLE_BLOCK_EXTENT` stayed at 128.
+//!
+//! **Run 18 then read a whole display-size surface back** (worklog 831): a 1920x1080 `64KB_R_X`
+//! draw, detiled with this swizzle inside each block and row-major 64 KiB blocks across them, matched
+//! a linear control at every one of its 2,073,600 pixels. So the whole-surface functions
+//! ([`tiled_byte_offset_64kb_rx_bpp4_surface`], [`detile_surface_64kb_rx_bpp4`],
+//! [`tile_surface_64kb_rx_bpp4`]) stand on a full readback, not on model agreement; the one-block
+//! [`detile_64kb_rx_bpp4`] keeps its own narrower contract.
 //!
 //! # Why only `64KB_R_X` at 32 bpp, and not `4KB_S` or the block-compressed formats
 //!
@@ -77,6 +82,188 @@ pub fn tiled_byte_offset_64kb_rx_bpp4(x: u32, y: u32) -> u32 {
     offset ^= (x << 6) & 0x0800;
     offset ^= (x << 9) & 0xa000;
     offset
+}
+
+/// Bytes in one `64KB_R_X` block.
+const BLOCK_BYTES: usize = 64 * 1024;
+
+/// The byte offset of texel `(x, y)` in a whole 32-bpp `64KB_R_X` surface `width` texels wide
+/// (worklog 831).
+///
+/// **Blocks run row-major** - the surface is `ceil(width / 128)` blocks wide, and texel `(x, y)` is in
+/// block `(y / 128) * blocks_per_row + x / 128` - and inside a block the swizzle is
+/// [`tiled_byte_offset_64kb_rx_bpp4`]'s, with no per-block rotation. That is a **hardware readback at
+/// display size**: obSCEne run 18 (`REQ-20260921T1640Z-1d5e`,
+/// `obscene/reports/hardware/20260921-run18-eboot.obs.log:5417-5442`, arm `arm1-rx-1080p`) rendered
+/// one draw into a 1920x1080 `64KB_R_X` target (`cb0-tiling-mode 0x1b`) and into a linear control,
+/// and detiling the first with this rule matched the second at all 2,073,600 pixels
+/// (`detile-mismatches 0`, `multiblock-mismatches 0`, 776,573 of them drawn) - every one of the 135
+/// blocks. The detile it ran is the open-toolchain SDK's (oops-sdk `src/agc/agc_tiler.c`), whose
+/// in-block basis vectors equal this crate's swizzle at all 16,384 texels (a test below).
+#[must_use]
+pub fn tiled_byte_offset_64kb_rx_bpp4_surface(x: u32, y: u32, width: u32) -> usize {
+    let blocks_per_row = width.div_ceil(SINGLE_BLOCK_EXTENT) as usize;
+    let block =
+        (y / SINGLE_BLOCK_EXTENT) as usize * blocks_per_row + (x / SINGLE_BLOCK_EXTENT) as usize;
+    block * BLOCK_BYTES
+        + tiled_byte_offset_64kb_rx_bpp4(x % SINGLE_BLOCK_EXTENT, y % SINGLE_BLOCK_EXTENT) as usize
+}
+
+/// Words a whole 32-bpp `64KB_R_X` surface occupies: every block it touches, whole.
+#[must_use]
+pub fn surface_words_64kb_rx_bpp4(width: u32, height: u32) -> usize {
+    width.div_ceil(SINGLE_BLOCK_EXTENT) as usize
+        * height.div_ceil(SINGLE_BLOCK_EXTENT) as usize
+        * (BLOCK_BYTES / 4)
+}
+
+/// Detiles a whole 32-bpp `64KB_R_X` surface of any size into a linear, row-major image
+/// (worklog 831), through [`tiled_byte_offset_64kb_rx_bpp4_surface`].
+///
+/// # Errors
+///
+/// [`DetileError::TiledDataTooShort`] when `tiled` does not cover every block the surface touches.
+pub fn detile_surface_64kb_rx_bpp4(
+    tiled: &[u32],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u32>, DetileError> {
+    let needed_words = surface_words_64kb_rx_bpp4(width, height);
+    if tiled.len() < needed_words {
+        return Err(DetileError::TiledDataTooShort {
+            needed_words,
+            got_words: tiled.len(),
+        });
+    }
+    Ok(detile_surface_64kb_rx_bpp4_mapped(
+        tiled,
+        width,
+        height,
+        |w| w,
+    ))
+}
+
+/// The in-block swizzle as two tables of word offsets, one per column and one per row (worklog 844).
+///
+/// [`tiled_byte_offset_64kb_rx_bpp4`] XORs a term that depends only on `x` with one that depends
+/// only on `y`, so a texel's word within its block is `column[x] ^ row[y]` - two lookups, rather than
+/// nine shifts and masks per texel.
+fn swizzle_tables() -> &'static ([usize; 128], [usize; 128]) {
+    static TABLES: std::sync::OnceLock<([usize; 128], [usize; 128])> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let column =
+            std::array::from_fn(|x| tiled_byte_offset_64kb_rx_bpp4(x as u32, 0) as usize / 4);
+        let row = std::array::from_fn(|y| tiled_byte_offset_64kb_rx_bpp4(0, y as u32) as usize / 4);
+        (column, row)
+    })
+}
+
+/// Words in one 64 KiB block.
+const BLOCK_WORDS: usize = BLOCK_BYTES / 4;
+
+/// [`detile_surface_64kb_rx_bpp4`], passing each texel through `map` on the way (worklog 844) - a
+/// component swap, done in the same pass - and assuming `tiled` covers the surface.
+///
+/// **One thread per row of blocks.** Each row of blocks is a contiguous run of `tiled` and of the
+/// linear image, so the rows convert independently; at 1080p that is nine, and a whole frame moves
+/// at memory speed rather than one texel at a time.
+///
+/// # Panics
+///
+/// When `tiled` is shorter than [`surface_words_64kb_rx_bpp4`] - the checked form above says so as an
+/// error instead.
+#[must_use]
+pub fn detile_surface_64kb_rx_bpp4_mapped(
+    tiled: &[u32],
+    width: u32,
+    height: u32,
+    map: impl Fn(u32) -> u32 + Sync,
+) -> Vec<u32> {
+    let (column, row) = swizzle_tables();
+    let (w, extent) = (width as usize, SINGLE_BLOCK_EXTENT as usize);
+    let block_row_words = w.div_ceil(extent) * BLOCK_WORDS;
+    let mut linear = vec![0u32; w * height as usize];
+    std::thread::scope(|scope| {
+        for (by, rows) in linear.chunks_mut(w * extent).enumerate() {
+            let blocks = &tiled[by * block_row_words..(by + 1) * block_row_words];
+            let map = &map;
+            scope.spawn(move || {
+                for (dy, out) in rows.chunks_mut(w).enumerate() {
+                    let r = row[dy];
+                    for (x, texel) in out.iter_mut().enumerate() {
+                        *texel = map(blocks[(x / extent) * BLOCK_WORDS + (column[x % extent] ^ r)]);
+                    }
+                }
+            });
+        }
+    });
+    linear
+}
+
+/// [`tile_surface_64kb_rx_bpp4`], passing each texel through `map` on the way (worklog 844), one
+/// thread per row of blocks - see [`detile_surface_64kb_rx_bpp4_mapped`]. Assumes the sizes the
+/// checked form checks.
+fn tile_mapped(linear: &[u32], width: u32, tiled: &mut [u32], map: &(impl Fn(u32) -> u32 + Sync)) {
+    let (column, row) = swizzle_tables();
+    let (w, extent) = (width as usize, SINGLE_BLOCK_EXTENT as usize);
+    let block_row_words = w.div_ceil(extent) * BLOCK_WORDS;
+    std::thread::scope(|scope| {
+        for (rows, blocks) in linear
+            .chunks(w * extent)
+            .zip(tiled.chunks_mut(block_row_words))
+        {
+            scope.spawn(move || {
+                for (dy, line) in rows.chunks(w).enumerate() {
+                    let r = row[dy];
+                    for (x, &texel) in line.iter().enumerate() {
+                        blocks[(x / extent) * BLOCK_WORDS + (column[x % extent] ^ r)] = map(texel);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// [`tile_surface_64kb_rx_bpp4`], passing each texel through `map` on the way (worklog 844) - a
+/// component swap, done in the same pass.
+///
+/// # Errors
+///
+/// As [`tile_surface_64kb_rx_bpp4`].
+pub fn tile_surface_64kb_rx_bpp4_mapped(
+    linear: &[u32],
+    width: u32,
+    height: u32,
+    tiled: &mut [u32],
+    map: impl Fn(u32) -> u32 + Sync,
+) -> Result<(), DetileError> {
+    let needed_words = surface_words_64kb_rx_bpp4(width, height);
+    let texels = width as usize * height as usize;
+    if tiled.len() < needed_words || linear.len() != texels {
+        return Err(DetileError::TiledDataTooShort {
+            needed_words: needed_words.max(texels),
+            got_words: tiled.len().min(linear.len()),
+        });
+    }
+    tile_mapped(linear, width, tiled, &map);
+    Ok(())
+}
+
+/// Tiles a linear, row-major 32-bpp image into a whole `64KB_R_X` surface's words (worklog 831) - the
+/// inverse of [`detile_surface_64kb_rx_bpp4`], for writing a rendered frame back where the guest reads
+/// it. Words the image does not cover (a partial edge block's padding) are left as they were.
+///
+/// # Errors
+///
+/// [`DetileError::TiledDataTooShort`] when `tiled` does not cover every block the surface touches, and
+/// the same when `linear` is not exactly `width * height` texels.
+pub fn tile_surface_64kb_rx_bpp4(
+    linear: &[u32],
+    width: u32,
+    height: u32,
+    tiled: &mut [u32],
+) -> Result<(), DetileError> {
+    tile_surface_64kb_rx_bpp4_mapped(linear, width, height, tiled, |w| w)
 }
 
 /// The widest surface the single-block swizzle covers, per dimension, at 32 bpp.
@@ -381,10 +568,93 @@ pub fn detile_texture(
 #[cfg(test)]
 mod tests {
     use super::{
-        DetileError, SurfaceError, detile_64kb_rx_bpp4, detile_colour_target, detile_texture,
-        tiled_byte_offset_64kb_rx_bpp4 as offset,
+        DetileError, SurfaceError, detile_64kb_rx_bpp4, detile_colour_target,
+        detile_surface_64kb_rx_bpp4, detile_texture, surface_words_64kb_rx_bpp4,
+        tile_surface_64kb_rx_bpp4, tiled_byte_offset_64kb_rx_bpp4 as offset,
+        tiled_byte_offset_64kb_rx_bpp4_surface as at,
     };
     use crate::registers::{ImageDescriptor, RegisterWrite, SwizzleMode};
+
+    /// **Inside the first block, the whole-surface address is the one-block swizzle**, for any width.
+    #[test]
+    fn surface_address_inside_block_zero_is_the_block_swizzle() {
+        for (x, y) in [(0, 0), (15, 15), (127, 0), (0, 127), (127, 127), (64, 33)] {
+            for width in [128, 129, 1920] {
+                assert_eq!(
+                    at(x, y, width),
+                    offset(x, y) as usize,
+                    "({x},{y}) width {width}"
+                );
+            }
+        }
+    }
+
+    /// **Blocks run row-major, 64 KiB each, with no per-block rotation** (obSCEne run 18): a 1920-wide
+    /// surface is 15 blocks wide, so (128,0) is block 1 and (0,128) is block 15, each at in-block (0,0).
+    #[test]
+    fn surface_blocks_are_row_major_and_unrotated() {
+        assert_eq!(at(128, 0, 1920), 65536);
+        assert_eq!(at(0, 128, 1920), 15 * 65536);
+        assert_eq!(
+            at(1919, 1079, 1920),
+            (8 * 15 + 14) * 65536 + offset(127, 55) as usize
+        );
+        // A width that is not a whole number of blocks still rounds up: 129 wide is 2 blocks.
+        assert_eq!(at(0, 128, 129), 2 * 65536);
+        assert_eq!(surface_words_64kb_rx_bpp4(1920, 1080), 135 * 16384);
+    }
+
+    /// **The in-block swizzle equals the open-toolchain SDK's basis at every texel** - the vectors
+    /// run 18 measured at display size (oops-sdk `src/agc/agc_tiler.c`).
+    #[test]
+    fn block_swizzle_equals_the_measured_basis() {
+        const X_BASIS: [u32; 7] = [0x4, 0x8, 0x80, 0x100, 0x2200, 0x800, 0x8400];
+        const Y_BASIS: [u32; 7] = [0x10, 0x20, 0x40, 0x1100, 0x200, 0x400, 0x4800];
+        let fold = |v: u32, basis: &[u32; 7]| {
+            (0..7)
+                .filter(|b| v >> b & 1 == 1)
+                .fold(0, |acc, b| acc ^ basis[b])
+        };
+        for y in 0..128 {
+            for x in 0..128 {
+                assert_eq!(
+                    offset(x, y),
+                    fold(x, &X_BASIS) ^ fold(y, &Y_BASIS),
+                    "({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// **Tiling then detiling returns the image**, at a size spanning partial edge blocks - the
+    /// property the write-back of a rendered frame depends on.
+    #[test]
+    fn tile_then_detile_round_trips_a_partial_block_surface() {
+        let (width, height) = (300, 150);
+        let linear: Vec<u32> = (0..width * height)
+            .map(|i: u32| i.wrapping_mul(2_654_435_761))
+            .collect();
+        let mut tiled = vec![0u32; surface_words_64kb_rx_bpp4(width, height)];
+        tile_surface_64kb_rx_bpp4(&linear, width, height, &mut tiled).expect("tiles");
+        assert_eq!(
+            detile_surface_64kb_rx_bpp4(&tiled, width, height).expect("detiles"),
+            linear
+        );
+    }
+
+    /// **A surface whose blocks the data does not cover is refused, in both directions.**
+    #[test]
+    fn surface_shorter_than_its_blocks_is_refused() {
+        let short = vec![0u32; surface_words_64kb_rx_bpp4(300, 150) - 1];
+        assert!(matches!(
+            detile_surface_64kb_rx_bpp4(&short, 300, 150),
+            Err(DetileError::TiledDataTooShort { .. })
+        ));
+        let mut short = short;
+        assert!(tile_surface_64kb_rx_bpp4(&vec![0; 300 * 150], 300, 150, &mut short).is_err());
+        let mut whole = vec![0u32; surface_words_64kb_rx_bpp4(300, 150)];
+        assert!(tile_surface_64kb_rx_bpp4(&[0; 10], 300, 150, &mut whole).is_err());
+    }
 
     /// Register writes setting colour buffer zero's base (256-byte units), extent and tiling.
     fn target_writes(base_256b: u32, attrib2: u32, attrib3: u32) -> Vec<RegisterWrite> {

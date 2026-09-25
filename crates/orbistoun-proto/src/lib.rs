@@ -93,6 +93,20 @@ pub enum Request {
         /// count. Both travel, because a guest that stops calling imports never reaches a
         /// budget and a guest in a tight import loop wastes most of a clock (D238).
         call_budget: Option<u64>,
+        /// A pad script this run plays, taking precedence over one named in `config.toml`
+        /// (D721) - so a test names its input in its own command, and a recording is replayed
+        /// by naming it here. `None` plays what the configuration says.
+        #[serde(default)]
+        input_script: Option<PathBuf>,
+        /// Capture what the title reads from its pad into this script file from its entry
+        /// (D721) - "capture input" pressed before the launch. `None` captures nothing.
+        #[serde(default)]
+        capture_input: Option<PathBuf>,
+        /// Run the module as a **staged** title, as if it lay under the library's
+        /// `data/homebrew` tree: its `/app0` is writable through an overlay (D722). A module that
+        /// does lie there is staged whatever this says; this is for a loose developer build.
+        #[serde(default)]
+        staged: bool,
     },
     /// Carry a shell action into a running session.
     ///
@@ -126,6 +140,22 @@ pub enum Request {
     Input {
         /// One state per configured port, in port order.
         pads: Vec<orbistoun_input::PadState>,
+    },
+    /// Starts capturing what the title reads from its pad into `to`, or stops with `None`
+    /// (D721). Only when somebody asks - the toolbar's "capture input" - never on its own.
+    ///
+    /// Answered on the reading thread like [`Self::Input`], with no reply.
+    CaptureInput {
+        /// The script file to write, or `None` to stop.
+        to: Option<PathBuf>,
+    },
+    /// Starts playing the pad script `script` from now, or stops playing with `None` (D721) -
+    /// the toolbar's "playback input" while a title runs.
+    ///
+    /// Answered on the reading thread like [`Self::Input`], with no reply.
+    PlayInput {
+        /// The script to play, or `None` to stop.
+        script: Option<PathBuf>,
     },
     /// Stop cleanly.
     Shutdown,
@@ -182,6 +212,45 @@ pub enum Event {
         /// The name of the region holding the bytes, resolved against the frames directory.
         region: String,
     },
+    /// The guest asked the system to start another title (a launcher did).
+    ///
+    /// The worker runs one guest, so starting the title is the front end's: it ends this run and
+    /// launches the id from its library, as the console suspends the caller and brings the title
+    /// up (worklog 842).
+    LaunchApp {
+        /// The title id asked for, as the guest passed it.
+        title_id: String,
+    },
+    /// Where the last stretch of a running title's time went - streamed about once a second, for a
+    /// front end to show over the picture (worklog 844).
+    Perf(PerfReport),
+}
+
+/// The [`PerfReport::phases`] entry that **contains** the others up to the write-back: a whole
+/// graphics submit. Reported beside them, never summed with them - what it holds beyond them is the
+/// submit's own unmeasured work (worklog 844).
+pub const SUBMIT_TOTAL_PHASE: &str = "submit (total)";
+
+/// The [`PerfReport::phases`] entry that is the **device's** busy time by its own clock, running
+/// alongside the host's phases rather than inside them - reported as its own share, never summed
+/// (worklog 847).
+pub const GPU_BUSY_PHASE: &str = "gpu busy";
+
+/// One stretch of a running title's time: how long, what happened in it, and which parts of
+/// presenting a frame took how much of it (worklog 844).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerfReport {
+    /// How long the stretch was, in milliseconds.
+    pub window_ms: f64,
+    /// Flips the guest submitted in it.
+    pub flips: u64,
+    /// Submissions whose draws were carried out.
+    pub submissions: u64,
+    /// Draws carried out.
+    pub draws: u64,
+    /// Milliseconds spent in each measured phase, by name, in the order a frame passes through them.
+    /// What is left of the window is the guest's own time and whatever nothing measures.
+    pub phases: Vec<(String, f64)>,
 }
 
 /// How a frame's bytes are laid out in its region.

@@ -81,6 +81,18 @@ pub(crate) struct App {
     title_config: Option<TitleConfig>,
     icons: Icons,
     running: Option<run::InFlight>,
+    /// The frame the running title last presented, uploaded (worklog 841). Shown in place of the
+    /// library while the title runs; cleared when the next run starts.
+    live: Option<egui::TextureHandle>,
+    /// Whether [`Self::live`] holds a frame from the run in flight, rather than the last run's.
+    live_fresh: bool,
+    /// Where the running title's last second went, drawn over its picture (worklog 844).
+    perf: Option<orbistoun_proto::PerfReport>,
+    /// Whether that overlay is showing - [`crate::perf_overlay::TOGGLE`] flips it.
+    show_perf: bool,
+    /// The launcher a running title was started from, returned to when that title's run ends -
+    /// as a console goes back to its home screen when a title closes (worklog 842).
+    home: Option<std::path::PathBuf>,
     finished: Option<run::Finished>,
     /// What was asked for while drawing. See [`Deferred`].
     ///
@@ -96,6 +108,13 @@ pub(crate) struct App {
     /// see is the same to them as no file, and a failure that reaches only a log is worse -
     /// the button looked like it worked.
     last_capture: Option<capture::Outcome>,
+    /// The file pad input is being captured into - or, with nothing running, will be from the
+    /// next launch (D721). Only ever set by the toolbar's "capture input".
+    input_capture: Option<std::path::PathBuf>,
+    /// The last capture's file, for the toolbar to say where it went.
+    input_captured: Option<std::path::PathBuf>,
+    /// The pad script playing - or, with nothing running, to play from the next launch (D721).
+    input_playback: Option<std::path::PathBuf>,
     /// Which view is showing.
     ///
     /// **One library, two presentations.** The shell and the list draw the same scan and
@@ -171,12 +190,20 @@ impl App {
             title_config: None,
             icons: Icons::default(),
             running: None,
+            live: None,
+            live_fresh: false,
+            perf: None,
+            show_perf: true,
+            home: None,
             finished: None,
             deferred: Deferred::default(),
             build: orbistoun_env::build::line(),
             docs: oops_docs::DocsWindow::default(),
 
             last_capture: None,
+            input_capture: None,
+            input_captured: None,
+            input_playback: None,
             view: match &start {
                 Start::In(view) => *view,
                 Start::Title { fallback, .. } => *fallback,
@@ -580,13 +607,264 @@ impl App {
         let Some(module) = self.selected_title().map(|t| t.module.clone()) else {
             return;
         };
+        // Chosen from the library, so nothing is returned to when it ends.
+        self.home = None;
+        self.start_module(&module);
+    }
+
+    /// Starts a run of `module`, replacing the picture of whatever ran before.
+    fn start_module(&mut self, module: &std::path::Path) {
         self.finished = None;
+        // A new run starts with no picture: the last run's frame is not this title's. **Hidden, not
+        // freed** - dropping the texture here freed it under a frame wgpu was still submitting, and
+        // the window panicked the moment a launcher started a title (worklog 842). The next frame
+        // overwrites it in place.
+        self.live_fresh = false;
+        self.perf = None;
         self.running = Some(run::start(
-            &module,
+            module,
             self.prefs.file.library.run_limit_seconds,
             self.prefs.file.library.run_call_budget,
             self.paths.traces_dir(),
+            run::RunInput {
+                play: self.input_playback.clone(),
+                capture: self.input_capture.clone(),
+            },
         ));
+    }
+
+    /// Arms `script` for the next launch - what `--playback <file>` on the command line does, the
+    /// same as choosing it from "playback input" before pressing launch (D721).
+    pub(crate) fn arm_playback(mut self, script: Option<std::path::PathBuf>) -> Self {
+        self.input_playback = script;
+        self
+    }
+
+    /// **The toolbar's "capture input"** (D721): starts capturing what the title reads from its
+    /// pad - now, into the running title, or from the next launch - or stops a capture. The file is
+    /// `<logs>/input/<title>-<unix ms>.toml`, a pad script `playback input` can play back.
+    fn toggle_input_capture(&mut self) {
+        if let Some(path) = self.input_capture.take() {
+            if let Some(in_flight) = &self.running {
+                in_flight.capture_input(None);
+            }
+            self.input_captured = Some(path);
+            return;
+        }
+        let module = self
+            .running
+            .as_ref()
+            .map(|in_flight| std::path::PathBuf::from(&in_flight.module))
+            .or_else(|| self.selected_title().map(|t| t.module.clone()));
+        let name = module
+            .as_deref()
+            .map_or_else(|| "run".to_owned(), capture_name);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        let path = self
+            .paths
+            .logs_dir()
+            .join("input")
+            .join(format!("{name}-{stamp}.toml"));
+        if let Some(in_flight) = &self.running {
+            in_flight.capture_input(Some(path.clone()));
+        }
+        self.input_capture = Some(path);
+    }
+
+    /// **The toolbar's "playback input"** (D721): plays `script` - from now on the running title,
+    /// or from the next launch - or stops playing with `None`.
+    fn choose_input_playback(&mut self, script: Option<std::path::PathBuf>) {
+        if let Some(in_flight) = &self.running {
+            in_flight.play_input(script.clone());
+        }
+        self.input_playback = script;
+    }
+
+    /// The toolbar's input section (D721): "capture input", which toggles, and "playback input", a
+    /// menu of captured files. Each acts on the running title from now, or - with nothing running -
+    /// arms the next launch from its start, so a capture replays from where it began.
+    fn input_controls(&mut self, ui: &mut egui::Ui) {
+        let running = self.running.is_some();
+        let capture_hover = match (&self.input_capture, running) {
+            (Some(path), true) => format!("capturing to {}", path.display()),
+            (Some(path), false) => format!(
+                "armed: the next launch captures from its start to {}",
+                path.display()
+            ),
+            (None, true) => "capture what the title reads from its pad, from now".to_owned(),
+            (None, false) => {
+                "arm a capture: the next launch captures what the title reads from its pad"
+                    .to_owned()
+            }
+        };
+        let capture_label = if self.input_capture.is_some() {
+            "⏹ stop capture"
+        } else {
+            "🎮 capture input"
+        };
+        if ui
+            .button(capture_label)
+            .on_hover_text(capture_hover)
+            .clicked()
+        {
+            self.toggle_input_capture();
+        }
+
+        let mut chosen: Option<Option<std::path::PathBuf>> = None;
+        ui.menu_button("▶ playback input", |ui| {
+            if self.input_playback.is_some() && ui.button("⏹ stop playback").clicked() {
+                chosen = Some(None);
+                ui.close_menu();
+            }
+            let captures = self.input_captures();
+            if captures.is_empty() {
+                ui.weak("no captured input yet");
+            }
+            for path in captures.into_iter().take(PLAYBACK_CHOICES) {
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                if ui
+                    .button(name)
+                    .on_hover_text(path.display().to_string())
+                    .clicked()
+                {
+                    chosen = Some(Some(path));
+                    ui.close_menu();
+                }
+            }
+        })
+        .response
+        .on_hover_text(if running {
+            "play captured input on the running title, from now"
+        } else {
+            "choose captured input for the next launch to play from its start"
+        });
+        if let Some(choice) = chosen {
+            self.choose_input_playback(choice);
+        }
+
+        // Short and fixed in shape, as the screenshot's own note: the file is on hover.
+        if let Some(path) = &self.input_playback {
+            ui.small(if running { "playing" } else { "playback armed" })
+                .on_hover_text(path.display().to_string());
+        } else if let (None, Some(path)) = (&self.input_capture, &self.input_captured) {
+            ui.small("captured")
+                .on_hover_text(path.display().to_string());
+        }
+    }
+
+    /// A run's capture and playback end with it, as the worker ends them (D721): the capture's file
+    /// is kept to say where it went, and nothing replays into the next launch unasked.
+    fn end_run_input(&mut self) {
+        if let Some(path) = self.input_capture.take() {
+            self.input_captured = Some(path);
+        }
+        self.input_playback = None;
+    }
+
+    /// Captured input files, newest first - what "playback input" offers.
+    fn input_captures(&self) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(self.paths.logs_dir().join("input")) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "toml"))
+            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .collect();
+        found.sort_by_key(|&(modified, _)| std::cmp::Reverse(modified));
+        found.into_iter().map(|(_, path)| path).collect()
+    }
+
+    /// Takes what the running title has presented and asked for, and its result once it ends.
+    fn collect_run(&mut self, ctx: &egui::Context) {
+        if let Some(in_flight) = &self.running {
+            // The newest presented frame, onto the one texture (worklog 841).
+            if let Some(report) = in_flight.latest_perf() {
+                self.perf = Some(report);
+            }
+            if let Some(frame) = in_flight.latest_frame() {
+                self.live_fresh = true;
+                match &mut self.live {
+                    Some(texture) => texture.set(frame, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.live = Some(ctx.load_texture(
+                            "live-frame",
+                            frame,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            }
+        }
+        self.follow_launch_request();
+        if let Some(in_flight) = &self.running {
+            match in_flight.poll() {
+                Ok(Some(finished)) => {
+                    self.finished = Some(finished);
+                    self.running = None;
+                    self.end_run_input();
+                    // A title started from a launcher goes back to it when it ends.
+                    if let Some(home) = self.home.take() {
+                        self.start_module(&home);
+                    }
+                    // The run just wrote a trace, so the last-run column is stale until
+                    // this. The other half of not rebuilding per frame is remembering to
+                    // rebuild when something actually changed (D164).
+                    self.rebuild_rows();
+                }
+                Ok(None) => {
+                    // Immediate mode only redraws on input, and a guest running on another
+                    // thread is not input - without this the spinner freezes and the
+                    // result never appears until the pointer moves.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+                Err(()) => {
+                    self.finished = Some(run::Finished::stopped());
+                    self.running = None;
+                    self.end_run_input();
+                }
+            }
+        }
+    }
+
+    /// Carries out a running guest's request to start another title (worklog 842): the run that
+    /// asked is ended and the title started from the library, and the asker is remembered as home.
+    ///
+    /// A title id the library does not hold is refused where a person can see it, rather than
+    /// ending a run that asked for nothing that could start.
+    fn follow_launch_request(&mut self) {
+        let Some(title_id) = self
+            .running
+            .as_ref()
+            .and_then(run::InFlight::requested_launch)
+        else {
+            return;
+        };
+        let target = self.titles.as_ref().ok().and_then(|titles| {
+            titles
+                .iter()
+                .find(|t| {
+                    t.name == title_id
+                        || t.metadata.as_ref().is_some_and(|m| m.title_id == title_id)
+                })
+                .map(|t| t.module.clone())
+        });
+        let Some(target) = target else {
+            eprintln!("[launch] {title_id} is not in the library; the request is ignored");
+            return;
+        };
+        if let Some(in_flight) = self.running.take() {
+            // A home that is itself a launched title's is kept: the chain returns to the first.
+            if self.home.is_none() {
+                self.home = Some(std::path::PathBuf::from(&in_flight.module));
+            }
+            in_flight.stop();
+        }
+        self.start_module(&target);
     }
 
     /// Opens the per-title override file for editing.
@@ -771,14 +1049,11 @@ impl App {
 
                 ui.separator();
 
-                // **Captures this window, and the label says so.** There is no guest frame
-                // yet - no title reaches its own main loop - so a button reading
-                // "screenshot" would be borrowing a meaning it cannot honour. What it does
-                // capture is worth having on its own: the panels here are a call tail, a
-                // register dump and a ranked finding list, and "paste the panel that says
-                // this" otherwise means an operating-system screen grab (D215).
+                // **A screenshot of this window** (D215): the running title's picture with the
+                // panels around it - a call tail, a register dump, a ranked finding list - so
+                // "paste the panel that says this" needs no operating-system screen grab.
                 if ui
-                    .button("📷 capture")
+                    .button("📷 screenshot")
                     .on_hover_text("write this window to a PNG in the screenshots folder")
                     .clicked()
                 {
@@ -802,11 +1077,14 @@ impl App {
                         ui.small("saved").on_hover_text(path.display().to_string());
                     }
                     Some(Err(why)) => {
-                        ui.colored_label(egui::Color32::from_rgb(0xd0, 0x60, 0x60), "✖ capture")
+                        ui.colored_label(egui::Color32::from_rgb(0xd0, 0x60, 0x60), "✖ screenshot")
                             .on_hover_text(why.as_str());
                     }
                     None => {}
                 }
+
+                ui.separator();
+                self.input_controls(ui);
 
                 ui.separator();
                 ui.label("limit");
@@ -1332,28 +1610,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Collect a finished run before drawing, so the frame that removes the spinner is
         // the same frame that shows the result.
-        if let Some(in_flight) = &self.running {
-            match in_flight.poll() {
-                Ok(Some(finished)) => {
-                    self.finished = Some(finished);
-                    self.running = None;
-                    // The run just wrote a trace, so the last-run column is stale until
-                    // this. The other half of not rebuilding per frame is remembering to
-                    // rebuild when something actually changed (D164).
-                    self.rebuild_rows();
-                }
-                Ok(None) => {
-                    // Immediate mode only redraws on input, and a guest running on another
-                    // thread is not input - without this the spinner freezes and the
-                    // result never appears until the pointer moves.
-                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
-                }
-                Err(()) => {
-                    self.finished = Some(run::Finished::stopped());
-                    self.running = None;
-                }
-            }
-        }
+        self.collect_run(ctx);
 
         // Before drawing, because the reply to a capture asked for on an earlier frame
         // arrives as an ordinary input event and the toolbar wants to report it this
@@ -1364,20 +1621,66 @@ impl eframe::App for App {
         // one. It also settles where the session stands, which decides what is drawn below.
         self.read_input(ctx);
 
-        match self.view {
+        // **A running title's own picture, over the library** (worklog 841): once it has presented
+        // a frame, that frame is what the window shows, as a console's would.
+        let playing = self
+            .running
+            .as_ref()
+            .and(self.live.as_ref())
+            .filter(|_| self.live_fresh)
+            .map(|texture| (texture.id(), texture.size_vec2()));
+        if ctx.input(|i| i.key_pressed(crate::perf_overlay::TOGGLE)) {
+            self.show_perf = !self.show_perf;
+        }
+        let overlay = self.perf.clone().filter(|_| self.show_perf);
+        let overlay = overlay.as_ref();
+        match (self.view, playing) {
+            (View::Shell, Some(frame)) => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(egui::Color32::BLACK))
+                    .show(ctx, |ui| live_frame(ui, frame, overlay));
+            }
             // The shell gets the whole window. A console's library is not a panel beside
             // something else, and leaving the toolbar visible would make it the list view
             // with different tiles rather than a second way of meeting the same library.
-            View::Shell => {
+            (View::Shell, None) => {
                 egui::CentralPanel::default().show(ctx, |ui| self.shell_panel(ui));
             }
-            View::List => {
+            (View::List, playing) => {
                 self.menu_bar(ctx);
                 self.toolbar(ctx);
                 egui::SidePanel::left("library")
                     .default_width(260.0)
                     .show(ctx, |ui| self.library_panel(ui));
-                egui::CentralPanel::default().show(ctx, |ui| self.detail_panel(ui));
+                match playing {
+                    Some(frame) => {
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::none().fill(egui::Color32::BLACK))
+                            .show(ctx, |ui| live_frame(ui, frame, overlay));
+                    }
+                    None => match &self.running {
+                        // A run that has not presented yet is said to be starting, on black -
+                        // the selected title's details in its place read as a hang (worklog 842).
+                        Some(in_flight) => {
+                            let name = std::path::Path::new(&in_flight.module)
+                                .parent()
+                                .and_then(|d| d.file_name())
+                                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                            egui::CentralPanel::default()
+                                .frame(egui::Frame::none().fill(egui::Color32::BLACK))
+                                .show(ctx, |ui| {
+                                    ui.centered_and_justified(|ui| {
+                                        ui.label(format!(
+                                            "starting {name} - waiting for its first frame"
+                                        ));
+                                    });
+                                });
+                        }
+                        None => {
+                            egui::CentralPanel::default().show(ctx, |ui| self.detail_panel(ui));
+                        }
+                    },
+                }
             }
         }
         // **Over everything, in both views.** The shell button is the system's, so it works
@@ -1495,6 +1798,45 @@ const DOCS: &[oops_docs::Doc] = &[
         include_str!("../../../docs/features/paths.md"),
     ),
 ];
+
+/// Draws a running title's presented frame, as large as fits with its aspect kept, centred on black
+/// (worklog 841).
+fn live_frame(
+    ui: &mut egui::Ui,
+    (texture, size): (egui::TextureId, egui::Vec2),
+    overlay: Option<&orbistoun_proto::PerfReport>,
+) {
+    let room = ui.available_size();
+    let scale = (room.x / size.x).min(room.y / size.y).max(0.0);
+    let shown = ui
+        .centered_and_justified(|ui| ui.add(egui::Image::new((texture, size * scale))))
+        .inner;
+    // Where the time goes, over the picture it went into (worklog 844).
+    if let Some(report) = overlay {
+        crate::perf_overlay::draw(ui, shown.rect, report);
+    }
+}
+
+/// How many captured files "playback input" lists, newest first.
+const PLAYBACK_CHOICES: usize = 20;
+
+/// What an input capture of `module`'s run is named after (D721): the title ID among its path's
+/// folders - four capitals and five digits, as `NVRB00001` - or the module's own name where there
+/// is none.
+fn capture_name(module: &std::path::Path) -> String {
+    let is_title_id = |name: &str| {
+        name.len() == 9
+            && name[..4].bytes().all(|b| b.is_ascii_uppercase())
+            && name[4..].bytes().all(|b| b.is_ascii_digit())
+    };
+    module
+        .ancestors()
+        .filter_map(|folder| folder.file_name()?.to_str())
+        .find(|name| is_title_id(name))
+        .or_else(|| module.file_stem()?.to_str())
+        .unwrap_or("run")
+        .to_owned()
+}
 
 #[cfg(test)]
 mod docs_tests {

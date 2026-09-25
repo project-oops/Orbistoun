@@ -42,7 +42,7 @@ fn interpolating_shader() -> Vec<u8> {
         let word = 0xC800_0000u32 | ((register as u32) << 18) | (channel << 8);
         bytes.extend(word.to_le_bytes());
     }
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0302_0100u32.to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());
     bytes
@@ -142,7 +142,7 @@ fn parameter_move_shader(parameter: u32) -> Vec<u8> {
             0xC800_0000u32 | (2 << 16) | ((register as u32) << 18) | (channel << 8) | parameter;
         bytes.extend(word.to_le_bytes());
     }
-    bytes.extend(0xF800_0000u32.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
     bytes.extend(0x0302_0100u32.to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());
     bytes

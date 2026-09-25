@@ -214,21 +214,9 @@ fn pad_discard(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// was there before in the rest - which is the failure `100-input/read-extent` exists to catch.
 fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, into) = (args[0], args[1]);
-    // **A scripted pad is sampled here, and then not delivered - on purpose.**
-    //
-    // `script::poll` is a pure function of how long the run has been going, so sampling it at
-    // the moment the guest asks keeps the run repeatable with no feeder thread to race.
-    //
-    // What cannot happen yet is writing it into the bytes below, because *which* byte carries a
-    // button has never been measured - the extent and the at-rest contents are measured, the
-    // field positions are an inference from that one image (D345, D704). Writing a guessed
-    // offset is the confident wrong answer this subsystem exists to avoid.
-    //
-    // So it is handed to `latest`, whose arrived-versus-read counters exist for exactly this
-    // gap, and the run report says how many updates never reached the guest. That turns a block
-    // that was previously invisible - a script pressing buttons into a void, forever, with
-    // nothing to show for it - into a counted, named one. When obSCEne's
-    // `REQ-20260910T0650Z-d1c4` lands, what changes is the copy below.
+    // A scripted pad is sampled at the moment the guest asks - `script::poll` is a pure function of
+    // how long the run has been going, so the run stays repeatable with no feeder thread to race -
+    // and lands in `latest` beside what the window sends.
     if let Some(state) = script::poll() {
         latest::arrived(&[state]);
     }
@@ -242,12 +230,21 @@ fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::FAULT).as_raw(),
         );
     }
+    // The pad the window (or a script) says, placed where the SDK reads it (D713); the measured
+    // at-rest image when nothing has said anything. Port 0 for every handle: handles do not record
+    // a port yet, and the window sends one pad.
+    let delivered = latest::delivered(0);
+    // What the guest is handed is what a recording keeps (D721), not what the window sent.
+    if let Some(state) = &delivered {
+        script::delivered(state);
+    }
+    let bytes = delivered.map_or(*pad::AT_REST, |state| pad::record(&state));
     // SAFETY: a guest-supplied destination under the identity mapping (D014), written for
     // exactly the extent the console was measured writing and no further. The source is a
-    // `'static` array of that length, and the two cannot overlap - one is guest memory and the
-    // other is this binary's own read-only data.
+    // local array of that length, and the two cannot overlap - one is guest memory and the
+    // other is this function's own stack.
     unsafe {
-        std::ptr::copy_nonoverlapping(pad::AT_REST.as_ptr(), into as *mut u8, pad::STATE_BYTES);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), into as *mut u8, pad::STATE_BYTES);
     }
     OK
 }
@@ -412,6 +409,8 @@ mod tests {
     /// is a stick is an inference, and nothing here needs it to answer this call correctly.
     #[test]
     fn a_pad_read_writes_the_bytes_the_console_wrote() {
+        let _guard = super::latest::exclusively();
+        super::latest::forget();
         let handle = call("scePadOpen", &args3(1, 0, 0));
         assert!((handle as i64) > 0, "a handle");
 
@@ -430,6 +429,17 @@ mod tests {
             into[super::pad::STATE_BYTES..].iter().all(|b| *b == 0xAA),
             "and not one byte past the extent that was measured"
         );
+
+        // **Once the window sends a pad, the guest reads it** (D713): cross held lands on bit 14.
+        let mut held = super::pad::PadState::neutral();
+        held.set(super::pad::Button::South, true);
+        super::latest::arrived(&[held]);
+        call(
+            "scePadReadState",
+            &args3(handle, into.as_mut_ptr().expose_provenance() as u64, 0),
+        );
+        assert_eq!(u32::from_le_bytes(into[0..4].try_into().unwrap()), 1 << 14);
+        super::latest::forget();
     }
 
     /// **A batched read answers the same structure**, which is the half a guess would differ on.

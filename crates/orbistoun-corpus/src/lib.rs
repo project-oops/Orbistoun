@@ -63,6 +63,9 @@ pub enum Target {
     Payloads,
     /// Installable packages, before anything installs them.
     Packages,
+    /// Titles staged on the user partition, as `pros restore` stages homebrew on the console:
+    /// the library's `data/homebrew` tree. A title there runs with a writable `/app0` (D722).
+    Staged,
 }
 
 impl Target {
@@ -73,6 +76,7 @@ impl Target {
             Self::Titles => "titles",
             Self::Payloads => "payloads",
             Self::Packages => "packages",
+            Self::Staged => "staged",
         }
     }
 }
@@ -106,6 +110,11 @@ pub struct Source {
     /// behind a working slow one (D664).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+    /// The [`Self::sources`] each name a `.zip` of a whole title directory, which is unpacked into
+    /// `<root>/<name>/` (worklog 842) - how a packaged title (`dist/<title>-prospero.zip`) joins the
+    /// corpus in the layout `run` reads, rather than one asset per stem directory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archive: bool,
     /// The licence the assets are obtained under. Recorded per D042; downloading is not
     /// redistributing, so this is a note, not a gate.
     pub licence: String,
@@ -191,6 +200,91 @@ impl Source {
         ))
     }
 
+    /// Fetches the source's one asset from the first of [`Self::sources`] that answers, pins it, and
+    /// places it: an [`Self::archive`] unpacked into `<root>/<name>/` (worklog 842), anything else
+    /// written as `<root>/<name>/<file>` - a payload, one executable (worklog 846).
+    ///
+    /// The pin is the asset's hash. A `local` source refreshes it whichever origin answered: its
+    /// fallback is the suite's rolling `latest-main` build, a dev artifact exactly as its sibling
+    /// checkout is, and a pin that changes with every push is not a fixed tag that moved. Any other
+    /// source's URL is checked against the pin, and a mismatch is reported, not placed.
+    fn sync_from_sources(
+        &mut self,
+        repo_root: &Path,
+        root: &Path,
+        client: &reqwest::blocking::Client,
+    ) -> Result<Vec<Outcome>> {
+        let attempt = first_that_answers(&self.sources, |origin| match Origin::classify(origin) {
+            Origin::Path(path) => std::fs::read(repo_root.join(path)).map_err(|e| e.to_string()),
+            Origin::Url(url) => client
+                .get(&url)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .and_then(reqwest::blocking::Response::bytes)
+                .map(|bytes| bytes.to_vec())
+                .map_err(|e| e.to_string()),
+        })
+        .map_err(|failed| {
+            anyhow::anyhow!(
+                "no origin of {:?} answered: {}",
+                self.name,
+                failed
+                    .iter()
+                    .map(|(origin, why)| format!("{origin} ({why})"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+        for (origin, why) in &attempt.failed {
+            println!("  skipped   {origin}: {why}");
+        }
+        let bytes = attempt.value;
+        let local =
+            matches!(Origin::classify(&attempt.used), Origin::Path(_)) || self.kind == KIND_LOCAL;
+        let file = Self::base(&attempt.used);
+        let sha = hash_hex(&bytes);
+        if self.asset.is_empty() {
+            self.asset.push(Asset {
+                file: file.clone(),
+                sha256: None,
+            });
+        }
+        let pin = self.asset[0].sha256.clone();
+        let state = if local {
+            State::LocalSnapshot
+        } else {
+            match pin.as_deref() {
+                Some(p) if p == sha => State::Verified,
+                Some(p) => State::Mismatch {
+                    expected: p.to_owned(),
+                },
+                None => State::PinnedNew,
+            }
+        };
+        let into = root.join(&self.name);
+        if !matches!(state, State::Mismatch { .. }) {
+            if self.archive {
+                unpack_title(&bytes, &into)
+                    .with_context(|| format!("unpacking {file} into {}", into.display()))?;
+            } else {
+                write_atomic(&into.join(&file), &bytes)?;
+            }
+            self.asset[0] = Asset {
+                file: file.clone(),
+                sha256: Some(sha.clone()),
+            };
+        }
+        Ok(vec![Outcome {
+            source: self.name.clone(),
+            file,
+            stem: self.name.clone(),
+            path: into,
+            sha256: sha,
+            bytes: bytes.len() as u64,
+            state,
+        }])
+    }
+
     /// The title id an asset records under: its file stem. `elfldr_v0.26.elf` -> `elfldr_v0.26`.
     pub fn stem(file: &str) -> String {
         Path::new(file)
@@ -229,6 +323,11 @@ impl Source {
         titles_root: &Path,
         client: &reqwest::blocking::Client,
     ) -> Result<Vec<Outcome>> {
+        // A source that lists origins is fetched from them, archive or single file; the `asset`
+        // walk below is for `path` and `repo` sources, which name their assets (worklog 846).
+        if self.archive || !self.sources.is_empty() {
+            return self.sync_from_sources(repo_root, titles_root, client);
+        }
         let name = self.name.clone();
         let kind = self.kind.clone();
         let path = self.path.clone();
@@ -381,6 +480,121 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Unpacks a packaged title directory into `into` (worklog 842): every file, at its path in the
+/// archive, with a single top-level folder the whole archive sits in stripped - a packaged title is
+/// `SCSH00001/eboot.bin` and so on, and the corpus names the directory itself.
+///
+/// **A zip or a tar, told apart by their bytes** (worklog 846): the suite packages a large title as
+/// a plain tar under the same `-title-prospero.zip` name, and what a file is named is not what it
+/// is. Only an entry's *enclosed* name is used either way, so an entry naming `..` or an absolute
+/// path is refused rather than written outside `into`.
+///
+/// # Errors
+///
+/// When the bytes are neither, an entry cannot be read or has an unsafe name, or a file cannot be
+/// written.
+pub fn unpack_title(bytes: &[u8], into: &Path) -> Result<usize> {
+    let entries = if bytes.starts_with(b"PK") {
+        zip_entries(bytes)?
+    } else if bytes.get(257..262) == Some(b"ustar") {
+        tar_entries(bytes)?
+    } else {
+        anyhow::bail!("not a zip or a tar archive");
+    };
+    // The one folder every entry sits in, when there is exactly one.
+    let first = |path: &PathBuf| path.components().next().map(|c| c.as_os_str().to_owned());
+    let top = entries.first().and_then(|entry| first(&entry.path));
+    let shared = top.filter(|top| {
+        entries.iter().all(|entry| {
+            first(&entry.path).as_ref() == Some(top)
+                && (entry.path.components().count() > 1 || entry.contents.is_none())
+        })
+    });
+    let mut written = 0;
+    for entry in entries {
+        let relative = match &shared {
+            Some(_) => entry.path.components().skip(1).collect::<PathBuf>(),
+            None => entry.path,
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = into.join(&relative);
+        match entry.contents {
+            None => std::fs::create_dir_all(&target)
+                .with_context(|| format!("creating {}", target.display()))?,
+            Some(contents) => {
+                write_atomic(&target, &contents)?;
+                written += 1;
+            }
+        }
+    }
+    Ok(written)
+}
+
+/// One entry of a packaged title: its enclosed path, and its bytes - `None` for a directory.
+struct PackedEntry {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+/// A zip's entries, each by its enclosed name.
+fn zip_entries(bytes: &[u8]) -> Result<Vec<PackedEntry>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).context("not a zip")?;
+    let mut entries = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let path = entry
+            .enclosed_name()
+            .with_context(|| format!("entry {:?} names a path outside the title", entry.name()))?;
+        let contents = if entry.is_dir() {
+            None
+        } else {
+            let mut contents = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
+            std::io::Read::read_to_end(&mut entry, &mut contents)?;
+            Some(contents)
+        };
+        entries.push(PackedEntry { path, contents });
+    }
+    Ok(entries)
+}
+
+/// A tar's regular files and directories, each by a path refused unless every component of it is
+/// an ordinary name - no root, no `..`, no drive - so nothing lands outside the title. Links and
+/// other special entries are skipped: a packaged title is files.
+fn tar_entries(bytes: &[u8]) -> Result<Vec<PackedEntry>> {
+    let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+    let mut entries = Vec::new();
+    for entry in archive.entries().context("not a tar")? {
+        let mut entry = entry.context("reading a tar entry")?;
+        let path = entry.path().context("a tar entry's path")?.into_owned();
+        let enclosed = path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        if !enclosed {
+            anyhow::bail!("entry {} names a path outside the title", path.display());
+        }
+        let path: PathBuf = path
+            .components()
+            .filter(|component| matches!(component, std::path::Component::Normal(_)))
+            .collect();
+        let contents = match entry.header().entry_type() {
+            tar::EntryType::Directory => None,
+            tar::EntryType::Regular | tar::EntryType::Continuous => {
+                let mut contents = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
+                std::io::Read::read_to_end(&mut entry, &mut contents)?;
+                Some(contents)
+            }
+            _ => continue,
+        };
+        entries.push(PackedEntry { path, contents });
+    }
+    Ok(entries)
+}
+
 /// Where one attempt to obtain an asset points.
 ///
 /// **Classified from the string rather than declared**, so a manifest can list a sibling checkout
@@ -455,6 +669,92 @@ pub fn first_that_answers<T, E: ToString>(
 
 #[cfg(test)]
 mod tests {
+    /// A zip holding `entries` (name, contents), stored uncompressed.
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, contents) in entries {
+            writer.start_file(*name, options).expect("an entry starts");
+            std::io::Write::write_all(&mut writer, contents).expect("an entry writes");
+        }
+        writer.finish().expect("the zip finishes").into_inner()
+    }
+
+    /// **A packaged title unpacks as the title directory, its one top folder stripped** (worklog
+    /// 842): `SCSH00001/eboot.bin` lands at `<into>/eboot.bin`, subdirectories kept.
+    #[test]
+    fn a_packaged_title_unpacks_with_its_top_folder_stripped() {
+        let dir = std::env::temp_dir().join(format!("corpus-unpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bytes = zip_of(&[
+            ("SCSH00001/eboot.bin", b"elf"),
+            ("SCSH00001/sce_sys/param.json", b"{}"),
+        ]);
+        let written = unpack_title(&bytes, &dir).expect("unpacks");
+        assert_eq!(written, 2);
+        assert_eq!(std::fs::read(dir.join("eboot.bin")).expect("eboot"), b"elf");
+        assert_eq!(
+            std::fs::read(dir.join("sce_sys").join("param.json")).expect("param"),
+            b"{}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An entry naming a path outside the title is refused, and nothing is written.**
+    #[test]
+    fn an_entry_escaping_the_title_is_refused() {
+        let dir = std::env::temp_dir().join(format!("corpus-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bytes = zip_of(&[("../outside.bin", b"x")]);
+        assert!(unpack_title(&bytes, &dir).is_err());
+        assert!(!dir.exists());
+    }
+
+    /// A tar holding `entries` (name, contents), each name written into its header as given - so a
+    /// test can name a path the builder's own checks would refuse.
+    fn tar_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.as_gnu_mut().expect("a gnu header").name[..name.len()]
+                .copy_from_slice(name.as_bytes());
+            header.set_size(contents.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append(&header, *contents)
+                .expect("an entry appends");
+        }
+        builder.into_inner().expect("the tar finishes")
+    }
+
+    /// **A title packaged as a tar under a `.zip` name unpacks the same** (worklog 846): the suite
+    /// ships its large titles that way, and the bytes, not the name, say which it is.
+    #[test]
+    fn a_title_packaged_as_a_tar_unpacks_like_a_zip() {
+        let dir = std::env::temp_dir().join(format!("corpus-tar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bytes = tar_of(&[
+            ("NVRB00001/eboot.bin", b"elf"),
+            ("NVRB00001/sce_sys/param.json", b"{}"),
+        ]);
+        assert_eq!(unpack_title(&bytes, &dir).expect("unpacks"), 2);
+        assert_eq!(std::fs::read(dir.join("eboot.bin")).expect("eboot"), b"elf");
+        assert!(dir.join("sce_sys").join("param.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A tar entry naming a path outside the title is refused, and nothing is written.**
+    #[test]
+    fn a_tar_entry_escaping_the_title_is_refused() {
+        let dir = std::env::temp_dir().join(format!("corpus-tar-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bytes = tar_of(&[("../outside.bin", b"x")]);
+        assert!(unpack_title(&bytes, &dir).is_err());
+        assert!(!dir.exists());
+        assert!(unpack_title(b"neither a zip nor a tar", &dir).is_err());
+    }
 
     /// **An origin is a local path or a URL, and nothing has to say which.**
     ///
@@ -528,6 +828,7 @@ mod tests {
         Source {
             target: Target::default(),
             sources: Vec::new(),
+            archive: false,
             name: "src".into(),
             kind: kind.into(),
             repo: Some("owner/repo".into()),

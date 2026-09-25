@@ -72,6 +72,15 @@ const EXEC_LO: u32 = 126;
 /// Scalar register holding the high half of the execution mask.
 const EXEC_HI: u32 = 127;
 
+/// Which half of the execution mask a scalar register is, if it is one: 0 low, 1 high.
+const fn exec_half(register: u32) -> Option<usize> {
+    match register {
+        EXEC_LO => Some(0),
+        EXEC_HI => Some(1),
+        _ => None,
+    }
+}
+
 /// Scalar register holding the low half of the condition mask.
 ///
 /// Where a comparison puts its answer. An ordinary register here, which is the whole
@@ -126,6 +135,8 @@ struct BoundTexture {
     /// module that only fetches never records one - and comparing a sampler nobody named would
     /// refuse a module for using two of something it uses none of.
     sampler: Option<u32>,
+    /// Which of the module's textures this is, and where its descriptor came from (worklog 840).
+    source: TextureSource,
     /// Set when a scalar write lands inside either group.
     ///
     /// **This is the rule that makes the other two an argument rather than a hope.** A shader
@@ -338,10 +349,17 @@ struct MeshOutputs {
 /// console's own canary sat 32,768 words past its base and no 64-word window could reach it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
-    /// The guest address of the window's first word.
+    /// The low thirty-two bits of the guest address of the window's first word - the half a
+    /// translated shader compares against, because its memory accesses read the low half of their
+    /// address register pair (see `Model::memory_base`).
     pub base: u32,
     /// How many words it spans. Private on purpose - see [`Window::spanning`].
     words: u32,
+    /// The high thirty-two bits of the window's guest address. A shader never sees it; it is where
+    /// the window's words are read *from*. Zero for every window below four gigabytes, which was
+    /// every window until a live submission's buffers, in direct memory far above that
+    /// (`0x7400_xxxx_xxxx`), needed one (D711).
+    high: u32,
 }
 
 impl Window {
@@ -351,6 +369,7 @@ impl Window {
         Self {
             base,
             words: MEMORY_WORDS,
+            high: 0,
         }
     }
 
@@ -374,13 +393,45 @@ impl Window {
         if words == 0 || !words.is_power_of_two() {
             return None;
         }
-        Some(Self { base, words })
+        Some(Self {
+            base,
+            words,
+            high: 0,
+        })
+    }
+
+    /// A window of `words` words at a full 64-bit guest address, or `None` when `words` is not a
+    /// power of two **or the window would cross a four-gigabyte boundary**.
+    ///
+    /// The crossing is refused for the reason the high half exists at all: a translated shader
+    /// compares only the low half of an address, so a window whose words straddle a boundary would
+    /// have its upper words at low addresses the comparison reads as *below* the base, and refuse
+    /// accesses the window holds (D711).
+    #[must_use]
+    pub const fn spanning_address(address: u64, words: u32) -> Option<Self> {
+        let Some(window) = Self::spanning(address as u32, words) else {
+            return None;
+        };
+        let end = (address as u32 as u64) + (words as u64) * 4;
+        if end > 1 << 32 {
+            return None;
+        }
+        Some(Self {
+            high: (address >> 32) as u32,
+            ..window
+        })
     }
 
     /// How many words this window spans.
     #[must_use]
     pub const fn words(self) -> u32 {
         self.words
+    }
+
+    /// The window's full guest address - where its words are read from.
+    #[must_use]
+    pub const fn address(self) -> u64 {
+        ((self.high as u64) << 32) | self.base as u64
     }
 }
 
@@ -390,6 +441,36 @@ impl Default for Window {
         Self::at(0)
     }
 }
+
+/// Where a stage's user data lands in its scalar registers, and where it sits in the push-constant
+/// block a draw supplies it through (worklog 826).
+///
+/// The hardware loads a stage's user-data registers into its first scalar registers before the
+/// shader's first instruction; a translated module starts with every scalar zero, so it reads them
+/// from the push-constant block instead, at entry. `count` zero reads nothing and declares no block -
+/// every module translated before this existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UserData {
+    /// The first scalar register the words land in: `s0` for a pixel shader, `s8` for the NGG
+    /// geometry program a vertex stage runs as.
+    pub first_register: u32,
+    /// How many words: the stage's `USER_SGPR` count.
+    pub count: u32,
+    /// Where this stage's words start in the block, in words.
+    pub block_offset: u32,
+    /// The stage's `DX10_CLAMP` mode bit (`SPI_SHADER_PGM_RSRC1` bit 21, Mesa
+    /// `S_00B848_DX10_CLAMP`): whether an instruction's output clamp turns a NaN into zero (set) or
+    /// passes it through (clear) - worklog 834. `None` when no `RSRC1` was seen, and then a clamped
+    /// instruction is refused rather than given either answer.
+    pub dx10_clamp: Option<bool>,
+}
+
+/// Words in the push-constant block: sixteen per stage, two stages. **128 bytes**, the smallest
+/// `maxPushConstantsSize` a Vulkan device may report, so every device takes it (worklog 826).
+pub const USER_DATA_BLOCK_WORDS: u32 = 32;
+
+/// The most user-data words one stage may take within the block.
+pub const USER_DATA_STAGE_WORDS: u32 = 16;
 
 /// How a fragment input is read.
 ///
@@ -488,13 +569,37 @@ fn emit_entry_point(b: &mut Builder, stage: Stage, main: Id, interface: &[u32]) 
     b.header(op::ENTRY_POINT, &entry);
 }
 
+/// How many guest lanes one invocation of a module for `stage` simulates.
+///
+/// **One at the fragment stage.** There one invocation is one pixel: the host rasteriser decides
+/// coverage and runs the quad, the interpolated inputs are this pixel's, and the export reads lane
+/// zero. Every other lane of a wavefront-wide fragment module read no input and wrote no output -
+/// each pixel ran the guest program thirty-two or sixty-four times and kept one answer, which made
+/// a Neverball pixel shader 18,880 instructions (worklog 847). What lane zero computes is unchanged,
+/// because no instruction this model translates reads another lane's registers.
+///
+/// A mask then holds this pixel's bit and nothing a neighbour contributed, so the branch tests
+/// that ask whether *any* lane survives ask it of this pixel alone (`control` clamps them to
+/// [`Model::lanes`]).
+/// That is the answer the pixel's own result depends on: a region the wavefront skips because no
+/// lane is live is a region this pixel would have run masked off.
+///
+/// Every other stage keeps the whole wavefront: a compute dispatch's lanes are its threads, and a
+/// mesh module's are its vertices (D688).
+fn simulated_lanes(stage: Stage, width: Width) -> u32 {
+    match stage {
+        Stage::Fragment => 1,
+        Stage::Compute | Stage::Mesh => width.lanes(),
+    }
+}
+
 /// Declares the four size constants the module's arrays and buffers are built from.
 ///
 /// Together because they are one idea - how big everything is - and separate from the
 /// constructor for its length.
-fn declare_counts(b: &mut Builder, u32_type: Id, counts: [Id; 4], width: Width, memory_words: u32) {
+fn declare_counts(b: &mut Builder, u32_type: Id, counts: [Id; 4], lanes: u32, memory_words: u32) {
     let [wave, registers, observed, memory] = counts;
-    b.declare(op::CONSTANT, &[u32_type.0, wave.0, width.lanes()]);
+    b.declare(op::CONSTANT, &[u32_type.0, wave.0, lanes]);
     b.declare(op::CONSTANT, &[u32_type.0, registers.0, REGISTER_COUNT]);
     b.declare(op::CONSTANT, &[u32_type.0, observed.0, OBSERVED_WORDS]);
     // **The declared array and the bounds check must be the same number.** `Model::word_index`
@@ -771,6 +876,44 @@ fn declare_local_share(
     b.declare(op::VARIABLE, &[local_array_ptr.0, local.0, WORKGROUP]);
 }
 
+/// Where a stage's user data is read from at entry.
+#[derive(Debug, Clone, Copy)]
+enum UserDataSource {
+    /// The push-constant block, at the stage's share of it.
+    Push(buffer::StorageBuffer),
+    /// The draw-data buffer, at this workgroup's stride (D718): a mesh module, one workgroup per
+    /// guest draw of a batch. `workgroup` is the `uvec3` type and the `WorkgroupId` input.
+    Draws {
+        buffer: buffer::StorageBuffer,
+        workgroup: (Id, Id),
+    },
+}
+
+impl UserDataSource {
+    /// The variables it adds to the entry point's interface.
+    fn interface(self) -> Vec<u32> {
+        match self {
+            Self::Push(block) => vec![block.buffer.0],
+            Self::Draws { buffer, workgroup } => vec![buffer.buffer.0, workgroup.1.0],
+        }
+    }
+}
+
+/// Declares the `WorkgroupId` built-in input: the `uvec3` type, and the variable.
+fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
+    let uvec3 = b.id();
+    let pointer = b.id();
+    let variable = b.id();
+    b.annotate(
+        op::DECORATE,
+        &[variable.0, decoration::BUILT_IN, built_in::WORKGROUP_ID],
+    );
+    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, 3]);
+    b.declare(op::TYPE_POINTER, &[pointer.0, INPUT, uvec3.0]);
+    b.declare(op::VARIABLE, &[pointer.0, variable.0, INPUT]);
+    (uvec3, variable)
+}
+
 /// Builds a wavefront-model module for one decoded shader.
 #[derive(Debug)]
 pub struct Wavefront<'a> {
@@ -800,8 +943,13 @@ pub struct Wavefront<'a> {
     memory_words: u32,
     builder: Builder,
     encodings: &'a EncodingTable,
-    /// How many lanes this shader's wavefront has, and therefore how wide its masks are.
-    width: Width,
+    /// How many lanes one invocation simulates - see [`simulated_lanes`].
+    lanes: u32,
+    /// Each half of the execution mask, where the instructions since the start of this block
+    /// wrote it a constant - which is how a primitive shader picks its threads: `s_mov_b32
+    /// exec_lo, 1` for the primitive, then `7` for three vertices. A lane known inactive then
+    /// emits nothing, and one known active writes without a select (worklog 854).
+    known_exec: [Option<u32>; 2],
     constants: BTreeMap<u32, Id>,
     /// The imported `GLSL.std.450` set id, cached after the first extended instruction imports it.
     glsl_set: Option<Id>,
@@ -815,12 +963,15 @@ pub struct Wavefront<'a> {
     /// every module was relying on capabilities the device had not enabled (worklog 556).
     f16_type: Option<Id>,
     u16_type: Option<Id>,
-    /// The sampled image, declared the first time an instruction samples one.
+    /// The sampled images, each declared the first time an instruction samples it - at most two
+    /// (worklog 840), in the order the module first samples them.
     ///
-    /// [`None`] for every module that does not sample, which is nearly all of them - and
-    /// declaring one unconditionally would put a descriptor binding in the layout of every
-    /// pipeline that runs a translated module, whether or not anything reads it.
-    texture: Option<BoundTexture>,
+    /// Empty for every module that does not sample, which is nearly all of them - and declaring one
+    /// unconditionally would put a descriptor binding in the layout of every pipeline that runs a
+    /// translated module, whether or not anything reads it.
+    textures: Vec<BoundTexture>,
+    /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`].
+    descriptor_loads: BTreeMap<u32, std::collections::BTreeSet<u32>>,
     /// The storage image, declared the first time an instruction stores to one.
     ///
     /// Lazy for a stronger reason than the sampled image is: declaring it declares a
@@ -852,6 +1003,51 @@ pub struct Wavefront<'a> {
     /// The `m0` register, as a private word starting at zero.
     m0: Id,
     translated: usize,
+    /// The stage's `DX10_CLAMP` mode, from its `RSRC1` (worklog 834); `None` when unknown.
+    dx10_clamp: Option<bool>,
+}
+
+impl Wavefront<'_> {
+    /// The texture sources this module samples, in slot order (worklog 840).
+    #[must_use]
+    pub fn texture_sources(&self) -> Vec<TextureSource> {
+        self.textures.iter().map(|bound| bound.source).collect()
+    }
+
+    /// The source of a texture first sampled through `descriptor` (worklog 840): the next slot, and
+    /// the table offset the descriptor was loaded from.
+    ///
+    /// Refused where which texture it is cannot be told: a third texture (two bindings exist), a
+    /// descriptor loaded from more than one offset, or a second texture when either of the two did
+    /// not come from the table - a pipeline finds a texture by its offset, and binding "whichever
+    /// is at offset zero" to both would draw a frame that looks right and is not (D690).
+    fn new_texture_source(&self, descriptor: u32) -> Result<TextureSource, &'static str> {
+        let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
+        if slot > 1 {
+            return Err("this shader reads more than two textures, and two bindings exist (D690)");
+        }
+        let table_offset = match self.descriptor_loads.get(&descriptor) {
+            None => None,
+            Some(offsets) if offsets.len() == 1 => offsets.first().copied(),
+            Some(_) => {
+                return Err(concat!(
+                    "this shader loads one image descriptor from more than one place in its ",
+                    "descriptor table, so which texture a sample reads is not fixed (D690)"
+                ));
+            }
+        };
+        let first_resolved = self
+            .textures
+            .first()
+            .is_none_or(|first| first.source.table_offset.is_some());
+        if slot == 1 && (table_offset.is_none() || !first_resolved) {
+            return Err(concat!(
+                "this shader reads two textures and at least one descriptor did not come from ",
+                "its descriptor table, so which is which cannot be told (D690)"
+            ));
+        }
+        Ok(TextureSource { slot, table_offset })
+    }
 }
 
 impl<'a> Wavefront<'a> {
@@ -864,7 +1060,7 @@ impl<'a> Wavefront<'a> {
             MeshPrimitive::default(),
             &[],
             &[],
-            Window::default(),
+            (Window::default(), UserData::default()),
         )
     }
 
@@ -882,7 +1078,7 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        window: Window,
+        (window, user_data): (Window, UserData),
     ) -> Self {
         // A mesh module declares 1.4, which its extension requires; everything else stays at
         // 1.3, where an entry point lists only its inputs and outputs (worklog 557).
@@ -975,13 +1171,43 @@ impl<'a> Wavefront<'a> {
             &mut b,
             u32_type,
             [wave_count, register_count, observed_count, memory_count],
-            width,
+            simulated_lanes(stage, width),
             window.words(),
         );
 
         let files = declare_files(&mut b, u32_type, register_count, wave_count);
         let (observation, guest_memory) =
             declare_buffers(&mut b, u32_type, observed_count, memory_count);
+        // The block a draw's user data arrives in, declared only when this stage reads some - so
+        // every module that reads none is word for word what it was (worklog 826).
+        //
+        // **A mesh module reads its words per draw** (D718): one host dispatch carries a run of
+        // guest draws, one workgroup each, so the words are in the draw-data buffer at the
+        // workgroup's stride rather than in the push-constant block every workgroup shares.
+        let user_data_source = (user_data.count > 0).then(|| {
+            if stage == Stage::Mesh {
+                let words = b.id();
+                b.declare(
+                    op::CONSTANT,
+                    &[
+                        u32_type.0,
+                        words.0,
+                        orbistoun_spirv::DRAW_DATA_MOST_DRAWS
+                            * orbistoun_spirv::DRAW_DATA_STRIDE_WORDS,
+                    ],
+                );
+                let buffer =
+                    buffer::declare(&mut b, u32_type, words, orbistoun_spirv::DRAW_DATA_BINDING);
+                UserDataSource::Draws {
+                    buffer,
+                    workgroup: declare_workgroup_id(&mut b, u32_type),
+                }
+            } else {
+                let words = b.id();
+                b.declare(op::CONSTANT, &[u32_type.0, words.0, USER_DATA_BLOCK_WORDS]);
+                UserDataSource::Push(buffer::declare_push_constants(&mut b, u32_type, words))
+            }
+        });
 
         // Every variable this module has, now that every one of them exists. What the entry
         // point is allowed to name depends on the version: 1.4 and above want all of them,
@@ -1000,6 +1226,9 @@ impl<'a> Wavefront<'a> {
                 observation.buffer.0,
                 guest_memory.buffer.0,
             ]);
+            if let Some(source) = user_data_source {
+                interface.extend(source.interface());
+            }
         }
         emit_entry_point(&mut b, stage, main, &interface);
 
@@ -1014,17 +1243,20 @@ impl<'a> Wavefront<'a> {
             primitive,
             vec4,
             memory_base: window.base,
+            dx10_clamp: user_data.dx10_clamp,
             builder: b,
             encodings,
             memory_words: window.words(),
-            width,
+            lanes: simulated_lanes(stage, width),
+            known_exec: [None; 2],
             constants: BTreeMap::new(),
             glsl_set: None,
             u32_type,
             f32_type,
             f16_type: None,
             u16_type: None,
-            texture: None,
+            textures: Vec::new(),
+            descriptor_loads: BTreeMap::new(),
             stored: None,
             bool_type,
             lane_ptr: files.lane_ptr,
@@ -1049,6 +1281,57 @@ impl<'a> Wavefront<'a> {
         let all = this.constant(u32::MAX);
         this.store_scalar(EXEC_LO, all);
         this.store_scalar(EXEC_HI, all);
+
+        // **The user data, where the hardware would have put it** (worklog 826): word `i` of this
+        // stage's range in the block into `s[first + i]`, before the first instruction runs.
+        if let Some(source) = user_data_source {
+            let member = this.constant(0);
+            // Where this stage's words begin: its share of the push-constant block, or this
+            // workgroup's stride of the draw-data buffer (D718).
+            let (block, first_word) = match source {
+                UserDataSource::Push(block) => (block, None),
+                UserDataSource::Draws { buffer, workgroup } => {
+                    let (uvec3, input) = workgroup;
+                    let id = this.builder.id();
+                    this.builder.function(op::LOAD, &[uvec3.0, id.0, input.0]);
+                    let x = this.builder.id();
+                    this.builder
+                        .function(op::COMPOSITE_EXTRACT, &[u32_type.0, x.0, id.0, 0]);
+                    let stride = this.constant(orbistoun_spirv::DRAW_DATA_STRIDE_WORDS);
+                    let first = this.builder.id();
+                    this.builder
+                        .function(op::IMUL, &[u32_type.0, first.0, x.0, stride.0]);
+                    (buffer, Some(first))
+                }
+            };
+            for i in 0..user_data.count {
+                let index = match first_word {
+                    None => this.constant(user_data.block_offset + i),
+                    Some(first) => {
+                        let within = this.constant(i);
+                        let index = this.builder.id();
+                        this.builder
+                            .function(op::IADD, &[u32_type.0, index.0, first.0, within.0]);
+                        index
+                    }
+                };
+                let pointer = this.builder.id();
+                this.builder.function(
+                    op::ACCESS_CHAIN,
+                    &[
+                        block.element_ptr.0,
+                        pointer.0,
+                        block.buffer.0,
+                        member.0,
+                        index.0,
+                    ],
+                );
+                let value = this.builder.id();
+                this.builder
+                    .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+                this.store_scalar(user_data.first_register + i, value);
+            }
+        }
         this
     }
 
@@ -1090,6 +1373,9 @@ impl<'a> Wavefront<'a> {
     }
 
     fn load_scalar(&mut self, register: u32) -> Id {
+        if let Some(known) = self.known_exec_half(register) {
+            return self.constant(known);
+        }
         let pointer = self.scalar_pointer(register);
         let loaded = self.builder.id();
         self.builder
@@ -1098,8 +1384,29 @@ impl<'a> Wavefront<'a> {
     }
 
     fn store_scalar(&mut self, register: u32, value: Id) {
+        if let Some(half) = exec_half(register) {
+            self.known_exec[half] = self.constant_value(value);
+        }
         let pointer = self.scalar_pointer(register);
         self.builder.function(op::STORE, &[pointer.0, value.0]);
+    }
+
+    /// The value a half of the execution mask is known to hold here, if it is known.
+    fn known_exec_half(&self, register: u32) -> Option<u32> {
+        exec_half(register).and_then(|half| self.known_exec[half])
+    }
+
+    /// The value `id` was declared as, when it is one of this module's constants.
+    fn constant_value(&self, id: Id) -> Option<u32> {
+        self.constants
+            .iter()
+            .find_map(|(value, constant)| (*constant == id).then_some(*value))
+    }
+
+    /// Whether `lane`'s bit of the execution mask is known, and if so whether it is set.
+    fn lane_known(&self, lane: u32) -> Option<bool> {
+        let (half, bit) = if lane < 32 { (0, lane) } else { (1, lane - 32) };
+        self.known_exec[half].map(|mask| mask >> bit & 1 != 0)
     }
 
     fn lane_pointer(&mut self, register: u32, lane: u32) -> Id {
@@ -1200,6 +1507,17 @@ impl<'a> Wavefront<'a> {
     }
 
     fn store_lane_masked(&mut self, register: u32, lane: u32, value: Id) {
+        match self.lane_known(lane) {
+            // Known inactive: the write does not happen.
+            Some(false) => return,
+            // Known active: nothing to keep, so no select and no load of the old value.
+            Some(true) => {
+                let pointer = self.lane_pointer(register, lane);
+                self.builder.function(op::STORE, &[pointer.0, value.0]);
+                return;
+            }
+            None => {}
+        }
         let active = self.lane_active(lane);
         let old = self.load_lane(register, lane);
         let chosen = self.builder.id();
@@ -1260,6 +1578,10 @@ impl<'a> Wavefront<'a> {
 impl Model for Wavefront<'_> {
     fn encodings(&self) -> &EncodingTable {
         self.encodings
+    }
+
+    fn dx10_clamp(&self) -> Option<bool> {
+        self.dx10_clamp
     }
 
     fn colour_output(&self) -> Option<(Id, Id)> {
@@ -1355,7 +1677,16 @@ impl Model for Wavefront<'_> {
     }
 
     fn lanes(&self) -> u32 {
-        self.width.lanes()
+        self.lanes
+    }
+
+    fn lane_may_run(&self, lane: u32) -> bool {
+        self.lane_known(lane) != Some(false)
+    }
+
+    fn enter_block(&mut self) {
+        // A block can be reached from more than one place, each with its own mask.
+        self.known_exec = [None; 2];
     }
 
     fn constant(&mut self, value: u32) -> Id {
@@ -1433,7 +1764,7 @@ impl Model for Wavefront<'_> {
         // because this is the only place that sees a write at all - and D690's third rule is
         // what stops a shader reloading the same eight registers from reading two textures
         // while naming one.
-        if let Some(bound) = self.texture.as_mut() {
+        for bound in &mut self.textures {
             let within = |first: u32, count: u32| register >= first && register < first + count;
             // The sampler's range only exists once something named a sampler - a module that
             // only fetches has an image descriptor and nothing else to disturb.
@@ -1583,24 +1914,24 @@ impl Model for Wavefront<'_> {
                 "fragment stage flags, and a guest's textured shading is what asked for one"
             ));
         }
-        if let Some(bound) = self.texture.as_mut() {
+        if let Some(bound) = self
+            .textures
+            .iter_mut()
+            .find(|b| b.descriptor == descriptor)
+        {
             if bound.disturbed {
                 return Err(concat!(
                     "the registers holding this shader's image descriptor were written ",
                     "between one access and the next, so the two read different textures and ",
-                    "only one is bound (D690)"
+                    "only one is bound for them (D690)"
                 ));
             }
             // A sampler only conflicts with a sampler. A fetch names none, so it neither
             // conflicts with the recorded one nor clears it.
-            let conflicts = bound.descriptor != descriptor
-                || matches!((bound.sampler, sampler), (Some(was), Some(now)) if was != now);
-            if conflicts {
+            if matches!((bound.sampler, sampler), (Some(was), Some(now)) if was != now) {
                 return Err(concat!(
-                    "this shader reads more than one texture and a pipeline binds one - ",
-                    "resolving which is which needs the descriptors decoded, and reading ",
-                    "whichever happened to be bound would draw a frame that looks right and ",
-                    "is not (D690)"
+                    "this shader reads one image through two samplers, and a binding carries ",
+                    "one (D690)"
                 ));
             }
             // The first instruction to name a sampler is what puts one on the record, which may
@@ -1608,6 +1939,12 @@ impl Model for Wavefront<'_> {
             bound.sampler = bound.sampler.or(sampler);
             return Ok(bound.texture);
         }
+        let source = self.new_texture_source(descriptor)?;
+        let binding = if source.slot == 0 {
+            orbistoun_spirv::TEXTURE_BINDING
+        } else {
+            orbistoun_spirv::SECOND_TEXTURE_BINDING
+        };
 
         let image = self.builder.id();
         let combined = self.builder.id();
@@ -1617,14 +1954,8 @@ impl Model for Wavefront<'_> {
 
         self.builder
             .annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
-        self.builder.annotate(
-            op::DECORATE,
-            &[
-                variable.0,
-                decoration::BINDING,
-                orbistoun_spirv::TEXTURE_BINDING,
-            ],
-        );
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
 
         // Element type, then: two-dimensional, not a depth texture, not an array, not
         // multi-sampled, used with a sampler, and of no declared format. Read out of compiled
@@ -1658,10 +1989,11 @@ impl Model for Wavefront<'_> {
             texel,
             result: self.vec4,
         };
-        self.texture = Some(BoundTexture {
+        self.textures.push(BoundTexture {
             texture,
             descriptor,
             sampler,
+            source,
             disturbed: false,
         });
         Ok(texture)
@@ -1740,15 +2072,23 @@ impl Model for Wavefront<'_> {
     /// wavefront will read this word, so a suppressed write that lands anyway corrupts a
     /// value a different lane is about to use.
     fn write_local(&mut self, word_index: Id, value: Id, lane: u32) -> Result<(), TranslateError> {
-        let active = self.lane_active(lane);
+        let known = self.lane_known(lane);
+        if known == Some(false) {
+            return Ok(());
+        }
         let (pointer_type, array, u32_type) = (self.local_ptr, self.local, self.u32_type);
-
-        let b = &mut self.builder;
-        let pointer = b.id();
-        b.function(
+        let pointer = self.builder.id();
+        self.builder.function(
             op::ACCESS_CHAIN,
             &[pointer_type.0, pointer.0, array.0, word_index.0],
         );
+        if known == Some(true) {
+            self.builder.function(op::STORE, &[pointer.0, value.0]);
+            return Ok(());
+        }
+        let active = self.lane_active(lane);
+
+        let b = &mut self.builder;
         let old = b.id();
         b.function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
         let chosen = b.id();
@@ -1778,7 +2118,10 @@ impl Model for Wavefront<'_> {
     /// inactive lane's store would otherwise land in memory another lane goes on to
     /// read.
     fn write_memory(&mut self, word_index: Id, value: Id, lane: u32) {
-        let active = self.lane_active(lane);
+        let known = self.lane_known(lane);
+        if known == Some(false) {
+            return;
+        }
         let (element_ptr, buffer, u32_type) = (self.memory_element_ptr, self.memory, self.u32_type);
         let member = Self::constant(self, 0);
 
@@ -1787,6 +2130,11 @@ impl Model for Wavefront<'_> {
             op::ACCESS_CHAIN,
             &[element_ptr.0, pointer.0, buffer.0, member.0, word_index.0],
         );
+        if known == Some(true) {
+            self.builder.function(op::STORE, &[pointer.0, value.0]);
+            return;
+        }
+        let active = self.lane_active(lane);
         let old = self.builder.id();
         self.builder
             .function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
@@ -1818,6 +2166,58 @@ impl Model for Wavefront<'_> {
 /// variable carries one decoration. That is refused by the caller rather than resolved by
 /// picking: reading a flat parameter through an interpolated input returns a different number
 /// everywhere except one vertex, and nothing in the output would say so.
+/// Which texture a translated module samples at which binding, and where its descriptor comes from
+/// (worklog 840): the byte offset in the pixel shader's descriptor table - the table its first two
+/// user-data registers point at - that the image descriptor was loaded from. `None` when the module
+/// never loaded it from there, which is the one-texture shape every module had before, and which a
+/// pipeline reads at offset zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureSource {
+    /// 0 for the first texture the module samples, 1 for a second.
+    pub slot: u32,
+    /// The descriptor's byte offset in the table, when a load from the table put it there.
+    pub table_offset: Option<u32>,
+}
+
+/// The descriptor-table offsets each eight-register group is loaded from (worklog 840): every
+/// `s_load_dwordx8 s[d:d+7], s[0:1], offset` in the program, as `d` to its offsets.
+///
+/// `s[0:1]` is where a pixel shader's first two user-data words land, and the open-toolchain GL
+/// context puts its descriptor table's address there; its second texture unit loads the image
+/// descriptor from `+0x40` where the first loads from `+0x00` (oops-sdk `tools/shader/tex-prolog2.s`).
+/// A group loaded from more than one offset has no single source and is refused where it is sampled.
+fn descriptor_table_loads(
+    decode: &Decode,
+    encodings: &EncodingTable,
+) -> BTreeMap<u32, std::collections::BTreeSet<u32>> {
+    let mut loads: BTreeMap<u32, std::collections::BTreeSet<u32>> = BTreeMap::new();
+    for instruction in &decode.instructions {
+        let Some(family) = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .map(|e| e.name.as_str())
+        else {
+            continue;
+        };
+        if encodings.mnemonic_for(family, instruction.opcode) != Some("s_load_dwordx8") {
+            continue;
+        }
+        if let [
+            Operand::Scalar(destination),
+            Operand::Scalar(0),
+            Operand::Immediate(offset),
+        ] = instruction.operands.as_slice()
+            && let Ok(offset) = u32::try_from(*offset)
+        {
+            loads
+                .entry(u32::from(*destination))
+                .or_default()
+                .insert(offset);
+        }
+    }
+    loads
+}
+
 fn interpolated_attributes(
     decode: &Decode,
     encodings: &EncodingTable,
@@ -1927,6 +2327,49 @@ pub fn translate_for_primitive(
     primitive: MeshPrimitive,
     window: Window,
 ) -> Result<(Vec<u32>, usize), TranslateError> {
+    translate_with_user_data(
+        decode,
+        encodings,
+        width,
+        (stage, primitive),
+        window,
+        UserData::default(),
+    )
+    .map(|(words, translated, _)| (words, translated))
+}
+
+/// As [`translate_for_primitive`], for a module that reads its stage's user data at entry (worklog
+/// 826).
+///
+/// # Errors
+///
+/// As the translation refuses anything, and when the stage takes more user-data words than its
+/// share of the push-constant block holds ([`USER_DATA_STAGE_WORDS`]) - refused rather than
+/// truncated, because a shader reading a word that never arrived would read zero and look fine.
+pub fn translate_with_user_data(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    width: Width,
+    (stage, primitive): (Stage, MeshPrimitive),
+    window: Window,
+    user_data: UserData,
+) -> Result<(Vec<u32>, usize, Vec<TextureSource>), TranslateError> {
+    if user_data.count > USER_DATA_STAGE_WORDS
+        || user_data.block_offset + user_data.count > USER_DATA_BLOCK_WORDS
+    {
+        return Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "the stage takes more user-data words than the push-constant block holds for it",
+        });
+    }
+    // A mesh module's words come from the draw-data buffer, which holds the geometry stage's share
+    // of the block - the first (D718). Any other offset would read the wrong stage's words.
+    if stage == Stage::Mesh && user_data.count > 0 && user_data.block_offset != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "a mesh module's user data is the geometry stage's share of the block, at offset zero",
+        });
+    }
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);
     let mut module = Wavefront::for_stage(
@@ -1936,8 +2379,11 @@ pub fn translate_for_primitive(
         primitive,
         &attributes,
         &parameters,
-        window,
+        (window, user_data),
     );
+    module.descriptor_loads = descriptor_table_loads(decode, encodings);
     crate::control::emit(&mut module, decode, encodings)?;
-    module.finish()
+    let sources = module.texture_sources();
+    let (words, translated) = module.finish()?;
+    Ok((words, translated, sources))
 }

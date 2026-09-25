@@ -110,6 +110,12 @@ pub struct Vocabulary {
 }
 
 impl Vocabulary {
+    /// The registers a stage's shader address is written to - every register
+    /// [`shader_candidates`] reads (worklog 844).
+    pub fn shader_register_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.shader_registers.keys().copied()
+    }
+
     /// Parses a vocabulary from TOML.
     pub fn load(toml_text: &str) -> Result<Self, VocabularyError> {
         let file: VocabularyFile =
@@ -223,7 +229,7 @@ pub fn register_writes(
                     writes.push(RegisterWrite {
                         packet_offset: packet.offset,
                         register: u32::from(base_register) + u32::try_from(index).unwrap_or(0),
-                        value: *value,
+                        value,
                     });
                 }
             }
@@ -235,17 +241,17 @@ pub fn register_writes(
                 // sixteen bits are the offset: the indexed user-config form carries an index in
                 // bits 31:28 (the GL cube capture writes 0x10000242 for VGT_PRIMITIVE_TYPE), and
                 // adding the whole word would name a register that does not exist.
-                let Some((offset, values)) = words.split_first() else {
+                let Some(offset) = words.first() else {
                     continue;
                 };
-                let offset = &(offset & 0xffff);
-                for (index, value) in values.iter().enumerate() {
+                let offset = offset & 0xffff;
+                for (index, value) in words.iter().skip(1).enumerate() {
                     writes.push(RegisterWrite {
                         packet_offset: packet.offset,
                         register: base
-                            .wrapping_add(*offset)
+                            .wrapping_add(offset)
                             .wrapping_add(u32::try_from(index).unwrap_or(0)),
-                        value: *value,
+                        value,
                     });
                 }
             }
@@ -298,6 +304,190 @@ pub fn shader_candidates(
             })
         })
         .collect()
+}
+
+/// The latest write to each register before a point in a stream, kept as the stream is walked
+/// forward (worklog 844).
+///
+/// Everything a draw reads of the register state - its shaders, blend, viewport transform and user
+/// data - is the **latest** write to each register before the draw. Answering that per draw by
+/// scanning every earlier write made preparing a submission quadratic in its draws: a GL frame of
+/// hundreds of draws rescanned thousands of writes hundreds of times, more than a quarter of every
+/// second a title ran. This walks the writes once, in order, and hands each draw the latest per
+/// register - which the per-draw functions answer from exactly as they did from the whole stream.
+#[derive(Debug)]
+pub struct RegisterSweep<'a> {
+    writes: &'a [RegisterWrite],
+    next: usize,
+    reached: u32,
+    /// The index of each register's latest write, by register - a table rather than a map because
+    /// a GL frame asks it tens of lookups per draw, for thousands of draws (worklog 854). Every
+    /// register a packet can name fits: the highest base, uconfig's `0xC000`, plus the widest
+    /// packet's count stays below [`SWEEP_REGISTERS`], and anything past it goes to `beyond`.
+    table: SweepTable,
+    beyond: BTreeMap<u32, usize>,
+}
+
+/// Registers the sweep's table covers directly.
+const SWEEP_REGISTERS: usize = 1 << 16;
+
+/// No write to a register yet, in a [`SweepTable`].
+const UNWRITTEN: u32 = u32::MAX;
+
+/// A sweep's register table, and the registers it has filled in.
+///
+/// **Reused, and cleared by what it touched** (worklog 853): a fresh table was a megabyte allocated
+/// and zeroed twice a submission, for a stream that writes a few hundred registers - more time than
+/// the lookups it serves. A sweep takes the spare one, and returns it with only its written entries
+/// reset, so the next sweep starts from the same all-unwritten table a fresh one would be.
+#[derive(Debug)]
+struct SweepTable {
+    latest: Vec<u32>,
+    touched: Vec<u32>,
+}
+
+impl SweepTable {
+    fn take() -> Self {
+        SPARE_TABLE
+            .with(std::cell::Cell::take)
+            .unwrap_or_else(|| Self {
+                latest: vec![UNWRITTEN; SWEEP_REGISTERS],
+                touched: Vec::new(),
+            })
+    }
+
+    fn clear(&mut self) {
+        for register in self.touched.drain(..) {
+            self.latest[register as usize] = UNWRITTEN;
+        }
+    }
+}
+
+thread_local! {
+    /// The table the last sweep on this thread finished with, all unwritten again.
+    static SPARE_TABLE: std::cell::Cell<Option<SweepTable>> = const { std::cell::Cell::new(None) };
+}
+
+impl Drop for RegisterSweep<'_> {
+    fn drop(&mut self) {
+        let mut table = std::mem::replace(
+            &mut self.table,
+            SweepTable {
+                latest: Vec::new(),
+                touched: Vec::new(),
+            },
+        );
+        table.clear();
+        SPARE_TABLE.with(|spare| spare.set(Some(table)));
+    }
+}
+
+impl<'a> RegisterSweep<'a> {
+    /// A sweep over `writes`, in the order they were made.
+    #[must_use]
+    pub fn new(writes: &'a [RegisterWrite]) -> Self {
+        Self {
+            writes,
+            next: 0,
+            reached: 0,
+            table: SweepTable::take(),
+            beyond: BTreeMap::new(),
+        }
+    }
+
+    /// The latest write to each of `registers` made in packets before `before`, in the order they
+    /// were made. Asked in increasing order this is one pass over the stream; asked out of order it
+    /// starts again, so it is never wrong, only slower.
+    pub fn before_among(
+        &mut self,
+        before: u32,
+        registers: impl IntoIterator<Item = u32>,
+    ) -> Vec<RegisterWrite> {
+        self.advance(before);
+        let mut indices: Vec<usize> = registers
+            .into_iter()
+            .filter_map(|register| self.index_of(register))
+            .collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .map(|index| self.writes[index])
+            .collect()
+    }
+
+    /// The value of the latest write to `register` in packets before `before`, if there was one.
+    ///
+    /// What a per-draw lookup wants when it reads registers one at a time: the answer without
+    /// gathering, sorting and rescanning a list per draw (worklog 854).
+    pub fn latest(&mut self, before: u32, register: u32) -> Option<u32> {
+        self.advance(before);
+        self.index_of(register)
+            .map(|index| self.writes[index].value)
+    }
+
+    fn index_of(&self, register: u32) -> Option<usize> {
+        match self.table.latest.get(register as usize) {
+            Some(&index) if index != UNWRITTEN => Some(index as usize),
+            _ => self.beyond.get(&register).copied(),
+        }
+    }
+
+    /// Takes in every write made before `before`.
+    fn advance(&mut self, before: u32) {
+        if before == self.reached {
+            return;
+        }
+        if before < self.reached {
+            self.next = 0;
+            self.table.clear();
+            self.beyond.clear();
+        }
+        self.reached = before;
+        while let Some(write) = self.writes.get(self.next) {
+            if write.packet_offset >= before {
+                break;
+            }
+            // A stream of more writes than a table index holds keeps the rest beside it, as it does
+            // registers past the table.
+            let index = u32::try_from(self.next).ok().filter(|&i| i != UNWRITTEN);
+            match (self.table.latest.get_mut(write.register as usize), index) {
+                (Some(slot), Some(index)) => {
+                    if *slot == UNWRITTEN {
+                        self.table.touched.push(write.register);
+                    }
+                    *slot = index;
+                }
+                (slot, _) => {
+                    // The table's older write is no longer the latest.
+                    if let Some(slot) = slot {
+                        *slot = UNWRITTEN;
+                    }
+                    self.beyond.insert(write.register, self.next);
+                }
+            }
+            self.next += 1;
+        }
+    }
+}
+
+/// The shader addresses in force at a packet: [`shader_candidates`] over only the writes made in
+/// earlier packets (worklog 835).
+///
+/// A stream that changes a stage's program between draws - the open-toolchain GL context swaps
+/// vertex programs by vertex size, 48, 64 or 80 bytes - has a different shader in force at each, and
+/// the whole stream's last write names only the one the final draws ran.
+#[must_use]
+pub fn shader_candidates_before(
+    writes: &[RegisterWrite],
+    vocabulary: &Vocabulary,
+    before: u32,
+) -> Vec<ShaderCandidate> {
+    let earlier: Vec<RegisterWrite> = writes
+        .iter()
+        .filter(|write| write.packet_offset < before)
+        .copied()
+        .collect();
+    shader_candidates(&earlier, vocabulary)
 }
 
 /// Reads `length` bytes at `start` as little-endian words.
@@ -385,7 +575,7 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
         match opcode {
             NUM_INSTANCES => {
                 if let Some(count) = words.first() {
-                    instances = *count;
+                    instances = count;
                 }
             }
             DRAW_INDEX_AUTO => {
@@ -393,9 +583,7 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
                     draws.push(DrawCall {
                         packet_offset: packet.offset,
                         instances,
-                        kind: DrawKind::Auto {
-                            vertices: *vertices,
-                        },
+                        kind: DrawKind::Auto { vertices },
                     });
                 }
             }
@@ -410,8 +598,8 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
                         packet_offset: packet.offset,
                         instances,
                         kind: DrawKind::Indexed {
-                            indices: *indices,
-                            address: u64::from(*lo) | (u64::from(*hi) << 32),
+                            indices,
+                            address: u64::from(lo) | (u64::from(hi) << 32),
                         },
                     });
                 }
@@ -422,15 +610,32 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
     draws
 }
 
-fn read_words(body: &[u8], start: usize, length: usize) -> Option<Vec<u32>> {
+fn read_words(body: &[u8], start: usize, length: usize) -> Option<Words<'_>> {
     let end = start.checked_add(length)?;
-    let slice = body.get(start..end)?;
-    Some(
-        slice
+    body.get(start..end).map(Words)
+}
+
+/// A packet body read as little-endian words, in place: a submission has hundreds of thousands of
+/// packets and most are looked at for a word or two, so none of them is copied out (worklog 854).
+#[derive(Clone, Copy)]
+struct Words<'a>(&'a [u8]);
+
+impl Words<'_> {
+    fn get(self, index: usize) -> Option<u32> {
+        let at = index.checked_mul(4)?;
+        let bytes = self.0.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn first(self) -> Option<u32> {
+        self.get(0)
+    }
+
+    fn iter(self) -> impl Iterator<Item = u32> {
+        self.0
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-    )
+    }
 }
 
 /// A compute dispatch a submission asked for.
@@ -467,7 +672,7 @@ pub fn dispatch_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DispatchCall> {
         if let (Some(x), Some(y), Some(z)) = (words.first(), words.get(1), words.get(2)) {
             dispatches.push(DispatchCall {
                 packet_offset: packet.offset,
-                groups: [*x, *y, *z],
+                groups: [x, y, z],
             });
         }
     }
@@ -1023,7 +1228,7 @@ pub fn stencil_control_at(writes: &[RegisterWrite]) -> Option<StencilControl> {
 /// `src/amd/registers/gfx103.json` (`BlendOp`: `BLEND_ZERO` 0 .. `BLEND_ONE_MINUS_CONSTANT_ALPHA` 20).
 /// The field is five bits and `21..32` are reserved, carried as [`BlendFactor::Other`] rather than
 /// mapped to a defined factor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlendFactor {
     /// Multiply by zero.
     Zero,
@@ -1106,7 +1311,7 @@ pub fn decode_blend_factor(field: u32) -> BlendFactor {
 /// How the multiplied source and destination are combined. Cited from oops-mesa
 /// `src/amd/registers/gfx103.json` (`CombFunc`: `COMB_DST_PLUS_SRC` 0 .. `COMB_DST_MINUS_SRC` 4); the
 /// field is three bits and `5..8` are reserved, carried as [`CombineFunc::Other`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CombineFunc {
     /// `dst + src` (additive blend).
     DstPlusSrc,
@@ -1139,14 +1344,14 @@ pub fn decode_combine_func(field: u32) -> CombineFunc {
 /// (register index `0xA1E0`). Cited from oops-mesa, not memory: `oops-mesa
 /// src/amd/registers/gfx103.json` maps `CB_BLEND0_CONTROL` at byte `165760` (`165760 / 4` = `0xA1E0`)
 /// and defines its fields.
-const CB_BLEND0_CONTROL: u32 = 0xA1E0;
+pub(crate) const CB_BLEND0_CONTROL: u32 = 0xA1E0;
 
 /// The colour-blend state for colour target zero, decoded from `CB_BLEND0_CONTROL`.
 ///
 /// A source and destination factor and a combine function for colour, the same three for alpha, and
 /// the flags that turn blending on and let alpha use its own set. What a host needs to build a colour
 /// blend attachment. It is colour target zero only; targets `1..8` have their own `CB_BLENDn_CONTROL`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlendControl {
     /// `COLOR_SRCBLEND` (bits 0:4): the source factor for colour.
     pub color_src: BlendFactor,
@@ -1270,6 +1475,162 @@ pub fn colour_swizzle_mode_at(writes: &[RegisterWrite]) -> Option<SwizzleMode> {
     Some(decode_colour_swizzle_mode(value))
 }
 
+/// `PA_CL_VPORT_XSCALE`, the first of the four viewport-transform registers `XSCALE`, `XOFFSET`,
+/// `YSCALE`, `YOFFSET` - `gfx103.json` maps them at bytes `164924`..`164936`, dwords `0xA10F`..`0xA112`
+/// (worklog 837).
+const PA_CL_VPORT_XSCALE: u32 = 0xA10F;
+/// `PA_CL_VTE_CNTL` (`gfx103.json`, byte `165912`, dword `0xA206`): bits 0-3 enable the x/y scale and
+/// offset.
+const PA_CL_VTE_CNTL: u32 = 0xA206;
+/// `VPORT_X_SCALE_ENA` through `VPORT_Y_OFFSET_ENA`.
+const VTE_XY_ENABLES: u32 = 0xF;
+
+/// The viewport transform a draw's clip-space positions are mapped to the target with (worklog 837):
+/// `x = x_scale * ndc_x + x_offset`, `y = y_scale * ndc_y + y_offset`, in the target's pixels, rows
+/// growing down.
+///
+/// **The sign is the point.** The open-toolchain GL context writes `YSCALE = -height / 2` - GL's NDC
+/// `+y` is up and the target's rows grow down (oops-sdk `gl_internal.h`, `gl_compute_vport`). A host
+/// that ignores the transform and maps `+y` down draws every frame upside down.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportTransform {
+    /// `PA_CL_VPORT_XSCALE`.
+    pub x_scale: f32,
+    /// `PA_CL_VPORT_XOFFSET`.
+    pub x_offset: f32,
+    /// `PA_CL_VPORT_YSCALE`.
+    pub y_scale: f32,
+    /// `PA_CL_VPORT_YOFFSET`.
+    pub y_offset: f32,
+}
+
+/// The viewport transform in force at packet `before`, from the last write of each of the four
+/// `PA_CL_VPORT_*` registers in an earlier packet (worklog 837).
+///
+/// `None` when any of the four was never written - a transform missing a term is not guessed at - or
+/// when `PA_CL_VTE_CNTL` was written without all four x/y enables, since then the hardware does not
+/// apply them and this has not modelled what it does instead. Both SDK draw paths write `0x43f`.
+#[must_use]
+pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<ViewportTransform> {
+    viewport_transform_from(|register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|w| w.register == register && w.packet_offset < before)
+            .map(|w| w.value)
+    })
+}
+
+/// [`viewport_transform_at`], reading each register's value through `last` - a
+/// [`RegisterSweep::latest`] for a caller walking draws in order (worklog 854).
+pub fn viewport_transform_from(
+    mut last: impl FnMut(u32) -> Option<u32>,
+) -> Option<ViewportTransform> {
+    if last(PA_CL_VTE_CNTL).is_some_and(|value| value & VTE_XY_ENABLES != VTE_XY_ENABLES) {
+        return None;
+    }
+    Some(ViewportTransform {
+        x_scale: f32::from_bits(last(PA_CL_VPORT_XSCALE)?),
+        x_offset: f32::from_bits(last(PA_CL_VPORT_XSCALE + 1)?),
+        y_scale: f32::from_bits(last(PA_CL_VPORT_XSCALE + 2)?),
+        y_offset: f32::from_bits(last(PA_CL_VPORT_XSCALE + 3)?),
+    })
+}
+
+/// `CB_COLOR0_INFO`, a context register: `gfx103.json` maps it at byte `167024`, dword `0xA31C`
+/// (worklog 832).
+const CB_COLOR0_INFO: u32 = 0xA31C;
+
+/// `ColorFormat` `COLOR_8_8_8_8` (`gfx103.json`, enum `ColorFormat`).
+pub const COLOR_8_8_8_8: u32 = 10;
+/// `SurfaceNumber` `NUMBER_UNORM` (`gfx103.json`, enum `SurfaceNumber`).
+pub const NUMBER_UNORM: u32 = 0;
+
+/// Which memory byte each of a four-channel colour target's shader outputs lands in -
+/// `CB_COLOR0_INFO.COMP_SWAP` (worklog 832).
+///
+/// The two orders named are the ones Mesa gives a four-channel format (`ac_formats.c:614-619`):
+/// `SWAP_STD` is `XYZW` - memory holds R, G, B, A - and `SWAP_ALT` is `ZYXW` - memory holds B, G, R, A,
+/// the order the open-toolchain GL context's display targets use (oops-sdk `gl_draw.c`, "COMP_SWAP=ALT
+/// (bytes B,G,R,A)"). The reversed orders are carried raw and refused where a byte order is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentSwap {
+    /// `SWAP_STD` (0): memory order R, G, B, A.
+    Standard,
+    /// `SWAP_ALT` (1): memory order B, G, R, A.
+    Alternate,
+    /// `SWAP_STD_REV` (2) or `SWAP_ALT_REV` (3), by raw value.
+    Other(u32),
+}
+
+/// Colour target zero's element layout: `CB_COLOR0_INFO`'s `FORMAT` (bits 2-6), `NUMBER_TYPE` (8-10)
+/// and `COMP_SWAP` (11-12), field bits from `oops-mesa src/amd/registers/gfx103.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColourTargetFormat {
+    /// The `ColorFormat` code.
+    pub format: u32,
+    /// The `SurfaceNumber` code.
+    pub number_type: u32,
+    /// The component order in memory.
+    pub swap: ComponentSwap,
+}
+
+impl ColourTargetFormat {
+    /// Whether this is a four-byte `8_8_8_8` `UNORM` target in an order [`Self::swap`] names - the
+    /// layout a rendered `Rgba8` frame can be written into exactly.
+    #[must_use]
+    pub const fn is_rgba8_class(&self) -> bool {
+        self.format == COLOR_8_8_8_8
+            && self.number_type == NUMBER_UNORM
+            && matches!(
+                self.swap,
+                ComponentSwap::Standard | ComponentSwap::Alternate
+            )
+    }
+}
+
+/// Decodes a `CB_COLOR0_INFO` value. The SDK's measured primitive-draw value `0x000180a8` decodes to
+/// `8_8_8_8`, `UNORM`, `SWAP_STD`.
+#[must_use]
+pub const fn decode_colour_target_format(info: u32) -> ColourTargetFormat {
+    ColourTargetFormat {
+        format: (info >> 2) & 0x1F,
+        number_type: (info >> 8) & 0x7,
+        swap: match (info >> 11) & 0x3 {
+            0 => ComponentSwap::Standard,
+            1 => ComponentSwap::Alternate,
+            other => ComponentSwap::Other(other),
+        },
+    }
+}
+
+/// Colour target zero's element layout from the live `CB_COLOR0_INFO` among the writes; [`None`] when
+/// the stream never set it. Most-recent-write-wins.
+#[must_use]
+pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetFormat> {
+    let value = writes
+        .iter()
+        .rev()
+        .find(|write| write.register == CB_COLOR0_INFO)?
+        .value;
+    Some(decode_colour_target_format(value))
+}
+
+/// How many distinct colour target zero base addresses a stream wrote. A submission whose draws are
+/// carried out together and written back as one frame (worklog 832) must have drawn into one target,
+/// so more than one is a refusal, not a guess at which draw went where.
+#[must_use]
+pub fn colour_target_bases_in(writes: &[RegisterWrite]) -> usize {
+    let mut bases: Vec<u32> = writes
+        .iter()
+        .filter(|write| write.register == CB_COLOR0_BASE)
+        .map(|write| write.value)
+        .collect();
+    bases.sort_unstable();
+    bases.dedup();
+    bases.len()
+}
+
 /// The absolute dword index of `VGT_GS_OUT_PRIM_TYPE`.
 ///
 /// From `oops-mesa src/amd/registers/gfx103.json` (`"map": {"at": 166508}`; `166508 / 4` = `0xA29B`),
@@ -1348,6 +1709,51 @@ pub fn primitive_topology_at(writes: &[RegisterWrite]) -> Option<PrimitiveTopolo
         .find(|write| write.register == VGT_GS_OUT_PRIM_TYPE)?
         .value;
     Some(decode_primitive_topology(value))
+}
+
+/// The absolute dword index of `VGT_SHADER_STAGES_EN`.
+///
+/// From `oops-mesa src/amd/registers/gfx103.json` (`"map": {"at": 166740}`; `166740 / 4` = `0xA2D5`),
+/// a context-space register. `GS_W32_EN` is its bit 22 in the same file's `VGT_SHADER_STAGES_EN`
+/// type: the primitive shader - what the host runs as a mesh stage - is thirty-two lanes wide.
+const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
+const GS_W32_EN: u32 = 1 << 22;
+
+/// The absolute dword index of `SPI_PS_IN_CONTROL`.
+///
+/// From `oops-mesa src/amd/registers/gfx103.json` (`"map": {"at": 165592}`; `165592 / 4` = `0xA1B6`).
+/// `PS_W32_EN` is its bit 15: the pixel shader is thirty-two lanes wide.
+const SPI_PS_IN_CONTROL: u32 = 0xA1B6;
+const PS_W32_EN: u32 = 1 << 15;
+
+/// Which of a draw's stages run thirty-two lanes wide.
+///
+/// The encodings are the same at either width and nothing in the instruction stream says which a
+/// shader was compiled for (D141): the hardware is told, in these two registers. A clear bit - or a
+/// register the stream never wrote, whose reset value is zero - is the sixty-four-lane wave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WaveWidths {
+    /// The primitive shader (the host's mesh stage) is thirty-two lanes wide.
+    pub primitive_w32: bool,
+    /// The pixel shader is thirty-two lanes wide.
+    pub pixel_w32: bool,
+}
+
+/// The stages' wave widths, from the live values of `VGT_SHADER_STAGES_EN` and `SPI_PS_IN_CONTROL`
+/// among the writes. Most-recent-write-wins.
+#[must_use]
+pub fn wave_widths_at(writes: &[RegisterWrite]) -> WaveWidths {
+    let latest = |register| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map_or(0, |write| write.value)
+    };
+    WaveWidths {
+        primitive_w32: latest(VGT_SHADER_STAGES_EN) & GS_W32_EN != 0,
+        pixel_w32: latest(SPI_PS_IN_CONTROL) & PS_W32_EN != 0,
+    }
 }
 
 /// An image resource descriptor - a "T#" - decoded from its eight dwords.
@@ -1487,6 +1893,117 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The sweep answers what the whole stream would** (worklog 854): the latest write before a
+    /// packet, per register, asked forwards, asked backwards (which starts again), and for a
+    /// register past the table.
+    #[test]
+    fn the_sweep_gives_each_registers_latest_earlier_write() {
+        use super::{RegisterSweep, RegisterWrite};
+        let write = |packet_offset, register, value| RegisterWrite {
+            packet_offset,
+            register,
+            value,
+        };
+        let writes = [
+            write(0, 0xA1E0, 1),
+            write(4, 0x2C8C, 2),
+            write(8, 0xA1E0, 3),
+            write(12, 0x1_0005, 4),
+        ];
+        let mut sweep = RegisterSweep::new(&writes);
+        assert_eq!(
+            sweep.latest(0, 0xA1E0),
+            None,
+            "a write in the packet itself is not before it"
+        );
+        assert_eq!(sweep.latest(8, 0xA1E0), Some(1));
+        assert_eq!(sweep.latest(9, 0xA1E0), Some(3));
+        assert_eq!(sweep.latest(9, 0x2C8C), Some(2));
+        assert_eq!(sweep.latest(13, 0x1_0005), Some(4));
+        // Backwards: the later writes are forgotten, not kept.
+        assert_eq!(sweep.latest(5, 0xA1E0), Some(1));
+        assert_eq!(sweep.latest(5, 0x1_0005), None);
+        let among = sweep.before_among(13, [0x1_0005, 0xA1E0, 0x2C8C]);
+        let values: Vec<u32> = among.iter().map(|w| w.value).collect();
+        assert_eq!(values, [2, 3, 4], "in the order they were made");
+    }
+
+    /// **A sweep starts from nothing, whatever the sweep before it on this thread saw** (worklog
+    /// 853): the table is reused, so a register the last stream wrote and this one does not must
+    /// read unwritten here, never the other stream's value.
+    #[test]
+    fn a_reused_sweep_table_remembers_nothing_of_the_last_stream() {
+        use super::{RegisterSweep, RegisterWrite};
+        let write = |packet_offset, register, value| RegisterWrite {
+            packet_offset,
+            register,
+            value,
+        };
+        let first = [write(0, 0xA1E0, 7), write(4, 0x2C8C, 8)];
+        {
+            let mut sweep = RegisterSweep::new(&first);
+            assert_eq!(sweep.latest(8, 0xA1E0), Some(7));
+            assert_eq!(sweep.latest(8, 0x2C8C), Some(8));
+        }
+        let second = [write(0, 0x2C8C, 9)];
+        let mut sweep = RegisterSweep::new(&second);
+        assert_eq!(
+            sweep.latest(8, 0xA1E0),
+            None,
+            "the last stream's write is not this one's"
+        );
+        assert_eq!(sweep.latest(8, 0x2C8C), Some(9));
+    }
+
+    /// **Each stage's width comes from its own bit** (worklog 854): the GL context's NGG setup
+    /// (`VGT_SHADER_STAGES_EN` = `0x00c12010`, `oops-sdk src/gl/gl_draw.c`) sets `GS_W32_EN`, and its
+    /// `SPI_PS_IN_CONTROL` sets `PS_W32_EN`. The AGC fixture's `0x02002000` sets neither, and a stream
+    /// that writes neither register is the reset value's sixty-four lanes. The later write wins.
+    #[test]
+    fn wave_widths_read_each_stages_own_bit() {
+        use super::{RegisterWrite, WaveWidths, wave_widths_at};
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        assert_eq!(wave_widths_at(&[]), WaveWidths::default());
+        let gl = [write(0xA2D5, 0x00c1_2010), write(0xA1B6, 0x0000_8002)];
+        assert_eq!(
+            wave_widths_at(&gl),
+            WaveWidths {
+                primitive_w32: true,
+                pixel_w32: true
+            }
+        );
+        // VS_W32_EN (bit 23) alone is not the primitive shader's width.
+        let vs_only = [write(0xA2D5, 1 << 23), write(0xA1B6, 0x0000_0002)];
+        assert_eq!(wave_widths_at(&vs_only), WaveWidths::default());
+        let fixture = [write(0xA2D5, 0x00c1_2010), write(0xA2D5, 0x0200_2000)];
+        assert!(!wave_widths_at(&fixture).primitive_w32);
+    }
+
+    /// **`CB_COLOR0_INFO` decodes to the element layout a written-back frame needs** (worklog 832): the
+    /// SDK's measured primitive-draw value is `8_8_8_8` `UNORM` in standard order, and the same value
+    /// with `COMP_SWAP` = 1 - the GL context's display targets - is the B, G, R, A order. A reversed
+    /// order or another format is not one a frame is written into.
+    #[test]
+    fn colour_target_info_decodes_format_number_and_swap() {
+        use super::{ComponentSwap, decode_colour_target_format};
+        let measured = decode_colour_target_format(0x0001_80a8);
+        assert_eq!(
+            (measured.format, measured.number_type, measured.swap),
+            (10, 0, ComponentSwap::Standard)
+        );
+        assert!(measured.is_rgba8_class());
+        let alternate = decode_colour_target_format(0x0001_80a8 | (1 << 11));
+        assert_eq!(alternate.swap, ComponentSwap::Alternate);
+        assert!(alternate.is_rgba8_class());
+        assert!(!decode_colour_target_format(0x0001_80a8 | (2 << 11)).is_rgba8_class());
+        assert!(!decode_colour_target_format(0x0001_80a8 | (1 << 8)).is_rgba8_class());
+        assert!(!decode_colour_target_format(0x0001_8000 | (12 << 2)).is_rgba8_class());
+    }
 
     #[test]
     fn every_shader_address_is_a_consecutive_low_high_pair() {
@@ -1651,6 +2168,102 @@ mod tests {
         let candidates = shader_candidates(&writes, &vocabulary());
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].address, 0x0000_0222_2222_2200);
+    }
+
+    /// **The viewport transform in force at a draw is its four registers' last writes before it**
+    /// (worklog 837): the GL context's 1080p transform has a negative y scale - its NDC `+y` is up -
+    /// and a draw before the writes, or after a `VTE_CNTL` disabling the x/y terms, has none.
+    #[test]
+    fn the_viewport_transform_is_read_with_its_sign() {
+        use super::{RegisterWrite, viewport_transform_at};
+        let at = |register, value: f32, packet_offset| RegisterWrite {
+            packet_offset,
+            register,
+            value: value.to_bits(),
+        };
+        // gl_compute_vport for a 1920x1080 viewport at the origin: 960, 960, -540, 540.
+        let mut writes = vec![
+            at(0xA10F, 960.0, 8),
+            at(0xA110, 960.0, 8),
+            at(0xA111, -540.0, 8),
+            at(0xA112, 540.0, 8),
+        ];
+        let transform = viewport_transform_at(&writes, 100).expect("all four were written");
+        assert_eq!(
+            (
+                transform.x_scale,
+                transform.x_offset,
+                transform.y_scale,
+                transform.y_offset
+            ),
+            (960.0, 960.0, -540.0, 540.0)
+        );
+        assert!(
+            viewport_transform_at(&writes, 8).is_none(),
+            "not before the writes"
+        );
+        writes.push(RegisterWrite {
+            packet_offset: 20,
+            register: 0xA206,
+            value: 0x430, // VTE_CNTL with the x/y enables clear
+        });
+        assert!(viewport_transform_at(&writes, 100).is_none());
+    }
+
+    /// **The vertex program is read from `PGM_LO/HI_ES`, not `PGM_LO/HI_VS`** (worklog 836): on this
+    /// generation the NGG wave takes its program counter from ES (Mesa `radv_shader.c:2078-2084`), and
+    /// the GL context's mid-frame program switch writes only the GS and ES pairs. A stream that points
+    /// ES at one program and VS at another names the ES one.
+    #[test]
+    fn the_vertex_program_is_the_es_pair() {
+        let vocabulary = Vocabulary::builtin().expect("the built-in vocabulary loads");
+        let bytes = stream(&[
+            // SET_SH_REG 0x2C48/0x2C49 (VS): one program ...
+            command(0x76, 3),
+            0x48,
+            0x1111_1111,
+            0x0000_0001,
+            // ... SET_SH_REG 0x2CC8/0x2CC9 (ES): the one the hardware runs.
+            command(0x76, 3),
+            0xC8,
+            0x2222_2222,
+            0x0000_0002,
+        ]);
+        let walked = walk(&bytes);
+        let writes = register_writes(&walked, &bytes, &vocabulary);
+        let vertex: Vec<_> = shader_candidates(&writes, &vocabulary)
+            .into_iter()
+            .filter(|c| c.stage == "vertex")
+            .collect();
+        assert_eq!(vertex.len(), 1);
+        assert_eq!(vertex[0].address, 0x0000_0222_2222_2200, "the ES program");
+    }
+
+    /// **Each draw runs the shader bound before it, not the stream's last** (worklog 835): the GL
+    /// context swaps a stage's program between draws, and a draw between the two binds saw the first.
+    /// Before this, every draw of a Neverball frame ran whichever vertex program was written last.
+    #[test]
+    fn a_draw_between_two_binds_sees_the_first() {
+        use super::shader_candidates_before;
+        let bytes = stream(&[
+            command(0x76, 3),
+            0x0C,
+            0x1111_1111,
+            0x0000_0001,
+            command(0x76, 3),
+            0x0C,
+            0x2222_2222,
+            0x0000_0002,
+        ]);
+        let walked = walk(&bytes);
+        let writes = register_writes(&walked, &bytes, &vocabulary());
+        let second_bind = walked.packets[1].offset;
+        let between = shader_candidates_before(&writes, &vocabulary(), second_bind);
+        assert_eq!(between.len(), 1);
+        assert_eq!(between[0].address, 0x0000_0111_1111_1100, "the first bind");
+        let after = shader_candidates_before(&writes, &vocabulary(), u32::MAX);
+        assert_eq!(after[0].address, 0x0000_0222_2222_2200, "the second bind");
+        assert!(shader_candidates_before(&writes, &vocabulary(), 0).is_empty());
     }
 
     #[test]

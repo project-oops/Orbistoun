@@ -353,6 +353,10 @@ pub mod storage {
     /// Not a buffer. A sampled image is bound through a descriptor and read with a sampling
     /// instruction rather than loaded, which is why it has a storage class of its own.
     pub const UNIFORM_CONSTANT: u32 = 0;
+    /// A small block the host writes per draw with a command rather than a buffer (Khronos SPIR-V
+    /// specification, `StorageClass` 9). How a draw's own values reach its shaders - the user data a
+    /// guest hands each draw (worklog 826).
+    pub const PUSH_CONSTANT: u32 = 9;
     /// Module-scope storage private to one invocation.
     ///
     /// Used here for a constant table a shader indexes: a composite constant cannot be
@@ -460,6 +464,9 @@ pub mod built_in {
     ///
     /// The guest's lane number, when one invocation is one lane.
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
+    /// This workgroup's index within its dispatch (a `uvec3`): which draw of a batch a mesh
+    /// workgroup is (D718).
+    pub const WORKGROUP_ID: u32 = 26;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
     /// A mesh shader's point index array: one vertex index per primitive (a `uint`).
@@ -1545,6 +1552,21 @@ pub const TEXTURE_BINDING: u32 = 2;
 /// storage image is written and declares no sampler. A guest's `image_store` names an image
 /// descriptor exactly as `image_load` does, and only the host cares that the two are separate.
 pub const STORAGE_IMAGE_BINDING: u32 = 3;
+
+/// Which binding a pixel shader's second sampled image is bound at: four, after the storage image
+/// (worklog 840). The open-toolchain GL context's second texture unit samples one.
+pub const SECOND_TEXTURE_BINDING: u32 = 4;
+
+/// Which binding a mesh module reads its per-draw user data from: five (D718). One host dispatch
+/// carries a run of guest draws, one workgroup each, and each workgroup reads its own draw's words -
+/// [`DRAW_DATA_STRIDE_WORDS`] of them at `workgroup * stride`.
+pub const DRAW_DATA_BINDING: u32 = 5;
+
+/// Words of user data each draw has in the draw-data buffer: one stage's share of the block.
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 16;
+
+/// The most draws one dispatch carries, and so how many strides the draw-data binding spans.
+pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 
 /// A fragment shader that writes one texel of a storage image, and a colour.
 ///

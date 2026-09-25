@@ -103,6 +103,29 @@ pub fn mount_title(module: &Path) {
     }
 }
 
+/// Where a staged title lives, from the guest's point of view: `/data/homebrew/<id>` (D722).
+pub const STAGING_MOUNT: &str = "/data/homebrew";
+
+/// Mounts a **staged** title: its directory at `/data/homebrew/<id>` and at `/app0`, both under
+/// one writable top layer, `<overlay>/data/homebrew/<id>`.
+///
+/// On the console a title staged on the user partition runs with `/app0` being that directory, and
+/// `/data` is read-write, so the title writes into its own directory. Here the title's files are
+/// the library's, which are never written: the shared top layer takes every write, and a file
+/// written through either path is seen through the other (D722).
+pub fn stage_title(module: &Path, overlay: &Path, id: &str) {
+    let Some(directory) = module.parent() else {
+        return;
+    };
+    let writable = overlay.join("data").join("homebrew").join(id);
+    let _ = std::fs::create_dir_all(&writable);
+    let staged = format!("{STAGING_MOUNT}/{id}");
+    layer(&staged, directory.to_path_buf());
+    layer(&staged, writable.clone());
+    layer(APP_MOUNT, writable);
+    allow_writes(APP_MOUNT);
+}
+
 /// Points `/data` at a host directory a guest may write into.
 ///
 /// Created here rather than at first write: a guest asking for a file under a mount whose
@@ -216,6 +239,20 @@ fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
             .all(|(on_disk, asked)| on_disk == asked)
 }
 
+/// A path under a mount with its `.` components (and the empty ones a doubled slash leaves) dropped.
+///
+/// **Only `.`, never `..`.** A `.` stays where it is, so dropping it cannot climb out of a mount or
+/// step through a symbolic link, and the rule [`is_contained`] protects is untouched: `..` survives
+/// this and is still refused there. Neverball names its data `/app0/./data` - its base directory
+/// joined to upstream's `./data` - and `Path::components` keeps a *leading* `.` as a component, so
+/// the containment walk refused a path every POSIX lookup accepts (worklog 812).
+fn without_current_dir(rest: &str) -> String {
+    rest.split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Maps a guest path to its host path - the existing layer if it has one, else the writable layer
 /// where a new file would go. **Path mapping, not an existence check**: a title's own copy shadows
 /// the base, and a not-yet-created file still maps to where it belongs. Creates and the tests that
@@ -235,12 +272,118 @@ pub fn resolve_existing(guest_path: &str) -> Option<PathBuf> {
     resolve_inner(guest_path, false)
 }
 
+/// Where a guest's write to `guest_path` goes: always the **top** layer of its mount, never one below.
+///
+/// `None` unless the path is under a writable prefix. A file that exists only in a lower layer - the
+/// base tree, or a staged title's library copy under its writable `/app0` (D722) - is **copied up**
+/// first, so the write modifies the guest's own copy and the lower layer is never touched. Without
+/// this a write to an existing file resolved to the first layer that had it, and that was the
+/// library.
+pub fn resolve_for_write(guest_path: &str) -> Option<PathBuf> {
+    let (top, below) = locate_for_write(guest_path)?;
+    if let Some(lower) = below {
+        if let Some(parent) = top.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        if lower.is_dir() {
+            std::fs::create_dir_all(&top).ok()?;
+        } else {
+            std::fs::copy(&lower, &top).ok()?;
+        }
+    }
+    Some(top)
+}
+
+/// Where a guest's truncating create of `guest_path` goes: the top layer, with nothing copied up,
+/// because the old contents are discarded either way. `None` unless the path is writable.
+pub fn resolve_for_create(guest_path: &str) -> Option<PathBuf> {
+    locate_for_write(guest_path).map(|(top, _)| top)
+}
+
+/// Where a guest's removal or rename of `guest_path` acts: the top layer's path, and only when the
+/// name does **not** also exist in a layer below it.
+///
+/// Removing the top copy of a name a lower layer also holds would leave the lower one visible, so the
+/// guest would see its delete fail to happen; and removing the lower one would write to the library.
+/// Answering that correctly needs a whiteout, which this overlay does not keep - so it is refused
+/// rather than answered wrong (D722).
+pub fn resolve_for_removal(guest_path: &str) -> Option<PathBuf> {
+    let (top, _) = locate_for_write(guest_path)?;
+    (!lower_layer_holds(guest_path)).then_some(top)
+}
+
+/// The top layer's path for a writable guest path, and the lower layer's copy when the name exists
+/// only there.
+fn locate_for_write(guest_path: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    if !is_writable(guest_path) {
+        return None;
+    }
+    let top = resolve_top(guest_path)?;
+    let existing = resolve_existing(guest_path);
+    let below = existing.filter(|found| *found != top);
+    Some((top, below))
+}
+
+/// Whether some layer other than the top one holds `guest_path`.
+fn lower_layer_holds(guest_path: &str) -> bool {
+    let Some(top) = resolve_top(guest_path) else {
+        return false;
+    };
+    let guest_path = guest_path.replace('\\', "/");
+    let Ok(mounts) = mounts().lock() else {
+        return false;
+    };
+    for (prefix, roots) in mounts.iter().rev() {
+        let Some(rest) = guest_path.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        let rest = without_current_dir(rest);
+        // A lower root may be the same host directory as the top one (a writable entry's overlay
+        // stacked twice), which is not a second copy.
+        return !rest.is_empty()
+            && is_contained(&rest)
+            && roots
+                .iter()
+                .skip(1)
+                .any(|root| root.join(&rest) != top && exists_case_sensitive(root, &rest));
+    }
+    false
+}
+
+/// The top layer's host path for a guest path, whether or not anything is there.
+fn resolve_top(guest_path: &str) -> Option<PathBuf> {
+    let guest_path = guest_path.replace('\\', "/");
+    let mounts = mounts().lock().ok()?;
+    for (prefix, roots) in mounts.iter().rev() {
+        let Some(rest) = guest_path.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        let rest = without_current_dir(rest);
+        let root = roots.first()?;
+        if rest.is_empty() {
+            return Some(root.clone());
+        }
+        return is_contained(&rest).then(|| root.join(rest));
+    }
+    None
+}
+
 fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
     // Normalised so `\` from a guest that mixes conventions cannot slip a component past
     // the component walk below.
     let guest_path = guest_path.replace('\\', "/");
     let mounts = mounts().lock().ok()?;
-    for (prefix, roots) in mounts.iter() {
+    // **The most specific mount answers first.** A mount nested in another - a title at
+    // `/user/app/<id>` inside `/user/app` - sorts after its parent, so walking in reverse key order
+    // reaches it first; in forward order the parent answered for every path under it and the
+    // nested mount was unreachable (worklog 842).
+    for (prefix, roots) in mounts.iter().rev() {
         let Some(rest) = guest_path.strip_prefix(prefix.as_str()) else {
             continue;
         };
@@ -253,15 +396,22 @@ fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
         if !guest_path[prefix.len()..].starts_with('/') {
             continue;
         }
-        if !is_contained(rest) {
+        // `.` names the directory it sits in, so `/app0/./data` is `/app0/data`, as a POSIX
+        // lookup has it. Collapsed only after the whole-component check, so `/app0.` stays a
+        // different name from `/app0`.
+        let rest = without_current_dir(rest);
+        if rest.is_empty() {
+            return roots.first().cloned();
+        }
+        if !is_contained(&rest) {
             return None;
         }
         let mut found = None;
         for (index, root) in roots.iter().enumerate() {
-            let candidate = root.join(rest);
+            let candidate = root.join(&rest);
             // The first layer that actually has it. A title's own copy shadows the base,
             // which is the whole point of layering rather than merging.
-            if exists_case_sensitive(root, rest) {
+            if exists_case_sensitive(root, &rest) {
                 return Some(candidate);
             }
             if index == 0 {
@@ -465,6 +615,31 @@ mod tests {
             resolve("/app0/..%2f.."),
             Some(std::path::PathBuf::from("/titles/one").join("..%2f..")),
             "only real components climb; an unescaped literal is just a filename"
+        );
+    }
+
+    /// **`.` names the directory it is in; `..` is still refused.** Neverball asks for
+    /// `/app0/./data/ttf/DejaVuSans-Bold.ttf` - its base directory joined to `./data` - and was
+    /// answered ENOENT for a font shipped in its own package (worklog 812).
+    #[test]
+    fn a_current_directory_component_names_the_directory_it_is_in() {
+        let _guard = with_app_mount("/titles/one");
+        let root = std::path::PathBuf::from("/titles/one");
+        assert_eq!(
+            resolve("/app0/./data/ttf/font.ttf"),
+            Some(root.join("data/ttf/font.ttf"))
+        );
+        assert_eq!(resolve("/app0/a/./b"), Some(root.join("a/b")));
+        assert_eq!(resolve("/app0/."), Some(root.clone()));
+        assert_eq!(
+            resolve("/app0/./../secret"),
+            None,
+            "a `.` does not unlock `..`"
+        );
+        assert_eq!(
+            resolve("/app0."),
+            None,
+            "`/app0.` is its own name, not the mount"
         );
     }
 

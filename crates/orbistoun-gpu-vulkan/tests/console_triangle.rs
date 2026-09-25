@@ -185,7 +185,11 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
 
     let mut backend = VulkanBackend::new();
     let outcome = drive(&mut backend, &submission).expect("the console triangle drives");
-    assert_eq!(outcome.refused, 0, "no command was refused");
+    assert_eq!(
+        outcome.refused, 0,
+        "no command was refused: {:?}",
+        outcome.refusals
+    );
     let frame = backend.last_frame().expect("a frame was rendered");
     assert_eq!(
         (frame.width, frame.height),
@@ -286,7 +290,11 @@ fn a_point_draw_renders_as_a_point_not_a_triangle() {
 
     let mut backend = VulkanBackend::new();
     let outcome = drive(&mut backend, &submission).expect("the point draw drives");
-    assert_eq!(outcome.refused, 0, "no command was refused");
+    assert_eq!(
+        outcome.refused, 0,
+        "no command was refused: {:?}",
+        outcome.refusals
+    );
     let frame = backend.last_frame().expect("a frame was rendered");
     assert_eq!(
         (frame.width, frame.height),

@@ -55,6 +55,9 @@ const DISPATCH_WORDS: usize = 64;
 const RENDER_WIDTH: u32 = 64;
 /// See [`RENDER_WIDTH`].
 const RENDER_HEIGHT: u32 = 64;
+/// Released snapshot buffers kept for reuse (worklog 850): one is in flight per deferred copy, and a
+/// few spare cover a guest with more than one copy destination.
+const SPARE_SNAPSHOTS: usize = 4;
 /// The colour a `Draw` clears its attachment to before drawing - opaque black.
 const CLEAR_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
@@ -153,26 +156,27 @@ fn upload_host_buffer(
         memory,
         size,
         words,
+        offset: 0,
     })
 }
 
-/// A content hash of the guest-memory window, so a stable window uploads once (D703).
-fn window_hash(words: &[u32]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    words.hash(&mut hasher);
-    hasher.finish()
-}
+/// What each window slot's offset is a multiple of (worklog 847): the largest
+/// `minStorageBufferOffsetAlignment` Vulkan allows, so no device's limit is missed.
+const WINDOW_SLOT_ALIGN: usize = 256;
 
 /// Whether the shared session's device can run a mesh stage.
 ///
 /// A guest's geometry is a mesh shader, and a device without the stage can run a frame's pixel
 /// shaders and not its geometry - which is a refusal to name (D010), not a crash at draw time.
 fn mesh_stage_available() -> bool {
-    matches!(
-        probe(),
-        Availability::Available { properties } if properties.mesh_shading
-    )
+    // Asked once: the device does not change, and asking cloned its properties on every draw.
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        matches!(
+            probe(),
+            Availability::Available { properties } if properties.mesh_shading
+        )
+    })
 }
 
 /// A shader made resident: the module the driver validated, and its words.
@@ -183,8 +187,33 @@ fn mesh_stage_available() -> bool {
 #[derive(Debug)]
 struct ResidentShader {
     module: vk::ShaderModule,
-    spirv: Vec<u32>,
+    /// Shared rather than owned, so a draw takes it without copying it (worklog 843).
+    spirv: std::sync::Arc<[u32]>,
+    /// A hash of [`Self::spirv`], taken once, that a draw's pipeline is looked up by.
+    hash: u64,
+    /// Whether it is a mesh shader, read off its entry point once rather than per draw.
+    mesh: bool,
 }
+
+/// A sampled texture a `BindTexture` gave: its texels, row length, and a hash of the texels taken
+/// once at the bind, that a draw's pipeline is looked up by (worklog 843).
+#[derive(Debug, Clone)]
+struct BoundTexture {
+    texels: std::sync::Arc<[u32]>,
+    width: u32,
+    hash: u64,
+}
+
+/// A content hash of guest words - what a shader or texture is, for finding the pipeline built
+/// for it (worklog 843).
+fn content_hash(words: &[u32]) -> u64 {
+    orbistoun_gpu::content_hash(words)
+}
+
+/// The target a draw rendered into, as [`VulkanBackend`]'s `contents` keys it - `None` inside is the
+/// interim square, not "no draw" (worklog 838).
+#[derive(Debug, Clone, Copy)]
+struct DrawnOn(Option<ResourceId>);
 
 /// A Vulkan render backend.
 ///
@@ -221,22 +250,67 @@ pub struct VulkanBackend {
     bound_buffer: Option<ResourceId>,
     /// The observation buffer of the most recent dispatch, read back from the device.
     last_output: Option<Vec<u32>>,
-    /// The frame the most recent `Draw` rendered, read back from the device.
-    last_pixels: Option<framebuffer::Pixels>,
+    /// The target the most recent `Draw` rendered into - its frame is that target's entry in
+    /// [`Self::contents`], kept once rather than copied (worklog 838).
+    last_drawn: Option<DrawnOn>,
+    /// Each target's attachment kept on the device across draws (worklog 839), by the same key as
+    /// [`Self::contents`].
+    resident: BTreeMap<Option<ResourceId>, framebuffer::ResidentAttachment>,
+    /// The targets whose resident attachment holds draws [`Self::contents`] does not have yet - read
+    /// back when their pixels are asked for.
+    unread: std::collections::BTreeSet<Option<ResourceId>>,
+    /// What each target holds after the draws on it so far, by the target a `SetRenderTargets`
+    /// selected (`None` is the interim square). The next draw on a target starts from this rather
+    /// than a clear, so a frame's draws accumulate (worklog 822).
+    contents: BTreeMap<Option<ResourceId>, framebuffer::Pixels>,
+    /// Frames kept as they stood when [`Self::snapshot_last_frame`] took them, by the id it
+    /// answered (worklog 850).
+    snapshots: BTreeMap<u64, framebuffer::FrameSnapshot>,
+    /// The id the next snapshot gets.
+    next_snapshot: u64,
+    /// Snapshot buffers released and kept for reuse: a GL frame keeps and drops one per submission,
+    /// and allocating eight megabytes each time was most of what keeping one cost.
+    spare_snapshots: Vec<framebuffer::FrameSnapshot>,
+    /// Counts every change to what a draw would be bound with - every command but a draw and the
+    /// geometry stage's user data, and every window, target or resource change (D718).
+    state_generation: u64,
+    /// The batch the last mesh draw went into, and the generation it was drawn at: a draw at the same
+    /// generation differs from it only in its geometry words, so it joins without being worked out
+    /// again.
+    batched: Option<(u64, framebuffer::BatchKey)>,
+    /// The user-data block the next draw's shaders read at entry, vertex words first (worklog 826),
+    /// as the latest `SetUserData` for each stage left it.
+    user_data: [u32; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
+    /// The texture the next draw samples, and its row length - the latest `BindTexture`
+    /// (worklog 828); `None` samples the default texel.
+    texture: Option<BoundTexture>,
+    /// The second texture a `BindTexture` of slot 1 gave (worklog 840).
+    second_texture: Option<BoundTexture>,
+    /// Colour target zero's blend state for the next draw - the latest `SetBlend` (`REQ-...2ea9`,
+    /// worklog 829); `None` draws opaque.
+    blend: Option<orbistoun_gpu::BlendControl>,
+    /// The guest's clip-to-pixel transform for the next draw - the latest `SetViewportTransform`
+    /// (worklog 837); `None` maps clip space over the whole attachment the host's way.
+    viewport_transform: Option<orbistoun_gpu::ViewportTransform>,
     /// The frame's guest-memory window, set once before its commands (D703): a geometry shader
     /// fetches its vertices from here.
     guest_memory: Vec<u32>,
+    /// Counts changes to [`Self::guest_memory`]'s words, each found by comparing them (worklog 857).
+    guest_memory_generation: u64,
     /// The window uploaded to the device, bound directly by a mesh draw instead of seeded each time
-    /// (D703, worklog 645), with the content hash it was built from so a stable window uploads once.
+    /// (D703, worklog 645), so a stable window uploads once.
     window_buffer: Option<compute::DispatchBuffer>,
-    /// The hash of the words [`Self::window_buffer`] holds, to know when it is stale.
-    window_hash: u64,
+    /// The [`Self::guest_memory_generation`] [`Self::window_buffer`] holds, to know when it is stale.
+    window_generation: u64,
     /// How many times the window buffer has actually been uploaded - it distinguishes "uploaded once
     /// and reused" from "re-uploaded every draw", which are identical from the pixels (D703).
     window_uploads: usize,
     /// The guest-memory window read back after the most recent mesh `Draw`, or [`None`] when the
     /// last draw took the vertex path (which reads no window).
     last_window: Option<Vec<u32>>,
+    /// Whether mesh draws have run on the window since [`Self::last_window`] was last read, so the
+    /// next ask reads it from the device (worklog 843).
+    window_unread: bool,
 }
 
 impl VulkanBackend {
@@ -254,12 +328,27 @@ impl VulkanBackend {
             bound_fragment: None,
             bound_buffer: None,
             last_output: None,
-            last_pixels: None,
+            last_drawn: None,
+            resident: BTreeMap::new(),
+            unread: std::collections::BTreeSet::new(),
+            contents: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
+            next_snapshot: 0,
+            spare_snapshots: Vec::new(),
+            state_generation: 0,
+            batched: None,
+            user_data: [0; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
+            texture: None,
+            second_texture: None,
+            blend: None,
+            viewport_transform: None,
             guest_memory: Vec::new(),
+            guest_memory_generation: 0,
             window_buffer: None,
-            window_hash: 0,
+            window_generation: 0,
             window_uploads: 0,
             last_window: None,
+            window_unread: false,
         }
     }
 
@@ -282,6 +371,124 @@ impl VulkanBackend {
         self.buffers.len()
     }
 
+    /// Sends the draws recorded so far to the device without waiting for them (D714): the frame is
+    /// read, and so waited for, only when it is written back.
+    ///
+    /// # Errors
+    ///
+    /// When the submit fails.
+    pub fn submit_draws(&mut self) -> Result<(), DispatchError> {
+        framebuffer::submit_recorded()
+    }
+
+    /// Whether this backend holds a frame for `target` at `extent` - on the device or read back - so a
+    /// submission into it can start from that rather than being seeded (worklog 844).
+    pub fn holds_target(&self, target: ResourceId, extent: (u32, u32)) -> bool {
+        self.resident
+            .get(&Some(target))
+            .is_some_and(|resident| resident.extent() == extent)
+            || self
+                .contents
+                .get(&Some(target))
+                .is_some_and(|pixels| (pixels.width, pixels.height) == extent)
+    }
+
+    /// Gives a colour target what it holds before any draw on it (`REQ-...77fa`, worklog 832): the
+    /// first draw on `target` then starts from these pixels rather than the clear, so a submission
+    /// drawn over a surface the guest already filled - a clear, the frame before - draws over that.
+    pub fn seed_target(&mut self, target: ResourceId, pixels: framebuffer::Pixels) {
+        self.state_generation += 1;
+        self.unread.remove(&Some(target));
+        // The seed replaces whatever the device held for it: in place, into its resident attachment
+        // when it has one of that extent (worklog 857), so the device holds it and no host copy does.
+        if let Some(resident) = self.resident.get(&Some(target))
+            && resident.extent() == (pixels.width, pixels.height)
+            && resident.reload(&pixels.bytes).is_ok()
+        {
+            self.contents.remove(&Some(target));
+            return;
+        }
+        // Otherwise its resident attachment goes, and the next draw makes one from the seed.
+        if let Some(resident) = self.resident.remove(&Some(target)) {
+            resident.destroy();
+        }
+        self.contents.insert(Some(target), pixels);
+    }
+
+    /// [`Self::seed_target`] with `word` - linear `Rgba8` - in every pixel: what a target the guest
+    /// cleared holds (worklog 863). Filled on the device, in place, where the target has a resident
+    /// attachment of that extent; otherwise seeded from the pixels as any seed is.
+    pub fn seed_target_uniform(&mut self, target: ResourceId, extent: (u32, u32), word: u32) {
+        if let Some(resident) = self.resident.get(&Some(target))
+            && resident.extent() == extent
+            && resident.reload_uniform(word).is_ok()
+        {
+            self.state_generation += 1;
+            self.unread.remove(&Some(target));
+            self.contents.remove(&Some(target));
+            return;
+        }
+        let pixels = extent.0 as usize * extent.1 as usize;
+        self.seed_target(
+            target,
+            framebuffer::Pixels {
+                width: extent.0,
+                height: extent.1,
+                bytes: word.to_le_bytes().repeat(pixels),
+            },
+        );
+    }
+
+    /// Binds a texture the following draws sample at `slot` - the second slot is a pixel shader's
+    /// second texture (worklog 840).
+    fn bind_texture(
+        &mut self,
+        slot: u32,
+        (texels, hash): (&std::sync::Arc<[u32]>, u64),
+        (width, height): (u32, u32),
+    ) -> Result<(), BackendError> {
+        if texels.len() != (width as usize) * (height as usize) {
+            return Err(BackendError::Device(format!(
+                "BindTexture carries {} texels for a {width}x{height} texture",
+                texels.len()
+            )));
+        }
+        // Shared, and hashed where it was read: binding copies and hashes nothing (worklog 844).
+        let bound = Some(BoundTexture {
+            texels: std::sync::Arc::clone(texels),
+            width,
+            hash,
+        });
+        match slot {
+            0 => self.texture = bound,
+            1 => self.second_texture = bound,
+            _ => {
+                self.refused += 1;
+                return Err(BackendError::Unsupported {
+                    command: "BindTexture beyond the second texture slot",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Records the fixed-function state a following draw runs under - set now, applied at the draw.
+    fn set_draw_state(&mut self, command: &RenderCommand) {
+        match command {
+            // The rectangle a following draw is restricted to (worklog 644). Its own rectangle is not
+            // validated here - a scissor outside the attachment is clamped where it is used, not
+            // refused.
+            RenderCommand::SetViewport(rect) => self.current_viewport = Some(*rect),
+            // The guest's clip-to-pixel transform (worklog 837).
+            RenderCommand::SetViewportTransform(transform) => {
+                self.viewport_transform = Some(*transform);
+            }
+            // The blend state (`REQ-...2ea9`, worklog 829).
+            RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
+            _ => {}
+        }
+    }
+
     /// How many distinct colour render targets the backend currently holds.
     pub fn resident_targets(&self) -> usize {
         self.targets.len()
@@ -301,9 +508,140 @@ impl VulkanBackend {
         self.last_output.as_deref()
     }
 
+    /// Keeps the frame the most recent `Draw` rendered **as it stands now**, on the device, and
+    /// answers an id to read it by later (worklog 850) - `None` when that frame is not resident with
+    /// draws the host has not seen, which is the only case a snapshot saves a read.
+    pub fn snapshot_last_frame(&mut self) -> Option<u64> {
+        let target = self.last_drawn?.0;
+        if !self.unread.contains(&target) {
+            return None;
+        }
+        let resident = self.resident.get(&target)?;
+        let extent = resident.extent();
+        let spare = self
+            .spare_snapshots
+            .iter()
+            .position(|spare| spare.extent() == extent)
+            .map(|index| self.spare_snapshots.swap_remove(index));
+        let snapshot = match spare.map_or_else(
+            || framebuffer::FrameSnapshot::create(extent.0, extent.1),
+            Ok,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                eprintln!("orbistoun: a frame snapshot could not be made: {e:?}");
+                return None;
+            }
+        };
+        if let Err(e) = resident.snapshot_into(&snapshot) {
+            eprintln!("orbistoun: a resident frame could not be kept: {e:?}");
+            self.release_snapshot(snapshot);
+            return None;
+        }
+        let id = self.next_snapshot;
+        self.next_snapshot += 1;
+        self.snapshots.insert(id, snapshot);
+        Some(id)
+    }
+
+    /// Keeps a released snapshot buffer for reuse, up to a few.
+    fn release_snapshot(&mut self, snapshot: framebuffer::FrameSnapshot) {
+        if self.spare_snapshots.len() < SPARE_SNAPSHOTS {
+            self.spare_snapshots.push(snapshot);
+        } else {
+            snapshot.destroy();
+        }
+    }
+
+    /// The pixels of snapshot `id`, releasing it. `None` when there is no such snapshot or it could
+    /// not be read.
+    pub fn take_snapshot(&mut self, id: u64) -> Option<framebuffer::Pixels> {
+        let snapshot = self.snapshots.remove(&id)?;
+        let pixels = snapshot.read();
+        self.release_snapshot(snapshot);
+        match pixels {
+            Ok(pixels) => Some(pixels),
+            Err(e) => {
+                eprintln!("orbistoun: a kept frame could not be read: {e:?}");
+                None
+            }
+        }
+    }
+
+    /// Releases snapshot `id` unread - the copy it stood for was overwritten before anything read it.
+    pub fn drop_snapshot(&mut self, id: u64) {
+        if let Some(snapshot) = self.snapshots.remove(&id) {
+            self.release_snapshot(snapshot);
+        }
+    }
+
     /// The frame the most recent `Draw` rendered, or [`None`] if none has.
-    pub fn last_frame(&self) -> Option<&framebuffer::Pixels> {
-        self.last_pixels.as_ref()
+    ///
+    /// A frame drawn into a resident attachment is read back here, once, the first time it is asked
+    /// for after a draw (worklog 839); `None` too when that readback fails, which is said on stderr.
+    pub fn last_frame(&mut self) -> Option<&framebuffer::Pixels> {
+        let target = self.last_drawn?.0;
+        if let Err(e) = self.read_back(target) {
+            eprintln!("orbistoun: a resident frame could not be read back: {e:?}");
+            return None;
+        }
+        self.contents.get(&target)
+    }
+
+    /// Brings [`Self::contents`] up to date with `target`'s resident attachment, if it has draws the
+    /// host has not seen.
+    fn read_back(&mut self, target: Option<ResourceId>) -> Result<(), DispatchError> {
+        if self.unread.contains(&target)
+            && let Some(resident) = self.resident.get(&target)
+        {
+            let pixels = resident.read_back()?;
+            self.contents.insert(target, pixels);
+            self.unread.remove(&target);
+        }
+        Ok(())
+    }
+
+    /// Hands `target` back to the host: its resident attachment is read back and destroyed, so
+    /// [`Self::contents`] is the only copy - before a draw on a path that does not use one, or a
+    /// seed that replaces it.
+    fn retire_resident(&mut self, target: Option<ResourceId>) -> Result<(), DispatchError> {
+        self.read_back(target)?;
+        if let Some(resident) = self.resident.remove(&target) {
+            resident.destroy();
+        }
+        Ok(())
+    }
+
+    /// `target`'s resident attachment at `width` x `height`, created from its [`Self::contents`] (or
+    /// the clear) when it has none or has one of another size.
+    fn resident_for(
+        &mut self,
+        target: Option<ResourceId>,
+        (width, height): (u32, u32),
+    ) -> Result<&framebuffer::ResidentAttachment, DispatchError> {
+        if self
+            .resident
+            .get(&target)
+            .is_some_and(|r| r.extent() != (width, height))
+        {
+            self.retire_resident(target)?;
+        }
+        Ok(match self.resident.entry(target) {
+            std::collections::btree_map::Entry::Occupied(existing) => existing.into_mut(),
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                let initial = self
+                    .contents
+                    .get(&target)
+                    .filter(|pixels| (pixels.width, pixels.height) == (width, height))
+                    .map(|pixels| pixels.bytes.as_slice());
+                slot.insert(framebuffer::ResidentAttachment::create(
+                    width,
+                    height,
+                    initial,
+                    CLEAR_COLOUR,
+                )?)
+            }
+        })
     }
 
     /// The guest-memory window read back after the most recent mesh `Draw` or compute `Dispatch`, or
@@ -313,7 +651,15 @@ impl VulkanBackend {
     /// drew and this shows what the window held after; for a dispatch, this is the guest's result,
     /// which lives in guest memory, not in the observation window (worklog 647). Either way it is what
     /// the frame set (worklog 641) unless a shader wrote it.
-    pub fn last_window(&self) -> Option<&[u32]> {
+    ///
+    /// After mesh draws it is read here, once, rather than after each draw (worklog 843).
+    pub fn last_window(&mut self) -> Option<&[u32]> {
+        if std::mem::take(&mut self.window_unread) {
+            self.last_window = self
+                .window_buffer
+                .as_ref()
+                .and_then(|buffer| framebuffer::read_buffer(buffer).ok());
+        }
         self.last_window.as_deref()
     }
 
@@ -323,9 +669,9 @@ impl VulkanBackend {
     /// by every draw that reads it, rather than copied into a fresh buffer each draw. When the bytes
     /// change the stale buffer is destroyed and a new one uploaded, so this never grows without bound.
     fn ensure_window_buffer(&mut self) -> Result<compute::DispatchBuffer, BackendError> {
-        let hash = window_hash(&self.guest_memory);
+        let generation = self.guest_memory_generation;
         if let Some(buffer) = self.window_buffer {
-            if self.window_hash == hash {
+            if self.window_generation == generation {
                 return Ok(buffer);
             }
         }
@@ -334,24 +680,79 @@ impl VulkanBackend {
         let session = session
             .lock()
             .map_err(|_| BackendError::Device("Vulkan session lock poisoned".to_owned()))?;
-        // The stale window, destroyed before the new one is uploaded: no draw is in flight between
-        // here and the next bind, and it was created by this backend.
-        if let Some(stale) = self.window_buffer.take() {
-            // SAFETY: created by this backend on this device, no longer bound, destroyed once.
-            unsafe { session.device.destroy_buffer(stale.buffer, None) };
-            // SAFETY: the buffer above is destroyed and nothing is bound to the memory now.
-            unsafe { session.device.free_memory(stale.memory, None) };
+        let device_error =
+            |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
+        let words = self.guest_memory.len().max(1);
+        // Each slot rounded up so every slot's offset is aligned for a storage-buffer binding: 256 is
+        // the most any device may ask (`minStorageBufferOffsetAlignment`).
+        let stride = (words * 4).next_multiple_of(WINDOW_SLOT_ALIGN) as vk::DeviceSize;
+        // **A ring of slots in one buffer** (worklog 847): a changed window goes into the next slot,
+        // which the device finished reading `WINDOW_SLOTS` submissions ago - so writing it waits for
+        // nothing in the ordinary case, and every cached pipeline's binding still names the one
+        // buffer, its slot a dynamic offset. Rewriting one buffer in place waited for the device to
+        // go idle on every submission.
+        if self.window_buffer.is_none_or(|view| view.words != words) {
+            if let Some(stale) = self.window_buffer.take() {
+                framebuffer::settle(&session).map_err(|e| device_error("settle", e))?;
+                // SAFETY: created by this backend on this device, no longer bound, destroyed once.
+                unsafe { session.device.destroy_buffer(stale.buffer, None) };
+                // SAFETY: the buffer above is destroyed and nothing is bound to the memory now.
+                unsafe { session.device.free_memory(stale.memory, None) };
+            }
+            let total = stride * framebuffer::WINDOW_SLOTS as vk::DeviceSize;
+            let (buffer, memory) = compute::create_host_buffer(
+                &session.instance,
+                session.physical,
+                &session.device,
+                total,
+                usize::try_from(total / 4).unwrap_or(words),
+            )
+            .map_err(|e| device_error("create_host_buffer", e))?;
+            self.window_buffer = Some(compute::DispatchBuffer {
+                buffer,
+                memory,
+                size: stride,
+                words,
+                // The last slot, so the first window goes into slot zero.
+                offset: stride * (framebuffer::WINDOW_SLOTS as vk::DeviceSize - 1),
+            });
         }
-        let bytes: Vec<u8> = self
-            .guest_memory
-            .iter()
-            .flat_map(|word| word.to_le_bytes())
-            .collect();
-        let buffer = upload_host_buffer(&session, &bytes)?;
-        self.window_buffer = Some(buffer);
-        self.window_hash = hash;
+        let Some(mut view) = self.window_buffer else {
+            return Err(BackendError::Device("no window buffer".to_owned()));
+        };
+        let slot = usize::try_from(view.offset / stride)
+            .unwrap_or(0)
+            .wrapping_add(1)
+            % framebuffer::WINDOW_SLOTS;
+        framebuffer::enter_window_slot(&session, slot)
+            .map_err(|e| device_error("window slot", e))?;
+        view.offset = stride * slot as vk::DeviceSize;
+        // SAFETY: the memory is host-visible and coherent, created by this backend and not mapped; the
+        // slot's last readers have finished (`enter_window_slot`), so no draw reads it meanwhile.
+        let mapped = unsafe {
+            session.device.map_memory(
+                view.memory,
+                view.offset,
+                stride,
+                vk::MemoryMapFlags::empty(),
+            )
+        }
+        .map_err(|e| BackendError::Device(format!("map_memory: {e:?}")))?;
+        // SAFETY: `mapped` covers the slot's `stride` bytes, at least the window's words, and this
+        // process has exclusive access while it is mapped.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.guest_memory.as_ptr(),
+                mapped.cast::<u32>(),
+                self.guest_memory.len(),
+            );
+        }
+        // SAFETY: mapped immediately above; the pointer is not used after unmapping.
+        unsafe { session.device.unmap_memory(view.memory) };
+        self.window_buffer = Some(view);
+        self.window_generation = generation;
         self.window_uploads += 1;
-        Ok(buffer)
+        Ok(view)
     }
 
     /// How many times the guest-memory window has been uploaded to the device - one for a window that
@@ -381,7 +782,123 @@ impl VulkanBackend {
     /// not build, so it is refused rather than drawn as a non-indexed draw pretending to be one.
     ///
     /// A draw with either shader unbound is refused rather than run half a pipeline.
+    /// **What a draw's pipeline is, as one number** (worklog 843): its two shaders, its two textures,
+    /// the blend, the viewport transform and the extent - everything a pipeline is built from except
+    /// the guest-memory buffer, which is re-bound each time. The hashes were taken once, when each
+    /// became resident or was bound, so the key costs nothing per draw.
+    fn pipeline_key(&self, shaders: (u64, u64), extent: (u32, u32)) -> std::num::NonZeroU64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (shaders, extent).hash(&mut hasher);
+        self.texture.as_ref().map(|t| t.hash).hash(&mut hasher);
+        self.second_texture
+            .as_ref()
+            .map(|t| t.hash)
+            .hash(&mut hasher);
+        // The scissor too: it is fixed state in the pipeline, so a draw with another must not be
+        // handed this one. Floats by their bits - hashed, not formatted, on every draw.
+        self.blend.hash(&mut hasher);
+        self.viewport_transform
+            .map(|t| [t.x_scale, t.x_offset, t.y_scale, t.y_offset].map(f32::to_bits))
+            .hash(&mut hasher);
+        self.current_viewport
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .hash(&mut hasher);
+        std::num::NonZeroU64::new(hasher.finish()).unwrap_or(std::num::NonZeroU64::MIN)
+    }
+
+    /// **Nothing but the geometry words changed since the last mesh draw was batched** (D718): this
+    /// draw is that draw's with its own words, so it joins the batch if the batch is still open -
+    /// `false` when it cannot, and the draw takes the whole path.
+    fn join_unchanged_batch(&mut self) -> bool {
+        let Some((generation, key)) = self.batched else {
+            return false;
+        };
+        if generation != self.state_generation {
+            return false;
+        }
+        let (words, _) = framebuffer::split_user_data(&self.user_data);
+        if !framebuffer::join_open_batch(&key, words) {
+            return false;
+        }
+        let target = self.current_target;
+        self.unread.insert(target);
+        self.last_drawn = Some(DrawnOn(target));
+        self.last_window = None;
+        self.window_unread = true;
+        true
+    }
+
+    /// A draw through a mesh stage, into `target`'s resident attachment.
+    fn draw_mesh(
+        &mut self,
+        shaders: (&[u32], &[u32]),
+        start: &framebuffer::Start<'_>,
+        target: Option<ResourceId>,
+        extent: (u32, u32),
+        scissor: Option<vk::Rect2D>,
+    ) -> Result<(), BackendError> {
+        let device_error =
+            |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
+        if !mesh_stage_available() {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "Draw of a mesh geometry shader on a device with no mesh stage",
+            });
+        }
+        // The guest-memory window the frame set, uploaded once and bound directly (worklog 645), so
+        // a guest's primitive shader fetches its vertices from it (worklog 641); read back after, in
+        // case a shader wrote it.
+        let window = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeWindow, || {
+            self.ensure_window_buffer()
+        })?;
+        let resident = self
+            .resident_for(target, extent)
+            .map_err(|e| device_error("draw (mesh)", e))?;
+        let batched = framebuffer::draw_mesh_resident(shaders, start, resident, &window, scissor)
+            .map_err(|e| device_error("draw (mesh)", e))?;
+        self.batched = batched.map(|key| (self.state_generation, key));
+        self.unread.insert(target);
+        self.last_drawn = Some(DrawnOn(target));
+        // Read when asked for, not after every draw (worklog 843).
+        self.last_window = None;
+        self.window_unread = true;
+        Ok(())
+    }
+
+    /// Counts a change to what a draw would be bound with: anything but a draw or the geometry
+    /// stage's words (D718).
+    fn note_state_change(&mut self, command: &RenderCommand) {
+        if !matches!(
+            command,
+            RenderCommand::Draw { .. }
+                | RenderCommand::DrawIndexed { .. }
+                | RenderCommand::SetUserData {
+                    stage: ShaderStage::Vertex,
+                    ..
+                }
+        ) {
+            self.state_generation += 1;
+        }
+    }
+
     fn draw_graphics(
+        &mut self,
+        draw: framebuffer::VertexDraw,
+        indexed: bool,
+    ) -> Result<(), BackendError> {
+        if orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawJoined, || {
+            self.join_unchanged_batch()
+        }) {
+            return Ok(());
+        }
+        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawWhole, || {
+            self.draw_whole(draw, indexed)
+        })
+    }
+
+    /// A draw that did not join the open batch: its pipeline and bindings worked out in full.
+    fn draw_whole(
         &mut self,
         draw: framebuffer::VertexDraw,
         indexed: bool,
@@ -392,45 +909,60 @@ impl VulkanBackend {
                 command: "Draw with no vertex and fragment shaders bound",
             });
         };
-        let geometry = self
+        let vertex_shader = self
             .shaders
             .get(&vertex_id)
-            .ok_or(BackendError::UnknownResource(vertex_id))?
-            .spirv
-            .clone();
-        let fragment = self
+            .ok_or(BackendError::UnknownResource(vertex_id))?;
+        let (geometry, geometry_hash, geometry_is_mesh) = (
+            vertex_shader.spirv.clone(),
+            vertex_shader.hash,
+            vertex_shader.mesh,
+        );
+        let fragment_shader = self
             .shaders
             .get(&fragment_id)
-            .ok_or(BackendError::UnknownResource(fragment_id))?
-            .spirv
-            .clone();
+            .ok_or(BackendError::UnknownResource(fragment_id))?;
+        let (fragment, fragment_hash) = (fragment_shader.spirv.clone(), fragment_shader.hash);
         let (width, height) = self.render_extent();
         // The viewport a `SetViewport` set restricts the draw to a rectangle (worklog 644); none is
         // the whole attachment.
         let scissor = self.current_viewport.map(scissor_of);
-        if is_mesh_module(&geometry) {
-            if !mesh_stage_available() {
-                self.refused += 1;
-                return Err(BackendError::Unsupported {
-                    command: "Draw of a mesh geometry shader on a device with no mesh stage",
-                });
-            }
-            // The guest-memory window the frame set, uploaded once and bound directly (worklog 645),
-            // so a guest's primitive shader fetches its vertices from it (worklog 641); read back
-            // after, in case a shader wrote it.
-            let window = self.ensure_window_buffer()?;
-            let (pixels, read_back) = framebuffer::draw_mesh_into(
-                &geometry,
-                &fragment,
-                CLEAR_COLOUR,
-                width,
-                height,
-                &window,
+        // **What the target already holds.** Every draw used to begin from a cleared attachment, so a
+        // frame of 450 draws kept only its last one, on black (worklog 822). A draw now starts from
+        // its target's contents - the earlier draws on it - and only the first draw of a target, or
+        // one whose size changed, starts from the clear. A mesh draw finds them in its target's
+        // resident attachment, on the device (worklog 839).
+        let target = self.current_target;
+        // A blend state with no exact Vulkan equivalent refuses the draw by name rather than
+        // drawing it opaque or approximately (`REQ-...2ea9`, worklog 829).
+        if let Err(what) = framebuffer::blend_attachment(self.blend) {
+            self.refused += 1;
+            return Err(BackendError::Unsupported { command: what });
+        }
+        let block = self.user_data;
+        let texture = self.texture.clone();
+        let second_texture = self.second_texture.clone();
+        let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
+        let start = framebuffer::Start {
+            clear: CLEAR_COLOUR,
+            initial: None,
+            user_data: &block,
+            texture: texture.as_ref().map(|t| (&t.texels[..], t.width)),
+            blend: self.blend,
+            viewport: self.viewport_transform,
+            second_texture: second_texture.as_ref().map(|t| (&t.texels[..], t.width)),
+            pipeline_key: Some(pipeline_key),
+        };
+        let device_error =
+            |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
+        if geometry_is_mesh {
+            self.draw_mesh(
+                (&geometry, &fragment),
+                &start,
+                target,
+                (width, height),
                 scissor,
-            )
-            .map_err(|e| BackendError::Device(format!("draw (mesh): {e:?}")))?;
-            self.last_pixels = Some(pixels);
-            self.last_window = Some(read_back);
+            )?;
         } else if indexed {
             // A vertex pipeline's indexed draw fetches from a host index buffer the executor does not
             // bind. This is only reached by a vertex module - a test shader - because a guest's
@@ -441,17 +973,33 @@ impl VulkanBackend {
                 command: "DrawIndexed on a vertex pipeline (no index buffer binding)",
             });
         } else {
+            // The vertex path draws into an attachment of its own, so the target comes back to the
+            // host first and starts this draw from there - after any resident draw still running.
+            framebuffer::settle_session().map_err(|e| device_error("draw", e))?;
+            self.retire_resident(target)
+                .map_err(|e| device_error("draw", e))?;
+            let initial = self
+                .contents
+                .get(&target)
+                .filter(|pixels| (pixels.width, pixels.height) == (width, height))
+                .map(|pixels| pixels.bytes.clone());
+            let start = framebuffer::Start {
+                initial: initial.as_deref(),
+                ..start
+            };
             let pixels = framebuffer::draw_vertices(
-                CLEAR_COLOUR,
+                &start,
                 (width, height),
                 draw,
                 scissor,
                 &geometry,
                 &fragment,
             )
-            .map_err(|e| BackendError::Device(format!("draw: {e:?}")))?;
-            self.last_pixels = Some(pixels);
+            .map_err(|e| device_error("draw", e))?;
+            self.contents.insert(target, pixels);
+            self.last_drawn = Some(DrawnOn(target));
             self.last_window = None;
+            self.window_unread = false;
         }
         Ok(())
     }
@@ -471,6 +1019,10 @@ impl VulkanBackend {
                 command: "Dispatch with no compute shader bound",
             });
         };
+        // A dispatch shares the guest-memory window with the draws before it, which are no longer
+        // waited on one by one (worklog 843).
+        framebuffer::settle_session()
+            .map_err(|e| BackendError::Device(format!("settle: {e:?}")))?;
         let spirv = self
             .shaders
             .get(&shader_id)
@@ -492,6 +1044,7 @@ impl VulkanBackend {
         };
         self.last_output = Some(observed);
         self.last_window = Some(guest_memory);
+        self.window_unread = false;
         Ok(())
     }
 }
@@ -503,6 +1056,10 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::BindShader { .. } => "BindShader",
         RenderCommand::BindBuffer { .. } => "BindBuffer",
         RenderCommand::SetViewport(_) => "SetViewport",
+        RenderCommand::SetViewportTransform(_) => "SetViewportTransform",
+        RenderCommand::SetUserData { .. } => "SetUserData",
+        RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",
         RenderCommand::DrawIndexed { .. } => "DrawIndexed",
@@ -521,6 +1078,7 @@ impl RenderBackend for VulkanBackend {
         id: ResourceId,
         resource: Resource<'_>,
     ) -> Result<(), BackendError> {
+        self.state_generation += 1;
         match resource {
             Resource::Shader(spirv) => {
                 // Idempotent: a module already resident under this content id is the same module,
@@ -542,7 +1100,9 @@ impl RenderBackend for VulkanBackend {
                     id,
                     ResidentShader {
                         module,
-                        spirv: spirv.to_vec(),
+                        spirv: spirv.into(),
+                        hash: content_hash(spirv),
+                        mesh: is_mesh_module(spirv),
                     },
                 );
                 Ok(())
@@ -570,6 +1130,7 @@ impl RenderBackend for VulkanBackend {
     }
 
     fn execute(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        self.note_state_change(command);
         match command {
             // The colour target a following draw renders into. Its first colour attachment sizes the
             // draw; a target named but not resident is a real error, and an empty set clears the
@@ -586,11 +1147,35 @@ impl RenderBackend for VulkanBackend {
                     Ok(())
                 }
             },
-            // The rectangle a following draw is restricted to. State, like the target: set now,
-            // applied at the draw (worklog 644). Its own rectangle is not validated here - a scissor
-            // outside the attachment is clamped where it is used, not refused.
-            RenderCommand::SetViewport(rect) => {
-                self.current_viewport = Some(*rect);
+            RenderCommand::SetViewport(_)
+            | RenderCommand::SetViewportTransform(_)
+            | RenderCommand::SetBlend(_) => {
+                self.set_draw_state(command);
+                Ok(())
+            }
+            // The guest's own texels, sampled by the draws that follow (worklog 828).
+            RenderCommand::BindTexture {
+                slot,
+                texels,
+                hash,
+                width,
+                height,
+            } => self.bind_texture(*slot, (texels, *hash), (*width, *height)),
+            // A stage's user data, into its half of the block the next draw pushes (worklog 826).
+            // The first sixteen words: a shader taking more is refused where it is translated.
+            RenderCommand::SetUserData { stage, words } => {
+                let half = orbistoun_gpu::USER_DATA_BLOCK_WORDS / 2;
+                let start = match stage {
+                    ShaderStage::Vertex => orbistoun_gpu::USER_DATA_BLOCK_OFFSETS[0],
+                    ShaderStage::Fragment => orbistoun_gpu::USER_DATA_BLOCK_OFFSETS[1],
+                    ShaderStage::Compute => {
+                        self.refused += 1;
+                        return Err(BackendError::Unsupported {
+                            command: "SetUserData for a compute dispatch",
+                        });
+                    }
+                };
+                self.user_data[start..start + half].copy_from_slice(&words[..half]);
                 Ok(())
             }
             // A shader is bound to its stage now and run by the following dispatch or draw.
@@ -661,7 +1246,17 @@ impl RenderBackend for VulkanBackend {
     }
 
     fn set_guest_memory(&mut self, memory: &[u32]) {
-        self.guest_memory = memory.to_vec();
+        // The window it already holds, word for word, changes nothing a draw is bound with, so it is
+        // not copied again (worklog 853). **Changed is found by comparing, not hashing** (worklog
+        // 857): the comparison is exact where equal hashes only probably meant equal words, and it
+        // costs less than hashing did.
+        if memory == self.guest_memory.as_slice() {
+            return;
+        }
+        self.state_generation += 1;
+        self.guest_memory_generation += 1;
+        self.guest_memory.clear();
+        self.guest_memory.extend_from_slice(memory);
     }
 }
 
@@ -669,6 +1264,15 @@ impl Drop for VulkanBackend {
     /// Destroys the shader modules the backend created. Best-effort: if the session cannot be
     /// reacquired the process is tearing down anyway and the driver reclaims them.
     fn drop(&mut self) {
+        for (_, resident) in std::mem::take(&mut self.resident) {
+            resident.destroy();
+        }
+        for (_, snapshot) in std::mem::take(&mut self.snapshots) {
+            snapshot.destroy();
+        }
+        for snapshot in std::mem::take(&mut self.spare_snapshots) {
+            snapshot.destroy();
+        }
         if self.shaders.is_empty() && self.buffers.is_empty() && self.window_buffer.is_none() {
             return;
         }
@@ -1553,6 +2157,183 @@ mod tests {
             frame.at(half + half / 2, mid_y),
             Some([0, 0, 0, 255]),
             "outside the viewport keeps the clear the draw never reached"
+        );
+    }
+
+    /// **The guest's blend state changes the frame** (`REQ-...2ea9`, worklog 829).
+    ///
+    /// Green over the whole attachment, then red at half alpha over it. With `CB_BLEND0_CONTROL` set
+    /// to `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` / add, enabled, the result is the two mixed - about
+    /// half red and half green; without a `SetBlend` the red lands opaque. The acceptance `2ea9`
+    /// names: the same draws, with and without the state, give different frames. And a constant-colour
+    /// factor, whose constants are not decoded, refuses the draw by name.
+    #[test]
+    fn a_guest_blend_state_mixes_a_translucent_draw_over_the_last() {
+        use orbistoun_gpu::{Resource, ResourceId, ShaderStage, decode_blend_control};
+
+        if !super::probe().is_available() {
+            return;
+        }
+        let vertex = orbistoun_spirv::fullscreen_triangle_vertex_module();
+        let green = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+        let red = orbistoun_spirv::constant_colour_fragment_module([1.0, 0.0, 0.0, 0.5]);
+        // SRCBLEND = SRC_ALPHA (4), COMB = DST_PLUS_SRC (0), DESTBLEND = ONE_MINUS_SRC_ALPHA (5),
+        // ENABLE (bit 30) - `gfx103.json` `CB_BLEND0_CONTROL`, as `decode_blend_control` reads it.
+        let alpha = decode_blend_control(0x4 | (0x5 << 8) | (1 << 30));
+
+        let draw = |blend: Option<orbistoun_gpu::BlendControl>| {
+            let mut backend = VulkanBackend::new();
+            for (id, module) in [(95, &vertex), (96, &green), (97, &red)] {
+                backend
+                    .ensure_resident(ResourceId(id), Resource::Shader(module))
+                    .expect("resident");
+            }
+            backend
+                .execute(&RenderCommand::BindShader {
+                    stage: ShaderStage::Vertex,
+                    shader: ResourceId(95),
+                })
+                .expect("bind vertex");
+            for fragment in [96, 97] {
+                if fragment == 97
+                    && let Some(blend) = blend
+                {
+                    backend
+                        .execute(&RenderCommand::SetBlend(blend))
+                        .expect("set blend");
+                }
+                backend
+                    .execute(&RenderCommand::BindShader {
+                        stage: ShaderStage::Fragment,
+                        shader: ResourceId(fragment),
+                    })
+                    .expect("bind fragment");
+                backend
+                    .execute(&RenderCommand::Draw {
+                        vertices: 3,
+                        instances: 1,
+                        first_vertex: 0,
+                    })
+                    .expect("the draw runs");
+            }
+            backend
+                .last_frame()
+                .expect("a frame")
+                .at(super::RENDER_WIDTH / 2, super::RENDER_HEIGHT / 2)
+                .expect("the centre")
+        };
+
+        let opaque = draw(None);
+        assert_eq!(
+            opaque[..3],
+            [255, 0, 0],
+            "without blending the red lands opaque"
+        );
+        let blended = draw(Some(alpha));
+        assert!(
+            (120..=136).contains(&blended[0])
+                && (120..=136).contains(&blended[1])
+                && blended[2] == 0,
+            "half red over green is half of each: {blended:?}"
+        );
+
+        // A constant-colour source factor (13), whose constants are not decoded: refused by name.
+        let constant = decode_blend_control(0xd | (0x5 << 8) | (1 << 30));
+        let mut backend = VulkanBackend::new();
+        backend
+            .ensure_resident(ResourceId(95), Resource::Shader(&vertex))
+            .expect("resident");
+        backend
+            .ensure_resident(ResourceId(96), Resource::Shader(&green))
+            .expect("resident");
+        for (stage, shader) in [(ShaderStage::Vertex, 95), (ShaderStage::Fragment, 96)] {
+            backend
+                .execute(&RenderCommand::BindShader {
+                    stage,
+                    shader: ResourceId(shader),
+                })
+                .expect("bind");
+        }
+        backend
+            .execute(&RenderCommand::SetBlend(constant))
+            .expect("set blend");
+        assert!(matches!(
+            backend.execute(&RenderCommand::Draw {
+                vertices: 3,
+                instances: 1,
+                first_vertex: 0,
+            }),
+            Err(BackendError::Unsupported { .. })
+        ));
+    }
+
+    /// **A frame's draws accumulate on their target** (worklog 822).
+    ///
+    /// Two draws on the same target, each restricted to one half: green on the left, then red on the
+    /// right. Every draw used to begin from a cleared attachment, so the frame kept only the last
+    /// one, the red right half on black, and a 450-draw frame read back as whatever the final draw
+    /// covered. With the target's contents carried from draw to draw both halves survive; the left
+    /// staying green is the assertion the old behaviour fails.
+    #[test]
+    fn a_frames_draws_accumulate_on_their_target() {
+        use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
+
+        if !super::probe().is_available() {
+            return;
+        }
+        let vertex = orbistoun_spirv::fullscreen_triangle_vertex_module();
+        let green = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+        let red = orbistoun_spirv::constant_colour_fragment_module([1.0, 0.0, 0.0, 1.0]);
+        let mut backend = VulkanBackend::new();
+        for (id, module) in [(90, &vertex), (91, &green), (92, &red)] {
+            backend
+                .ensure_resident(ResourceId(id), Resource::Shader(module))
+                .expect("resident");
+        }
+        backend
+            .execute(&RenderCommand::BindShader {
+                stage: ShaderStage::Vertex,
+                shader: ResourceId(90),
+            })
+            .expect("bind vertex");
+
+        let half = super::RENDER_WIDTH / 2;
+        let right = i32::try_from(half).expect("half the interim width fits");
+        for (x, fragment) in [(0, 91), (right, 92)] {
+            backend
+                .execute(&RenderCommand::SetViewport(Rect {
+                    x,
+                    y: 0,
+                    width: half,
+                    height: super::RENDER_HEIGHT,
+                }))
+                .expect("set the viewport");
+            backend
+                .execute(&RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader: ResourceId(fragment),
+                })
+                .expect("bind fragment");
+            backend
+                .execute(&RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                })
+                .expect("the draw runs");
+        }
+
+        let frame = backend.last_frame().expect("a frame");
+        let mid_y = super::RENDER_HEIGHT / 2;
+        assert_eq!(
+            frame.at(half / 2, mid_y),
+            Some([0, 255, 0, 255]),
+            "the first draw's green survives the second draw"
+        );
+        assert_eq!(
+            frame.at(half + half / 2, mid_y),
+            Some([255, 0, 0, 255]),
+            "and the second draw's red is beside it"
         );
     }
 

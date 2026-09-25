@@ -1142,7 +1142,54 @@ impl Resolved {
     pub fn len(&self) -> usize {
         self.values.len()
     }
+
+    /// A title's effective settings for a run: the shipped record's `[settings]` (the repository
+    /// layer, carried in at build time), then the user's own `<overrides_dir>/<title>.toml` over it.
+    ///
+    /// A user file that does not parse contributes nothing rather than failing the run - the run
+    /// still has the shipped layer, and the user file is theirs to fix.
+    #[must_use]
+    pub fn for_run(title: &str, overrides_dir: &std::path::Path) -> Self {
+        let mut layers = Vec::new();
+        if let Some(file) = shipped(title) {
+            layers.push((Layer::Repo, file));
+        }
+        if let Ok(text) = std::fs::read_to_string(overrides_dir.join(format!("{title}.toml")))
+            && let Ok(file) = OverrideFile::from_toml(&text)
+        {
+            layers.push((Layer::User, file));
+        }
+        Self::merge(&layers)
+    }
+
+    /// Convenience for a named mode. Same non-coercing rule as [`Self::bool`].
+    pub fn text(&self, key: &str) -> Option<&str> {
+        match self.get(key).map(|r| &r.value) {
+            Some(Value::Text(v)) => Some(v),
+            _ => None,
+        }
+    }
 }
+
+mod shipped_records {
+    include!(concat!(env!("OUT_DIR"), "/shipped.rs"));
+}
+
+/// The shipped record's `[settings]` for `title`, as built into this binary.
+#[must_use]
+pub fn shipped(title: &str) -> Option<OverrideFile> {
+    shipped_records::SHIPPED
+        .iter()
+        .find(|(name, _)| *name == title)
+        .and_then(|(_, text)| OverrideFile::from_toml(text).ok())
+}
+
+/// The setting naming which filesystem a title sees: absent is its own sandbox, and
+/// [`FILESYSTEM_VIEW_SYSTEM`] is the console's whole tree, as a system application sees it.
+pub const FILESYSTEM_VIEW: &str = "filesystem_view";
+
+/// [`FILESYSTEM_VIEW`]'s value for the system view.
+pub const FILESYSTEM_VIEW_SYSTEM: &str = "system";
 
 #[cfg(test)]
 mod tests {
@@ -2104,5 +2151,39 @@ reason = "..."
             said.contains("answered by name"),
             "a message naming only the default is how this went unnoticed: {said}"
         );
+    }
+
+    /// **A shipped record's `[settings]` reach a run, and the user's file wins per key.**
+    ///
+    /// The launcher's system view is the case that needs it: without the shipped layer it would
+    /// run sandboxed and list no titles at all.
+    #[test]
+    fn a_shipped_setting_reaches_a_run_and_the_user_file_overrides_it() {
+        let empty =
+            std::env::temp_dir().join(format!("orbistoun-no-overrides-{}", std::process::id()));
+        let launcher = Resolved::for_run("SCSH00001", &empty);
+        assert_eq!(
+            launcher.text(super::FILESYSTEM_VIEW),
+            Some(super::FILESYSTEM_VIEW_SYSTEM)
+        );
+        assert_eq!(
+            launcher.get(super::FILESYSTEM_VIEW).map(|v| v.layer),
+            Some(Layer::Repo)
+        );
+        assert_eq!(
+            Resolved::for_run("GLCB00001", &empty).text(super::FILESYSTEM_VIEW),
+            None
+        );
+
+        let dir = std::env::temp_dir().join(format!("orbistoun-overrides-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SCSH00001.toml"),
+            "[settings]\nfilesystem_view = \"sandbox\"\n",
+        )
+        .unwrap();
+        let mine = Resolved::for_run("SCSH00001", &dir);
+        assert_eq!(mine.text(super::FILESYSTEM_VIEW), Some("sandbox"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

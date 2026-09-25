@@ -63,6 +63,42 @@ pub(crate) fn declare(b: &mut Builder, u32_type: Id, count: Id, binding: u32) ->
     }
 }
 
+/// Declares the push-constant block of `count` words a module's user data is read from (worklog 826).
+///
+/// The same struct-of-array shape as [`declare`] and reached the same way, with two indices; a push
+/// constant has no descriptor set or binding, only its offset within the block.
+pub(crate) fn declare_push_constants(b: &mut Builder, u32_type: Id, count: Id) -> StorageBuffer {
+    let array = b.id();
+    let block = b.id();
+    let block_ptr = b.id();
+    let element_ptr = b.id();
+    let buffer = b.id();
+
+    b.annotate(op::DECORATE, &[array.0, decoration::ARRAY_STRIDE, 4]);
+    b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
+
+    b.declare(op::TYPE_ARRAY, &[array.0, u32_type.0, count.0]);
+    b.declare(op::TYPE_STRUCT, &[block.0, array.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[block_ptr.0, storage::PUSH_CONSTANT, block.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[element_ptr.0, storage::PUSH_CONSTANT, u32_type.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[block_ptr.0, buffer.0, storage::PUSH_CONSTANT],
+    );
+
+    StorageBuffer {
+        buffer,
+        element_ptr,
+    }
+}
+
 /// Binding of the observation window.
 pub(crate) const OBSERVATION: u32 = 0;
 
