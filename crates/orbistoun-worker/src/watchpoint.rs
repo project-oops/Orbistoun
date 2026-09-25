@@ -511,11 +511,33 @@ pub fn arm(requests: &[Request]) -> Result<String, String> {
     }
     imp::arm(requests)?;
     remember(requests);
+    let _ = REQUESTED.set(requests.to_vec());
     let described: Vec<String> = requests
         .iter()
         .map(|r| format!("{:#x}+{} {}", r.address, r.length, r.kind.label()))
         .collect();
     Ok(described.join(", "))
+}
+
+/// The watchpoints the run asked for, kept so every guest thread can carry them.
+static REQUESTED: std::sync::OnceLock<Vec<Request>> = std::sync::OnceLock::new();
+
+/// Arms the run's watchpoints on the calling thread: a guest thread spawned after entry.
+///
+/// **Debug registers are per thread.** They were set on the thread that became the guest and on
+/// no other, so an access from any spawned thread went unseen - and the report said `never
+/// touched`, which is the arm that cannot fail. PPSA25872 builds the binding table its wall reads
+/// on a spawned thread, and three watchpoints over it all reported untouched (worklog 871).
+///
+/// Called from the per-thread start hook; a thread that cannot be armed says so rather than
+/// running as though it were watched.
+pub fn arm_this_thread() {
+    let Some(requests) = REQUESTED.get() else {
+        return;
+    };
+    if let Err(reason) = imp::arm(requests) {
+        eprintln!("orbistoun: a spawned guest thread runs unwatched: {reason}");
+    }
 }
 
 /// What a debug exception was, and what the handler must do to resume.

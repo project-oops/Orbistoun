@@ -2565,6 +2565,8 @@ fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, S
 /// registered unconditionally and most threads then have nothing to build. A failure leaves a
 /// thread that will fault on its first `fs:`-relative access, so it is said out loud, not swallowed.
 fn set_up_this_threads_tls() {
+    // The run's watchpoints go with every guest thread, not only the first (worklog 871).
+    watchpoint::arm_this_thread();
     let Some(Some((layout, tdata))) = TLS_TEMPLATE.get() else {
         return;
     };
