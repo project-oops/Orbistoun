@@ -23,11 +23,13 @@ pub const CLEAR_STATE: u8 = 0x12;
 pub const CONTEXT_CONTROL: u8 = 0x28;
 /// The shadow enables of `CONTEXT_CONTROL`'s second word - `shadow_global_config` (0),
 /// `shadow_per_context_state` (1), `shadow_global_uconfig` (15), `shadow_gfx_sh_regs` (16) and
-/// `shadow_cs_sh_regs` (24) (`cp_pm4_table_data_gfx11.json:1273-1308`). With any set, the command
-/// processor writes register state to a shadow in memory, which is not carried out here. Bit 31,
-/// `update_shadow_enables`, only says the word is to be applied. The first word's load enables
-/// select what later `LOAD_*_REG` packets read, and touch no memory themselves.
+/// `shadow_cs_sh_regs` (24) (`cp_pm4_table_data_gfx11.json:1275-1309`). With any set, the command
+/// processor writes register state to a shadow in memory, which is not carried out here. The first
+/// word's load enables select what later `LOAD_*_REG` packets read, and touch no memory themselves.
 const CONTEXT_CONTROL_SHADOW_ENABLES: u32 = (1 << 0) | (1 << 1) | (1 << 15) | (1 << 16) | (1 << 24);
+/// `update_shadow_enables`, bit 31 of the second word (`cp_pm4_table_data_gfx11.json:1315`): the
+/// shadow enables are applied only with it set, so without it the word changes nothing.
+const CONTEXT_CONTROL_UPDATE_SHADOW_ENABLES: u32 = 1 << 31;
 
 /// `PKT3_WRITE_DATA` (`sid.h:83`): a control word, a destination, then the data words
 /// (`cp_pm4_table_data_gfx11.json:6677`).
@@ -370,7 +372,36 @@ pub fn fill_of(body: &[u32]) -> Option<Fill> {
     })
 }
 
+/// `DMA_DATA`'s `DST_SEL` "nowhere" (`cp_pm4_table_data_gfx11.json:1979`, `dst_nowhere` = 2): the
+/// source is read into L2 and nothing is written - radeonsi's shader prefetch
+/// (`si_state_draw.cpp:659-664`).
+const DST_SEL_NOWHERE: u32 = 2;
+
+/// A prefetch writes nothing; the only thing it can do to the stream is fault on a source that is
+/// not memory, so an unreadable source is refused.
+fn dma_prefetch(body: &[u32], memory: &dyn CpMemory) -> Option<Result<(), Stop>> {
+    let [control, src_low, src_high, _, _, command, ..] = *body else {
+        return None;
+    };
+    if (control >> 20) & 0x3 != DST_SEL_NOWHERE {
+        return None;
+    }
+    if !SRC_SEL_ADDRESS.contains(&((control >> 29) & 0x3)) {
+        return Some(Err(Stop::NeedsGpu));
+    }
+    let count = (command & BYTE_COUNT_MASK) as usize;
+    let readable = count == 0 || memory.read(address(src_low, src_high), count).is_some();
+    Some(if readable {
+        Ok(())
+    } else {
+        Err(Stop::OutOfBounds)
+    })
+}
+
 fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -> Result<(), Stop> {
+    if let Some(prefetched) = dma_prefetch(body, memory) {
+        return prefetched;
+    }
     let DmaData {
         src_sel,
         src_low,
@@ -444,7 +475,9 @@ fn context_control(body: &[u32]) -> Result<(), Stop> {
     let [_load, shadow, ..] = *body else {
         return Err(Stop::Malformed);
     };
-    if shadow & CONTEXT_CONTROL_SHADOW_ENABLES != 0 {
+    if shadow & CONTEXT_CONTROL_UPDATE_SHADOW_ENABLES != 0
+        && shadow & CONTEXT_CONTROL_SHADOW_ENABLES != 0
+    {
         return Err(Stop::NeedsGpu);
     }
     Ok(())
@@ -799,6 +832,55 @@ mod tests {
 
         assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
         assert_eq!(memory.word(fence), 0xbeef_cafe);
+    }
+
+    /// Shadow bits in a word whose `update_shadow_enables` (bit 31) is clear are not applied, so
+    /// the packet changes nothing: a stream that sets them without the update bit retires.
+    #[test]
+    fn context_control_shadow_bits_without_their_update_bit_change_nothing() {
+        let mut stream = vec![
+            command_header(super::CONTEXT_CONTROL, 2),
+            0x200,
+            0x0101_8003,
+        ];
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+    }
+
+    /// A `DMA_DATA` with `DST_SEL` "nowhere" is radeonsi's L2 prefetch
+    /// (`si_state_draw.cpp:659-664`): it reads its source and writes nothing.
+    #[test]
+    fn a_dma_prefetch_writes_nothing_and_retires() {
+        let prefetch = vec![
+            command_header(measured::DMA_DATA, 6),
+            (3 << 29) | (2 << 20),
+            0x2000,
+            0,
+            0x2000,
+            0,
+            0x0400_0100,
+        ];
+        let mut stream = prefetch.clone();
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+        memory.write(0x2000, &[7; 0x100]);
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x2000), 0x0707_0707, "nothing written over it");
+        assert_eq!(done.bytes_written, 4, "only the fence");
+
+        // A prefetch of memory that is not there faults on the hardware; here it is refused.
+        let mut unmapped = prefetch;
+        unmapped[2] = 0xdead_0000;
+        let done = execute(&bytes(&unmapped), &mut Fake::default());
+        assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
     }
 
     /// A `CONTEXT_CONTROL` enabling any shadow writes register state to memory, which is not
