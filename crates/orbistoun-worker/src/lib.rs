@@ -358,13 +358,7 @@ struct Limits {
 /// `title-data/` recognises it by.
 fn install_filesystem(module: &str) {
     let paths = orbistoun_paths::Paths::resolve();
-    let title = Path::new(module)
-        .parent()
-        .and_then(|d| d.file_name())
-        .map_or_else(
-            || "unknown".to_owned(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+    let title = title_of(Path::new(module));
     // The sandbox is established as one thing, in orbistoun-fs: this crate supplies where the bytes
     // live and the retention policy, and the fs crate owns the order (D423). The retention default
     // is `Retain`, so what a guest wrote persists; `ORBISTOUN_SANDBOX=ephemeral` empties it each
@@ -403,6 +397,14 @@ fn install_filesystem(module: &str) {
             &installed_titles(&paths.titles_dir()),
         );
     }
+}
+
+/// The title a module belongs to: the name of the directory holding it.
+fn title_of(module: &Path) -> String {
+    module.parent().and_then(|d| d.file_name()).map_or_else(
+        || "unknown".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Whether the current run asked to be staged (`Request::Run::staged`), set from its request and
@@ -600,23 +602,39 @@ fn relocate_the_executable(
 
 /// Records the title's link plan: the executable first, then the modules it ships (D724).
 ///
-/// Only the digest reaches the run's conditions, so a verdict between two runs that linked
-/// differently says so rather than crediting the difference to an implementation.
+/// The digest reaches the run's conditions, so a verdict between two runs that linked differently
+/// says so rather than crediting the difference to an implementation. The plan is compared with
+/// the one stored in the title library and stored when none is kept under its key.
 fn record_link_plan(
     image: &Image,
     writes: Vec<orbistoun_loader::plan::SlotWrite>,
     title: &orbistoun_service::LinkedTitle,
+    executable: (&Path, &[u8]),
 ) {
-    let mut modules = vec![orbistoun_loader::plan::ModulePlan::of("", image, writes)];
+    use orbistoun_loader::plan;
+    let mut modules = vec![plan::ModulePlan::of("", image, writes)];
     modules.extend(title.plans.iter().cloned());
-    let plan = orbistoun_loader::plan::LinkPlan { modules };
-    let digest = plan.digest();
+    let fresh = plan::LinkPlan { modules };
+    let digest = fresh.digest();
+    let (path, bytes) = executable;
+    let key = plan::PlanKey::for_executable(bytes, orbistoun_env::build::line());
+    let stored = orbistoun_paths::Paths::resolve().title_link_plan_file(&title_of(path));
+    let standing = match plan::settle(&stored, &key, &fresh) {
+        Ok((standing, _)) => standing.word(),
+        Err(e) => {
+            tracing::warn!(
+                "the link plan could not be stored at {}: {e}",
+                stored.display()
+            );
+            ""
+        }
+    };
     tracing::info!(
-        "link plan {digest}: {} modules, {} relocation writes",
-        plan.modules.len(),
-        plan.write_count()
+        "link plan {digest} ({standing}): {} modules, {} relocation writes",
+        fresh.modules.len(),
+        fresh.write_count()
     );
-    report::note_link_plan(digest);
+    report::note_link_plan(digest, standing);
 }
 
 /// Fills the globals a guest reads without ever calling anything that could fill them.
@@ -705,7 +723,7 @@ fn place_and_relocate<W: Write>(
     let (tally, unnameable) =
         match relocate_with_refusals(service, &image, bytes, &title, &database, symbols_db) {
             Ok((applied, unnameable)) => {
-                record_link_plan(&image, applied.writes, &title);
+                record_link_plan(&image, applied.writes, &title, (path, bytes));
                 (applied.tally, unnameable)
             }
             Err(e) => {
@@ -964,6 +982,7 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
         build: orbistoun_env::build::line(),
         // Linking comes later; the report merges the digest in when it collects the trace.
         link_plan: String::new(),
+        link_plan_stored: String::new(),
     });
     experiments
 }

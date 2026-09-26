@@ -561,6 +561,11 @@ pub struct Conditions {
     /// across it measures the loader as well as any implementation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_plan: String,
+    /// How the plan stood against the one stored for the title: `new`, `match` or `mismatch`.
+    ///
+    /// Recorded but not compared: the digest already says whether two runs linked alike.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link_plan_stored: String,
 }
 
 impl Conditions {
@@ -1746,9 +1751,14 @@ mod tests {
             propping: 3,
             build: "0.1.0".to_owned(),
             link_plan: "0123456789abcdef".to_owned(),
+            link_plan_stored: "new".to_owned(),
         };
         let before = under(conditions.clone());
-        let after = under(conditions);
+        // The first run stored the plan the second matched: the same link.
+        let after = under(Conditions {
+            link_plan_stored: "match".to_owned(),
+            ..conditions
+        });
 
         assert!(compare(Some(&before), &after).conditions_changed.is_empty());
     }

@@ -16,6 +16,8 @@ workspace = true
 serde = { workspace = true }
 # The link plan's digest (D724).
 sha2 = { workspace = true }
+# The stored link plan (D724).
+serde_json = { workspace = true }
 orbistoun-elf = { workspace = true }
 orbistoun-nid = { workspace = true }
 orbistoun-thunk = { workspace = true }
@@ -27,4 +29,5 @@ orbistoun-env = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 toml = { workspace = true }

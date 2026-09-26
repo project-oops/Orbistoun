@@ -6,6 +6,7 @@
 //! compare as data, and a verdict between runs that linked differently says so.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -119,9 +120,230 @@ impl LinkPlan {
     }
 }
 
+/// What a stored plan was computed from (D724).
+///
+/// One executable linked by one loader build on a host with the same instructions makes the
+/// same decisions, so a stored plan under an equal key is the plan a fresh link must reproduce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanKey {
+    /// The executable's SHA-256, in hex.
+    pub executable: String,
+    /// The orbistoun build that linked it.
+    pub build: String,
+    /// The host CPU features linking may depend on.
+    pub host: String,
+}
+
+impl PlanKey {
+    /// The key for an executable's bytes, linked by `build` on this host.
+    #[must_use]
+    pub fn for_executable(bytes: &[u8], build: String) -> Self {
+        let mut executable = String::with_capacity(64);
+        for byte in Sha256::digest(bytes) {
+            let _ = write!(executable, "{byte:02x}");
+        }
+        Self {
+            executable,
+            build,
+            host: host_features(),
+        }
+    }
+}
+
+/// The host CPU features an instruction rewrite may depend on, present ones only, in a fixed
+/// order (D725).
+#[must_use]
+pub fn host_features() -> String {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let known = [
+            ("sse4a", std::arch::is_x86_feature_detected!("sse4a")),
+            ("sse4.2", std::arch::is_x86_feature_detected!("sse4.2")),
+            ("popcnt", std::arch::is_x86_feature_detected!("popcnt")),
+            ("lzcnt", std::arch::is_x86_feature_detected!("lzcnt")),
+            ("bmi1", std::arch::is_x86_feature_detected!("bmi1")),
+            ("bmi2", std::arch::is_x86_feature_detected!("bmi2")),
+            ("avx", std::arch::is_x86_feature_detected!("avx")),
+            ("avx2", std::arch::is_x86_feature_detected!("avx2")),
+            ("fma", std::arch::is_x86_feature_detected!("fma")),
+            ("f16c", std::arch::is_x86_feature_detected!("f16c")),
+            ("movbe", std::arch::is_x86_feature_detected!("movbe")),
+            ("aes", std::arch::is_x86_feature_detected!("aes")),
+            (
+                "pclmulqdq",
+                std::arch::is_x86_feature_detected!("pclmulqdq"),
+            ),
+            ("sha", std::arch::is_x86_feature_detected!("sha")),
+        ];
+        known
+            .iter()
+            .filter(|(_, present)| *present)
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        std::env::consts::ARCH.to_owned()
+    }
+}
+
+/// A plan as the title library keeps it, with what it was computed from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPlan {
+    /// What the plan was computed from.
+    pub key: PlanKey,
+    /// The plan.
+    pub plan: LinkPlan,
+}
+
+/// How a fresh plan stands against the stored one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// Nothing was stored under this key, so the fresh plan now is.
+    New,
+    /// The stored plan under this key is the fresh plan.
+    Match,
+    /// The stored plan under this key differs from the fresh one: a loader defect.
+    Mismatch,
+}
+
+impl Standing {
+    /// The word a run report records.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Match => "match",
+            Self::Mismatch => "mismatch",
+        }
+    }
+}
+
+/// The stored plan at `path`, if one is there and readable.
+#[must_use]
+pub fn load(path: &Path) -> Option<StoredPlan> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Writes `plan` under `key` to `path`, replacing whatever is there.
+///
+/// # Errors
+///
+/// When the directory cannot be created or the file written.
+pub fn store(path: &Path, key: &PlanKey, plan: &LinkPlan) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stored = StoredPlan {
+        key: key.clone(),
+        plan: plan.clone(),
+    };
+    let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
+    // Written beside and renamed over, so a run stopped mid-write leaves the old plan or none.
+    let partial = path.with_extension("partial");
+    std::fs::write(&partial, bytes)?;
+    std::fs::rename(&partial, path)
+}
+
+/// Compares a fresh plan with the one stored at `path`, storing it when none is stored under
+/// its key.
+///
+/// A stored plan under an equal key is never overwritten here, so a mismatch stays
+/// reproducible until a relink replaces it on purpose. The stored plan comes back beside the
+/// standing, for naming what differs.
+///
+/// # Errors
+///
+/// When a plan that must be stored cannot be written.
+pub fn settle(
+    path: &Path,
+    key: &PlanKey,
+    plan: &LinkPlan,
+) -> std::io::Result<(Standing, Option<StoredPlan>)> {
+    match load(path) {
+        Some(stored) if stored.key == *key => {
+            let standing = if stored.plan == *plan {
+                Standing::Match
+            } else {
+                Standing::Mismatch
+            };
+            Ok((standing, Some(stored)))
+        }
+        _ => {
+            store(path, key, plan)?;
+            Ok((Standing::New, None))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LinkPlan, ModulePlan, SegmentPlan, SlotWrite};
+    use super::{LinkPlan, ModulePlan, PlanKey, SegmentPlan, SlotWrite, Standing};
+
+    fn key() -> PlanKey {
+        PlanKey::for_executable(b"executable", "build".to_owned())
+    }
+
+    /// The first run stores its plan; the next with the same plan matches and leaves it.
+    #[test]
+    fn a_plan_is_stored_once_then_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("title").join("link-plan.json");
+        let plan = LinkPlan {
+            modules: vec![module(Vec::new())],
+        };
+        let (first, _) = super::settle(&path, &key(), &plan).unwrap();
+        assert_eq!(first, Standing::New);
+        let before = std::fs::read(&path).unwrap();
+        let (second, stored) = super::settle(&path, &key(), &plan).unwrap();
+        assert_eq!(second, Standing::Match);
+        assert_eq!(stored.unwrap().plan, plan);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// Under the same key a different plan is a mismatch, and the stored one is kept.
+    #[test]
+    fn a_differing_plan_under_the_same_key_is_kept_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link-plan.json");
+        let stored = LinkPlan {
+            modules: vec![module(vec![SlotWrite { at: 8, value: 1 }])],
+        };
+        let fresh = LinkPlan {
+            modules: vec![module(vec![SlotWrite { at: 8, value: 2 }])],
+        };
+        super::settle(&path, &key(), &stored).unwrap();
+        let (standing, _) = super::settle(&path, &key(), &fresh).unwrap();
+        assert_eq!(standing, Standing::Mismatch);
+        assert_eq!(super::load(&path).unwrap().plan, stored);
+    }
+
+    /// A changed key replaces the stored plan.
+    #[test]
+    fn a_changed_key_replaces_the_stored_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link-plan.json");
+        let fresh = LinkPlan {
+            modules: vec![module(Vec::new())],
+        };
+        super::settle(&path, &key(), &LinkPlan::default()).unwrap();
+        let rebuilt = PlanKey::for_executable(b"executable", "another build".to_owned());
+        let (standing, _) = super::settle(&path, &rebuilt, &fresh).unwrap();
+        assert_eq!(standing, Standing::New);
+        let now = super::load(&path).unwrap();
+        assert_eq!((now.key, now.plan), (rebuilt, fresh));
+    }
+
+    /// The executable part of the key is its SHA-256.
+    #[test]
+    fn the_key_names_the_executable_by_its_sha256() {
+        assert_eq!(
+            PlanKey::for_executable(b"", String::new()).executable,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     fn module(writes: Vec<SlotWrite>) -> ModulePlan {
         ModulePlan {

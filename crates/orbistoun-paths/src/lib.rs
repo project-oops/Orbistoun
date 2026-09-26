@@ -305,6 +305,11 @@ impl Paths {
         self.data_root.join(dirs::CONSOLE)
     }
 
+    /// Where one title's stored link plan is kept (D724).
+    pub fn title_link_plan_file(&self, title: &str) -> PathBuf {
+        self.shared.title_dir(title).join("link-plan.json")
+    }
+
     /// Where one title's save states are kept.
     pub fn title_savestates_dir(&self, title: &str) -> PathBuf {
         // Beside the guest filesystem, under the same title, so everything known about one title is
