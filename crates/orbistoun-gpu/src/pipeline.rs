@@ -1310,11 +1310,14 @@ fn read_texture(
         *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     let descriptor = decode_image_descriptor(words);
-    if words[3] >> 28 != IMAGE_TYPE_2D
-        || descriptor.tiling != SwizzleMode::Linear
-        || descriptor.format != FORMAT_8_8_8_8_UNORM
-    {
+    if words[3] >> 28 != IMAGE_TYPE_2D || descriptor.format != FORMAT_8_8_8_8_UNORM {
         return None;
+    }
+    match descriptor.tiling {
+        SwizzleMode::Linear => {}
+        // The one tiled layout measured: the same surface layout sampled as rendered.
+        SwizzleMode::Tiled64KbRX => return read_tiled_texture(&descriptor, slot, memory, texels),
+        SwizzleMode::Other(_) => return None,
     }
     let pitch_field = words[4] & 0x3fff;
     let pitch = if pitch_field == 0 {
@@ -1393,6 +1396,68 @@ struct CachedTexels {
 
 /// Texels read from guest memory, by where they lie and their shape.
 type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
+
+/// A 32-bpp `64KB_R_X` texture, read whole, detiled into row-major texels and bound.
+///
+/// The cache key's pitch is zero, a value no linear surface has, so a tiled and a linear surface at
+/// one address never share texels.
+fn read_tiled_texture(
+    descriptor: &ImageDescriptor,
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    let span = crate::tiling::surface_words_64kb_rx_bpp4(descriptor.width, descriptor.height) * 4;
+    let key = (descriptor.base, descriptor.width, descriptor.height, 0);
+    if let Some(cached) = texels.get(&key)
+        && cached.since.and_then(|since| {
+            orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
+        }) == Some(false)
+    {
+        return Some(RenderCommand::BindTexture {
+            slot,
+            hash: cached.hash,
+            texels: cached.texels.clone(),
+            width: descriptor.width,
+            height: descriptor.height,
+        });
+    }
+    let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
+    let bytes = memory.read(descriptor.base, span)?;
+    let mut hasher = crate::ContentHasher::new(span / 4);
+    hasher.bytes(bytes);
+    let hash = hasher.finish();
+    let shared = match texels.get(&key) {
+        Some(cached) if cached.hash == hash => cached.texels.clone(),
+        _ => {
+            let words: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+                .collect();
+            crate::tiling::detile_surface_64kb_rx_bpp4(&words, descriptor.width, descriptor.height)
+                .ok()?
+                .into()
+        }
+    };
+    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
+        texels.clear();
+    }
+    texels.insert(
+        key,
+        CachedTexels {
+            since,
+            hash,
+            texels: std::sync::Arc::clone(&shared),
+        },
+    );
+    Some(RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels: shared,
+        width: descriptor.width,
+        height: descriptor.height,
+    })
+}
 
 /// How many textures the cache holds before it restarts: enough for a frame's set, and a bound for
 /// a guest streaming new textures every frame.
@@ -1826,6 +1891,61 @@ mod tests {
 
     /// A linear texture is read at its descriptor's pitch, not its width, and a descriptor that is
     /// not 2D linear RGBA8 binds nothing.
+    #[test]
+    fn a_tiled_texture_is_detiled_into_rows() {
+        use super::{RenderCommand, read_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        // One 64 KiB block past the descriptor, at a 256-byte-aligned base.
+        let (table, texels, width, height) = (0x1000_u64, 0x1100_u64, 8u32, 4u32);
+        let mut bytes = vec![0u8; 0x100 + 0x1_0000];
+        let descriptor = [
+            (texels >> 8) as u32,
+            ((texels >> 40) as u32 & 0xff) | (56 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            (9 << 28) | (27 << 20) | 0xfac,
+            0,
+            0,
+            0,
+            0,
+        ];
+        for (i, word) in descriptor.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // Texel (x, y) holds `y * 100 + x`, placed where the measured 64KB_R_X addressing puts it.
+        for y in 0..height {
+            for x in 0..width {
+                let at = (texels - table) as usize
+                    + crate::tiling::tiled_byte_offset_64kb_rx_bpp4_surface(x, y, width);
+                bytes[at..at + 4].copy_from_slice(&(y * 100 + x).to_le_bytes());
+            }
+        }
+        let mut cache = super::TexelCache::new();
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: w,
+            height: h,
+            ..
+        }) = read_texture(table, 0, &Memory(bytes), &mut cache)
+        else {
+            panic!("a tiled RGBA8 texture binds");
+        };
+        assert_eq!((w, h), (width, height));
+        let expected: Vec<u32> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| y * 100 + x))
+            .collect();
+        assert_eq!(
+            texels.as_ref(),
+            expected.as_slice(),
+            "row-major after detiling"
+        );
+    }
+
     #[test]
     fn a_linear_texture_is_read_at_its_descriptors_pitch() {
         use super::{RenderCommand, read_texture};
