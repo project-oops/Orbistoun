@@ -2851,6 +2851,7 @@ dependencies = [
  "orbistoun-shader",
  "orbistoun-translate",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",
@@ -3198,6 +3199,7 @@ dependencies = [
  "orbistoun-gpu-vulkan",
  "orbistoun-shader",
  "orbistoun-spirv",
+ "serde",
  "thiserror 2.0.20",
 ]
 

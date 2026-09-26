@@ -16,6 +16,8 @@ workspace = true
 orbistoun-shader = { workspace = true }
 orbistoun-spirv = { workspace = true }
 thiserror = { workspace = true }
+# A translation's inputs kept across runs with its output (D113).
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 orbistoun-gpu-vulkan = { workspace = true }

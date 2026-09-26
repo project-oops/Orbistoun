@@ -310,6 +310,13 @@ impl Paths {
         self.shared.title_dir(title).join("link-plan.json")
     }
 
+    /// Where one title's kept shader translations are stored (D113).
+    pub fn title_translations_file(&self, title: &str) -> PathBuf {
+        self.shared
+            .title_dir(title)
+            .join("shader-translations.json")
+    }
+
     /// Where one title's save states are kept.
     pub fn title_savestates_dir(&self, title: &str) -> PathBuf {
         // Beside the guest filesystem, under the same title, so everything known about one title is

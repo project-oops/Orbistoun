@@ -18,6 +18,8 @@ orbistoun-hle = { workspace = true }
 orbistoun-shader = { workspace = true }
 orbistoun-translate = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# The kept translations (D113).
+serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

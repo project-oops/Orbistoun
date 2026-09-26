@@ -432,6 +432,8 @@ pub struct Pipeline {
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
     next_resource: u64,
+    /// Translations kept across runs, consulted before translating and added to after (D113).
+    store: Option<crate::translations::TranslationStore>,
 }
 
 impl Pipeline {
@@ -457,7 +459,20 @@ impl Pipeline {
             texture_sources: BTreeMap::new(),
             texels: TexelCache::new(),
             next_resource: 1,
+            store: None,
         })
+    }
+
+    /// Serves translations from `store` and keeps new ones in it (D113).
+    #[must_use]
+    pub fn with_translation_store(mut self, store: crate::translations::TranslationStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// The kept translations, when this pipeline keeps any.
+    pub fn translation_store_mut(&mut self) -> Option<&mut crate::translations::TranslationStore> {
+        self.store.as_mut()
     }
 
     /// Has every submission place the window at the constant 64-bit base its geometry shader forms,
@@ -988,6 +1003,50 @@ impl Pipeline {
             )));
         }
 
+        let context = crate::translations::Context {
+            strategy,
+            stage: host_stage,
+            primitive,
+            window: self.window,
+            user_data,
+        };
+        // A translation kept from an earlier run is the module this one would make (D113).
+        let kept = if let Some(kept) = self.store.as_ref().and_then(|store| store.get(key, shader))
+        {
+            kept.clone()
+        } else {
+            let kept = self.translate_now(address, shader, decoded, context)?;
+            if let Some(store) = self.store.as_mut() {
+                store.insert(key, kept.clone());
+            }
+            kept
+        };
+
+        let resource = ResourceId(self.next_resource);
+        self.next_resource += 1;
+        self.cache.insert(key, Cached::of(resource, shader));
+        // Where each texture the module samples comes from, for binding them per draw.
+        self.texture_sources.insert(resource, kept.textures);
+        Ok(Prepared::Fresh {
+            resource,
+            module: kept.module,
+            warnings: kept
+                .warnings
+                .iter()
+                .map(|warning| format!("the shader at {address:#x}: {warning}"))
+                .collect(),
+        })
+    }
+
+    /// Translates a shader whose bytes are known, decoding them again when the caller has no
+    /// decode.
+    fn translate_now(
+        &self,
+        address: u64,
+        shader: &[u8],
+        decoded: Option<&orbistoun_shader::Decode>,
+        context: crate::translations::Context,
+    ) -> Result<crate::translations::Kept, PrepareFailure> {
         let again;
         let decoded = if let Some(decoded) = decoded {
             decoded
@@ -1008,30 +1067,25 @@ impl Pipeline {
         let translated = translate_with_user_data(
             decoded,
             &self.encodings,
-            strategy,
-            (host_stage, primitive),
-            self.window,
-            user_data,
+            context.strategy,
+            (context.stage, context.primitive),
+            context.window,
+            context.user_data,
         )
         .map_err(|e| {
             PrepareFailure::Resolved(format!(
                 "the shader at {address:#x} could not be translated: {e}"
             ))
         })?;
-
-        let resource = ResourceId(self.next_resource);
-        self.next_resource += 1;
-        self.cache.insert(key, Cached::of(resource, shader));
-        // Where each texture the module samples comes from, for binding them per draw.
-        self.texture_sources
-            .insert(resource, translated.textures.clone());
-        Ok(Prepared::Fresh {
-            resource,
+        Ok(crate::translations::Kept {
+            bytes: shader.to_vec(),
+            context,
             module: translated.module,
+            textures: translated.textures,
             warnings: translated
                 .warnings
                 .iter()
-                .map(|warning| format!("the shader at {address:#x}: {warning}"))
+                .map(ToString::to_string)
                 .collect(),
         })
     }

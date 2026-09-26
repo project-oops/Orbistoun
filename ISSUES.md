@@ -30,7 +30,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - `tests/oracle_gl_cube.rs` prints its two pixel hashes instead of asserting them.
 - The GUI does not present the headless frame.
 - The two-lane subgroup design (64-wide wavefronts on 32-wide host subgroups) needs a decision.
-- The single-block dispatch loop is not collapsed and the shader cache is neither persisted nor filled before the run (D113).
+- The single-block dispatch loop is not collapsed.
 
 ## Linking
 

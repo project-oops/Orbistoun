@@ -170,7 +170,7 @@ fn declare_files(b: &mut Builder, u32_type: Id, registers: Id, lanes: Id) -> Fil
 /// that exports colour needs a graphics pipeline, so it is a fragment module with an output
 /// variable (D553). The stages differ in execution model, execution mode, and whether the epilogue
 /// writes the observation window; a fragment module's oracle is its attachment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Stage {
     /// A compute dispatch whose epilogue publishes the registers. The default.
     Compute,
@@ -190,7 +190,7 @@ pub enum Stage {
 /// here; only [`Stage::Mesh`] reads it. Vulkan ignores a mesh pipeline's input-assembly topology,
 /// so the module states the shape in three places that must agree: the output execution mode, the
 /// per-primitive index built-in, and how many packed `exp prim` indices are read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MeshPrimitive {
     /// One vertex per primitive.
     Points,
@@ -262,7 +262,7 @@ struct MeshOutputs {
 /// A translated shader reaches guest memory through one storage buffer that is a window: a fixed
 /// number of words at a base, with every access checked against it. [`Window::at`] takes the
 /// default length and [`Window::spanning`] a chosen one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Window {
     /// The low thirty-two bits of the guest address of the window's first word: the half a
     /// translated shader compares against, because its memory accesses read the low half of their
@@ -350,7 +350,7 @@ impl Default for Window {
 /// The hardware loads user data into a stage's first scalar registers before its first instruction;
 /// a translated module reads it from the push-constant block at entry. `count` zero reads nothing
 /// and declares no block.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserData {
     /// The first scalar register the words land in: `s0` for a pixel shader, `s8` for the geometry
     /// program a vertex stage runs as.
@@ -2037,7 +2037,7 @@ impl Model for Wavefront<'_> {
 /// the byte offset in the pixel shader's descriptor table (addressed by its first two user-data
 /// registers) that the image descriptor was loaded from. `None` when the module did not load it
 /// from there; a pipeline then reads offset zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextureSource {
     /// 0 for the first texture the module samples, 1 for a second.
     pub slot: u32,

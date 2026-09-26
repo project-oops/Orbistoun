@@ -1480,6 +1480,57 @@ fn live_pipeline() -> &'static Mutex<Option<Pipeline>> {
     LIVE.get_or_init(|| Mutex::new(None))
 }
 
+/// Where the title's kept translations are written, once a run has named it (D113).
+static TRANSLATIONS_AT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// The kept translations read before the guest started, until the live pipeline takes them.
+static TRANSLATIONS: Mutex<Option<crate::translations::TranslationStore>> = Mutex::new(None);
+
+/// Reads the title's kept translations from `path` and makes every one `translator`'s, before the
+/// guest starts, so a draw finds its module already made (D113). Returns what the refill did and
+/// how many translations are kept.
+pub fn prepare_translations(
+    path: std::path::PathBuf,
+    translator: &str,
+) -> (crate::translations::Refill, usize) {
+    let mut store = crate::translations::TranslationStore::load(&path);
+    let tables = orbistoun_shader::EncodingTable::builtin()
+        .and_then(|e| orbistoun_shader::OperandTable::builtin().map(|o| (e, o)));
+    let refill = match tables {
+        Ok((encodings, operands)) => store.refill(translator, (&encodings, &operands)),
+        Err(e) => {
+            tracing::warn!("the kept translations were not refilled: {e}");
+            crate::translations::Refill::default()
+        }
+    };
+    if let Err(e) = store.save_if_changed(&path) {
+        tracing::warn!(
+            "the kept translations could not be written to {}: {e}",
+            path.display()
+        );
+    }
+    let kept = store.len();
+    let _ = TRANSLATIONS_AT.set(path);
+    if let Ok(mut slot) = TRANSLATIONS.lock() {
+        *slot = Some(store);
+    }
+    (refill, kept)
+}
+
+/// Writes any translation the pipeline made since the last write.
+fn keep_new_translations(pipeline: &mut Pipeline) {
+    let (Some(path), Some(store)) = (TRANSLATIONS_AT.get(), pipeline.translation_store_mut())
+    else {
+        return;
+    };
+    if let Err(e) = store.save_if_changed(path) {
+        tracing::warn!(
+            "the kept translations could not be written to {}: {e}",
+            path.display()
+        );
+    }
+}
+
 /// Translated modules whose submission was not drawn, carried into the next one.
 fn undelivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>
 {
@@ -1525,10 +1576,20 @@ fn submit_described_timed(descriptor: u64) -> u64 {
             .ok()
             // A live guest's shaders name their own buffers, so the window is placed from them
             // (D711).
-            .map(|pipeline| pipeline.placing_window_from_shaders().feeding_user_data());
+            .map(|pipeline| pipeline.placing_window_from_shaders().feeding_user_data())
+            .map(|pipeline| {
+                match TRANSLATIONS.lock().ok().and_then(|mut slot| slot.take()) {
+                    Some(store) => pipeline.with_translation_store(store),
+                    None => pipeline,
+                }
+            });
         }
         live.as_mut()
-            .map(|pipeline| pipeline.submit(&bytes, Queue::Draw, &[], &memory))
+            .map(|pipeline| {
+                let submission = pipeline.submit(&bytes, Queue::Draw, &[], &memory);
+                keep_new_translations(pipeline);
+                submission
+            })
             .unwrap_or_default()
     });
     // A module travels once, with the first submission to use it, so one whose draws never reached

@@ -25,7 +25,7 @@ use orbistoun_shader::{Decode, EncodingTable};
 ///
 /// The guest executes sixty-four lanes in lockstep; SPIR-V describes one invocation. The
 /// levels differ in correctness, not only speed, so none is picked silently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Fidelity {
     /// Pick the cheapest level valid for this shader on this machine.
     #[default]
@@ -64,7 +64,7 @@ impl core::fmt::Display for Fidelity {
 }
 
 /// How guest control flow is expressed in SPIR-V.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Strategy {
     /// The guest's flat instruction stream, executed under a mask.
     Predicated {
@@ -91,7 +91,7 @@ impl Default for Strategy {
 /// The width is chosen per shader at compile time and the encodings are identical either
 /// way, so it is supplied by the caller from the pipeline state rather than inferred
 /// (D145). Defaults to sixty-four, the previous generation's width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Width {
     /// Thirty-two lanes, the narrow mode this generation adds.
     Wave32,

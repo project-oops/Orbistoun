@@ -477,6 +477,25 @@ fn installed_titles(library: &Path) -> Vec<(String, std::path::PathBuf)> {
         .collect()
 }
 
+/// Makes the title's kept shader translations this build's before the guest starts (D113).
+fn prepare_translations(service: &Service, module: &str) {
+    let Some(paths) = service.paths() else {
+        return;
+    };
+    let title = orbistoun_service::linkplan::title_of(Path::new(module));
+    let started = std::time::Instant::now();
+    let (refill, kept) = orbistoun_gpu::agc_driver::prepare_translations(
+        paths.title_translations_file(&title),
+        &orbistoun_env::build::line(),
+    );
+    tracing::info!(
+        "shader translations: {kept} kept ({} translated again, {} dropped) in {:.1} ms",
+        refill.translated,
+        refill.dropped,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 /// Connects what a running guest shows and asks for to the front end.
 fn install_presentation() {
     // The draws, carried out at submit and written back where the guest reads them, so the fence
@@ -853,6 +872,7 @@ fn prepare_diagnostics(
 
     install_guest_region_lookups();
     install_presentation();
+    prepare_translations(service, module);
 
     // Where the trace goes. Named after the module so a sweep over titles leaves one file per
     // title.
