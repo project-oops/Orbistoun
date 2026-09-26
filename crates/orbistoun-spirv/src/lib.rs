@@ -341,6 +341,10 @@ pub mod decoration {
 pub mod capability {
     /// Shader stages. The baseline for anything graphics or compute.
     pub const SHADER: u32 = 1;
+    /// The geometry stage's built-ins, which include a fragment shader reading its `Layer`.
+    ///
+    /// A device without the `geometryShader` feature refuses a module declaring this.
+    pub const GEOMETRY: u32 = 2;
     /// Permits writing to a storage image whose format the module does not declare.
     ///
     /// A guest's format lives in a descriptor that is not decoded, so the module says `Unknown` and
@@ -405,6 +409,13 @@ pub mod built_in {
     /// Signed in Vulkan's environment: the variable is declared `int`, and an unsigned declaration
     /// is rejected.
     pub const VERTEX_INDEX: u32 = 42;
+    /// A fragment's window position (a `vec4`): pixel centre in `x` and `y`, depth in `z`, and the
+    /// reciprocal of clip-space `w` in `w`.
+    pub const FRAG_COORD: u32 = 15;
+    /// Whether the fragment's primitive faces the viewer (a `bool`).
+    pub const FRONT_FACING: u32 = 17;
+    /// The framebuffer layer a fragment is rendered into (a 32-bit integer).
+    pub const LAYER: u32 = 9;
 }
 
 /// Addressing models.
