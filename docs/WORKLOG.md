@@ -347,5 +347,4 @@ One entry per milestone. Commit messages hold the rest.
 - Neverball's build plays through to gameplay, and headless it matches `run`: the same link plan,
   53 distinct imports and 92 submissions writing 863,437,904 bytes.
 - A manually run workflow packs it as `neverball-aot-portable-win.zip` with its licences and
-  sources; guests run only on Windows, because the thread pointer shares `fs` with the host on
-  Linux.
+  sources. It is Windows only: no guest has been run on Linux or macOS.
