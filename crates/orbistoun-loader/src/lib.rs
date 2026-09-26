@@ -9,6 +9,7 @@
 //! [`survey`] parses and resolves without executing anything, answering what a title imports.
 
 pub mod image;
+pub mod plan;
 pub mod process;
 pub mod protect;
 pub mod relocate;

@@ -34,10 +34,8 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Linking
 
-- The loader applies its result directly; no link plan is built, stored or reused, and every run links again (D724).
-- `orbistoun-cli link`, `run --relink` and native host executable output are not built (D724).
-- The run report does not say when two compared runs applied different link plans.
-- `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725).
+- The link plan is recorded only as a digest in the run's conditions; it is not stored or reused, and every run links again (D724).
+- `orbistoun-cli link`, `run --relink` and native host executable output are not built (D724).- `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725).
 - Raw `syscall` sites in guest code are found only when executed, not listed at link.
 
 ## Kernel, libraries and filesystem

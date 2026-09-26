@@ -583,7 +583,7 @@ fn relocate_the_executable(
     title: &orbistoun_service::LinkedTitle,
     refuse: Option<&std::collections::BTreeSet<usize>>,
     weak_zero: Option<&std::collections::BTreeSet<usize>>,
-) -> Result<orbistoun_elf::reloc::RelocationTally, orbistoun_service::ServiceError> {
+) -> Result<orbistoun_loader::relocate::Applied, orbistoun_service::ServiceError> {
     // No offset: the executable is module 0, so its symbol index is its slot (D484).
     let stubs = orbistoun_loader::relocate::ImportResolver {
         thunks: &title.thunks,
@@ -595,7 +595,28 @@ fn relocate_the_executable(
         bound: &title.bound,
         inner: &stubs,
     };
-    service.relocate_image(image, bytes, &resolver)
+    service.relocate_image_recorded(image, bytes, &resolver)
+}
+
+/// Records the title's link plan: the executable first, then the modules it ships (D724).
+///
+/// Only the digest reaches the run's conditions, so a verdict between two runs that linked
+/// differently says so rather than crediting the difference to an implementation.
+fn record_link_plan(
+    image: &Image,
+    writes: Vec<orbistoun_loader::plan::SlotWrite>,
+    title: &orbistoun_service::LinkedTitle,
+) {
+    let mut modules = vec![orbistoun_loader::plan::ModulePlan::of("", image, writes)];
+    modules.extend(title.plans.iter().cloned());
+    let plan = orbistoun_loader::plan::LinkPlan { modules };
+    let digest = plan.digest();
+    tracing::info!(
+        "link plan {digest}: {} modules, {} relocation writes",
+        plan.modules.len(),
+        plan.write_count()
+    );
+    report::note_link_plan(digest);
 }
 
 /// Fills the globals a guest reads without ever calling anything that could fill them.
@@ -683,7 +704,10 @@ fn place_and_relocate<W: Write>(
     publish_what_the_guest_reads(service);
     let (tally, unnameable) =
         match relocate_with_refusals(service, &image, bytes, &title, &database, symbols_db) {
-            Ok(t) => t,
+            Ok((applied, unnameable)) => {
+                record_link_plan(&image, applied.writes, &title);
+                (applied.tally, unnameable)
+            }
             Err(e) => {
                 return halt(
                     output,
@@ -778,7 +802,7 @@ fn relocate_with_refusals(
     symbols_db: Option<&Path>,
 ) -> Result<
     (
-        orbistoun_elf::reloc::RelocationTally,
+        orbistoun_loader::relocate::Applied,
         Option<std::collections::BTreeSet<usize>>,
     ),
     orbistoun_service::ServiceError,
@@ -790,7 +814,7 @@ fn relocate_with_refusals(
     if let Some(refused) = unnameable.as_mut() {
         refused.retain(|idx| !weak_zero.contains(idx));
     }
-    let tally = relocate_the_executable(
+    let applied = relocate_the_executable(
         service,
         image,
         bytes,
@@ -798,7 +822,7 @@ fn relocate_with_refusals(
         unnameable.as_ref(),
         Some(&weak_zero),
     )?;
-    Ok((tally, unnameable))
+    Ok((applied, unnameable))
 }
 
 /// Notes the placement and relocation lines and builds the one-line summary of a placed image.
@@ -938,6 +962,8 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
         // crate version, so a run record names the tree that produced it and a regression can be
         // bisected.
         build: orbistoun_env::build::line(),
+        // Linking comes later; the report merges the digest in when it collects the trace.
+        link_plan: String::new(),
     });
     experiments
 }

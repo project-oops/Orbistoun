@@ -2968,6 +2968,7 @@ dependencies = [
  "orbistoun-nid",
  "orbistoun-thunk",
  "serde",
+ "sha2",
  "thiserror 2.0.20",
  "toml 0.8.23",
 ]

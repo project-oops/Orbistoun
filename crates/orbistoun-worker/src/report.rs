@@ -2248,7 +2248,7 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         conditions: {
             // Merged at read time, because the conditions are recorded before the import labels
             // exist and resolving which import to plant into needs them.
-            let mut c = CONDITIONS.get().cloned().unwrap_or_default();
+            let mut c = linked_conditions();
             if let Some(planted) = PLANTED.get() {
                 // With the counts, always: a forced write that matched an import and refused every
                 // target otherwise looks like one that landed and changed nothing.
@@ -2564,6 +2564,25 @@ static PLANTED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// Records what the run was put under, for the run conditions.
 pub fn note_experiments(what: String) {
     let _ = PLANTED.set(what);
+}
+
+/// The digest of the link plan this run applied (D724).
+///
+/// A third slot, because linking happens after the conditions are recorded.
+static LINK_PLAN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records which link plan the run applied, for the run conditions.
+pub fn note_link_plan(digest: String) {
+    let _ = LINK_PLAN.set(digest);
+}
+
+/// The recorded conditions, with the link plan merged in.
+fn linked_conditions() -> Conditions {
+    let mut conditions = CONDITIONS.get().cloned().unwrap_or_default();
+    if let Some(plan) = LINK_PLAN.get() {
+        conditions.link_plan.clone_from(plan);
+    }
+    conditions
 }
 
 /// Reports what the guest managed first, if it runs out of time.

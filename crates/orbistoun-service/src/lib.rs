@@ -766,6 +766,9 @@ pub struct LinkedTitle {
     pub slots: Vec<ModuleSlots>,
     /// What relocating each module came to, by library name.
     pub tallies: Vec<(String, orbistoun_elf::reloc::RelocationTally)>,
+    /// What linking decided for each of the title's own modules, the executable excluded: the
+    /// worker relocates that, and puts its plan first (D724).
+    pub plans: Vec<orbistoun_loader::plan::ModulePlan>,
     /// Names more than one module imports as data, which a lookup by name cannot separate.
     pub shared_data: Vec<String>,
     /// The one stub table serving every module, the executable included.
@@ -1685,10 +1688,21 @@ impl Service {
         bytes: &[u8],
         resolver: &impl orbistoun_loader::relocate::SymbolResolver,
     ) -> Result<orbistoun_elf::reloc::RelocationTally, ServiceError> {
+        self.relocate_image_recorded(image, bytes, resolver)
+            .map(|applied| applied.tally)
+    }
+
+    /// [`Self::relocate_image`], also returning every value written, for the link plan (D724).
+    pub fn relocate_image_recorded(
+        &self,
+        image: &orbistoun_loader::Image,
+        bytes: &[u8],
+        resolver: &impl orbistoun_loader::relocate::SymbolResolver,
+    ) -> Result<orbistoun_loader::relocate::Applied, ServiceError> {
         // The module's own thread-local layout, read from the container so a caller cannot pair an
         // image with another module's layout.
         let tls = orbistoun_loader::tls::layout_of(bytes)?.map(|(layout, _, _)| layout);
-        Ok(orbistoun_loader::relocate::apply(
+        Ok(orbistoun_loader::relocate::apply_recorded(
             image,
             bytes,
             resolver,
@@ -1858,6 +1872,7 @@ impl Service {
         let bound = per_module.first().cloned().unwrap_or_default();
 
         let mut tallies = Vec::new();
+        let mut plans = Vec::new();
         // `slots[0]` is the executable, which the worker relocates as part of entering it.
         for (index, ((library, image), slot)) in
             placed.images().iter().zip(slots.iter().skip(1)).enumerate()
@@ -1887,8 +1902,13 @@ impl Service {
                 bound: per_module.get(index + 1).unwrap_or(&nothing),
                 inner: &shifted,
             };
-            let tally = self.relocate_image(image, bytes, &resolver)?;
-            tallies.push((library.clone(), tally));
+            let applied = self.relocate_image_recorded(image, bytes, &resolver)?;
+            plans.push(orbistoun_loader::plan::ModulePlan::of(
+                library,
+                image,
+                applied.writes,
+            ));
+            tallies.push((library.clone(), applied.tally));
         }
         // Protected only now: relocation writes into text, so protecting earlier would fault those
         // writes, and an unprotected module faults on instruction fetch (D489).
@@ -1934,6 +1954,7 @@ impl Service {
             placed,
             slots,
             tallies,
+            plans,
             shared_data,
             thunks,
             data,

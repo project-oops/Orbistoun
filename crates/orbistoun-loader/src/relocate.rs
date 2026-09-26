@@ -10,6 +10,7 @@
 use orbistoun_elf::reloc::{Elf64Rela, RelocationTally, kind, parse_table};
 use orbistoun_elf::{Container, dynamic::DynamicInfo};
 
+use crate::plan::SlotWrite;
 use crate::tls::{self, TlsLayout};
 use crate::{Image, LoadError};
 
@@ -282,14 +283,34 @@ pub fn apply(
     resolver: &impl SymbolResolver,
     tls: Option<&TlsLayout>,
 ) -> Result<RelocationTally, LoadError> {
+    apply_recorded(image, whole, resolver, tls).map(|applied| applied.tally)
+}
+
+/// What relocating an image did: the tally, and every value written, for the link plan (D724).
+#[derive(Debug, Clone, Default)]
+pub struct Applied {
+    /// How many entries were applied, and why the rest were not.
+    pub tally: RelocationTally,
+    /// Every write, in the order it was made.
+    pub writes: Vec<SlotWrite>,
+}
+
+/// [`apply`], also returning every write it made.
+pub fn apply_recorded(
+    image: &Image,
+    whole: &[u8],
+    resolver: &impl SymbolResolver,
+    tls: Option<&TlsLayout>,
+) -> Result<Applied, LoadError> {
     let container = Container::parse(whole)?;
     let Some(dyn_bytes) = container.dynamic_bytes(whole)? else {
         // No dynamic table: a static binary has no relocations.
-        return Ok(RelocationTally::default());
+        return Ok(Applied::default());
     };
     let info = DynamicInfo::parse(dyn_bytes);
 
     let mut tally = RelocationTally::default();
+    let mut writes = Vec::new();
     for (addr, size) in [(info.rela, info.relasz), (info.jmprel, info.pltrelsz)] {
         if addr == 0 || size == 0 {
             continue;
@@ -303,18 +324,26 @@ pub fn apply(
         let Some(table_bytes) = whole.get(at..at.saturating_add(len)) else {
             continue;
         };
-        apply_table(&parse_table(table_bytes), image, resolver, tls, &mut tally)?;
+        apply_table(
+            &parse_table(table_bytes),
+            image,
+            resolver,
+            tls,
+            &mut tally,
+            &mut writes,
+        )?;
     }
-    Ok(tally)
+    Ok(Applied { tally, writes })
 }
 
-/// Applies one parsed table, accumulating into `tally`.
+/// Applies one parsed table, accumulating into `tally` and `writes`.
 fn apply_table(
     table: &[Elf64Rela],
     image: &Image,
     resolver: &impl SymbolResolver,
     tls: Option<&TlsLayout>,
     tally: &mut RelocationTally,
+    writes: &mut Vec<SlotWrite>,
 ) -> Result<(), LoadError> {
     let (span_base, span_len) = image.span();
     let base = image.base();
@@ -353,6 +382,10 @@ fn apply_table(
         unsafe {
             std::ptr::with_exposed_provenance_mut::<u64>(ptr).write_unaligned(value.value());
         }
+        writes.push(SlotWrite {
+            at: target,
+            value: value.value(),
+        });
         match value {
             RelocValue::Address(_) => tally.applied += 1,
             RelocValue::WeakZero(_) => tally.weak_zero += 1,

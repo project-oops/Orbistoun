@@ -555,6 +555,12 @@ pub struct Conditions {
     /// result contributed from another tree.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub build: String,
+    /// The digest of the link plan the run applied (D724).
+    ///
+    /// Compared: the same executable linked differently is a loader change, and a verdict
+    /// across it measures the loader as well as any implementation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link_plan: String,
 }
 
 impl Conditions {
@@ -606,6 +612,17 @@ impl Conditions {
                 "this run was under {} and the last was under {}",
                 describe_planted(&self.experiments),
                 describe_planted(&before.experiments)
+            ));
+        }
+        // Only when both runs recorded one: a trace from before plans were recorded is not a
+        // different plan.
+        if self.link_plan != before.link_plan
+            && !self.link_plan.is_empty()
+            && !before.link_plan.is_empty()
+        {
+            changed.push(format!(
+                "the link plan changed from {} to {}",
+                before.link_plan, self.link_plan
             ));
         }
         changed
@@ -1671,6 +1688,35 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_link_plan_qualifies_the_verdict() {
+        // The same executable linked differently is a loader change (D724).
+        let before = under(Conditions {
+            link_plan: "aaaaaaaaaaaaaaaa".to_owned(),
+            ..Conditions::default()
+        });
+        let after = under(Conditions {
+            link_plan: "bbbbbbbbbbbbbbbb".to_owned(),
+            ..Conditions::default()
+        });
+
+        let changed = compare(Some(&before), &after).conditions_changed;
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].contains("link plan") && changed[0].contains("bbbbbbbbbbbbbbbb"));
+    }
+
+    #[test]
+    fn a_trace_without_a_plan_is_not_a_different_plan() {
+        // A trace recorded before plans were recorded compares as unchanged.
+        let before = under(Conditions::default());
+        let after = under(Conditions {
+            link_plan: "bbbbbbbbbbbbbbbb".to_owned(),
+            ..Conditions::default()
+        });
+
+        assert!(compare(Some(&before), &after).conditions_changed.is_empty());
+    }
+
+    #[test]
     fn the_build_is_recorded_but_never_compared() {
         // The build changes with every release, so it is recorded but not compared.
         let before = under(Conditions {
@@ -1699,6 +1745,7 @@ mod tests {
             overrides: 3,
             propping: 3,
             build: "0.1.0".to_owned(),
+            link_plan: "0123456789abcdef".to_owned(),
         };
         let before = under(conditions.clone());
         let after = under(conditions);
