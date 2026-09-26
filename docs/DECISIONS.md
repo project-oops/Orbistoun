@@ -700,7 +700,7 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D676 | [Weak undefined symbols bind to zero when unanswered](decisions/D676-weak-undefined-symbols-bind-to-zero.md) | decided | 2026-09-10 |
 | 🟢 | D677 | [the measured mapper abort is a guest-engine branch, not a call to fake](decisions/D677-the-measured-mapper-abort-is-a-guest.md) | decided | 2026-09-12 |
 | 🟢 | D678 | [common-dialog answers the guest-observed 0 once measurement is proven impossible](decisions/D678-common-dialog-answers-the-guest.md) | decided | 2026-09-12 |
-| 🟢 | D679 | [an on-disk fallback for the APR index: tried, and not shipped](decisions/D679-an-on-disk-fallback-for-the-apr-index.md) | decided | 2026-09-12 |
+| 🟢 | D679 | [No on-disk fallback for the APR index](decisions/D679-an-on-disk-fallback-for-the-apr-index.md) | decided | 2026-09-26 |
 | 🟢 | D680 | [the app-content init sequence, and that it is not Terminator's wall](decisions/D680-the-app-content-init-sequence-and-that.md) | decided | 2026-09-12 |
 | 🟢 | D681 | [the shader-fixture reference toolchain is LLVM 18, reachable in a container](decisions/D681-the-shader-fixture-reference-toolchain.md) | decided | 2026-09-12 |
 | 🟢 | D682 | [shader capture into the census corpus requires a terminator, not a translatable decode](decisions/D682-shader-capture-into-the-census-corpus.md) | decided | 2026-09-13 |
@@ -740,11 +740,11 @@ the project; the conversation that produced these decisions is not.
 | 🟢 | D716 | [a fragment module simulates one lane, and a known exec mask emits only the lanes it runs](decisions/D716-a-fragment-module-simulates-one-lane.md) | decided | 2026-09-24 |
 | 🟢 | D717 | [a copy out of a colour target on the device is carried out when its destination is first touched](decisions/D717-a-copy-out-of-a-colour-target-on-the.md) | decided | 2026-09-24 |
 | 🟢 | D718 | [consecutive guest draws that share their state are one host mesh dispatch](decisions/D718-consecutive-guest-draws-that-share.md) | decided | 2026-09-25 |
-| 🟡 | D719 | [a flipped frame reaches guest memory when something reads it](decisions/D719-a-flipped-frame-reaches-guest-memory.md) | assumed | 2026-09-25 |
-| 🟡 | D720 | [a colour target is write-protected while it is trusted unchanged](decisions/D720-a-colour-target-is-write-protected.md) | assumed | 2026-09-25 |
-| 🟢 | D721 | [pad input is recorded and replayed against the guest's flips](decisions/D721-pad-input-is-recorded-and-replayed.md) | decided | 2026-09-25 |
-| 🟢 | D722 | [a title's /app0 is writable by where it is staged, not what it ships](decisions/D722-a-title-s-app0-is-writable-by-where-it.md) | decided | 2026-09-25 |
-| 🟡 | D723 | [a played window reads the host clock](decisions/D723-a-played-window-reads-the-host.md) | assumed | 2026-09-25 |
+| 🟡 | D719 | [A flipped frame reaches guest memory when something reads it](decisions/D719-a-flipped-frame-reaches-guest-memory.md) | assumed | 2026-09-26 |
+| 🟡 | D720 | [A colour target is write-protected while it is trusted unchanged](decisions/D720-a-colour-target-is-write-protected.md) | assumed | 2026-09-26 |
+| 🟢 | D721 | [Pad input captured and replayed against the guest's flips](decisions/D721-pad-input-is-recorded-and-replayed.md) | decided | 2026-09-26 |
+| 🟢 | D722 | [A title's /app0 is writable by where it is staged, not what it ships](decisions/D722-a-title-s-app0-is-writable-by-where-it.md) | decided | 2026-09-26 |
+| 🟡 | D723 | [A played window reads the host clock](decisions/D723-a-played-window-reads-the-host.md) | assumed | 2026-09-26 |
 
 | | meaning |
 |---|---|

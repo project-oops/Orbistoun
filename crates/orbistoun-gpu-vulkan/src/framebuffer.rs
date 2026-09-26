@@ -485,10 +485,9 @@ impl ResidentAttachment {
         })
     }
 
-    /// **Gives it new contents in place** (worklog 857): `pixels` (tightly packed `Rgba8`, exactly
-    /// the extent) copied in through its own buffer, after everything already recorded on the queue.
-    /// Destroying and creating an attachment for every seed waited for the device twice and
-    /// allocated two 8 MB blocks, once a frame.
+    /// Gives it new contents in place: `pixels` (tightly packed `Rgba8`, exactly the extent) copied
+    /// in through its own buffer, after everything already recorded on the queue. In place because
+    /// recreating the attachment for every seed waits for the device twice and allocates twice.
     ///
     /// The buffer is written only once nothing still reads it: the device is settled first, which
     /// finishes a previous reload's copy and any readback.
@@ -554,8 +553,8 @@ impl ResidentAttachment {
         })
     }
 
-    /// **Gives it one `Rgba8` word everywhere, in place, on the device** (worklog 863) - what a clear
-    /// the guest filled seeds. The word goes into its buffer by `vkCmdFillBuffer`, exact bits rather
+    /// Gives it one `Rgba8` word everywhere, in place, on the device - what a clear the guest
+    /// filled seeds. The word goes into its buffer by `vkCmdFillBuffer`, exact bits rather
     /// than a float clear's rounding, and is copied in from there - all recorded after what the queue
     /// already holds, so nothing waits: the host never touches the buffer, and the device orders
     /// the fill after the buffer's last reader.
@@ -4273,10 +4272,8 @@ mod tests {
         assert_eq!(laid.texels, texels);
     }
 
-    /// **A uniform reload leaves exactly that word in every pixel** (worklog 863): an attachment
-    /// seeded with a ramp, refilled on the device with a word whose four bytes differ, reads back as
-    /// that word everywhere - bit for bit, and in byte order red first. Skipped, and says so, where
-    /// no device is present.
+    /// A uniform reload leaves exactly its word in every pixel, bit for bit, red first. Skipped,
+    /// and says so, where no device is present.
     #[test]
     fn a_uniform_reload_leaves_exactly_its_word_everywhere() {
         if crate::compute::session().is_err() {

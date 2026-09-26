@@ -321,7 +321,7 @@ pub struct RegisterSweep<'a> {
     next: usize,
     reached: u32,
     /// The index of each register's latest write, by register - a table rather than a map because
-    /// a GL frame asks it tens of lookups per draw, for thousands of draws (worklog 854). Every
+    /// a GL frame asks it tens of lookups per draw, for thousands of draws. Every
     /// register a packet can name fits: the highest base, uconfig's `0xC000`, plus the widest
     /// packet's count stays below [`SWEEP_REGISTERS`], and anything past it goes to `beyond`.
     table: SweepTable,
@@ -336,10 +336,9 @@ const UNWRITTEN: u32 = u32::MAX;
 
 /// A sweep's register table, and the registers it has filled in.
 ///
-/// **Reused, and cleared by what it touched** (worklog 853): a fresh table was a megabyte allocated
-/// and zeroed twice a submission, for a stream that writes a few hundred registers - more time than
-/// the lookups it serves. A sweep takes the spare one, and returns it with only its written entries
-/// reset, so the next sweep starts from the same all-unwritten table a fresh one would be.
+/// Reused, and cleared by what it touched: a fresh table is a megabyte to allocate and zero for a
+/// stream that writes a few hundred registers. A sweep takes the spare one and returns it with only
+/// its written entries reset, so the next sweep starts from an all-unwritten table.
 #[derive(Debug)]
 struct SweepTable {
     latest: Vec<u32>,
@@ -418,7 +417,7 @@ impl<'a> RegisterSweep<'a> {
     /// The value of the latest write to `register` in packets before `before`, if there was one.
     ///
     /// What a per-draw lookup wants when it reads registers one at a time: the answer without
-    /// gathering, sorting and rescanning a list per draw (worklog 854).
+    /// gathering, sorting and rescanning a list per draw.
     pub fn latest(&mut self, before: u32, register: u32) -> Option<u32> {
         self.advance(before);
         self.index_of(register)
@@ -616,7 +615,7 @@ fn read_words(body: &[u8], start: usize, length: usize) -> Option<Words<'_>> {
 }
 
 /// A packet body read as little-endian words, in place: a submission has hundreds of thousands of
-/// packets and most are looked at for a word or two, so none of them is copied out (worklog 854).
+/// packets and most are looked at for a word or two, so none of them is copied out.
 #[derive(Clone, Copy)]
 struct Words<'a>(&'a [u8]);
 
@@ -1522,7 +1521,7 @@ pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<Vi
 }
 
 /// [`viewport_transform_at`], reading each register's value through `last` - a
-/// [`RegisterSweep::latest`] for a caller walking draws in order (worklog 854).
+/// [`RegisterSweep::latest`] for a caller walking draws in order.
 pub fn viewport_transform_from(
     mut last: impl FnMut(u32) -> Option<u32>,
 ) -> Option<ViewportTransform> {
@@ -1894,9 +1893,7 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 #[cfg(test)]
 mod tests {
 
-    /// **The sweep answers what the whole stream would** (worklog 854): the latest write before a
-    /// packet, per register, asked forwards, asked backwards (which starts again), and for a
-    /// register past the table.
+    /// The sweep answers what the whole stream would, forwards, backwards and past the table.
     #[test]
     fn the_sweep_gives_each_registers_latest_earlier_write() {
         use super::{RegisterSweep, RegisterWrite};
@@ -1956,10 +1953,8 @@ mod tests {
         assert_eq!(sweep.latest(8, 0x2C8C), Some(9));
     }
 
-    /// **Each stage's width comes from its own bit** (worklog 854): the GL context's NGG setup
-    /// (`VGT_SHADER_STAGES_EN` = `0x00c12010`, `oops-sdk src/gl/gl_draw.c`) sets `GS_W32_EN`, and its
-    /// `SPI_PS_IN_CONTROL` sets `PS_W32_EN`. The AGC fixture's `0x02002000` sets neither, and a stream
-    /// that writes neither register is the reset value's sixty-four lanes. The later write wins.
+    /// Each stage's wave width comes from its own bit, and the later write wins. The GL values are
+    /// the context's NGG setup in `oops-sdk src/gl/gl_draw.c`.
     #[test]
     fn wave_widths_read_each_stages_own_bit() {
         use super::{RegisterWrite, WaveWidths, wave_widths_at};

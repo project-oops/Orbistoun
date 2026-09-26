@@ -205,7 +205,7 @@ pub enum Before<'a> {
     Held,
     /// These, as linear `Rgba8` words.
     Words(&'a [u32]),
-    /// This linear `Rgba8` word in every pixel - a clear (worklog 863). Said as one word so a drawer
+    /// This linear `Rgba8` word in every pixel - a clear. Said as one word so a drawer
     /// can fill its target on the device rather than be handed megabytes of the same four bytes.
     Uniform(u32),
 }
@@ -626,8 +626,8 @@ fn read_target(
     if bytes.len() < length {
         return None;
     }
-    // **A target of one word throughout - a clear - needs no detile** (worklog 857): every pixel is
-    // that word in the target's byte order, wherever the tiling puts it.
+    // A target of one word throughout - a clear - needs no detile: every pixel is that word in the
+    // target's byte order, wherever the tiling puts it.
     let first = bytes.first_chunk::<4>().map(|w| u32::from_le_bytes(*w));
     let uniform = first.filter(|&word| {
         bytes
@@ -663,8 +663,7 @@ enum TargetRead {
     Unchanged,
     /// Something else wrote it: its contents, as linear `Rgba8`.
     Changed(Vec<u32>),
-    /// Something else wrote it with one word throughout - a clear: that word as linear `Rgba8`
-    /// (worklog 863).
+    /// Something else wrote it with one word throughout - a clear: that word as linear `Rgba8`.
     Uniform(u32),
 }
 
@@ -910,7 +909,7 @@ pub struct LazyCopies {
     /// Releases a kept frame unread.
     pub discard: fn(u64),
     /// Releases kept frame `old` unread and keeps the frame as it stands now, as one step - what a
-    /// copy superseding another does (worklog 859). The new id, or `None` with `old` released.
+    /// copy superseding another does. The new id, or `None` with `old` released.
     pub replace: fn(u64) -> Option<u64>,
     /// Makes `[base, base + len)` (whole host pages) inaccessible; the protection to restore.
     pub guard: fn(u64, u64) -> Option<u32>,
@@ -1127,7 +1126,7 @@ impl GuestCp<'_> {
             .iter()
             .position(|copy| copy.destination == destination && copy.length == length);
         // The superseded copy's snapshot is released when this one's is kept, in one trip to the
-        // device (worklog 859) - or on its own, on a path that keeps none.
+        // device - or on its own, on a path that keeps none.
         let (guard, superseded_snapshot) = match superseded {
             Some(index) => {
                 let old = list.remove(index);
@@ -1798,9 +1797,7 @@ mod tests {
         assert!(handed.is_some(), "changed by the guest, so read again");
     }
 
-    /// **A target of one word throughout is handed over as that word everywhere, as a detile would
-    /// hand it** (worklog 857): a `SWAP_ALT` clear of the whole surface, compared with detiling the
-    /// same memory - the shortcut skips the detile, not its answer.
+    /// A uniform target is handed over exactly as detiling the same memory would hand it.
     #[test]
     fn a_uniform_target_reads_as_its_detile_would() {
         use super::{ColourTarget, ComponentSwap, draw_over, swapped, words_of};

@@ -236,12 +236,10 @@ pub const PERF_DETAIL: Var = Var {
     read_by: "orbistoun-worker",
 };
 
-/// Each submission the executor carried out, a line apiece (worklog 858).
+/// Each submission the executor carried out, a line apiece.
 ///
-/// A GL title submits fifty times a frame, and a line for each was ~2% of a Neverball second
-/// spent writing what nobody reads. Refusals and failures are said whether or not this is set -
-/// a draw that did not run is never quiet. A verbosity level of the logging service once there is
-/// one.
+/// Off by default because a GL title submits many times a frame and the lines cost real frame
+/// time. Refusals and failures are printed regardless - a draw that did not run is never quiet.
 pub const TRACE_SUBMITS: Var = Var {
     name: "ORBISTOUN_TRACE_SUBMITS",
     kind: Kind::Diagnostic,

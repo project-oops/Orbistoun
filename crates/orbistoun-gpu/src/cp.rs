@@ -241,7 +241,7 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         let end = start + packet.body_length() as usize;
         let bytes = stream.get(start..end).unwrap_or_default();
         // Decided from the length alone, before any body is built: a GL frame is tens of thousands of
-        // packets and nearly all are inert or draws (worklog 854).
+        // packets and nearly all are inert or draws.
         if is_memory_inert(opcode, bytes.len() / 4) {
             continue;
         }

@@ -99,7 +99,7 @@ purpose = "The POSIX spelling of `sceKernelClose`, failing the POSIX way."
 returns = "status"
 edge_cases = [
     "Served by `sceKernelClose`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "FAILS THE POSIX WAY, MEASURED (obSCEne REQ-20260914T1110Z-9b12): close(-1) answered -1 with errno = EBADF (9), where the vendor twin answers 0x8002_0009. The twin's vendor code is translated - errno set, -1 returned (worklog 875).",
+    "FAILS THE POSIX WAY, MEASURED (obSCEne 019-posixerr/provoked-errors): close(-1) answers -1 with errno = EBADF (9), where the vendor twin answers 0x8002_0009. The twin's vendor code is translated - errno set, -1 returned.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
@@ -391,7 +391,7 @@ purpose = "The POSIX spelling of `sceKernelOpen`, failing the POSIX way."
 returns = "handle"
 edge_cases = [
     "Served by `sceKernelOpen`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "FAILS THE POSIX WAY, MEASURED (obSCEne REQ-20260914T1110Z-9b12): open of a missing path answered -1 with errno = ENOENT (2), not the vendor 0x8002_0002. The twin's vendor code is translated - errno set, -1 returned (worklog 875).",
+    "FAILS THE POSIX WAY, MEASURED (obSCEne 019-posixerr/provoked-errors): open of a missing path answers -1 with errno = ENOENT (2), not the vendor 0x8002_0002. The twin's vendor code is translated - errno set, -1 returned.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
@@ -2870,7 +2870,7 @@ assumptions = [
     "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_on = "2026-09-25"
-note = "Served alongside pthread_setschedparam (worklog 869)."
+note = "Served alongside pthread_setschedparam."
 
 [[function]]
 name = "pthread_setschedparam"
@@ -2889,7 +2889,7 @@ assumptions = [
 ]
 found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Served by delegation (worklog 869)."
+note = "Served by delegation."
 
 [[function]]
 name = "pthread_setspecific"
@@ -2928,7 +2928,7 @@ purpose = "The POSIX spelling of `sceKernelRead`, failing the POSIX way."
 returns = "count"
 edge_cases = [
     "Served by `sceKernelRead`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A failure is translated to -1 with errno set, the convention obSCEne measured for open and close through their POSIX names (REQ-20260914T1110Z-9b12, worklog 875).",
+    "A failure is translated to -1 with errno set, the convention obSCEne measured for open and close through their POSIX names (019-posixerr/provoked-errors).",
 ]
 found_by = "published-standard"
 known_by = "assumed"
@@ -3144,7 +3144,7 @@ purpose = "The POSIX spelling of `sceKernelWrite`, failing the POSIX way."
 returns = "count"
 edge_cases = [
     "Served by `sceKernelWrite`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A failure is translated to -1 with errno set, the convention obSCEne measured for open and close through their POSIX names (REQ-20260914T1110Z-9b12, worklog 875); that write follows its siblings is inferred.",
+    "A failure is translated to -1 with errno set, the convention obSCEne measured for open and close through their POSIX names (019-posixerr/provoked-errors); that write follows its siblings is inferred.",
     "Seventeen of the twenty-five open-toolchain payloads import it - the POSIX spelling only. A server writes its output through this, so without it a payload that has accepted a connection has nothing to say on it.",
 ]
 found_by = "static"

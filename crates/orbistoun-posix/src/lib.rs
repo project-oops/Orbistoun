@@ -62,8 +62,8 @@ guest_module! {
         "pthread_mutexattr_setprotocol" => 2,
         "pthread_mutexattr_settype" => 2,
         "pthread_self" => 0,
-        // `(thread, policy, const struct sched_param *)` in both spellings, so they delegate:
-        // PPSA04263 imports the setter here and it answered a placeholder (worklog 869).
+        // `(thread, policy, const struct sched_param *)` in both spellings, so they delegate;
+        // PPSA04263 imports the setter under this name.
         "pthread_getschedparam" => 3,
         "pthread_setschedparam" => 3,
         "read" => 3,
@@ -821,10 +821,9 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
 
 /// The POSIX file calls whose failures are reported the POSIX way: `-1` with `errno` set.
 ///
-/// **Measured for `open` and `close`** (obSCEne REQ-20260914T1110Z-9b12: a missing path answered
-/// `-1`, `errno = ENOENT`; `close(-1)` answered `-1`, `errno = EBADF`). `read` and `write` are the
-/// same family of POSIX-named exports and take the same convention, which is inferred rather than
-/// measured (worklog 875).
+/// Measured for `open` (a missing path gives `ENOENT`) and `close` (`close(-1)` gives `EBADF`) -
+/// the `open` and `close` records in `libScePosix.toml`. `read` and `write` are assumed to follow
+/// the same convention as POSIX-named exports of the same family.
 const FILE_CALLS: [(&str, &str, GuestFn); 4] = [
     ("open", "sceKernelOpen", posix_open),
     ("close", "sceKernelClose", posix_close),
@@ -890,9 +889,7 @@ mod tests {
         assert_eq!(served.len(), super::DELEGATED.len());
     }
 
-    /// **`close(-1)` fails the POSIX way**: `-1`, with `errno` set to `EBADF` - what the console
-    /// answered through the POSIX name (obSCEne REQ-20260914T1110Z-9b12), where the vendor twin
-    /// answers `0x8002_0009`.
+    /// `close(-1)` answers `-1` with `errno = EBADF`, not the vendor twin's `0x8002_0009`.
     #[test]
     fn a_posix_file_call_fails_with_errno_not_a_vendor_code() {
         /// `EBADF`, from FreeBSD `sys/sys/errno.h` - the value the console reported.

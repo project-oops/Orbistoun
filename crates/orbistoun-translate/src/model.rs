@@ -1977,7 +1977,7 @@ fn export<M: Model + ?Sized>(
 }
 
 /// The lanes an instruction whose only effect is a masked write emits code for: every lane but
-/// those the model knows are inactive (worklog 854). An instruction that writes a **mask** loops
+/// those the model knows are inactive. An instruction that writes a mask loops
 /// over every lane instead, because its answer for an inactive lane is a bit someone reads.
 fn running_lanes<M: Model + ?Sized>(model: &M) -> Vec<u32> {
     (0..model.lanes())

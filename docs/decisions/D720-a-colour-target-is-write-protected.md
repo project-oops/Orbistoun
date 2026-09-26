@@ -1,35 +1,21 @@
-# D720 - a colour target is write-protected while it is trusted unchanged
+# D720 - A colour target is write-protected while it is trusted unchanged
 
 **Status:** assumed
-**Date:** 2026-09-25
+**Date:** 2026-09-26
 
-## The question
+When the command processor has read or written a colour target, the target's pages become
+read-only; a write to them faults, and the fault handler records the target as written, restores
+the protection and retries the write. A target still read-only and unwritten is unchanged; one
+written, or never protected, is compared against the kept bytes.
 
-Before each submission's draws, the command processor asks whether the colour target's memory has
-changed since it last wrote or read it (worklog 844). If it has not, the device already holds it.
-The host answers from write-watch (worklog 851), but only for memory the host allocated privately.
-Guest direct memory is mapped views, which the host cannot write-watch, so every submission compared
-the target's 8 MB against the bytes kept: ~80 ms of every Neverball second. How is "unchanged"
-answered there without comparing?
+**Why:** the host write-watches only memory it allocated privately, and guest direct memory is
+mapped views, so without protection every submission compares the target's 8 MB against the kept
+bytes. Page protection sees every write to the pages, as write-watch does, and errs in the same
+direction: a write of the same bytes is caught as a write and then passes the comparison. The
+command processor's own writes, and anything that guards the pages another way (D717, D719), release
+the protection first rather than faulting. One target is protected at a time: the one the kept
+bytes belong to.
 
-## The choice
-
-**The target's pages are made read-only while it is trusted unchanged.** When the command processor
-has read or written a target, its pages become read-only.
-
-- Any write to them faults, whoever makes it: the guest, or host code on its behalf. The fault
-  handler records the target as written, gives the pages their protection back and retries the
-  write.
-- The command processor's own writes release the protection first, rather than faulting.
-- So does anything that guards the pages another way (D717, D719).
-
-A target still read-only and unwritten is unchanged. A target written, or never protected, is
-compared as before. A write of the very bytes that were there still reads as unchanged by the
-comparison.
-
-One target is protected at a time: the one the kept bytes belong to.
-
-## Why it is exact
-
-Page protection sees every write to the pages, as write-watch does. It is conservative in the same
-direction: a write of the same bytes is caught as a write and then passes the comparison.
+**Rejected:** comparing the whole target before every submission - exact, and the dominant cost of
+a frame.
+**Rejected:** write-watch on guest direct memory - the host does not offer it for mapped views.

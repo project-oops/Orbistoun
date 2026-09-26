@@ -1373,71 +1373,27 @@ fn next_mapping_base(len: u64) -> u64 {
     NEXT.fetch_add(step, Ordering::Relaxed)
 }
 
-/// `sceKernelMapNamedDirectMemory(addr, len, prot, flags, physical, alignment)`.
+/// Virtual addresses already handed out, as `(address, len)` by the physical offset mapped.
 ///
-/// Gives the guest a virtual address for physical memory it has already reserved. This is
-/// the other half of `sceKernelAllocateMainDirectMemory`: the allocation answers *which*
-/// physical memory, and this answers *where the guest can reach it*.
-///
-/// # How this was found
-///
-/// The ordered call tail (D154) ended with three calls and then a null write:
-///
-/// ```text
-/// sceKernelAllocateMainDirectMemory(0x100000)
-/// libc::0xa75420e43cad1cdc(...)
-/// libkernel::0x8434cc175396c635(0x6000007ffcd8)
-/// -> write to 0x0
-/// ```
-///
-/// The hash was unnamed. Proposing candidate names and letting the hash confirm - the
-/// ordinary clean-room method, nothing consulted - matched `sceKernelMapNamedDirectMemory`
-/// exactly. The first argument being a guest stack address agrees: it is where the guest
-/// wants to be told the answer (D155).
-///
-/// # What is honoured and what is not
-///
-/// The requested protection is applied. The name is the **seventh** argument and this
-/// trampoline spills six, so it is not readable here at all - which costs a label in a
-/// trace and nothing else.
-///
-/// Physical memory is not aliased. Two mappings of the same physical range get two
-/// separate pieces of host memory, so a guest that writes through one and reads through
-/// the other sees stale data. Nothing observed does that yet, and doing it properly needs
-/// a shared-memory object rather than a reservation - recorded rather than pretended.
-/// Virtual addresses already handed out, by the physical offset they were mapped from.
-///
-/// **Because physical memory has to alias itself.** A guest allocates a physical range,
-/// maps it, loads a file into the address it was given, and later maps the same range
-/// again expecting its data to still be there. Handing out fresh zeroed memory the second
-/// time is a silent, total data loss - the guest reads zeroes from a buffer it filled, and
-/// the fault lands wherever it first trusts the contents (D174).
-///
-/// This is not full aliasing: two *simultaneous* mappings of one physical range still get
-/// one address rather than two, which would need a shared memory object rather than a
-/// reservation. It is the case that actually occurs.
-///
-/// **An entry lives only as long as both halves of it do** (worklog 860). Each holds the
-/// address *and the length* mapped. It is forgotten when the physical memory is released or the
-/// mapping unmapped, and a map asking for more than the entry covers is not the same mapping.
-/// A stale entry once answered a `0x40000` map of reallocated physical memory with a `0x10000`
-/// mapping from before its release, and Neverball's `memset` of the new buffer walked off the end
-/// into a free page.
+/// A guest maps a physical range, fills it, and maps the same range again expecting its data
+/// back, so a second map of the same physical memory returns the first address (D174). Two
+/// simultaneous mappings of one range share one address; distinct addresses would need a shared
+/// memory object. An entry holds only while both the physical memory and the mapping exist, and
+/// only for maps no longer than the one it records - a longer map is a different mapping.
 fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, (u64, u64)>> {
     static MAPPED: OnceLock<Mutex<std::collections::BTreeMap<u64, (u64, u64)>>> = OnceLock::new();
     MAPPED.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
 }
 
 /// Forgets every alias whose physical offset lies in `[start, start + len)` - the memory was
-/// released, so a later allocation of it is new memory with nothing to keep (worklog 860).
+/// released, so a later allocation of it is new memory with nothing to keep.
 fn forget_physical(start: u64, len: u64) {
     if let Ok(mut mapped) = physical_mappings().lock() {
         mapped.retain(|&physical, _| physical < start || physical - start >= len);
     }
 }
 
-/// Forgets every alias whose mapping starts in `[address, address + len)` - the guest unmapped it
-/// (worklog 860).
+/// Forgets every alias whose mapping starts in `[address, address + len)` - the guest unmapped it.
 fn forget_mapped(address: u64, len: u64) {
     if let Ok(mut mapped) = physical_mappings().lock() {
         mapped.retain(|_, &mut (base, _)| base < address || base - address >= len);
@@ -1455,16 +1411,17 @@ fn forget_mapped(address: u64, len: u64) {
 
 /// Ranges `sceKernelReserveVirtualRange` handed out, as `(base, len)`.
 ///
-/// **A reservation is address space, not memory**, and a guest asks which it has. orbistoun
-/// reserves and backs in one step, so its address space alone cannot tell a reservation from a
-/// mapping - and answering a fresh reservation as committed read-write memory made the Unity titles
-/// skip the direct-memory allocate-and-map that fills it (worklog 868). A range here that no
-/// direct mapping has been placed in is answered uncommitted and inaccessible.
+/// A reservation is address space, not memory, and a guest queries which it has. orbistoun
+/// reserves and backs in one step, so a range here that no direct mapping has been placed in is
+/// answered uncommitted and inaccessible - a guest fills a reservation only when it reads as empty.
 fn reservations() -> &'static Mutex<Vec<(u64, u64)>> {
     static RESERVED: OnceLock<Mutex<Vec<(u64, u64)>>> = OnceLock::new();
     RESERVED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// `sceKernelMapNamedDirectMemory(addr, len, prot, flags, physical, alignment)` - gives the guest
+/// a virtual address for physical memory `sceKernelAllocateMainDirectMemory` reserved (D155). The
+/// name is the seventh argument and the trampoline spills six, so it is not read.
 fn map_named_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // **Every way out that is not success is recorded, from one place.** The refusal note started
     // on the one failure path anybody had looked at, and this function has a dozen - so a map the
@@ -1497,11 +1454,9 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     let (out, len, prot, physical, alignment) = (args[0], args[1], args[2], args[4], args[5]);
 
-    // Already mapped? Then the guest gets the address it had, and its data with it. The
-    // physical offset is the identity of the memory; the virtual address is just where it
-    // is currently reachable. **Only if that mapping covers what is asked for** (worklog 860): a
-    // longer map is not the same mapping, and answering it with the shorter one leaves the rest
-    // of what the guest was promised unmapped.
+    // Already mapped, and covering what is asked for: the guest gets the address it had, and its
+    // data with it. A longer map is a different mapping - answering it with the shorter one would
+    // leave the rest of what the guest was promised unmapped.
     if let Ok(mapped) = physical_mappings().lock() {
         if let Some(&(existing, existing_len)) = mapped.get(&physical)
             && existing_len >= len
@@ -4343,13 +4298,9 @@ fn munmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // for that exact code would never match the `0x7fff…` this used to return (D125).
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     }
-    // The reservation itself is not torn down here. orbistoun maps the guest's whole span
-    // once at load and hands out pieces of it; releasing a piece back to the host would
-    // put a hole in an address space the guest still believes is contiguous. Recorded as
-    // an assumption rather than implied by this answering success (D273).
-    //
-    // What *is* torn down is the alias: a later map of the same physical memory is a new
-    // mapping, not this one handed back (worklog 860).
+    // The host reservation stays: orbistoun maps the guest's whole span once at load, and
+    // releasing a piece would hole an address space the guest believes contiguous (D273). The
+    // alias goes, so a later map of the same physical memory is a new mapping.
     forget_mapped(address, len);
     OK
 }
@@ -4486,9 +4437,8 @@ fn virtual_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if info == 0 {
         return vendor(orbistoun_core::errno::INVALID);
     }
-    // **An address in no region is `EACCES`, not `ENOENT`.** Measured: obSCEne's
-    // `020-memory/virtual-query-unmapped` queried `0x720000240000` with flags 0 and the console
-    // answered `0x8002000d` (REQ-20260914T1110Z-9b12, worklog 868).
+    // An address in no region is `EACCES` (`0x8002000d`), not `ENOENT` - measured: obSCEne
+    // `020-memory/virtual-query-unmapped`.
     let Some(region) = query_region(addr) else {
         return vendor(orbistoun_core::errno::DENIED);
     };
@@ -4504,8 +4454,8 @@ fn virtual_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// How many bytes `SceKernelVirtualQueryInfo` is: measured, the console's `extent` for all three
-/// regions obSCEne queried (REQ-20260914T1110Z-9b12).
+/// How many bytes `SceKernelVirtualQueryInfo` is - measured: obSCEne
+/// `020-memory/virtual-query-{mapped,text,stack}`, the same extent for all three.
 const VIRTUAL_QUERY_INFO_BYTES: usize = 72;
 
 /// Where each field of `SceKernelVirtualQueryInfo` sits, from the console's own bytes.
@@ -4565,10 +4515,9 @@ impl QueryRegion {
 
 /// The protection each guest range was last *asked* for, as `(base, len, prot)`, newest last.
 ///
-/// **What the guest asked, not what orbistoun granted.** `protection_from_guest` grants read with
-/// write and keeps an unasked-for range readable, because the host needs it; answering a query with
-/// that grant told the guest a range was already set up that it had not set up, and it skipped the
-/// `sceKernelMprotect` that sets it up (worklog 868).
+/// What the guest asked, not what orbistoun granted: `protection_from_guest` widens the grant for
+/// the host's sake, and a query answered with the grant tells the guest a range is set up when it
+/// is not, so it skips the `sceKernelMprotect` that sets it up.
 fn requested_protections() -> &'static Mutex<Vec<(u64, u64, u64)>> {
     static REQUESTED: OnceLock<Mutex<Vec<(u64, u64, u64)>>> = OnceLock::new();
     REQUESTED.get_or_init(|| Mutex::new(Vec::new()))
@@ -4595,11 +4544,9 @@ fn requested_protection(addr: u64) -> Option<u64> {
 
 /// The console's protection field for a range asked for with `prot`: the request, as asked.
 ///
-/// Measured for CPU bits - a read-write mapping reported 3, execute-only text 4. **Guest-observed
-/// for the GPU bits above them:** PPSA25872's allocator queries a committed range and compares
-/// this field with the `0xf2` it wants (CPU write plus GPU read and write), calling
-/// `sceKernelMprotect` only when they differ (`image+0x1ae28b4`, worklog 868). A field holding
-/// CPU bits alone could never equal `0xf2`, so the console must hand the full request back.
+/// Measured for the CPU bits (obSCEne `020-memory/virtual-query-{mapped,text}`). Guest-observed for
+/// the GPU bits: PPSA25872 compares this field with the `0xf2` it wants and calls `sceKernelMprotect`
+/// only when they differ (`image+0x1ae28b4`), which CPU bits alone could never equal.
 const fn reported_protection(prot: u64) -> u32 {
     prot as u32
 }
@@ -4653,9 +4600,9 @@ fn query_region(addr: u64) -> Option<QueryRegion> {
                     flags: vq::DIRECT | vq::COMMITTED,
                     name: "anon",
                 },
-                // A reservation nothing has been mapped into: address space only - no access, not
-                // committed. Inferred from what reserving means and from the guest, which fills
-                // such a range only when the query says it is empty (worklog 868); not measured.
+                // A reservation nothing has been mapped into: address space only, no access, not
+                // committed. Assumed from what reserving means and from the guest, which fills such
+                // a range only when the query says it is empty.
                 _ if !flexible && is_reservation(start) => QueryRegion {
                     start,
                     end,
@@ -4904,7 +4851,7 @@ fn map_flexible_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // `available` for memory the guest never received.
     if result == OK {
         direct::record_flexible_map(len);
-        // Mapped through the direct path, and still flexible memory to a query (worklog 868).
+        // Mapped through the direct path, and still flexible memory to a query.
         if let (Some(base), Ok(mut flexible)) = (read_word(out), flexible_mappings().lock()) {
             flexible.push(base);
         }
@@ -6652,18 +6599,11 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceKernelMapperGetParam(out)` - fills a size-prefixed structure and answers `0`.
 ///
-/// **Measured on FW 12.40, twice in one sweep** (obSCEne `report-1790100990`,
-/// `137-kernelcall/mapper-param` and `166-agc/mapper-after-init`): `rc 0x0`, and the 56-byte
-/// structure whose first quadword is its size (`0x38`) came back with the 48 bytes after the size
-/// filled - [`MAPPER_PARAM`]. The size word itself is left as the caller wrote it (`changed 48`).
-///
-/// The `0x8002_0006` this answered before was an earlier cold call (b7e2, worklog 505) that a later
-/// sweep superseded; Earthion aborts on any non-zero answer here (D677), which is what that stale
-/// value produced (worklog 877).
-///
-/// Only the bytes the caller's own size declares are written, so a smaller structure is never
-/// overrun; a size the measurement did not cover gets the prefix of the measured bytes it has room
-/// for.
+/// Measured on FW 12.40: obSCEne `137-kernelcall/mapper-param` and `166-agc/mapper-after-init`
+/// answer `0` and fill the 48 bytes after the 56-byte structure's leading size quadword with
+/// [`MAPPER_PARAM`], leaving the size word as the caller wrote it. Earthion aborts on any non-zero
+/// answer here (D677). Only the bytes the caller's size declares are written, so a smaller
+/// structure is never overrun.
 fn mapper_get_param(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out = args[0];
     let Some(declared) = read_word(out) else {
@@ -7061,26 +7001,14 @@ fn read_path(address: u64) -> String {
 
 /// `sceKernelAprResolveFilepathsToIdsAndFileSizes(paths, count, ids, sizes, statuses, options)`.
 ///
-/// # The contract, measured
+/// Measured with signature-filled out-arrays (obSCEne `040-file/apr-resolve-filepaths`): `ids` is
+/// `u32` per entry, `sizes` `u64`, `statuses` `u32`, and `options` may be null and is never
+/// written. An unresolved path gets id `0xffffffff`, size 0 and status 0, and the call returns -1.
+/// Each entry is written at its full width, since a guest reads a size slot it did not initialise.
 ///
-/// obSCEne called it on hardware with each out-array pre-filled with its own signature
-/// (REQ-20260925T1834Z-a7e2): `ids` is `u32` per entry, `sizes` is `u64` per entry, `statuses`
-/// is `u32` per entry, and `options` is an input that may be null and is never written. For a path
-/// that does not resolve the console writes id `0xffffffff`, size 0 and status 0, and the call
-/// returns -1.
-///
-/// **Every entry is written, at its measured width.** Leaving a slot as the caller prepared it
-/// is what stopped PPSA25872: its stream read an unwritten size slot, got a stack address, and
-/// reserved a string that long (worklog 867). The width was the other half - D679's experiment
-/// wrote four bytes into the eight-byte size slot and kept the stack address's upper half.
-///
-/// # What resolves
-///
-/// A path the title's own index names (D591) resolves to the index's identifier and size. Every
-/// other path gets the measured unresolved answer: orbistoun has no source for the identifier a
-/// console hands out for a file outside an index, and a synthesised one is the guess D679
-/// declined. What a *successful* resolve of such a path returns on hardware - its id, its status,
-/// the return value - is not measured.
+/// A path the title's own index names (D591) resolves to the index's identifier and size. Any
+/// other path gets the unresolved answer: there is no source for the id a console assigns a file
+/// outside an index.
 fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (array, count, ids, sizes, statuses) = (args[0], args[1], args[2], args[3], args[4]);
     let mut paths = Vec::new();
@@ -7107,9 +7035,8 @@ fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             }
             paths.push(path);
         }
-        // **The first unresolved path ends the call** and every later slot is left as the caller
-        // prepared it - measured with a two-path call whose second entry kept its signature bytes
-        // (obSCEne REQ-20260925T2130Z-e61a, worklog 874).
+        // The first unresolved path ends the call and later slots keep what the caller put there -
+        // measured: the `sceKernelAprResolveFilepathsToIdsAndFileSizes` record in `libkernel.toml`.
         if answer.is_none() {
             break;
         }
@@ -7631,10 +7558,7 @@ mod tests {
             .collect()
     }
 
-    /// **The encoder writes the console's bytes, byte for byte.** Two of obSCEne's hardware records
-    /// (`020-memory/virtual-query-mapped` and `-stack`, REQ-20260914T1110Z-9b12), rebuilt from the
-    /// fields orbistoun knows and compared whole - so a field at the wrong offset, a wrong width or
-    /// an unzeroed tail fails here rather than in a title.
+    /// The encoder reproduces obSCEne `020-memory/virtual-query-mapped` and `-stack` byte for byte.
     #[test]
     fn a_query_encodes_what_the_console_wrote() {
         let mapped = super::QueryRegion {
@@ -7672,10 +7596,7 @@ mod tests {
         assert_eq!(stack.encode().to_vec(), console);
     }
 
-    /// **An unresolvable path is answered as the console answered it, at the measured widths.**
-    /// obSCEne's signature fill (REQ-20260925T1834Z-a7e2), rebuilt: the id slot gets four bytes
-    /// of `0xff`, the size slot all eight bytes zeroed, the status slot four zero bytes, nothing
-    /// past any of them, and the call returns -1.
+    /// An unresolved path fills each slot at the width obSCEne `040-file/apr-resolve-filepaths` measured.
     #[test]
     fn an_unresolved_path_fills_every_slot_at_its_measured_width() {
         let path = b"/app0/not-in-any-index.json\0";
@@ -7699,8 +7620,7 @@ mod tests {
         assert_eq!(&statuses[4..], &[0xc3; 28]);
     }
 
-    /// **The first unresolved path ends the call**: in a two-path call the second entry's slots keep
-    /// what the caller put there (obSCEne REQ-20260925T2130Z-e61a).
+    /// The first unresolved path ends the call, leaving later entries' slots untouched.
     #[test]
     fn an_unresolved_path_leaves_the_later_slots_untouched() {
         let (first, second) = (b"/app0/missing-one\0", b"/app0/missing-two\0");
@@ -7755,9 +7675,7 @@ mod tests {
         );
     }
 
-    /// **A fresh reservation is answered uncommitted and inaccessible.** The Unity allocator tests
-    /// the committed bit (`0x10` at `+0x20`) and fills an uncommitted range with direct memory;
-    /// answering orbistoun's reserve-and-back as committed made it skip the fill (worklog 868).
+    /// A fresh reservation queries as uncommitted and inaccessible, so a guest fills it.
     #[test]
     fn a_fresh_reservation_is_not_committed() {
         let mut slot: u64 = 0;
@@ -8100,11 +8018,7 @@ mod tests {
         assert_eq!(read_back, 0xFEED_FACE, "and the data survived");
     }
 
-    /// **An alias does not outlive its memory, and does not stand in for a longer map**
-    /// (worklog 860). Neverball released a 64 KiB span, allocated `0x40000` at the same physical
-    /// offset, and was handed the old 64 KiB mapping - its `memset` faulted on the free page after
-    /// it. Here: a longer map of a still-mapped offset is a mapping of the whole length; a
-    /// released offset maps afresh; an unmapped one too.
+    /// An alias does not outlive its memory or its mapping, and never answers a longer map.
     #[test]
     fn an_alias_is_forgotten_with_its_memory_and_never_answers_a_longer_map() {
         direct::configure(direct::Settings {

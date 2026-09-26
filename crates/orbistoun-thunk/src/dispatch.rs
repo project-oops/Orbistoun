@@ -1258,17 +1258,15 @@ fn dump_arguments(index: u64, args: *const u64) {
 
 /// How many of the most recent calls to a named import keep their caller's stack.
 ///
-/// **The most recent, not the first.** Argument dumps keep an import's first calls, because
-/// that is when a constant can be told from an out-parameter. The question this answers is
-/// *who made the call that went wrong*, and that is usually the last one: PPSA25872's
-/// thirty-fifth reservation was the bad one, after thirty-four good ones (worklog 867).
+/// The most recent, not the first: argument dumps keep an import's first calls, but the call
+/// that went wrong is usually among the last, often after many good ones.
 const CALLER_STACKS: usize = 4;
 
 /// Stack words kept per call, from the return address up.
 ///
-/// Four kibibytes: an allocator's frames alone took half a kibibyte in the chain this was built
-/// for, and the caller that chose the size sat above them (worklog 867). Return addresses are
-/// picked out by the report, which knows where guest code lies; this layer only copies.
+/// Four kibibytes: an allocator's own frames can take half a kibibyte, and the caller of interest
+/// sits above them. The report picks out return addresses, since it knows where guest code lies;
+/// this layer only copies.
 pub const CALLER_STACK_WORDS: usize = 512;
 
 /// The ring of captured stacks, and which call each belongs to (sequence, import index + 1).

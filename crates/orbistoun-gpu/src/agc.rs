@@ -247,10 +247,8 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             // (measured, obSCEne 166-agc/create-shader). Unaligned for the field's sake.
             let rel = unsafe { peek_u64(entry_addr) };
             if rel != 0 && rel < 0x1000 {
-                // **Self-relative, like every offset in this object** (worklog 872): the entry's
-                // own address plus its offset. Relative to the table base instead, PPSA25872's
-                // slot tables landed eight bytes short on `0xffff` padding and its constant upload
-                // wrote through a null extended buffer.
+                // Self-relative, like every offset in this object: the entry's own address plus
+                // its offset (measured: obSCEne `166-agc/create-shader`, `shader-obj`).
                 // SAFETY: the same entry just read, written back as an absolute pointer.
                 unsafe { poke_u64(entry_addr, entry_addr.wrapping_add(rel)) };
             }
@@ -271,10 +269,9 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // extent is 0x130 bytes.
         let rel = unsafe { peek_u64(field) };
         if rel != 0 && rel < 0x1000 {
-            // **Self-relative: the field's own address plus its offset.** Measured - the probe's
-            // header held `0x70` at `+0x20` and `0x38` at `+0x28`, and the console wrote back
-            // `header + 0x90` and `header + 0x60` (worklog 872). Relative to the header base, as
-            // this was, both land 0x20 and 0x28 bytes short.
+            // Self-relative: the field's own address plus its offset. Measured: obSCEne
+            // `166-agc/create-shader` wrote `header + 0x90` back over `0x70` at `+0x20`, and
+            // `header + 0x60` over `0x38` at `+0x28`.
             // SAFETY: the same field just read, written back as an absolute pointer.
             unsafe { poke_u64(field, field.wrapping_add(rel)) };
         }
@@ -290,13 +287,10 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// Writes the program's address into the shader's register descriptor, as the console does.
 ///
-/// **Measured (obSCEne REQ-20260925T2056Z-5d19).** The descriptor `+0x20` points at is
-/// `{reg, value, reg + 1, value}`, the program-address register pair. The console wrote
-/// `payload >> 8` into its second dword - the two bytes a relocation model could not account for -
-/// and wrote nothing when the first dword named no register (stages 4 and 5). The high half,
-/// `payload >> 40` into the fourth dword, is the same pair's other register: Mesa programs it as
-/// `address32_hi >> 8` (`ac_cmdbuf.c:318-324`), and it read zero on the probe only because its
-/// payload sat below 2^40 (worklog 874).
+/// The descriptor `+0x20` points at is `{reg, value, reg + 1, value}`, the program-address
+/// register pair. The console writes `payload >> 8` into the second dword, and nothing when the
+/// first dword names no register (measured: obSCEne `166-agc/create-shader`). The fourth dword
+/// takes `payload >> 40`, the pair's high register, as Mesa programs it (`ac_cmdbuf.c:318-324`).
 ///
 /// # Safety
 ///
@@ -1101,11 +1095,8 @@ mod tests {
             "+0x08 is the sub-table pointer"
         );
         assert_eq!(read_u64(0x10), bytecode, "+0x10 is the bytecode pointer");
-        // **The console's own answer, from its capture** (obSCEne `166-agc/create-shader`,
-        // `shader-obj`): the probe's header held `0x70` at `+0x20` and `0x38` at `+0x28`, and
-        // hardware wrote back `header + 0x90` and `header + 0x60` - each field's own address plus
-        // its offset (worklog 872). This test once asserted `header + 0x70`: the belief, not the
-        // capture.
+        // Each field becomes its own address plus its offset, as the console wrote back
+        // (measured: obSCEne `166-agc/create-shader`, `shader-obj`).
         assert_eq!(
             read_u64(0x20),
             header + 0x20 + 0x70,
@@ -1197,10 +1188,8 @@ mod tests {
         assert_eq!(read2(0x38), 0, "an empty +0x38 is not turned into header+0");
     }
 
-    /// **The console's full byte diff, replayed** (obSCEne REQ-20260925T2056Z-5d19): the register
-    /// descriptor at `+0x90` gets the program address in its second (and fourth) dword, the five
-    /// sub-table entries land at `+0x118` then `+0x130` four times, and a descriptor naming no
-    /// register (stages 4 and 5) is left alone.
+    /// `create_shader` reproduces the console's byte diff (obSCEne `166-agc/create-shader`),
+    /// including leaving a descriptor that names no register alone.
     #[test]
     fn create_shader_matches_the_consoles_byte_diff() {
         let run = |reg: u32| {

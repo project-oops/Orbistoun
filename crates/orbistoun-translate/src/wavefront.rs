@@ -948,7 +948,7 @@ pub struct Wavefront<'a> {
     /// Each half of the execution mask, where the instructions since the start of this block
     /// wrote it a constant - which is how a primitive shader picks its threads: `s_mov_b32
     /// exec_lo, 1` for the primitive, then `7` for three vertices. A lane known inactive then
-    /// emits nothing, and one known active writes without a select (worklog 854).
+    /// emits nothing, and one known active writes without a select.
     known_exec: [Option<u32>; 2],
     constants: BTreeMap<u32, Id>,
     /// The imported `GLSL.std.450` set id, cached after the first extended instruction imports it.

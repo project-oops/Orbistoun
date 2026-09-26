@@ -690,10 +690,8 @@ fn parse_indirect(text: &str, registers: &Registers) -> Option<(u64, usize)> {
 /// The address a slot expression names: a hex address, or a register at the fault plus an
 /// optional hex offset (`r15+0x8`).
 ///
-/// **For the object that moves.** A heap object's address changes every run, so neither it nor
-/// a fixed stack slot always reaches it - but the register holding it at the fault does. PPSA02664's
-/// binding object sits at `0x740001ec78a0` one run and `0x740001cc78a0` the next, always in `r15`,
-/// and `[r15+0x8]` is its sub-table whatever the run (worklog 876).
+/// A heap object's address changes every run, so neither it nor a fixed stack slot always
+/// reaches it - the register holding it at the fault does.
 #[cfg(windows)]
 fn slot_address(expr: &str, registers: &Registers) -> Option<u64> {
     let (base, offset) = match expr.split_once('+') {
@@ -823,9 +821,9 @@ fn dump_at_fault(registers: &Registers) {
 }
 
 /// The most recent calls to each import named with `ORBISTOUN_DUMP`, with the guest-code addresses
-/// found on the caller's stack at each (worklog 867).
+/// found on the caller's stack at each.
 ///
-/// **Candidates, not a call chain.** Words are copied from the return address up and those that
+/// Candidates, not a call chain: words are copied from the return address up and those that
 /// land in guest code are listed; with no frame pointer followed, a stale word from an older frame
 /// qualifies too, and the line says so. Word 0 is the return address itself, so the first entry is
 /// always exact.
@@ -1135,7 +1133,7 @@ fn note_instruction_shape(line: &mut Line, opcode: &[u8], faulting_address: u64)
 }
 
 /// The host's view of the page holding `address` - protection, state, kind, region - and every
-/// recent change orbistoun's page guards made to it, oldest first (worklog 859).
+/// recent change orbistoun's page guards made to it, oldest first.
 #[cfg(windows)]
 fn note_page(line: &mut Line, address: u64) {
     use windows_sys::Win32::System::Memory::{
@@ -1358,10 +1356,9 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     let _ = std::io::stderr().write_all(line.as_bytes());
     let _ = std::io::stderr().flush();
 
-    // **The faulting page as the host holds it, and what this process did to its protection**
-    // (worklog 859): a page left inaccessible or read-only by orbistoun's own guards (D717, D719,
-    // D720) and a page the guest never had look alike from the fault alone. Its own line, still
-    // allocation-free.
+    // The faulting page as the host holds it, and what this process did to its protection: a
+    // page left inaccessible or read-only by orbistoun's own guards and a page the guest never
+    // had look alike from the fault alone. Its own line, still allocation-free.
     if faulting_address != u64::MAX {
         let mut page = Line::new();
         note_page(&mut page, faulting_address);
@@ -3128,8 +3125,8 @@ mod tests {
         assert_eq!(parse_indirect("[0x10]garbage", &regs), None);
     }
 
-    /// **A slot can be a register at the fault plus an offset** - `[r15+0x8]` reaches an object
-    /// whose address changes every run (worklog 876). An unknown name is refused, not read as zero.
+    /// A slot can be a register at the fault plus an offset; an unknown name is refused, not
+    /// read as zero.
     #[cfg(windows)]
     #[test]
     fn an_indirect_peek_takes_a_register_base() {
@@ -3707,7 +3704,7 @@ mod host_module_tests {
         );
     }
 
-    /// **A fault report says whose protection a page has** (worklog 859): a page this process
+    /// A fault report says whose protection a page has: a page this process
     /// guarded is named no-access and its guard listed; the same page released reads read-write,
     /// guard and release both listed; a page no guard touched says so.
     #[test]

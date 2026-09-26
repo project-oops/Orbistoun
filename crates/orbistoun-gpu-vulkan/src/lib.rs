@@ -295,7 +295,7 @@ pub struct VulkanBackend {
     /// The frame's guest-memory window, set once before its commands (D703): a geometry shader
     /// fetches its vertices from here.
     guest_memory: Vec<u32>,
-    /// Counts changes to [`Self::guest_memory`]'s words, each found by comparing them (worklog 857).
+    /// Counts changes to [`Self::guest_memory`]'s words, each found by comparing them.
     guest_memory_generation: u64,
     /// The window uploaded to the device, bound directly by a mesh draw instead of seeded each time
     /// (D703, worklog 645), so a stable window uploads once.
@@ -400,7 +400,7 @@ impl VulkanBackend {
         self.state_generation += 1;
         self.unread.remove(&Some(target));
         // The seed replaces whatever the device held for it: in place, into its resident attachment
-        // when it has one of that extent (worklog 857), so the device holds it and no host copy does.
+        // when it has one of that extent, so the device holds it and no host copy does.
         if let Some(resident) = self.resident.get(&Some(target))
             && resident.extent() == (pixels.width, pixels.height)
             && resident.reload(&pixels.bytes).is_ok()
@@ -416,7 +416,7 @@ impl VulkanBackend {
     }
 
     /// [`Self::seed_target`] with `word` - linear `Rgba8` - in every pixel: what a target the guest
-    /// cleared holds (worklog 863). Filled on the device, in place, where the target has a resident
+    /// cleared holds. Filled on the device, in place, where the target has a resident
     /// attachment of that extent; otherwise seeded from the pixels as any seed is.
     pub fn seed_target_uniform(&mut self, target: ResourceId, extent: (u32, u32), word: u32) {
         if let Some(resident) = self.resident.get(&Some(target))
@@ -1247,9 +1247,8 @@ impl RenderBackend for VulkanBackend {
 
     fn set_guest_memory(&mut self, memory: &[u32]) {
         // The window it already holds, word for word, changes nothing a draw is bound with, so it is
-        // not copied again (worklog 853). **Changed is found by comparing, not hashing** (worklog
-        // 857): the comparison is exact where equal hashes only probably meant equal words, and it
-        // costs less than hashing did.
+        // not copied again. Changed is found by comparing, not hashing: the comparison is exact,
+        // where equal hashes only probably mean equal words, and it costs less.
         if memory == self.guest_memory.as_slice() {
             return;
         }

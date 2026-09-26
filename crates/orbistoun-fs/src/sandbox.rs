@@ -205,9 +205,7 @@ mod tests {
         (root, title)
     }
 
-    /// **A library image's `/app0` refuses writes; a staged title's accepts them (D722).**
-    ///
-    /// Both halves in one test, because the decision is the difference between them: the same
+    /// A library image's `/app0` refuses writes; a staged title's accepts them (D722). The same
     /// directory, established with each origin, answers each way.
     #[test]
     fn only_a_staged_title_may_write_its_app0() {

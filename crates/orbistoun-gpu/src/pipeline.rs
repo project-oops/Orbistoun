@@ -600,10 +600,10 @@ pub struct Pipeline {
     user_data: [UserData; 2],
     /// Shader bytes, by content hash, to the resource holding the translation.
     cache: BTreeMap<u64, Cached>,
-    /// The bytes each shader address decoded to, end-of-program included (worklog 853).
+    /// The bytes each shader address decoded to, end-of-program included.
     decoded: BTreeMap<u64, Vec<u8>>,
     /// The constant base each vertex program address formed (D711), with the program bytes it was
-    /// found in (worklog 853).
+    /// found in.
     bases: BTreeMap<u64, (Vec<u8>, Option<u64>)>,
     /// Each translated module's texture sources, by its resource (worklog 840).
     texture_sources: BTreeMap<ResourceId, Vec<TextureSource>>,
@@ -919,8 +919,8 @@ impl Pipeline {
         let mut sweep = crate::registers::RegisterSweep::new(writes);
         let shader_registers: Vec<u32> = self.vocabulary.shader_register_ids().collect();
         // A draw whose shader registers hold the same values as the previous draw's runs the same
-        // shaders (worklog 854) - which stage runs what is those values and nothing else - and a GL
-        // frame rewrites one pair's addresses unchanged before each of thousands of draws.
+        // shaders - which stage runs what is those values and nothing else - and a GL frame
+        // rewrites one pair's addresses unchanged before each of thousands of draws.
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
         for draw in draws {
@@ -1112,9 +1112,9 @@ impl Pipeline {
         (topology, widths): (Option<PrimitiveTopology>, WaveWidths),
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
-        // **A shader already decoded at this address, and still byte for byte what it was, is not
-        // decoded again** (worklog 853): a decode's answer is a function of the bytes, and a GL frame
-        // names the same few shaders in every one of its fifty submissions.
+        // A shader already decoded at this address, and still byte for byte the same, is not decoded
+        // again: a decode is a function of the bytes, and a GL frame names the same few shaders in
+        // every submission.
         if let Some(known) = self.decoded.get(&address)
             && let Some(bytes) = memory.read(guest_address_of(address), known.len())
             && bytes == known.as_slice()
@@ -1306,8 +1306,8 @@ fn push_geometry_commands(
             _ => None,
         })
         .collect();
-    // Each draw's state from the latest writes before it, found in one pass (worklog 844), and read
-    // a register at a time rather than gathered into a list per draw (worklog 854).
+    // Each draw's state from the latest writes before it, found in one pass, and read a register at
+    // a time rather than gathered into a list per draw.
     let mut sweep = crate::registers::RegisterSweep::new(writes);
     for (index, draw) in draws.iter().enumerate() {
         let at = draw.packet_offset;
@@ -1685,7 +1685,7 @@ impl Pipeline {
             .find_map(|candidate| {
                 let address = guest_address_of(candidate.address);
                 // The base is a function of the program's bytes: one already found for these same
-                // bytes at this address is that answer (worklog 853).
+                // bytes at this address is that answer.
                 if let Some((known, base)) = self.bases.get(&address)
                     && memory.read(address, known.len()) == Some(known.as_slice())
                 {
@@ -2271,12 +2271,7 @@ mod tests {
         );
     }
 
-    /// **A shader decoded once is not decoded again while its bytes stand, and is when they change**
-    /// (worklog 853).
-    ///
-    /// The console-run cube program at one address, prepared twice, is translated once and then
-    /// served from the cache. The negative is the point: the same address rewritten with a different
-    /// program - one move longer - must translate again rather than match the earlier decode.
+    /// A shader is decoded again when the bytes at its address change, and only then.
     #[test]
     fn a_shader_rewritten_in_place_is_decoded_again() {
         use super::{Pipeline, Prepared, ShaderStage, WaveWidths};
@@ -2333,11 +2328,7 @@ mod tests {
         );
     }
 
-    /// **The window a vertex program places follows its bytes, not its address** (worklog 853).
-    ///
-    /// The base is kept per address with the bytes it was found in. The console cube program places
-    /// the window at `0x2_0090_0000`, twice from the cache; rewritten in place so its `s2` is written
-    /// twice, the same address must place it where that program says, `0x2_0092_0000`.
+    /// The window a vertex program places follows its bytes, not its address.
     #[test]
     fn a_vertex_program_rewritten_in_place_places_its_own_window() {
         use super::{Candidate, Pipeline, ShaderStage};

@@ -228,9 +228,8 @@ static EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static EXEC_SLOT_AT: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 /// How many times each execute slot fired, across every thread it was armed on.
 ///
-/// **Per slot, not one total.** The summary used to print the total beside the first hit's
-/// address, so `0x10` "hit 2 times" when `0x10` and `0xb2` had each hit once, and a bisection of
-/// PPSA04263's constructor list read every run as "only the first entry ran" (worklog 873).
+/// Per slot, not one total - a total printed beside the first hit's address reads two
+/// breakpoints hit once each as one breakpoint hit twice.
 static EXEC_SLOT_HITS: [AtomicU64; MAX_WATCHPOINTS] =
     [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 
@@ -544,10 +543,8 @@ static REQUESTED: std::sync::OnceLock<Vec<Request>> = std::sync::OnceLock::new()
 
 /// Arms the run's watchpoints on the calling thread: a guest thread spawned after entry.
 ///
-/// **Debug registers are per thread.** They were set on the thread that became the guest and on
-/// no other, so an access from any spawned thread went unseen - and the report said `never
-/// touched`, which is the arm that cannot fail. PPSA25872 builds the binding table its wall reads
-/// on a spawned thread, and three watchpoints over it all reported untouched (worklog 871).
+/// Debug registers are per thread, so a watchpoint armed only on the entry thread misses every
+/// access from a spawned one and reports the watched range as never touched.
 ///
 /// Called from the per-thread start hook; a thread that cannot be armed says so rather than
 /// running as though it were watched.
@@ -643,7 +640,7 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
             // Execute: counted against its own slot, the first hit anywhere snapshots the state
             // the instruction was entered with, and the slot disarms on the thread that hit it -
             // a one-shot per thread, so the instruction runs and the guest carries on. The slot
-            // stays known, because every guest thread carries these (worklog 871) and a hit on a
+            // stays known, because every guest thread carries these and a hit on a
             // second thread is still ours to count, not a stranger's exception.
             ours = true;
             EXEC_SLOT_HITS[slot].fetch_add(1, Ordering::Relaxed);
@@ -952,9 +949,8 @@ mod tests {
         assert_eq!(anyway[0].length, 1);
     }
 
-    /// **Each execute breakpoint is counted against itself.** Two slots fire, one of them twice (a
-    /// second thread), and the counts come back per slot - not as one total beside the first
-    /// address, which read a bisection's four hits as "only the first ran" (worklog 873).
+    /// Each execute breakpoint is counted against itself: two slots fire, one of them twice (a
+    /// second thread), and the counts come back per slot.
     #[test]
     fn execute_hits_are_counted_per_breakpoint() {
         use super::{EXEC_SLOT_HITS, Registers, Request, attribute, execute_snapshot, remember};

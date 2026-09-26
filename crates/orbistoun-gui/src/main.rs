@@ -59,10 +59,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // **A played window reads the host clock** unless somebody chose otherwise (D723). The
-    // logical clock (D582) makes a measured run repeat, and it does so by advancing a step per
-    // reading - so a guest thread that spins on its counter makes game time race ahead of the
-    // person holding the pad. Set here, before any worker exists, because each worker inherits it.
+    // A played window reads the host clock unless somebody chose otherwise (D723): the logical
+    // clock advances a step per reading, so a guest spinning on its counter races ahead of the
+    // player. Set before any worker exists, because each worker inherits it.
     if std::env::var_os(orbistoun_env::CLOCK.name).is_none() {
         // SAFETY: no worker or guest thread exists yet, and nothing started so far reads the
         // environment concurrently; the spawned workers inherit it at their start.

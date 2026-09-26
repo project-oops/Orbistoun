@@ -106,7 +106,7 @@ pub fn mount_title(module: &Path) {
 /// Where a staged title lives, from the guest's point of view: `/data/homebrew/<id>` (D722).
 pub const STAGING_MOUNT: &str = "/data/homebrew";
 
-/// Mounts a **staged** title: its directory at `/data/homebrew/<id>` and at `/app0`, both under
+/// Mounts a staged title: its directory at `/data/homebrew/<id>` and at `/app0`, both under
 /// one writable top layer, `<overlay>/data/homebrew/<id>`.
 ///
 /// On the console a title staged on the user partition runs with `/app0` being that directory, and
@@ -272,13 +272,11 @@ pub fn resolve_existing(guest_path: &str) -> Option<PathBuf> {
     resolve_inner(guest_path, false)
 }
 
-/// Where a guest's write to `guest_path` goes: always the **top** layer of its mount, never one below.
+/// Where a guest's write to `guest_path` goes: always the top layer of its mount, never one below.
 ///
 /// `None` unless the path is under a writable prefix. A file that exists only in a lower layer - the
-/// base tree, or a staged title's library copy under its writable `/app0` (D722) - is **copied up**
-/// first, so the write modifies the guest's own copy and the lower layer is never touched. Without
-/// this a write to an existing file resolved to the first layer that had it, and that was the
-/// library.
+/// base tree, or a staged title's library copy under its writable `/app0` (D722) - is copied up
+/// first, so the write modifies the guest's own copy and the lower layer is never touched.
 pub fn resolve_for_write(guest_path: &str) -> Option<PathBuf> {
     let (top, below) = locate_for_write(guest_path)?;
     if let Some(lower) = below {
@@ -301,7 +299,7 @@ pub fn resolve_for_create(guest_path: &str) -> Option<PathBuf> {
 }
 
 /// Where a guest's removal or rename of `guest_path` acts: the top layer's path, and only when the
-/// name does **not** also exist in a layer below it.
+/// name does not also exist in a layer below it.
 ///
 /// Removing the top copy of a name a lower layer also holds would leave the lower one visible, so the
 /// guest would see its delete fail to happen; and removing the lower one would write to the library.

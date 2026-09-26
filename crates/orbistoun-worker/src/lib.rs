@@ -463,7 +463,7 @@ static RUN_STAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Where a module's title is stored, which decides whether its `/app0` is writable (D722).
 ///
-/// **Staged** when its directory lies directly under the library's staging tree, or when the run
+/// Staged when its directory lies directly under the library's staging tree, or when the run
 /// asked for it; an image otherwise. Only the path decides - never anything the title ships. The
 /// staged id is the directory's name, which is what it is staged under on the console.
 fn origin_of(module: &Path, staging: &Path, asked: bool) -> orbistoun_fs::sandbox::Origin {
@@ -1142,13 +1142,9 @@ fn write_process_image(
     );
 
     let description = process::Description {
-        // The module's own name, which is what a program expects to find in the first
-        // argument. Not the host path: that is a fact about this machine, and a guest
-        // printing it would be printing something no console ever would.
-        //
-        // `module` is the host path the run was given, so it is cut to its file name here: the
-        // whole path went in, and a Unity title printed `Arg 0 = /app0/C:\...\eboot.bin` - a host
-        // directory inside the guest's own argument vector (worklog 866).
+        // The module's own name under `/app0`, which is what a program expects in the first
+        // argument. `module` is a host path, a fact about this machine that no console would
+        // ever hand a guest, so only its file name goes in.
         arguments: vec![guest_argument_zero(module)],
         environment: settings.environment.clone(),
         auxiliary,
@@ -2565,7 +2561,7 @@ fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, S
 /// registered unconditionally and most threads then have nothing to build. A failure leaves a
 /// thread that will fault on its first `fs:`-relative access, so it is said out loud, not swallowed.
 fn set_up_this_threads_tls() {
-    // The run's watchpoints go with every guest thread, not only the first (worklog 871).
+    // The run's watchpoints go with every guest thread, not only the first.
     watchpoint::arm_this_thread();
     let Some(Some((layout, tdata))) = TLS_TEMPLATE.get() else {
         return;
@@ -3789,8 +3785,7 @@ mod tests {
         assert!(matches!(events.as_slice(), [Event::Failed { .. }]));
     }
 
-    /// **A guest's first argument names its module under `/app0`, never the host path.** A Unity
-    /// title printed the whole host directory back when the full path went in (worklog 866).
+    /// A guest's first argument names its module under `/app0`, never the host path.
     #[test]
     fn argument_zero_is_the_module_under_app0() {
         assert_eq!(
@@ -3807,8 +3802,8 @@ mod tests {
         );
     }
 
-    /// **Only where a module lies, or the run's own flag, makes it staged (D722).** A library
-    /// title beside the staging tree, or one nested deeper inside it, is an image.
+    /// Only where a module lies, or the run's own flag, makes it staged (D722) - a library title
+    /// beside the staging tree, or one nested deeper inside it, is an image.
     #[test]
     fn a_title_is_staged_by_where_it_lies() {
         use orbistoun_fs::sandbox::Origin;

@@ -1,4 +1,4 @@
-//! Guarding guest pages until something touches them (worklog 850, D717).
+//! Guarding guest pages until something touches them (D717).
 //!
 //! A deferred copy's destination is made inaccessible, so the first read or write of it - by the
 //! guest, or by host code on the guest's behalf - faults, and the fault handler in [`crate::report`]
@@ -10,10 +10,10 @@
 //! and an 8 MB colour target spans five 2 MB ones (D719). Protection is changed a region at a time,
 //! because the host changes it within one allocation per call.
 //!
-//! Away from Windows there is no guard yet, so every copy is carried out when it is made - exact,
-//! and slower.
+//! Away from Windows there is no guard, so every copy is carried out when it is made - exact, and
+//! slower.
 
-/// One change this module made to guest pages' host protection (worklog 859): the range, the
+/// One change this module made to guest pages' host protection: the range, the
 /// protection it asked for, whether the host agreed, and its place in the order of changes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Change {
@@ -60,8 +60,8 @@ fn note(base: u64, len: u64, to: u32, ok: bool) {
     }
 }
 
-/// **The remembered changes that touched `address`, oldest first**, into `out` - how many
-/// (worklog 859). For a fault report: whether a guest page's protection is one this process set, and
+/// The remembered changes that touched `address`, oldest first, into `out` - how many. For a
+/// fault report: whether a guest page's protection is one this process set, and
 /// whether it was put back. Allocation-free, and it never waits: a fault handler asks it, and a
 /// thread that faulted while holding the history answers `None`.
 pub fn changes_touching(address: u64, out: &mut [Change]) -> Option<usize> {
@@ -275,7 +275,7 @@ mod tests {
             "{guarded:x?}"
         );
         assert!(super::release(base as u64, 2 * PAGE as u64, PAGE_READWRITE));
-        // And the history a fault report reads says so, guard then release (worklog 859).
+        // And the history a fault report reads says so, guard then release.
         let mut changes = [super::Change::default(); 4];
         // Asked until it answers: the history never waits for its lock (a fault handler asks it),
         // and another test in this process may be holding it for a moment.

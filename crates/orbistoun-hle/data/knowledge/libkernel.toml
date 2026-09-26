@@ -285,13 +285,13 @@ arity = 6
 purpose = "Turns guest paths into the identifiers and sizes the asynchronous file path works in: (paths, count, u32 *ids, u64 *sizes, u32 *statuses, options)."
 returns = "status"
 edge_cases = [
-    "MEASURED (obSCEne REQ-20260925T1834Z-a7e2, signature-filled buffers): arg2 receives a u32 id per entry, arg3 a u64 size per entry, arg4 a u32 status per entry; arg5 is an input that may be null and is never written. An unresolvable path gets id 0xffffffff, size 0, status 0, and the call returns -1.",
-    "MEASURED (obSCEne REQ-20260925T2130Z-e61a): only /app0/... paths are valid (anything else is EINVAL in the kernel log); a multi-path call stops at its first unresolved entry and leaves the later slots as the caller prepared them; and a title without a mounted package filesystem gets the unresolved answer for every path, so no probe can show a real id.",
-    "An unwritten size slot is not harmless: PPSA25872's stream read one as its file length - a leftover stack address - and reserved a string that long, then trapped (worklog 867). D679's four-byte writes into the eight-byte size slot left the same upper half.",
+    "MEASURED (obSCEne 040-file/apr-resolve-filepaths, signature-filled buffers): arg2 receives a u32 id per entry, arg3 a u64 size per entry, arg4 a u32 status per entry; arg5 is an input that may be null and is never written. An unresolvable path gets id 0xffffffff, size 0, status 0, and the call returns -1.",
+    "MEASURED (obSCEne 040-file/apr-resolve-filepaths): only /app0/... paths are valid (anything else is EINVAL in the kernel log); a multi-path call stops at its first unresolved entry and leaves the later slots as the caller prepared them; and a title without a mounted package filesystem gets the unresolved answer for every path, so no probe shows a real id.",
+    "Every size slot is written as a full eight bytes: PPSA25872's stream reads an unwritten slot as its file length, reserves a string that long and traps.",
 ]
 partial = "A path the title's own index names (D591) resolves to the index's id and size with status 0 and a 0 return; every other path gets the measured unresolved answer. What a successful resolve of a path outside an index returns on hardware - the id, the status, the return value - is not measured, and orbistoun synthesises no id for it."
 known_by = "measured"
-cites = "obSCEne hardware run task-81926.log, 040-file/apr-resolve-filepaths (REQ-20260925T1834Z-a7e2)"
+cites = "obSCEne hardware run task-81926.log, 040-file/apr-resolve-filepaths"
 found_in = ["PPSA03416-app0", "PPSA25872-app0"]
 found_on = "2026-09-08"
 
@@ -927,10 +927,10 @@ name = "sceKernelMapperGetParam"
 arity = 1
 purpose = "Fills a caller-provided structure with the mapper's parameters. The name is confirmed by hash, not read off a header: the console's kernel export table places this hash at libkernel+0x31d60 and this project's firmware layout names that offset, and sceKernelMapperGetParam hashes to 0x04df812afad225d7 exactly (D642)."
 edge_cases = [
-    "**One argument, and the structure states its own size.** The dump shows arg0 pointing at a stack local whose first quadword is 0x38 - fifty-six - followed by twenty-four zero bytes. That is the size-prefixed shape sceKernelDirectMemoryQuery uses (D083): the caller writes how large its structure is and the kernel fills the rest. arg1..arg3 are consecutive stack locals eight bytes apart, which is what leftover registers look like rather than arguments.",
-    "**The guest aborts on the return code, and only on it.** PPSA28061 calls this once, is handed 0x7fff0001, and calls libc::abort seventy-seven bytes later from the same function in its own module. Forcing a 0x0 answer carries it from 26 distinct imports to 59 and from 334 calls to 961 - and it then aborts again, further in. So the return is what that first abort tests, and the fifty-six bytes are what the second one needs (D643).",
-    "MEASURED SUCCESS (obSCEne report-1790100990, 137-kernelcall/mapper-param and 166-agc/mapper-after-init, FW 12.40): rc 0x0, and the 56-byte structure comes back with its size word untouched and the 48 bytes after it filled - 0x80000000000 at +0x08, 0x88000000000 at +0x10, +0x18 and +0x20, 0x40 at +0x28, 0x2663 at +0x30. orbistoun answers exactly that, writing no further than the caller's declared size (worklog 877).",
-    "SUPERSEDED: an earlier cold call (20260910-154133, b7e2) answered 0x80020006 and filled nothing; the later sweep's plain call succeeds. PPSA28061's engine aborts on any non-zero answer (worklog 516), which is what the stale value produced.",
+    "One argument, and the structure states its own size. The dump shows arg0 pointing at a stack local whose first quadword is 0x38 - fifty-six - followed by twenty-four zero bytes. That is the size-prefixed shape sceKernelDirectMemoryQuery uses (D083): the caller writes how large its structure is and the kernel fills the rest. arg1..arg3 are consecutive stack locals eight bytes apart, which is what leftover registers look like rather than arguments.",
+    "The guest aborts on the return code, and only on it. PPSA28061 calls this once, is handed 0x7fff0001, and calls libc::abort seventy-seven bytes later from the same function in its own module. Forcing a 0x0 answer carries it from 26 distinct imports to 59 and from 334 calls to 961 - and it then aborts again, further in. So the return is what that first abort tests, and the fifty-six bytes are what the second one needs (D643).",
+    "MEASURED SUCCESS (obSCEne report-1790100990, 137-kernelcall/mapper-param and 166-agc/mapper-after-init, FW 12.40): rc 0x0, and the 56-byte structure comes back with its size word untouched and the 48 bytes after it filled - 0x80000000000 at +0x08, 0x88000000000 at +0x10, +0x18 and +0x20, 0x40 at +0x28, 0x2663 at +0x30. orbistoun answers exactly that, writing no further than the caller's declared size.",
+    "A plain call succeeds on hardware; PPSA28061's engine aborts on any non-zero answer.",
 ]
 known_by = "measured"
 cites = "obSCEne reports/report-1790100990.txt, sections 137-kernelcall/mapper-param and 166-agc/mapper-after-init"
@@ -1181,15 +1181,15 @@ arity = 4
 purpose = "Describes the mapping that holds an address, so a guest can bound it before placing something."
 returns = "status"
 edge_cases = [
-    "Stubbed, it answered a placeholder and the guest read a mapping that was not there, computing a bad address and writing through it - the D125 shape, and the wall past sceKernelReserveVirtualRange for the titles measured.",
+    "A placeholder answer makes the guest read a mapping that is not there, compute a bad address and write through it - the D125 shape, and the wall past sceKernelReserveVirtualRange for the titles measured.",
     "SceKernelVirtualQueryInfo is 72 bytes and the console writes all of them, zeros included: start +0x00, end +0x08, a direct mapping's physical offset +0x10, protection (u32) +0x18 - 3 read-write, 4 execute-only text - memory type (u32) +0x1c, a flag byte +0x20 (flexible 0x01, direct 0x02, stack 0x04, committed 0x10), and a NUL-terminated name from +0x21 (`anon`, `executable`, `main stack`).",
     "An address in no region, queried with flags 0, is answered 0x8002000d (EACCES) - measured at 0x720000240000.",
 ]
 known_by = "measured"
-cites = "obSCEne hardware run 20260923-dcb-extent-eboot.obs.log, 020-memory/virtual-query-{mapped,text,stack,unmapped} (REQ-20260914T1110Z-9b12)"
+cites = "obSCEne hardware run 20260923-dcb-extent-eboot.obs.log, 020-memory/virtual-query-{mapped,text,stack,unmapped}"
 partial = "Direct mappings and the main stack are answered in full, as measured. The protection is the one the guest asked for (measured for CPU bits; PPSA25872 compares it with a GPU-bit request of 0xf2, so the console returns the full value - guest-observed). A reservation nothing is mapped into is answered uncommitted with no protection - the Unity allocator tests the committed bit (0x10 at +0x20) and fills an uncommitted range, which is what reserving means; not measured on hardware. A flexible mapping gets the flexible and committed bits, applied from the text and stack samples. Regions the loader noted (the image, modules) and thread stacks get their bounds and zeros - orbistoun notes the image whole where the console answers per segment. The flags argument is not modelled; every measured query passed 0."
 found_on = "2026-09-01"
-note = "Answers the whole 72-byte structure from the region holding the address (worklog 868)."
+note = "Answers the whole 72-byte structure from the region holding the address."
 
 [[function]]
 name = "sceKernelWaitEqueue"

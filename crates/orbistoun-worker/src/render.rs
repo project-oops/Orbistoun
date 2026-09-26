@@ -487,13 +487,13 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
                 Pixels {
                     width: extent.width,
                     height: extent.height,
-                    // The words' own bytes, little-endian as the host is: one copy, where a byte
-                    // at a time through an iterator was most of seeding (worklog 857).
+                    // The words' own bytes, little-endian as the host is, in one copy - a byte at
+                    // a time through an iterator dominates seeding.
                     bytes: zerocopy::IntoBytes::as_bytes(before).to_vec(),
                 },
             );
         }),
-        // A clear, filled on the device rather than handed over as megabytes (worklog 863).
+        // A clear, filled on the device rather than handed over as megabytes.
         Before::Uniform(word) => perf::measure(perf::Phase::DrawOther, || {
             backend.seed_target_uniform(target, (extent.width, extent.height), word);
         }),
@@ -517,7 +517,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     // From here as well as from a flip: a title that takes many submissions per frame would otherwise
     // report only as often as it flips (worklog 844).
     report_perf(LIVE_EVENTS.get().copied());
-    // Every submission's line only when asked (`ORBISTOUN_TRACE_SUBMITS`, worklog 858); a refusal is
+    // Every submission's line only when asked (`ORBISTOUN_TRACE_SUBMITS`); a refusal is
     // always said, below.
     let trace = *TRACE.get_or_init(|| orbistoun_env::TRACE_SUBMITS.get().as_deref() == Some("1"));
     perf::span(perf::Span::ExecutorLog, || {
@@ -599,7 +599,7 @@ pub fn keep_frame_on_device() -> Option<u64> {
 }
 
 /// Releases kept frame `old` unread and keeps the frame as it stands now, in one trip to the device
-/// thread (worklog 859): what a copy superseding another needs, and a hand-off apiece was two.
+/// thread - what a copy superseding another needs, where a hand-off apiece costs two.
 pub fn replace_snapshot(old: u64) -> Option<u64> {
     on_device(move || {
         let mut held = live_backend()
