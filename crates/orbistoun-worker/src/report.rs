@@ -485,11 +485,6 @@ pub(crate) fn host_module_of(address: u64) -> Option<(String, u64)> {
     (!name.is_empty()).then(|| (name, address - base))
 }
 
-/// Away from Windows nothing reaches the fault reporter, so no host module is ever named.
-#[cfg(not(windows))]
-pub(crate) const fn host_module_of(_address: u64) -> Option<(String, u64)> {
-    None
-}
 
 /// The bytes of the faulting instruction, copied from the instruction pointer.
 ///
@@ -764,6 +759,7 @@ fn caller_stacks_at_fault() {
 }
 
 /// Whether a region named by [`locate`] holds guest code: the image or the title's own modules.
+#[cfg(windows)]
 fn is_code_region(region: &str) -> bool {
     region == REGION_NAMES[Region::Image.slot()]
         || region == REGION_NAMES[Region::TitleModules.slot()]

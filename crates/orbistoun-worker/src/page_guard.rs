@@ -39,9 +39,11 @@ static CHANGES: std::sync::Mutex<[Change; HISTORY]> = std::sync::Mutex::new(
         sequence: 0,
     }; HISTORY],
 );
+#[cfg(windows)]
 static CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Remembers a change, for a fault report to ask about later.
+#[cfg(windows)]
 fn note(base: u64, len: u64, to: u32, ok: bool) {
     let sequence = CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if let Ok(mut changes) = CHANGES.lock() {

@@ -14,6 +14,9 @@ pub enum Unsupported {
     NoProcessorSupport,
     /// The build has no way to do this at all on this platform.
     NoPlatformSupport,
+    /// The write ran and the base did not read back as written: the operating system (or a
+    /// hypervisor under it) does not keep a base user code writes.
+    NotRetained,
 }
 
 impl core::fmt::Display for Unsupported {
@@ -25,6 +28,9 @@ impl core::fmt::Display for Unsupported {
             Self::NoPlatformSupport => {
                 f.write_str("no supported way to set the thread pointer on this platform")
             }
+            Self::NotRetained => f.write_str(
+                "the segment base did not read back as written, so the system does not keep it",
+            ),
         }
     }
 }
@@ -53,7 +59,8 @@ pub fn processor_supports_base_writes() -> bool {
 ///
 /// # Errors
 ///
-/// When the processor or the platform provides no way to do it.
+/// When the processor or the platform provides no way to do it, or the base does not read back as
+/// written.
 ///
 /// # Safety
 ///
@@ -80,7 +87,13 @@ pub unsafe fn install(address: u64) -> Result<(), Unsupported> {
             options(nostack, preserves_flags),
         );
     }
-    Ok(())
+    // Read back, as the module promises: a write the system discards would otherwise look like
+    // success and leave `fs:` pointing at the host's block.
+    if current() == Some(address) {
+        Ok(())
+    } else {
+        Err(Unsupported::NotRetained)
+    }
 }
 
 /// Points the `fs` base at `address`.
@@ -159,7 +172,7 @@ mod tests {
             Err(e) => {
                 assert!(
                     !processor_supports_base_writes()
-                        || matches!(e, Unsupported::NoPlatformSupport),
+                        || matches!(e, Unsupported::NoPlatformSupport | Unsupported::NotRetained),
                     "a refusal must have a reason: {e}"
                 );
             }
