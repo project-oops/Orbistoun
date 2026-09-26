@@ -2442,6 +2442,9 @@ fn guest_stopped(reason: orbistoun_core::StopReason, code: u64) -> ! {
     what_the_guest_asked_for();
     let module = MODULE.get().map_or("unknown", String::as_str);
     let trace = collect_calls(module, "Entered");
+    // As at the time limit and the budget: a guest that submitted and then stopped itself still
+    // made a submission. After the trace, because rendering takes the submission it reads.
+    crate::render::render_and_log_last_submission();
     persist(&trace);
 
     tracing::info!("{} ({code:#x})", reason.label());
