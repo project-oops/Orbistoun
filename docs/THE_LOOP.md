@@ -11,7 +11,7 @@ worth reading.
 ```mermaid
 flowchart TD
     A["a title's eboot.bin, in the title library"] --> B["./bin/orbistoun run TITLE"]
-    B --> C["list what the module imports<br/>- by 64-bit hash, not by name"]
+    B --> C["build the link plan, or reuse the stored one;<br/>list what the module imports<br/>- by 64-bit hash, not by name"]
     C --> D{"does the hash<br/>have a name?"}
     D -- yes --> G
     D -- no --> E["generate candidates, and read<br/>identifier-shaped strings out<br/>of the module's own bytes"]
@@ -73,7 +73,9 @@ the file is shown absent from the place the run reads: the resolved data directo
 
 2. `./bin/orbistoun run <title-id>` rebuilds, refreshes names if they are stale, runs the
    guest under a time limit, and reports.
-3. orbistoun parses the container and lists every system function the module imports.
+3. orbistoun reuses the title's stored link plan when the executable, the loader and the host
+   CPU are the ones it was built from, and otherwise parses the container and builds a new
+   one (D724). Either way it lists every system function the module imports.
 4. The imports are 64-bit hashes rather than names, because that is how the guest links, so
    each is looked up in the symbol database.
 5. For hashes nothing names, the name search generates candidates from a grammar and reads
@@ -84,8 +86,11 @@ the file is shown absent from the place the run reads: the resolved data directo
    so the next module needs less searching.
 8. orbistoun builds a stub for every declared function it does not implement, from the stub
    policy. The policy is data: changing an answer costs a relaunch, not a rebuild.
-9. The ELF loader reserves the address space, places the module, resolves imports, applies
-   relocations, sets up TLS and jumps to the entry point.
+9. The ELF loader reserves the address space and applies the plan: it places the module,
+   writes the relocations and any instruction rewrites (D725), sets up TLS, attaches the
+   current handlers and stubs to the thunks, and jumps to the entry point. The title's
+   recorded shaders are translated into its cache before that jump (D113), so a shader that
+   will not translate is a finding before a guest instruction runs.
 10. The guest's machine code executes natively - same architecture, no translation - until it
     calls out.
 11. Every call to a system function lands in orbistoun instead of the platform's operating
@@ -96,7 +101,8 @@ the file is shown absent from the place the run reads: the resolved data directo
     results, and each writes a trace.
 14. The trace is written to disk keyed by module, so a sweep leaves one per title.
 15. The trace is compared with the previous one for the same module, giving `FURTHER`, `same`
-    or `BACK`.
+    or `BACK`. When the two runs applied different link plans, the verdict says so, so a loader
+    change is never read as the effect of an implementation.
 16. The findings are printed, ranked worst first: what went wrong, the evidence, and what to
     do about it.
 17. A person reads the top finding. `orbistoun-turn` has already run the mechanical sweeps
@@ -350,3 +356,8 @@ receive these; see [WORKFLOW.md](WORKFLOW.md#recording-what-a-turn-produced).
 - Step 16 removes diagnosis, not fixing: the run states the wall, with evidence, ranked.
 - The loop never keeps unverified code: step 18 is a person's, and a change is kept only when
   the re-run says `FURTHER`.
+- Step 18 never invalidates step 3: the plan names thunk indices, not implementations, so a
+  turn that adds an implementation reuses the stored plan and pays only for the run.
+- The loop runs in the worker, because the mechanical sweeps of step 17 need it. A native
+  executable (D724) writes the same trace as a run played from the window and is compared and
+  recorded like one, so playing a title that way still feeds steps 14 to 16.

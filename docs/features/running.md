@@ -27,6 +27,7 @@ orbistoun-cli verify <title>/eboot.bin   # how much of the import list the symbo
 | `--profile <name>` | present a named machine profile instead of `shell.toml`'s; see [machine profile](#machine-profile) |
 | `--input <file>` | play a pad script on player 1; see [controllers](controllers.md) |
 | `--staged` | run a loose build as a staged title, with a writable `/app0` |
+| `--relink` | build a fresh link plan and report any difference from the stored one; see [linking ahead of time](#linking-ahead-of-time) |
 
 ## Limits
 
@@ -38,6 +39,31 @@ time limit is the backstop for a guest that stops calling imports.
 The window's runs take the limit from the toolbar (or preferences - general) and the budget
 from `run-call-budget` under `[library]` in `config.toml`. Both default to `0`, no limit,
 because a title launched from the window is being played.
+
+## Linking ahead of time
+
+A run starts from the title's link plan (D724). The first run of an executable builds the plan
+and stores it in the title library beside the title, keyed by the executable's hash, the
+loader's build and the host CPU's features; later runs apply the stored plan instead of
+linking again. There is no setting for this: a stored plan is a cache, and a changed
+executable, loader or CPU builds a new one. Implementations attach when the guest starts, so
+a new implementation reuses the stored plan. The shader translation cache is stored the same
+way and filled from the title's recorded shaders before the guest starts (D113).
+
+`run --relink` builds a fresh plan and compares it with the stored one. A difference is a
+loader defect, and the run report lists it.
+
+```bash
+orbistoun-cli link <title>/eboot.bin                  # build and store the plan without running
+orbistoun-cli link <title>/eboot.bin --native <file>  # also write it as a host executable
+```
+
+A native executable loads the orbistoun runtime library and runs the title in its own process,
+with the same thunks and the same trace as a run from the window. It is built from the
+operator's own title and stays on the machine that built it ([scope](../SCOPE.md)).
+
+On a host CPU without SSE4a, the plan rewrites `extrq` and `insertq` (D725), and the run
+report lists how many instructions it rewrote.
 
 ## The run result
 

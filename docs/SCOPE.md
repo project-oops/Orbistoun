@@ -41,6 +41,12 @@ No disassembly in the tree and no code written while reading the vendor's binari
 modules are tracked either: `./bin/orbistoun provenance` refuses them, so anything that
 needs a guest module to reproduce stays outside the repository.
 
+## Not a way to ship titles
+
+A title linked ahead of time into a native host executable (D724) is derived from the
+operator's own copy of that title. It is built on the machine that runs it and never
+published, packaged or shared, and orbistoun offers nothing that distributes one.
+
 ## Not an online-services implementation
 
 The vendor's online services are out of scope. Their network calls are declared so that a

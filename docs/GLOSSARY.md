@@ -38,6 +38,16 @@ far more to find than a noisy missing one. This is
 [CONVENTIONS.md section 3](https://github.com/project-oops/OOPS/blob/main/docs/CONVENTIONS.md)
 applied to the largest surface in the collection.
 
+**Link plan** - everything the loader decides about a title before its first instruction runs:
+where each segment sits, what each import resolves to, the thunk table, thread-local storage,
+instruction rewrites and raw `syscall` sites. Linking at load applies it in the worker;
+linking ahead of time stores it in the title library and reuses it; a native executable is
+the same plan written as a host image (D724).
+
+**Instruction rewrite** - an instruction the guest CPU has and the host CPU lacks, replaced at
+link with an equivalent sequence (D725). It is the only change the link plan makes to guest
+code.
+
 **Worker** - the isolated process guest code executes in. A fault happens in the child; the
 parent survives to write out what was learned.
 

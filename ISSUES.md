@@ -30,7 +30,15 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - `tests/oracle_gl_cube.rs` prints its two pixel hashes instead of asserting them.
 - The GUI does not present the headless frame.
 - The two-lane subgroup design (64-wide wavefronts on 32-wide host subgroups) needs a decision.
-- The single-block dispatch loop is not collapsed and the shader cache is not persisted.
+- The single-block dispatch loop is not collapsed and the shader cache is neither persisted nor filled before the run (D113).
+
+## Linking
+
+- The loader applies its result directly; no link plan is built, stored or reused, and every run links again (D724).
+- `orbistoun-cli link`, `run --relink` and native host executable output are not built (D724).
+- The run report does not say when two compared runs applied different link plans.
+- `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725).
+- Raw `syscall` sites in guest code are found only when executed, not listed at link.
 
 ## Kernel, libraries and filesystem
 
