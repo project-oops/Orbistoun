@@ -122,6 +122,25 @@ const PRESENT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5
 /// whose pixels its GL context writes as B, G, R, A (`gl_draw.c`).
 const SCANOUT_BGRA8: u64 = 0x8000_0000_0000_0000;
 
+/// Whether any flip found a frame orbistoun drew waiting for write-back.
+static FRAME_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a flip wrote a drawn frame back into the very buffer it flipped.
+static DRAWN_FRAME_PRESENTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the guest flipped a buffer holding a frame orbistoun drew for it: the drawn half of
+/// `Reach::Presented`.
+pub fn drawn_frame_presented() -> bool {
+    DRAWN_FRAME_PRESENTED.load(Ordering::Relaxed)
+}
+
+/// Whether any frame was drawn this run. Its targets are guarded for lazy write-back (D717), so a
+/// report must not read them.
+pub fn any_frame_drawn() -> bool {
+    FRAME_DRAWN.load(Ordering::Relaxed)
+}
+
 /// Shows the frame the guest just flipped: the [`orbistoun_video::FlipObserver`] the worker
 /// installs. The flipped buffer is read out of guest memory, detiled, put in `Rgba8` order,
 /// written to a frame region and streamed as an [`Event::Frame`] as it is presented.
@@ -156,9 +175,16 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // The frame drawn since the last flip is written back to guest memory on every flip, shown or
     // not (D714), since the guest's own scanout is what is honoured. A frame due in the window
     // comes with a device copy of its own.
+    let drawn_into = orbistoun_gpu::agc_driver::pending_frame_base();
     let (written, shown) = orbistoun_gpu::agc_driver::write_back_at_this_flip_showing(due);
     if !written {
         tracing::warn!("a drawn frame could not be written back at the flip");
+    }
+    if drawn_into.is_some() {
+        FRAME_DRAWN.store(true, Ordering::Relaxed);
+    }
+    if written && drawn_into == Some(address) {
+        DRAWN_FRAME_PRESENTED.store(true, Ordering::Relaxed);
     }
     report_perf(LIVE_EVENTS.get().copied());
     let Some((sink, dir)) = listening.filter(|_| due) else {

@@ -94,7 +94,7 @@ SYS_sceKernelReleaseDirectMemory = 574
 # The number was found in the aggregate census a `run` prints, which totals every module's trace,
 # so it first read as the title being run rather than as the payload that actually issued it - a
 # reminder that a direct syscall in that census belongs to whichever guest's trace carried it,
-# not to whichever title the command named (worklog 727).
+# not to whichever title the command named (commit 3212e2a).
 #
 # **Served by the same function `sceKernelDebugOutText` is** (see that call's `SPELT_DIFFERENTLY`
 # binding). That function writes the string at the second argument and ignores the first, which

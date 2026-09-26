@@ -4,12 +4,13 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Retail title walls
 
-- PPSA02664, PPSA03416: after one frame, a host `memcpy` reads `0xa8` through a null element buffer at image+0x3f8f0 during command-buffer construction; dump the shader slot tables to see how hardware avoids that path.
-- PPSA25872: stops at image+0x3b383b past thread creation; the per-slot upload mask names a slot past the shader's binding count; find who builds the mask.
-- PPSA04263: the static object at image+0x5b37e98 (wall at image+0x19676d7) is never constructed; reached by computed dispatch below image+0x4b7c77.
+- PPSA02664, PPSA03416: a null write at image+0x3f840 after one frame; both call `libSceAmpr`'s command-buffer constructors first, which have no implementation.
+- PPSA25872: `ScriptingAssemblies.json` is opened and never read, because it is read through `libSceAmpr` command buffers, which have no implementation; every IL2CPP type lookup then fails and a null read follows in its own module.
+- `libSceAmpr` and the APR submit, wait, file-stat and prefix-resolve calls have no implementation; their layouts are unmeasured.
+- PPSA04263: the static object at image+0x5b37e98 (wall at image+0x19676d7) is never constructed; it calls the unimplemented APR prefix-resolve and file-stat 302 times each before that.
 - PPSA04263: the IME update and user-service game-preset stubs need measured values.
 - PPSA21564: stops in its own module code at +0x7af792 with no missing import named.
-- PPSA28061: null read at image+0x43c4, then an abort after the mapper-parameter call; remaining hypothesis is a side effect of `sceSysmoduleLoadModule`.
+- PPSA28061: aborts after `libSceJson2` initialisation answers a placeholder.
 - NVRB00001: the menu draws over black because depth, stencil and cull state are decoded but not applied per draw.
 - NVRB00001: busy-waits on the process time counter (about 100 million reads in 40 s).
 
@@ -98,3 +99,4 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - `agc_driver::tests::a_protected_target_is_trusted_until_a_write_to_it_faults` is flaky.
 - The GUI's embedded-docs registry in `orbistoun-gui/src/app.rs` has stale page names and blurbs.
 - Other oops-apps titles sync as images rather than staged directories.
+- `orbistoun-gen measurements` over obSCEne's current logs writes 7,288 measurements (11 MB) against the 638 committed, and repeats ids such as `166-agc/tiling-swizzle:variant-256x256:format`, so `hardware.toml` has not been regenerated since obSCEne's later sweeps.

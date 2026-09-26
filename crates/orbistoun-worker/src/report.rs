@@ -485,12 +485,6 @@ pub(crate) fn host_module_of(address: u64) -> Option<(String, u64)> {
     (!name.is_empty()).then(|| (name, address - base))
 }
 
-/// Away from Windows nothing reaches the fault reporter, so no host module is ever named.
-#[cfg(not(windows))]
-pub(crate) const fn host_module_of(_address: u64) -> Option<(String, u64)> {
-    None
-}
-
 /// The bytes of the faulting instruction, copied from the instruction pointer.
 ///
 /// Returns a fixed buffer and how many bytes of it are valid, with no allocation, because this runs
@@ -764,6 +758,7 @@ fn caller_stacks_at_fault() {
 }
 
 /// Whether a region named by [`locate`] holds guest code: the image or the title's own modules.
+#[cfg(windows)]
 fn is_code_region(region: &str) -> bool {
     region == REGION_NAMES[Region::Image.slot()]
         || region == REGION_NAMES[Region::TitleModules.slot()]
@@ -2154,32 +2149,33 @@ fn frame_written_against(address: u64, regions: &[(u64, u64, bool)], cap: u64) -
 /// Whether the buffer the guest last flipped holds bytes it wrote: the framebuffer signal behind
 /// `Reach::Presented`.
 ///
-/// The address comes from the video crate. It is bounds-checked against the run's allocated regions
-/// before it is read, and only a bounded head is read: an unwritten buffer is zero throughout while
-/// a written one differs at its start. False when nothing flipped, when the address lies outside
-/// every allocated region, or when the window is all zero.
+/// A frame orbistoun drew and wrote back into the flipped buffer counts. Otherwise the buffer is
+/// read, only in a run that drew nothing: a drawn target's pages are guarded for lazy write-back
+/// (D717), and touching them from here would wait on threads that are stopped. The address is a
+/// virtual one, so it is bounded by the guest mapping holding it, never by the physical
+/// direct-memory map, and the whole frame the decoded shape describes is read: a guest drawing over
+/// black leaves the first rows zero.
 fn flipped_frame_written() -> bool {
-    /// The head read of a flipped buffer, in bytes: one page, enough for a written frame to show at
-    /// its start and cheap to read.
-    const WINDOW: u64 = 4096;
+    /// Bytes per pixel the extent is taken at. Every scanout format registered in the corpus is
+    /// four bytes a pixel; a wider one is read only as far as its first four bytes a pixel reach.
+    const BYTES_PER_PIXEL: u64 = 4;
 
-    // The decoded shape is available here; the head window below is a fixed page.
-    let Some((address, _shape)) = orbistoun_video::last_flipped_buffer() else {
+    if crate::render::drawn_frame_presented() {
+        return true;
+    }
+    if crate::render::any_frame_drawn() {
+        return false;
+    }
+    let Some((address, shape)) = orbistoun_video::last_flipped_buffer() else {
         return false;
     };
-    let Ok(map) = orbistoun_kernel::direct::map().lock() else {
-        return false;
-    };
-    // The regions are copied out so the read-and-decide is a function of data, and the lock is held
-    // across it so a validated region cannot be unmapped underneath the read.
-    let regions: Vec<(u64, u64, bool)> = map
-        .regions()
-        .iter()
-        .map(|r| (r.start, r.end, r.allocated))
-        .collect();
-    let written = frame_written_against(address, &regions, WINDOW);
-    drop(map);
-    written
+    let extent = u64::from(shape.width) * u64::from(shape.height) * BYTES_PER_PIXEL;
+    // The read happens with the mappings held, so the range validated cannot be unmapped under it.
+    orbistoun_kernel::with_guest_mappings(|ranges| {
+        let regions: Vec<(u64, u64, bool)> = ranges.iter().map(|&(a, b)| (a, b, true)).collect();
+        frame_written_against(address, &regions, extent)
+    })
+    .unwrap_or(false)
 }
 
 /// Collects the trace, recording where the guest died.
@@ -2446,6 +2442,9 @@ fn guest_stopped(reason: orbistoun_core::StopReason, code: u64) -> ! {
     what_the_guest_asked_for();
     let module = MODULE.get().map_or("unknown", String::as_str);
     let trace = collect_calls(module, "Entered");
+    // As at the time limit and the budget: a guest that submitted and then stopped itself still
+    // made a submission. After the trace, because rendering takes the submission it reads.
+    crate::render::render_and_log_last_submission();
     persist(&trace);
 
     tracing::info!("{} ({code:#x})", reason.label());

@@ -72,6 +72,8 @@ pub struct SurveyedImport {
     /// `known` says orbistoun has something for the slot; this says whether a thunk is the
     /// right kind of thing to put there (D307).
     pub kind: orbistoun_elf::dynamic::Kind,
+    /// How the import binds: a weak one nothing answers binds to zero (D676).
+    pub binding: orbistoun_elf::dynamic::Binding,
 }
 
 /// What a module needs, determined without executing it.
@@ -113,6 +115,7 @@ pub fn survey(bytes: &[u8], registry: &Registry) -> Result<Survey, LoadError> {
             SurveyedImport {
                 symbol_index: import.symbol_index,
                 kind: import.kind,
+                binding: import.binding,
                 // Prefer the declared library; fall back to the one the module named, so an
                 // unresolved import is still attributed to a library.
                 library: resolved.map_or_else(
@@ -149,6 +152,7 @@ mod tests {
             imports: vec![
                 SurveyedImport {
                     kind: orbistoun_elf::dynamic::Kind::Function,
+                    binding: orbistoun_elf::dynamic::Binding::Global,
                     symbol_index: 1,
                     nid: Nid::from_raw(1),
                     library: Some("libTest".to_owned()),
@@ -157,6 +161,7 @@ mod tests {
                 },
                 SurveyedImport {
                     kind: orbistoun_elf::dynamic::Kind::Function,
+                    binding: orbistoun_elf::dynamic::Binding::Weak,
                     symbol_index: 2,
                     nid: Nid::from_raw(2),
                     library: None,

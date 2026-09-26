@@ -328,6 +328,15 @@ fn pending_target() -> Option<(ColourTarget, ComponentSwap)> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The base of the target a drawn frame is waiting to be written back to, if one is.
+///
+/// Asked at a flip, before the write-back, to learn whether the buffer being flipped holds a frame
+/// orbistoun drew for the guest.
+#[must_use]
+pub fn pending_frame_base() -> Option<u64> {
+    pending_target().map(|(target, _)| target.base)
+}
+
 fn set_pending(target: Option<(ColourTarget, ComponentSwap)>) {
     *pending()
         .lock()

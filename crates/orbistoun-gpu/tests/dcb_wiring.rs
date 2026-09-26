@@ -313,13 +313,12 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     }
 }
 
-/// The whole `sceAgc*Patch*` family answers the measured `0x0`, not a placeholder. They are
-/// returns, not builders: no packet is appended and no writer touched.
+/// The rest of the `sceAgc*Patch*` family answers the measured `0x0`, not a placeholder, and
+/// touches no packet. The two Cx register patches write their measured fields and are replayed in
+/// `the_indirect_register_patches_replay_the_measured_sequence`.
 #[test]
 fn every_patch_answers_the_measured_success_not_a_placeholder() {
     for name in [
-        "sceAgcSetCxRegIndirectPatchAddRegisters",
-        "sceAgcSetCxRegIndirectPatchSetAddress",
         "sceAgcSetShRegIndirectPatchAddRegisters",
         "sceAgcSetShRegIndirectPatchSetAddress",
         "sceAgcSetUcRegIndirectPatchAddRegisters",
@@ -468,6 +467,34 @@ fn a_register_run_is_read_from_guest_memory() {
     );
 }
 
+/// With no values the run is reserved, payload zeroed, and its address returned; the payload
+/// pointer the unnamed helper gives for it is where the guest then writes the values.
+#[test]
+fn a_register_run_with_no_values_is_reserved_for_the_guest_to_fill() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = 0x240;
+    args[3] = 3;
+
+    let at = w.cursor();
+    assert_eq!(call("sceAgcCbSetShRegisterRangeDirect", args), at);
+    assert_eq!(w.written(), 20, "n + 2 dwords for n = 3");
+    assert_eq!(
+        &w.bytes()[..8],
+        &[0x00, 0x76, 0x03, 0xc0, 0x40, 0x02, 0x00, 0x00]
+    );
+    assert!(w.bytes()[8..].iter().all(|&b| b == 0));
+
+    let mut payload = 0u64;
+    let mut query = [0u64; GUEST_ARG_REGISTERS];
+    query[0] = std::ptr::addr_of_mut!(payload) as u64;
+    query[1] = at;
+    query[2] = 1;
+    assert_eq!(call("0x7d86501b8094ef57", query), 0);
+    assert_eq!(payload, at + 8);
+}
+
 /// A packet that does not fit is refused and nothing is written. The real library calls the
 /// overflow callback; this answers the placeholder instead of writing past the buffer.
 #[test]
@@ -517,15 +544,38 @@ fn set_cx_registers_indirect_writes_measured_header_and_format() {
     );
 }
 
-/// The phantom `0x7d86501b8094ef57` query helper writes the workload size into `*arg0`.
+/// The probe's sequence (`166-agc/patch-cx-registers-indirect`): the producer called as
+/// `(dcb, 2, table)`, one `AddRegisters(packet, 1)`, `SetAddress(packet, 0x2_0086_0000)`, then a
+/// second `AddRegisters`, gives the measured dw1, dw2 and dw4 at each step.
 #[test]
-fn phantom_get_size_writes_workload_size() {
-    let mut size: u64 = 0;
+fn the_indirect_register_patches_replay_the_measured_sequence() {
+    let w = Writer::new(0x400);
+    let table = 0x0000_0002_0085_3880_u64;
     let mut args = [0u64; GUEST_ARG_REGISTERS];
-    args[0] = std::ptr::addr_of_mut!(size) as u64;
+    args[0] = w.handle();
+    args[1] = 2;
+    args[2] = table;
+    let packet = call("sceAgcDcbSetCxRegistersIndirect", args);
+    let dword = |i: usize| u32::from_le_bytes(w.bytes()[i * 4..i * 4 + 4].try_into().unwrap());
+    assert_eq!((dword(1), dword(2), dword(4)), (0, 0, 0x3880));
 
-    assert_eq!(call("0x7d86501b8094ef57", args), 0);
-    assert_eq!(size, 0xa8, "workload buffer size is 168 (0xa8) bytes");
+    let mut patch = [0u64; GUEST_ARG_REGISTERS];
+    patch[0] = packet;
+    patch[1] = 1;
+    assert_eq!(call("sceAgcSetCxRegIndirectPatchAddRegisters", patch), 0);
+    assert_eq!(dword(4), 0x3881);
+
+    patch[1] = 0x0000_0002_0086_0000;
+    assert_eq!(call("sceAgcSetCxRegIndirectPatchSetAddress", patch), 0);
+    assert_eq!(
+        (dword(1), dword(2), dword(3)),
+        (0x0086_0000, 2, 0x8000_0000)
+    );
+
+    patch[1] = 1;
+    assert_eq!(call("sceAgcSetCxRegIndirectPatchAddRegisters", patch), 0);
+    assert_eq!(dword(4), 0x3882);
+    assert_eq!(w.written(), 20, "the patches amend in place");
 }
 
 /// `sceAgcInit` (and alias `0x53bbd82b51d172db`) validates version 13 and returns 0.

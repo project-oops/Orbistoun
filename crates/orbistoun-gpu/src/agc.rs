@@ -13,7 +13,7 @@ use orbistoun_hle::guest_module;
 
 guest_module! {
     "libSceAgc" {
-        "0x7d86501b8094ef57" => 1,
+        "0x7d86501b8094ef57" => 3,
         "sceAgcAcbAcquireMem" => 6,
         "sceAgcAcbDispatchIndirect" => 6,
         "sceAgcAcbDmaData" => 6,
@@ -416,15 +416,54 @@ fn dcb_set_uc_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceAgcDcbSetCxRegistersIndirect(dcb, ...)` - reserves the packet a title patches and hands
 /// back its real address.
 ///
-/// The producer half of the patch family. It appends a correctly sized packet and returns the real
-/// cursor, so the guest's `memcpy` and the patch that follows land in command-buffer memory. The
-/// header and 20-byte extent are measured; which argument becomes which body dword is not, and the
-/// guest fills the body itself through `sceAgcSetCxRegIndirectPatchAddRegisters` (D696).
+/// The producer half of the patch family. It appends the measured 20-byte packet, its body filled
+/// from `(dcb, table, count)`, and returns the real cursor, so the patches that follow amend it in
+/// command-buffer memory (`166-agc/patch-cx-registers-indirect`).
 fn dcb_set_cx_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::set_cx_registers_indirect_skeleton(),
+        &packet::build::set_cx_registers_indirect(args[1], args[2]),
     )
+}
+
+/// Offset of an indirect register packet's table address, low half then high half.
+const INDIRECT_TABLE_AT: u64 = 4;
+
+/// Offset of an indirect register packet's register count.
+const INDIRECT_COUNT_AT: u64 = 16;
+
+/// `sceAgcSetCxRegIndirectPatchAddRegisters(packet, count, ...)`: adds `count` to the packet's
+/// register count and answers `0x0`. Measured: one call moved dw4 from `0x3880` to `0x3881`, a
+/// second to `0x3882`, and nothing else in the packet or workload changed
+/// (`166-agc/patch-cx-registers-indirect`).
+fn cx_indirect_patch_add_registers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (packet, count) = (args[0], args[1] as u32);
+    if packet != 0 {
+        let at = packet.wrapping_add(INDIRECT_COUNT_AT);
+        // SAFETY: `packet` is the producer's answer the guest passes back, a 20-byte packet in its
+        // own command buffer; dw4 lies inside it.
+        let was = unsafe { guest::read_u32(at) }.unwrap_or(0);
+        let now = (was & !packet::build::INDIRECT_COUNT_MASK)
+            | (was.wrapping_add(count) & packet::build::INDIRECT_COUNT_MASK);
+        // SAFETY: the same dword, in the guest's own command buffer.
+        unsafe { guest::write_u32(at, now) };
+    }
+    OK
+}
+
+/// `sceAgcSetCxRegIndirectPatchSetAddress(packet, address)`: writes the table address into dw1
+/// and dw2 and answers `0x0`. Measured: address `0x2_0086_0000` came back as dw1 `0x860000`, dw2
+/// `0x2` (`166-agc/patch-cx-registers-indirect`).
+fn cx_indirect_patch_set_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (packet, address) = (args[0], args[1]);
+    if packet != 0 {
+        let at = packet.wrapping_add(INDIRECT_TABLE_AT);
+        // SAFETY: dw1 and dw2 of the producer's 20-byte packet, in the guest's command buffer.
+        unsafe { guest::write_u32(at, (address as u32) & !3) };
+        // SAFETY: as above, the next dword.
+        unsafe { guest::write_u32(at.wrapping_add(4), (address >> 32) as u32) };
+    }
+    OK
 }
 
 /// The `sceAgc*Patch*` family - amend an already-written packet in place, and return the measured
@@ -449,20 +488,27 @@ fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Non-export inline query helper (`0x7d86501b8094ef57`).
+/// Bytes from a register write's start to its values: the measured `SET_SH_REG` packet is a
+/// header, the register offset, then the values (`166-agc/dcb-set-sh-reg-direct`).
+const REGISTER_PAYLOAD_OFFSET: u64 = 8;
+
+/// The kind [`agc_packet_payload`] is asked with for a register write.
+const REGISTER_WRITE_KIND: u64 = 1;
+
+/// `0x7d86501b8094ef57(out, packet, kind)`: where the payload of a packet the guest reserved
+/// begins.
 ///
-/// At its call site the value written through `arg0` is used as a byte size, aligned up to 8 and
-/// passed to buffer allocators. The value, `0xa8` (168), is guest-observed, not a measured return:
-/// on the hardware this NID is not exported, its import slot binds null and the call is never made
-/// (`166-agc/cb-unnamed-ef57`). `0xa8` stands in for the size the title's own inlined helper
-/// computes.
-fn agc_phantom_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let out = args[0];
-    if out != 0 {
-        // SAFETY: `out` is the guest-supplied out-parameter stack slot, eight bytes, holding the
-        // size.
-        unsafe { guest::write_u64(out, 0xa8) };
+/// Guest-observed: PPSA02664 calls it with kind 1 on the register write it just reserved with no
+/// values, then fills the values through the answer, so kind 1 answers the measured payload
+/// offset. It also calls it with kind 0 on a data `NOP`, whose layout is unmeasured; that kind is
+/// refused until obSCEne measures it.
+fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (out, packet, kind) = (args[0], args[1], args[2]);
+    if out == 0 || packet == 0 || kind != REGISTER_WRITE_KIND {
+        return BAD_ARGUMENT;
     }
+    // SAFETY: `out` is the guest-supplied pointer-sized out-parameter.
+    unsafe { guest::write_u64(out, packet.wrapping_add(REGISTER_PAYLOAD_OFFSET)) };
     OK
 }
 
@@ -643,12 +689,23 @@ const MAX_REGISTER_RUN: u64 = 0x3ffe;
 /// `sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count)`. Measured
 /// (`166-agc/dcb-set-sh-reg-direct`): a two-register run comes back as `header, offset, value,
 /// value`, with no marker, `n + 2` dwords.
+///
+/// With no `values` the packet is reserved with its payload zeroed and its address returned: a
+/// title passes null and then fills the run itself through the payload pointer
+/// [`agc_packet_payload`] gives it (guest-observed in PPSA02664).
 fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (offset, values, count) = (args[1], args[2], args[3]);
-    if values == 0 || count == 0 || count > MAX_REGISTER_RUN {
+    if count == 0 || count > MAX_REGISTER_RUN {
         return BAD_ARGUMENT;
     }
     let mut run = Vec::with_capacity(count as usize);
+    if values == 0 {
+        run.resize(count as usize, 0);
+        return dcb_append(
+            args[0],
+            &packet::build::set_sh_register_range(offset as u16, &run),
+        );
+    }
     for i in 0..count {
         // SAFETY: `values` is the guest's own array of `count` dwords, the argument this call is
         // defined by; `count` is bounded above.
@@ -693,7 +750,7 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// pinned by `tests/dcb_wiring.rs`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
-        ("0x7d86501b8094ef57", agc_phantom_get_size),
+        ("0x7d86501b8094ef57", agc_packet_payload),
         ("sceAgcCreateShader", create_shader),
         ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
         ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
@@ -743,11 +800,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         // The whole `sceAgc*Patch*` family, each measured to return 0x0.
         (
             "sceAgcSetCxRegIndirectPatchAddRegisters",
-            agc_patch_returns_ok,
+            cx_indirect_patch_add_registers,
         ),
         (
             "sceAgcSetCxRegIndirectPatchSetAddress",
-            agc_patch_returns_ok,
+            cx_indirect_patch_set_address,
         ),
         (
             "sceAgcSetShRegIndirectPatchAddRegisters",
@@ -1088,15 +1145,23 @@ mod tests {
         );
     }
 
-    /// The phantom `0x7d86501b8094ef57` writes the workload size 168 (0xa8) into `*arg0`.
+    /// `0x7d86501b8094ef57` answers a register write's values, two dwords in, and refuses the
+    /// unmeasured kinds without writing.
     #[test]
-    fn phantom_get_size_writes_workload_size() {
+    fn the_payload_of_a_reserved_register_write_starts_two_dwords_in() {
         let mut slot: u64 = 0;
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = std::ptr::addr_of_mut!(slot) as u64;
-
-        assert_eq!(agc_phantom_get_size(&args), OK);
-        assert_eq!(slot, 0xa8);
+        args[1] = 0x7400_0218_7e30;
+        args[2] = 1;
+        assert_eq!(agc_packet_payload(&args), OK);
+        assert_eq!(slot, 0x7400_0218_7e38);
+        for kind in [0, 2] {
+            slot = 0;
+            args[2] = kind;
+            assert_eq!(agc_packet_payload(&args), BAD_ARGUMENT);
+            assert_eq!(slot, 0);
+        }
     }
 
     /// `sceAgcInit` returns 0 for version 13, and 0x8a6c0004 for other versions.

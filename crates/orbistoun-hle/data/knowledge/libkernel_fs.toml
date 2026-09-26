@@ -134,7 +134,7 @@ edge_cases = [
 known_by = "guest-observed"
 found_in = ["PPSA04263-app0"]
 found_on = "2026-09-21"
-note = "PPSA04263 (Grand Theft Auto V) calls it by the libkernel name; wiring it to the existing fstat logic moved the run FURTHER (+6 calls, +1 import, worklog 761)."
+note = "PPSA04263 (Grand Theft Auto V) calls it by the libkernel name; wiring it to the existing fstat logic moved the run FURTHER (+6 calls, +1 import, commit 3212e2a)."
 
 [[function]]
 name = "sceKernelWrite"
@@ -184,7 +184,7 @@ arity = 4
 purpose = "Reads a directory's entries through its descriptor, as FreeBSD 12's `struct dirent` records (64-bit inode, name at 24, records rounded to 8). System call 554."
 returns = "count"
 edge_cases = [
-    "The entries are the listing `opendir` gives the same path - mount points first, then the host's own files - taken when the directory is opened (worklog 842).",
+    "The entries are the listing `opendir` gives the same path - mount points first, then the host's own files - taken when the directory is opened (commit 8beebaa).",
     "A buffer too small for the next whole record fails rather than writing part of one.",
     "`*basep` receives the position the read started at; zero bytes answered is the end.",
 ]

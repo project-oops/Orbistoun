@@ -1743,6 +1743,15 @@ impl Service {
                     nid: i.nid.as_raw(),
                     library: i.library,
                     known: i.known,
+                    binding: match i.binding {
+                        orbistoun_elf::dynamic::Binding::Global => {
+                            orbistoun_proto::ImportBinding::Global
+                        }
+                        orbistoun_elf::dynamic::Binding::Weak => {
+                            orbistoun_proto::ImportBinding::Weak
+                        }
+                        _ => orbistoun_proto::ImportBinding::Other,
+                    },
                     kind: match i.kind {
                         orbistoun_elf::dynamic::Kind::Function => {
                             orbistoun_proto::ImportKind::Function
@@ -1776,7 +1785,9 @@ impl Service {
         let (libraries, _modules) = self.module_tables(&bytes)?;
         let root = executable.parent().unwrap_or(Path::new("."));
         let wanted: Vec<String> = libraries.into_values().collect();
-        Ok(titlemodules::find(root, &wanted))
+        Ok(titlemodules::find(root, &wanted, |library| {
+            self.registry.declares_library(library)
+        }))
     }
 
     /// Places the title's own modules and reports what they export.

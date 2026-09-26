@@ -139,7 +139,7 @@ arity = 6
 purpose = "Gives a port a set of buffers to display from."
 returns = "status"
 edge_cases = [
-    "**The addresses are read and stored** (worklog 678): video_out_register_buffers records each buffer address for the framebuffer diff a flip will eventually need. There is still no output surface, so a buffer registered here is one nobody will ever present yet; the count and addresses are recorded because a guest can read them back, and nothing beyond what was measured is invented.",
+    "**The addresses are read and stored** (commit b4f7e73): video_out_register_buffers records each buffer address for the framebuffer diff a flip will eventually need. There is still no output surface, so a buffer registered here is one nobody will ever present yet; the count and addresses are recorded because a guest can read them back, and nothing beyond what was measured is invented.",
     "Answers success rather than refusing, deliberately and reversibly: a guest that cannot register buffers stops setting up its display, while one that believes it can proceeds to submit flips - which is where the GPU layer is eventually reached.",
 ]
 found_by = "generated"
@@ -173,9 +173,19 @@ note = "Called 2 time(s) across the recorded corpus; nothing beyond the name and
 
 [[function]]
 name = "sceVideoOutSetBufferAttribute2"
+arity = 6
+purpose = "Fills a caller-owned 80-byte buffer attribute block: (attr, pixelformat, tiling, width, height, option), with dcc_control and dcc_clear_color as the seventh and eighth arguments on the stack."
+returns = "status"
+edge_cases = [
+    "MEASURED extent: exactly 0x50 bytes are written; bytes 0x50..0xff of a poisoned 256-byte block stay poisoned in both passes.",
+    "MEASURED fields: tiling u32 at 0x4 (0 tiled, 1 linear), width u32 at 0xc, height u32 at 0x10, option u64 at 0x18, pixel format u64 at 0x20, DCC clear colour u64 at 0x28, DCC control u32 at 0x30. Pass 1 (1080p tiled, format 0x8000000000000000) and pass 2 (4K linear, format 0x80000000) each came back in those places.",
+    "MEASURED zeros: 0x0, 0x8 and 0x14 read zero in both passes, so nothing the call takes lands there.",
+    "The DCC arguments are the seventh and eighth, on the guest stack past the six registers the trampoline captures; orbistoun leaves 0x28 and 0x30 as the caller had them.",
+]
+known_by = "measured"
+cites = "obSCEne sweep 20260919-040243 (eboot PPSA90000, retail FW 12.40), reports/hardware/20260919-040243-eboot.obs.log:2125-2168, check 080-video/attribute-block; obSCEne REQ-20260919T0230Z-83df."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Implemented (worklog 807): writes the buffer's shape into the caller's 80-byte block at the offsets obSCEne -83df measured - tiling 0x4, width 0xc, height 0x10, option 0x18, format 0x20 - and video_out_register_buffers decodes it so a flipped buffer carries its extent. The DCC fields (0x28, 0x30) are the seventh and eighth arguments, on the stack past the six the trampoline captures, so they are left untouched; pitch (0x0, 0x8, 0x14) read zero in both measured passes and is unassigned. The full structured restatement - arity, per-argument offsets, known_by = measured, and the hardware.toml rows - is REQ-20260920T0125Z-9d4e."
 
 [[function]]
 name = "sceVideoOutSetFlipRate"

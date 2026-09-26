@@ -331,6 +331,7 @@ mod tests {
             symbol: symbol.map(str::to_owned),
             known,
             kind: orbistoun_proto::ImportKind::Function,
+            binding: orbistoun_proto::ImportBinding::Global,
         }
     }
 

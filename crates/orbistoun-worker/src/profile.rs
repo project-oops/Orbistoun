@@ -8,6 +8,7 @@
 //! never allocates or locks while a thread is suspended, since that thread may hold the heap's
 //! lock.
 
+#[cfg(windows)]
 use std::sync::Mutex;
 
 /// Whether `ORBISTOUN_PROFILE` asked for sampling: `1`, or how many buckets to show.
@@ -35,19 +36,25 @@ pub fn watch_this_thread(name: &'static str) {
 }
 
 /// The guest's fixed image base, and how far past it a sample still counts as the guest's.
+#[cfg(windows)]
 const GUEST_IMAGE: u64 = crate::DEFAULT_MODULE_BASE;
+#[cfg(windows)]
 const GUEST_SPAN: u64 = 0x0100_0000_0000;
 
 /// Samples kept per thread between reports: at one a millisecond, far more than a report's worth.
+#[cfg(windows)]
 const CAPACITY: usize = 1 << 16;
 /// How often the counts are printed.
+#[cfg(windows)]
 const REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many buckets a report names per thread.
 const SHOWN: usize = 16;
 /// The most threads watched at once.
+#[cfg(windows)]
 const MOST_THREADS: usize = 8;
 
 /// Counts one thread's `samples` into buckets and prints the largest.
+#[cfg(windows)]
 fn report(thread: &str, samples: &[(u64, u64)]) {
     use std::collections::HashMap;
     let mut buckets: HashMap<String, usize> = HashMap::new();
@@ -93,6 +100,7 @@ fn report(thread: &str, samples: &[(u64, u64)]) {
 }
 
 /// The threads watched, by name. Taken only to copy the list, never while a thread is suspended.
+#[cfg(windows)]
 static WATCHED: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
 
 #[cfg(windows)]

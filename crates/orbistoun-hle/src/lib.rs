@@ -337,6 +337,14 @@ impl Registry {
         }
     }
 
+    /// Whether any function registered here belongs to `library`: a library the platform provides.
+    #[must_use]
+    pub fn declares_library(&self, library: &str) -> bool {
+        self.by_nid
+            .values()
+            .any(|resolved| resolved.library == library)
+    }
+
     /// Looks up what orbistoun knows about `nid`.
     ///
     /// `None` means the guest imported something declared nowhere, which an import dump reports.

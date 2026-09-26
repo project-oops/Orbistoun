@@ -893,7 +893,7 @@ exact address it names - a batch entry is never relocated, because it says where
 memory. It is how a scanout surface is brought up: the open-toolchain display init allocates one
 physical block and batch-maps sixteen 2 MiB pages of it into the GPU virtual range, and until this
 landed the whole call fell on a stub, so the display reported itself not ready one step before any
-pixel (GLCB00001, worklog 806).
+pixel (GLCB00001, commit d1502d2).
 """
 returns = "status"
 edge_cases = [
@@ -1613,7 +1613,7 @@ edge_cases = [
 known_by = "assumed"
 found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Implemented 2026-09-22 (worklog 797): the read D523 anticipated, now that PPSA04263 asks for it."
+note = "Implemented 2026-09-22 (commit d1502d2): the read D523 anticipated, now that PPSA04263 asks for it."
 
 [[function]]
 name = "scePthreadGetschedparam"

@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 /// `.sprx`, but nothing guarantees a title follows that, so both are searched.
 const MODULE_EXTENSIONS: [&str; 2] = ["prx", "sprx"];
 
+/// The package's module directory, where a title ships the platform libraries it links itself.
+pub const PACKAGE_MODULES: &str = "sce_module";
+
 /// How deep to look before giving up.
 ///
 /// Deeper than any layout in the corpus (`Media/Modules/` is two), and bounded so a large data tree
@@ -33,14 +36,37 @@ pub struct TitleModule {
 /// exact-case match. The case-insensitivity is for the host filesystem; titles spell the filename
 /// as they spell the import (D482). A name nothing answers is absent from the result, which is
 /// normal for the platform's own libraries.
+///
+/// A library the platform provides (`is_platform`) is taken only from the package's module
+/// directory, [`PACKAGE_MODULES`]: the platform's loader looks there and in its own libraries,
+/// never elsewhere in the title's tree. A copy anywhere else, such as a directory of firmware
+/// libraries a backport tool adds, is not the title's.
 #[must_use]
-pub fn find(root: &Path, wanted: &[String]) -> Vec<TitleModule> {
+pub fn find(
+    root: &Path,
+    wanted: &[String],
+    is_platform: impl Fn(&str) -> bool,
+) -> Vec<TitleModule> {
     let candidates = shipped_modules(root);
+    let packaged = |path: &&PathBuf| {
+        path.parent().is_some_and(|dir| {
+            dir.parent() == Some(root)
+                && dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(PACKAGE_MODULES))
+        })
+    };
     let mut out = Vec::new();
     for library in wanted {
         let lowered = library.to_lowercase();
         let Some(matches) = candidates.get(&lowered) else {
             continue;
+        };
+        let matches: Vec<&PathBuf> = if is_platform(library) {
+            matches.iter().filter(packaged).collect()
+        } else {
+            matches.iter().collect()
         };
         // Exact case wins where the filesystem offered several spellings; otherwise the first,
         // which is stable because the walk sorts.
@@ -55,7 +81,7 @@ pub fn find(root: &Path, wanted: &[String]) -> Vec<TitleModule> {
         if let Some(path) = chosen {
             out.push(TitleModule {
                 library: library.clone(),
-                path: path.clone(),
+                path: (*path).clone(),
             });
         }
     }
@@ -140,10 +166,34 @@ mod tests {
         let found = find(
             dir.path(),
             &["Il2CppUserAssemblies".to_owned(), "libc".to_owned()],
+            |_| false,
         );
         let names: Vec<&str> = found.iter().map(|m| m.library.as_str()).collect();
         assert_eq!(names, ["Il2CppUserAssemblies", "libc"]);
         assert!(found[0].path.ends_with("Il2CppUserAssemblies.prx"));
+    }
+
+    /// A platform library is the title's only in the package's module directory; a copy elsewhere,
+    /// such as a backport tool's firmware libraries, is not, and a title's own module still is.
+    #[test]
+    fn a_platform_library_counts_only_from_the_package_modules() {
+        let dir = title(&[
+            "fakelib/libSceAmpr.sprx",
+            "sce_module/libc.prx",
+            "Media/Modules/Il2CppUserAssemblies.prx",
+        ]);
+        let platform = |library: &str| library == "libSceAmpr" || library == "libc";
+        let found = find(
+            dir.path(),
+            &[
+                "libSceAmpr".to_owned(),
+                "libc".to_owned(),
+                "Il2CppUserAssemblies".to_owned(),
+            ],
+            platform,
+        );
+        let names: Vec<&str> = found.iter().map(|m| m.library.as_str()).collect();
+        assert_eq!(names, ["libc", "Il2CppUserAssemblies"]);
     }
 
     /// A name the title does not ship is absent, not an error.
@@ -153,6 +203,7 @@ mod tests {
         let found = find(
             dir.path(),
             &["libkernel".to_owned(), "Il2CppUserAssemblies".to_owned()],
+            |_| false,
         );
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].library, "Il2CppUserAssemblies");
@@ -163,7 +214,7 @@ mod tests {
     #[test]
     fn the_library_name_comes_back_as_the_executable_spells_it() {
         let dir = title(&["Media/Modules/Il2cppUserAssemblies.prx"]);
-        let found = find(dir.path(), &["Il2cppUserAssemblies".to_owned()]);
+        let found = find(dir.path(), &["Il2cppUserAssemblies".to_owned()], |_| false);
         assert_eq!(
             found,
             vec![TitleModule {
@@ -177,7 +228,7 @@ mod tests {
     #[test]
     fn an_exact_spelling_wins_where_the_filesystem_offers_two() {
         let dir = title(&["a/Il2CppUserAssemblies.prx", "b/il2cppuserassemblies.prx"]);
-        let found = find(dir.path(), &["Il2CppUserAssemblies".to_owned()]);
+        let found = find(dir.path(), &["Il2CppUserAssemblies".to_owned()], |_| false);
         assert_eq!(found.len(), 1);
         assert!(
             found[0].path.ends_with("Il2CppUserAssemblies.prx"),
@@ -190,6 +241,6 @@ mod tests {
     #[test]
     fn a_file_that_is_not_a_module_is_not_matched() {
         let dir = title(&["Media/Modules/Il2CppUserAssemblies.dat"]);
-        assert!(find(dir.path(), &["Il2CppUserAssemblies".to_owned()]).is_empty());
+        assert!(find(dir.path(), &["Il2CppUserAssemblies".to_owned()], |_| false).is_empty());
     }
 }

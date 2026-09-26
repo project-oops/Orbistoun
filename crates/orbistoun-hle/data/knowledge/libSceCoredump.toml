@@ -10,4 +10,4 @@ edge_cases = [
 known_by = "assumed"
 found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Implemented 2026-09-22 (worklog 798): accepted honestly, the accept pattern D523/worklog 673 set."
+note = "Implemented 2026-09-22 (commit d1502d2): accepted honestly, the accept pattern D523/commit b4f7e73 set."

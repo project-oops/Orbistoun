@@ -5,7 +5,9 @@
 
 A command builder whose job in the guest's path is to reserve space for the patch calls to fill
 is wired once its header and extent are measured: it writes the measured header, reserves the
-measured length, zeroes the body and returns the real cursor.
+measured length, zeroes the body and returns the real cursor. Once which argument lands in which
+body dword is measured, the body is filled from the guest's own arguments, as
+`sceAgcDcbSetCxRegistersIndirect` is.
 
 **Why:** the guest fills the body through the patch calls; the reservation and the returned
 address are what it depends on. Filling the body from a single capture would encode the probe's
