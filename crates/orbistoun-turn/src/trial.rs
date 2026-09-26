@@ -1,32 +1,12 @@
 //! Running an experiment against a real guest.
 //!
-//! The other half of [`crate::experiment`]: that module decides what to try and reads
-//! what the results mean, this one shells out and gets them.
-//!
-//! # It reads the trace, not the terminal
-//!
-//! D046 is explicit that a machine consumer must not grep log prose - *"rewording that
-//! message silently breaks it; log prose becomes an unversioned API"*. So the fault
-//! address comes from the persisted trace, which is the contract, rather than from what
-//! the run printed.
-//!
-//! # One thing here is prose, and it fails safe
-//!
-//! Whether a planted write actually landed is reported inside `conditions.experiments`,
-//! as a sentence: `"<target>:<slot>:<value> (N planted, M refused)"`. There is no
-//! structured field for it, so this parses that string - the one place where the rule
-//! above is broken because there is no alternative.
-//!
-//! **It fails in the safe direction.** A parse that does not match reports the write as
-//! *not planted*, which the sweep reads as `NeverPlanted` - "nothing was measured" -
-//! rather than as evidence against a slot. A format change therefore costs a
-//! re-examination, not a wrong conclusion.
-//!
-//! # No guest is needed to test the reasoning
-//!
-//! Everything that decides anything lives in [`crate::experiment`], behind the `Trial`
-//! trait. This module is the part that cannot be tested without a title and a
-//! twenty-second boot, so it is deliberately as small and as stupid as it can be.
+//! The other half of [`crate::experiment`], which decides what to try and reads what the results
+//! mean; this module runs the guest and gets them. The fault address comes from the persisted
+//! trace, never from log prose (D046). The one exception is whether a planted write landed,
+//! reported only as a sentence in `conditions.experiments`; a parse that does not match reads as
+//! not planted, which the sweep reports as nothing measured rather than as evidence against a slot.
+//! Everything that decides anything lives behind the `Trial` trait, so this module is as small as
+//! it can be.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,11 +24,8 @@ pub struct GuestTrial {
     env: Vec<(String, String)>,
     /// The symbol database every run is given, if the caller has one.
     ///
-    /// **Load-bearing, and it was missing.** The database decides which imports have names, a
-    /// named import is one an implementation can be found for, and an unnamed one gets a stub -
-    /// so a run without it is a *different program*. PPSA02664 walls at `image+0x39f7c` with the
-    /// database and at `image+0xf56e09` without it, and every verdict this dispatcher produced
-    /// was measured against the second while being compared with the first (D599).
+    /// The database decides which imports have names, and an unnamed import gets a stub, so a run
+    /// without it is a different program from the one the loop measures.
     symbols: Option<PathBuf>,
 }
 
@@ -71,8 +48,7 @@ impl GuestTrial {
 
     /// Gives every run the symbol database the caller was given.
     ///
-    /// Without it a sweep measures a guest whose unnamed imports all landed on stubs, and then
-    /// compares the result against a loop that named them (D599).
+    /// Without it a sweep measures a guest whose unnamed imports all landed on stubs.
     #[must_use]
     pub fn with_symbols(mut self, symbols: Option<PathBuf>) -> Self {
         self.symbols = symbols;
@@ -81,9 +57,8 @@ impl GuestTrial {
 
     /// Sets a variable on every run this makes.
     ///
-    /// Needed because a sweep should not write its traces into whatever data directory
-    /// the machine happens to use - twelve runs would overwrite whatever was there, and
-    /// the newest-trace rule would pick up somebody else's run if one overlapped.
+    /// A sweep writes its traces into its own data directory, so it neither overwrites the
+    /// machine's nor picks up another run's trace as the newest.
     #[must_use]
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
@@ -92,10 +67,7 @@ impl GuestTrial {
 
     /// The trace the last run wrote, parsed.
     ///
-    /// Exposed so a caller can enumerate what the guest actually called before deciding
-    /// what to sweep. Reading the trace rather than guessing at a target is the whole
-    /// difference between a sweep that plants something and one that reports
-    /// `NeverPlanted` twelve times.
+    /// Exposed so a caller can enumerate what the guest called before deciding what to sweep.
     ///
     /// # Errors
     ///
@@ -110,10 +82,8 @@ impl GuestTrial {
 
     /// The trace this run wrote.
     ///
-    /// Newest by modification time. Traces are keyed by module, so a run overwrites its
-    /// own rather than accumulating - which means "the newest" is the one just written
-    /// whenever a sweep points at one title, and a sweep that pointed at several would
-    /// need the module name instead.
+    /// Newest by modification time. Traces are keyed by module, so a run overwrites its own and the
+    /// newest is the one just written while a sweep points at one title.
     fn newest_trace(&self) -> Result<PathBuf, Error> {
         let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
         let entries = std::fs::read_dir(&self.traces)
@@ -149,18 +119,15 @@ impl Trial for GuestTrial {
 impl GuestTrial {
     /// Runs once with these axes applied, or with none of them for a baseline.
     ///
-    /// **A slice rather than one**, because a two-condition dependency needs both applied at
-    /// once and one at a time cannot see it: at `image+0xafc959` the plant needed the call to
-    /// answer success before the guest would read what was planted, and either alone left the
-    /// fault exactly where it was (D283, D286).
+    /// A slice, because a two-condition dependency needs both applied at once: a plant can need the
+    /// call to answer success before the guest reads what was planted (D286).
     ///
     /// # Errors
     ///
     /// If the run could not be made, or wrote no trace.
     pub fn spawn(&self, axes: &[Axis]) -> Result<Outcome, Error> {
         let mut command = Command::new(&self.binary);
-        // **Before the subcommand**, because it is a global option - and it is the difference
-        // between measuring the program the loop measures and measuring another one (D599).
+        // Before the subcommand, because it is a global option.
         if let Some(symbols) = &self.symbols {
             command.arg("--symbols-db").arg(symbols);
         }
@@ -168,38 +135,28 @@ impl GuestTrial {
         for (key, value) in &self.env {
             command.env(key, value);
         }
-        // **Every diagnostic variable cleared first, always.** One experiment inheriting
-        // another's - or the environment this sweep was launched from - is not a
-        // controlled run, and a baseline taken with a stale variable set is not a
-        // baseline at all.
+        // Every diagnostic variable is cleared first, so a run inherits nothing from another
+        // experiment or from the environment the sweep was launched from.
         for name in Axis::every_variable() {
             command.env_remove(name);
         }
-        // Set after the clearing loop above, so nothing an experiment asks for is removed by
-        // the tidy-up meant for the run before it.
+        // Set after the clearing loop, so nothing an experiment asks for is removed.
         for axis in axes {
             let (name, value) = axis.env();
             command.env(name, value);
         }
 
-        // **An axis that reports by writing has its writing let through.** `output()` captures
-        // the child's error stream and drops it, so every byte a watch or a snapshot printed
-        // was discarded - while `Taken::Watched`'s own documentation said *"what it saw is on
-        // the run's error stream, by design"*. It was on the child's, and nothing forwarded it.
-        //
-        // Gated on the axis rather than always: a sweep is hundreds of boots and inheriting
-        // all of them would bury the result in guest output. These two produce no verdict of
-        // their own - what they print *is* the finding - so for them there is nothing else to
-        // read (D586).
+        // An axis that reports by writing has the child's error stream let through, since
+        // `output()` would capture and drop it. Only for those axes: a sweep is hundreds of boots,
+        // and these produce no verdict of their own, so what they print is the finding.
         let reports_by_writing = axes
             .iter()
             .any(|a| matches!(a, Axis::Read { .. } | Axis::Watch { .. }));
         if reports_by_writing {
             command.stderr(std::process::Stdio::inherit());
         }
-        // A faulting guest is the normal outcome and often a non-zero exit, so the status
-        // is not checked. What matters is whether a trace was written, and that is
-        // checked below.
+        // A faulting guest is the normal outcome and often a non-zero exit, so the status is not
+        // checked; whether a trace was written is, below.
         command
             .output()
             .map_err(|e| Error::Reply(format!("running {}: {e}", self.binary.display())))?;
@@ -214,20 +171,16 @@ impl GuestTrial {
             fault: trace
                 .pointer("/fault/address")
                 .and_then(serde_json::Value::as_u64),
-            // Only a planted write reports a count. Every other axis is applied by
-            // setting its variable, and the run either honoured it or the worker said so
-            // on its own terms - so an axis with no count of its own counts as applied.
-            // A run carrying a write is applied only if the write landed; one carrying any
-            // other axis is applied by having set its variable. A run carrying nothing is a
-            // baseline and applied nothing.
+            // Only a planted write reports a count. A run carrying a write is applied only if the
+            // write landed; one carrying any other axis is applied by having set its variable; a
+            // baseline applied nothing.
             planted: match axes.iter().find(|a| matches!(a, Axis::Write { .. })) {
                 Some(_) => planted > 0,
                 None => !axes.is_empty(),
             },
             refused: axes.iter().any(|a| matches!(a, Axis::Write { .. })) && refused > 0,
-            // The second signal. Read from the trace rather than inferred, because
-            // "the fault moved" and "the guest was broken earlier" look identical
-            // from the address alone - and one of those is worth an afternoon.
+            // The second signal, read from the trace, because "the fault moved" and "the guest was
+            // broken earlier" look identical from the address alone.
             reached: usize::try_from(
                 trace
                     .get("distinct")
@@ -235,11 +188,9 @@ impl GuestTrial {
                     .unwrap_or_default(),
             )
             .unwrap_or(usize::MAX),
-            // The third. An illegal instruction, a breakpoint or a stack overflow carries
-            // no address parameters, so the reporter fills the field with the instruction
-            // pointer - a real number that is not somewhere the guest asked to touch.
-            // Classified by the list `orbistoun-report` publishes, rather than by matching
-            // the prose here, so there is one definition of it.
+            // The third. An illegal instruction, a breakpoint or a stack overflow carries no
+            // address parameters, so the reporter fills the field with the instruction pointer.
+            // Classified by the list `orbistoun-report` publishes, so there is one definition.
             touched: trace
                 .pointer("/fault/kind")
                 .and_then(serde_json::Value::as_str)
@@ -272,13 +223,10 @@ impl GuestTrial {
 /// 0x11000000 at *arg1 of 0x6abac2f3dc6f8cee (0 planted, 1 refused)
 /// ```
 ///
-/// **Both numbers matter and they mean different things.** Planted means the value
-/// reached guest memory. Refused means the address in that argument is not writable -
-/// so the argument is not a pointer at all, which rules the slot out for a reason. When
-/// neither number appears the write was never attempted, and nothing was measured.
-///
-/// Zeroes for anything that does not match, which is the safe direction: the sweep reads
-/// that as *nothing was measured* rather than as evidence against a slot.
+/// Planted means the value reached guest memory. Refused means the address in that argument is not
+/// writable, so the argument is not a pointer. When neither appears the write was never attempted.
+/// Anything that does not match reads as zeroes: nothing was measured, rather than evidence against
+/// a slot.
 #[must_use]
 pub fn counts(experiments: &str) -> (u64, u64) {
     let Some(inside) = experiments.split_once('(').map(|(_, rest)| rest) else {
@@ -292,8 +240,8 @@ pub fn counts(experiments: &str) -> (u64, u64) {
             .and_then(|number| number.parse().ok())
             .unwrap_or(0)
     };
-    // Split on the label rather than on position: "N planted, M refused" and any future
-    // reordering both read correctly, and a sentence with neither label reads as zero.
+    // Split on the label rather than on position, so a reordering reads correctly and a sentence
+    // with neither label reads as zero.
     let planted = if inside.contains("planted") {
         number_before("planted")
     } else {
@@ -314,9 +262,8 @@ pub fn counts(experiments: &str) -> (u64, u64) {
 
 /// Where traces land beneath a data directory.
 ///
-/// Matches `orbistoun-paths`' own constant without depending on it - this crate stays
-/// clear of the workspace's path policy for the same reason `orbistoun-llm` does, and a
-/// caller that has `orbistoun-paths` should pass its answer instead.
+/// Matches `orbistoun-paths`' own constant without depending on it, keeping this crate clear of the
+/// workspace's path policy; a caller with `orbistoun-paths` passes its answer instead.
 pub const TRACES_DIR: &str = "traces";
 
 /// The traces directory beneath a data root.
@@ -339,11 +286,8 @@ mod tests {
         assert_eq!(counts("libkernel::foo:1:0x22 (0 planted, 7 refused)").0, 0);
     }
 
-    /// **Anything unrecognised reads as zero, and that is the safe direction.**
-    ///
-    /// Zero means the sweep reports `NeverPlanted` - nothing was measured - rather than
-    /// treating the run as evidence that the slot is innocent. A change to the sentence
-    /// this parses therefore costs a re-examination, never a wrong conclusion.
+    /// Anything unrecognised reads as zero, so the sweep reports nothing measured rather than a
+    /// slot ruled out.
     #[test]
     fn an_unrecognised_condition_reads_as_nothing_planted() {
         for unrecognised in [
@@ -359,13 +303,11 @@ mod tests {
 
     /// A run with no experiment reports nothing planted, whatever the conditions say.
     ///
-    /// The baseline has nothing to plant, so a stale sentence left in a trace by an
-    /// earlier run must not make it look as though it had.
+    /// A stale sentence left in a trace by an earlier run must not make a baseline look planted.
     #[test]
     fn a_baseline_is_never_reported_as_planted() {
-        // The behaviour is in `Trial::run`, which needs a guest; what is checked here is
-        // the half that decides it - `experiment.is_some_and(..)` is false for a
-        // baseline regardless of what the string holds.
+        // The behaviour is in `Trial::run`, which needs a guest; what is checked here is the half
+        // that decides it: `experiment.is_some_and(..)` is false for a baseline.
         let stale = "0x6abac2f3dc6f8cee:0:0x11000000 (3 planted, 0 refused)";
         assert!(counts(stale).0 > 0, "the fixture must look planted");
         let baseline: Option<&super::Experiment> = None;

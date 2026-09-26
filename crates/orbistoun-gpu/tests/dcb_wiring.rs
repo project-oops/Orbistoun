@@ -1,15 +1,10 @@
-//! The wired command builders, driven through the table the loader actually dispatches from.
+//! The wired command builders, driven through the table the loader dispatches from.
 //!
-//! # What this covers that `measured_builders.rs` does not
-//!
-//! That file proves the *encoders* produce the bytes hardware produced. This proves the other
-//! half: that a handler reached through `agc::implementations()` places those bytes **into the
-//! guest's own writer handle** and advances its cursor - what a title's next call needs.
-//!
-//! The handle layout under test (`+0x10` cursor, `+0x18` limit) was read off PPSA02664's stack and
-//! then confirmed by the library's own behaviour: obSCEne built a handle to that shape, called the
-//! real builders through it on hardware, and each advanced the cursor by exactly what its own
-//! `GetSize` had answered (worklog 534).
+//! `measured_builders.rs` checks that the encoders produce the bytes the hardware produced. This
+//! checks that a handler reached through `agc::implementations()` places those bytes into the
+//! guest's own writer handle (`+0x10` cursor, `+0x18` limit) and advances its cursor. The handle
+//! layout is guest-observed and confirmed on hardware: builders called through a handle of this
+//! shape advance the cursor by exactly their own `GetSize` answer.
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_gpu::agc;
@@ -70,24 +65,11 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
     f(&args)
 }
 
-/// **The wired set is exactly this size, so the module documentation cannot drift from it.**
+/// The wired set has exactly this size, so a change to it is deliberate.
 ///
-/// `agc.rs` states its count in prose, and prose nothing checks is how that count came to read
-/// "nothing here is implemented" while sixteen handlers answered - and to be believed, by a gap
-/// analysis that read it at its word and reported the surface as emptier than it is. Wiring or
-/// removing a builder now fails here, and the failure says which document to correct.
-///
-/// A count rather than a list because the list below already pins the names: this pins the
-/// *size*, which is the thing the prose repeats and the list cannot catch.
-///
-/// **Fifty: the count moves as handlers land (… -> 41 -> 44 -> 45 -> 46 -> 49 -> 50), the point.**
-/// The fiftieth is not a builder but a capability query, `sceAgcGetIsTrinityMode` (worklog 788) -
-/// `implementations()` is the whole wired set, builders and queries alike, which is what this counts.
-/// `rustfmt` wraps one entry - `sceAgcCbSetShRegisterRangeDirect` - onto its own line, so grepping
-/// the file for the handler pattern undercounts it, which is the same wrapping that twice made a
-/// registered handler look registered when it was not. Counting the built slice is the only count
-/// that cannot be fooled by the layout, which is the whole reason this test reads `implementations()`
-/// rather than the source text.
+/// Counting the built slice rather than the source text cannot be fooled by formatting, and
+/// `implementations()` is the whole wired set, builders and queries (such as
+/// `sceAgcGetIsTrinityMode`) alike.
 #[test]
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
@@ -112,8 +94,7 @@ fn every_wired_builder_is_reachable_by_its_import_name() {
         "sceAgcDcbSetCxRegisterDirect",
         "sceAgcDcbSetUcRegisterDirect",
         "sceAgcCbSetShRegisterRangeDirect",
-        // Added once the sweep of 20260914-222710 measured them: DrawIndex in full (the two
-        // dwords worklog 536 could not place) and SetIndexSize across eight argument pairs.
+        // DrawIndex, measured in full, and SetIndexSize, measured across eight argument pairs.
         "sceAgcDcbDrawIndex",
         "sceAgcDcbSetIndexSize",
     ] {
@@ -127,8 +108,8 @@ fn every_wired_builder_is_reachable_by_its_import_name() {
 /// `sceAgcCbNop` writes the measured header-only no-op and advances the cursor by four.
 #[test]
 fn cb_nop_writes_the_measured_header_only_packet() {
-    // Fully measured, not a reservation: `166-agc/cb-nop` says the whole packet is `0xffff1000`
-    // and four bytes, and it takes no arguments, so this is complete rather than a stand-in.
+    // Fully measured: `166-agc/cb-nop` says the whole packet is `0xffff1000`, four bytes, no
+    // arguments.
     let w = Writer::new(0x400);
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[0] = w.handle();
@@ -143,18 +124,14 @@ fn cb_nop_writes_the_measured_header_only_packet() {
     );
 }
 
-/// `sceAgcDcbAcquireMem` reserves the measured 32-byte extent with the measured header, body zero.
-///
-/// A reservation, not a full encoder (D696): the header and length are what the guest needs to get
-/// a real cursor and step past the placeholder, and those are measured; the argument-to-body
-/// permutation is not, so the body is zero and the test asserts exactly that - the header present,
-/// the length right, and no invented body.
+/// `sceAgcDcbAcquireMem` reserves the measured 32-byte extent with the measured header and a zero
+/// body (D696): the header present, the length right, and no argument in the body.
 #[test]
 fn dcb_acquire_mem_reserves_the_measured_extent_with_a_zero_body() {
     let w = Writer::new(0x400);
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[0] = w.handle();
-    args[1] = 0x1111_1111; // an argument that must NOT appear in the packet
+    args[1] = 0x1111_1111; // an argument that must not appear in the packet
 
     let at = w.cursor();
     assert_eq!(
@@ -174,13 +151,8 @@ fn dcb_acquire_mem_reserves_the_measured_extent_with_a_zero_body() {
     );
 }
 
-/// The three skeletons the `20260915-174357` sweep pinned by header and extent: each reserves its
-/// measured length with the measured header and a zero body, and refuses to let an argument leak in.
-///
-/// One test over the three because they are the same contract - a reservation, not an encoding
-/// (D696, REQ-...a70f) - and asserting each separately would just repeat it. The argument in `arg1`
-/// is the guard: a skeleton that started encoding its body from the arguments would fail here, which
-/// is the whole line between a reservation and a guess.
+/// The three skeletons measured by header and extent each reserve their measured length with the
+/// measured header and a zero body (D696). The argument in `arg1` must not leak into the body.
 #[test]
 fn the_measured_skeletons_reserve_their_extent_with_a_zero_body() {
     for (name, extent, header) in [
@@ -191,7 +163,7 @@ fn the_measured_skeletons_reserve_their_extent_with_a_zero_body() {
         let w = Writer::new(0x400);
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = w.handle();
-        args[1] = 0x1111_1111; // an argument that must NOT appear in the packet
+        args[1] = 0x1111_1111; // an argument that must not appear in the packet
         args[2] = 0x2222_2222;
 
         let at = w.cursor();
@@ -216,9 +188,9 @@ fn a_skeleton_refuses_a_null_handle() {
     assert_eq!(call("sceAgcDcbDmaData", args), BAD_ARGUMENT);
 }
 
-/// The markers reserve their measured 12-byte header (`0xc0017904`, the reserved-byte bit kept), and
-/// `WaitRegMem` reserves its measured 56-byte compound with all three packet headers present and
-/// bodies zero (worklog 618). The markers were answering placeholders on PPSA02664's command buffer.
+/// The markers reserve their measured 12-byte header (`0xc0017904`, the reserved-byte bit kept),
+/// and `WaitRegMem` reserves its measured 56-byte compound with all three packet headers present
+/// and bodies zero.
 #[test]
 fn the_markers_and_wait_reg_mem_reserve_their_measured_shapes() {
     // Markers: 12 bytes, the measured header with its reserved-byte bit, body zero.
@@ -268,16 +240,14 @@ fn the_markers_and_wait_reg_mem_reserve_their_measured_shapes() {
     );
 }
 
-/// `sceAgcDcbResetQueue` reserves its measured 32-byte writer-struct: a NOP filler, then two
-/// `SET_UCONFIG_REG` headers, all bodies zero (REQ-...b7e4). obSCEne measured it with zero arguments,
-/// and the two marker-register values it wrote are address-shaped, so the body is zeroed on the same
-/// skeleton discipline as the markers and `WaitRegMem` - and the argument in `arg1` must not leak in.
+/// `sceAgcDcbResetQueue` reserves its measured 32-byte stream: a NOP filler, then two
+/// `SET_UCONFIG_REG` headers, all bodies zero, with the argument in `arg1` kept out.
 #[test]
 fn dcb_reset_queue_reserves_its_measured_writer_struct_with_a_zero_body() {
     let w = Writer::new(0x400);
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[0] = w.handle();
-    args[1] = 0x1111_1111; // must NOT appear in the packet
+    args[1] = 0x1111_1111; // must not appear in the packet
 
     let at = w.cursor();
     assert_eq!(
@@ -307,8 +277,7 @@ fn dcb_reset_queue_reserves_its_measured_writer_struct_with_a_zero_body() {
     );
 }
 
-/// The REQ-...a70f cluster each reserves its measured extent with its measured header and a zero
-/// body - a real cursor where the guest was getting a placeholder to memcpy through (worklog 618).
+/// Each reservation skeleton reserves its measured extent with its measured header and a zero body.
 /// The header is asserted little-endian so a wrong opcode or count cannot pass, and the argument in
 /// `arg1` must not leak into the body.
 #[test]
@@ -327,7 +296,7 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
         let w = Writer::new(0x400);
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = w.handle();
-        args[1] = 0x1111_1111; // must NOT appear in the packet
+        args[1] = 0x1111_1111; // must not appear in the packet
 
         let at = w.cursor();
         assert_eq!(call(name, args), at, "{name} returns the packet address");
@@ -344,11 +313,8 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     }
 }
 
-/// The whole `sceAgc*Patch*` family answers the measured `0x0`, not the placeholder the guest carried
-/// into a `memcpy`. These are returns, not builders: they append no packet and touch no writer, so
-/// the property to pin is only that not one of them still hands the guest a placeholder-as-pointer
-/// (REQ-...4386 for the Cx pair, ...3d1e for the other eight - each measured `rc 0x0` across two
-/// argument passes). Closing the family as a set is what stops the wall moving one patch downstream.
+/// The whole `sceAgc*Patch*` family answers the measured `0x0`, not a placeholder. They are
+/// returns, not builders: no packet is appended and no writer touched.
 #[test]
 fn every_patch_answers_the_measured_success_not_a_placeholder() {
     for name in [
@@ -364,7 +330,7 @@ fn every_patch_answers_the_measured_success_not_a_placeholder() {
         "sceAgcQueueEndOfPipeActionPatchAddress",
     ] {
         let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = 0x7400_0224_7d9c; // a real packet address, as the producer skeletons now return
+        args[0] = 0x7400_0224_7d9c; // a real packet address, as the producer skeletons return
         let rc = call(name, args);
         assert_eq!(rc, 0, "{name} answers the measured 0x0");
         assert_ne!(
@@ -374,13 +340,8 @@ fn every_patch_answers_the_measured_success_not_a_placeholder() {
     }
 }
 
-/// `sceAgcDcbWaitUntilSafeForRendering` is a measured library no-op: it answers the measured `0x0`
-/// and writes nothing, on a real writer or none.
-///
-/// obSCEne re-probed it (REQ-...4e91): 0 bytes and `rc 0x0` under every condition, `GetSize` absent,
-/// `empty-encoding` true. Worklog 665 refused it while its only measurement was a failed capture; the
-/// successful re-probe replaced that with a library-confirmed empty encoding, so this pins that it now
-/// answers `0x0` rather than the placeholder and leaves the writer untouched.
+/// `sceAgcDcbWaitUntilSafeForRendering` is a measured library no-op: it answers `0x0` and writes
+/// nothing, on a real writer or none.
 #[test]
 fn wait_until_safe_for_rendering_is_a_no_op_that_answers_zero() {
     let w = Writer::new(0x400);
@@ -391,7 +352,7 @@ fn wait_until_safe_for_rendering_is_a_no_op_that_answers_zero() {
     assert_ne!(rc, UNIMPLEMENTED, "not the placeholder");
     assert_eq!(w.written(), 0, "a no-op writes no packet");
 
-    // A null handle is still 0x0 - it dereferences nothing.
+    // A null handle is still 0x0: nothing is dereferenced.
     assert_eq!(
         call(
             "sceAgcDcbWaitUntilSafeForRendering",
@@ -423,8 +384,8 @@ fn event_write_lands_in_the_handle_and_advances_the_cursor() {
     );
 }
 
-/// Consecutive builders append, rather than each overwriting the last. This is the property the
-/// cursor exists for, and the one a title depends on when it builds a whole command buffer.
+/// Consecutive builders append rather than overwrite: the property a title depends on when it
+/// builds a whole command buffer.
 #[test]
 fn consecutive_builders_append_back_to_back() {
     let w = Writer::new(0x400);
@@ -447,8 +408,8 @@ fn consecutive_builders_append_back_to_back() {
     assert_eq!(call("sceAgcDcbDrawIndexAuto", args), third);
     assert_eq!(w.written(), 28, "12 more for the three-dword draw");
 
-    // The property that separates "the packet address" from "the buffer start": three calls,
-    // three different returns, each 8 and then 8 bytes on from the last.
+    // Three calls, three returns, each 8 bytes on from the last: the return is the packet's
+    // address, not the buffer start.
     assert_eq!(second, first + 8, "the second return is the second packet");
     assert_eq!(third, first + 16, "and the third is the third");
 
@@ -507,9 +468,8 @@ fn a_register_run_is_read_from_guest_memory() {
     );
 }
 
-/// **A packet that will not fit is refused, and nothing is written.** The real library calls the
-/// overflow callback and grows the buffer; this does not, and says so loudly rather than writing
-/// past a guest's buffer.
+/// A packet that does not fit is refused and nothing is written. The real library calls the
+/// overflow callback; this answers the placeholder instead of writing past the buffer.
 #[test]
 fn a_full_buffer_is_refused_rather_than_overrun() {
     let w = Writer::new(4); // room for a header and not one dword more

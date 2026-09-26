@@ -1,12 +1,9 @@
-//! `libSceAgcDriver` - the submission side of the current generation's graphics API.
+//! `libSceAgcDriver` - the submission side of the current generation's graphics interface.
 //!
 //! Separate from [`super::agc`] because the platform separates them: a guest builds command
-//! buffers with `libSceAgc` and hands them over with `libSceAgcDriver`, and the two are
-//! distinct libraries in an import table. Declaring them as one would make every trace
-//! entry name the wrong library.
-//!
-//! Names, provenance and the arity caveat are as [`super::agc`] states them - read out of
-//! real import tables, with arities deliberately unestablished.
+//! buffers with `libSceAgc` and hands them over with `libSceAgcDriver`, two distinct libraries in
+//! an import table. Names come from real import tables; arities are unestablished, as
+//! [`super::agc`] states.
 
 use crate::cp;
 use crate::pipeline::{GuestMemory, Pipeline, Queue, Submission, SubmissionReport};
@@ -38,29 +35,23 @@ guest_module! {
 
 /// `sceAgcDriverCreateQueue(type, out_queue, flags)`.
 ///
-/// Accepts the queue type and returns `0` - the measured success code for both the compute queue
-/// (`type` 3) and the graphics Universal Graphics Queue (`type` 0): obSCEne's
-/// `166-agc/driver-create-queue` and `166-agc/primitive-draw` both record `rc-create 0x0` (sweeps
-/// `20260911-*` and `20260912-003916`, the latter answering 9a41).
+/// Returns `0`, the measured success code for the compute queue (`type` 3) and the graphics queue
+/// (`type` 0) in obSCEne's `166-agc/driver-create-queue` and `166-agc/primitive-draw`.
 ///
-/// **And it hands back a queue handle** in `*out_queue`. It did not until a guest needed one: the
-/// open-toolchain GL context gates its entire hardware path on `if (rc == 0 && queue != NULL)`, so a
-/// null out-parameter left `use_hardware` off and every draw fell to *no hardware pipeline: nothing
-/// is drawn* (the cube, worklog 809). The handle is orbistoun's own opaque object at orbistoun's own
-/// address, the way every handle this project hands out is - a video-out port, a file descriptor -
-/// and **not** the fabricated hardware pointer principle 3 forbids, which would be inventing where the
-/// console places the object. The guest holds the handle and passes it back to a submit that reads
-/// the descriptor, never the queue, so the object is opaque here; its bytes are the header obSCEne
-/// measured, so a guest that validates the handle finds a real object rather than zeros.
+/// It writes a queue handle into `*out_queue`: guests gate their hardware path on a non-null
+/// queue. The handle is orbistoun's own opaque object at its own address, like every handle this
+/// project hands out, not an invented hardware pointer. A submit reads the descriptor, never the
+/// queue; the object's bytes are the header obSCEne measured, so a guest that validates the
+/// handle finds a real object.
 fn create_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out_queue = args[1];
     if out_queue != 0
         && let Ok(dest) = usize::try_from(out_queue)
     {
         let handle = queue_object();
-        // SAFETY: `out_queue` is the guest's own `void**` under the identity mapping (D014) - the
-        // stack local it passed for the answer - so the eight-byte handle written there is in bounds
-        // and owned by the guest for the duration of the call.
+        // SAFETY: `out_queue` is the guest's own identity-mapped `void**`, the stack local it
+        // passed for the answer, so the eight-byte handle written there is in bounds and owned by
+        // the guest for the call.
         unsafe {
             std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(dest), handle);
         }
@@ -71,11 +62,9 @@ fn create_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The opaque queue object orbistoun hands a guest, one per process, its address written into
 /// `*out_queue` by [`create_queue`].
 ///
-/// A single leaked block: the guest keeps the pointer for as long as it runs and never frees it, so a
-/// per-call object would leak the same way with nothing gained. Filled with the header obSCEne
-/// measured for `166-agc/driver-create-queue` (`38 00 00 00 03 00 00 00 00 00 02 00`); the current
-/// guest passes the handle only to a submit that reads the descriptor, so the bytes go unread, but a
-/// measured header is a better answer than zeros to a guest that reads them.
+/// A single leaked block: the guest keeps the pointer for as long as it runs. Filled with the
+/// header obSCEne measured for `166-agc/driver-create-queue` (`38 00 00 00 03 00 00 00 00 00 02
+/// 00`), so a guest that reads it finds measured bytes rather than zeros.
 fn queue_object() -> u64 {
     static QUEUE: OnceLock<u64> = OnceLock::new();
     *QUEUE.get_or_init(|| {
@@ -87,19 +76,10 @@ fn queue_object() -> u64 {
 
 /// `SCE_AGC_ERROR_RESOURCE_REGISTRATION_NOT_SUPPORTED`.
 ///
-/// **The whole resource-registration subsystem is a stub on retail.** obSCEne disassembled
-/// `libSceAgcDriver.sprx` (REQ-...0925Z-7b3c) and found `sceAgcDriverRegisterOwner`,
-/// `RegisterResource`, `InitResourceRegistration` are each `mov $0x8a6c9018, %eax; ret` - pure
-/// stubs - and confirmed it on hardware: they return `0x8a6c9018` and mutate zero bytes of their
-/// caller buffers. So this is the measured value, and orbistoun returns it for fidelity (principle 1): the
-/// guest gets exactly the "not supported" the console gives it.
-///
-/// It is **not** what gates PPSA28061's startup abort, and returning it does not clear that abort.
-/// With this in effect alongside `sceAgcCreateShader -> 0x0` and
-/// `sceKernelMapperGetParam -> 0x80020006`, PPSA28061 still aborts at the same point (worklog 515).
-/// The abort is gated on the *mapper's* return, not this constant (D643); that the console ships with
-/// these measured codes and the guest here does not survive them is an open divergence, not a reason
-/// to invent a success.
+/// The resource-registration subsystem is a stub on the hardware: `sceAgcDriverRegisterOwner`,
+/// `RegisterResource` and `InitResourceRegistration` return `0x8a6c9018` and change no byte of
+/// their caller buffers. orbistoun returns the same measured value, so the guest gets the "not
+/// supported" the hardware gives it.
 const RESOURCE_REGISTRATION_NOT_SUPPORTED: u64 = 0x8a6c_9018;
 
 /// `sceAgcDriverRegisterOwner(owner_buf)` - stub, returns `0x8a6c9018`, writes nothing.
@@ -119,21 +99,19 @@ fn init_resource_registration(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(...)` - stub, returns `0x8a6c9018`.
 ///
-/// Hardware left the caller's size sentinel at `0`; being a "not supported" stub it does not write a
-/// meaningful requirement, and a guest that gets the error does not read the size, so nothing is
-/// written back rather than an invented figure.
+/// The hardware leaves the caller's size sentinel at `0`, and a guest that gets the error does not
+/// read the size, so nothing is written.
 fn query_resource_registration_user_memory_requirements(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
 }
 
-/// The measured `rc-submit`: `0x0` on every `166-agc/driver-submit-*` check obSCEne ran (sweep
-/// `20260916-223136`), and on the `primitive-draw` submission itself.
+/// The measured `rc-submit`: `0x0` on every `166-agc/driver-submit-*` check and on the
+/// `primitive-draw` submission.
 const SUBMIT_OK: u64 = 0x0;
 
-/// A ceiling on how many dwords a submit will read out of guest memory, so a wild `size` field in the
-/// descriptor cannot walk the read off into unmapped memory. obSCEne's own draw buffers are ~2 KB;
-/// this is generous (16 MiB) and exists only to refuse an absurd descriptor, not to model a real
-/// buffer limit.
+/// A ceiling on how many dwords a submit reads out of guest memory, so a wild `size` field in the
+/// descriptor cannot walk the read into unmapped memory. Generous (16 MiB): it refuses an absurd
+/// descriptor, not a real buffer.
 const MAX_DCB_DWORDS: u32 = 1 << 22;
 
 /// The guest's readable memory regions (`start`, `end` half-open), set by the worker before a run.
@@ -144,10 +122,10 @@ fn guest_regions() -> &'static Mutex<Vec<(u64, u64)>> {
 
 /// Record the regions a submit may read from - the allocated regions of the guest's memory map.
 ///
-/// The worker calls this before entering the guest, from the same map it records as `memory_map` in
-/// the run conditions. A submit then serves the pipeline from these: a shader address inside one is
-/// read (and counted resolved), one outside reads `None` (counted unresolved) - the count that
-/// settles D101's first route - and neither faults the host. Set empty (the default) nothing resolves.
+/// The worker calls this before entering the guest, from the map it records as `memory_map` in the
+/// run conditions. A shader address inside a region is read and counted resolved; one outside
+/// reads `None` and is counted unresolved (D130). Neither faults the host. Empty (the default),
+/// nothing resolves.
 pub fn set_guest_regions(regions: Vec<(u64, u64)>) {
     if let Ok(mut slot) = guest_regions().lock() {
         *slot = regions;
@@ -155,7 +133,7 @@ pub fn set_guest_regions(regions: Vec<(u64, u64)>) {
 }
 
 /// Whether a range is readable guest memory as the run stands now - installed by the worker, which
-/// owns the kernel's mapping tables this crate does not depend on (principle 12).
+/// owns the kernel's mapping tables this crate does not depend on.
 type RegionLookup = fn(u64, u64) -> bool;
 
 fn region_lookup() -> &'static OnceLock<RegionLookup> {
@@ -165,10 +143,9 @@ fn region_lookup() -> &'static OnceLock<RegionLookup> {
 
 /// Installs the live readability check a submit consults beside the regions set at entry.
 ///
-/// **Why the entry list is not enough**: it is taken before the guest runs, and a GL context maps
-/// its command buffer, its fence and its render targets afterwards - so the cube's first submission
-/// read as a command buffer in no region and walked to zero packets (worklog 814). With this, a range
-/// the guest mapped at any point before the submit is served (worklog 815). First install wins.
+/// The entry list is taken before the guest runs, and a GL context maps its command buffer, fence
+/// and render targets afterwards; this serves any range the guest mapped before the submit. First
+/// install wins.
 pub fn install_region_lookup(lookup: RegionLookup) {
     let _ = region_lookup().set(lookup);
 }
@@ -178,35 +155,31 @@ fn write_lookup() -> &'static OnceLock<RegionLookup> {
     &LOOKUP
 }
 
-/// Installs the live **writability** check the command processor's memory work consults before it
-/// writes guest memory - a fill, a copy, a fence (worklog 816). Nothing is written until one is
-/// installed, so a run without it executes nothing rather than writing blind.
+/// Installs the live writability check the command processor's memory work consults before it
+/// writes guest memory (a fill, a copy, a fence). Nothing is written until one is installed.
 pub fn install_write_lookup(lookup: RegionLookup) {
     let _ = write_lookup().set(lookup);
 }
 
-/// Carries out a submission's draws over its colour target (worklog 832), given the target's contents
-/// before them as linear `Rgba8` words (red in the low byte). Answers whether it carried out every
-/// draw exactly; the frame they leave is kept, and read with the installed [`FrameReader`] when it is
+/// Carries out a submission's draws over its colour target, given the target's contents before
+/// them as linear `Rgba8` words (red in the low byte). Answers whether it carried out every draw
+/// exactly; the frame they leave is kept, and read with the installed [`FrameReader`] when it is
 /// written back (D714).
 ///
-/// Installed by the worker, which owns the graphics device this crate may not depend on (principle 12).
-///
-/// `None` for the contents before means **the target holds exactly the frame this executor last
-/// drew or was handed** - nothing else wrote it since - so the executor starts from what it already
-/// has rather than being handed the same eight megabytes back (worklog 844).
+/// Installed by the worker, which owns the graphics device this crate does not depend on.
+/// [`Before::Held`] means the target holds exactly the frame the executor last drew or was handed,
+/// so it starts from what it already has.
 pub type DrawExecutor = fn(&Submission, Before<'_>) -> bool;
 
 /// What a drawer is handed of a target's contents before its draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Before<'a> {
-    /// The drawer already holds them - nothing wrote the target since it last drew or was handed
-    /// it (worklog 844).
+    /// The drawer already holds them: nothing wrote the target since it last drew or was handed it.
     Held,
     /// These, as linear `Rgba8` words.
     Words(&'a [u32]),
-    /// This linear `Rgba8` word in every pixel - a clear. Said as one word so a drawer
-    /// can fill its target on the device rather than be handed megabytes of the same four bytes.
+    /// This linear `Rgba8` word in every pixel - a clear. One word, so a drawer can fill its target
+    /// on the device rather than be handed megabytes of the same four bytes.
     Uniform(u32),
 }
 
@@ -228,17 +201,16 @@ fn draw_executor() -> &'static OnceLock<DrawExecutor> {
     &EXECUTOR
 }
 
-/// Installs the executor a submit carries out its draws with (worklog 832). Until one is installed a
-/// draw stops the command processor, as it always did. First install wins.
+/// Installs the executor a submit carries out its draws with. Without one, a draw stops the command
+/// processor. First install wins.
 pub fn install_draw_executor(executor: DrawExecutor) {
     let _ = draw_executor().set(executor);
 }
 
-/// The one colour target a submission's draws can be carried out into and written back to exactly
-/// (worklog 832): a single base, a single resident target of the same extent, the `64KB_R_X` tiling
-/// whose whole-surface layout run 18 measured (worklog 831), and an `8_8_8_8` `UNORM` element in an
-/// order `CB_COLOR0_INFO` names. Anything else is `None` - the draws stay unexecuted rather than
-/// written somewhere a guess put them.
+/// The one colour target a submission's draws can be carried out into and written back to exactly:
+/// a single base, a single resident target of the same extent, `64KB_R_X` tiling with its measured
+/// whole-surface layout, and an `8_8_8_8` `UNORM` element in an order `CB_COLOR0_INFO` names.
+/// Anything else is `None`, and the draws stay unexecuted.
 fn writable_target(submission: &Submission) -> Option<(ColourTarget, ComponentSwap)> {
     let target = submission.colour_target?;
     let format = submission.colour_target_format?;
@@ -265,9 +237,9 @@ const fn swapped(word: u32, swap: ComponentSwap) -> u32 {
     }
 }
 
-/// Guest memory as the command processor sees it: reads through [`MappedRegions`], writes only where
-/// the installed write lookup vouches for the whole range, under the identity mapping (D014) - and the
-/// submission whose draws [`cp::CpMemory::run_draws`] carries out.
+/// Guest memory as the command processor sees it: reads through [`MappedRegions`], writes only
+/// where the installed write lookup vouches for the whole range - and the submission whose draws
+/// [`cp::CpMemory::run_draws`] carries out.
 struct GuestCp<'a> {
     memory: MappedRegions,
     /// `None` for a write-back outside any submission - at a flip (D714).
@@ -275,8 +247,8 @@ struct GuestCp<'a> {
 }
 
 impl GuestCp<'_> {
-    /// Reads the target, has the executor draw over it, and - after every submission, or at the flip
-    /// (D714) - writes the result back where the guest reads it (worklog 832). `false`, with nothing
+    /// Reads the target, has the executor draw over it, and - after every submission, or at the
+    /// flip - writes the result back where the guest reads it (D714). `false`, with nothing
     /// written, at the first thing that is not exact.
     fn draw_into_target(&mut self) -> bool {
         let (Some(execute), Some(read)) = (draw_executor().get(), frame_reader().get()) else {
@@ -300,8 +272,8 @@ impl GuestCp<'_> {
                 execute(submission, before).then(read).flatten()
             });
         }
-        // **Drawn and left on the device** (D714): the frame is written back when the guest flips,
-        // not after each of the dozens of submissions a GL frame takes.
+        // Drawn and left on the device: the frame is written back when the guest flips, not after
+        // each of the many submissions a GL frame takes (D714).
         let Some(before) = read_target(self, target, swap) else {
             return false;
         };
@@ -315,8 +287,8 @@ impl GuestCp<'_> {
     }
 }
 
-/// Answers the frame the executor's last draws left on the target, as linear `Rgba8` words - read off
-/// the device when the frame is written back (D714). Installed by the worker with the executor.
+/// Answers the frame the executor's last draws left on the target, as linear `Rgba8` words - read
+/// off the device when the frame is written back (D714). Installed by the worker with the executor.
 pub type FrameReader = fn() -> Option<Vec<u32>>;
 
 fn frame_reader() -> &'static OnceLock<FrameReader> {
@@ -329,7 +301,8 @@ pub fn install_frame_reader(reader: FrameReader) {
     let _ = frame_reader().set(reader);
 }
 
-/// Whether a drawn target is written back at the flip (the default) or after every submission (D714).
+/// Whether a drawn target is written back at the flip (the default) or after every submission
+/// (D714).
 static WRITE_BACK_AT_FLIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 fn write_back_at_flip() -> bool {
@@ -337,7 +310,8 @@ fn write_back_at_flip() -> bool {
 }
 
 /// Chooses when a drawn target is written back (D714): at the flip, or after every submission for a
-/// guest that reads its own target between them. Set by the worker from `ORBISTOUN_TARGET_WRITEBACK`.
+/// guest that reads its own target between them. Set by the worker from
+/// `ORBISTOUN_TARGET_WRITEBACK`.
 pub fn set_write_back_at_flip(at_flip: bool) {
     WRITE_BACK_AT_FLIP.store(at_flip, std::sync::atomic::Ordering::Relaxed);
 }
@@ -360,8 +334,9 @@ fn set_pending(target: Option<(ColourTarget, ComponentSwap)>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = target;
 }
 
-/// Writes the pending frame, if there is one, into guest memory (D714). `true` when there was none or
-/// it was written; `false` when it could not be, which drops it rather than leaving it pending forever.
+/// Writes the pending frame, if there is one, into guest memory (D714). `true` when there was none
+/// or it was written; `false` when it could not be, which drops it rather than leaving it pending
+/// forever.
 fn write_back_pending(memory: &mut dyn cp::CpMemory) -> bool {
     let Some((target, swap)) = pending_target() else {
         return true;
@@ -377,11 +352,12 @@ fn write_back_pending(memory: &mut dyn cp::CpMemory) -> bool {
     write_target(memory, target, swap, &after)
 }
 
-/// **Writes a pending drawn frame back where the guest scans it out** (D714) - called as the guest
-/// flips, before the flipped buffer is read. `true` when nothing was pending or it was written.
+/// Writes a pending drawn frame back where the guest scans it out, called as the guest flips,
+/// before the flipped buffer is read. `true` when nothing was pending or it was written.
 ///
-/// Written back **when something first reads it** (D719): the pending target becomes a deferred copy
-/// onto itself, carried out by the first touch of its pages. Written now only when it cannot wait.
+/// The write-back happens when something first reads it (D719): the pending target becomes a
+/// deferred copy onto itself, carried out by the first touch of its pages. It is written now only
+/// when it cannot wait.
 pub fn write_back_at_this_flip() -> bool {
     write_back_at_this_flip_showing(false).0
 }
@@ -399,13 +375,12 @@ pub struct ShownFrame {
 }
 
 /// [`write_back_at_this_flip`], and - when `show` asks and the write-back was deferred - a second
-/// snapshot of the flipped frame for the display to read on its own time (D719). What the display
-/// scans out is the target's memory, which over the visible pixels is that frame in the target's
-/// byte order ([`memory_order`]); the guest cannot observe the display, so it need not wait for it.
+/// snapshot of the flipped frame for the display to read on its own time (D719). The display scans
+/// out the target's memory, which over the visible pixels is that frame in the target's byte order
+/// ([`memory_order`]); the guest cannot observe the display, so it need not wait for it.
 ///
 /// The two snapshots are taken back to back on this thread. A draw another guest thread submits in
-/// between would put its pixels in the display's copy and not in memory's - the window's picture
-/// only, never guest memory.
+/// between reaches only the display's copy, never guest memory.
 pub fn write_back_at_this_flip_showing(show: bool) -> (bool, Option<ShownFrame>) {
     crate::perf::span(
         crate::perf::Span::FlipWriteBack,
@@ -422,16 +397,16 @@ pub fn write_back_at_this_flip_showing(show: bool) -> (bool, Option<ShownFrame>)
     )
 }
 
-/// A linear `Rgba8` word as a target in `swap` order holds it in memory (worklog 832).
+/// A linear `Rgba8` word as a target in `swap` order holds it in memory.
 #[must_use]
 pub const fn memory_order(word: u32, swap: ComponentSwap) -> u32 {
     swapped(word, swap)
 }
 
-/// **The pending frame's write-back, deferred** (D719): a [`Deferred`] copy of the frame onto its own
-/// target, from the target's memory as the draws started from it - which is what memory still holds,
-/// since anything that touched the target since would have written the frame back and left nothing
-/// pending. `false` when it cannot wait; the caller then writes it back now.
+/// The pending frame's write-back, deferred (D719): a [`Deferred`] copy of the frame onto its own
+/// target, from the target's memory as the draws started from it - which memory still holds, since
+/// anything that touched the target since would have written the frame back. `false` when it
+/// cannot wait; the caller then writes it back now.
 fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     let hooks = lazy_copies().get().ok_or(CannotWait)?;
     let (target, swap) = pending_target().ok_or(CannotWait)?;
@@ -508,11 +483,10 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
 /// A write-back that cannot be deferred, and is written now instead (D719).
 struct CannotWait;
 
-/// **Drops the pending frame, unwritten, when `[address, address + length)` overwrites its whole
-/// target** (D719): every byte the write-back would produce is overwritten before anything can read
+/// Drops the pending frame, unwritten, when `[address, address + length)` overwrites its whole
+/// target (D719): every byte the write-back would produce is overwritten before anything can read
 /// it. What memory held before the draws is forgotten too, so the next submission reads the target
-/// in full - the fill may leave the very bytes the draws started from, and "unchanged" would then
-/// hand the drawer its own frame instead of the fill.
+/// in full rather than handing the drawer its own frame instead of the fill.
 fn drop_pending_covered(address: u64, length: u64) {
     let Some((target, _)) = pending_target() else {
         return;
@@ -525,9 +499,9 @@ fn drop_pending_covered(address: u64, length: u64) {
     }
 }
 
-/// **Drops, unread, every deferred copy whose destination `[address, address + length)` overwrites
-/// completely** (D719): nothing can have observed its bytes, and nothing will. Its pages get their
-/// protection back and its snapshot is released. What a clear of a flipped buffer nobody read does.
+/// Drops, unread, every deferred copy whose destination `[address, address + length)` overwrites
+/// completely (D719): nothing has observed its bytes, and nothing will. Its pages get their
+/// protection back and its snapshot is released.
 fn drop_covered(address: u64, length: u64) {
     let Some(hooks) = lazy_copies().get() else {
         return;
@@ -543,9 +517,9 @@ fn drop_covered(address: u64, length: u64) {
     *list = kept;
     for copy in covered {
         let (base, len, protection) = copy.pages;
-        // Its pages come back as they were, and the fill that follows writes them. Pages that
-        // would not come back are carried out instead, which tries again - never left guarded with
-        // nothing to answer the fault.
+        // Its pages come back as they were, and the fill that follows writes them. Pages that would
+        // not come back are carried out instead, never left guarded with nothing to answer the
+        // fault.
         if !(hooks.release)(base, len, protection) {
             carry_out(&copy, hooks);
             continue;
@@ -561,9 +535,9 @@ fn drop_covered(address: u64, length: u64) {
 }
 
 /// Reads `target` out of `memory`, has `draw` turn its `Rgba8` contents into the contents after the
-/// draws, and writes that back tiled and in the target's byte order (worklog 832). `false`, with
-/// nothing written, when the target is not readable, `draw` declines or answers the wrong size, or the
-/// write is refused - a target outside the guest's memory is never written.
+/// draws, and writes that back tiled and in the target's byte order. `false`, with nothing written,
+/// when the target is not readable, `draw` declines or answers the wrong size, or the write is
+/// refused - a target outside the guest's memory is never written.
 fn draw_over(
     memory: &mut dyn cp::CpMemory,
     target: ColourTarget,
@@ -574,20 +548,19 @@ fn draw_over(
         return false;
     };
     let Some(after) = draw(before.before()) else {
-        // A drawer that failed part-way may hold draws the target does not: never trust it as
-        // "unchanged" again until a frame has been written.
+        // A drawer that failed part-way may hold draws the target does not: it is not trusted as
+        // "unchanged" until a frame has been written.
         forget_written();
         return false;
     };
     write_target(memory, target, swap, &after)
 }
 
-/// Reads `target` out of `memory` as linear `Rgba8` for a drawer to start from - or answers `None`
-/// for it when the target is **unchanged since this last wrote or read it** (worklog 844), so the
-/// drawer already holds what is there. `None` overall when the target is not readable.
+/// Reads `target` out of `memory` as linear `Rgba8` for a drawer to start from, or answers that it
+/// is unchanged since this last wrote or read it, so the drawer already holds it. `None` when the
+/// target is not readable.
 ///
-/// Unchanged is asked first, in place: a GL frame is dozens of submissions into one target, and
-/// copying and converting eight megabytes to find it untouched was most of reading it.
+/// Unchanged is asked first, in place: a GL frame is many submissions into one target.
 fn read_target(
     memory: &dyn cp::CpMemory,
     target: ColourTarget,
@@ -596,13 +569,12 @@ fn read_target(
     let (width, height) = (target.width, target.height);
     let read_started = std::time::Instant::now();
     let length = tiling::surface_words_64kb_rx_bpp4(width, height) * 4;
-    // **Unchanged is asked of the host first** (worklog 851): whether any page of the target has been
-    // written since this last wrote or read it. Only where the host cannot say, or says it was, are
-    // the bytes compared - a write of the same bytes is still unchanged.
-    // Read-only and unwritten since (D720) is asked first: it is the host's answer where write-watch
-    // cannot give one, guest direct memory being mapped views. Whether it was, is taken before the
-    // pages are protected (again) for next time - protected before they are compared or read, so a
-    // write racing either is seen next time rather than lost.
+    // Unchanged is asked of the host first: whether any page of the target has been written since
+    // this last wrote or read it. Only where the host cannot say, or says it was, are the bytes
+    // compared - a write of the same bytes is still unchanged. Read-only and unwritten (D720) is
+    // asked first, since write-watch cannot answer for guest direct memory's mapped views. The
+    // pages are protected again before they are compared or read, so a racing write is seen next
+    // time rather than lost.
     let was_protected = protected_unwritten(target);
     protect_target(target);
     let unchanged = last_written().lock().is_ok_and(|last| {
@@ -643,8 +615,9 @@ fn read_target(
             |w| swapped(w, swap),
         )),
     };
-    // What the drawer is handed is what memory holds now: with the frame kept on the device until the
-    // flip (D714), memory still holding these bytes means nothing else has written the target since.
+    // What the drawer is handed is what memory holds now: with the frame kept on the device until
+    // the flip, memory still holding these bytes means nothing else has written the target since
+    // (D714).
     if let Ok(mut last) = last_written().lock() {
         *last = Some(Written {
             base: target.base,
@@ -656,7 +629,7 @@ fn read_target(
     Some(before)
 }
 
-/// What reading a colour target found (worklog 844).
+/// What reading a colour target found.
 #[derive(Debug)]
 enum TargetRead {
     /// Memory holds exactly what this last wrote or read there: the drawer already has it.
@@ -688,7 +661,8 @@ fn words_of(bytes: &[u8]) -> Vec<u32> {
 
 /// Tiles `after` over the target in its byte order and writes it where the guest reads it,
 /// remembering what was written. The surface's padding words - a partial edge block's - are kept as
-/// memory holds them. `false` when the target is unreadable, the size is wrong, or the write refused.
+/// memory holds them. `false` when the target is unreadable, the size is wrong, or the write
+/// refused.
 fn write_target(
     memory: &mut dyn cp::CpMemory,
     target: ColourTarget,
@@ -697,8 +671,8 @@ fn write_target(
 ) -> bool {
     let (width, height) = (target.width, target.height);
     crate::perf::measure(crate::perf::Phase::WriteTarget, || {
-        // **Tiled straight into the target** (worklog 849): reading the surface out, converting it to
-        // words and back and writing it in again was four of every write-back's five passes.
+        // Tiled straight into the target, in place, rather than read out, converted and written
+        // again.
         let words = tiling::surface_words_64kb_rx_bpp4(width, height);
         let mut tiled_ok = false;
         let mut written = Vec::new();
@@ -728,15 +702,15 @@ fn write_target(
     })
 }
 
-/// The target this last wrote back or read, and the bytes memory held then (worklog 844). Shared, so
-/// a deferred copy of the target can keep them without copying them (worklog 850).
+/// The target this last wrote back or read, and the bytes memory held then. Shared, so a deferred
+/// copy of the target can keep them without copying.
 fn last_written() -> &'static Mutex<Option<Written>> {
     static LAST: Mutex<Option<Written>> = Mutex::new(None);
     &LAST
 }
 
 /// A target's base, the bytes its memory held when this last wrote or read it, and the host's mark
-/// of that moment when it keeps one (worklog 851).
+/// of that moment when it keeps one.
 #[derive(Debug, Clone)]
 struct Written {
     base: u64,
@@ -766,9 +740,9 @@ fn write_protected() -> &'static Mutex<Option<WriteProtected>> {
     &PROTECTED
 }
 
-/// **Makes the target read-only while it is trusted unchanged** (D720), so a write to it - by
-/// anything - is seen. Where the host cannot, or another target is protected and cannot be released,
-/// nothing is protected and "unchanged" is asked by comparing, as before.
+/// Makes the target read-only while it is trusted unchanged (D720), so a write to it by anything
+/// is seen. Where the host cannot, or another protected target cannot be released, nothing is
+/// protected and "unchanged" is answered by comparing.
 fn protect_target(target: ColourTarget) {
     let Some(hooks) = lazy_copies().get() else {
         return;
@@ -777,7 +751,7 @@ fn protect_target(target: ColourTarget) {
     let pages = page_span(target.base, span);
     // A deferred copy guarding these pages would be carried out by the next reader; protecting them
     // now would save its no-access as the protection to restore. The list is held throughout, so no
-    // deferral lands on these pages meanwhile - and taken first, as everywhere both are held.
+    // deferral lands on these pages meanwhile, and taken first, as everywhere both are held.
     let Ok(list) = deferred().lock() else {
         return;
     };
@@ -842,9 +816,9 @@ fn release_protection(p: WriteProtected, hooks: &LazyCopies) {
     }
 }
 
-/// **A write to guest memory faulted**: when `address` is in the protected target, it is written -
-/// its pages get their protection back and the write can be retried (D720). What the host's fault
-/// handler asks for a faulting write, before [`carry_out_at`].
+/// A write to guest memory faulted: when `address` is in the protected target, its pages get their
+/// protection back and the write can be retried (D720). The host's fault handler asks this for a
+/// faulting write, before [`carry_out_at`].
 pub fn written_at(address: u64) -> bool {
     let Some(hooks) = lazy_copies().get() else {
         return false;
@@ -876,10 +850,9 @@ fn write_guest(address: u64, bytes: &[u8]) -> bool {
     }
     unprotect_overlapping(address, bytes.len() as u64);
     // SAFETY: the installed lookup vouched that `[address, address + len)` lies wholly inside one
-    // guest mapping whose protection allows writes; under the identity mapping (D014) that is `len`
-    // writable bytes of this process. A deferred copy's destination has its host protection restored
-    // before it is written (worklog 850), and a protected target's just above (D720), so nothing
-    // here faults.
+    // identity-mapped guest mapping whose protection allows writes: `len` writable bytes of this
+    // process. A deferred copy's destination and a protected target (D720) have their host
+    // protection restored above, so nothing here faults.
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -897,9 +870,9 @@ fn overlaps_target(target: ColourTarget, address: u64, length: u64) -> bool {
 }
 
 /// What a copy out of a colour target whose frame is still on the device needs from the host to be
-/// carried out **lazily** (worklog 850, D717): a snapshot of the frame on the device, and page
-/// protection on the copy's destination, so the bytes are produced the first time anything touches
-/// them - exactly the bytes the console's copy would have left there.
+/// carried out lazily (D717): a snapshot of the frame on the device, and page protection on the
+/// copy's destination, so the bytes are produced the first time anything touches them - exactly the
+/// bytes the hardware's copy would have left there.
 #[derive(Debug, Clone, Copy)]
 pub struct LazyCopies {
     /// Keeps the frame the executor last drew, as it stands now; an id to take it by.
@@ -930,7 +903,7 @@ pub fn install_lazy_copies(hooks: LazyCopies) {
     let _ = lazy_copies().set(hooks);
 }
 
-/// A copy of a colour target into guest memory that has not been carried out yet (worklog 850).
+/// A copy of a colour target into guest memory that has not been carried out yet.
 struct Deferred {
     /// The copy's destination and length.
     destination: u64,
@@ -952,7 +925,7 @@ fn deferred() -> &'static Mutex<Vec<Deferred>> {
 }
 
 /// Page ranges recently carried out, so a thread that faulted on one while another thread was
-/// carrying it out retries its access rather than reporting a fault (worklog 850).
+/// carrying it out retries its access rather than reporting a fault.
 fn resolved() -> &'static Mutex<Vec<(u64, u64)>> {
     static RESOLVED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
     &RESOLVED
@@ -1047,16 +1020,16 @@ fn carry_out_all(copies: &[Deferred], hooks: &LazyCopies) -> bool {
     ok
 }
 
-/// **Before host code reads `[address, address + length)` of guest memory directly**: carries out
-/// every deferred copy into it (D719), so the read sees what the console's memory holds. `false`
-/// when one could not be.
+/// Before host code reads `[address, address + length)` of guest memory directly: carries out every
+/// deferred copy into it (D719), so the read sees what the hardware's memory holds. `false` when
+/// one could not be.
 pub fn carry_out_before_reading(address: u64, length: u64) -> bool {
     carry_out_overlapping(address, length)
 }
 
-/// **An access to guest memory faulted**: when `address` is in a deferred copy's destination, the
-/// copy is carried out now and the access can be retried (worklog 850). What the host's fault
-/// handler asks, for a faulting read or write.
+/// An access to guest memory faulted: when `address` is in a deferred copy's destination, the copy
+/// is carried out now and the access can be retried. The host's fault handler asks this for a
+/// faulting read or write.
 pub fn carry_out_at(address: u64) -> bool {
     let Some(hooks) = lazy_copies().get() else {
         return false;
@@ -1080,12 +1053,11 @@ pub fn carry_out_at(address: u64) -> bool {
 }
 
 impl GuestCp<'_> {
-    /// **A copy of the whole pending target, deferred** (worklog 850): what the console's command
-    /// processor copies at this point is the target's memory with the frame drawn so far over it, and
-    /// nothing observes the destination until something touches it. So the frame is kept on the
-    /// device as it stands, the destination's pages are guarded, and [`carry_out`] produces the bytes
-    /// on first touch. `false` when this copy is not one that can wait - the caller then carries it
-    /// out now.
+    /// A copy of the whole pending target, deferred (D717): the hardware copies the target's memory
+    /// with the frame drawn so far over it, and nothing observes the destination until something
+    /// touches it. The frame is kept on the device, the destination's pages are guarded, and
+    /// [`carry_out`] produces the bytes on first touch. `false` when this copy cannot wait; the
+    /// caller then carries it out now.
     fn defer_copy(source: u64, destination: u64, count: usize) -> bool {
         let Some(hooks) = lazy_copies().get() else {
             return false;
@@ -1099,8 +1071,8 @@ impl GuestCp<'_> {
             return false;
         }
         // The target's memory as this copy sees it: what the draws started from, unchanged since -
-        // the submission read it (or found it unchanged) before drawing, and any memory work since
-        // that touched it would have written the frame back and left nothing pending.
+        // any memory work that touched it would have written the frame back and left nothing
+        // pending.
         let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
             Some(written) if written.base == target.base && written.bytes.len() as u64 == span => {
                 written.bytes
@@ -1174,11 +1146,10 @@ impl GuestCp<'_> {
         true
     }
 
-    /// **Memory work that touches a target whose frame is still on the device writes that frame back
-    /// first** (worklog 849). Deferring the write-back to the flip (D714) holds only while nothing but
-    /// the flip looks at the target. The GL context copies its colour target into a readback buffer
-    /// at the end of every submission, and that copy read the frame from before the submission's
-    /// draws. `false` when the frame could not be written back.
+    /// Memory work that touches a target whose frame is still on the device writes that frame back
+    /// first (D714): deferring to the flip holds only while nothing else looks at the target, and a
+    /// GL context copies its colour target into a readback buffer after each submission. `false`
+    /// when the frame could not be written back.
     fn settle_pending(&mut self, address: u64, length: u64) -> bool {
         match pending_target() {
             Some((target, _)) if overlaps_target(target, address, length) => {
@@ -1210,7 +1181,7 @@ impl cp::CpMemory for GuestCp<'_> {
     }
 
     fn fill(&mut self, address: u64, pattern: u32, count: usize) -> bool {
-        // A deferred copy this fill overwrites completely is dropped unread (D719) - once the fill
+        // A deferred copy this fill overwrites completely is dropped unread (D719), once the fill
         // is sure to happen, so a refused fill never loses the bytes it would have covered.
         if write_lookup()
             .get()
@@ -1234,17 +1205,15 @@ impl cp::CpMemory for GuestCp<'_> {
             return false;
         }
         unprotect_overlapping(address, count as u64);
-        // SAFETY: the installed lookup vouched that `[address, address + count)` lies inside guest
-        // mappings whose protection allows writes, and a protected target's pages among them were
-        // given their protection back just above; under the identity mapping (D014) those are `count`
-        // writable bytes of this process, and the guest thread that owns them is blocked in this
-        // submit while they are filled, so nothing else holds a reference to them.
+        // SAFETY: the installed lookup vouched that `[address, address + count)` lies inside
+        // identity- mapped guest mappings whose protection allows writes, and a protected target's
+        // pages among them were given their protection back above: `count` writable bytes of this
+        // process. The guest thread that owns them is blocked in this submit while they are filled.
         let target = unsafe {
             std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(dest), count)
         };
-        // Whole words as words (worklog 852): a frame's clears are ~19 MB, and four bytes at a time
-        // filled them at a fraction of what a word fill does. A misaligned destination, and a
-        // count that is not whole words, keep the byte loop - the pattern starts at the destination
+        // Whole words as words, since a frame's clears are megabytes. A misaligned destination or a
+        // count that is not whole words keeps the byte loop; the pattern starts at the destination
         // either way.
         let whole = count - count % 4;
         let (words, tail) = target.split_at_mut(whole);
@@ -1277,11 +1246,11 @@ impl cp::CpMemory for GuestCp<'_> {
             return false;
         }
         unprotect_overlapping(address, length);
-        // SAFETY: a protected target's pages here were given their protection back just above, and
-        // the installed lookup vouched that `[address, address + 4 * count)` lies inside guest
-        // mappings whose protection allows writes; under the identity mapping (D014) those are `count`
-        // writable, word-aligned `u32`s of this process (the host is little-endian, as the guest is),
-        // and the guest thread that owns them is blocked in this submit while `edit` runs.
+        // SAFETY: a protected target's pages here were given their protection back above, and the
+        // installed lookup vouched that `[address, address + 4 * count)` lies inside
+        // identity-mapped guest mappings whose protection allows writes: `count` writable,
+        // word-aligned `u32`s of this process (host and guest are both little-endian). The owning
+        // guest thread is blocked in this submit while `edit` runs.
         let words = unsafe {
             std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u32>(at), count)
         };
@@ -1291,8 +1260,7 @@ impl cp::CpMemory for GuestCp<'_> {
 
     fn copy(&mut self, source: u64, destination: u64, count: usize) -> bool {
         // The source is read now, so what is deferred into it is carried out first. The destination
-        // is left to `defer_copy`, which drops a deferred copy this one overwrites completely rather
-        // than producing bytes nothing will read.
+        // is left to `defer_copy`, which drops a deferred copy this one overwrites completely.
         if !carry_out_overlapping(source, count as u64) {
             return false;
         }
@@ -1319,10 +1287,10 @@ impl cp::CpMemory for GuestCp<'_> {
         }
         unprotect_overlapping(destination, count as u64);
         // SAFETY: `from` is `count` readable guest bytes and the installed lookup vouched that the
-        // destination's `count` bytes are writable guest memory (a protected target's pages among them
-        // given their protection back just above), under the identity mapping (D014); a
-        // DMA's two ranges may overlap, so this is a `memmove`, and the guest thread that owns both is
-        // blocked in this submit for the duration of the copy.
+        // destination's `count` bytes are writable identity-mapped guest memory (a protected
+        // target's pages given their protection back above). A DMA's two ranges may overlap, so
+        // this is a `memmove`; the guest thread that owns both is blocked in this submit for the
+        // copy.
         unsafe {
             std::ptr::copy(
                 from.as_ptr(),
@@ -1344,8 +1312,7 @@ impl cp::CpMemory for GuestCp<'_> {
     }
 
     /// The GPU clock counter: nanoseconds since the first stamp, plus one so it is never zero. The
-    /// console's counter rate is unmeasured; the guest here reads the stamp only to see that one came
-    /// back (`fence[2] != 0 || fence[3] != 0`), so a monotonic, non-zero count is what it needs.
+    /// hardware's counter rate is unmeasured; guests check only that a non-zero stamp came back.
     fn timestamp(&mut self) -> u64 {
         static START: OnceLock<std::time::Instant> = OnceLock::new();
         let start = START.get_or_init(std::time::Instant::now);
@@ -1363,7 +1330,7 @@ pub struct ExecutionRecord {
     pub submissions: u64,
     /// Of those, the ones that ran to the end with nothing needing the GPU.
     pub completed: u64,
-    /// Of those, the ones whose draws were carried out and written back (worklog 832).
+    /// Of those, the ones whose draws were carried out and written back.
     pub drawn: u64,
     /// Bytes written to guest memory across them all.
     pub bytes_written: u64,
@@ -1387,10 +1354,9 @@ pub fn execution() -> ExecutionRecord {
 
 /// Guest memory served from the regions the guest was given.
 ///
-/// A read whose whole range lies inside a region is answered from host memory (identity mapping,
-/// D014); one outside every region is `None`, so a shader **GPU** address that does not resolve is
-/// reported rather than dereferenced (the open half of D101). This is the whole of what a submit
-/// needs, and the only reads it makes are ones a region vouches for.
+/// A read whose whole range lies inside a region is answered from identity-mapped host memory; one
+/// outside every region is `None`, so a shader GPU address that does not resolve is reported
+/// rather than dereferenced (D130).
 struct MappedRegions {
     regions: Vec<(u64, u64)>,
 }
@@ -1428,14 +1394,14 @@ impl GuestMemory for MappedRegions {
         }
         let ptr = std::ptr::with_exposed_provenance::<u8>(usize::try_from(address).ok()?);
         // SAFETY: `[address, address + length)` lies wholly inside a region the guest was given
-        // (checked above); under the identity mapping (D014) it is `length` bytes of readable guest
-        // memory, which outlives this borrow because the guest's mappings live for the process.
+        // (checked above), so it is `length` bytes of readable identity-mapped guest memory, which
+        // outlives this borrow because the guest's mappings live for the process.
         Some(unsafe { std::slice::from_raw_parts(ptr, length) })
     }
 }
 
-/// The last submission a guest handed to `sceAgcDriverSubmitDcb`, held whole so the worker can both
-/// read its report and drive its commands to a backend (D695, `-36c0`).
+/// The last submission a guest handed to `sceAgcDriverSubmitDcb`, held whole so the worker can
+/// read its report and drive its commands to a backend (D695).
 fn last_submission() -> &'static Mutex<Option<Submission>> {
     static LAST: OnceLock<Mutex<Option<Submission>>> = OnceLock::new();
     LAST.get_or_init(|| Mutex::new(None))
@@ -1443,8 +1409,7 @@ fn last_submission() -> &'static Mutex<Option<Submission>> {
 
 /// The report of the most recent DCB a guest submitted, or `None` if none has.
 ///
-/// Read by the run report (`orbistoun-worker`): a submission is the first real graphics measurement a
-/// title produces, and it belongs beside the reach and import counts rather than only in a trace.
+/// Read by the run report (`orbistoun-worker`), beside the reach and import counts.
 #[must_use]
 pub fn last_submission_report() -> Option<SubmissionReport> {
     last_submission()
@@ -1454,7 +1419,7 @@ pub fn last_submission_report() -> Option<SubmissionReport> {
 }
 
 /// The whole of the most recent submission - its commands and modules, not only its report - so the
-/// worker can drive it to a constructed backend (`-36c0`). `None` until a guest submits one.
+/// worker can drive it to a backend. `None` until a guest submits one.
 #[must_use]
 pub fn take_last_submission() -> Option<Submission> {
     last_submission()
@@ -1463,15 +1428,14 @@ pub fn take_last_submission() -> Option<Submission> {
         .and_then(|mut slot| slot.take())
 }
 
-/// Reads the 16-byte submit descriptor (`{gpu_addr: u64, size_dwords: u32, flags: u8, pad}`, obSCEne
-/// `-1c97`, sweep `20260917-124503`) into an address and a byte length, refusing a null or absurd one.
+/// Reads the 16-byte submit descriptor (`{gpu_addr: u64, size_dwords: u32, flags: u8, pad}`, as
+/// obSCEne measures it) into an address and a byte length, refusing a null or absurd one.
 fn submit_descriptor(descriptor: u64) -> Option<(u64, usize)> {
     if descriptor == 0 {
         return None;
     }
-    // SAFETY: `descriptor` is the guest's own submit descriptor - a CPU-side 16-byte struct it fills
-    // and passes by pointer; under the identity mapping (D014) the guest address is a host pointer.
-    // Sixteen bytes are read, the width obSCEne measured the driver reads (1c97).
+    // SAFETY: `descriptor` is the guest's own identity-mapped 16-byte submit descriptor, filled and
+    // passed by pointer; sixteen bytes are read, the width the driver reads.
     let desc = unsafe {
         std::slice::from_raw_parts(
             std::ptr::with_exposed_provenance::<u8>(usize::try_from(descriptor).ok()?),
@@ -1486,45 +1450,37 @@ fn submit_descriptor(descriptor: u64) -> Option<(u64, usize)> {
     Some((gpu_addr, size_dwords as usize * 4))
 }
 
-/// `sceAgcDriverSubmitDcb(dcb)` - **the handover.** A guest builds a command buffer with `libSceAgc`
-/// and hands it over here; this reads the descriptor it passed, walks the command buffer through the
+/// `sceAgcDriverSubmitDcb(dcb)` - the handover. A guest builds a command buffer with `libSceAgc`
+/// and hands it over here; this reads the descriptor, walks the command buffer through the
 /// translator, and records a `SubmissionReport`.
 ///
-/// It is the only point at which a real guest command stream enters `walk` and `pipeline` - until now
-/// both were reached only from tests and `orbistoun-cli`. No backend is attached, so this **reports
-/// rather than renders**: packets, register writes, draws and shader candidates, the measurement that
-/// says where translation effort goes (3861). It never fails on the guest's account - an empty or
-/// out-of-bounds descriptor records nothing and still returns success, the way the console's does
-/// (`rc-submit 0x0` throughout obSCEne's driver-submit checks). The command buffer and the shader
-/// addresses the stream names are both served from the regions the guest was given, so a descriptor
-/// pointing outside every region is refused rather than dereferenced, and a shader address that does
-/// not fall in a region is counted unresolved (D101's first route) rather than faulted (5bff).
+/// It never fails on the guest's account: an empty or out-of-bounds descriptor records nothing and
+/// returns success, as the hardware does (`rc-submit 0x0`). The command buffer and the shader
+/// addresses it names are served from the guest's regions, so a descriptor outside every region
+/// is refused rather than dereferenced, and an unresolved shader address is counted (D130).
 fn submit_dcb(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     submit_described(args[0])
 }
 
 /// `sceAgcDriverSubmitCommandBuffer(queue, dcb)` - the same handover with the queue named.
 ///
-/// The open-toolchain SDK's GL context and draw path try this first and fall back to
-/// [`submit_dcb`] only when it does not resolve, passing the handle [`create_queue`] wrote and the
-/// same 16-byte descriptor (`oops-sdk` `gl_context.c`, `agc_draw.c`). Unnamed, it landed on the
-/// loud stub, whose placeholder the GL context read as *the driver refused the command buffer* - so
-/// the hardware clear self-test failed and every draw stopped (worklog 809). The queue is orbistoun's
-/// own opaque handle and carries nothing a submit needs, so the descriptor in argument one goes down
-/// exactly the path `SubmitDcb`'s argument zero does, and answers the `SubmitDcb` success code; that
-/// this entry point answers the same code is assumed, not measured (worklog 813).
+/// The open-toolchain SDK tries this first and falls back to [`submit_dcb`], passing the handle
+/// [`create_queue`] wrote and the same 16-byte descriptor (`gl_context.c`, `agc_draw.c` in
+/// oops-sdk). The queue carries nothing a submit needs, so the descriptor in argument one takes the
+/// path `SubmitDcb`'s argument zero does and answers the same success code; that this entry point
+/// answers that code is assumed, not measured.
 fn submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     submit_described(args[1])
 }
 
 /// The pipeline a running guest's submissions are prepared through, kept for the run so its shader
-/// cache survives between them (worklog 844).
+/// cache survives between them.
 fn live_pipeline() -> &'static Mutex<Option<Pipeline>> {
     static LIVE: OnceLock<Mutex<Option<Pipeline>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(None))
 }
 
-/// Translated modules whose submission was not drawn, carried into the next one (worklog 844).
+/// Translated modules whose submission was not drawn, carried into the next one.
 fn undelivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>
 {
     static PENDING: OnceLock<Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>> =
@@ -1542,24 +1498,21 @@ fn submit_described(descriptor: u64) -> u64 {
     })
 }
 
-/// [`submit_described`]'s body, timed whole as [`crate::perf::Phase::Submit`] (worklog 844).
+/// [`submit_described`]'s body, timed whole as [`crate::perf::Phase::Submit`].
 fn submit_described_timed(descriptor: u64) -> u64 {
     let Some((gpu_addr, length)) = submit_descriptor(descriptor) else {
         return SUBMIT_OK;
     };
     let memory = MappedRegions::current();
-    // Refuse a descriptor whose command buffer lies outside every region the guest was given, rather
-    // than dereferencing an address that would fault the host. Recorded as an empty report so the run
-    // report shows the submit happened and read nothing (5bff).
+    // A descriptor whose command buffer lies outside every region is refused rather than
+    // dereferenced, and recorded as an empty report so the run report shows the submit happened.
     let Some(bytes) = memory.read(gpu_addr, length).map(<[u8]>::to_vec) else {
         if let Ok(mut slot) = last_submission().lock() {
             *slot = Some(Submission::default());
         }
         return SUBMIT_OK;
     };
-    // **One pipeline for the run, not one per submission** (worklog 844): the pipeline is where
-    // translated shaders are cached, and a fresh one each submission translated every shader again -
-    // more than half of every second a GL title ran.
+    // One pipeline for the run, not one per submission: the pipeline caches translated shaders.
     let submission = crate::perf::measure(crate::perf::Phase::Prepare, || {
         let mut live = live_pipeline()
             .lock()
@@ -1570,17 +1523,17 @@ fn submit_described_timed(descriptor: u64) -> u64 {
                 width: Width::default(),
             })
             .ok()
-            // A live guest's shaders name their own buffers, so the window is placed from them (D711).
+            // A live guest's shaders name their own buffers, so the window is placed from them
+            // (D711).
             .map(|pipeline| pipeline.placing_window_from_shaders().feeding_user_data());
         }
         live.as_mut()
             .map(|pipeline| pipeline.submit(&bytes, Queue::Draw, &[], &memory))
             .unwrap_or_default()
     });
-    // **A module travels once, with the first submission to use it** - so one whose draws never
-    // reached the backend (the command processor stopped before them) would leave the backend never
-    // knowing it, and a later submission's draw of it would name an unknown resource. Carried forward
-    // until a submission is drawn; re-sending one the backend has is a no-op (worklog 844).
+    // A module travels once, with the first submission to use it, so one whose draws never reached
+    // the backend is carried forward until a submission is drawn; re-sending one the backend has is
+    // a no-op.
     let mut submission = submission;
     if let Ok(mut pending) = undelivered_modules().lock() {
         for (id, module) in std::mem::take(&mut *pending) {
@@ -1588,11 +1541,10 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
     }
     let submission = submission;
-    // **The command processor's own memory work, carried out now** - synchronously, as the submit
-    // returns, which is the only timing an emulator with no asynchronous GPU has (D705, worklog 816).
-    // It stops at the first packet needing the GPU, so a fence is written only when everything before
-    // it really ran - and the draws are such work once an executor is installed and they can run as
-    // one into a target they can be written back to (worklog 832).
+    // The command processor's own memory work, carried out synchronously as the submit returns. It
+    // stops at the first packet needing the GPU, so a fence is written only when everything before
+    // it ran (D705); draws are such work once an executor is installed and they can run as one into
+    // a target they can be written back to.
     let executed = crate::perf::span(crate::perf::Span::CommandProcessor, || {
         cp::execute(
             &bytes,
@@ -1622,10 +1574,8 @@ fn submit_described_timed(descriptor: u64) -> u64 {
 
 /// Implementations this crate provides for `libSceAgcDriver`.
 ///
-/// `sceAgcDriverCreateQueue` accepts the queue (9a41); the resource-registration family are the
-/// retail stubs 7b3c disassembled, each returning the measured `0x8a6c9018`. This is fidelity, not an
-/// unblock: PPSA28061 still aborts at its startup wall with these in effect (the abort is gated on the
-/// mapper, D643/worklog 515).
+/// `sceAgcDriverCreateQueue` accepts the queue; the resource-registration family returns the
+/// hardware's measured `0x8a6c9018`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceAgcDriverCreateQueue", create_queue),
@@ -1652,9 +1602,9 @@ mod tests {
     };
     use std::sync::{Mutex, PoisonError};
 
-    /// **A range touches a target exactly when it shares a byte with its tiled surface** (worklog 849):
-    /// a 16x8 target is one 64 KiB block, so the byte before it and the byte after its block are
-    /// outside, and a copy starting inside or spanning it is not.
+    /// A range touches a target exactly when it shares a byte with its tiled surface: a 16x8 target
+    /// is one 64 KiB block, so the byte before it and the byte after its block are outside, and a
+    /// copy starting inside or spanning it is not.
     #[test]
     fn a_range_overlaps_a_target_when_it_shares_a_byte_with_its_surface() {
         use super::{ColourTarget, overlaps_target};
@@ -1682,9 +1632,9 @@ mod tests {
         assert!(overlaps_target(target, 0, u64::MAX), "spans it");
     }
 
-    /// **A frame goes into a `SWAP_ALT` target as B, G, R, A and comes back out as it went in**
-    /// (worklog 832): Neverball's space blue, `Rgba8` `0xff190000` (B 0x19 in the third byte), lands
-    /// with its blue in the first byte of memory, and a standard-order target takes it unchanged.
+    /// A frame goes into a `SWAP_ALT` target as B, G, R, A and comes back out as it went in:
+    /// `Rgba8` `0xff190000` lands with its blue in the first byte of memory, and a standard-order
+    /// target takes it unchanged.
     #[test]
     fn a_swap_alt_target_stores_blue_first_and_round_trips() {
         use super::{ComponentSwap, swapped};
@@ -1730,10 +1680,9 @@ mod tests {
         }
     }
 
-    /// **The frame the draws make lands in the guest's target, tiled and in its byte order, over what
-    /// the target held** (`REQ-...0ab6`, `-77fa`, worklog 832): the draw is handed the target's own
-    /// contents, and every texel it answers is found at its `64KB_R_X` address, blue first for a
-    /// `SWAP_ALT` target.
+    /// The frame the draws make lands in the guest's target, tiled and in its byte order, over what
+    /// the target held: the draw is handed the target's own contents, and every texel it answers is
+    /// found at its `64KB_R_X` address, blue first for a `SWAP_ALT` target.
     #[test]
     fn a_drawn_frame_is_written_back_tiled_over_the_target_s_own_contents() {
         use super::{ColourTarget, ComponentSwap, draw_over};
@@ -1777,8 +1726,8 @@ mod tests {
             "red third in B, G, R, A"
         );
 
-        // **The next submission into the same, untouched target is told so** (worklog 844): the
-        // drawer already holds that frame, so it is handed nothing to start from...
+        // The next submission into the same, untouched target is told so: the drawer already holds
+        // that frame, so it is handed nothing to start from...
         let mut handed = Some(Vec::new());
         draw_over(&mut memory, target, ComponentSwap::Alternate, |before| {
             handed = before.to_words(128);
@@ -1786,8 +1735,8 @@ mod tests {
         });
         assert_eq!(handed, None, "unchanged since it was written");
         // ...and once the guest writes the target itself, it is handed the target again. Where the
-        // target is write-protected (D720, when the lazy hooks are installed) that write faults, and
-        // the handler asks `written_at`: asked here, as the fault would.
+        // target is write-protected (D720) that write faults and the handler asks `written_at`,
+        // asked here.
         memory.0[0] ^= 0xff;
         super::written_at(BASE);
         draw_over(&mut memory, target, ComponentSwap::Alternate, |before| {
@@ -1829,8 +1778,7 @@ mod tests {
         );
     }
 
-    /// **A target outside the guest's memory is refused unwritten, and the draw is never run**
-    /// (`REQ-...0ab6`).
+    /// A target outside the guest's memory is refused unwritten, and the draw is never run.
     #[test]
     fn a_target_outside_guest_memory_is_refused_unwritten() {
         use super::{ColourTarget, ComponentSwap, draw_over};
@@ -1849,9 +1797,8 @@ mod tests {
         assert!(memory.0.iter().all(|&b| b == 0x5a));
     }
 
-    /// **Only a target a frame can be written into exactly is one** (worklog 832): a single-base,
-    /// single-target, `64KB_R_X`, `8_8_8_8` `UNORM` submission qualifies, and each way of breaking
-    /// that - a second base, linear tiling, no format - refuses.
+    /// Only a target a frame can be written into exactly qualifies: single-base, single-target,
+    /// `64KB_R_X`, `8_8_8_8` `UNORM`; a second base, linear tiling or no format each refuses.
     #[test]
     fn a_writable_target_needs_one_tiled_rgba8_surface() {
         use super::writable_target;
@@ -1890,11 +1837,8 @@ mod tests {
         assert!(refused(|s| s.colour_target_format = None));
     }
 
-    /// **CreateQueue returns the measured success code and hands back a non-null queue handle.**
-    ///
-    /// The GL context gates its whole hardware path on `rc == 0 && queue != NULL`; leaving the
-    /// out-parameter null kept `use_hardware` off and every draw fell to "no hardware pipeline". So
-    /// the handle must be written, non-null, and the same object each call (one process-wide block).
+    /// CreateQueue returns the measured success code and hands back the same non-null queue handle
+    /// on every call.
     #[test]
     fn create_queue_hands_back_a_non_null_handle() {
         let mut queue_out: u64 = 0;
@@ -1929,7 +1873,8 @@ mod tests {
         LOCK.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The `(start, end)` region a heap buffer occupies, its address exposed for the handler's read.
+    /// The `(start, end)` region a heap buffer occupies, its address exposed for the handler's
+    /// read.
     fn region_of(buffer: &[u8]) -> (u64, u64) {
         let base = buffer.as_ptr() as usize as u64;
         (base, base + buffer.len() as u64)
@@ -1958,9 +1903,9 @@ mod tests {
             .collect()
     }
 
-    /// A heap buffer holding the shader at a **256-byte-aligned** address (a shader-address register
-    /// stores the address in 256-byte units, so its low bits must be zero to reconstruct), and that
-    /// address. The whole buffer is the region to register.
+    /// A heap buffer holding the shader at a 256-byte-aligned address (a shader-address register
+    /// stores the address in 256-byte units), and that address. The whole buffer is the region to
+    /// register.
     fn aligned_shader() -> (Vec<u8>, u64) {
         let shader = shader_bytes();
         let mut buffer = vec![0u8; shader.len() + 512];
@@ -2014,8 +1959,8 @@ mod tests {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
-    /// A 16-byte submit descriptor pointing at `buffer` (the layout obSCEne `-1c97` measured). The
-    /// pointer is cast through `usize`, which exposes its provenance for the handler's read.
+    /// A 16-byte submit descriptor pointing at `buffer`. The pointer is cast through `usize`, which
+    /// exposes its provenance for the handler's read.
     fn descriptor(buffer: &[u8]) -> [u8; 16] {
         let mut d = [0u8; 16];
         d[0..8].copy_from_slice(&(buffer.as_ptr() as usize as u64).to_le_bytes());
@@ -2029,11 +1974,8 @@ mod tests {
         a
     }
 
-    /// **A submitted command buffer inside a region is walked into a report.**
-    ///
-    /// The handover, exercised: the descriptor's buffer (now served from the region it lies in) walks
-    /// into a report whose packet count is what the walk recognised. A null descriptor returns
-    /// success without faulting - the property `pipeline`'s walker already guarantees, carried up.
+    /// A submitted command buffer inside a region is walked into a report, and a null descriptor
+    /// returns success without faulting.
     #[test]
     fn a_submitted_command_buffer_in_a_region_is_reported() {
         let _guard = serial();
@@ -2052,12 +1994,10 @@ mod tests {
         assert_eq!(submit_dcb(&args(0)), SUBMIT_OK);
     }
 
-    /// **`SubmitCommandBuffer(queue, desc)` reads its descriptor from argument one.**
+    /// `SubmitCommandBuffer(queue, desc)` reads its descriptor from argument one.
     ///
-    /// The SDK's GL context submits through this entry point with the queue handle first (worklog
-    /// 813). The same command buffer must walk into the same report as through `SubmitDcb`, and a
-    /// descriptor left in argument zero - where `SubmitDcb` reads it - must be ignored, or the queue
-    /// handle would be read as a descriptor.
+    /// The same command buffer walks into the same report as through `SubmitDcb`, and a descriptor
+    /// left in argument zero is ignored, since that is where the queue handle goes.
     #[test]
     fn submit_command_buffer_reads_the_descriptor_after_the_queue() {
         let _guard = serial();
@@ -2083,13 +2023,9 @@ mod tests {
         );
     }
 
-    /// **A shader named at an address inside a region resolves; one outside every region does not.**
-    ///
-    /// D101's first route, both ways (5bff). When the shader's region is registered its address falls
-    /// in a region, so it is counted resolved and - the bytes being a real shader - translated, which
-    /// is what pushes a `BindShader`. When it is not registered the same address falls in no region,
-    /// so it is counted unresolved and nothing is prepared. The command buffer's own region is
-    /// registered in both, so the difference is the shader's alone.
+    /// A shader named at an address inside a region resolves; one outside every region does not
+    /// (D130). The command buffer's region is registered in both cases, so the difference is the
+    /// shader's alone.
     #[test]
     fn a_shader_address_resolves_in_a_region_and_not_outside_one() {
         let _guard = serial();
@@ -2112,7 +2048,8 @@ mod tests {
             "the resolved shader translated, yielding a BindShader: {resolved:?}"
         );
 
-        // Unresolved: only the command buffer's region is registered, so the shader is out of bounds.
+        // Unresolved: only the command buffer's region is registered, so the shader is out of
+        // bounds.
         set_guest_regions(vec![region_of(&stream)]);
         assert_eq!(submit_dcb(&args(desc.as_ptr() as usize as u64)), SUBMIT_OK);
         let unresolved = last_submission_report().expect("a report");
@@ -2125,8 +2062,8 @@ mod tests {
         assert_eq!(unresolved.shaders_translated, 0, "{unresolved:?}");
     }
 
-    /// Lets the command processor write `[base, base + len)` and nothing else - a test's own buffer,
-    /// never an address another test names.
+    /// Lets the command processor write `[base, base + len)` and nothing else - a test's own
+    /// buffer, never an address another test names.
     fn allow_writes_to(base: u64, len: u64) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static ALLOWED: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
@@ -2141,9 +2078,9 @@ mod tests {
         });
     }
 
-    /// The lazy-copy hooks every test here shares (the first install wins): snapshots and protection
-    /// that are counted, not real. No page's protection changes, so a test drives the fault path by
-    /// calling what the handler would.
+    /// The lazy-copy hooks every test here shares (the first install wins): snapshots and
+    /// protection that are counted, not real. No page's protection changes, so a test drives the
+    /// fault path by calling what the handler would.
     mod fake {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2181,12 +2118,12 @@ mod tests {
         }
     }
 
-    /// **A target is compared only when it may have been written** (D720).
+    /// A target is compared only when it may have been written (D720).
     ///
-    /// Read once, the target is protected; read again, it is unchanged on the protection's word -
-    /// the test changes memory behind the fake protection's back to show the comparison is not what
-    /// answered. A write then faults (`written_at`, as the handler calls it), and the next read
-    /// compares and finds the change. A command-processor fill releases the protection itself.
+    /// Read once, the target is protected; read again, it is unchanged on the protection's word,
+    /// even with memory changed behind the fake protection's back. A write then faults
+    /// (`written_at`), and the next read compares and finds the change. A command-processor fill
+    /// releases the protection.
     #[test]
     fn a_protected_target_is_trusted_until_a_write_to_it_faults() {
         use super::{
@@ -2249,12 +2186,11 @@ mod tests {
         super::forget_written();
     }
 
-    /// **A flipped frame reaches memory when something reads it, and not before** (D719).
+    /// A flipped frame reaches memory when something reads it, and not before (D719).
     ///
-    /// A 16x8 target in the test's own buffer, with a frame pending. The flip leaves memory as it
-    /// was and keeps a snapshot; the first read carries it out, and memory then holds exactly the
-    /// frame tiled over what it held - what D714 wrote at the flip. The negative: a flip followed by
-    /// a fill covering the whole target never reads its snapshot, and memory holds the fill.
+    /// The flip leaves memory as it was and keeps a snapshot; the first read carries it out, and
+    /// memory then holds the frame tiled over what it held. A flip followed by a fill covering the
+    /// whole target never reads its snapshot, and memory holds the fill.
     #[test]
     fn a_flipped_frame_is_written_back_on_first_read_or_dropped_by_a_covering_fill() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
@@ -2326,9 +2262,9 @@ mod tests {
         super::forget_written();
     }
 
-    /// **A fill over the whole pending target drops the frame rather than writing it back** (D719),
-    /// and forgets what memory held, so the next read of the target is a full one. No frame reader
-    /// is installed here, so a write-back would fail the fill: the negative is that failure.
+    /// A fill over the whole pending target drops the frame rather than writing it back (D719), and
+    /// forgets what memory held, so the next read is a full one. No frame reader is installed, so a
+    /// write-back would fail the fill.
     #[test]
     fn a_fill_over_the_whole_pending_target_drops_the_frame_unwritten() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
@@ -2369,10 +2305,8 @@ mod tests {
         );
     }
 
-    /// **A descriptor whose command buffer is outside every region is refused, not dereferenced.**
-    ///
-    /// The `gpu_addr` is a wild address in no region; the submit returns success and records an empty
-    /// report without reading it, rather than faulting the host on a raw dereference (5bff).
+    /// A descriptor whose command buffer is outside every region is refused, not dereferenced: the
+    /// submit returns success and records an empty report.
     #[test]
     fn a_descriptor_outside_every_region_returns_ok_without_reading() {
         let _guard = serial();

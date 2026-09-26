@@ -1,27 +1,11 @@
 //! The maths library, which speaks entirely in floating-point registers.
 //!
-//! # Why these could not work before
-//!
-//! A `double` argument travels in `xmm0`-`xmm7` and never in the integer registers, and
-//! the call boundary carried only integers. So the guest put 4.0 in `xmm0`, the handler
-//! read six integer registers that did not contain it, and answered in `rax` - which the
-//! guest was not reading. `sqrt(4)` came back as **4**: the guest's own argument, still in
-//! `xmm0` because nothing had written it.
-//!
-//! Thirteen conformance checks failed that way, and every one of them was the same gap
-//! wearing a different hat (D268).
-//!
-//! # Why the host's own maths is the right answer here
-//!
-//! Both sides are IEEE 754 doubles on the same architecture, and these functions are
-//! defined by that standard rather than by the platform. `sqrt` is correctly rounded by
-//! the specification, so there is one right answer and the host produces it.
-//!
-//! The transcendentals - `sin`, `cos`, `exp`, `log`, `pow` - are **not** correctly rounded
-//! by IEEE 754, and two conforming libraries may differ in the last bit. Recorded as an
-//! assumption rather than glossed: a title comparing a computed value against a stored
-//! constant could see that difference, and the probe on real hardware is what would settle
-//! it.
+//! A `double` argument travels in `xmm0`-`xmm7` and the answer in `xmm0`, so these handlers
+//! take the floating-point registers as well as the integer ones (D268). Both sides are IEEE
+//! 754 doubles on the same architecture, so the host's maths is the right answer: `sqrt` is
+//! correctly rounded by the specification. The transcendentals (`sin`, `cos`, `exp`, `log`,
+//! `pow`) are not, and two conforming libraries may differ in the last bit; this is an
+//! assumption a hardware probe would settle.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GUEST_FLOAT_REGISTERS, GuestFloatFn};
 
@@ -32,9 +16,8 @@ fn arg(floats: &[u64; GUEST_FLOAT_REGISTERS], n: usize) -> f64 {
 
 /// Reads floating-point argument `n` as a `float`.
 ///
-/// The low half of the register, which is where a single-precision value sits - not a
-/// narrowing of the double, which would round twice and disagree with the guest in the
-/// last bit.
+/// The low half of the register, where a single-precision value sits; narrowing the double
+/// would round twice.
 fn arg_f32(floats: &[u64; GUEST_FLOAT_REGISTERS], n: usize) -> f32 {
     f32::from_bits((floats[n] & 0xFFFF_FFFF) as u32)
 }
@@ -46,8 +29,7 @@ const fn ret(value: f64) -> u64 {
 
 /// The bits a `float` answer goes back in.
 ///
-/// The upper half is left zero. A caller reads the low half and nothing defines the rest,
-/// so writing anything there would be inventing a value.
+/// The upper half is left zero; nothing defines it.
 const fn ret_f32(value: f32) -> u64 {
     value.to_bits() as u64
 }
@@ -126,15 +108,10 @@ fn fmodf(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTER
     ret_f32(arg_f32(floats, 0) % arg_f32(floats, 1))
 }
 
-/// `strtod(text, end)` - the one here that reads an integer register and answers in `xmm0`.
+/// `strtod(text, end)` - reads an integer register and answers in `xmm0`.
 ///
-/// The pointer arrives in `rdi` and the result leaves in `xmm0`, which is why the two
-/// argument arrays are carried together rather than a function being one kind or the other.
-///
-/// **`end` is written when it is supplied**, because a caller uses it to walk a list of
-/// numbers and a loop that never advances is a hang rather than a wrong value. Rust's
-/// parser is stricter than C's - it will not accept a trailing suffix - so the longest
-/// parsable prefix is found rather than handing the whole string over and failing.
+/// `end` is written when supplied, since a caller walks a list of numbers with it. Rust's
+/// parser rejects a trailing suffix, so the longest parsable prefix is found, as C specifies.
 fn strtod(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
     let Some(text) = (unsafe { orbistoun_mem::guest::read_path(ints[0]) }) else {
@@ -149,17 +126,15 @@ fn strtod(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTE
             best = Some((end, value));
         }
     }
-    // **When nothing converts, the end pointer is the original string.** The skipped
-    // whitespace does not count as consumed: a caller walking a list tells "no number
-    // here" from "a number I have passed" by whether the pointer moved at all, and
-    // leading space on its own is not a number. The integer family already answers this
-    // way, and the two disagreeing would be worse than either rule.
+    // When nothing converts, the end pointer is the original string: leading whitespace alone is
+    // not consumed, so a caller can tell "no number here" by the pointer not moving. The integer
+    // family answers the same way.
     let (consumed, value) = best.map_or((0, 0.0), |(end, value)| (skipped + end, value));
     if ints[1] != 0 {
         if let Ok(at) = usize::try_from(ints[1]) {
             let end_pointer = ints[0].saturating_add(consumed as u64);
-            // SAFETY: a guest-supplied `char **` under the identity mapping (D014), written
-            // only when the guest asked for it by passing a non-null pointer.
+            // SAFETY: a guest-supplied `char **` under the identity mapping, written only when the
+            // guest passed a non-null pointer.
             unsafe {
                 std::ptr::write_unaligned(
                     std::ptr::with_exposed_provenance_mut::<u64>(at),
@@ -173,16 +148,14 @@ fn strtod(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTE
 
 /// `fmod(x, y)` - the remainder with the sign of `x`.
 ///
-/// Rust's `%` on floats is the C `fmod`, not a Euclidean remainder, which is what the
-/// standard asks for here.
+/// Rust's `%` on floats is the C `fmod`, not a Euclidean remainder.
 fn fmod(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     ret(arg(floats, 0) % arg(floats, 1))
 }
 
 /// `log(x)` - the natural logarithm.
 ///
-/// Named `ln` in Rust; `log` in Rust takes a base and would answer a different question
-/// entirely from the same call.
+/// Rust's `ln`; Rust's `log` takes a base.
 fn log(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     ret(arg(floats, 0).ln())
 }
@@ -194,9 +167,8 @@ fn log10(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTER
 
 /// `round(x)` - halfway cases away from zero.
 ///
-/// **Not `rint` and not banker's rounding.** The standard specifies away-from-zero for this
-/// function, so `round(2.5)` is 3, and the conformance probe checks exactly that. Rust's
-/// `f64::round` has the same rule.
+/// Not `rint` and not banker's rounding: the standard specifies away-from-zero, so
+/// `round(2.5)` is 3. Rust's `f64::round` has the same rule.
 fn round(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     ret(arg(floats, 0).round())
 }
@@ -215,10 +187,9 @@ binary_f32!(atan2f, atan2);
 
 /// `sincosf(x, sinp, cosp)` - sine and cosine of `x` at once, each written through its pointer.
 ///
-/// The angle arrives in `xmm0`; the two destinations are pointers in the integer registers (`rdi`,
-/// `rsi`), so this reads both argument arrays - the same shape as [`strtod`]. Computed in `f32`
-/// rather than narrowed from an `f64`, so it agrees with the guest in the last bit, and each result
-/// is written only when its pointer is non-null, since a caller may want just one.
+/// The angle arrives in `xmm0` and the destinations in `rdi` and `rsi`, so this reads both
+/// argument arrays, as [`strtod`] does. Computed in `f32`, and each result is written only when
+/// its pointer is non-null.
 fn sincosf(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     let (sin, cos) = arg_f32(floats, 0).sin_cos();
     for (pointer, value) in [(ints[0], sin), (ints[1], cos)] {
@@ -228,8 +199,8 @@ fn sincosf(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTE
         let Ok(at) = usize::try_from(pointer) else {
             continue;
         };
-        // SAFETY: a guest-supplied `float *` under the identity mapping (D014), written only when
-        // the guest passed a non-null pointer for it.
+        // SAFETY: a guest-supplied `float *` under the identity mapping, written only when the
+        // guest passed a non-null pointer for it.
         unsafe {
             std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<f32>(at), value);
         }
@@ -239,8 +210,8 @@ fn sincosf(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTE
 
 /// `strtof(text, end)` - single precision.
 ///
-/// Parsed as an `f32` rather than narrowed from the `f64` [`strtod`] produces: narrowing
-/// rounds twice, and a value exactly between two `f32`s would land on the wrong one.
+/// Parsed as an `f32` rather than narrowed from an `f64`: narrowing rounds twice, and a value
+/// exactly between two `f32`s would land on the wrong one.
 fn strtof(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
     let Some(text) = (unsafe { orbistoun_mem::guest::read_path(ints[0]) }) else {
@@ -254,17 +225,13 @@ fn strtof(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTE
             best = Some((end, value));
         }
     }
-    // **When nothing converts, the end pointer is the original string.** The skipped
-    // whitespace does not count as consumed: a caller walking a list tells "no number
-    // here" from "a number I have passed" by whether the pointer moved at all, and
-    // leading space on its own is not a number. The integer family already answers this
-    // way, and the two disagreeing would be worse than either rule.
+    // When nothing converts, the end pointer is the original string, as in `strtod`.
     let (consumed, value) = best.map_or((0, 0.0), |(end, value)| (skipped + end, value));
     if ints[1] != 0 {
         if let Ok(at) = usize::try_from(ints[1]) {
             let end_pointer = ints[0].saturating_add(consumed as u64);
-            // SAFETY: a guest-supplied `char **` under the identity mapping (D014), written
-            // only when the guest asked for it by passing a non-null pointer.
+            // SAFETY: a guest-supplied `char **` under the identity mapping, written only when the
+            // guest passed a non-null pointer.
             unsafe {
                 std::ptr::write_unaligned(
                     std::ptr::with_exposed_provenance_mut::<u64>(at),
@@ -276,17 +243,9 @@ fn strtof(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTE
     ret_f32(value)
 }
 
-// ---------------------------------------------------------------------------------------
-// Added in bulk from ISO/IEC 9899 7.12, ahead of any guest reaching them (D472). The simple
-// ones are the standard's function under Rust's name for it; the ones written out by hand
-// below are the ones where that correspondence does not exist.
-//
-// **Each line names the standard, not just the clause.** These once read `- 7.12.4.2.` and
-// leaned on this header for the rest, which is fine for a person and wrong for the knowledge
-// generator: it takes a citation from the line it is describing, so a bare clause number
-// became the entry's *purpose* and the entry was recorded `assumed` with "cites no published
-// specification". `acosf` below, alone in carrying the full reference, was recorded
-// `published`. One block, one generator, and the only difference was six characters.
+// Declared from ISO/IEC 9899 7.12 ahead of any guest reaching them (D472). The simple ones are
+// the standard's function under Rust's name for it. Each line names the standard in full,
+// because the knowledge generator takes an entry's citation from its own line.
 
 // `acosf(x)` - ISO/IEC 9899 7.12.4.1.
 unary_f32!(acosf, acos);
@@ -313,20 +272,18 @@ unary!(exp2, exp2);
 
 /// `nearbyintf(x)` - ISO/IEC 9899 7.12.9.3.
 ///
-/// Rounds to the nearest integer **in the current rounding direction, without raising the
-/// inexact exception**. The default direction is to-nearest-ties-to-even, which is what this
-/// answers; nothing here changes the rounding mode, so there is no other direction to honour.
-/// Not `round`, which is ties-away-from-zero and would disagree on exactly the halfway cases.
+/// Rounds in the current rounding direction without raising inexact. Nothing here changes
+/// the rounding mode, so that is to-nearest-ties-to-even; not `round`, which ties away from
+/// zero.
 fn nearbyintf(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     ret_f32(arg_f32(floats, 0).round_ties_even())
 }
 
 /// Multiplies by a power of two, without the intermediate overflowing.
 ///
-/// `2^n` is exactly representable only for `n` in the exponent's range, so a single
-/// `x * 2f64.powi(n)` answers infinity for a large `n` even when the product would be finite.
-/// Splitting the scaling keeps every factor representable, and multiplying by an exact power
-/// of two is itself exact - so the answer is correctly rounded once, at the end.
+/// `2^n` is representable only within the exponent's range, so a single `x * 2f64.powi(n)`
+/// answers infinity for a large `n` even when the product is finite. Scaling in exact steps
+/// rounds once, at the end.
 fn scale(mut x: f64, mut n: i32) -> f64 {
     /// The largest and smallest exponents a `double` can hold as a normal number.
     const HIGH: i32 = 1023;
@@ -344,8 +301,7 @@ fn scale(mut x: f64, mut n: i32) -> f64 {
 
 /// `ldexp(x, n)` - `x` times two to the `n`. ISO/IEC 9899 7.12.6.6.
 ///
-/// **`n` arrives in an integer register**, not a floating-point one: it is an `int`, and
-/// reading it from `floats` would read whatever the caller last put there.
+/// `n` is an `int` and arrives in an integer register.
 fn ldexp(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     ret(scale(arg(floats, 0), ints[0] as i32))
 }
@@ -362,8 +318,7 @@ fn write_f64(at: u64, value: f64) {
     if at == 0 {
         return;
     }
-    // SAFETY: a guest-supplied out-parameter under the identity mapping (D014); eight bytes,
-    // which is what the `double *` the caller declared points at.
+    // SAFETY: a guest-supplied `double *` out-parameter under the identity mapping; eight bytes.
     unsafe { std::ptr::write_unaligned(crate::ptr(at).cast::<f64>(), value) };
 }
 
@@ -378,9 +333,8 @@ fn write_f32(at: u64, value: f32) {
 
 /// `frexp(x, exp)` - splits `x` into a fraction in `[0.5, 1)` and a power of two.
 ///
-/// ISO/IEC 9899 7.12.6.4. **Zero, infinity and NaN are answered unchanged with `*exp` set to
-/// zero**, which the standard requires and which a formula-based version gets wrong: taking a
-/// logarithm of zero would answer negative infinity and store nonsense.
+/// ISO/IEC 9899 7.12.6.4. Zero, infinity and NaN are answered unchanged with `*exp` set to
+/// zero, as the standard requires.
 fn frexp(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     let x = arg(floats, 0);
     let out = ints[0];
@@ -408,14 +362,14 @@ fn write_exponent(at: u64, value: i32) {
     if at == 0 {
         return;
     }
-    // SAFETY: a guest-supplied `int *` under the identity mapping (D014); four bytes.
+    // SAFETY: a guest-supplied `int *` under the identity mapping; four bytes.
     unsafe { std::ptr::write_unaligned(crate::ptr(at).cast::<i32>(), value) };
 }
 
 /// `modf(x, iptr)` - splits `x` into its fractional and integral parts.
 ///
-/// ISO/IEC 9899 7.12.6.12. **Both parts carry `x`'s sign**, so `modf(-3.5)` answers `-0.5`
-/// and stores `-3.0` - not `0.5` and `-4.0`, which is what flooring would give.
+/// ISO/IEC 9899 7.12.6.12. Both parts carry `x`'s sign: `modf(-3.5)` answers `-0.5` and stores
+/// `-3.0`.
 fn modf(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     let x = arg(floats, 0);
     let integral = x.trunc();
@@ -441,10 +395,10 @@ fn modff(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS
     })
 }
 
-/// `sincos(x, s, c)` - both at once, into two out-parameters.
+/// `sincos(x, s, c)` - both at once, into two out-parameters. Answers nothing.
 ///
-/// Reference: FreeBSD `sincos(3)`. Not ISO C - it is a BSD extension, and the target's C
-/// library is FreeBSD-derived, which is why it is imported at all. Answers nothing.
+/// Reference: FreeBSD `sincos(3)`, a BSD extension the target's FreeBSD-derived C library
+/// exports.
 fn sincos(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
     let x = arg(floats, 0);
     write_f64(ints[0], x.sin());
@@ -533,9 +487,7 @@ mod bulk_ported {
         f(&i, &d)
     }
 
-    /// **The cases a formula gets wrong.** Zero and infinity must come back unchanged with the
-    /// exponent set to zero; a version taking a logarithm answers negative infinity for zero
-    /// and stores nonsense in the caller's `int`.
+    /// Zero and infinity come back unchanged with the exponent set to zero.
     #[test]
     fn frexp_answers_zero_and_infinity_unchanged() {
         let mut out = 99_i32;
@@ -547,8 +499,8 @@ mod bulk_ported {
         assert_eq!(out, 0);
     }
 
-    /// And the ordinary case holds its own contract: the fraction is in `[0.5, 1)` and
-    /// multiplying it back by the power of two gives the original.
+    /// The ordinary case: the fraction is in `[0.5, 1)` and multiplying it back by the power of
+    /// two gives the original.
     #[test]
     fn frexp_splits_into_a_fraction_and_a_power_of_two() {
         let mut out = 0_i32;
@@ -563,8 +515,7 @@ mod bulk_ported {
         }
     }
 
-    /// **Both parts carry the sign.** `modf(-3.5)` is `-0.5` and `-3.0`; flooring would give
-    /// `0.5` and `-4.0`, which reassembles to the same number and is still wrong.
+    /// Both parts carry the sign: `modf(-3.5)` is `-0.5` and `-3.0`, not `0.5` and `-4.0`.
     #[test]
     fn modf_gives_both_parts_the_sign_of_the_argument() {
         let mut integral = 0.0_f64;
@@ -574,8 +525,8 @@ mod bulk_ported {
         assert_eq!(integral, -3.0);
     }
 
-    /// `ldexp` must stay exact past the point where a single `2^n` would overflow, and must
-    /// still reach the smallest subnormal going the other way.
+    /// `ldexp` stays exact past the point where a single `2^n` would overflow, and still reaches
+    /// the smallest subnormal going the other way.
     #[test]
     fn ldexp_scales_beyond_a_single_power_of_two() {
         assert_eq!(
@@ -592,8 +543,7 @@ mod bulk_ported {
         assert_eq!(f64::from_bits(call(ldexp, [3, 0], 1.0)), 8.0);
     }
 
-    /// **Ties to even, not away from zero.** `round` would answer 1 and 3 here, and the
-    /// difference is invisible except on exactly the halfway cases.
+    /// Ties to even, not away from zero.
     #[test]
     fn nearbyintf_rounds_halves_to_even() {
         let f = |x: f32| {

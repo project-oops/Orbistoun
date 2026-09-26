@@ -1,24 +1,9 @@
-//! Reading real input, and deciding who is allowed to see it.
+//! Reads host input and decides who may see it.
 //!
-//! # Why the window owns this and the worker does not
-//!
-//! The guest runs in a child process (D032) and the keyboard belongs to whichever window
-//! has focus, which is this one. That is not an inconvenience - it is what makes the shell
-//! button work at all. **The system's own button has to be seen by something that is not
-//! the title**, and a worker reading input directly would have no way to keep one button
-//! back.
-//!
-//! So input is read here, the shell takes its button, and what is left is what a title may
-//! see. The second half is not yet carried across the process boundary, and deliberately:
-//! nothing on the far side can consume it, because the structure a title reads a pad into
-//! is unmeasured (D326). Building the transport before there is anything to receive it is
-//! speculation by principle 12's own test.
-//!
-//! # What is missing, plainly
-//!
-//! Real gamepads. [`orbistoun_input::Source::Gamepad`] is in the configuration and nothing
-//! here reads one, so a port set to it reports a neutral pad. That is a stated gap rather
-//! than a silent one: the settings pane says so next to the control.
+//! The window owns host input (D326): the guest runs in a child process and the keyboard
+//! belongs to the focused window. The shell takes its own button here, and what is left is
+//! what a title may see. A port set to [`orbistoun_input::Source::Gamepad`] is not read by
+//! this window and reports a neutral pad; the settings pane says so beside the control.
 
 use orbistoun_input::{Button, PadState, Pads, ShellButton, ShellPress, Source};
 
@@ -27,14 +12,11 @@ use orbistoun_input::{Button, PadState, Pads, ShellButton, ShellPress, Source};
 pub(crate) struct Reader {
     /// The shell button's press, across frames.
     ///
-    /// **One, not one per port.** The shell is a single thing and it opens once; four
-    /// people holding four pads are not four shells. Any port may press it.
+    /// One, not one per port: there is a single shell, and any port may press it.
     shell: ShellButton,
     /// What was down last frame, per port.
     ///
-    /// **Navigation needs edges, not levels.** A menu that moved once per frame while a
-    /// direction was held would cross a library of twelve titles in a fifth of a second,
-    /// which is not a menu anybody can aim.
+    /// Navigation needs edges, not levels: a held direction moves the highlight once.
     previous: Vec<u32>,
 }
 
@@ -42,8 +24,8 @@ pub(crate) struct Reader {
 pub(crate) struct Frame {
     /// One state per configured port, in port order.
     ///
-    /// Held even when nothing drives a port: an empty port is a pad nobody is holding,
-    /// which is a real state a title may enumerate (see `orbistoun_input::mapping`).
+    /// Held even when nothing drives a port: an empty port is a pad nobody is holding, a
+    /// state a title may enumerate (see `orbistoun_input::mapping`).
     pub(crate) pads: Vec<PadState>,
     /// What the shell button did.
     pub(crate) shell: ShellPress,
@@ -56,35 +38,29 @@ pub(crate) struct Frame {
 impl Reader {
     /// Reads one frame.
     ///
-    /// `elapsed_ms` comes from the caller rather than a clock in here, so the press-versus-
-    /// hold decision stays the tested one in `orbistoun_input::shell_button`.
+    /// `elapsed_ms` comes from the caller rather than a clock here, so the press-or-hold
+    /// decision stays the tested one in `orbistoun_input::shell_button`.
     pub(crate) fn read(&mut self, ctx: &egui::Context, pads: &Pads, elapsed_ms: u32) -> Frame {
         let states: Vec<PadState> = pads
             .ports
             .iter()
             .map(|port| match port.source {
                 Source::Keyboard => ctx.input(|input| keyboard(input, port)),
-                // A port with nothing driving it, a port set to a gamepad this build cannot
-                // read, and a port driven by a script are all the same to this live reader: a
-                // pad it is not feeding. The script is sampled in the worker as a pure function
-                // of run time, not pushed from here, so there is nothing for the window to read
-                // (`orbistoun_input::script`, D707). They are not the same to a person, which is
-                // why the settings pane distinguishes them and this does not have to.
+                // None of these is fed by this live reader. A script is sampled in the worker
+                // as a pure function of run time (`orbistoun_input::script`, D707).
                 Source::Empty | Source::Gamepad { .. } | Source::Script { .. } => {
                     PadState::neutral()
                 }
             })
             .collect();
 
-        // Any port may reach the shell. Held rather than pressed, because the decision
-        // between a tap and a hold is about duration and this only reports the level.
+        // Any port may reach the shell. The level is reported; tap-or-hold is decided by
+        // duration downstream.
         let down = states.iter().any(|state| state.is_down(Button::Shell));
         let press = self.shell.update(down, elapsed_ms);
 
-        // Buttons that went down this frame, across every port. Pooled rather than kept per
-        // port because the shell is one thing being navigated: whoever presses a direction
-        // moves the highlight, and four people fighting over it is their problem rather than
-        // a case this has to model.
+        // Buttons that went down this frame, pooled across ports because one shell is being
+        // navigated.
         self.previous.resize(states.len(), 0);
         let mut edges = 0_u32;
         for (index, state) in states.iter().enumerate() {
@@ -103,8 +79,7 @@ impl Reader {
 
 /// Which way a frame's fresh presses point, if any.
 ///
-/// One direction per frame: two pressed together is somebody rolling a thumb across a
-/// stick, and picking the first is steadier than trying to honour both.
+/// One direction per frame; with two pressed together the first wins.
 #[must_use]
 pub(crate) fn steering(just_pressed: u32) -> Option<orbistoun_shell::Move> {
     use orbistoun_shell::Move;
@@ -123,31 +98,25 @@ pub(crate) fn steering(just_pressed: u32) -> Option<orbistoun_shell::Move> {
 fn keyboard(input: &egui::InputState, port: &orbistoun_input::Port) -> PadState {
     let mut state = PadState::neutral();
     for (button, name) in &port.keys {
-        // A name egui does not recognise is skipped here and **reported by the settings
-        // pane**, not swallowed. A typo that silently binds nothing is a button somebody
-        // presses repeatedly while wondering what is broken.
+        // A name egui does not recognise is skipped here and reported by the settings pane.
         let Some(key) = egui::Key::from_name(name) else {
             continue;
         };
-        // **Level or edge.** A key held across frames reports down, which is what a hold
-        // needs - but a press and release that both land inside one frame would otherwise
-        // be invisible, and the shortest real tap on a fast display is close to that. The
-        // edge makes a one-frame press count without affecting anything held longer.
+        // Level or edge: a held key reports down, and the edge makes a press and release
+        // inside one frame still count.
         if !input.key_down(key) && !input.key_pressed(key) {
             continue;
         }
         match button {
-            // Through `set_trigger`, so the analogue value and the bit agree. A key is all
-            // or nothing, so a held key is a fully pulled trigger.
+            // Through `set_trigger`, so the analogue value and the bit agree; a held key is
+            // a fully pulled trigger.
             Button::L2 => state.set_trigger(false, 1.0),
             Button::R2 => state.set_trigger(true, 1.0),
             other => state.set(*other, true),
         }
     }
 
-    // **Sticks, which a keyboard could not move at all until this existed.** The shipped
-    // configuration is one keyboard port, so without it the out-of-the-box setup could
-    // press every button and drive nothing analogue - which is most 3D titles.
+    // Sticks from named key pushes (D341), so the default keyboard port drives analogue input.
     for (push, name) in &port.axes {
         let Some(key) = egui::Key::from_name(name) else {
             continue;
@@ -159,10 +128,7 @@ fn keyboard(input: &egui::InputState, port: &orbistoun_input::Port) -> PadState 
         state.sticks[stick].x += x;
         state.sticks[stick].y += y;
     }
-    // **Opposite directions cancel to centre rather than one winning.** A keyboard can hold
-    // left and right at once and a stick cannot be in two places, so summing and clamping
-    // makes the pair mean "not pushed" - which is a position a stick can actually be in.
-    // Letting the first one win would make left+right mean something no pad can express.
+    // Opposite directions sum and cancel to centre, a position a real stick can hold.
     for stick in &mut state.sticks {
         stick.x = stick.x.clamp(-1.0, 1.0);
         stick.y = stick.y.clamp(-1.0, 1.0);
@@ -202,11 +168,7 @@ pub(crate) fn unresolved(pads: &Pads) -> Vec<String> {
 mod tests {
     use orbistoun_input::{Button, Pads};
 
-    /// **Every key in the shipped layout resolves.**
-    ///
-    /// The default mapping is written as text in a crate that has never heard of this
-    /// window, so nothing but a test connects the two. A typo there is a button that does
-    /// nothing on a fresh installation, with no error anywhere.
+    /// Every key name in the shipped default mapping resolves to an egui key.
     #[test]
     fn the_default_layout_names_keys_this_window_understands() {
         let unresolved = super::unresolved(&Pads::default());

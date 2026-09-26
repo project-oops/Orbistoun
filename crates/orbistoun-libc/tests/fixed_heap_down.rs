@@ -1,25 +1,13 @@
 //! The fixed heap handing blocks out downward.
 //!
-//! # Why this is a second binary rather than a second test
-//!
-//! The direction is read once per process, from the same variable as the base, so a run can
-//! only be one of the two. The ascending case is in `fixed_heap.rs` for the same reason.
-//!
-//! # Why it exists at all
-//!
-//! This direction is an **instrument, not a feature**. Fifty-one runs across thirteen bases
-//! showed that fixing the heap collapses D499's oscillation and that the address *value* is
-//! not what does it. Reversing the order blocks come out in - and changing nothing else -
-//! is what separates "the addresses are fixed" from "the addresses are ordered".
-//!
-//! A negative from an instrument is only worth what the instrument is worth, so this asserts
-//! the direction really reverses. Without it, a run that failed to descend and a run that
-//! descended and changed nothing are the same output (check 3).
+//! The direction is read once per process, from the same variable as the base, so it has its
+//! own binary. Reversing only the order blocks come out in separates a guest depending on
+//! fixed addresses from one depending on their ordering; this asserts the direction really
+//! reverses.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
-/// Where this test puts its region. A different base from the ascending test's, so neither
-/// can be reading the other's.
+/// Where this test puts its region, a different base from the ascending test's.
 const BASE: u64 = 0x0000_6E01_0000_0000;
 
 /// How far the region reaches, mirroring `arena::SPAN`.
@@ -46,7 +34,7 @@ fn call(name: &str, args: &[u64]) -> u64 {
 /// Downward, every later block is at a lower address, and every block is still real memory.
 #[test]
 fn the_descending_region_really_descends() {
-    // SAFETY: set before any thread in this process reads the environment - this binary has
+    // SAFETY: set before any thread in this process reads the environment; this binary has
     // exactly one test, and nothing runs before it.
     unsafe { std::env::set_var("ORBISTOUN_HEAP_BASE", format!("{BASE:x}-down")) };
 
@@ -68,8 +56,8 @@ fn the_descending_region_really_descends() {
             previous
         );
         assert_eq!(block % 16, 0, "still aligned like `malloc` must be");
-        // The whole block is writable, which a start rounded down past the region's floor
-        // would not be.
+        // The whole block is writable, which a start rounded down past the region's floor would
+        // not be.
         for offset in 0..64_u64 {
             // SAFETY: inside the sixty-four bytes just returned.
             unsafe {
@@ -89,8 +77,8 @@ fn the_descending_region_really_descends() {
         previous = block;
     }
 
-    // Blocks do not overlap, which downward arithmetic gets wrong more easily than upward:
-    // eight distinct 64-byte blocks need at least 8 * 64 bytes between the first and last.
+    // Blocks do not overlap: eight distinct 64-byte blocks need at least 8 * 64 bytes between
+    // the first and last.
     let first = call("malloc", &[64]);
     assert!(
         first < previous,

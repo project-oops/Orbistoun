@@ -1,67 +1,34 @@
 //! Building SPIR-V modules.
 //!
-//! # This crate knows nothing about the guest
-//!
-//! It emits SPIR-V. It has never heard of wavefronts, execution masks or vector
-//! registers, and it must stay that way - the same boundary `orbistoun-gpu` holds
-//! against Vulkan, for the same reason. Translation lives above this and maps guest
-//! semantics onto what is here.
-//!
-//! # Words, not text
-//!
-//! SPIR-V is a binary format of 32-bit words: a five-word header, then instructions,
-//! each beginning with a word packing its length and opcode. Nothing here goes via an
-//! assembler, because a translator that emits text and shells out to `spirv-as` cannot
-//! run where it is needed.
-//!
-//! # Identifiers are handed out, never chosen
-//!
-//! Every result in a module is a number, and the header declares a bound that must
-//! exceed all of them. [`Builder`] allocates them, so a mismatch between the bound and
-//! the identifiers in use cannot happen - which is a whole class of module that
-//! validates as malformed for a reason nobody can see by reading it.
-//!
-//! # Verification
-//!
-//! Structural properties are checked by unit tests here. Whether the output is *valid
-//! SPIR-V* is answered by `spirv-val`, run over emitted modules by
-//! `tools/validate-spirv.sh` - a real validator rather than this crate's opinion of
-//! itself, which is the same argument the shader decoder's differential test makes.
+//! This crate emits SPIR-V and knows nothing about the guest: translation above it maps guest
+//! semantics onto what is here. Modules are built as 32-bit words directly, with no assembler, so
+//! the translator runs wherever it is needed. [`Builder`] allocates every identifier, so the
+//! header's bound always exceeds them. Structural properties are unit-tested here; validity is
+//! decided by `spirv-val`, run over emitted modules by `tools/validate-spirv.sh`.
 
 use core::fmt;
 
 /// First word of every module.
 pub const MAGIC: u32 = 0x0723_0203;
 
-/// Version 1.0, as the format packs it: minor in the second byte.
-///
-/// The floor. Every consumer accepts it, so anything that can be said in 1.0 is said
-/// in 1.0.
+/// Version 1.0, as the format packs it: minor in the second byte. Accepted by every consumer, so
+/// anything expressible in 1.0 is declared as 1.0.
 pub const VERSION_1_0: u32 = 0x0001_0000;
 
 /// Version 1.3.
 ///
-/// Needed only for the `StorageBuffer` storage class. Version 1.0 can describe the same
-/// thing using `Uniform` plus a `BufferBlock` decoration, but that spelling is
-/// deprecated and drivers treat it as legacy - so a module that needs a storage buffer
-/// declares 1.3 and one that does not stays at 1.0.
-///
-/// 1.4 is deliberately not used: from there on, an entry point must list *every* global
-/// variable in its interface, and getting that wrong is a validation failure with a
-/// confusing message.
+/// Needed for the `StorageBuffer` storage class; the 1.0 spelling (`Uniform` plus `BufferBlock`) is
+/// deprecated. A module without a storage buffer stays at 1.0.
 pub const VERSION_1_3: u32 = 0x0001_0300;
 
 /// Version 1.4, which the mesh-shader extension requires.
 ///
-/// Declared only by modules that need it, for the reason the note above gives: from 1.4 an
-/// entry point must list **every** global variable in its interface, not only the inputs and
-/// outputs, and getting that wrong fails validation with a message about interfaces that says
-/// nothing about which variable is missing. A mesh module's globals are exactly its three
-/// output arrays, so listing them all is no burden there.
+/// Declared only where needed: from 1.4 an entry point lists every global variable in its
+/// interface, not only inputs and outputs, and an omission fails validation without naming the
+/// variable.
 pub const VERSION_1_4: u32 = 0x0001_0400;
 
-/// Generator identifier. Zero means unregistered, which is honest: the registry exists
-/// for tool vendors and this is not one of them.
+/// Generator identifier. Zero means unregistered; the registry is for tool vendors.
 pub const GENERATOR: u32 = 0;
 
 /// An identifier for a result within a module.
@@ -74,26 +41,20 @@ impl fmt::Display for Id {
     }
 }
 
-/// The opcodes this crate emits.
-///
-/// A subset, and named rather than numbered at the call site. Every value is checked
-/// by `spirv-val` the first time a module using it is emitted - a wrong number
-/// produces an instruction the validator rejects by name, which is about as loud as a
-/// mistake can be.
+/// The opcodes this crate emits, named rather than numbered at the call site. A wrong value is
+/// rejected by name by `spirv-val`.
 pub mod op {
     /// Declares a capability the module needs.
     pub const CAPABILITY: u16 = 17;
     /// Declares a SPIR-V extension the module relies on, by name.
     ///
-    /// Needed because this project emits SPIR-V 1.3, and the float controls that let a
-    /// module say "do not flush subnormals to zero" were an extension until 1.4. Naming
-    /// the extension is cheaper than raising the version, which would raise the Vulkan
-    /// version the host must support along with it.
+    /// The float controls that keep subnormals were an extension before 1.4, and naming the
+    /// extension avoids raising the SPIR-V and Vulkan versions.
     pub const EXTENSION: u16 = 10;
     /// Imports an extended instruction set (e.g. `GLSL.std.450`), binding it to a result id.
     pub const EXT_INST_IMPORT: u16 = 11;
-    /// Invokes an instruction from an imported extended set - the faithful spelling of the
-    /// transcendentals and min/max/abs the core set has no opcode for.
+    /// Invokes an instruction from an imported extended set: the transcendentals and min/max/abs
+    /// that have no core opcode.
     pub const EXT_INST: u16 = 12;
     /// Declares the addressing and memory model.
     pub const MEMORY_MODEL: u16 = 14;
@@ -108,17 +69,13 @@ pub mod op {
     /// An integer type.
     pub const TYPE_INT: u16 = 21;
     /// A vector of a component type.
-    ///
-    /// Needed for exactly one thing so far: a subgroup ballot answers with four words,
-    /// because the largest subgroup SPIR-V admits is 128 lanes wide.
     pub const TYPE_VECTOR: u16 = 23;
     /// Pulls one component out of a composite by a literal index.
     pub const COMPOSITE_EXTRACT: u16 = 81;
     /// The set of invocations in a subgroup for which a condition holds, as a bit mask.
     ///
-    /// This is what makes a per-invocation `bool` and a guest lane mask the same thing:
-    /// each invocation says whether *it* is active, and the ballot turns that into the
-    /// mask word the guest's scalar instructions expect to read.
+    /// Turns each invocation's per-lane `bool` into the mask word the guest's scalar instructions
+    /// read.
     pub const GROUP_NON_UNIFORM_BALLOT: u16 = 339;
     /// A floating-point type.
     pub const TYPE_FLOAT: u16 = 22;
@@ -140,9 +97,7 @@ pub mod op {
     pub const SWITCH: u16 = 251;
     /// Declares the merge and continue targets of a loop.
     ///
-    /// Must be the second-to-last instruction in its block, immediately before the
-    /// branch. That ordering is what makes a backward branch a *loop* rather than
-    /// something the validator rejects.
+    /// Must immediately precede the block's branch; that is what makes a backward branch a loop.
     pub const LOOP_MERGE: u16 = 246;
     /// Declares where a selection converges.
     pub const SELECTION_MERGE: u16 = 247;
@@ -150,11 +105,9 @@ pub mod op {
     pub const IEQUAL: u16 = 170;
     /// A constant.
     pub const CONSTANT: u16 = 43;
-    /// A constant aggregate - a vector, or an array of them - from constant parts.
+    /// A constant aggregate (a vector, or an array of them) from constant parts.
     pub const CONSTANT_COMPOSITE: u16 = 44;
-    /// An aggregate built at run time from values, rather than from constants.
-    ///
-    /// What an export needs: four registers become the `vec4` a colour output takes.
+    /// An aggregate built at run time from values; an export builds its `vec4` colour this way.
     pub const COMPOSITE_CONSTRUCT: u16 = 80;
     /// A fixed-length array type.
     pub const TYPE_ARRAY: u16 = 28;
@@ -172,40 +125,36 @@ pub mod op {
     pub const DECORATE: u16 = 71;
     /// Annotates a structure member.
     pub const MEMBER_DECORATE: u16 = 72;
-    /// Declares how many vertices and primitives a mesh workgroup will actually emit.
+    /// Declares how many vertices and primitives a mesh workgroup will emit.
     ///
-    /// Two operands, both ids. Everything a mesh shader writes afterwards is within what it
-    /// declared here - which is the instruction a guest's `MSG_GS_ALLOC_REQ` corresponds to.
+    /// Two id operands. Everything the shader writes afterwards is within this; it corresponds to a
+    /// guest's `MSG_GS_ALLOC_REQ`.
     pub const SET_MESH_OUTPUTS_EXT: u16 = 5295;
     /// A texture: the element type, its dimensionality, and how it is used.
     pub const TYPE_IMAGE: u16 = 25;
     /// An image paired with the sampler that reads it.
     pub const TYPE_SAMPLED_IMAGE: u16 = 27;
-    /// Samples a texture, letting the implementation pick the level of detail from the
-    /// derivatives of the coordinate - which only a fragment stage has.
+    /// Samples a texture, with the implementation choosing the level of detail from the
+    /// coordinate's derivatives, which only a fragment stage has.
     pub const IMAGE_SAMPLE_IMPLICIT_LOD: u16 = 87;
     /// Samples a texture at a level of detail the instruction names.
     ///
-    /// The form a guest's `image_sample_lz` asks for, and the one available in a stage with
-    /// no derivatives. Carries a literal operand mask after the coordinate, then the level.
+    /// The form a guest's `image_sample_lz` asks for, and the one available without derivatives.
+    /// Carries a literal operand mask after the coordinate, then the level.
     pub const IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88;
     /// Reads one texel by its integer coordinate, with no sampler involved.
     ///
-    /// What a guest's `image_load` is: an image descriptor, a texel coordinate, and no
-    /// filtering, wrapping or level selection to speak of. Carries a literal operand mask like
-    /// the explicit sampling form, and Vulkan requires the level be named for a non-multisampled
-    /// image - so in practice it always carries one.
+    /// What a guest's `image_load` is. Carries a literal operand mask like the explicit sampling
+    /// form; Vulkan requires the level for a non-multisampled image, so it always carries one.
     pub const IMAGE_FETCH: u16 = 95;
     /// The image inside a sampled image, so it can be fetched from rather than sampled.
     ///
-    /// A fetch takes an image; a descriptor binds the image and its sampler together. This is
-    /// the one that gets from the second to the first, and it is why reading a texel needs no
-    /// binding of its own.
+    /// A descriptor binds image and sampler together and a fetch takes the image alone, so reading
+    /// a texel needs no binding of its own.
     pub const IMAGE: u16 = 100;
     /// Writes one texel of a storage image by its integer coordinate.
     ///
-    /// What a guest's `image_store` is. No result: an image write is an effect, like a store to
-    /// memory, so nothing names its outcome.
+    /// What a guest's `image_store` is. It has no result: an image write is an effect.
     pub const IMAGE_WRITE: u16 = 99;
     /// Builds a vector from components of two others, by index.
     pub const VECTOR_SHUFFLE: u16 = 79;
@@ -213,9 +162,8 @@ pub mod op {
     pub const LOAD: u16 = 61;
     /// Reinterprets a value's bits as another type of the same width.
     ///
-    /// **Not a conversion.** A register holds thirty-two bits and the instruction
-    /// decides how to read them, so translating float arithmetic means bitcasting -
-    /// converting would take the bit pattern of 1.0 and produce the float 1065353216.0.
+    /// Not a conversion: a register holds thirty-two bits and the instruction decides how to read
+    /// them, so float arithmetic on registers bitcasts.
     pub const BITCAST: u16 = 124;
     /// Integer addition, for address arithmetic.
     pub const IADD: u16 = 128;
@@ -235,20 +183,19 @@ pub mod op {
     pub const CONVERT_S_TO_F: u16 = 111;
     /// Converts an unsigned integer to the float of the same value.
     pub const CONVERT_U_TO_F: u16 = 112;
-    /// Converts an unsigned integer to another width - truncating to a narrower one, which is
-    /// how a packed field is narrowed to the sixteen bits a half occupies.
+    /// Converts an unsigned integer to another width; truncating narrows a packed field to the
+    /// sixteen bits a half occupies.
     pub const UCONVERT: u16 = 113;
     /// Converts a float to another width, widening a half to a single-precision float.
     pub const FCONVERT: u16 = 115;
     /// Chooses between two values without branching.
     ///
-    /// How a masked write is expressed when the alternative would be a merge block per
-    /// lane: keep the old value where the mask says the lane is inactive.
+    /// A masked write keeps the old value where the mask says the lane is inactive.
     pub const SELECT: u16 = 169;
     /// Unsigned right shift.
     pub const SHIFT_RIGHT_LOGICAL: u16 = 194;
-    /// Signed right shift - the sign bit fills the vacated high bits, which is what makes it
-    /// the tool for sign-extending a narrow signed field up to a full word.
+    /// Signed right shift: the sign bit fills the vacated high bits, which sign-extends a narrow
+    /// signed field to a full word.
     pub const SHIFT_RIGHT_ARITHMETIC: u16 = 195;
     /// Left shift.
     pub const SHIFT_LEFT_LOGICAL: u16 = 196;
@@ -258,15 +205,10 @@ pub mod op {
     pub const UGREATER_THAN: u16 = 172;
     /// Unsigned integer greater-than-or-equal.
     ///
-    /// Unsigned throughout the buffer bounds checks: a record count and a byte offset are
-    /// both magnitudes, and a signed comparison would call an offset above two billion
-    /// negative and therefore in range.
+    /// The buffer bounds checks are unsigned: a record count and a byte offset are magnitudes, and
+    /// a signed comparison would treat an offset above two billion as negative and in range.
     pub const UGREATER_THAN_EQUAL: u16 = 174;
-    /// Signed integer less-than.
-    ///
-    /// Distinct from the unsigned form for a reason that is invisible in most tests: the
-    /// two agree on every pair of non-negative values and disagree on every pair where
-    /// one is negative.
+    /// Signed integer less-than. Agrees with the unsigned form except where an operand is negative.
     pub const SLESS_THAN: u16 = 177;
     /// Signed integer greater-than.
     pub const SGREATER_THAN: u16 = 173;
@@ -290,10 +232,8 @@ pub mod op {
     pub const INOT_EQUAL: u16 = 171;
     /// Ordered float equality.
     ///
-    /// *Ordered* means the result is false when either operand is a NaN, which is what
-    /// the guest's comparison does. The unordered forms answer true instead, and the
-    /// difference is invisible until a shader produces a NaN - at which point every
-    /// branch taken on it inverts.
+    /// Ordered means false when either operand is a NaN, as the guest's comparison is. The
+    /// unordered forms answer true.
     pub const FORD_EQUAL: u16 = 180;
     /// Ordered float less-than.
     pub const FORD_LESS_THAN: u16 = 184;
@@ -301,10 +241,8 @@ pub mod op {
     pub const FORD_GREATER_THAN: u16 = 186;
     /// Whether a float is a NaN.
     ///
-    /// Preferred over comparing a value with itself. The self-comparison trick is exact
-    /// but relies on the comparison *not* being folded away, and a compiler entitled to
-    /// assume no NaNs is entitled to fold it. Asking the question directly cannot be
-    /// optimised into the wrong answer.
+    /// Preferred over comparing a value with itself, which a compiler assuming no NaNs may fold
+    /// away.
     pub const IS_NAN: u16 = 156;
     /// Whether a float is an infinity, of either sign.
     pub const IS_INF: u16 = 157;
@@ -318,9 +256,7 @@ pub mod op {
     pub const FORD_GREATER_THAN_EQUAL: u16 = 190;
     /// A composite whose every element is zero.
     ///
-    /// Needed for a private variable's initialiser: without one its contents are
-    /// undefined at entry, and a test asserting an untouched register reads zero would
-    /// be asserting on whatever the driver happened to leave there.
+    /// A private variable's initialiser: without one its contents are undefined at entry.
     pub const CONSTANT_NULL: u16 = 46;
     /// The boolean `true`.
     pub const CONSTANT_TRUE: u16 = 41;
@@ -328,9 +264,8 @@ pub mod op {
 
 /// The `SPV_KHR_float_controls` extension, by name.
 ///
-/// Requesting it is how a module states that its arithmetic depends on subnormals being
-/// preserved rather than flushed to zero. Without it an implementation may flush, and a
-/// shader whose correctness depends on the difference has no way to say so.
+/// How a module states that its arithmetic depends on subnormals being preserved rather than
+/// flushed to zero.
 pub const FLOAT_CONTROLS: &str = "SPV_KHR_float_controls";
 
 /// Storage classes.
@@ -339,36 +274,33 @@ pub mod storage {
     pub const STORAGE_BUFFER: u32 = 12;
     /// Read-only, supplied by the pipeline rather than by the shader.
     ///
-    /// Built-in variables live here. At this version an input variable must also be
-    /// listed in the entry point's interface, which is easy to forget and produces a
-    /// module that is rejected rather than one that misbehaves.
+    /// Built-in variables live here. An input variable must be listed in the entry point's
+    /// interface, or the module is rejected.
     pub const INPUT: u32 = 1;
     /// Written by the shader and read by the next stage, or by the framebuffer.
     ///
-    /// Where a vertex shader puts its position and a fragment shader its colour. Like
-    /// [`INPUT`], an output variable must appear in the entry point's interface.
+    /// Where a vertex shader puts its position and a fragment shader its colour. Like [`INPUT`], an
+    /// output variable must appear in the entry point's interface.
     pub const OUTPUT: u32 = 3;
     /// Read-only storage the pipeline binds: images, samplers, and the two together.
     ///
-    /// Not a buffer. A sampled image is bound through a descriptor and read with a sampling
-    /// instruction rather than loaded, which is why it has a storage class of its own.
+    /// A sampled image is bound through a descriptor and read by a sampling instruction rather than
+    /// loaded, so it has its own storage class.
     pub const UNIFORM_CONSTANT: u32 = 0;
-    /// A small block the host writes per draw with a command rather than a buffer (Khronos SPIR-V
-    /// specification, `StorageClass` 9). How a draw's own values reach its shaders - the user data a
-    /// guest hands each draw (worklog 826).
+    /// A small block the host writes per draw with a command rather than a buffer (SPIR-V
+    /// `StorageClass` 9). How the user data a guest hands each draw reaches its shaders.
     pub const PUSH_CONSTANT: u32 = 9;
     /// Module-scope storage private to one invocation.
     ///
-    /// Used here for a constant table a shader indexes: a composite constant cannot be
-    /// indexed dynamically, but a `Private` variable initialised with one can.
+    /// Used for a constant table a shader indexes: a composite constant cannot be indexed
+    /// dynamically, but a `Private` variable initialised with one can.
     pub const PRIVATE: u32 = 6;
 }
 
 /// The optional operands a sampling instruction may carry, as a mask.
 ///
-/// Measured from compiled output, like everything else here: a GLSL shader calling
-/// `textureLod` was compiled and disassembled, and its sampling instruction carries mask `2`
-/// followed by the level (worklog 566).
+/// Taken from compiled output: a GLSL `textureLod` call disassembles to mask `2` followed by the
+/// level.
 pub mod image_operands {
     /// A level of detail follows the mask.
     pub const LOD: u32 = 2;
@@ -386,20 +318,18 @@ pub mod decoration {
     pub const BUILT_IN: u32 = 11;
     /// Which interface slot an input or output occupies.
     ///
-    /// A fragment shader's colour output needs one: location zero is colour attachment
-    /// zero, which is what a render pass's first attachment is.
+    /// Location zero of a fragment shader's colour output is colour attachment zero, a render
+    /// pass's first attachment.
     pub const LOCATION: u32 = 30;
     /// No interpolation: every fragment of a primitive reads the provoking vertex's value.
     ///
-    /// What the guest's parameter-move instruction asks for. Reading the same attribute
-    /// without this decoration interpolates it, which is a different number everywhere except
-    /// at one vertex - so the decoration is the translation rather than a hint about it.
+    /// What the guest's parameter-move instruction asks for; without it the attribute is
+    /// interpolated, which differs everywhere except at one vertex.
     pub const FLAT: u32 = 14;
     /// Marks a storage image the module only ever writes.
     ///
-    /// Emitted because the reference compiler emits it for a write-only image, and because it
-    /// is true of everything this project stores to: a guest's `image_store` writes, and the
-    /// instruction that reads is a fetch through the sampled binding instead.
+    /// The reference compiler emits it for a write-only image, and it holds for everything stored
+    /// to here: a guest's `image_store` writes, and reads go through the sampled binding.
     pub const NON_READABLE: u32 = 25;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
@@ -413,25 +343,18 @@ pub mod capability {
     pub const SHADER: u32 = 1;
     /// Permits writing to a storage image whose format the module does not declare.
     ///
-    /// **The whole reason a store is translatable at all.** A storage image normally names its
-    /// format in the module, and a guest's format lives in a descriptor this project does not
-    /// decode - so declaring one would be inventing it. With this, the module says `Unknown` and
-    /// the format is whatever the pipeline bound, which is a fact rather than a guess (D692).
-    ///
-    /// The device has to offer `shaderStorageImageWriteWithoutFormat`, and a module declaring a
-    /// capability the device was not created with is refused rather than run - which is the
-    /// behaviour to want.
+    /// A guest's format lives in a descriptor that is not decoded, so the module says `Unknown` and
+    /// the format is whatever the pipeline bound (D692). A device without
+    /// `shaderStorageImageWriteWithoutFormat` refuses a module declaring this.
     pub const STORAGE_IMAGE_WRITE_WITHOUT_FORMAT: u32 = 56;
     /// Mesh and task stages, from `SPV_EXT_mesh_shader`.
     ///
-    /// It implies [`SHADER`], so a mesh module declares this alone - which is what the
-    /// reference compiler emits, and what the numbers here were read out of (worklog 557).
+    /// It implies [`SHADER`], so a mesh module declares this alone, as the reference compiler does.
     pub const MESH_SHADING_EXT: u32 = 5283;
     /// Permits a module to require that subnormal results are kept, not flushed.
     ///
-    /// From `SPV_KHR_float_controls`. A device that does not offer it cannot run a
-    /// module that declares it, which is the point: refusing to load beats loading and
-    /// silently computing zero where the guest expected a subnormal.
+    /// From `SPV_KHR_float_controls`. A device that does not offer it refuses the module rather
+    /// than computing zero where the guest expected a subnormal.
     pub const DENORM_PRESERVE: u32 = 4464;
     /// Invocations may ask about their subgroup at all.
     pub const GROUP_NON_UNIFORM: u32 = 61;
@@ -439,12 +362,11 @@ pub mod capability {
     pub const GROUP_NON_UNIFORM_BALLOT: u32 = 64;
     /// 16-bit floating-point types and arithmetic.
     ///
-    /// Needed to widen a packed half to a float through a real 16-bit float type, which is
-    /// the driver's own IEEE conversion rather than a hand-rolled one that has to get
-    /// subnormals and infinities right without a way to notice when it does not.
+    /// Widens a packed half through a real 16-bit float type, using the driver's IEEE conversion
+    /// for subnormals and infinities.
     pub const FLOAT16: u32 = 9;
-    /// 16-bit integer types, for narrowing a packed field to the width a half occupies before
-    /// it is read as one.
+    /// 16-bit integer types, for narrowing a packed field to the width of a half before it is read
+    /// as one.
     pub const INT16: u32 = 22;
 }
 
@@ -452,17 +374,15 @@ pub mod capability {
 pub mod scope {
     /// The subgroup: the invocations the hardware runs in lockstep.
     ///
-    /// A literal *identifier* in the encoding rather than a literal number, so it has to
-    /// be declared as a constant like any other value - which is easy to get wrong,
-    /// because it reads like a flag.
+    /// A scope is an identifier operand in the encoding, so it is declared as a constant like any
+    /// other value.
     pub const SUBGROUP: u32 = 3;
 }
 
 /// Built-in variables, by their decoration value.
 pub mod built_in {
-    /// This invocation's index within its subgroup.
-    ///
-    /// The guest's lane number, when one invocation is one lane.
+    /// This invocation's index within its subgroup: the guest's lane number when one invocation is
+    /// one lane.
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
     /// This workgroup's index within its dispatch (a `uvec3`): which draw of a batch a mesh
     /// workgroup is (D718).
@@ -477,8 +397,8 @@ pub mod built_in {
     pub const PRIMITIVE_TRIANGLE_INDICES_EXT: u32 = 5296;
     /// Which vertex of the draw this invocation is.
     ///
-    /// Signed, in Vulkan's environment - the variable is declared `int`, and declaring it
-    /// unsigned produces a module a driver rejects rather than one that misbehaves.
+    /// Signed in Vulkan's environment: the variable is declared `int`, and an unsigned declaration
+    /// is rejected.
     pub const VERTEX_INDEX: u32 = 42;
 }
 
@@ -504,9 +424,8 @@ pub mod execution {
     pub const VERTEX: u32 = 0;
     /// A mesh shader: one workgroup produces a small set of vertices and primitives.
     ///
-    /// The stage a guest's NGG primitive shader corresponds to (D688) - it declares how much
-    /// it will emit before emitting any of it, which is what the guest's geometry-engine
-    /// allocation request does.
+    /// The stage a guest's primitive shader corresponds to (D688): it declares how much it will
+    /// emit before emitting any of it, as the guest's allocation request does.
     pub const MESH_EXT: u32 = 5365;
 }
 
@@ -518,8 +437,7 @@ pub mod mode {
     pub const LOCAL_SIZE: u32 = 17;
     /// Subnormal results of the given width are preserved rather than flushed.
     ///
-    /// Takes the bit width as its one literal operand, so a module can ask for it at
-    /// 32 bits without committing to 16 or 64.
+    /// Takes the bit width as its literal operand, so a module can ask for 32 bits alone.
     pub const DENORM_PRESERVE: u32 = 4459;
     /// The most vertices a mesh shader's workgroup will emit. One literal operand.
     pub const OUTPUT_VERTICES: u32 = 26;
@@ -538,27 +456,15 @@ const HEADER_SLOTS: usize = 6;
 
 /// Which slot a header instruction belongs in.
 ///
-/// # Why the header is ordered by opcode and not by call order
-///
-/// D102 gave the builder sections so that correctness stopped being a property of the
-/// order calls happen to be written in. It solved that *between* sections and left it
-/// inside them, and the header is the section where that matters: the format requires
-/// every capability before the memory model, which must precede the entry point, which
-/// must precede the execution modes.
-///
-/// It went wrong exactly as the original fault did. A module that needed two extra
-/// capabilities declared them from the code that needed them, which runs after the entry
-/// point is written - so they were emitted after it. The driver accepted the module, which
-/// is worse than rejecting it: the layout was wrong and nothing said so.
-///
-/// So the opcode decides the slot, and a capability declared last is still emitted first.
-/// The same principle D102 states, applied one level down.
+/// The format requires every capability before the memory model, which precedes the entry point,
+/// which precedes the execution modes. The opcode decides the slot, so a capability declared after
+/// the entry point is still emitted first.
 const fn header_slot(opcode: u16) -> usize {
     match opcode {
         op::CAPABILITY => 0,
         op::EXTENSION => 1,
-        // Extended-instruction imports follow the extensions and precede the memory model,
-        // which is the order the logical layout requires (SPIR-V 2.4).
+        // Extended-instruction imports follow the extensions and precede the memory model, as the
+        // logical layout requires (SPIR-V 2.4).
         op::EXT_INST_IMPORT => 2,
         op::MEMORY_MODEL => 3,
         op::ENTRY_POINT => 4,
@@ -605,8 +511,8 @@ impl Builder {
 
     /// Declares a later version.
     ///
-    /// Raised only when something in the module needs it. A version higher than the
-    /// module requires narrows what will accept it and buys nothing.
+    /// Raised only when something in the module needs it; a higher version narrows what accepts the
+    /// module.
     #[must_use]
     pub const fn with_version(mut self, version: u32) -> Self {
         self.version = version;
@@ -627,20 +533,15 @@ impl Builder {
 
     /// Appends a decoration.
     ///
-    /// Its own section because the format requires **every** decoration to precede
-    /// **every** type, and a builder with one undifferentiated preamble makes that a
-    /// property of the order calls happen to be written in rather than a property of
-    /// the builder. It was got wrong the first time a second buffer was declared, and
-    /// the validator's answer - "Decorate is in an invalid layout section" - names the
-    /// symptom rather than the cause.
+    /// Its own section because the format requires every decoration to precede every type, which
+    /// the builder guarantees regardless of call order.
     pub fn annotate(&mut self, opcode: u16, operands: &[u32]) {
         encode(&mut self.annotations, opcode, operands);
     }
 
     /// Appends a type, constant or global variable.
     ///
-    /// Order within this section is preserved, because a type may name one declared
-    /// before it.
+    /// Order within this section is preserved, because a type may name one declared before it.
     pub fn declare(&mut self, opcode: u16, operands: &[u32]) {
         encode(&mut self.declarations, opcode, operands);
     }
@@ -653,10 +554,9 @@ impl Builder {
     /// Imports an extended instruction set by name (e.g. `"GLSL.std.450"`), returning the id
     /// [`Self::ext_inst`] refers to as its set.
     ///
-    /// Placed in the header at the slot the logical layout requires - after the extensions and
-    /// before the memory model - so a caller cannot put it in the wrong place. Call it once per
-    /// set per module and keep the id; a second import of the same set is a second set as far as
-    /// the validator is concerned.
+    /// Placed in the header slot the logical layout requires, after the extensions and before the
+    /// memory model. Call it once per set per module and keep the id; a second import is a second
+    /// set.
     pub fn ext_inst_import(&mut self, name: &str) -> Id {
         let set = self.id();
         let mut operands = vec![set.0];
@@ -678,12 +578,11 @@ impl Builder {
         result
     }
 
-    /// Encodes a string as the format does: NUL-terminated, packed four bytes to a
-    /// word, little-endian, and always with at least one terminating zero.
+    /// Encodes a string as the format does: NUL-terminated, packed four bytes to a word,
+    /// little-endian.
     ///
-    /// The padding rule is the part that is easy to get wrong: a string whose length is
-    /// an exact multiple of four still needs a whole extra word of zeros, because
-    /// without it there is no terminator.
+    /// A string whose length is a multiple of four still gets a whole extra word of zeros as its
+    /// terminator.
     pub fn literal_string(text: &str) -> Vec<u32> {
         let mut bytes = text.as_bytes().to_vec();
         bytes.push(0);
@@ -707,15 +606,11 @@ impl Builder {
         words.push(MAGIC);
         words.push(self.version);
         words.push(GENERATOR);
-        // The bound must exceed every identifier in use. Allocating them here is what
-        // makes that true by construction rather than by arithmetic somebody has to
-        // keep right.
+        // The bound must exceed every identifier in use, which allocation through the builder
+        // guarantees.
         words.push(self.next_id);
         words.push(0); // schema, reserved
-        // The order the format requires. Enforced here rather than by callers, so that
-        // declaring something new cannot put a decoration in the wrong place - and, within
-        // the header, so that declaring a capability late cannot put it after the entry
-        // point.
+        // The order the format requires, enforced here rather than by callers.
         for slot in &self.header {
             words.extend_from_slice(slot);
         }
@@ -725,44 +620,25 @@ impl Builder {
         words
     }
 
-    /// Checks the identifiers in the module refer to something.
+    /// Checks the identifiers in the module refer to something (D103).
     ///
-    /// # Why this exists
-    ///
-    /// An identifier used but never defined is not a malformed *instruction* - every
-    /// word is well-formed, the length is right, the opcode is real. It is a module
-    /// that reads perfectly and means nothing, and a driver handed one does not
-    /// diagnose it. It faults. Twice now that fault has presented as
-    /// `STATUS_ACCESS_VIOLATION` inside the graphics driver with no indication of
-    /// which identifier or which instruction was at fault, and both times the answer
-    /// came from `spirv-val` in a virtual machine rather than from anything here.
-    ///
-    /// The builder hands out every identifier, so it is the one place that can say
-    /// which were never given a meaning. Doing it here turns a driver crash into a
-    /// named error, which is the same trade [`finish`](Self::finish) already makes for
-    /// the identifier bound.
-    ///
-    /// # What it does not do
-    ///
-    /// It is not a validator and must not grow into one - `spirv-val` exists, is
-    /// authoritative, and disagreeing with it would be worse than silence. This checks
-    /// three properties a builder is uniquely placed to check, and nothing else.
+    /// An identifier used but never defined leaves every instruction well-formed, and a driver
+    /// handed such a module faults rather than diagnosing it. The builder hands out every
+    /// identifier, so it can name the undefined ones. This checks three properties a builder is
+    /// placed to check and nothing else; `spirv-val` is the validator.
     pub fn check(&self) -> Result<(), ModuleError> {
         let header: Vec<u32> = self.header.concat();
         let sections = [
             (header.as_slice(), true),
             (self.annotations.as_slice(), true),
             (self.declarations.as_slice(), false),
-            // Function bodies forward-reference by necessity: a branch names a label
-            // that appears later, and a loop header names its own merge block before
-            // either exists. Only the "defined somewhere" half of the check applies
-            // here - which is the half that caught the real bug, an identifier reserved
-            // and never given a meaning at all.
+            // Function bodies forward-reference by necessity (a branch names a later label, a loop
+            // header its merge block), so only the "defined somewhere" half applies.
             (self.functions.as_slice(), true),
         ];
 
-        // Every opcode first. An unknown one makes the rest of this check produce
-        // confident nonsense, so it is reported rather than skipped.
+        // Every opcode first: an unknown one makes the rest of the check unreliable, so it is
+        // reported.
         for (words, _) in sections {
             for (opcode, _) in Instructions::new(words) {
                 if Shape::of(opcode).is_none() {
@@ -791,10 +667,9 @@ impl Builder {
             }
         }
 
-        // Forward references are legal in the header and the annotations - an entry
-        // point names a function declared later, and a decoration names the variable it
-        // decorates. In the declarations and the function bodies they are not, so those
-        // two sections are checked in order as well as for existence.
+        // Forward references are legal in the header and the annotations: an entry point names a
+        // function declared later, and a decoration names the variable it decorates. The
+        // declarations and function bodies are also checked for order.
         let mut seen: Vec<bool> = vec![false; self.next_id as usize];
         for (words, may_forward_reference) in sections {
             for (opcode, operands) in Instructions::new(words) {
@@ -840,10 +715,8 @@ fn encode(into: &mut Vec<u32>, opcode: u16, operands: &[u32]) {
 
 /// Builds the smallest module that validates: a compute entry point that returns.
 ///
-/// Exists so the emitter can be exercised end to end before anything is translated. If
-/// this does not validate, nothing built on top of it will, and the fault is here
-/// rather than in whatever was being translated - which is a distinction worth being
-/// able to make cheaply.
+/// Exercises the emitter end to end without translation; if this fails to validate, the fault is in
+/// the emitter.
 pub fn minimal_compute_module(workgroup: [u32; 3]) -> Vec<u32> {
     let mut b = Builder::new();
 
@@ -886,13 +759,8 @@ pub fn minimal_compute_module(workgroup: [u32; 3]) -> Vec<u32> {
 
 /// Builds a compute shader that writes one known value into a storage buffer.
 ///
-/// The point of it is to prove a *runner*, not to be useful. A dispatch harness that
-/// has never executed a shader whose answer is known cannot be trusted with one whose
-/// answer is not - so this is the first thing it runs, and if the value does not come
-/// back the fault is in the harness rather than in anything translated.
-///
-/// One invocation, one write. Indexing by invocation identifier would need builtin
-/// inputs and prove nothing extra about the plumbing.
+/// Proves a dispatch runner: if the value does not come back, the fault is in the harness rather
+/// than in anything translated. One invocation, one write.
 pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
     let mut b = Builder::new().with_version(VERSION_1_3);
 
@@ -919,9 +787,8 @@ pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
     b.header(op::ENTRY_POINT, &entry);
     b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
 
-    // Decorations describe the memory layout a host must match. An array stride of
-    // four and a member offset of zero say the buffer is tightly packed from its
-    // start, which is what the runner allocates.
+    // An array stride of four and a member offset of zero declare the buffer tightly packed from
+    // its start, as the runner allocates it.
     b.annotate(op::DECORATE, &[array.0, decoration::ARRAY_STRIDE, 4]);
     b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
     b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
@@ -968,26 +835,11 @@ pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
 
 /// Builds a vertex shader that covers the whole framebuffer with one triangle.
 ///
-/// # Why this exists
-///
-/// The framebuffer oracle needs a draw, and a draw needs somewhere for its fragments to come
-/// from. This is the smallest vertex shader that produces them: three vertices at `(-1, -1)`,
-/// `(3, -1)` and `(-1, 3)` in clip space - a triangle twice the size of the viewport, so every
-/// pixel is inside it and the fragment shader runs for all of them (D550).
-///
-/// **Hand-written, not translated.** The oracle exists to check the translator, so a shader the
-/// translator produced could not check it. This is assembled instruction by instruction through
-/// the builder, which emits the words it is given.
-///
-/// # Why a constant table rather than arithmetic
-///
-/// The usual trick derives the position from `gl_VertexIndex` with shifts and a multiply-add.
-/// That is fewer declarations and more opcodes, and every opcode is somewhere this could be
-/// wrong. Three positions in an array indexed by the vertex index is one `OpAccessChain` and no
-/// arithmetic at all - and a wrong constant is visible by reading it, where a wrong shift is not.
-///
-/// A composite constant cannot be indexed dynamically, so the array lives in a `Private`
-/// variable initialised with one. That is what `Private` is here for.
+/// Three vertices at `(-1, -1)`, `(3, -1)` and `(-1, 3)` in clip space cover every pixel, so the
+/// fragment shader runs for all of them. Hand-written, because the oracle checks the translator
+/// (D549). The positions are a constant table indexed by the vertex index, one `OpAccessChain` and
+/// no arithmetic; a composite constant cannot be indexed dynamically, so the table is a `Private`
+/// variable initialised with one.
 #[must_use]
 pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
     let mut b = Builder::new();
@@ -1019,8 +871,8 @@ pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
     b.header(op::CAPABILITY, &[capability::SHADER]);
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
-    // Every input and output variable the entry point touches is named in its interface.
-    // Leaving one out produces a module a driver rejects rather than one that misbehaves.
+    // Every input and output variable the entry point touches is named in its interface, or a
+    // driver rejects the module.
     let mut entry = vec![execution::VERTEX, main.0];
     entry.extend(Builder::literal_string("main"));
     entry.extend([position.0, vertex_index.0]);
@@ -1110,18 +962,9 @@ pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
 
 /// Builds a fragment shader that writes one colour to attachment zero.
 ///
-/// # Why a constant and nothing else
-///
-/// The harness this feeds asks a single question - **does a fragment shader's output reach the
-/// attachment** - and anything the shader computed would make a failure ambiguous between the
-/// pipeline and the arithmetic. A constant makes the answer binary (D550).
-///
-/// Hand-written for the same reason as the vertex shader beside it: the oracle cannot be built
-/// out of the thing it checks.
-///
-/// The components are taken as bit patterns rather than floats so the caller's expectation and
-/// the shader's constant are written the same way once, and compared against a byte value the
-/// caller writes separately.
+/// It asks only whether a fragment shader's output reaches the attachment, so the colour is a
+/// constant and a failure cannot be the arithmetic's (D549). The components are bit patterns so the
+/// caller's expectation and the shader's constant are written the same way.
 #[must_use]
 pub fn constant_colour_fragment_module(colour: [f32; 4]) -> Vec<u32> {
     let mut b = Builder::new();
@@ -1174,10 +1017,8 @@ pub fn constant_colour_fragment_module(colour: [f32; 4]) -> Vec<u32> {
     b.finish()
 }
 
-/// Declares the per-corner varying values as one constant array.
-///
-/// The same shape as the position table beside it - three `vec4` constants gathered into an
-/// array - so the vertex shader indexes both the same way. Split out for length.
+/// Declares the per-corner varying values as one constant array, the same shape as the position
+/// table, so the vertex shader indexes both the same way.
 fn declare_varying_table(
     b: &mut Builder,
     f32_type: Id,
@@ -1209,45 +1050,24 @@ fn declare_varying_table(
 
 /// Builds a vertex shader that covers the framebuffer and hands each corner a value.
 ///
-/// # Why the oracle needs this
-///
-/// [`fullscreen_triangle_vertex_module`] emits a position and nothing else, so a fragment shader
-/// fed by it has no inputs. Interpolation - which is what `v_interp_p1_f32` and its pair
-/// compute, and the last capture-free family the translator refuses - cannot be checked against
-/// a pipeline that never interpolates anything (D554).
-///
-/// This is the same triangle with one addition: a `Location 0` output carrying `corners[i]` for
-/// vertex `i`. Everything else is unchanged, deliberately - the positions are the same constant
-/// table, so a failure here is about the varying rather than about the geometry.
-///
-/// Hand-assembled, like everything else in this oracle. The translator is what it exists to
-/// check.
-// A module is a linear sequence of declarations, and every identifier in it is a local the
-// next line needs. Splitting further means helpers taking six or eight ids apiece, which
-// moves the length rather than removing it and makes the order harder to read - the one
-// property that matters in a builder. The varying and position tables are already out.
+/// The [`fullscreen_triangle_vertex_module`] triangle plus a `Location 0` output carrying
+/// `corners[i]` for vertex `i`, so interpolation can be checked against a pipeline. The positions
+/// are the same table, so a failure is about the varying rather than the geometry.
+// A module is a linear sequence of declarations, each a local the next line needs; splitting it
+// further only moves the length into helpers taking many ids.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn interpolated_vertex_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     interpolating_vertex_module(&[corners])
 }
 
-/// The same triangle carrying **one varying per location**, in order from zero.
+/// The same triangle carrying one varying per location, in order from zero.
 ///
-/// # Why more than one
-///
-/// A guest's textured pixel shader reads two: a colour it modulates by and a coordinate it
-/// samples at. Fed by a vertex module that writes only the first, the second arrives undefined -
-/// so the shader samples one texel everywhere and the frame says nothing about whether the
-/// coordinate reached the sample. The console's own shader is exactly that shape (worklog 581).
-///
-/// Each entry is that varying's value at the three corners, and the location is its index.
-/// Everything else is [`interpolated_vertex_module`] unchanged - the same position table, so a
-/// failure is about the varyings rather than about the geometry.
-// A module is a linear sequence of declarations, and every identifier in it is a local the
-// next line needs. Splitting further means helpers taking six or eight ids apiece, which
-// moves the length rather than removing it and makes the order harder to read - the one
-// property that matters in a builder. The varying and position tables are already out.
+/// A guest's textured pixel shader reads two varyings, a colour and a coordinate; with only the
+/// first written, the second arrives undefined. Each entry is that varying's value at the three
+/// corners. Otherwise [`interpolated_vertex_module`] unchanged.
+// A module is a linear sequence of declarations, each a local the next line needs; splitting it
+// further only moves the length into helpers taking many ids.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn interpolating_vertex_module(varying_values: &[[[f32; 4]; 3]]) -> Vec<u32> {
@@ -1393,14 +1213,12 @@ pub fn interpolating_vertex_module(varying_values: &[[[f32; 4]; 3]]) -> Vec<u32>
 
 /// Which level of detail a sampling module asks its texture for.
 ///
-/// Not a detail to default: a guest's `image_sample_lz` names level zero *explicitly*, and a
-/// fragment stage is also free to let the implementation choose from the derivatives of the
-/// coordinate. The two are different instructions, and an oracle that only had one of them
-/// could not be what a translation is measured against.
+/// A guest's `image_sample_lz` names level zero explicitly, while a fragment stage may let the
+/// implementation choose from derivatives. They are different instructions, and the oracle offers
+/// both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lod {
-    /// Chosen by the implementation from the derivatives of the coordinate. Fragment stages
-    /// only - nothing else has derivatives.
+    /// Chosen by the implementation from the derivatives of the coordinate. Fragment stages only.
     Implicit,
     /// Level zero, named by the instruction. What a guest's `_lz` form asks for.
     Zero,
@@ -1408,29 +1226,12 @@ pub enum Lod {
 
 /// A fragment shader that samples a bound texture at the interpolated coordinate.
 ///
-/// # Why this exists
-///
-/// The oracle for the one thing a guest's textured pixel shader needs and this project has
-/// never had: an image, a sampler, and an instruction that reads one through the other. A
-/// guest's `image_sample_lz` takes its texture from a descriptor held in eight scalar registers
-/// and its sampler from four more; what those describe has to become *this* on the host, and
-/// building the host half first is the order that worked for the mesh stage (D549, worklog 557).
-///
-/// # Where the numbers came from
-///
-/// Measured, like every other encoding here. A GLSL fragment shader that samples a texture was
-/// compiled with the SDK's compiler and read back with `spirv-dis`: the image type and its seven
-/// operands, the sampled-image type, the storage class a descriptor-bound image lives in, and
-/// the sampling instruction are that module's own (worklog 566).
-///
-/// The sampled image sits at set 0, binding 2, because bindings 0 and 1 are the two storage
-/// buffers every translated module declares.
-///
-/// The level of detail is the implementation's, chosen from the derivatives of the coordinate.
-/// That is what a fragment stage can do and a guest's `_lz` form asks for level zero explicitly;
-/// which of the two a translation should emit is a question for the translation, not for this.
-// A module is a linear sequence of declarations, each needed by the line after it - the same
-// judgement every other builder here records.
+/// The host half of a guest's textured pixel shader, built before the translation targets it
+/// (D549). The image type and its seven operands, the sampled-image type, the storage class and the
+/// sampling instruction are taken from a GLSL sampling shader compiled and disassembled with
+/// `spirv-dis`. The sampled image is at set 0, binding 2, after the two storage buffers every
+/// translated module declares.
+// A module is a linear sequence of declarations, each needed by the line after it.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn sampling_fragment_module(lod: Lod) -> Vec<u32> {
@@ -1474,9 +1275,8 @@ pub fn sampling_fragment_module(lod: Lod) -> Vec<u32> {
     b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
     b.declare(op::TYPE_VECTOR, &[vec2.0, f32_type.0, 2]);
-    // Element type, then: two-dimensional, not a depth texture, not an array, not
-    // multi-sampled, used with a sampler, and of no declared format - which is what a
-    // descriptor-bound sampled image is.
+    // Element type, then: two-dimensional, not depth, not arrayed, single-sampled, used with a
+    // sampler, and no declared format, which is a descriptor-bound sampled image.
     b.declare(op::TYPE_IMAGE, &[image.0, f32_type.0, 1, 0, 0, 0, 1, 0]);
     b.declare(op::TYPE_SAMPLED_IMAGE, &[sampled_image.0, image.0]);
     b.declare(
@@ -1492,9 +1292,8 @@ pub fn sampling_fragment_module(lod: Lod) -> Vec<u32> {
     b.declare(op::TYPE_POINTER, &[output_vec4.0, storage::OUTPUT, vec4.0]);
     b.declare(op::VARIABLE, &[output_vec4.0, output.0, storage::OUTPUT]);
 
-    // The level an explicit sample asks for. Declared whichever form this module emits: a
-    // constant nothing references is dead weight in a module, not an error, and declaring it
-    // under a branch would put one in the single place a builder should read straight down.
+    // The level an explicit sample asks for, declared whichever form this module emits: an
+    // unreferenced constant is harmless and keeps the builder branch-free.
     b.declare(op::CONSTANT, &[f32_type.0, zero.0, 0.0f32.to_bits()]);
 
     b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
@@ -1516,8 +1315,7 @@ pub fn sampling_fragment_module(lod: Lod) -> Vec<u32> {
             op::IMAGE_SAMPLE_IMPLICIT_LOD,
             &[vec4.0, sampled.0, bound.0, coordinate.0],
         ),
-        // The mask says a level follows, and the level is the constant zero. Two extra
-        // operands, which is the whole difference between the two instructions.
+        // The mask says a level follows, and the level is the constant zero.
         Lod::Zero => b.function(
             op::IMAGE_SAMPLE_EXPLICIT_LOD,
             &[
@@ -1541,25 +1339,23 @@ pub fn sampling_fragment_module(lod: Lod) -> Vec<u32> {
 
 /// Which binding a sampled image is bound at.
 ///
-/// Two, because zero and one are the storage buffers every translated module declares - the
-/// observation window and guest memory - and a pipeline binds one set.
+/// Two, because zero and one are the observation window and guest memory, which every translated
+/// module declares, and a pipeline binds one set.
 pub const TEXTURE_BINDING: u32 = 2;
 
 /// Which binding a storage image is bound at.
 ///
-/// Three, after the sampled image. They are two bindings rather than one because they are two
-/// different things: a sampled image is read through a sampler and cannot be written, and a
-/// storage image is written and declares no sampler. A guest's `image_store` names an image
-/// descriptor exactly as `image_load` does, and only the host cares that the two are separate.
+/// Three, after the sampled image. Separate bindings because a sampled image is read through a
+/// sampler and cannot be written, and a storage image is written and has no sampler.
 pub const STORAGE_IMAGE_BINDING: u32 = 3;
 
-/// Which binding a pixel shader's second sampled image is bound at: four, after the storage image
-/// (worklog 840). The open-toolchain GL context's second texture unit samples one.
+/// Which binding a pixel shader's second sampled image is bound at: four, after the storage image.
+/// The open-toolchain GL context's second texture unit samples one.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
 
 /// Which binding a mesh module reads its per-draw user data from: five (D718). One host dispatch
-/// carries a run of guest draws, one workgroup each, and each workgroup reads its own draw's words -
-/// [`DRAW_DATA_STRIDE_WORDS`] of them at `workgroup * stride`.
+/// carries a run of guest draws, one workgroup each, and each workgroup reads
+/// [`DRAW_DATA_STRIDE_WORDS`] words at `workgroup * stride`.
 pub const DRAW_DATA_BINDING: u32 = 5;
 
 /// Words of user data each draw has in the draw-data buffer: one stage's share of the block.
@@ -1570,25 +1366,11 @@ pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 
 /// A fragment shader that writes one texel of a storage image, and a colour.
 ///
-/// # Why both
-///
-/// A fragment shader that only stored would be a draw with nothing to look at, and a frame that
-/// came back as the clear would be indistinguishable from a draw that never ran. Writing the
-/// colour too means the attachment says "the shader ran" and the image says "and this is what it
-/// stored", which is the same pair of observations the guest-memory window gives (worklog 570).
-///
-/// # Where the numbers came from
-///
-/// Measured. A GLSL fragment shader calling `imageStore` through a format-less `writeonly
-/// image2D` was compiled and disassembled: the write instruction, the capability a format-less
-/// storage image requires, the `NonReadable` decoration, and the image type with its `Sampled`
-/// operand at **2** rather than 1 - which is the whole difference between a storage image and a
-/// sampled one (worklog 575).
-///
-/// The texel and its coordinate are the caller's, so a test can name what it expects to find
-/// where, rather than deriving it from a varying and asserting on arithmetic this module did.
-// A module is a linear sequence of declarations, each needed by the line after it - the same
-// judgement every other builder here records.
+/// The colour shows the shader ran; the image shows what it stored. The write instruction, the
+/// capability a format-less storage image needs, the `NonReadable` decoration and the image type
+/// with `Sampled` at 2 are taken from a compiled GLSL `imageStore` through a format-less `writeonly
+/// image2D`. The texel and coordinate are the caller's, so a test names what it expects where.
+// A module is a linear sequence of declarations, each needed by the line after it.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn storing_fragment_module(at: [u32; 2], texel: [f32; 4]) -> Vec<u32> {
@@ -1639,9 +1421,9 @@ pub fn storing_fragment_module(at: [u32; 2], texel: [f32; 4]) -> Vec<u32> {
     b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
     b.declare(op::TYPE_VECTOR, &[uvec2.0, u32_type.0, 2]);
-    // The same seven operands a sampled image takes, with **`Sampled` at 2**: written to
-    // through an image instruction rather than read through a sampler. The format stays
-    // `Unknown`, which is what the capability above buys.
+    // The seven operands a sampled image takes, with `Sampled` at 2 (written through an image
+    // instruction, not read through a sampler) and the format `Unknown`, which the capability above
+    // permits.
     b.declare(op::TYPE_IMAGE, &[image.0, f32_type.0, 1, 0, 0, 0, 2, 0]);
     b.declare(
         op::TYPE_POINTER,
@@ -1684,9 +1466,8 @@ pub fn storing_fragment_module(at: [u32; 2], texel: [f32; 4]) -> Vec<u32> {
 
 /// Builds a fragment shader that writes its interpolated input straight out.
 ///
-/// The counterpart to [`interpolated_vertex_module`]: a `Location 0` input, read and stored to a
-/// `Location 0` output with nothing in between. What lands in the attachment is therefore
-/// exactly what the pipeline interpolated, which is the thing being checked.
+/// The counterpart to [`interpolated_vertex_module`]: a `Location 0` input stored to a `Location 0`
+/// output, so the attachment holds exactly what the pipeline interpolated.
 #[must_use]
 pub fn passthrough_fragment_module() -> Vec<u32> {
     let mut b = Builder::new();
@@ -1712,8 +1493,8 @@ pub fn passthrough_fragment_module() -> Vec<u32> {
     b.header(op::ENTRY_POINT, &entry);
     b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
 
-    // The input's location must match the vertex shader's output location, which is how a
-    // varying is paired across the two stages.
+    // The input's location matches the vertex shader's output location, which pairs a varying
+    // across the two stages.
     b.annotate(op::DECORATE, &[input.0, decoration::LOCATION, 0]);
     b.annotate(op::DECORATE, &[output.0, decoration::LOCATION, 0]);
 
@@ -1743,12 +1524,8 @@ pub fn passthrough_fragment_module() -> Vec<u32> {
 pub enum ModuleError {
     /// An opcode was emitted that the shape table does not describe.
     ///
-    /// Checked before anything else, because it makes every other answer unreliable: an
-    /// instruction whose shape is unknown is skipped, so the identifier it defines is
-    /// never recorded, and the next instruction to use that identifier is reported as
-    /// referring to nothing. That is a **false** failure naming the wrong instruction,
-    /// and it cost a confusing detour the first time a new opcode was added without its
-    /// row.
+    /// Checked first: an instruction of unknown shape is skipped, so its result is never recorded
+    /// and a later use would be reported against the wrong instruction.
     UnknownOpcode {
         /// The opcode.
         opcode: u16,
@@ -1786,11 +1563,7 @@ pub enum ModuleError {
 impl fmt::Display for ModuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            // The eighteen spaces that used to sit before "checked" are what D184 is about:
-            // this message was written as a line-continued literal, `cargo fmt` collapsed it,
-            // and the source indentation was baked into what a reader sees. It had shipped
-            // that way. Repaired here rather than left, because the whole point of converting
-            // the rest of the tree is that a message reads as the sentence it was written as.
+            // One literal, so the message carries no source indentation.
             Self::UnknownOpcode { opcode } => write!(
                 f,
                 concat!(
@@ -1845,9 +1618,8 @@ impl<'a> Iterator for Instructions<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let head = *self.words.get(self.at)?;
         let length = (head >> 16) as usize;
-        // A zero length would not advance, so the walk would never end. It cannot
-        // happen - `encode` always writes at least the head word - but a loop that
-        // hangs on malformed input is a worse failure than one that stops.
+        // A zero length would never advance the walk; `encode` always writes the head word, but a
+        // loop that hangs on malformed input is worse than one that stops.
         let length = length.max(1);
         let end = (self.at + length).min(self.words.len());
         let operands = &self.words[self.at + 1..end];
@@ -1858,10 +1630,8 @@ impl<'a> Iterator for Instructions<'a> {
 
 /// Where an instruction keeps its result identifier and which operands name others.
 ///
-/// Data rather than a match arm per opcode, and deliberately minimal: only the opcodes
-/// this crate emits appear, and an opcode absent from the table is skipped rather than
-/// guessed at. Guessing would mean treating a literal as an identifier, which produces
-/// a confident complaint about a module that is fine - worse than not checking.
+/// Only the opcodes this crate emits appear; an absent opcode is skipped rather than guessed at,
+/// because reading a literal as an identifier would reject a valid module.
 struct Shape {
     /// Operand index holding the result identifier.
     result: Option<usize>,
@@ -1918,9 +1688,8 @@ type ShapeEntry = (
 
 /// How to walk the operands from a shape's `rest` index.
 ///
-/// `Every` is the usual case. `Alternating` exists for `OpSwitch`, whose tail is
-/// literal-then-label repeated - reading it as all identifiers would report the case
-/// values as undefined identifiers and reject a module that is fine.
+/// `Every` is the usual case. `Alternating` is for `OpSwitch`, whose tail is literal-then-label
+/// repeated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestStride {
     Every,
@@ -1929,29 +1698,22 @@ enum RestStride {
 
 /// Where each opcode keeps its identifiers.
 ///
-/// `(opcode, result operand index, operand indices naming existing identifiers, index
-/// from which every remaining operand is an identifier)`.
-///
-/// A table rather than a match, because that is what it is: the same four facts about
-/// each opcode, with nothing computed. An opcode absent from it is skipped rather than
-/// guessed at - guessing would mean reading a literal as an identifier and complaining
-/// confidently about a module that is fine, which is worse than not checking.
+/// `(opcode, result operand index, operand indices naming existing identifiers, index from which
+/// every remaining operand is an identifier)`. An opcode absent from the table is skipped rather
+/// than guessed at.
 static SHAPES: &[ShapeEntry] = &[
     // Types declare their identifier first. The trailing words of an integer or float
     // type are widths, so `rest` is not simply always set.
     (op::TYPE_VOID, Some(0), &[], None, RestStride::Every),
     (op::TYPE_BOOL, Some(0), &[], None, RestStride::Every),
     (op::TYPE_INT, Some(0), &[], None, RestStride::Every),
-    // Result id, then the component type and a literal count.
-    // The component type is an identifier; the count is a literal. The result is
-    // named by `Some(0)` and must not also be listed as a use of itself.
+    // Result id, then the component type (an identifier) and a literal count. The result is named
+    // by `Some(0)` and is not also a use of itself.
     (op::TYPE_VECTOR, Some(0), &[1], None, RestStride::Every),
-    // Imports an extended set: result id first, then a literal name string - no identifiers,
-    // so `rest` is None.
+    // Imports an extended set: result id, then a literal name string, so no identifiers.
     (op::EXT_INST_IMPORT, Some(0), &[], None, RestStride::Every),
-    // Result type, result, set, a literal instruction number, then operand identifiers. The
-    // number at index 3 is a literal, so `rest` starts at 4 and index 3 is named by neither
-    // `fixed` nor `rest` - reading it as an identifier would reject a valid module.
+    // Result type, result, set, a literal instruction number, then operand identifiers. Index 3 is
+    // the literal, named by neither `fixed` nor `rest`.
     (op::EXT_INST, Some(1), &[0, 2], Some(4), RestStride::Every),
     (op::CONSTANT_TRUE, Some(1), &[0], None, RestStride::Every),
     // Result type, result, composite, then literal indices.
@@ -1990,8 +1752,7 @@ static SHAPES: &[ShapeEntry] = &[
         Some(2),
         RestStride::Every,
     ),
-    // Result type, result, then every constituent - the same shape as the constant form,
-    // and every constituent is an identifier that must already exist.
+    // Result type, result, then every constituent, each an identifier that must exist.
     (
         op::COMPOSITE_CONSTRUCT,
         Some(1),
@@ -2004,9 +1765,7 @@ static SHAPES: &[ShapeEntry] = &[
     (op::VARIABLE, Some(1), &[0], Some(3), RestStride::Every),
     // Operand two is a function control mask, operand three the function type.
     (op::FUNCTION, Some(1), &[0, 3], None, RestStride::Every),
-    // Every index after the base is an identifier rather than a literal - the detail
-    // that made a two-index access chain look like a one-index one, and cost a driver
-    // fault to find.
+    // Every index after the base is an identifier, not a literal.
     (op::ACCESS_CHAIN, Some(1), &[0], Some(2), RestStride::Every),
     (op::LOAD, Some(1), &[0, 2], None, RestStride::Every),
     (op::BITCAST, Some(1), &[0, 2], None, RestStride::Every),
@@ -2033,9 +1792,8 @@ static SHAPES: &[ShapeEntry] = &[
         Some(0),
         RestStride::Every,
     ),
-    // A texture type: result id, the element type, then six literals saying what kind of
-    // texture it is. Only operand one is an identifier - reading the dimensionality or the
-    // format as one would reject a module that is fine.
+    // A texture type: result id, the element type, then six literals. Only operand one is an
+    // identifier.
     (op::TYPE_IMAGE, Some(0), &[1], None, RestStride::Every),
     // An image paired with a sampler: result id and the image type it wraps.
     (
@@ -2045,10 +1803,9 @@ static SHAPES: &[ShapeEntry] = &[
         None,
         RestStride::Every,
     ),
-    // Result type, result, the sampled image, and the coordinate. A tail of image operands
-    // may follow - a literal mask and then identifiers - and this crate emits none, so it is
-    // named by neither `fixed` nor `rest`. **Emitting one means extending this row**: the
-    // alternative is reading the mask as an identifier and rejecting a valid module.
+    // Result type, result, the sampled image, and the coordinate. This crate emits no trailing
+    // image operands for this opcode; emitting one needs this row extended, or its mask would be
+    // read as an identifier.
     (
         op::IMAGE_SAMPLE_IMPLICIT_LOD,
         Some(1),
@@ -2056,9 +1813,8 @@ static SHAPES: &[ShapeEntry] = &[
         None,
         RestStride::Every,
     ),
-    // The same, plus a literal operand mask at index four and the identifiers it announces
-    // from index five - so the mask is named by neither `fixed` nor `rest`, and the level
-    // that follows it is checked.
+    // The same, plus a literal operand mask at index four and the identifiers it announces from
+    // index five, so the level is checked and the mask is not.
     (
         op::IMAGE_SAMPLE_EXPLICIT_LOD,
         Some(1),
@@ -2066,8 +1822,8 @@ static SHAPES: &[ShapeEntry] = &[
         Some(5),
         RestStride::Every,
     ),
-    // The same shape as the explicit sampling form, and for the same reason: a literal mask at
-    // index four, and the level it announces from index five.
+    // The same shape as the explicit sampling form: a literal mask at index four, and the level
+    // from index five.
     (
         op::IMAGE_FETCH,
         Some(1),
@@ -2077,11 +1833,10 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     // Result type, result, and the sampled image the image is taken out of.
     (op::IMAGE, Some(1), &[0, 2], None, RestStride::Every),
-    // No result at all - an image write is an effect. The image, the coordinate and the texel
-    // are all identifiers, so the whole instruction is `rest` from zero.
+    // No result: an image write is an effect. The image, coordinate and texel are all identifiers,
+    // so the whole instruction is `rest` from zero.
     (op::IMAGE_WRITE, None, &[], Some(0), RestStride::Every),
-    // Result type, result, the two vectors, then literal component indices - which are
-    // positions in a vector, not identifiers.
+    // Result type, result, the two vectors, then literal component indices.
     (
         op::VECTOR_SHUFFLE,
         Some(1),
@@ -2252,31 +2007,16 @@ static SHAPES: &[ShapeEntry] = &[
 
 /// A mesh shader that emits one triangle covering the viewport, with a colour per corner.
 ///
-/// # Why this exists
-///
-/// The oracle for the stage a guest's NGG primitive shader translates to (D688). Everything
-/// about that correspondence is written down and nothing had been run: a mesh shader declares
-/// how many vertices and primitives its workgroup will emit, writes the primitive's indices,
-/// and writes per-vertex outputs - which is `MSG_GS_ALLOC_REQ`, `exp prim` and
-/// `exp pos`/`exp param`, in that order. This is the host half of it, hand-assembled, so the
-/// translated half has something to be compared against rather than only reasoned about.
-///
-/// # Where the numbers came from
-///
-/// Measured, not transcribed. A reference mesh shader was compiled with the SDK's GLSL
-/// compiler and read back with `spirv-dis`, and every mesh-specific value here - the
-/// capability, the execution model, the three execution modes, the index built-in and the
-/// opcode that declares the counts - was taken out of that module's words (worklog 557). The
-/// structure follows it too: the per-vertex outputs are an array of a `Block` struct whose
-/// first member carries `Position`, because that is what the stage requires and not a choice.
-///
-/// The geometry is the same triangle every other oracle here draws - one that covers the
-/// viewport from three corners - so a frame from this is comparable with a frame from the
-/// vertex-shader path pixel for pixel.
+/// The host oracle for the stage a guest's primitive shader translates to (D688): it declares its
+/// counts, writes the primitive's indices, then writes per-vertex outputs, matching
+/// `MSG_GS_ALLOC_REQ`, `exp prim` and `exp pos`/`exp param`. Every mesh-specific value (capability,
+/// execution model, execution modes, index built-in, count opcode) is taken from a reference mesh
+/// shader compiled with the SDK's GLSL compiler and read with `spirv-dis`. The per-vertex outputs
+/// are an array of a `Block` struct whose first member carries `Position`, as the stage requires.
+/// The triangle is the one every other oracle here draws, so frames compare pixel for pixel.
 #[must_use]
 pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
-    // 1.4, because `SPV_EXT_mesh_shader` requires it - said by `spirv-val` on the first
-    // attempt, which is the kind of thing this project would rather be told than assume.
+    // 1.4, because `SPV_EXT_mesh_shader` requires it.
     let mut b = Builder::new().with_version(VERSION_1_4);
 
     let ids = MeshIds::new(&mut b);
@@ -2318,8 +2058,7 @@ pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
     b.function(op::LABEL, &[entry_block.0]);
 
-    // **Before anything is written**: three vertices, one primitive. A mesh shader that wrote
-    // outputs it had not declared would be writing past what the stage allocated for it.
+    // Declared before anything is written: three vertices, one primitive.
     b.function(op::SET_MESH_OUTPUTS_EXT, &[three.0, one.0]);
 
     let slots = [zero, one, two];
@@ -2449,7 +2188,7 @@ fn emit_mesh_header(b: &mut Builder, ids: &MeshIds) {
         main,
         ..
     } = *ids;
-    // `MeshShadingEXT` implies `Shader`, so it is declared alone - as the reference does.
+    // `MeshShadingEXT` implies `Shader`, so it is declared alone, as the reference does.
     b.header(op::CAPABILITY, &[capability::MESH_SHADING_EXT]);
     let mut extension = Vec::new();
     extension.extend(Builder::literal_string("SPV_EXT_mesh_shader"));
@@ -2471,8 +2210,8 @@ fn emit_mesh_header(b: &mut Builder, ids: &MeshIds) {
     );
     b.header(op::EXECUTION_MODE, &[main.0, mode::OUTPUT_TRIANGLES_EXT]);
 
-    // The per-vertex outputs are a block, and the position is a member of it. A bare array of
-    // `vec4` decorated `Position` is what a vertex shader has and is not what this stage takes.
+    // The per-vertex outputs are a block with the position as a member; a bare `vec4` array
+    // decorated `Position` is the vertex-stage shape.
     b.annotate(op::DECORATE, &[per_vertex.0, decoration::BLOCK]);
     b.annotate(
         op::MEMBER_DECORATE,
@@ -2598,6 +2337,7 @@ mod tests {
         storage,
     };
 
+    /// A module starts with the magic word, and its header carries a bound.
     #[test]
     fn a_module_begins_with_the_magic_word_and_a_bound() {
         let words = minimal_compute_module([64, 1, 1]);
@@ -2606,11 +2346,10 @@ mod tests {
         assert!(words.len() > 5, "a header alone is not a module");
     }
 
+    /// The header's bound exceeds every identifier the builder handed out.
     #[test]
     fn the_bound_exceeds_every_identifier_handed_out() {
-        // A bound at or below an identifier in use makes the module malformed for a
-        // reason invisible to anyone reading it. Allocating identifiers through the
-        // builder is what makes this hold by construction.
+        // A bound at or below an identifier in use makes the module malformed.
         let mut b = Builder::new();
         let first = b.id();
         let last = b.id();
@@ -2619,10 +2358,10 @@ mod tests {
         assert_eq!(first.0, 1, "identifier zero is reserved by the format");
     }
 
+    /// An instruction's first word packs its length above its opcode.
     #[test]
     fn an_instruction_word_packs_its_length_and_opcode() {
-        // Getting this backwards produces a module the validator rejects with an
-        // opcode nobody recognises, which reads as a wrong opcode rather than a wrong
+        // Getting this backwards makes the validator report an unknown opcode rather than a bad
         // header.
         let mut b = Builder::new();
         b.header(op::CAPABILITY, &[1]);
@@ -2649,12 +2388,11 @@ mod tests {
         None
     }
 
+    /// An extended-set import precedes the memory model whatever the call order (SPIR-V 2.4).
     #[test]
     fn an_extended_set_is_imported_before_the_memory_model_whatever_the_call_order() {
-        // OpExtInstImport must precede OpMemoryModel in the logical layout (SPIR-V 2.4). The
-        // builder places it by slot, so the import lands ahead of the memory model even though
-        // this asks for them the other way round - and spirv-val rejects the reverse with a
-        // layout error that names neither instruction.
+        // The builder places it by slot, so the import lands ahead of the memory model although
+        // this asks for them the other way round.
         let mut b = Builder::new();
         b.header(op::CAPABILITY, &[super::capability::SHADER]);
         b.header(
@@ -2676,11 +2414,12 @@ mod tests {
         b.check().expect("identifiers resolve");
     }
 
+    /// An `OpExtInst` carries result type, result, set, instruction number and operands in that
+    /// order.
     #[test]
     fn an_ext_inst_carries_result_type_result_set_instruction_and_operands_in_order() {
-        // The word order OpExtInst requires: result type, result, set, the instruction number
-        // as a literal, then the operand ids. A transposition here validates as a different
-        // instruction or a wrong-typed one, so it is pinned rather than trusted.
+        // A transposition validates as a different or wrong-typed instruction, so the order is
+        // pinned.
         let mut b = Builder::new();
         let float = b.id();
         let value = b.id();
@@ -2697,22 +2436,24 @@ mod tests {
         );
     }
 
+    /// A string whose length is a multiple of four still gets a terminating word.
     #[test]
     fn a_string_is_terminated_even_when_its_length_is_a_multiple_of_four() {
-        // The rule that is easy to miss: four characters do not fit in one word,
-        // because the terminator still needs somewhere to go.
+        // Four characters fill a word, so the terminator needs a second.
         assert_eq!(Builder::literal_string("main").len(), 2);
         assert_eq!(Builder::literal_string("abc").len(), 1);
         let words = Builder::literal_string("main");
         assert_eq!(words[1], 0, "the whole trailing word is the terminator");
     }
 
+    /// A string packs four bytes to a word, little-endian.
     #[test]
     fn a_string_packs_four_bytes_to_a_word_little_endian() {
         let words = Builder::literal_string("abc");
         assert_eq!(words[0], u32::from_le_bytes([b'a', b'b', b'c', 0]));
     }
 
+    /// The byte form of a module is its word form, little-endian.
     #[test]
     fn bytes_and_words_describe_the_same_module() {
         let mut b = Builder::new();
@@ -2723,13 +2464,11 @@ mod tests {
         assert_eq!(&bytes[..4], &MAGIC.to_le_bytes());
     }
 
+    /// `check` names an identifier that is used but never defined.
     #[test]
     fn an_array_whose_length_was_never_declared_is_named() {
-        // The bug this check exists for, reduced. An identifier was reserved for the
-        // array's length and the `OpConstant` defining it was never emitted, so the
-        // array type referred to nothing. Every instruction is well-formed; the module
-        // is meaningless. The driver did not say so - it faulted, twice, and the
-        // diagnosis came from `spirv-val` in a virtual machine both times.
+        // An identifier reserved for the array's length whose `OpConstant` is never emitted: every
+        // instruction is well-formed and the module is meaningless, and a driver faults on it.
         let mut b = Builder::new();
         let u32_type = b.id();
         let length = b.id();
@@ -2747,14 +2486,11 @@ mod tests {
         );
     }
 
+    /// A capability declared after the entry point is still emitted before it.
     #[test]
     fn a_capability_declared_late_is_still_emitted_first() {
-        // The format wants every capability before the memory model, which precedes the
-        // entry point. D102 made *sections* independent of call order and left the inside
-        // of a section dependent on it - and a module that declared two extra capabilities
-        // from the code needing them emitted them after its entry point. The driver
-        // accepted it, which is worse than a rejection: the layout was wrong and nothing
-        // said so.
+        // The format wants every capability before the memory model, which precedes the entry
+        // point.
         let mut b = Builder::new();
         b.header(op::CAPABILITY, &[1]);
         b.header(op::MEMORY_MODEL, &[0, 1]);
@@ -2784,12 +2520,11 @@ mod tests {
         );
     }
 
+    /// A function body may branch to a label defined later.
     #[test]
     fn a_function_body_may_name_a_label_that_appears_later() {
-        // The exemption D111 records, and the reason it had to exist. A forward branch
-        // names a block that does not exist yet, and a loop header names its own merge
-        // before either block is written. Both are legal and unavoidable, so the ordering
-        // half of the check cannot apply inside a function.
+        // A forward branch names a block not yet written, and a loop header names its own merge
+        // first, so the ordering half of the check does not apply inside a function (D103).
         let mut b = Builder::new();
         let void = b.id();
         let fn_type = b.id();
@@ -2814,15 +2549,11 @@ mod tests {
         );
     }
 
+    /// A function body may not name an identifier defined nowhere.
     #[test]
     fn a_function_body_may_not_name_something_defined_nowhere() {
-        // The half D111 *kept*, in the section where it was narrowed. Relaxing the
-        // ordering rule inside a function is forced; relaxing it into "anything goes"
-        // would give up the thing that caught the fault this check was written for - an
-        // identifier reserved and never given a meaning, which crashed a driver.
-        //
-        // That fault lived in the declarations section and there are tests for it there.
-        // There were none here, so what the narrowing left behind was never checked.
+        // Relaxing ordering inside a function does not relax existence: an identifier reserved and
+        // never given a meaning is still reported there.
         let mut b = Builder::new();
         let void = b.id();
         let fn_type = b.id();
@@ -2847,10 +2578,10 @@ mod tests {
         );
     }
 
+    /// A type used before it is declared is named.
     #[test]
     fn a_type_used_before_it_is_declared_is_named() {
-        // Legal to write, illegal to run: the declarations section is ordered, so a
-        // type may only name one already declared.
+        // The declarations section is ordered, so a type may only name one already declared.
         let mut b = Builder::new();
         let u32_type = b.id();
         let length = b.id();
@@ -2868,12 +2599,11 @@ mod tests {
         );
     }
 
+    /// A decoration may name a variable declared after it.
     #[test]
     fn a_decoration_may_name_a_variable_declared_later() {
-        // The other side of the ordering rule, and the reason it is not applied to
-        // every section: a decoration necessarily precedes what it decorates, and an
-        // entry point names a function declared after it. Checking those in order
-        // would reject every well-formed module this crate emits.
+        // A decoration necessarily precedes what it decorates, and an entry point names a function
+        // declared after it, so those sections are not checked for order.
         let mut b = Builder::new();
         let u32_type = b.id();
         let pointer = b.id();
@@ -2892,6 +2622,7 @@ mod tests {
         assert_eq!(b.check(), Ok(()));
     }
 
+    /// Two instructions cannot claim the same result identifier.
     #[test]
     fn two_instructions_cannot_claim_the_same_result() {
         let mut b = Builder::new();
@@ -2908,12 +2639,11 @@ mod tests {
         );
     }
 
+    /// An access chain's indices count as identifier uses.
     #[test]
     fn an_access_chain_index_counts_as_an_identifier() {
-        // The indices of an access chain are identifiers, not literals. Reading them
-        // as literals is what made a two-index chain look like a one-index one, which
-        // was the *previous* driver fault. A check that skipped them would have missed
-        // it, so it is worth a test of its own.
+        // The indices of an access chain are identifiers, not literals; reading them as literals
+        // makes a two-index chain look like a one-index one.
         let mut b = Builder::new();
         let u32_type = b.id();
         let missing = Id(b.id_count() + 40);
@@ -2930,6 +2660,7 @@ mod tests {
         ));
     }
 
+    /// The minimal module declares exactly one function.
     #[test]
     fn the_minimal_module_declares_exactly_one_function() {
         let words = minimal_compute_module([64, 1, 1]);

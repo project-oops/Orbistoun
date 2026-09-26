@@ -1,32 +1,12 @@
 //! Vulkan implementation of [`orbistoun_gpu::RenderBackend`].
 //!
-//! **This is the only crate in the workspace that names a graphics API.** The
-//! translator in `orbistoun-gpu` has no dependency on `ash`, so host-API concepts
-//! cannot leak into it - `cargo` enforces that, not code review (CLAUDE.md principle
-//! 12).
-//!
-//! # Status
-//!
-//! The backend makes resources resident and **executes**: a `Dispatch` runs a bound compute shader
-//! (into a resident buffer or an interim throwaway) and reads it back; a `SetRenderTargets` selects
-//! a resident colour target; and a `Draw` runs a bound geometry+fragment pipeline into an attachment
-//! sized from that target - the guest's decoded dimensions, or an interim square when none is set -
-//! and reads the frame back (D701). The geometry stage is drawn as a mesh or a vertex shader
-//! depending on the bound module's own execution model - a guest's geometry translates to a mesh
-//! shader (D688) - and a mesh module on a device with no mesh stage is refused rather than issued. An
-//! indexed `Draw` takes the same path, because a guest's indexed geometry is a mesh shader that reads
-//! its own indices from the window (worklog 643). A `SetViewport` restricts a following draw to a
-//! rectangle (worklog 644). Only a `ClearColour` is still refused with
-//! [`orbistoun_gpu::BackendError::Unsupported`], the honest answer (D010) while its register oracle
-//! is not in hand (D702): a backend that silently accepted a command and drew nothing would look like
-//! a rendering bug rather than an unimplemented layer.
-//!
-//! The device is opened lazily, on the first resource made resident, through the same shared session
-//! [`compute`] and [`framebuffer`] use. `ash` is a real dependency here, deliberately not one while
-//! nothing used Vulkan (D019).
-//!
-//! The architectural boundary is unaffected: it is enforced by `orbistoun-gpu` having **no** path to
-//! a graphics API, not by this crate having one.
+//! The only crate in the workspace that names a graphics API: `orbistoun-gpu` has no dependency on
+//! `ash`, so host-API concepts cannot leak into the translator. Resources are made resident by
+//! content id (D701). A `Dispatch` runs a bound compute shader and reads it back; a `Draw` or
+//! `DrawIndexed` runs a bound geometry+fragment pipeline into an attachment sized from the selected
+//! target, as a mesh or vertex draw by the module's execution model. A command with no execution is
+//! refused with [`orbistoun_gpu::BackendError::Unsupported`] rather than dropped. The device opens
+//! lazily, through the session [`compute`] and [`framebuffer`] share.
 
 pub mod compute;
 pub mod framebuffer;
@@ -39,31 +19,21 @@ use orbistoun_gpu::{
     BackendError, Rect, RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage,
 };
 
-/// The interim width of a compute dispatch's output buffer, in `u32`s.
-///
-/// A guest dispatch's buffers are resources it binds, and their sizes come from the guest. Until
-/// the buffer arm lands (D701), a dispatch runs a compute shader that writes its own storage into
-/// a buffer of this fixed width and reads it back - enough to execute a translated shader end to
-/// end, not yet enough to run a guest's.
+/// The width of a compute dispatch's output buffer when no resident buffer is bound, in `u32`s.
 const DISPATCH_WORDS: usize = 64;
 
-/// The interim size of the colour attachment a `Draw` renders into.
-///
-/// A guest's render target has its own dimensions, decoded from the CB registers a stream sets;
-/// until that decode lands a draw renders into a fixed square, enough to run a translated
-/// vertex+fragment pipeline end to end and read the frame back.
+/// The size of the colour attachment a `Draw` renders into when no target is selected.
 const RENDER_WIDTH: u32 = 64;
 /// See [`RENDER_WIDTH`].
 const RENDER_HEIGHT: u32 = 64;
-/// Released snapshot buffers kept for reuse (worklog 850): one is in flight per deferred copy, and a
-/// few spare cover a guest with more than one copy destination.
+/// Released snapshot buffers kept for reuse: one is in flight per deferred copy, and a few spare
+/// cover a guest with more than one copy destination.
 const SPARE_SNAPSHOTS: usize = 4;
 /// The colour a `Draw` clears its attachment to before drawing - opaque black.
 const CLEAR_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// The first word of a SPIR-V module, and the `OpEntryPoint` opcode and mesh execution model, from
-/// the Khronos SPIR-V specification. **Transcribed from an open standard, not the guest's** - so
-/// unlike a register offset these are documented constants, not a hypothesis.
+/// The first word of a SPIR-V module, from the Khronos SPIR-V specification, as are the
+/// `OpEntryPoint` opcode and mesh execution model below.
 const SPIRV_MAGIC: u32 = 0x0723_0203;
 /// `OpEntryPoint`'s opcode, in the low sixteen bits of its first word.
 const OP_ENTRY_POINT: u16 = 15;
@@ -72,14 +42,10 @@ const EXECUTION_MODEL_MESH_EXT: u32 = 5365;
 
 /// Whether a translated module's entry point is a mesh shader rather than a vertex one.
 ///
-/// A guest's geometry stage translates to a mesh shader (D688) and a fullscreen-triangle test shader
-/// to a vertex one; the two are drawn by different calls, and the module itself is what says which -
-/// the guest bound a `Vertex` stage either way, and the host mesh-ness is a translation detail this
-/// crate owns, not the frontend's to carry (principle 12).
-///
-/// Reads the execution model of the first `OpEntryPoint` (its operand one), walking the instruction
-/// stream after the five-word header. Anything that is not a SPIR-V module, or names no entry point,
-/// is not a mesh module - it is the vertex path's to reject if it is malformed.
+/// A guest's geometry stage translates to a mesh shader (D688) and a fullscreen-triangle test
+/// shader to a vertex one; the guest binds a `Vertex` stage either way, so the module decides which
+/// draw call is used. Reads the execution model of the first `OpEntryPoint` after the five-word
+/// header. Anything that is not a SPIR-V module, or names no entry point, is not a mesh module.
 fn is_mesh_module(spirv: &[u32]) -> bool {
     if spirv.first() != Some(&SPIRV_MAGIC) {
         return false;
@@ -88,8 +54,7 @@ fn is_mesh_module(spirv: &[u32]) -> bool {
     let mut index = 5;
     while let Some(&word) = spirv.get(index) {
         let word_count = (word >> 16) as usize;
-        // A zero-length instruction would never advance the walk; treat the module as malformed
-        // rather than loop forever.
+        // A zero-length instruction would never advance the walk: the module is malformed.
         if word_count == 0 {
             return false;
         }
@@ -101,10 +66,8 @@ fn is_mesh_module(spirv: &[u32]) -> bool {
     false
 }
 
-/// The Vulkan scissor a guest's viewport rectangle names.
-///
-/// A plain repackaging: the guest's rectangle in its target's pixels becomes the rectangle
-/// rasterisation is restricted to. It is clamped to the attachment where it is used, not here.
+/// The Vulkan scissor a guest's viewport rectangle names. Clamped to the attachment where it is
+/// used, not here.
 fn scissor_of(rect: Rect) -> vk::Rect2D {
     vk::Rect2D {
         offset: vk::Offset2D {
@@ -120,9 +83,8 @@ fn scissor_of(rect: Rect) -> vk::Rect2D {
 
 /// Uploads bytes into a fresh host-visible buffer on the session's device.
 ///
-/// The buffer arm of `ensure_resident` and the guest-memory window (D703) both create a buffer this
-/// way, so the one unsafe upload lives here. At least one word, because a zero-sized buffer is not a
-/// legal binding and an empty window still needs one.
+/// The one unsafe upload shared by the buffer arm of `ensure_resident` and the guest-memory window
+/// (D703). At least one word, because a zero-sized buffer is not a legal binding.
 fn upload_host_buffer(
     session: &compute::Session,
     bytes: &[u8],
@@ -160,16 +122,14 @@ fn upload_host_buffer(
     })
 }
 
-/// What each window slot's offset is a multiple of (worklog 847): the largest
-/// `minStorageBufferOffsetAlignment` Vulkan allows, so no device's limit is missed.
+/// What each window slot's offset is a multiple of: the largest `minStorageBufferOffsetAlignment`
+/// Vulkan allows, so no device's limit is missed.
 const WINDOW_SLOT_ALIGN: usize = 256;
 
-/// Whether the shared session's device can run a mesh stage.
-///
-/// A guest's geometry is a mesh shader, and a device without the stage can run a frame's pixel
-/// shaders and not its geometry - which is a refusal to name (D010), not a crash at draw time.
+/// Whether the shared session's device can run a mesh stage. Without one, a guest's geometry is
+/// refused by name rather than crashing at draw time (D010).
 fn mesh_stage_available() -> bool {
-    // Asked once: the device does not change, and asking cloned its properties on every draw.
+    // Asked once: the device does not change.
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
         matches!(
@@ -179,15 +139,12 @@ fn mesh_stage_available() -> bool {
     })
 }
 
-/// A shader made resident: the module the driver validated, and its words.
-///
-/// The words are kept so a compute dispatch can run the shader now, through the tested compute
-/// path; when the executor assembles pipelines from resident modules directly, they become
-/// redundant and go.
+/// A shader made resident: the module the driver validated, and its words, which a compute dispatch
+/// runs through the compute path.
 #[derive(Debug)]
 struct ResidentShader {
     module: vk::ShaderModule,
-    /// Shared rather than owned, so a draw takes it without copying it (worklog 843).
+    /// Shared rather than owned, so a draw takes it without copying.
     spirv: std::sync::Arc<[u32]>,
     /// A hash of [`Self::spirv`], taken once, that a draw's pipeline is looked up by.
     hash: u64,
@@ -196,7 +153,7 @@ struct ResidentShader {
 }
 
 /// A sampled texture a `BindTexture` gave: its texels, row length, and a hash of the texels taken
-/// once at the bind, that a draw's pipeline is looked up by (worklog 843).
+/// once at the bind, that a draw's pipeline is looked up by.
 #[derive(Debug, Clone)]
 struct BoundTexture {
     texels: std::sync::Arc<[u32]>,
@@ -204,24 +161,22 @@ struct BoundTexture {
     hash: u64,
 }
 
-/// A content hash of guest words - what a shader or texture is, for finding the pipeline built
-/// for it (worklog 843).
+/// A content hash of guest words: what a shader or texture is, for finding the pipeline built for
+/// it.
 fn content_hash(words: &[u32]) -> u64 {
     orbistoun_gpu::content_hash(words)
 }
 
-/// The target a draw rendered into, as [`VulkanBackend`]'s `contents` keys it - `None` inside is the
-/// interim square, not "no draw" (worklog 838).
+/// The target a draw rendered into, as [`VulkanBackend`]'s `contents` keys it; `None` inside is the
+/// interim square, not "no draw".
 #[derive(Debug, Clone, Copy)]
 struct DrawnOn(Option<ResourceId>);
 
 /// A Vulkan render backend.
 ///
-/// It holds the host objects a submission's resources become, keyed by their content id, runs a
-/// compute dispatch of a resident shader and a draw of a resident vertex+fragment pipeline into a
-/// target-sized attachment, and refuses the commands whose execution has not landed.
-/// [`VulkanBackend::new`] creates no device - the device is acquired lazily, on the first resource
-/// made resident.
+/// Holds the host objects a submission's resources become, keyed by content id; runs compute
+/// dispatches and draws; refuses commands with no execution. [`VulkanBackend::new`] creates no
+/// device: the device is acquired on the first resource made resident.
 #[derive(Debug, Default)]
 pub struct VulkanBackend {
     refused: usize,
@@ -232,8 +187,7 @@ pub struct VulkanBackend {
     /// across frames and destroyed when the backend drops.
     buffers: BTreeMap<ResourceId, compute::DispatchBuffer>,
     /// Colour render targets made resident, by id, to their `(width, height)`. A target holds no
-    /// host object - a draw allocates its own attachment - so this carries only the dimensions a
-    /// following `Draw` sizes that attachment to, and needs no cleanup on drop.
+    /// host object (a draw allocates its own attachment), so this carries only dimensions.
     targets: BTreeMap<ResourceId, (u32, u32)>,
     /// The colour target a `SetRenderTargets` selected, that a following `Draw` renders into.
     current_target: Option<ResourceId>,
@@ -250,10 +204,10 @@ pub struct VulkanBackend {
     bound_buffer: Option<ResourceId>,
     /// The observation buffer of the most recent dispatch, read back from the device.
     last_output: Option<Vec<u32>>,
-    /// The target the most recent `Draw` rendered into - its frame is that target's entry in
-    /// [`Self::contents`], kept once rather than copied (worklog 838).
+    /// The target the most recent `Draw` rendered into; its frame is that target's entry in
+    /// [`Self::contents`].
     last_drawn: Option<DrawnOn>,
-    /// Each target's attachment kept on the device across draws (worklog 839), by the same key as
+    /// Each target's attachment kept on the device across draws, by the same key as
     /// [`Self::contents`].
     resident: BTreeMap<Option<ResourceId>, framebuffer::ResidentAttachment>,
     /// The targets whose resident attachment holds draws [`Self::contents`] does not have yet - read
@@ -261,15 +215,15 @@ pub struct VulkanBackend {
     unread: std::collections::BTreeSet<Option<ResourceId>>,
     /// What each target holds after the draws on it so far, by the target a `SetRenderTargets`
     /// selected (`None` is the interim square). The next draw on a target starts from this rather
-    /// than a clear, so a frame's draws accumulate (worklog 822).
+    /// than a clear, so a frame's draws accumulate.
     contents: BTreeMap<Option<ResourceId>, framebuffer::Pixels>,
     /// Frames kept as they stood when [`Self::snapshot_last_frame`] took them, by the id it
-    /// answered (worklog 850).
+    /// answered.
     snapshots: BTreeMap<u64, framebuffer::FrameSnapshot>,
     /// The id the next snapshot gets.
     next_snapshot: u64,
     /// Snapshot buffers released and kept for reuse: a GL frame keeps and drops one per submission,
-    /// and allocating eight megabytes each time was most of what keeping one cost.
+    /// and allocating one each time dominated the cost.
     spare_snapshots: Vec<framebuffer::FrameSnapshot>,
     /// Counts every change to what a draw would be bound with - every command but a draw and the
     /// geometry stage's user data, and every window, target or resource change (D718).
@@ -278,38 +232,38 @@ pub struct VulkanBackend {
     /// generation differs from it only in its geometry words, so it joins without being worked out
     /// again.
     batched: Option<(u64, framebuffer::BatchKey)>,
-    /// The user-data block the next draw's shaders read at entry, vertex words first (worklog 826),
-    /// as the latest `SetUserData` for each stage left it.
+    /// The user-data block the next draw's shaders read at entry, vertex words first, as the latest
+    /// `SetUserData` for each stage left it.
     user_data: [u32; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
-    /// The texture the next draw samples, and its row length - the latest `BindTexture`
-    /// (worklog 828); `None` samples the default texel.
+    /// The texture the next draw samples, and its row length: the latest `BindTexture`; `None`
+    /// samples the default texel.
     texture: Option<BoundTexture>,
-    /// The second texture a `BindTexture` of slot 1 gave (worklog 840).
+    /// The second texture, from a `BindTexture` of slot 1.
     second_texture: Option<BoundTexture>,
-    /// Colour target zero's blend state for the next draw - the latest `SetBlend` (`REQ-...2ea9`,
-    /// worklog 829); `None` draws opaque.
+    /// Colour target zero's blend state for the next draw: the latest `SetBlend`; `None` draws
+    /// opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
-    /// The guest's clip-to-pixel transform for the next draw - the latest `SetViewportTransform`
-    /// (worklog 837); `None` maps clip space over the whole attachment the host's way.
+    /// The guest's clip-to-pixel transform for the next draw: the latest `SetViewportTransform`;
+    /// `None` maps clip space over the whole attachment the host's way.
     viewport_transform: Option<orbistoun_gpu::ViewportTransform>,
     /// The frame's guest-memory window, set once before its commands (D703): a geometry shader
     /// fetches its vertices from here.
     guest_memory: Vec<u32>,
     /// Counts changes to [`Self::guest_memory`]'s words, each found by comparing them.
     guest_memory_generation: u64,
-    /// The window uploaded to the device, bound directly by a mesh draw instead of seeded each time
-    /// (D703, worklog 645), so a stable window uploads once.
+    /// The window uploaded to the device, bound directly by a mesh draw, so a stable window uploads
+    /// once (D703).
     window_buffer: Option<compute::DispatchBuffer>,
     /// The [`Self::guest_memory_generation`] [`Self::window_buffer`] holds, to know when it is stale.
     window_generation: u64,
-    /// How many times the window buffer has actually been uploaded - it distinguishes "uploaded once
-    /// and reused" from "re-uploaded every draw", which are identical from the pixels (D703).
+    /// How many times the window buffer has been uploaded: "uploaded once and reused" and
+    /// "re-uploaded every draw" give identical pixels.
     window_uploads: usize,
     /// The guest-memory window read back after the most recent mesh `Draw`, or [`None`] when the
     /// last draw took the vertex path (which reads no window).
     last_window: Option<Vec<u32>>,
     /// Whether mesh draws have run on the window since [`Self::last_window`] was last read, so the
-    /// next ask reads it from the device (worklog 843).
+    /// next ask reads it from the device.
     window_unread: bool,
 }
 
@@ -354,9 +308,8 @@ impl VulkanBackend {
 
     /// How many commands have been refused.
     ///
-    /// Useful before the backend does anything real: it distinguishes "the translator
-    /// emitted nothing" from "the translator emitted plenty and none of it landed",
-    /// which look identical from a black screen.
+    /// Distinguishes "the translator emitted nothing" from "the translator emitted plenty and none
+    /// of it landed", which look identical from a black screen.
     pub const fn refused(&self) -> usize {
         self.refused
     }
@@ -381,8 +334,8 @@ impl VulkanBackend {
         framebuffer::submit_recorded()
     }
 
-    /// Whether this backend holds a frame for `target` at `extent` - on the device or read back - so a
-    /// submission into it can start from that rather than being seeded (worklog 844).
+    /// Whether this backend holds a frame for `target` at `extent`, on the device or read back, so
+    /// a submission into it can start from that rather than being seeded.
     pub fn holds_target(&self, target: ResourceId, extent: (u32, u32)) -> bool {
         self.resident
             .get(&Some(target))
@@ -393,14 +346,14 @@ impl VulkanBackend {
                 .is_some_and(|pixels| (pixels.width, pixels.height) == extent)
     }
 
-    /// Gives a colour target what it holds before any draw on it (`REQ-...77fa`, worklog 832): the
-    /// first draw on `target` then starts from these pixels rather than the clear, so a submission
-    /// drawn over a surface the guest already filled - a clear, the frame before - draws over that.
+    /// Gives a colour target what it holds before any draw on it: the first draw on `target` then
+    /// starts from these pixels rather than the clear, so a submission drawn over a surface the
+    /// guest already filled draws over it.
     pub fn seed_target(&mut self, target: ResourceId, pixels: framebuffer::Pixels) {
         self.state_generation += 1;
         self.unread.remove(&Some(target));
-        // The seed replaces whatever the device held for it: in place, into its resident attachment
-        // when it has one of that extent, so the device holds it and no host copy does.
+        // The seed replaces whatever the device held: written in place into the resident attachment
+        // when it has one of that extent.
         if let Some(resident) = self.resident.get(&Some(target))
             && resident.extent() == (pixels.width, pixels.height)
             && resident.reload(&pixels.bytes).is_ok()
@@ -439,8 +392,8 @@ impl VulkanBackend {
         );
     }
 
-    /// Binds a texture the following draws sample at `slot` - the second slot is a pixel shader's
-    /// second texture (worklog 840).
+    /// Binds a texture the following draws sample at `slot`; the second slot is a pixel shader's
+    /// second texture.
     fn bind_texture(
         &mut self,
         slot: u32,
@@ -453,7 +406,7 @@ impl VulkanBackend {
                 texels.len()
             )));
         }
-        // Shared, and hashed where it was read: binding copies and hashes nothing (worklog 844).
+        // Shared, and hashed where it was read: binding copies and hashes nothing.
         let bound = Some(BoundTexture {
             texels: std::sync::Arc::clone(texels),
             width,
@@ -475,15 +428,14 @@ impl VulkanBackend {
     /// Records the fixed-function state a following draw runs under - set now, applied at the draw.
     fn set_draw_state(&mut self, command: &RenderCommand) {
         match command {
-            // The rectangle a following draw is restricted to (worklog 644). Its own rectangle is not
-            // validated here - a scissor outside the attachment is clamped where it is used, not
-            // refused.
+            // The rectangle a following draw is restricted to. Not validated here: a scissor
+            // outside the attachment is clamped where it is used.
             RenderCommand::SetViewport(rect) => self.current_viewport = Some(*rect),
-            // The guest's clip-to-pixel transform (worklog 837).
+            // The guest's clip-to-pixel transform.
             RenderCommand::SetViewportTransform(transform) => {
                 self.viewport_transform = Some(*transform);
             }
-            // The blend state (`REQ-...2ea9`, worklog 829).
+            // The blend state.
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
             _ => {}
         }
@@ -508,9 +460,9 @@ impl VulkanBackend {
         self.last_output.as_deref()
     }
 
-    /// Keeps the frame the most recent `Draw` rendered **as it stands now**, on the device, and
-    /// answers an id to read it by later (worklog 850) - `None` when that frame is not resident with
-    /// draws the host has not seen, which is the only case a snapshot saves a read.
+    /// Keeps the frame the most recent `Draw` rendered as it stands now, on the device, and answers
+    /// an id to read it by later. `None` when that frame is not resident with draws the host has
+    /// not seen, the only case a snapshot saves a read.
     pub fn snapshot_last_frame(&mut self) -> Option<u64> {
         let target = self.last_drawn?.0;
         if !self.unread.contains(&target) {
@@ -578,7 +530,7 @@ impl VulkanBackend {
     /// The frame the most recent `Draw` rendered, or [`None`] if none has.
     ///
     /// A frame drawn into a resident attachment is read back here, once, the first time it is asked
-    /// for after a draw (worklog 839); `None` too when that readback fails, which is logged.
+    /// for after a draw; `None` too when that readback fails, which is logged.
     pub fn last_frame(&mut self) -> Option<&framebuffer::Pixels> {
         let target = self.last_drawn?.0;
         if let Err(e) = self.read_back(target) {
@@ -602,8 +554,8 @@ impl VulkanBackend {
     }
 
     /// Hands `target` back to the host: its resident attachment is read back and destroyed, so
-    /// [`Self::contents`] is the only copy - before a draw on a path that does not use one, or a
-    /// seed that replaces it.
+    /// [`Self::contents`] is the only copy. Used before a draw on a path that does not use one, or
+    /// a seed that replaces it.
     fn retire_resident(&mut self, target: Option<ResourceId>) -> Result<(), DispatchError> {
         self.read_back(target)?;
         if let Some(resident) = self.resident.remove(&target) {
@@ -644,15 +596,12 @@ impl VulkanBackend {
         })
     }
 
-    /// The guest-memory window read back after the most recent mesh `Draw` or compute `Dispatch`, or
-    /// [`None`] when the last draw took the vertex path (which reads no window).
+    /// The guest-memory window read back after the most recent mesh `Draw` or compute `Dispatch`,
+    /// or [`None`] when the last draw took the vertex path.
     ///
-    /// How a shader that reads or writes guest memory is observed: for a draw, the frame shows what it
-    /// drew and this shows what the window held after; for a dispatch, this is the guest's result,
-    /// which lives in guest memory, not in the observation window (worklog 647). Either way it is what
-    /// the frame set (worklog 641) unless a shader wrote it.
-    ///
-    /// After mesh draws it is read here, once, rather than after each draw (worklog 843).
+    /// For a draw it shows what the window held after; for a dispatch it is the guest's result,
+    /// which lives in guest memory rather than the observation window. After mesh draws it is read
+    /// here, once.
     pub fn last_window(&mut self) -> Option<&[u32]> {
         if std::mem::take(&mut self.window_unread) {
             self.last_window = self
@@ -663,11 +612,11 @@ impl VulkanBackend {
         self.last_window.as_deref()
     }
 
-    /// The guest-memory window as a resident buffer, uploaded once and reused until its bytes change.
+    /// The guest-memory window as a resident buffer, uploaded once and reused until its bytes
+    /// change (D703).
     ///
-    /// The direct-bind D703 deferred: a stable window - the common case - is uploaded once and bound
-    /// by every draw that reads it, rather than copied into a fresh buffer each draw. When the bytes
-    /// change the stale buffer is destroyed and a new one uploaded, so this never grows without bound.
+    /// A stable window is uploaded once and bound by every draw that reads it. When the bytes
+    /// change the stale buffer is replaced, so this never grows without bound.
     fn ensure_window_buffer(&mut self) -> Result<compute::DispatchBuffer, BackendError> {
         let generation = self.guest_memory_generation;
         if let Some(buffer) = self.window_buffer {
@@ -683,14 +632,12 @@ impl VulkanBackend {
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
         let words = self.guest_memory.len().max(1);
-        // Each slot rounded up so every slot's offset is aligned for a storage-buffer binding: 256 is
-        // the most any device may ask (`minStorageBufferOffsetAlignment`).
+        // Each slot is rounded up so its offset is aligned for a storage-buffer binding.
         let stride = (words * 4).next_multiple_of(WINDOW_SLOT_ALIGN) as vk::DeviceSize;
-        // **A ring of slots in one buffer** (worklog 847): a changed window goes into the next slot,
-        // which the device finished reading `WINDOW_SLOTS` submissions ago - so writing it waits for
-        // nothing in the ordinary case, and every cached pipeline's binding still names the one
-        // buffer, its slot a dynamic offset. Rewriting one buffer in place waited for the device to
-        // go idle on every submission.
+        // A ring of slots in one buffer: a changed window goes into the next slot, which the device
+        // finished reading `WINDOW_SLOTS` submissions ago, so writing it waits for nothing in the
+        // ordinary case, and every cached pipeline's binding names the one buffer with its slot as
+        // a dynamic offset.
         if self.window_buffer.is_none_or(|view| view.words != words) {
             if let Some(stale) = self.window_buffer.take() {
                 framebuffer::settle(&session).map_err(|e| device_error("settle", e))?;
@@ -763,29 +710,13 @@ impl VulkanBackend {
 
     /// Runs the bound geometry+fragment pipeline and keeps the frame it drew.
     ///
-    /// The attachment is sized from the target a `SetRenderTargets` selected - the guest's decoded
-    /// dimensions (worklog 637) - or the interim square ([`RENDER_WIDTH`]) when the stream set no
-    /// target.
-    ///
-    /// **Which stage produced the geometry is the module's to say, not the command's.** A guest
-    /// binds a `Vertex` stage either way, but its geometry program translates to a *mesh* shader
-    /// (D688) while a fullscreen-triangle test shader is a real vertex one - so the module's
-    /// execution model chooses the path (worklog 640). A vertex draw issues the guest's decoded
-    /// count (worklog 639); a mesh draw is one workgroup, because a mesh shader declares its own
-    /// output and the count does not apply. A mesh module on a device with no mesh stage is refused
-    /// by name (D010) rather than issued as an invalid command.
-    ///
-    /// **An indexed draw takes the same paths (worklog 643).** A guest's indexed geometry is a mesh
-    /// shader that fetches its own indices from guest memory - the index buffer sits in the window
-    /// (worklog 641), not a host binding - so a mesh geometry's indexed draw *is* its mesh draw. A
-    /// vertex pipeline's indexed draw would need a host index buffer bound, which the executor does
-    /// not build, so it is refused rather than drawn as a non-indexed draw pretending to be one.
-    ///
-    /// A draw with either shader unbound is refused rather than run half a pipeline.
-    /// **What a draw's pipeline is, as one number** (worklog 843): its two shaders, its two textures,
-    /// the blend, the viewport transform and the extent - everything a pipeline is built from except
-    /// the guest-memory buffer, which is re-bound each time. The hashes were taken once, when each
-    /// became resident or was bound, so the key costs nothing per draw.
+    /// The attachment is sized from the selected target, or the interim square ([`RENDER_WIDTH`])
+    /// when none is set. The module's execution model chooses the path (D688): a vertex draw issues
+    /// the guest's decoded count; a mesh draw is one workgroup, since a mesh shader declares its
+    /// own output. A mesh module on a device with no mesh stage, a vertex pipeline's indexed draw
+    /// (which would need a host index buffer), and a draw with either shader unbound are refused by
+    /// name. An indexed mesh draw is the mesh draw, because the shader fetches its own indices from
+    /// the window.
     fn pipeline_key(&self, shaders: (u64, u64), extent: (u32, u32)) -> std::num::NonZeroU64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -795,8 +726,7 @@ impl VulkanBackend {
             .as_ref()
             .map(|t| t.hash)
             .hash(&mut hasher);
-        // The scissor too: it is fixed state in the pipeline, so a draw with another must not be
-        // handed this one. Floats by their bits - hashed, not formatted, on every draw.
+        // The scissor too: it is fixed pipeline state. Floats are hashed by their bits.
         self.blend.hash(&mut hasher);
         self.viewport_transform
             .map(|t| [t.x_scale, t.x_offset, t.y_scale, t.y_offset].map(f32::to_bits))
@@ -807,9 +737,8 @@ impl VulkanBackend {
         std::num::NonZeroU64::new(hasher.finish()).unwrap_or(std::num::NonZeroU64::MIN)
     }
 
-    /// **Nothing but the geometry words changed since the last mesh draw was batched** (D718): this
-    /// draw is that draw's with its own words, so it joins the batch if the batch is still open -
-    /// `false` when it cannot, and the draw takes the whole path.
+    /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so this
+    /// draw joins the batch if it is still open; `false` when it cannot.
     fn join_unchanged_batch(&mut self) -> bool {
         let Some((generation, key)) = self.batched else {
             return false;
@@ -846,9 +775,9 @@ impl VulkanBackend {
                 command: "Draw of a mesh geometry shader on a device with no mesh stage",
             });
         }
-        // The guest-memory window the frame set, uploaded once and bound directly (worklog 645), so
-        // a guest's primitive shader fetches its vertices from it (worklog 641); read back after, in
-        // case a shader wrote it.
+        // The guest-memory window the frame set, uploaded once and bound directly, so a guest's
+        // primitive shader fetches its vertices from it; read back after, in case a shader wrote
+        // it.
         let window = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeWindow, || {
             self.ensure_window_buffer()
         })?;
@@ -860,7 +789,7 @@ impl VulkanBackend {
         self.batched = batched.map(|key| (self.state_generation, key));
         self.unread.insert(target);
         self.last_drawn = Some(DrawnOn(target));
-        // Read when asked for, not after every draw (worklog 843).
+        // Read when asked for, not after every draw.
         self.last_window = None;
         self.window_unread = true;
         Ok(())
@@ -882,6 +811,10 @@ impl VulkanBackend {
         }
     }
 
+    /// What a draw's pipeline is, as one number: its two shaders, its two textures, the blend, the
+    /// viewport transform and the extent; everything a pipeline is built from except the
+    /// guest-memory buffer, which is re-bound each time. The hashes are taken when each input
+    /// became resident or was bound, so the key costs nothing per draw.
     fn draw_graphics(
         &mut self,
         draw: framebuffer::VertexDraw,
@@ -924,17 +857,15 @@ impl VulkanBackend {
             .ok_or(BackendError::UnknownResource(fragment_id))?;
         let (fragment, fragment_hash) = (fragment_shader.spirv.clone(), fragment_shader.hash);
         let (width, height) = self.render_extent();
-        // The viewport a `SetViewport` set restricts the draw to a rectangle (worklog 644); none is
-        // the whole attachment.
+        // The viewport a `SetViewport` set restricts the draw to a rectangle; none is the whole
+        // attachment.
         let scissor = self.current_viewport.map(scissor_of);
-        // **What the target already holds.** Every draw used to begin from a cleared attachment, so a
-        // frame of 450 draws kept only its last one, on black (worklog 822). A draw now starts from
-        // its target's contents - the earlier draws on it - and only the first draw of a target, or
-        // one whose size changed, starts from the clear. A mesh draw finds them in its target's
-        // resident attachment, on the device (worklog 839).
+        // A draw starts from its target's contents, the earlier draws on it; only the first draw of
+        // a target, or one whose size changed, starts from the clear. A mesh draw finds them in its
+        // target's resident attachment, on the device.
         let target = self.current_target;
         // A blend state with no exact Vulkan equivalent refuses the draw by name rather than
-        // drawing it opaque or approximately (`REQ-...2ea9`, worklog 829).
+        // drawing it opaque or approximately.
         if let Err(what) = framebuffer::blend_attachment(self.blend) {
             self.refused += 1;
             return Err(BackendError::Unsupported { command: what });
@@ -964,17 +895,16 @@ impl VulkanBackend {
                 scissor,
             )?;
         } else if indexed {
-            // A vertex pipeline's indexed draw fetches from a host index buffer the executor does not
-            // bind. This is only reached by a vertex module - a test shader - because a guest's
-            // indexed geometry is a mesh shader that read its own indices above; refusing is the
-            // honest answer rather than a non-indexed draw standing in for one (D010).
+            // A vertex pipeline's indexed draw fetches from a host index buffer the executor does
+            // not bind. Only a vertex module (a test shader) reaches this, so it is refused rather
+            // than drawn non-indexed (D010).
             self.refused += 1;
             return Err(BackendError::Unsupported {
                 command: "DrawIndexed on a vertex pipeline (no index buffer binding)",
             });
         } else {
             // The vertex path draws into an attachment of its own, so the target comes back to the
-            // host first and starts this draw from there - after any resident draw still running.
+            // host first, after any resident draw still running.
             framebuffer::settle_session().map_err(|e| device_error("draw", e))?;
             self.retire_resident(target)
                 .map_err(|e| device_error("draw", e))?;
@@ -1007,10 +937,9 @@ impl VulkanBackend {
     /// Runs the bound compute shader on the device and keeps both what it wrote to the observation
     /// window (binding 0) and to guest memory (binding 1).
     ///
-    /// The guest-memory window is bound at binding 1 and read back (worklog 647): **a guest's dispatch
-    /// leaves its result in guest memory, not in the observation window a translated shader reports
-    /// registers through** (worklog 635). The observation is a bound resident buffer when a
-    /// `BindBuffer` named one, or a throwaway otherwise. The writeback is `last_window`, the
+    /// A guest's dispatch leaves its result in guest memory, not in the observation window a
+    /// translated shader reports registers through. The observation is a bound resident buffer when
+    /// a `BindBuffer` named one, or a throwaway otherwise. The writeback is `last_window`, the
     /// observation `last_output`.
     fn dispatch_compute(&mut self, groups: [u32; 3]) -> Result<(), BackendError> {
         let Some(shader_id) = self.bound_compute else {
@@ -1019,8 +948,8 @@ impl VulkanBackend {
                 command: "Dispatch with no compute shader bound",
             });
         };
-        // A dispatch shares the guest-memory window with the draws before it, which are no longer
-        // waited on one by one (worklog 843).
+        // A dispatch shares the guest-memory window with the draws before it, which are not waited
+        // on one by one.
         framebuffer::settle_session()
             .map_err(|e| BackendError::Device(format!("settle: {e:?}")))?;
         let spirv = self
@@ -1081,8 +1010,7 @@ impl RenderBackend for VulkanBackend {
         self.state_generation += 1;
         match resource {
             Resource::Shader(spirv) => {
-                // Idempotent: a module already resident under this content id is the same module,
-                // so it is reused rather than created again ("upload once").
+                // Idempotent: a module already resident under this content id is reused.
                 if self.shaders.contains_key(&id) {
                     return Ok(());
                 }
@@ -1121,8 +1049,8 @@ impl RenderBackend for VulkanBackend {
                 Ok(())
             }
             Resource::RenderTarget { width, height } => {
-                // A target holds no host object - a draw allocates its own attachment - so making it
-                // resident is recording its size. Idempotent by id, like the others.
+                // A target holds no host object, so making it resident records its size. Idempotent
+                // by id.
                 self.targets.insert(id, (width, height));
                 Ok(())
             }
@@ -1132,10 +1060,10 @@ impl RenderBackend for VulkanBackend {
     fn execute(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
         self.note_state_change(command);
         match command {
-            // The colour target a following draw renders into. Its first colour attachment sizes the
-            // draw; a target named but not resident is a real error, and an empty set clears the
-            // selection back to the interim square. The depth target is not modelled yet, and the
-            // frontend emits none - a depth attachment is a later arm (D010).
+            // The colour target a following draw renders into. Its first colour attachment sizes
+            // the draw; a target named but not resident is an error, and an empty set clears the
+            // selection back to the interim square. Depth is not modelled, and the frontend emits
+            // none.
             RenderCommand::SetRenderTargets { colour, depth: _ } => match colour.first() {
                 Some(id) if self.targets.contains_key(id) => {
                     self.current_target = Some(*id);
@@ -1153,7 +1081,7 @@ impl RenderBackend for VulkanBackend {
                 self.set_draw_state(command);
                 Ok(())
             }
-            // The guest's own texels, sampled by the draws that follow (worklog 828).
+            // The guest's own texels, sampled by the draws that follow.
             RenderCommand::BindTexture {
                 slot,
                 texels,
@@ -1161,8 +1089,8 @@ impl RenderBackend for VulkanBackend {
                 width,
                 height,
             } => self.bind_texture(*slot, (texels, *hash), (*width, *height)),
-            // A stage's user data, into its half of the block the next draw pushes (worklog 826).
-            // The first sixteen words: a shader taking more is refused where it is translated.
+            // A stage's user data, into its half of the block the next draw pushes: the first
+            // sixteen words. A shader taking more is refused where it is translated.
             RenderCommand::SetUserData { stage, words } => {
                 let half = orbistoun_gpu::USER_DATA_BLOCK_WORDS / 2;
                 let start = match stage {
@@ -1178,8 +1106,8 @@ impl RenderBackend for VulkanBackend {
                 self.user_data[start..start + half].copy_from_slice(&words[..half]);
                 Ok(())
             }
-            // A shader is bound to its stage now and run by the following dispatch or draw.
-            // Binding an unknown shader is a real error, not a gap.
+            // A shader is bound to its stage now and run by the following dispatch or draw. Binding
+            // an unknown shader is an error.
             RenderCommand::BindShader { stage, shader } => {
                 if !self.shaders.contains_key(shader) {
                     return Err(BackendError::UnknownResource(*shader));
@@ -1191,8 +1119,8 @@ impl RenderBackend for VulkanBackend {
                 }
                 Ok(())
             }
-            // A buffer is bound as the dispatch's output; its offset and length are not yet read -
-            // the whole buffer is bound - which the fixed 2-storage-buffer convention allows.
+            // A buffer is bound as the dispatch's output. Its offset and length are not read: the
+            // whole buffer is bound, which the fixed two-storage-buffer convention allows.
             RenderCommand::BindBuffer { buffer, .. } => {
                 if self.buffers.contains_key(buffer) {
                     self.bound_buffer = Some(*buffer);
@@ -1214,10 +1142,9 @@ impl RenderBackend for VulkanBackend {
                 },
                 false,
             ),
-            // A guest's indexed geometry is a mesh shader reading its own indices from the window, so
-            // this takes the mesh path; a vertex pipeline's indexed draw is refused for want of an
-            // index buffer binding (worklog 643). The count rides in `vertices` for symmetry, unused
-            // by the mesh path.
+            // A guest's indexed geometry is a mesh shader reading its own indices from the window,
+            // so this takes the mesh path; a vertex pipeline's indexed draw is refused. The count
+            // rides in `vertices` and is unused by the mesh path.
             RenderCommand::DrawIndexed {
                 indices,
                 instances,
@@ -1230,8 +1157,7 @@ impl RenderBackend for VulkanBackend {
                 },
                 true,
             ),
-            // The rest - a `ClearColour` (awaiting its register oracle, D702) and a `Fence` - are
-            // refused by name, honestly (D010), until their execution lands.
+            // The rest, a `ClearColour` (D702) and a `Fence`, are refused by name.
             other => {
                 self.refused += 1;
                 Err(BackendError::Unsupported {
@@ -1246,9 +1172,8 @@ impl RenderBackend for VulkanBackend {
     }
 
     fn set_guest_memory(&mut self, memory: &[u32]) {
-        // The window it already holds, word for word, changes nothing a draw is bound with, so it is
-        // not copied again. Changed is found by comparing, not hashing: the comparison is exact,
-        // where equal hashes only probably mean equal words, and it costs less.
+        // An unchanged window changes nothing a draw is bound with, so it is not copied again.
+        // Found by exact comparison rather than hashing, which is also cheaper.
         if memory == self.guest_memory.as_slice() {
             return;
         }
@@ -1260,8 +1185,8 @@ impl RenderBackend for VulkanBackend {
 }
 
 impl Drop for VulkanBackend {
-    /// Destroys the shader modules the backend created. Best-effort: if the session cannot be
-    /// reacquired the process is tearing down anyway and the driver reclaims them.
+    /// Destroys the objects the backend created. Best-effort: if the session cannot be reacquired
+    /// the process is tearing down and the driver reclaims them.
     fn drop(&mut self) {
         for (_, resident) in std::mem::take(&mut self.resident) {
             resident.destroy();
@@ -1308,14 +1233,11 @@ mod tests {
     use super::VulkanBackend;
     use orbistoun_gpu::{BackendError, Rect, RenderBackend, RenderCommand};
 
+    /// A command with no execution is refused by name, not silently dropped.
     #[test]
     fn an_unimplemented_command_is_refused_by_name_not_silently_dropped() {
-        // The failure this guards against: a backend that returns Ok and draws
-        // nothing is indistinguishable from a rendering bug. A command whose execution
-        // has not landed must be refused *by name*, so a report says which capability is
-        // missing. `ClearColour` is one of those still-unimplemented commands - it was
-        // `SetViewport` until that one learned to restrict a draw to a rectangle (worklog 644),
-        // and `SetRenderTargets` before that. Its own register oracle is not in hand (D702).
+        // A backend that returns Ok and draws nothing looks like a rendering bug, so a command with
+        // no execution is refused by name. `ClearColour` has no register oracle yet (D702).
         let mut b = VulkanBackend::new();
         let err = b
             .execute(&RenderCommand::ClearColour {
@@ -1331,10 +1253,10 @@ mod tests {
         );
     }
 
+    /// Refusals are counted.
     #[test]
     fn refusals_are_counted() {
-        // Distinguishes "translator emitted nothing" from "translator emitted plenty
-        // and none of it landed" - identical from a black screen otherwise.
+        // Distinguishes "translator emitted nothing" from "none of it landed".
         let mut b = VulkanBackend::new();
         for _ in 0..3 {
             let _ = b.execute(&RenderCommand::Fence { label: 1 });
@@ -1342,6 +1264,7 @@ mod tests {
         assert_eq!(b.refused(), 3);
     }
 
+    /// Presenting is refused too.
     #[test]
     fn present_is_refused_too() {
         let mut b = VulkanBackend::new();
@@ -1349,13 +1272,10 @@ mod tests {
         assert_eq!(b.name(), "vulkan");
     }
 
-    /// **A translated shader is made resident as a real module, and a resident one is reused.**
+    /// A translated shader is made resident as a real module, and a resident one is reused (D701).
     ///
-    /// This is the first arm of the resource-residency mechanism (D701): the backend turns the
-    /// translator's SPIR-V into a `vk::ShaderModule` the driver accepted - a stronger signal than
-    /// "the words start with the SPIR-V magic" - and, keyed by content id, creates it once. Skips
-    /// where no Vulkan device is present, exactly as the compute tests do; on a machine with one
-    /// it is a real check that a translated module loads.
+    /// The driver accepting the module is a stronger signal than the SPIR-V magic. Skips where no
+    /// Vulkan device is present.
     #[test]
     fn a_translated_shader_is_made_resident_once_and_reused() {
         use orbistoun_gpu::{Resource, ResourceId};
@@ -1371,7 +1291,7 @@ mod tests {
             .expect("a valid module is accepted by the driver");
         assert_eq!(backend.resident_shaders(), 1);
 
-        // The same content id is already resident, so it is reused rather than created again.
+        // The same content id is already resident, so it is reused.
         backend
             .ensure_resident(ResourceId(1), Resource::Shader(&spirv))
             .expect("a resident module is reused");
@@ -1388,12 +1308,11 @@ mod tests {
         assert_eq!(backend.resident_shaders(), 2);
     }
 
-    /// **A bound compute shader runs on dispatch, and its output reads back through the executor.**
+    /// A bound compute shader runs on dispatch, and its output reads back through the executor
+    /// (D701).
     ///
-    /// The first genuinely-executed command: a translated compute shader is made resident, bound,
-    /// and dispatched, and the constant it writes comes back - the same chain the dispatch harness
-    /// proves, now driven through `RenderBackend::execute` (D701). The output buffer is the interim
-    /// fixed width until buffer resources carry their own. Skips where there is no device.
+    /// Resident, bound, dispatched, and the constant it writes comes back, through
+    /// `RenderBackend::execute`. Skips where there is no device.
     #[test]
     fn a_bound_compute_shader_runs_on_dispatch_and_reads_back() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1429,12 +1348,10 @@ mod tests {
         );
     }
 
-    /// **A dispatch writes into a bound *resident* buffer, not a throwaway one.**
+    /// A dispatch writes into a bound resident buffer, not a throwaway one.
     ///
-    /// The guest's own resource: a buffer is made resident, bound, and a compute shader writes its
-    /// constant into it - `dispatch_into` binds the resident buffer at binding 0 rather than the
-    /// fixed-width scratch the no-buffer path uses. Reading the buffer back proves the shader wrote
-    /// the guest's buffer, which is the whole point of the buffer arm. Skips where no device.
+    /// `dispatch_into` binds the resident buffer at binding 0; reading it back proves the shader
+    /// wrote the guest's buffer. Skips where there is no device.
     #[test]
     fn a_dispatch_writes_into_a_bound_resident_buffer() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1483,13 +1400,11 @@ mod tests {
         );
     }
 
-    /// **A compute dispatch reads back the guest-memory window - where a guest's result lives.**
+    /// A compute dispatch reads back the guest-memory window, where a guest's result lives.
     ///
-    /// The gap worklog 635 named and 647 closes: a guest compute shader leaves its result in guest
-    /// memory (binding 1), not in the observation window (binding 0) a translated shader reports
-    /// registers through. Seeded with known words and dispatched with a shader that ignores the
-    /// window, the window comes back the seed - proof it was bound at binding 1 and read back, not the
-    /// zeros the observation-only path returned. Skips where there is no device.
+    /// Seeded with known words and dispatched with a shader that ignores the window, the window
+    /// comes back as the seed: proof it was bound at binding 1 and read back. Skips where there is
+    /// no device.
     #[test]
     fn a_dispatch_reads_back_the_guest_memory_window() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1532,12 +1447,11 @@ mod tests {
         assert!(matches!(err, BackendError::Unsupported { .. }));
     }
 
-    /// **A bound vertex+fragment pipeline draws a coloured frame through the executor.**
+    /// A bound vertex+fragment pipeline draws a coloured frame through the executor.
     ///
-    /// The first graphics execution: a fullscreen-triangle vertex shader and a constant-colour
-    /// fragment shader are made resident, bound, and a `Draw` renders them into the interim
-    /// attachment - reading the frame back gives the fragment's colour, the graphics counterpart of
-    /// the compute dispatch. Skips where there is no device.
+    /// A fullscreen-triangle vertex shader and a constant-colour fragment shader draw into the
+    /// interim attachment, and the frame reads back as the fragment's colour. Skips where there is
+    /// no device.
     #[test]
     fn a_bound_vertex_and_fragment_pipeline_draws_a_frame() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1584,13 +1498,11 @@ mod tests {
         );
     }
 
-    /// **The geometry stage is routed by the module's execution model, not the command's stage.**
+    /// The geometry stage is routed by the module's execution model, not the command's stage
+    /// (D688).
     ///
-    /// A guest binds a `Vertex` stage whether its geometry is a real vertex shader or - as every
-    /// guest's is - an NGG primitive shader translated to a mesh shader (D688). The module itself
-    /// says which, through its execution model, and getting that wrong draws a guest's geometry
-    /// through the wrong call. Checked against real modules with no device, so the reader is pinned
-    /// even where a mesh stage cannot run.
+    /// Checked against real modules with no device, so the reader is pinned even where a mesh stage
+    /// cannot run.
     #[test]
     fn the_geometry_stage_is_routed_by_the_module_not_the_command() {
         let green = [0.0, 1.0, 0.0, 1.0];
@@ -1606,19 +1518,16 @@ mod tests {
             !super::is_mesh_module(&orbistoun_spirv::constant_colour_fragment_module(green)),
             "a fragment module is not a mesh one"
         );
-        // Not SPIR-V, and empty: not a mesh module, and no panic reading past the end.
+        // Not SPIR-V, and short: not a mesh module, and no read past the end.
         assert!(!super::is_mesh_module(&[0, 1, 2]));
         assert!(!super::is_mesh_module(&[]));
     }
 
-    /// **A bound mesh geometry shader is drawn through the mesh path.**
+    /// A bound mesh geometry shader is drawn through the mesh path.
     ///
-    /// The executor routes a guest's geometry - a mesh shader - to the mesh draw, reading that from
-    /// the module rather than the command. `triangle_mesh_module` emits a fullscreen triangle in the
-    /// colour it is given and the passthrough fragment shows it, so the frame comes back that colour.
-    /// The made-to-fail is structural: a mesh module drawn through the *vertex* path fails pipeline
-    /// creation (its execution model is not vertex), so a green frame is itself the proof the routing
-    /// worked. Skips where the device has no mesh stage.
+    /// `triangle_mesh_module` emits a fullscreen triangle and the passthrough fragment shows it. A
+    /// mesh module drawn through the vertex path fails pipeline creation, so a green frame proves
+    /// the routing. Skips where the device has no mesh stage.
     #[test]
     fn a_bound_mesh_geometry_shader_draws_through_the_mesh_path() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1665,13 +1574,10 @@ mod tests {
         );
     }
 
-    /// **A mesh draw's guest-memory window is fed from the frame and read back through the executor.**
+    /// A mesh draw's guest-memory window is fed from the frame and read back through the executor.
     ///
-    /// A guest's geometry fetches its vertices from the window; the executor seeds it from the
-    /// frame's guest memory (worklog 641) and reads it back. Seeded with known words and drawn with a
-    /// mesh that ignores the window, the window comes back the seed - proof it was bound and carried
-    /// the guest's bytes, not the zeros an unfed window would. Skips where the device has no mesh
-    /// stage.
+    /// Seeded with known words and drawn with a mesh that ignores the window, the window comes back
+    /// as the seed, not zeros. Skips where the device has no mesh stage.
     #[test]
     fn a_mesh_draw_binds_and_reads_back_the_guest_memory_window() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1719,13 +1625,10 @@ mod tests {
         );
     }
 
-    /// **The window is uploaded once, bound directly, and survives the draw.**
+    /// The window is uploaded once, bound directly, and survives the draw (D703).
     ///
-    /// The direct-bind D703 deferred (worklog 645): the window is uploaded to a resident buffer and
-    /// bound by each draw rather than copied fresh. Two draws over the same window both read it back
-    /// correctly - which proves the draw did not destroy the resident buffer, since a release that
-    /// freed it would fault the second draw - and the upload count stays one, proving it was reused
-    /// rather than re-uploaded. Skips where there is no mesh stage.
+    /// Two draws over the same window both read it back, so the draw did not free the resident
+    /// buffer, and the upload count stays one. Skips where there is no mesh stage.
     #[test]
     fn the_window_is_uploaded_once_and_survives_the_draw() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1769,8 +1672,7 @@ mod tests {
             .expect("first draw uploads and binds");
         assert_eq!(backend.last_window(), Some(seed.as_slice()));
 
-        // The second draw reuses the resident buffer the first left intact - a release that freed it
-        // would fault here rather than read back.
+        // The second draw reuses the resident buffer; a release that freed it would fault here.
         backend
             .execute(&draw)
             .expect("second draw reuses the surviving window");
@@ -1782,12 +1684,10 @@ mod tests {
         );
     }
 
-    /// **A window whose bytes change is re-uploaded; an unchanged one is not.**
+    /// A window whose bytes change is re-uploaded; an unchanged one is not (D703).
     ///
-    /// The other half of "upload once" (D703): the resident buffer is content-keyed, so setting the
-    /// same window again binds the same buffer, and setting different bytes uploads a fresh one. Made
-    /// to fail against an upload that never refreshed (a stale window) or one that refreshed every
-    /// draw (no caching). Skips where there is no mesh stage.
+    /// Fails against an upload that never refreshed or one that refreshed every draw. Skips where
+    /// there is no mesh stage.
     #[test]
     fn a_changed_window_is_re_uploaded_and_an_unchanged_one_is_not() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -1865,14 +1765,12 @@ mod tests {
         assert!(matches!(err, BackendError::Unsupported { .. }));
     }
 
-    /// **A whole frame composes through the driver: target, viewport, shaders, draw.**
+    /// A whole frame composes through the driver: target, viewport, shaders, draw.
     ///
-    /// Everything the executor grew this session, driven as one submission rather than command by
-    /// command: the driver makes the colour target and the two modules resident, a `SetRenderTargets`
-    /// sizes the attachment (worklog 637), a `SetViewport` clips it (644, 646), and a bound
-    /// vertex+fragment pipeline draws (636). The frame comes back the target's size, the fragment's
-    /// green inside the viewport and the clear outside - proof the pieces compose, not just that each
-    /// runs alone. Skips where there is no device.
+    /// One submission: the driver makes the colour target and the two modules resident,
+    /// `SetRenderTargets` sizes the attachment, `SetViewport` clips it, and a vertex+fragment
+    /// pipeline draws. The frame comes back the target's size, green inside the viewport and the
+    /// clear outside. Skips where there is no device.
     #[test]
     fn a_full_frame_composes_through_the_driver() {
         use orbistoun_gpu::pipeline::Submission;
@@ -1944,12 +1842,10 @@ mod tests {
         );
     }
 
-    /// **An indexed draw routes to the graphics path, not the generic refusal.**
+    /// An indexed draw routes to the graphics path, not the generic refusal.
     ///
-    /// A `DrawIndexed` used to be refused by name like any unimplemented command; now it reaches
-    /// `draw_graphics` (worklog 643). With nothing bound, the refusal it gets is the *graphics* one -
-    /// "no vertex and fragment shaders bound" - not the generic "DrawIndexed", which is what proves it
-    /// routed there. No device needed: the bound-shader check runs before the device is touched.
+    /// With nothing bound, the refusal is the graphics one ("no vertex and fragment shaders
+    /// bound"), not the generic "DrawIndexed". No device needed: the bound-shader check runs first.
     #[test]
     fn an_indexed_draw_routes_to_the_graphics_path() {
         let mut backend = VulkanBackend::new();
@@ -1969,13 +1865,10 @@ mod tests {
         );
     }
 
-    /// **An indexed draw of mesh geometry executes through the mesh path.**
+    /// An indexed draw of mesh geometry executes through the mesh path.
     ///
-    /// A guest's indexed geometry is a mesh shader that reads its own indices from the window
-    /// (worklog 641); its `DrawIndexed` is therefore its mesh draw, and it renders rather than being
-    /// refused. `triangle_mesh_module` drew through a `DrawIndexed` comes back the fragment's green -
-    /// the same proof-by-structure as the mesh `Draw` (a mesh module on the vertex path fails pipeline
-    /// creation). Skips where the device has no mesh stage.
+    /// A mesh module drawn through a `DrawIndexed` comes back the fragment's green; on the vertex
+    /// path it would fail pipeline creation. Skips where the device has no mesh stage.
     #[test]
     fn an_indexed_draw_of_mesh_geometry_executes() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -2024,13 +1917,10 @@ mod tests {
         );
     }
 
-    /// **An indexed draw on a *vertex* pipeline is refused, not drawn as a non-indexed one.**
+    /// An indexed draw on a vertex pipeline is refused, not drawn as a non-indexed one (D010).
     ///
-    /// A vertex pipeline's indexed draw fetches from a host index buffer the executor does not bind,
-    /// and drawing it without one would draw the wrong geometry while looking like it worked - the
-    /// plausible-output failure (D010). This is only reachable by a vertex module (a test shader),
-    /// since a guest's geometry is a mesh shader. Skips where there is no device to make the module
-    /// resident.
+    /// Drawing it without an index buffer would draw the wrong geometry. Only a vertex module (a
+    /// test shader) reaches this. Skips where there is no device.
     #[test]
     fn an_indexed_draw_on_a_vertex_pipeline_is_refused() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -2076,8 +1966,8 @@ mod tests {
         );
     }
 
-    /// **A `SetViewport` is accepted as state, not refused.** It sets the rectangle a following draw
-    /// is restricted to and touches no device, so it succeeds before anything is bound.
+    /// A `SetViewport` is accepted as state: it touches no device, so it succeeds before anything
+    /// is bound.
     #[test]
     fn a_set_viewport_is_accepted() {
         let mut b = VulkanBackend::new();
@@ -2090,12 +1980,10 @@ mod tests {
         .expect("a viewport is state the backend keeps, not an unimplemented command");
     }
 
-    /// **A `SetViewport` restricts a draw to its rectangle - pixels outside keep the clear.**
+    /// A `SetViewport` restricts a draw to its rectangle; pixels outside keep the clear.
     ///
-    /// The viewport is applied as the scissor (worklog 644): a fullscreen-triangle draw restricted to
-    /// the left half of the attachment paints the left half the fragment's green and leaves the right
-    /// half the clear black. A backend that ignored the viewport would paint the whole frame green, so
-    /// the black right half is what proves the rectangle took effect. Skips where there is no device.
+    /// The viewport is applied as the scissor: a fullscreen triangle restricted to the left half
+    /// paints it green and leaves the right half black. Skips where there is no device.
     #[test]
     fn a_set_viewport_restricts_the_draw_to_its_rectangle() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -2159,13 +2047,12 @@ mod tests {
         );
     }
 
-    /// **The guest's blend state changes the frame** (`REQ-...2ea9`, worklog 829).
+    /// The guest's blend state changes the frame.
     ///
-    /// Green over the whole attachment, then red at half alpha over it. With `CB_BLEND0_CONTROL` set
-    /// to `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` / add, enabled, the result is the two mixed - about
-    /// half red and half green; without a `SetBlend` the red lands opaque. The acceptance `2ea9`
-    /// names: the same draws, with and without the state, give different frames. And a constant-colour
-    /// factor, whose constants are not decoded, refuses the draw by name.
+    /// Green over the whole attachment, then red at half alpha. With `CB_BLEND0_CONTROL` set to
+    /// `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` / add, the result is the two mixed; without a `SetBlend`
+    /// the red lands opaque. A constant-colour factor, whose constants are not decoded, refuses the
+    /// draw by name.
     #[test]
     fn a_guest_blend_state_mixes_a_translucent_draw_over_the_last() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage, decode_blend_control};
@@ -2177,7 +2064,7 @@ mod tests {
         let green = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
         let red = orbistoun_spirv::constant_colour_fragment_module([1.0, 0.0, 0.0, 0.5]);
         // SRCBLEND = SRC_ALPHA (4), COMB = DST_PLUS_SRC (0), DESTBLEND = ONE_MINUS_SRC_ALPHA (5),
-        // ENABLE (bit 30) - `gfx103.json` `CB_BLEND0_CONTROL`, as `decode_blend_control` reads it.
+        // ENABLE (bit 30): `gfx103.json` `CB_BLEND0_CONTROL`, as `decode_blend_control` reads it.
         let alpha = decode_blend_control(0x4 | (0x5 << 8) | (1 << 30));
 
         let draw = |blend: Option<orbistoun_gpu::BlendControl>| {
@@ -2266,13 +2153,11 @@ mod tests {
         ));
     }
 
-    /// **A frame's draws accumulate on their target** (worklog 822).
+    /// A frame's draws accumulate on their target.
     ///
-    /// Two draws on the same target, each restricted to one half: green on the left, then red on the
-    /// right. Every draw used to begin from a cleared attachment, so the frame kept only the last
-    /// one, the red right half on black, and a 450-draw frame read back as whatever the final draw
-    /// covered. With the target's contents carried from draw to draw both halves survive; the left
-    /// staying green is the assertion the old behaviour fails.
+    /// Two draws on one target, each restricted to one half: green on the left, then red on the
+    /// right. The left half staying green shows the second draw started from the target's contents,
+    /// not a clear.
     #[test]
     fn a_frames_draws_accumulate_on_their_target() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -2336,12 +2221,10 @@ mod tests {
         );
     }
 
-    /// **A `Draw` issues the guest's decoded vertex count, not a fixed three.**
+    /// A `Draw` issues the guest's decoded vertex count, not a fixed three.
     ///
-    /// The count reaches `cmd_draw`: with the same bound fullscreen-triangle pipeline, a draw of
-    /// **zero** vertices issues no geometry, so the frame stays the clear colour, while a draw of
-    /// three paints it the fragment's. A backend that ignored the count and always drew three would
-    /// paint both, so the black frame is what proves the count is honoured. Skips where no device.
+    /// With the same pipeline, zero vertices leave the frame the clear colour and three paint it
+    /// the fragment's. Skips where there is no device.
     #[test]
     fn a_draw_issues_its_decoded_vertex_count() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
@@ -2409,10 +2292,8 @@ mod tests {
         );
     }
 
-    /// **A `SetRenderTargets` naming a target that is not resident is refused, not silently drawn to
-    /// the wrong size.** Selecting a target the backend never received is a real error - the
-    /// residency pass should have delivered it - and answering `UnknownResource` says so rather than
-    /// falling back to the interim square as if nothing were named.
+    /// A `SetRenderTargets` naming a target that is not resident is refused with `UnknownResource`,
+    /// not drawn at the interim size.
     #[test]
     fn an_unresident_render_target_is_refused() {
         use orbistoun_gpu::ResourceId;
@@ -2430,9 +2311,8 @@ mod tests {
         );
     }
 
-    /// **An empty `SetRenderTargets` clears the selection back to the interim square.** A frame that
-    /// unbinds its target is not an error; the next draw simply has no guest size to honour, so the
-    /// backend falls back to the fixed attachment rather than refusing.
+    /// An empty `SetRenderTargets` clears the selection back to the interim square: unbinding a
+    /// target is not an error.
     #[test]
     fn an_empty_render_target_set_clears_the_selection() {
         let mut backend = VulkanBackend::new();
@@ -2449,12 +2329,11 @@ mod tests {
         );
     }
 
-    /// **A `Draw` renders into the selected target's dimensions, not the interim square.**
+    /// A `Draw` renders into the selected target's dimensions, not the interim square.
     ///
-    /// The guest's decoded size (worklog 637) reaches the attachment: a 128x96 colour target is made
-    /// resident, selected, and a fullscreen triangle drawn - the frame comes back 128x96, which the
-    /// fixed `RENDER_WIDTH` square could not produce, and its centre is the fragment's colour. This
-    /// is the join between the register decode and the pixels. Skips where there is no device.
+    /// A 128x96 colour target is made resident and selected, and a fullscreen triangle drawn: the
+    /// frame comes back 128x96, with the fragment's colour at its centre. Skips where there is no
+    /// device.
     #[test]
     fn a_draw_renders_into_the_selected_target_size() {
         use orbistoun_gpu::{Resource, ResourceId, ShaderStage};

@@ -1,26 +1,11 @@
 //! What a thunk answers, and what it does on the way there.
 //!
-//! # Why a second integration binary
-//!
-//! Every table here is a `OnceLock` - handlers, stub returns, forced returns, planted
-//! writes, readable and writable ranges - because a thunk has no register left to carry a
-//! context pointer, so all of it is process-global and installed once. That means **one
-//! configuration per process**, and the existing `executes.rs` already owns one. This is a
-//! second process with a different one.
-//!
-//! It also means the stateful assertions live in a single test: two `#[test]` functions
-//! installing tables would race to set the same lock, and the loser's install is a silent
-//! no-op rather than an error. The pure functions are tested separately, since they touch
-//! nothing.
-//!
-//! # What it is really checking
-//!
-//! The precedence of the four things that can answer a call, which is the part no unit test
-//! can reach: a forced diagnostic answer beats an implementation, a region answer beats a
-//! scalar one, a scalar policy answer beats the error code, and the error code is what is
-//! left. Every layer here exists because a previous one could not express something, and
-//! each was added without removing the last - so the order they are consulted in is the
-//! whole behaviour.
+//! Every table here is a process-global `OnceLock`, because a thunk has no register left for a
+//! context pointer, so each integration binary holds one configuration. The stateful assertions
+//! are one test, since two tests installing tables would race and the loser's install is a
+//! silent no-op. What it checks is the precedence of the layers that can answer a call: a forced
+//! diagnostic answer beats an implementation, a region answer beats a scalar one, a scalar
+//! policy answer beats the error code, and the error code is what is left (D166).
 
 use orbistoun_core::{
     GUEST_ARG_REGISTERS, GUEST_FLOAT_REGISTERS, GUEST_PAGE_SIZE, GuestError, GuestFloatFn, GuestFn,
@@ -34,24 +19,20 @@ type GuestCall = extern "sysv64" fn(u64, u64, u64, u64, u64, u64) -> u64;
 fn callable(address: u64) -> GuestCall {
     let pointer: *const () =
         std::ptr::with_exposed_provenance(usize::try_from(address).expect("fits"));
-    // SAFETY: `address` came from `ThunkTable::address_of`, so it is the start of a stub the
-    // table wrote and then mapped read-execute. The stub is encoded to the System V
-    // convention this type declares, and the table outlives the call.
+    // SAFETY: `address` came from `ThunkTable::address_of`: the start of a stub the table wrote
+    // and mapped read-execute, encoded to the System V convention this type declares. The table
+    // outlives the call.
     unsafe { std::mem::transmute::<*const (), GuestCall>(pointer) }
 }
 
-/// A base far from anything the host is likely to have mapped.
-///
-/// Not `SUGGESTED_BASE`: the other integration binary uses that, and while these are
-/// separate processes, picking a different one keeps the two from ever being confused for
-/// each other in a fault report.
+/// A base far from anything the host is likely to have mapped, and different from the other
+/// integration binary's so fault reports never confuse the two.
 const TABLE_BASE: u64 = 0x0000_5000_0000;
 
 /// How many imports this run declares.
 const IMPORTS: usize = 8;
 
-// Indices, each configured differently. Named because the assertions below are unreadable
-// as bare numbers, and a wrong one would still pass some of them.
+// Indices, each configured differently, named so the assertions are readable.
 /// An ordinary implemented import.
 const IMPLEMENTED: usize = 0;
 /// One whose answer arrives in a floating-point register.
@@ -89,10 +70,8 @@ fn handler(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     HANDLER_ANSWER
 }
 
-/// The one whose implementation is shadowed by a forced answer.
-///
-/// It still records that it ran, because the implementation is supposed to execute and only
-/// its *answer* be replaced - skipping it would suppress every side effect too.
+/// Records that the shadowed implementation ran: a forced answer replaces only its answer, not
+/// its side effects.
 static HANDLER_RAN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn shadowed_handler(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -102,21 +81,16 @@ fn shadowed_handler(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// An import that answers in a floating-point register.
 fn float_handler(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
-    // Reads an integer register, which is what makes this different from a pure maths
-    // function and worth carrying both arrays for.
+    // Reads an integer register, so this is not a pure maths function and needs both arrays.
     ints[0].wrapping_add(1)
 }
 
-// --- the pure rules ------------------------------------------------------------------------
+// The pure rules.
 
-/// The alignment rule, which is a fact about the convention rather than about a run.
+/// A callee's first instruction sees exactly one stack remainder, eight.
 ///
-/// **Pure so it can be tested without a guest**, and that matters here more than usual: the
-/// code that uses it runs inside a naked trampoline, where a mistake is invisible until it
-/// is catastrophic.
-///
-/// A `call` pushes eight bytes onto a sixteen-byte-aligned stack, so a callee's first
-/// instruction always sees a remainder of eight. Every other remainder is impossible.
+/// A `call` pushes eight bytes onto a sixteen-byte-aligned stack. Tested without a guest
+/// because the code using it runs inside a naked trampoline.
 #[test]
 fn the_entry_alignment_rule_admits_exactly_one_remainder() {
     assert!(dispatch::entry_alignment_conforms(
@@ -134,11 +108,8 @@ fn the_entry_alignment_rule_admits_exactly_one_remainder() {
     }
 }
 
-/// Only a mapped argument carries bytes.
-///
-/// The three-way distinction is the point: a scalar and an address pointing at nothing this
-/// run mapped were once both reported as an empty buffer, so a pointer read as a count and
-/// the tool doing the diagnosing was quietly reporting the wrong kind of thing (D217).
+/// Only a mapped argument is reported as carrying bytes; a scalar and an unmapped address
+/// are reported as what they are.
 #[test]
 fn only_a_mapped_argument_is_reported_as_carrying_bytes() {
     assert!(dispatch::Pointing::Mapped.was_read());
@@ -147,21 +118,17 @@ fn only_a_mapped_argument_is_reported_as_carrying_bytes() {
     assert_ne!(dispatch::Pointing::Scalar, dispatch::Pointing::Unreadable);
 }
 
-// --- the whole configuration, in one process ---------------------------------------------------
+// The whole configuration, in one process.
 
 /// Everything the tables can do to a call, in the order they are consulted.
 ///
-/// One test because the tables are process-global and set once. Assertions are grouped by
-/// what they are about rather than by call order, and each says which layer it is pinning.
-///
-/// Long, and it has to be: splitting it into several `#[test]` functions is exactly what the
-/// `OnceLock` tables forbid, and splitting it into helpers would hand each one the buffers,
-/// the table and the call closure - more machinery than the thing it would be organising.
+/// One test because the tables are process-global and set once; assertions are grouped by the
+/// layer they pin.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn what_answers_a_call_and_in_what_order() {
-    // Guest memory this run declares. Held for the whole test, because the addresses handed
-    // to the trampoline point into them.
+    // Guest memory this run declares, held for the whole test because the trampoline is handed
+    // addresses into it.
     let mut readable = vec![0_u8; 256];
     for (at, byte) in readable.iter_mut().enumerate() {
         *byte = at as u8;
@@ -171,7 +138,7 @@ fn what_answers_a_call_and_in_what_order() {
     let mut writable = vec![0_u64; 16];
     let writable_at = writable.as_mut_ptr().expose_provenance() as u64;
 
-    // --- install, before anything is called ---------------------------------------------
+    // Install, before anything is called.
 
     let mut handlers: Vec<Option<GuestFn>> = vec![None; IMPORTS];
     handlers[IMPLEMENTED] = Some(handler);
@@ -182,9 +149,8 @@ fn what_answers_a_call_and_in_what_order() {
     floats[FLOATING] = Some(float_handler);
     dispatch::install_float_handlers(floats);
 
-    // The scalar answers first, so the region answers below land in the second table and can
-    // be shown to win. Installed in this order deliberately: it is the order a real run
-    // installs them, and the reason the second table exists at all (D300).
+    // Scalar answers first, so the region answers below land in the second table and can be shown
+    // to win; this is the order a run installs them.
     let mut stubs: Vec<Option<u64>> = vec![None; IMPORTS];
     stubs[SCALAR_ANSWER] = Some(SCALAR_VALUE);
     stubs[REGION_ANSWER] = Some(SCALAR_VALUE);
@@ -206,8 +172,7 @@ fn what_answers_a_call_and_in_what_order() {
             offset: 0,
             value: PLANTED,
         },
-        // Also lands, one word along, which is what makes a single run able to eliminate
-        // several candidate slots at once.
+        // Also lands, one word along, so a single run can eliminate several candidate slots.
         dispatch::Plant {
             position: 0,
             offset: 8,
@@ -232,7 +197,7 @@ fn what_answers_a_call_and_in_what_order() {
     let table = ThunkTable::build(TABLE_BASE, IMPORTS, GUEST_PAGE_SIZE).expect("build the table");
     let at = |index: usize| callable(table.address_of(index).expect("in range"));
 
-    // --- what each layer answers ---------------------------------------------------------
+    // What each layer answers.
 
     assert_eq!(
         at(IMPLEMENTED)(0xA11CE, 0, 0, 0, 0, 0),
@@ -273,7 +238,7 @@ fn what_answers_a_call_and_in_what_order() {
         )
     );
 
-    // --- the forced answer, and the fact the implementation still ran ---------------------
+    // The forced answer, and the implementation still ran.
 
     assert_eq!(
         at(FORCED_OVER_HANDLER)(0, 0, 0, 0, 0, 0),
@@ -297,7 +262,7 @@ fn what_answers_a_call_and_in_what_order() {
         )
     );
 
-    // --- what a stub does before it answers -------------------------------------------------
+    // What a stub does before it answers.
 
     assert_eq!(
         at(PLANTS)(writable_at, 7, 0, 0, 0, 0),
@@ -317,7 +282,7 @@ fn what_answers_a_call_and_in_what_order() {
         )
     );
 
-    // --- what the guest was pointing at ------------------------------------------------------
+    // What the guest was pointing at.
 
     // One unimplemented call with one of each kind of argument.
     let unmapped = readable_at + 0x10_0000;
@@ -364,7 +329,7 @@ fn what_answers_a_call_and_in_what_order() {
         )
     );
 
-    // --- what a run can say about itself -------------------------------------------------------
+    // What a run can say about itself.
 
     assert!(
         dispatch::is_implemented(IMPLEMENTED),
@@ -391,7 +356,7 @@ fn what_answers_a_call_and_in_what_order() {
         )
     );
 
-    // --- the calling convention --------------------------------------------------------------
+    // The calling convention.
 
     let conformance = dispatch::abi_conformance();
     assert_eq!(
@@ -421,16 +386,11 @@ fn what_answers_a_call_and_in_what_order() {
     );
     assert_eq!(orbistoun_thunk::total_calls(), 8);
 
-    // --- and a second install is ignored, which is why there is one table (D484) ------
+    // A second install is ignored, so there is one table (D484).
 
-    // `BARE` is deliberately unimplemented above, and every call to it was recorded as
-    // called-and-not-implemented. Installing a handler for it *now* must change nothing:
-    // the tables are `OnceLock`s, so the first install is the live one for the process.
-    //
-    // **This is the claim a second module's stub table would rest on**, and it is false: a
-    // per-module table would be built, dropped in silence, and every count taken afterwards
-    // would be indexed against the wrong module. Asserted here rather than reasoned about,
-    // because a guard nobody has watched fail is a guard nobody knows anything about.
+    // `BARE` is unimplemented above and every call to it was recorded as such. Installing a
+    // handler for it now changes nothing, because the first install of each `OnceLock` is the live
+    // one; a per-module table would be built and dropped silently.
     assert!(
         !dispatch::is_implemented(BARE),
         "the first install left this slot empty, which is what makes the check below mean something"

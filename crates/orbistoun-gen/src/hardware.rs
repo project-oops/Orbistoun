@@ -1,31 +1,12 @@
 //! Ingest conformance records as observations on the functions they exercised.
 //!
-//! # What a record can and cannot say
-//!
-//! A conformance run emits `try` naming the check's library and symbol, and `res` carrying the
-//! verdict, a value and a note. Joined on the check id, that is a genuine hardware observation
-//! about a named function - the strongest provenance this project has.
-//!
-//! **What it is not is a return value.** The value's meaning lives in the check, which is C
-//! source, not in the record: `sceKernelWrite` answering `0xffffffff80020009` to a bad
-//! descriptor is a fact about the function, and `sceKernelGetProcessTime` answering `0xc3` is
-//! the time it happened to be. Both arrive in the same field.
-//!
-//! **The two captures prove it rather than merely suggesting it.** Twelve check-and-function
-//! pairs answered *differently* in the two runs of the same suite - timestamps, mapped
-//! addresses, allocation sizes, a thread handle, a module count. A run that read every value
-//! as "what this function returns" would have written that `sceKernelGetProcessTime` returns
-//! `0xc3`, which the other capture contradicts on its own. That is the plausible output
-//! principle 3 forbids, and it would have looked like 234 new facts.
-//!
-//! So an observation is recorded **quoted rather than interpreted**: the check that made it,
-//! the verdict, the value as written, the note, and where to read it back. And where the runs
-//! disagreed, that is itself recorded - a value that moves between runs is not a constant of
-//! the platform, which is worth knowing and is invisible in either run alone.
-//!
-//! # Why `known_by` is deliberately left alone
-//!
-//! See [`observation_of`]. It is the one field this refuses to touch.
+//! A run emits `try` naming the check's library and symbol, and `res` carrying the verdict,
+//! a value and a note; joined on the check id, that is a hardware observation about a named
+//! function. The value is not necessarily a return value: its meaning lives in the check,
+//! so `sceKernelWrite` answering an error code and `sceKernelGetProcessTime` answering the
+//! time share one field. An observation is therefore quoted rather than interpreted, and a
+//! value that differs between runs is recorded as not constant. [`observation_of`] leaves
+//! `known_by` unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,10 +38,8 @@ pub(crate) struct Observation {
 
 /// Reads the observations out of one capture, one outcome each.
 ///
-/// **Pseudo-symbols are skipped.** A census or sweep check names its subject `(census)` or
-/// `(symbol probe)` because it has no single one - 178 of the 234 valued records in the
-/// 2026-08-30 run are census rows - and attaching those to a function would attribute a
-/// whole-surface count to whichever name happened to be in the field.
+/// Pseudo-symbols are skipped: a census or sweep check names its subject `(census)` or
+/// `(symbol probe)`, and its whole-surface count is not a fact about one function.
 pub(crate) fn observations_in(capture: &str, source: &str) -> Vec<Observation> {
     let mut subjects: BTreeMap<&str, &str> = BTreeMap::new();
     let mut out = Vec::new();
@@ -96,10 +75,8 @@ pub(crate) fn observations_in(capture: &str, source: &str) -> Vec<Observation> {
 
 /// Gathers every run's report of the same check against the same function.
 ///
-/// Where the runs agreed, that is **one** finding seen more than once, recorded once naming
-/// every run. Where they did not, the disagreement is kept and becomes the finding: a value
-/// that moves between two runs of one check is not a constant of the platform, and no single
-/// run can show that.
+/// Where the runs agreed, one finding is recorded naming every run. Where they did not, the
+/// disagreement is the finding: the value is not a platform constant.
 #[must_use]
 pub(crate) fn fold(observations: Vec<Observation>) -> Vec<Observation> {
     let mut out: Vec<Observation> = Vec::new();
@@ -158,8 +135,8 @@ fn reported(outcome: &Outcome) -> String {
 
 /// The sentence an observation becomes.
 ///
-/// Quoted, never interpreted - the value appears as "the check reported this", not as "the
-/// function returns this", because only the check knows which of those it is.
+/// Quoted, never interpreted: the value reads as "the check reported this", not "the
+/// function returns this".
 pub(crate) fn edge_case(observation: &Observation) -> String {
     let head = format!("Measured on hardware: obSCEne `{}` ", observation.check);
     match observation.outcomes.as_slice() {
@@ -177,8 +154,7 @@ pub(crate) fn edge_case(observation: &Observation) -> String {
                 .iter()
                 .map(|o| format!("{} in {}", reported(o), seen_in(&o.sources)))
                 .collect();
-            // **The disagreement is said first**, because a reader scanning for a constant
-            // needs to know this is not one before they reach a value they might copy.
+            // The disagreement comes first, before any value a reader might copy.
             format!(
                 concat!(
                     "{}did not report the same thing twice, so the value is not a constant of ",
@@ -194,19 +170,10 @@ pub(crate) fn edge_case(observation: &Observation) -> String {
 
 /// Turns an observation into a record that adds one edge case and changes nothing else.
 ///
-/// # The field this refuses to set
-///
-/// **`known_by` is left exactly as it was**, and that is a deliberate refusal rather than an
-/// omission. The field means "how the behaviour recorded above was established", and one
-/// hardware observation about one edge does not establish a function's whole recorded
-/// contract - most of which came from a published specification. Promoting an entry to
-/// `measured` on the strength of a single check would make the tier counts read as though the
-/// platform had confirmed far more than it has, which is the same over-claim in a report that
-/// principle 3 forbids in a stub.
-///
-/// The tier moves when a record carries its own condition as data - subject, condition,
-/// observation, provenance - because then the entry can say what was established rather than
-/// only that something was. Until then the observation is itemised and the tier holds.
+/// `known_by` is left as it was (D180): it says how the whole recorded behaviour was
+/// established, and one observation about one edge does not establish a function's
+/// contract. Promoting it would inflate the tier counts; the observation is itemised
+/// instead.
 pub(crate) fn observation_of(observation: &Observation) -> Record {
     Record {
         function: observation.symbol.clone(),
@@ -217,23 +184,18 @@ pub(crate) fn observation_of(observation: &Observation) -> Record {
 
 /// Joins the parts of a measurement id, using a character no field can contain.
 ///
-/// A unit separator rather than a colon or a slash: check ids contain slashes, conditions
-/// contain hyphens, and a separator a field can hold would split one measurement into two.
+/// A unit separator, because check ids contain slashes and conditions contain hyphens.
 const JOIN: char = '\u{1f}';
 
 /// Reads the `measure` records out of one capture.
 ///
-/// These are the records that carry their own condition, so unlike a `res` value they can be
-/// asserted rather than only quoted. Reused through the same [`Observation`] shape as the
-/// prose ingest, so [`fold`] decides agreement for both rather than there being two rules.
+/// These records carry their own condition, so unlike a `res` value they can be asserted.
+/// They share the [`Observation`] shape, so [`fold`] decides agreement for both.
 pub(crate) fn measurements_in(capture: &str, source: &str) -> Vec<Observation> {
     let mut out = Vec::new();
     for line in capture.lines() {
-        // **Read through the crate that owns the record format, not by splitting on a pipe
-        // here.** This used to do its own field match, which was a second copy of the
-        // protocol living one directory away from the first - the shape D291 and D292 gave
-        // this crate its `orbistoun-hle` dependency to avoid. `orbistoun-probe` grew a
-        // `Measure` variant in D605; the copy went with it.
+        // Read through `orbistoun-probe`, which owns the record format, rather than a second
+        // copy of the protocol here.
         let Ok(orbistoun_probe::Line::Record(orbistoun_probe::Record::Measure {
             section,
             subject,
@@ -244,19 +206,14 @@ pub(crate) fn measurements_in(capture: &str, source: &str) -> Vec<Observation> {
         else {
             continue;
         };
-        // **The export census is not an observation of a condition.** Its subject is a hash
-        // rather than a named thing and its "value" is where the kernel happens to have
-        // placed it, so folding 2,443 of them in here would make a table of checkable claims
-        // four fifths symbol table - and every entry would read as a platform constant when
-        // an address is the least constant thing a report carries. It is consumed by the name
-        // search instead, which is what a hash and an address are for (D605, D609).
+        // The export census is not an observation of a condition: its subject is a hash and
+        // its value an address, so it goes to the name search instead.
         if section == orbistoun_probe::KEXPORT_SECTION {
             continue;
         }
         out.push(Observation {
-            // The condition rides in the check field so `fold` groups by the full triple: two
-            // conditions of one check are different measurements and must not be folded
-            // together as though the runs had disagreed.
+            // The condition rides in the check field so `fold` groups by the full triple, and
+            // two conditions of one check stay separate measurements.
             check: format!("{section}{JOIN}{field}{JOIN}{unit}"),
             symbol: subject,
             outcomes: vec![Outcome {
@@ -272,24 +229,11 @@ pub(crate) fn measurements_in(capture: &str, source: &str) -> Vec<Observation> {
 
 /// Turns a committed table back into observations, so a regeneration adds rather than replaces.
 ///
-/// # Why this exists
-///
-/// A report directory is **overwritten**. The sibling project's probe writes into one place, and
-/// an hour later the six files there are six different files - so a regeneration that read only
-/// what is on disk silently dropped everything the previous batch had said.
-///
-/// That is not merely a lost record. A measurement marked `constant = false` *because two batches
-/// disagreed* becomes constant again the moment one of them is deleted, and something may then
-/// assert it. Evidence going missing would make a claim **stronger**, which is the one direction
-/// nothing should ever move on its own (D618).
-///
-/// So the committed table is folded in beside the captures, exactly as `write_symbol_db`
-/// accumulates names and `write_wanted` accumulates hashes (D074). What a run cannot see, it
-/// keeps.
-///
-/// The `disagreed` field is parsed back into the outcomes it was rendered from - `value in
-/// source and source` - which is why [`table`] writes it in that shape rather than as a bare
-/// list of values.
+/// Report directories are overwritten, so the committed table is folded in beside the
+/// captures, as `write_symbol_db` accumulates names. Otherwise a measurement marked
+/// `constant = false` because two batches disagreed would turn constant once one batch was
+/// gone. The `disagreed` field is parsed back from the `value in source and source` shape
+/// [`table`] writes.
 pub(crate) fn observations_in_table(
     table: &orbistoun_hle::hardware::Measurements,
 ) -> Vec<Observation> {
@@ -303,8 +247,7 @@ pub(crate) fn observations_in_table(
         }];
         for rendered in &m.disagreed {
             // `value in a.txt and b.txt`. A line that does not split that way is kept whole as
-            // the value with no source, which loses the provenance and never the disagreement -
-            // the disagreement is the part that must not be dropped.
+            // the value with no source, so the disagreement is never dropped.
             let (value, sources) = rendered
                 .split_once(" in ")
                 .map_or((rendered.as_str(), Vec::new()), |(v, s)| {
@@ -327,9 +270,8 @@ pub(crate) fn observations_in_table(
 }
 /// Turns folded observations into the committed table.
 ///
-/// **A measurement is constant when every run that took it agreed**, which is decided by the
-/// runs rather than by what its kind ought to mean. Eleven of the thirty-eight disagree, and
-/// they are kept: that a value moves between runs is a fact no single run can show.
+/// A measurement is constant when every run that took it agreed, decided by the runs
+/// rather than by its kind. Disagreeing measurements are kept.
 pub(crate) fn table(folded: &[Observation]) -> orbistoun_hle::hardware::Measurements {
     let mut out = Vec::new();
     for observation in folded {
@@ -369,15 +311,14 @@ pub(crate) struct Ingested {
     pub(crate) varying: usize,
     /// Observed functions with no knowledge entry, which are reported rather than invented.
     pub(crate) unknown: BTreeSet<String>,
-    /// Provenance faults. **Any fault means nothing is written.**
+    /// Provenance faults. Any fault means nothing is written.
     pub(crate) faults: Vec<String>,
 }
 
 /// Attaches every observation to the entry for the function it names.
 ///
-/// An observation about a function nothing has recorded is **reported, not created**: this
-/// knows the vendor library the check used, not which of orbistoun's files models it, and
-/// guessing would put an entry in a file that does not describe that library.
+/// An observation about a function with no entry is reported, not created: the vendor
+/// library the check used does not say which knowledge file models it.
 pub(crate) fn ingest(
     observations: &[Observation],
     existing: &BTreeMap<String, KnowledgeFile>,
@@ -417,11 +358,8 @@ mod tests {
 
     /// A committed table survives a regeneration that cannot see the captures it came from.
     ///
-    /// **The failure this guards is silent and makes a claim stronger.** A report directory is
-    /// overwritten, so a measurement marked non-constant *because two batches disagreed* would
-    /// become constant again the moment one batch is deleted - and something may then assert it.
-    /// Dropping the table from 429 rows to 38 is what actually happened when the fold was
-    /// removed to check (D618).
+    /// Otherwise a measurement marked non-constant because two batches disagreed would turn
+    /// constant once one batch was gone.
     #[test]
     fn a_committed_table_is_carried_through_a_regeneration_that_cannot_see_its_captures() {
         use super::{observations_in_table, table};
@@ -454,8 +392,8 @@ mod tests {
             ],
         };
 
-        // Read back and written out again with no captures at all: the round trip is the whole
-        // contract, because a regeneration that saw nothing new does exactly this.
+        // Read back and written out again with no captures, as a regeneration that saw
+        // nothing new does.
         let again = table(&fold(observations_in_table(&committed)));
         assert_eq!(again.measurements.len(), 2, "nothing may be dropped");
 
@@ -500,8 +438,7 @@ mod tests {
 
     /// A census row names no function, so it is not attached to one.
     ///
-    /// 178 of the 234 valued records in the 2026-08-30 run are census rows. Attaching them
-    /// would record a whole-surface count as a fact about whichever name sat in the field.
+    /// A whole-surface count is not a fact about one function.
     #[test]
     fn a_census_row_is_not_an_observation_about_a_function() {
         let found = observations_in(CAPTURE, "ps5-full.txt");
@@ -519,11 +456,8 @@ mod tests {
         );
     }
 
-    /// **The value is quoted as a report, never as what the function returns.**
-    ///
-    /// The distinction the whole module exists for: the same field carries an error code from
-    /// one check and a timestamp from another, and only the check knows which. Asserting on
-    /// the wording because the wording is the guarantee.
+    /// The value is quoted as a report, never as what the function returns; the wording is
+    /// the guarantee, so the test asserts on it.
     #[test]
     fn an_observation_is_quoted_rather_than_interpreted() {
         let found = observations_in(CAPTURE, "ps5-full.txt");
@@ -573,12 +507,8 @@ mod tests {
         );
     }
 
-    /// **A value that moves between runs is recorded as not being a constant.**
-    ///
-    /// The case the two real captures forced: twelve check-and-function pairs answered
-    /// differently in the two runs - timestamps, mapped addresses, a module count. Merging
-    /// them to one value would assert a constant the other run disproves; dropping them would
-    /// throw away the only evidence that the value varies at all.
+    /// A value that differs between runs is recorded as not constant, neither merged nor
+    /// dropped.
     #[test]
     fn a_value_that_differs_between_runs_says_so() {
         let a = concat!(
@@ -604,11 +534,8 @@ mod tests {
         assert!(text.contains("0xc3") && text.contains("0x83"), "{text}");
     }
 
-    /// **`known_by` is not touched**, which is the refusal this module is built around.
-    ///
-    /// A single observation about one edge does not establish a function's whole recorded
-    /// behaviour. Promoting the entry would inflate the tier counts, and the tier counts are
-    /// what the project uses to know how much of itself is guessed.
+    /// `known_by` is not touched: one observation does not establish a function's whole
+    /// recorded behaviour.
     #[test]
     fn an_observation_does_not_promote_the_entry_to_measured() {
         let found = observations_in(CAPTURE, "ps5-full.txt");

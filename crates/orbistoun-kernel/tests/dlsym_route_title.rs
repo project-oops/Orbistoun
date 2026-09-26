@@ -1,11 +1,8 @@
 //! `sceKernelDlsym` refuses a platform name on a title's route.
 //!
-//! The other half of [`dlsym_route`](../dlsym_route.rs), in its own binary for the reason
-//! stated there: the route and the stub table are both `OnceLock`s.
-//!
-//! **The title route is the default**, so nothing here sets it. The stub table *is* installed,
-//! and that is what makes the assertion mean something: without it the name would resolve to
-//! nothing anyway and the refusal would prove only that the table was empty.
+//! The other half of [`dlsym_route`](../dlsym_route.rs), in its own binary because the route
+//! and the stub table are both `OnceLock`s. The title route is the default, so nothing here sets
+//! it; the stub table is installed so the refusal cannot come from an empty table.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -13,7 +10,7 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 /// the route.
 const IMPLEMENTED: &str = "sceKernelUsleep";
 
-/// Where the pretend stub lives - the address a payload would have been given.
+/// Where the pretend stub lives: the address a payload would be given.
 const THUNK_AT: u64 = 0x0000_7000_0000_1234;
 
 fn dlsym() -> GuestFn {
@@ -31,12 +28,10 @@ fn guest_string(text: &str) -> (Vec<u8>, u64) {
     (storage, at)
 }
 
-/// **A title does not resolve a platform name, which is what the console does.**
+/// A title does not resolve a platform name, matching the hardware.
 ///
-/// Measured: obSCEne asks libkernel - a valid handle - for a symbol it knows exists, and the
-/// package leg of sweep 20260909-234847 answers `0x8002_0003`. Every `dlsym` measurement in
-/// that leg is `0x0`, and `005-generation/detect` says in as many words that this platform
-/// does not resolve modules by name.
+/// On the hardware, `dlsym` on libkernel's valid handle for a known symbol answers
+/// `0x8002_0003` on a title.
 #[test]
 fn a_title_does_not_resolve_a_platform_name() {
     orbistoun_thunk::install_name_thunks(

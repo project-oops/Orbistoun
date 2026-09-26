@@ -1,46 +1,18 @@
 //! The command processor's own memory work, carried out at submit.
 //!
-//! A submitted stream is mostly work for the GPU's shader engines - draws and dispatches - which
-//! orbistoun translates and hands to a backend. But a part of it is work the **command processor**
-//! does itself, against memory, with no shader involved: `DMA_DATA` fills and copies,
-//! `RELEASE_MEM`'s end-of-pipe write of a value or the clock counter, `WAIT_REG_MEM`'s check of a
-//! memory word. That work is exactly reproducible on the CPU: a fill is a fill.
-//!
-//! # Why this is execution and not a posted completion (D705)
-//!
-//! D705 declined to post a submission's completion before execution lands, because a fence written
-//! for work that never ran claims a result the work did not produce. This carries the work out. It
-//! walks the stream in order and **stops at the first packet that needs the GPU** - a draw, a
-//! dispatch, anything it does not know to be memory-only - so a `RELEASE_MEM` is reached, and its
-//! fence written, only when every packet before it has been carried out or has no effect on memory.
-//! A stream with a draw before its fence therefore writes no fence, and the guest's wait on it stays
-//! the honest wall D705 describes. The open-toolchain GL context's hardware clear self-test is a
-//! stream of exactly this shape - register state, four `DMA_DATA` fills, a fence, a wait, a copy to
-//! its readback buffer, a clock-counter fence - so it runs to completion, and the self-test then
-//! checks the pixels the fill really wrote (worklog 816).
-//!
-//! **Draws are such work too, once something can carry them out** (D712, worklog 832). At a stream's
-//! first draw, [`CpMemory::run_draws`] is asked to carry out all of its draws and write what they
-//! drew into the guest's colour target; when it can, the draws are passed as done and the fence after
-//! them retires from work that ran. It is asked only when nothing between the first draw and the last
-//! touches memory - otherwise running them together would move that work - and that case stops by
-//! name ([`Stopped::DrawsInterleaved`]) before any draw runs.
-//!
-//! Register-write packets are state for the shader engines; with nothing executing them they have no
-//! effect on memory, so they are passed over rather than stopped at. Cache-control packets
-//! (`ACQUIRE_MEM`, a one-dword `EVENT_WRITE`) are passed over for the same reason: there is no cache
-//! between the command processor here and guest memory.
-//!
-//! Field layouts are the public PM4 ones, cited where they are used: `DMA_DATA` word zero and its
-//! body (`src/amd/common/sid.h:177-184` in the collection's Mesa tree), its 26-bit byte count on this
-//! generation (`src/amd/registers/gfx103.json:12266`, `CP_DMA_ME_COMMAND.BYTE_COUNT` bits 0-25),
-//! `RELEASE_MEM`'s body (`src/amd/common/ac_cmdbuf_cp.c:216-229`) and `DATA_SEL`
-//! (`sid.h:163-167`), and `WAIT_REG_MEM` (`sid.h:90-94`).
+//! Part of a submitted stream is work the command processor does against memory with no shader
+//! involved: `DMA_DATA` fills and copies, `RELEASE_MEM` end-of-pipe writes, `WAIT_REG_MEM` checks.
+//! That work is reproduced exactly on the CPU. The walk goes in order and stops at the first packet
+//! that needs the GPU, so a fence is written only when the work before it ran (D705). At the first
+//! draw, [`CpMemory::run_draws`] may carry out all the stream's draws together, unless
+//! memory work sits between them ([`Stopped::DrawsInterleaved`]). Register writes and cache control
+//! are passed over: nothing here executes register state, and there is no cache before guest
+//! memory. Field layouts are the public PM4 ones, cited from the collection's Mesa tree where used.
 
 use crate::packet::{self, PacketKind, build::measured};
 
-/// `PKT3_WAIT_REG_MEM` (`sid.h:90`). Not among the opcodes obSCEne measured a builder for; the
-/// open-toolchain GL context emits it by hand, as the public layout has it.
+/// `PKT3_WAIT_REG_MEM` (`sid.h:90`). No measured builder emits it; the open-toolchain GL context
+/// writes it by hand to the public layout.
 pub const WAIT_REG_MEM: u8 = 0x3c;
 
 /// `DMA_DATA` `SRC_SEL` values (`sid.h:178`, bits 30:29): the source is the packet's own data word.
@@ -48,7 +20,7 @@ const SRC_SEL_DATA: u32 = 2;
 /// `DMA_DATA` `SRC_SEL`: the source is an address - direct, or through L2 (`sid.h:178`). Both are
 /// the same memory here.
 const SRC_SEL_ADDRESS: [u32; 2] = [0, 3];
-/// `DMA_DATA` `DST_SEL` (bits 21:20): an address, direct or through L2. `1` is GDS, which is not memory.
+/// `DMA_DATA` `DST_SEL` (bits 21:20): an address, direct or through L2. `1` is GDS, not memory.
 const DST_SEL_ADDRESS: [u32; 2] = [0, 3];
 /// `CP_DMA_ME_COMMAND.BYTE_COUNT`, bits 0-25 on this generation (`gfx103.json:12266`).
 const BYTE_COUNT_MASK: u32 = 0x03ff_ffff;
@@ -76,16 +48,15 @@ pub trait CpMemory {
     fn write(&mut self, address: u64, bytes: &[u8]) -> bool;
     /// The 64-bit GPU clock counter a `RELEASE_MEM` with `DATA_SEL` 3 writes.
     fn timestamp(&mut self) -> u64;
-    /// Whether the memory at `address` holds exactly `expected` - asked of a whole colour target to
-    /// see whether anything wrote it (worklog 844). The default reads a copy; guest memory compares in
-    /// place.
+    /// Whether the memory at `address` holds exactly `expected`, asked of a whole colour target to
+    /// see whether anything wrote it. The default reads a copy; guest memory compares in place.
     fn holds(&self, address: u64, expected: &[u8]) -> bool {
         self.read(address, expected.len())
             .is_some_and(|bytes| bytes == expected)
     }
-    /// Fills `count` bytes at `address` with a four-byte pattern, or answers `false` when the range is
-    /// not writable guest memory. The default builds the bytes and writes them; guest memory fills in
-    /// place (worklog 844).
+    /// Fills `count` bytes at `address` with a four-byte pattern, or answers `false` when the range
+    /// is not writable guest memory. The default builds the bytes and writes them; guest memory
+    /// fills in place.
     fn fill(&mut self, address: u64, pattern: u32, count: usize) -> bool {
         let mut bytes = pattern.to_le_bytes().repeat(count.div_ceil(4));
         bytes.truncate(count);
@@ -93,15 +64,15 @@ pub trait CpMemory {
     }
     /// Copies `count` bytes from `source` to `destination`, or answers `false` when either range is
     /// not guest memory it may use. The default reads a copy and writes it; guest memory copies in
-    /// place (worklog 844).
+    /// place.
     fn copy(&mut self, source: u64, destination: u64, count: usize) -> bool {
         self.read(source, count)
             .is_some_and(|bytes| self.write(destination, &bytes))
     }
-    /// Runs `edit` over the `count` little-endian words at `address`, and keeps what it leaves there -
-    /// or answers `false`, with nothing changed, when the range is not writable guest memory. The
-    /// default reads a copy and writes it back; guest memory edits in place, which is what lets a
-    /// frame be tiled straight into its target (worklog 849).
+    /// Runs `edit` over the `count` little-endian words at `address` and keeps the result, or
+    /// answers `false` with nothing changed when the range is not writable guest memory. The
+    /// default reads a copy and writes it back; guest memory edits in place, so a frame tiles
+    /// straight into its target.
     fn edit_words(&mut self, address: u64, count: usize, edit: &mut dyn FnMut(&mut [u32])) -> bool {
         let Some(bytes) = self.read(address, count * 4) else {
             return false;
@@ -117,11 +88,10 @@ pub trait CpMemory {
         }
         self.write(address, &out)
     }
-    /// Carries out every draw in the stream, together, and writes what they drew into guest memory
-    /// (worklog 832) - answering whether that happened. Asked once, at the first draw, and only when
-    /// no memory work sits between the stream's first draw and its last, so running them as one is
-    /// the same as running them in turn. The default carries out nothing, which leaves a draw the
-    /// honest stop it always was.
+    /// Carries out every draw in the stream together and writes what they drew into guest memory,
+    /// answering whether that happened (D712). Asked once, at the first draw, and only when no
+    /// memory work sits between the first draw and the last, so running them as one equals running
+    /// them in turn. The default carries out nothing, which leaves the draw as a stop.
     fn run_draws(&mut self) -> bool {
         false
     }
@@ -147,8 +117,8 @@ pub enum Stopped {
         /// Its opcode.
         opcode: u8,
     },
-    /// A packet between the stream's first draw and its last is neither a draw nor inert, so its draws
-    /// cannot be carried out together without reordering them around it (worklog 832).
+    /// A packet between the stream's first draw and its last is neither a draw nor inert, so the
+    /// draws cannot be carried out together without reordering them around it.
     DrawsInterleaved {
         /// Byte offset of that packet in the stream.
         offset: u32,
@@ -184,7 +154,7 @@ pub struct CpExecution {
     pub releases: usize,
     /// `WAIT_REG_MEM` checks that held.
     pub waits: usize,
-    /// Draw packets carried out, through [`CpMemory::run_draws`] (worklog 832).
+    /// Draw packets carried out, through [`CpMemory::run_draws`].
     pub draws: usize,
     /// Bytes written to guest memory.
     pub bytes_written: u64,
@@ -224,7 +194,7 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         result.stopped = Stopped::Malformed { offset: 0 };
         return result;
     }
-    // Whether the draws can run as one: decided before any of them does (worklog 832).
+    // Whether the draws can run as one, decided before any of them does.
     let interleaved = interleaved_with_draws(&walked.packets);
     let mut draws_ran = false;
     for packet in &walked.packets {
@@ -240,8 +210,8 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         let start = packet.body_offset() as usize;
         let end = start + packet.body_length() as usize;
         let bytes = stream.get(start..end).unwrap_or_default();
-        // Decided from the length alone, before any body is built: a GL frame is tens of thousands of
-        // packets and nearly all are inert or draws.
+        // Decided from the length alone, before any body is built: a GL frame is tens of thousands
+        // of packets, nearly all inert or draws.
         if is_memory_inert(opcode, bytes.len() / 4) {
             continue;
         }
@@ -287,8 +257,8 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
     result
 }
 
-/// The first packet strictly between the stream's first draw and its last that is neither a draw nor
-/// memory-inert, by offset and opcode - `None` when the draws can be carried out together.
+/// The first packet strictly between the stream's first draw and its last that is neither a draw
+/// nor memory-inert, by offset and opcode - `None` when the draws can be carried out together.
 fn interleaved_with_draws(packets: &[packet::Packet]) -> Option<(u32, u8)> {
     let command = |p: &packet::Packet| match p.kind {
         PacketKind::Command { opcode } => Some(opcode),
@@ -318,7 +288,8 @@ const fn address(low: u32, high: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 
-/// `DMA_DATA`: word zero, source (data or address), destination address, command (`sid.h:177-184`).
+/// `DMA_DATA`: word zero, source (data or address), destination address, command
+/// (`sid.h:177-184`); the byte count is 26 bits on this generation (`gfx103.json:12266`).
 fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -> Result<(), Stop> {
     let [control, src_low, src_high, dst_low, dst_high, command, ..] = *body else {
         return Err(Stop::Malformed);
@@ -330,8 +301,7 @@ fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -
     }
     let count = (command & BYTE_COUNT_MASK) as usize;
     let destination = address(dst_low, dst_high);
-    // **In place** (worklog 844): a GL frame fills and copies megabytes a submission, and building
-    // each into a buffer before writing it was most of a frame's command processing.
+    // In place: a GL frame fills and copies megabytes per submission.
     let done = if count == 0 {
         true
     } else if src_sel == SRC_SEL_DATA {
@@ -520,12 +490,11 @@ mod tests {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
-    /// **The GL context's clear self-test runs to completion, and the pixels are really there.**
+    /// The GL context's clear self-test runs to completion, and the pixels are really there.
     ///
-    /// Register state, a fill of the colour target, the fence, a wait on it, a copy of the target to
-    /// the readback buffer, and a clock-counter fence - the stream's shape (worklog 816). Each is
-    /// carried out, so the fence holds `0xbeefcafe` because the fill before it ran, and the readback
-    /// holds the fill's colour because the copy ran.
+    /// Register state, a fill of the colour target, a fence, a wait on it, a copy to the readback
+    /// buffer and a clock-counter fence. The fence holds `0xbeefcafe` because the fill ran, and the
+    /// readback holds the fill's colour because the copy ran.
     #[test]
     fn a_clear_self_test_stream_runs_to_its_fence_and_its_readback() {
         let (target, fence, readback) = (0x2000_u64, 0x1000_u64, 0x4000_u64);
@@ -559,10 +528,9 @@ mod tests {
         }
     }
 
-    /// **A draw before the fence stops execution, so no fence is written for work that did not run.**
-    ///
-    /// D705's line, pinned: the fill before the draw is carried out (it is real), the draw is not,
-    /// and the `RELEASE_MEM` after it is never reached - the fence stays as the guest left it.
+    /// A draw before the fence stops execution, so no fence is written for work that did not run
+    /// (D705). The fill before the draw is carried out; the `RELEASE_MEM` after it is never
+    /// reached.
     #[test]
     fn a_draw_before_the_fence_leaves_the_fence_unwritten() {
         let fence = 0x1000_u64;
@@ -620,9 +588,8 @@ mod tests {
         [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2]
     }
 
-    /// **Draws carried out at submit let the fence after them retire** (worklog 832): the executor is
-    /// asked once for all three draws, what they drew is in memory before the fence is, and the fence
-    /// the guest polls is written because the work before it ran.
+    /// Draws carried out at submit let the fence after them retire: the executor is asked once for
+    /// all three draws, and what they drew is in memory before the fence is.
     #[test]
     fn draws_carried_out_together_let_the_fence_after_them_retire() {
         let fence = 0x1000_u64;
@@ -646,8 +613,7 @@ mod tests {
         assert_eq!(memory.inner.word(fence), 0xbeef_cafe, "the fence retires");
     }
 
-    /// **An executor that cannot carry the draws out leaves the fence unwritten** - D705's line holds
-    /// with an executor installed, not only without one.
+    /// An executor that cannot carry the draws out leaves the fence unwritten (D705).
     #[test]
     fn draws_the_executor_refuses_still_stop_before_the_fence() {
         let fence = 0x1000_u64;
@@ -666,7 +632,7 @@ mod tests {
         assert_eq!(memory.inner.word(fence), 0);
     }
 
-    /// **Memory work between two draws refuses running them together, by name, before either runs** -
+    /// Memory work between two draws refuses running them together, by name, before either runs:
     /// running both at the first would move the fill after the second draw ahead of it.
     #[test]
     fn memory_work_between_draws_is_refused_before_any_draw_runs() {
@@ -695,7 +661,7 @@ mod tests {
         assert_eq!(memory.inner.word(fence), 0);
     }
 
-    /// **A wait that cannot hold stops the stream; memory out of bounds is refused, not written.**
+    /// A wait that cannot hold stops the stream; memory out of bounds is refused, not written.
     #[test]
     fn an_unsatisfiable_wait_and_an_unmapped_target_both_stop_execution() {
         let mut stream = wait_equal(0x1000, 0xbeef_cafe);
@@ -716,7 +682,7 @@ mod tests {
         assert_eq!(done.bytes_written, 0);
 
         // A stream whose last packet claims more body than there is: the walk overran, so nothing
-        // in it is trusted - not even the well-formed fill before the bad packet.
+        // in it is trusted, not even the well-formed fill before the bad packet.
         let mut overrun = fill(0x2000, 0x7777_7777, 16);
         overrun.push(command_header(measured::DMA_DATA, 6));
         let done = execute(&bytes(&overrun), &mut memory);

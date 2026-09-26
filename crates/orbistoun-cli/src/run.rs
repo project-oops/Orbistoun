@@ -5,15 +5,10 @@ use crate::compat::record_compat;
 use crate::progress::report_progress;
 use anyhow::{Context, Result};
 
-/// `run` - execute a guest, in a worker process.
+/// Validates a `--profile` name and sets the environment the spawned worker reads.
 ///
-/// Both shims go through the worker uniformly (D033): the CLI gets no in-process fast
-/// path just because a CLI crash is cheap. One execution path means the GUI's protocol
-/// is exercised on every CLI run rather than only when someone opens the GUI.
-/// Validates a `--profile` name and, if good, sets the env the spawned worker reads.
-///
-/// Validated here, before the worker is spawned, so an unknown name fails fast with the
-/// alternatives rather than the worker silently falling back to the configured machine (D409).
+/// Validated before the worker is spawned, so an unknown name fails with the alternatives instead
+/// of the worker falling back to the configured machine.
 fn set_profile_for_run(profile: Option<&str>) -> Result<()> {
     if let Some(name) = profile {
         if orbistoun_shell::profiles::machine(name).is_none() {
@@ -22,12 +17,15 @@ fn set_profile_for_run(profile: Option<&str>) -> Result<()> {
                 orbistoun_shell::profiles::names().join(", ")
             );
         }
-        // SAFETY: single-threaded here, and the spawned worker inherits this at startup.
+        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
         unsafe { std::env::set_var("ORBISTOUN_MACHINE_PROFILE", name) };
     }
     Ok(())
 }
 
+/// `run` - execute a guest in a worker process.
+///
+/// The CLI has no in-process path: every shim runs guests through the worker (D033).
 pub(crate) fn cmd_run(
     path: &std::path::Path,
     limit: u64,
@@ -40,19 +38,16 @@ pub(crate) fn cmd_run(
     let mut worker =
         orbistoun_worker::WorkerHandle::spawn_self().context("spawning a worker process")?;
 
-    // Read before the run, because the run overwrites it. The comparison is the whole
-    // point of keeping traces at all.
+    // Read before the run, which overwrites it.
     let before = previous_trace(path);
-    // And its identity, so that "the run overwrites it" can be *checked* rather than
-    // assumed. A worker that dies without writing leaves this file untouched (D470).
+    // Its identity too, so whether this run wrote a new trace is checked (D470).
     let before_stamp = trace_stamp(path);
 
     let events = worker
         .request(&orbistoun_proto::Request::Run {
             path: path.to_path_buf(),
             symbols_db: symbols_db.map(std::path::Path::to_path_buf),
-            // Zero is the explicit way to ask for no limit, rather than a magic
-            // sentinel: an unlimited run is a deliberate choice, not a default.
+            // Zero asks for no limit explicitly.
             limit_seconds: (limit > 0).then_some(limit),
             call_budget: (calls > 0).then_some(calls),
             // Absolute, because the worker resolves nothing against this process's directory.
@@ -65,8 +60,8 @@ pub(crate) fn cmd_run(
     for event in &events {
         match event {
             orbistoun_proto::Event::Reached { phase } => println!("reached {phase:?}"),
-            // The terminal event repeats the furthest phase; the progress lines above
-            // already said it, so only the outcome is new here.
+            // The terminal event repeats the furthest phase, which the progress lines already
+            // printed.
             orbistoun_proto::Event::Terminated { outcome, .. } => match outcome {
                 orbistoun_proto::Outcome::Halted { reason } => println!("halted {reason}"),
                 other => println!("outcome {other:?}"),
@@ -78,13 +73,9 @@ pub(crate) fn cmd_run(
 
     worker.shutdown().context("shutting the worker down")?;
 
-    // After the worker has exited, so the trace it wrote is complete - *if* it wrote one.
-    //
-    // **Checked, not assumed.** A worker that dies before it can record anything leaves the
-    // previous run's file in place, and reading it back presents an old measurement as this
-    // one - which compares equal to itself and reads as `same - nothing moved`, the most
-    // convincing possible way to say nothing happened. Six reports came out of one file that
-    // way (D470).
+    // After the worker has exited, so its trace is complete. A worker that dies before recording
+    // leaves the previous run's file in place, which would compare equal to itself as "nothing
+    // moved" (D470).
     if orbistoun_report::trace::wrote_a_trace(before_stamp, trace_stamp(path)) {
         if let Some(after) = previous_trace(path) {
             report_progress(before.as_ref(), &after);
@@ -112,15 +103,15 @@ enum Used {
     },
     /// The run ended somewhere else, so it never reached this field.
     No {
-        /// What did happen, for the reader who wants to know the run was not simply broken.
+        /// What did happen, so the run is seen to be sound.
         instead: String,
     },
 }
 
 /// `handoff` - which fields of the handoff structure a runtime uses.
 ///
-/// One run per field. A fault **on the poisoned address** means the field was used; anything
-/// else means the run never reached it, which is as much of an answer.
+/// One run per field. A fault on the poisoned address means the field was used; anything else means
+/// the run never reached it.
 pub(crate) fn cmd_handoff(path: &std::path::Path, fields: u64, limit: u64) -> Result<()> {
     println!("asking {} which handoff fields it uses", path.display());
     println!("  one run per field, poisoned with an address nothing maps\n");
@@ -130,8 +121,8 @@ pub(crate) fn cmd_handoff(path: &std::path::Path, fields: u64, limit: u64) -> Re
         let verdict = ask_about_field(path, field, limit)?;
         match &verdict {
             Used::Yes { kind, site } => {
-                // The kind carries its own preposition - "read of", "instruction fetch
-                // from" - so the value goes straight after it, as the fault report does.
+                // The kind carries its own preposition ("read of", "instruction fetch from"), as in
+                // the fault report.
                 println!("  field {field:2}  USED         {kind} the field's own value, at {site}");
                 used.push(field);
             }
@@ -154,14 +145,11 @@ pub(crate) fn cmd_handoff(path: &std::path::Path, fields: u64, limit: u64) -> Re
 
 /// Runs the guest once with one field poisoned, and reads what happened.
 fn ask_about_field(path: &std::path::Path, field: u64, limit: u64) -> Result<Used> {
-    // **The handoff argument, selected rather than assumed.** This asked which field of the
-    // handoff structure a guest used while the run it measured was handed whatever the
-    // configuration named - which for a bare payload is not the handoff at all. It poisoned
-    // fields of a block the guest never received, and answered "no field was reached" about a
-    // structure that was never handed over (D399).
+    // The entry argument is selected as the handoff structure, not whatever the configuration names
+    // (D399).
     //
-    // SAFETY: single-threaded here, and the child process reads it at startup. Both variables
-    // are removed again below so a later run is not silently still under them.
+    // SAFETY: single-threaded here; the child reads both variables at startup, and both are removed
+    // below so a later run is not under them.
     unsafe { std::env::set_var(orbistoun_env::ENTRY_ARGUMENT.name, "handoff") };
     // SAFETY: as above.
     unsafe { std::env::set_var(orbistoun_env::HANDOFF_POISON.name, field.to_string()) };
@@ -172,9 +160,7 @@ fn ask_about_field(path: &std::path::Path, field: u64, limit: u64) -> Result<Use
     unsafe { std::env::remove_var(orbistoun_env::ENTRY_ARGUMENT.name) };
     outcome?;
 
-    // **The worker's own constants, not a copy of them.** This has to recognise the exact
-    // address the other side planted, and two numbers that must agree are two numbers that
-    // can drift - the same reason the harvested constants moved to one crate (D385).
+    // The worker's own constants, so this matches the exact address the worker planted.
     let poisoned = orbistoun_worker::POISON_BASE + field * orbistoun_worker::POISON_STRIDE;
     let Some(trace) = previous_trace(path) else {
         return Ok(Used::No {
@@ -232,7 +218,7 @@ pub(crate) struct Run<'a> {
     pub(crate) returned: Option<u64>,
     pub(crate) from: u64,
     pub(crate) count: u64,
-    /// Every distinct first argument across the run, so the line can say when `arg0` was
-    /// not the only one (D574).
+    /// Every distinct first argument across the run, so the line can say when `arg0` was not the
+    /// only one.
     pub(crate) firsts: std::collections::BTreeSet<u64>,
 }

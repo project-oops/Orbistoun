@@ -1,24 +1,8 @@
 //! Application preferences, and per-title overrides.
 //!
-//! # What is here, and what is deliberately not
-//!
-//! Every control below changes something that **actually takes effect on the next run**.
-//! That is a rule rather than a coincidence: a setting whose subsystem does not exist yet
-//! is principle 3's failure mode wearing a dropdown. Somebody picks 1080p, nothing
-//! changes, and there is no way to tell whether the setting is broken, the emulator
-//! ignored it, or the title overrode it.
-//!
-//! So the video and input panes exist and say what is missing, rather than showing
-//! controls that do nothing. The roadmap called this before the window did: *settings
-//! panes stubbed, populated as the subsystems behind them land rather than built as dead
-//! UI* (D162).
-//!
-//! # These are the bisection loop
-//!
-//! The settings that *are* here - the entry convention, the thread policy, the direct
-//! memory switch - are not conveniences. They are the levers the whole method turns on,
-//! and until now every one of them meant hand-editing a TOML in the data directory.
-//! Today's alignment bug was found by flipping one of them (D159).
+//! Every control takes effect on the next run (D162). A pane whose subsystem is missing
+//! says so instead of showing controls that do nothing. The entry convention, thread policy
+//! and direct-memory switch are the levers for bisecting a run's behaviour.
 
 use orbistoun_service::FileConfig;
 use orbistoun_shell::View;
@@ -35,7 +19,7 @@ pub(crate) enum Pane {
     Threads,
     /// Subsystem switches.
     Memory,
-    /// What the emulated console is set to.
+    /// What the emulated machine is set to.
     Shell,
     /// Controllers, and what maps to what.
     Pads,
@@ -75,21 +59,16 @@ impl Pane {
 
 /// Preferences the window owns, plus the file they are written to.
 pub(crate) struct Preferences {
-    /// Where this installation keeps its data, which is what a relative library root is
-    /// resolved against. Held so the general pane can show the folder that setting
-    /// actually names rather than leaving the reader to work it out.
+    /// Where this installation keeps its data, against which a relative library root is
+    /// resolved; held so the general pane can show the resolved folder.
     pub(crate) data_root: std::path::PathBuf,
-    /// The settings a run reads, exactly as they are stored - including where the
-    /// library is, which is why it survives a restart.
+    /// The settings a run reads, exactly as stored, including the library location.
     pub(crate) file: FileConfig,
-    /// What the emulated console is set to.
+    /// What the emulated machine is set to.
     ///
-    /// **Held here rather than on the window, so there is one copy.** The shell draws it and
-    /// this pane edits it; two copies would eventually disagree about what the machine is
-    /// set to, and the one the guest reads would be whichever got written last.
-    ///
-    /// Its own file, because `config.toml` holds how the *emulator* is configured and this
-    /// holds what the machine it presents is set to (D311).
+    /// Held here rather than on the window, so the shell and this pane share one copy. Its
+    /// own file, because `config.toml` configures the emulator and this configures the
+    /// machine it presents (D311).
     pub(crate) shell: orbistoun_shell::Settings,
     /// Which pane is showing.
     pub(crate) pane: Pane,
@@ -99,20 +78,17 @@ pub(crate) struct Preferences {
     pub(crate) status: Option<Result<String, String>>,
     /// Why the settings file could not be read, if it could not.
     ///
-    /// Separate from `status`, which also carries save results and is only visible while
-    /// the preferences window is open. A settings file that failed to parse falls back to
-    /// defaults - including the library folder - so the *library panel* reports something
-    /// puzzling while the explanation sits behind a window nobody has opened. This is what
-    /// lets that panel say why (D228).
+    /// Separate from `status`, which is visible only while the preferences window is open.
+    /// A settings file that fails to parse falls back to defaults, including the library
+    /// folder, so the library panel shows this to explain itself.
     pub(crate) load_error: Option<String>,
 }
 
 impl Preferences {
     /// Reads what is on disk.
     ///
-    /// A malformed file surfaces as a status rather than being replaced silently. The
-    /// alternative loses whatever somebody was mid-way through writing by hand, and hides
-    /// that their file was wrong (D153).
+    /// A malformed file surfaces as a status rather than being silently replaced, so a
+    /// hand-edited file is neither lost nor hidden.
     pub(crate) fn load(
         path: &std::path::Path,
         shell_path: &std::path::Path,
@@ -125,9 +101,7 @@ impl Preferences {
                 Some(format!("{e} - showing defaults, nothing was overwritten")),
             ),
         };
-        // Reported separately from the one above rather than folded in. Two files fail for
-        // unrelated reasons, and "your console settings would not parse" sends somebody to a
-        // different file from "your run configuration would not parse".
+        // Reported separately from the one above, so the message names the right file.
         let (shell, shell_error) = match orbistoun_shell::Settings::load(shell_path) {
             Ok(shell) => (shell, None),
             Err(e) => (
@@ -152,10 +126,8 @@ impl Preferences {
 
     /// Writes the settings back.
     ///
-    /// **Both files, and a failure in either is reported.** They are saved by one button
-    /// because they are edited in one window; a save that quietly wrote one of them would
-    /// leave somebody's console settings on disk from a previous session while the run
-    /// configuration moved on.
+    /// Both files, edited in one window and saved by one button; a failure in either is
+    /// reported.
     pub(crate) fn save(&mut self, path: &std::path::Path, shell_path: &std::path::Path) {
         let config = self
             .file
@@ -215,9 +187,8 @@ fn general(ui: &mut egui::Ui, prefs: &mut Preferences) {
         ui.label("library folder");
         ui.text_edit_singleline(&mut prefs.file.library.root);
     });
-    // What that setting actually means on this machine. A relative root is joined to
-    // the data root rather than to wherever the program was started from, and showing
-    // the result is the difference between a setting and a guess (D228).
+    // A relative root is joined to the data root, never the working directory (D038), and
+    // the result is shown.
     let resolved = prefs.file.library.resolve(&prefs.data_root);
     ui.horizontal(|ui| {
         ui.small("scans");
@@ -257,12 +228,7 @@ fn general(ui: &mut egui::Ui, prefs: &mut Preferences) {
 
 /// Controllers: how many, what drives each, and which key is which button.
 ///
-/// # The live readout is not decoration
-///
-/// A mapping is a claim that pressing a key presses a button, and until now the only way to
-/// check one was to launch something and see whether it responded. The lit indicators make
-/// the claim checkable in the place it is edited - press the key, watch the button light -
-/// which is the same argument the rest of this project makes about every other claim.
+/// Each button lights from the live state, so a mapping is checked where it is edited.
 fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_input::PadState]) {
     use orbistoun_input::{Button, Source};
 
@@ -291,8 +257,8 @@ fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_i
             ui.selectable_value(&mut port.source, Source::Gamepad { index: 0 }, "gamepad");
         });
         if matches!(port.source, Source::Gamepad { .. }) {
-            // Said where the control is, not in a release note. A port set to something
-            // this build cannot read would otherwise be a pad that silently never moves.
+            // Stated beside the control: a port set to a source this build cannot read
+            // never moves.
             ui.colored_label(
                 egui::Color32::LIGHT_YELLOW,
                 "no gamepad is read yet - this port reports a pad nobody is holding",
@@ -304,7 +270,7 @@ fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_i
             .num_columns(3)
             .show(ui, |ui| {
                 for button in Button::ALL {
-                    // Lit from the live state, so the row proves itself.
+                    // Lit from the live state.
                     let down = state.is_down(button);
                     ui.colored_label(
                         if down {
@@ -325,8 +291,7 @@ fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_i
                     ui.small(if down { "down" } else { "" });
                     ui.end_row();
                 }
-                // Sticks, in the same grid. A keyboard could not move one at all until
-                // recently, and a binding nobody can edit is only half a fix (D341).
+                // Stick pushes, editable in the same grid (D341).
                 for push in orbistoun_input::Push::ALL {
                     let (stick, x, y) = push.amount();
                     let pushed = state.sticks[stick].x * x + state.sticks[stick].y * y;
@@ -352,8 +317,7 @@ fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_i
             });
     }
 
-    // Both problems reported, both beside the thing that caused them, and neither resolved
-    // silently - a binding that half works with nothing saying so is the failure here.
+    // Both problems are reported beside their cause, never resolved silently.
     ui.separator();
     for conflict in pads.conflicts() {
         ui.colored_label(egui::Color32::LIGHT_RED, conflict.say());
@@ -368,40 +332,26 @@ fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_i
     ));
 }
 
-/// What the emulated console is set to.
+/// What the emulated machine is set to.
 ///
-/// # This pane bends the module's rule, and says so on screen
-///
-/// The rule above is that every control takes effect on the next run, because a setting
-/// whose subsystem does not exist is principle 3's failure wearing a dropdown. These are
-/// the awkward case: the settings are **real** - they are facts about what the owner wants
-/// their machine to be - and only one of them currently reaches anything.
-///
-/// The resolution is not to hide them, because then nothing can ever be set. It is to say
-/// which is which, in the pane, in terms of something checkable: how many parameter
-/// identifiers have a measured encoding. That number is zero today and the pane says zero.
-/// When it stops being zero these controls start mattering, and nothing here needs editing
-/// for that to happen (D311).
+/// These settings are real choices, but most reach the guest only once a parameter's
+/// encoding is measured, so the pane shows how many identifiers are answerable (D311).
 fn shell(ui: &mut egui::Ui, settings: &mut orbistoun_shell::Settings) {
     use orbistoun_shell::ButtonAssignment;
 
     ui.heading("shell");
 
-    // **Users, editable, because a name a guest reads has to be one somebody chose.**
-    // `sceUserServiceGetUserName` answers from this list, so a list nobody can edit would be
-    // the settings-are-the-point argument made and then not delivered (D346).
+    // Users are editable, because `sceUserServiceGetUserName` answers from this list (D346).
     ui.label("users");
     let mut remove = None;
     for index in 0..settings.users.len() {
         ui.horizontal(|ui| {
             let id = settings.users[index].id;
-            // Signing in is a radio rather than a per-row toggle: exactly one user is signed
-            // in, and two checkboxes both ticked is a state nothing here models.
+            // A radio rather than a per-row toggle: exactly one user is signed in.
             ui.radio_value(&mut settings.signed_in, id, "");
             ui.text_edit_singleline(&mut settings.users[index].name);
             ui.weak(format!("id {id}"));
-            // The last user cannot be removed. A machine with no accounts is one no title can
-            // start on, and rebuilding it from an empty list is worse than refusing here.
+            // The last user cannot be removed: no title can start on a machine with none.
             if settings.users.len() > 1 && ui.button("remove").clicked() {
                 remove = Some(index);
             }
@@ -418,9 +368,8 @@ fn shell(ui: &mut egui::Ui, settings: &mut orbistoun_shell::Settings) {
         });
     }
     if settings.current().is_none() {
-        // Reachable by removing whoever was signed in, and said rather than silently
-        // repaired: a title asking who is signed in gets a refusal, and the reason should be
-        // visible where it was caused.
+        // Reachable by removing the signed-in user. Shown rather than silently repaired,
+        // because a title asking who is signed in is refused.
         ui.colored_label(
             egui::Color32::LIGHT_RED,
             "nobody is signed in - a title asking for the current user will be refused",
@@ -459,8 +408,7 @@ fn shell(ui: &mut egui::Ui, settings: &mut orbistoun_shell::Settings) {
     ));
 
     ui.separator();
-    // The honest part, and the reason this pane is allowed to exist under the rule at the
-    // top of the file. Counted rather than asserted, so it cannot drift out of date.
+    // Counted rather than stated, so the number cannot go stale.
     let answerable = orbistoun_shell::Parameters::empty();
     ui.colored_label(
         egui::Color32::LIGHT_YELLOW,

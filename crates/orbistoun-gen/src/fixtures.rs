@@ -1,37 +1,13 @@
 //! Generating differential-test fixtures for the shader decoder.
 //!
-//! `crates/orbistoun-shader/tests/fixtures/` and `data/mnemonics.toml`
+//! Writes `crates/orbistoun-shader/tests/fixtures/` and `data/mnemonics.toml`.
 //!
-//! # Why this exists
-//!
-//! The instruction encoding table is transcribed from a published specification (D085), and
-//! a wrong row in it does not fail to build - it silently mis-decodes. Until real shaders
-//! are captured from a real title, which is a long way off, there is nothing to check it
-//! against.
-//!
-//! LLVM ships a code generator for this GPU architecture, so shaders whose contents we
-//! specified can be produced on demand, and its disassembler then says exactly where each
-//! instruction begins. That is a reference decoder to diff against, available today, with no
-//! console and no title involved.
-//!
-//! # The provenance line, drawn deliberately
-//!
-//! The disassembler is used to **detect** that an entry is wrong. Correcting it is done from
-//! the published AMD document, not by reading LLVM's tables.
-//!
-//! Differential testing against another implementation is ordinary engineering. Reading that
-//! implementation's source to source the right value is deriving from it, and this project
-//! draws that line everywhere else too. Worth holding here because the temptation is
-//! strongest exactly where the answer is hardest to look up.
-//!
-//! # Fixtures are committed, so LLVM is not a test dependency
-//!
-//! Output goes into the repository and the differential test reads it there. This runs when
-//! someone wants new coverage; the test runs everywhere, forever, including on machines with
-//! no GPU toolchain at all.
-//!
-//! The binaries are compiled from source in `tools/shader-fixtures/` that this project
-//! wrote. Generated, never extracted - the same rule every other fixture here follows.
+//! A wrong row in the encoding table mis-decodes silently (D085). LLVM compiles shaders
+//! from source this project wrote in `tools/shader-fixtures/`, and its disassembler says
+//! where each instruction begins, giving a reference decoder to diff against. The
+//! disassembler only detects a wrong entry; the correction comes from the published
+//! instruction-set reference, never from LLVM's tables. Fixtures are committed, so LLVM is
+//! not a test dependency.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -52,10 +28,8 @@ pub(crate) struct Instruction {
     pub(crate) words: Vec<u32>,
     /// The mnemonic the reference printed.
     pub(crate) mnemonic: String,
-    /// Operands **as the reference printed them, verbatim**.
-    ///
-    /// Normalisation belongs on the reading side. Storing a cleaned-up version would bake
-    /// one comparison strategy into the fixture and lose whatever the next one needs.
+    /// Operands as the reference printed them, verbatim; normalisation belongs on the
+    /// reading side.
     pub(crate) operands: String,
 }
 
@@ -69,11 +43,9 @@ impl Instruction {
 
 /// The target a source declares, or the default.
 ///
-/// Read from the source rather than fixed by the generator so a fixture is
-/// self-describing - the file that needs a different environment is the file that says so.
-/// Compute shaders use the HSA environment; graphics shaders must declare the graphics one,
-/// because HSA refuses them outright, which surfaced as an LLVM crash rather than a
-/// diagnostic and cost a run to find.
+/// Read from the source so a fixture is self-describing. Compute shaders use the HSA
+/// environment; graphics shaders must declare the graphics one, because HSA refuses them
+/// with an LLVM crash rather than a diagnostic.
 #[must_use]
 pub(crate) fn triple_for(text: &str) -> String {
     crate::patterns::declared_triple(text).unwrap_or_else(|| TRIPLE.to_owned())
@@ -81,9 +53,8 @@ pub(crate) fn triple_for(text: &str) -> String {
 
 /// Reads `llvm-objdump` output into instructions.
 ///
-/// The encoding words are taken from the trailing comment rather than from a separate binary
-/// dump, so the bytes and the expectations are guaranteed to describe the same instructions -
-/// two files produced from one parse cannot disagree with each other.
+/// The encoding words come from the trailing comment rather than a separate binary dump, so
+/// the bytes and the expectations come from one parse.
 #[must_use]
 pub(crate) fn parse_disassembly(text: &str) -> Vec<Instruction> {
     text.lines()
@@ -93,9 +64,8 @@ pub(crate) fn parse_disassembly(text: &str) -> Vec<Instruction> {
 
 /// Every instruction must begin where the previous one ended.
 ///
-/// If this fails, the **reference** has been misparsed - a line missed, most likely - and the
-/// fixture would encode a gap as though it were real. A fixture with a hole in it teaches
-/// the decoder to be wrong.
+/// A failure means the reference output was misparsed, most likely a missed line, and the
+/// fixture would encode the gap as real.
 pub(crate) fn check_contiguous(name: &str, instructions: &[Instruction]) -> Result<()> {
     let mut expected = 0_u64;
     for instruction in instructions {
@@ -120,8 +90,7 @@ pub(crate) fn binary_of(instructions: &[Instruction]) -> Vec<u8> {
 
 /// What the reference says is in it.
 ///
-/// One line per instruction so a mismatch in the test can name an offset rather than say the
-/// file differs.
+/// One line per instruction, so a test mismatch names an offset.
 #[must_use]
 pub(crate) fn render_expectations(
     source_name: &str,
@@ -151,10 +120,8 @@ pub(crate) fn render_expectations(
 
 /// Emits the opcode-name table from what the reference actually said.
 ///
-/// Every entry here was observed: a real compiler emitted the instruction and a real
-/// disassembler named it. That makes this table verified by construction, and it grows only
-/// as the fixture set grows - which is the right constraint, because an unobserved name is a
-/// guess and this project does not ship those.
+/// Every entry was observed: a compiler emitted the instruction and the disassembler named
+/// it. The table grows only with the fixture set.
 #[must_use]
 pub(crate) fn render_mnemonics(observed: &BTreeMap<(String, u32), String>) -> String {
     let mut lines: Vec<String> = [
@@ -199,10 +166,9 @@ pub(crate) struct Report {
     pub(crate) built: Vec<(String, usize, usize)>,
     /// Sources the toolchain would not build, and why.
     ///
-    /// **Named rather than merely counted**: each one is an encoding family left unverified,
-    /// which is a gap in what the differential test can prove.
+    /// Named rather than counted: each leaves an encoding family unverified.
     pub(crate) skipped: Vec<(String, String)>,
-    /// Classification disagreements - the same opcode named two ways.
+    /// Classification disagreements: the same opcode named two ways.
     pub(crate) conflicts: Vec<String>,
     /// Every opcode a fixture named.
     pub(crate) observed: BTreeMap<(String, u32), String>,
@@ -210,8 +176,8 @@ pub(crate) struct Report {
 
 /// Records one instruction's name against its classification.
 ///
-/// **First observation wins.** A later fixture naming the same opcode differently would mean
-/// the classification is wrong, and quietly overwriting would hide it - so it is reported.
+/// First observation wins; a later fixture naming the same opcode differently means the
+/// classification is wrong, and is reported.
 pub(crate) fn observe(report: &mut Report, instruction: &Instruction, encodings: &[Encoding]) {
     let Some(key) = table::classify(&instruction.words, encodings) else {
         return;
@@ -254,17 +220,10 @@ fn disassembly_of(
 
 /// Two routes to the same object file, then one disassembly.
 ///
-/// LLVM IR goes through `llc`, which is how every fixture that came from real shader source
-/// is built. Assembly goes through `llvm-mc`, which exists because three encoding families -
-/// SOPK, MTBUF and VINTRP - could not be reached any other way: nothing the compiler emits
-/// from the IR anyone can write produces them, so they stayed transcribed-only and unverified
-/// while every other family had been checked against a reference (D085).
-///
-/// Writing the instruction by hand is a weaker fixture than compiling one, because the
-/// instruction chosen is one somebody thought of rather than one a compiler reached for. It
-/// is still an enormous step up from nothing: the reference decides the bytes and the
-/// boundaries, so a wrong mask, value, opcode field or length in the table fails here exactly
-/// as it would for a compiled fixture.
+/// LLVM IR goes through `llc`. Assembly goes through `llvm-mc`, for the families (SOPK,
+/// MTBUF, VINTRP) the compiler never emits. A hand-written instruction is a weaker fixture
+/// than a compiled one, but the reference still decides the bytes and boundaries, so a
+/// wrong table row fails the same way.
 fn build_and_disassemble(path: &Path, triple: &str) -> Result<String> {
     use std::process::Command;
 
@@ -330,9 +289,8 @@ fn build_and_disassemble(path: &Path, triple: &str) -> Result<String> {
 
 /// The most useful line of a build failure.
 ///
-/// **On a crash the last line is a stack frame and the diagnosis is near the top**, so a real
-/// `error:` line is preferred. Reporting the frame instead sent the first investigation of
-/// this straight past the actual message.
+/// On a crash the last line is a stack frame and the diagnosis is near the top, so an
+/// `error:` line is preferred.
 #[must_use]
 pub(crate) fn unbuildable_reason(stderr: &str) -> String {
     let lines: Vec<&str> = stderr.trim().lines().collect();
@@ -391,11 +349,8 @@ pub(crate) fn run(
         let disassembly = match disassembly_of(source, &stem, &path, &triple, record) {
             Ok(text) => text,
             Err(reason) => {
-                // **Delete whatever was there.** A skip used to leave the *previous* run's
-                // fixture on disk, and after a retarget that is a file full of another
-                // architecture generation's bytes with nothing marking it - the differential
-                // test then compares this target's decoder against the last one's output and
-                // reports the decoder as broken. Cost two real-looking failures to find.
+                // Delete the previous fixture: after a retarget it would hold another
+                // generation's bytes and fail the differential test for the wrong reason.
                 let stale = out_dir.join(format!("{stem}.txt"));
                 let had = stale.exists();
                 if !dry_run {
@@ -439,13 +394,9 @@ pub(crate) fn run(
         report.built.push((stem, instructions.len(), binary.len()));
     }
 
-    // **A run that built nothing is a failure, not an empty success.**
-    //
-    // Without a toolchain every source is skipped, and the skip path has already deleted
-    // each `.txt`. Remove this and the run goes on to write a `mnemonics.toml` containing no
-    // mnemonics over the committed one, print "0 fixtures", and exit zero - destroying the
-    // reference output the differential suite exists to compare against, on any machine
-    // without an AMDGPU-enabled LLVM, which is most of them.
+    // A run that built nothing is a failure: without a toolchain every source is skipped,
+    // and writing an empty `mnemonics.toml` over the committed one would destroy the
+    // reference output.
     anyhow::ensure!(
         !report.built.is_empty(),
         concat!(
@@ -505,8 +456,7 @@ mod tests {
 
     /// A gap means the parser missed a line, and is refused rather than written out.
     ///
-    /// **A fixture with a hole teaches the decoder to be wrong**: every instruction after
-    /// the gap would be expected four bytes early, forever.
+    /// Every instruction after a gap would otherwise be expected early.
     #[test]
     fn a_gap_in_the_disassembly_is_refused() {
         let good = [
@@ -523,9 +473,7 @@ mod tests {
 
     /// A branch's symbol reference does not stop the line being read.
     ///
-    /// Anchoring the pattern to end of line seemed tidier and silently dropped **every
-    /// branch instruction** - which the contiguity check then caught as a gap, because a
-    /// fixture missing its control flow teaches the decoder that what follows starts early.
+    /// An end-of-line anchor would drop every branch instruction.
     #[test]
     fn a_branch_with_a_symbol_reference_is_still_read() {
         let text = "\ts_cbranch_scc1 65535   // 000000000010: BF85FFFF <control+0x2c>\n";
@@ -568,8 +516,7 @@ mod tests {
 
     /// A real diagnostic beats a stack frame.
     ///
-    /// On a crash the last line is a frame and the diagnosis is near the top. Reporting the
-    /// frame sent the first investigation of this straight past the actual message.
+    /// On a crash the last line is a frame and the diagnosis is near the top.
     #[test]
     fn a_real_diagnostic_is_preferred_to_a_stack_frame() {
         let stderr = concat!(

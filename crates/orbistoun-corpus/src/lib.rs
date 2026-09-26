@@ -1,28 +1,12 @@
 //! The test corpus: a manifest of sources, fetched into `titles/`, ready to run and record.
 //!
-//! # What this is for
-//!
-//! orbistoun's one measure of progress is whether a real guest gets further than it did last
-//! week (D042). That needs guests, and the honest ones are third-party homebrew nobody here
-//! wrote. This crate turns a **tracked manifest** - `corpus/sources.toml`, metadata only - into
-//! **gitignored guest bytes** under `titles/`, so the corpus is reproducible from a checkout
-//! without ever committing somebody else's binary.
-//!
-//! # The provenance line this holds
-//!
-//! The manifest is metadata: a name, where the bytes come from, a licence, a citation, and a
-//! per-asset hash. The bytes themselves are never tracked - `titles/` is gitignored and the
-//! provenance guard fails CI if anything of that shape is committed (D042). Downloading is not
-//! redistributing; pinning by hash is what makes "reproducible on any machine" true past a month
-//! (a moving branch is not). A `github-release` asset is verified against its pin every fetch; a
-//! `local` asset is a dev artifact snapshotted from a sibling checkout until it has a release of
-//! its own.
-//!
-//! # What lives here, and what does not
-//!
-//! This crate holds the manifest and the fetch/pin logic and nothing else - no run, no record.
-//! The CLI runs each fetched guest through the ordinary `run` path, which records to `compat/`
-//! on its own. Keeping the two apart is D034: the crate is the logic, the shim is the shim.
+//! A tracked manifest, `corpus/sources.toml`, holds metadata only: a name, where the bytes come
+//! from, a licence, a citation and a per-asset hash. The guest bytes are fetched into gitignored
+//! roots, so the corpus is reproducible from a checkout without committing anybody else's binary
+//! (D042). A `github-release` asset is verified against its pin on every fetch; a `local` asset
+//! is a dev artifact snapshotted from a sibling checkout. This crate holds the manifest and the
+//! fetch logic only; the CLI runs each guest through the ordinary `run` path, which records to
+//! `compat/`.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -31,11 +15,11 @@ use std::path::{Path, PathBuf};
 
 /// A `github-release` source: assets pinned by hash and verified every fetch.
 pub const KIND_GITHUB_RELEASE: &str = "github-release";
-/// A `local` source: bytes copied from a sibling checkout, re-snapshotted each fetch. For a
-/// project of ours that has no published release yet; carries a `todo` to migrate it.
+/// A `local` source: bytes copied from a sibling checkout, re-snapshotted each fetch, for a
+/// project of ours with no published release; carries a `todo` to migrate it.
 pub const KIND_LOCAL: &str = "local";
 
-/// The whole manifest - every source the corpus knows about.
+/// The whole manifest: every source the corpus knows about.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Manifest {
     /// Every source, in the order they appear in the file.
@@ -45,26 +29,21 @@ pub struct Manifest {
 
 /// Which of orbistoun's roots a source's assets belong under.
 ///
-/// # Why this is per-source and not one root for everything
-///
-/// Every asset used to land under `titles/`, because that was the only root a corpus knew
-/// about. It put twenty-five one-file homebrew ELFs beside installed titles, where a shell
-/// listing the library showed them as titles - which they are not. A title is a directory with
-/// a `param.json`, an `eboot.bin` and its own filesystem; a payload is one executable somebody
-/// runs; a package is something that has not been installed yet. Three kinds, three roots, and
-/// the manifest says which (D661).
+/// A title is a directory with a `param.json`, an `eboot.bin` and its own filesystem; a payload
+/// is one executable; a package is not installed yet. Each kind has its own root, and the
+/// manifest says which (D661).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Target {
-    /// Installed titles - a directory each, with their own material.
+    /// Installed titles, a directory each with their own material.
     #[default]
     Titles,
     /// Raw executables, run directly rather than installed.
     Payloads,
     /// Installable packages, before anything installs them.
     Packages,
-    /// Titles staged on the user partition, as `pros restore` stages homebrew on the console:
-    /// the library's `data/homebrew` tree. A title there runs with a writable `/app0` (D722).
+    /// Titles staged on the user partition, as `pros restore` stages homebrew on the hardware: the
+    /// library's `data/homebrew` tree. A title there runs with a writable `/app0` (D722).
     Staged,
 }
 
@@ -86,8 +65,7 @@ pub struct Source {
     /// The directory name, under whichever root [`Self::target`] names, this source's guests
     /// land in.
     pub name: String,
-    /// Which root those guests belong under. Defaults to `titles` - what every source was
-    /// before there was anywhere else to put one.
+    /// Which root those guests belong under. Defaults to `titles`.
     #[serde(default)]
     pub target: Target,
     /// `github-release` or `local`; see the `KIND_*` constants.
@@ -95,28 +73,25 @@ pub struct Source {
     /// `github-release`: `owner/repo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
-    /// `github-release`: the pinned release tag (a tag, never a branch - D042).
+    /// `github-release`: the pinned release tag, a tag and never a branch (D042).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// `local`: a path to the source's build output, relative to the orbistoun repo root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Origins to try in order, each a local path or a URL, first one that answers wins.
+    /// Origins to try in order, each a local path or a URL; the first that answers wins.
     ///
-    /// **An alternative to `repo`/`tag`/`path`, not an addition to them.** A sibling checkout is
-    /// the fast path when somebody has one and absent when they do not; a published release is
-    /// slower and always there. Listing both lets one manifest serve both cases without a person
-    /// editing it, and every origin that failed is reported so a broken fast path does not hide
-    /// behind a working slow one (D664).
+    /// An alternative to `repo`/`tag`/`path`, not an addition: a sibling checkout is the fast path
+    /// where one exists and a published release the fallback. Every origin that failed is reported,
+    /// so a broken fast path does not hide behind a working one (D664).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
     /// The [`Self::sources`] each name a `.zip` of a whole title directory, which is unpacked into
-    /// `<root>/<name>/` (worklog 842) - how a packaged title (`dist/<title>-prospero.zip`) joins the
-    /// corpus in the layout `run` reads, rather than one asset per stem directory.
+    /// `<root>/<name>/` in the layout `run` reads.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archive: bool,
-    /// The licence the assets are obtained under. Recorded per D042; downloading is not
-    /// redistributing, so this is a note, not a gate.
+    /// The licence the assets are obtained under. Downloading is not redistributing, so this is a
+    /// note, not a gate.
     pub licence: String,
     /// Where this source is, for a person to check.
     pub cite: String,
@@ -150,7 +125,7 @@ pub enum State {
     Reused,
     /// A `local` dev artifact, copied and its hash refreshed (never a failure on change).
     LocalSnapshot,
-    /// Downloaded but did not match its pin - the release moved under a fixed tag. An error.
+    /// Downloaded but did not match its pin: the release moved under a fixed tag. An error.
     Mismatch {
         /// The hash the manifest pinned, which the fetched bytes failed to match.
         expected: String,
@@ -171,8 +146,8 @@ pub struct Outcome {
     pub source: String,
     /// The asset's filename.
     pub file: String,
-    /// The title id this guest records under - its file stem, which becomes the parent
-    /// directory so `run`'s automatic recording keys `compat/<stem>.toml` correctly.
+    /// The title id this guest records under: its file stem, which becomes the parent directory so
+    /// `run`'s automatic recording keys `compat/<stem>.toml`.
     pub stem: String,
     /// Where the bytes now live: `titles/<source>/<stem>/<file>`.
     pub path: PathBuf,
@@ -180,12 +155,16 @@ pub struct Outcome {
     pub sha256: String,
     /// How many bytes were fetched.
     pub bytes: u64,
-    /// What the fetch amounted to - pinned, verified, cached, snapshotted, or a mismatch.
+    /// What the fetch amounted to: pinned, verified, cached, snapshotted, or a mismatch.
     pub state: State,
 }
 
 impl Source {
     /// The download URL for one asset of a `github-release` source.
+    ///
+    /// # Errors
+    ///
+    /// When the source has no `repo` or no `tag`.
     pub fn asset_url(&self, file: &str) -> Result<String> {
         let repo = self
             .repo
@@ -200,14 +179,13 @@ impl Source {
         ))
     }
 
-    /// Fetches the source's one asset from the first of [`Self::sources`] that answers, pins it, and
-    /// places it: an [`Self::archive`] unpacked into `<root>/<name>/` (worklog 842), anything else
-    /// written as `<root>/<name>/<file>` - a payload, one executable (worklog 846).
+    /// Fetches the source's one asset from the first of [`Self::sources`] that answers, pins it,
+    /// and places it: an [`Self::archive`] unpacked into `<root>/<name>/`, anything else written as
+    /// `<root>/<name>/<file>`.
     ///
-    /// The pin is the asset's hash. A `local` source refreshes it whichever origin answered: its
-    /// fallback is the suite's rolling `latest-main` build, a dev artifact exactly as its sibling
-    /// checkout is, and a pin that changes with every push is not a fixed tag that moved. Any other
-    /// source's URL is checked against the pin, and a mismatch is reported, not placed.
+    /// A `local` source refreshes its pin whichever origin answered, since its fallback is a
+    /// rolling build, a dev artifact like the sibling checkout. Any other source's URL is checked
+    /// against the pin, and a mismatch is reported, not placed.
     fn sync_from_sources(
         &mut self,
         repo_root: &Path,
@@ -303,28 +281,31 @@ impl Source {
     /// [`Self::target`].
     ///
     /// Each guest gets its own directory because `run` keys a compatibility record by the
-    /// containing directory's name (a title is a directory holding its material), so a flat
-    /// layout would make every guest overwrite one record.
+    /// containing directory's name, so a flat layout would make every guest overwrite one record.
     pub fn path_for(&self, root: &Path, file: &str) -> PathBuf {
         root.join(&self.name)
             .join(Self::stem(file))
             .join(Self::base(file))
     }
 
-    /// Fetch every asset of this source into `titles_root`, verifying or pinning each.
+    /// Fetches every asset of this source into `titles_root`, verifying or pinning each.
     ///
-    /// `repo_root` is where a `local` source's relative `path` is resolved from. Mutates each
-    /// asset's `sha256` in place when a fetch pins or refreshes it, so the caller can persist the
-    /// manifest afterwards. Returns one [`Outcome`] per asset. A [`State::Mismatch`] is returned,
-    /// not raised - the caller decides whether one bad pin should stop the whole sync.
+    /// `repo_root` is where a `local` source's relative `path` is resolved from. Each asset's
+    /// `sha256` is updated in place when a fetch pins or refreshes it, so the caller can persist
+    /// the manifest. Returns one [`Outcome`] per asset; a [`State::Mismatch`] is returned, not
+    /// raised, so the caller decides whether it stops the sync.
+    ///
+    /// # Errors
+    ///
+    /// When a source is malformed, an asset cannot be fetched or read, or a file cannot be written.
     pub fn sync(
         &mut self,
         repo_root: &Path,
         titles_root: &Path,
         client: &reqwest::blocking::Client,
     ) -> Result<Vec<Outcome>> {
-        // A source that lists origins is fetched from them, archive or single file; the `asset`
-        // walk below is for `path` and `repo` sources, which name their assets (worklog 846).
+        // A source that lists origins is fetched from them; the `asset` walk below is for `path`
+        // and `repo` sources, which name their assets.
         if self.archive || !self.sources.is_empty() {
             return self.sync_from_sources(repo_root, titles_root, client);
         }
@@ -412,8 +393,8 @@ impl Source {
                 }
             };
 
-            // Pin a new hash and refresh a local snapshot; leave a verified pin; never overwrite
-            // a pin the bytes failed to match - that is the caller's to resolve.
+            // Pin a new hash and refresh a local snapshot; leave a verified pin; never overwrite a
+            // pin the bytes failed to match, which is the caller's to resolve.
             if matches!(state, State::PinnedNew | State::LocalSnapshot) {
                 asset.sha256 = Some(sha.clone());
             }
@@ -432,9 +413,12 @@ impl Source {
     }
 }
 
-/// An HTTP client for fetching release assets. Built here rather than in the CLI so `reqwest`
-/// stays a dependency of this crate and not of the binary (the crate boundary is the point).
-/// Carries a user-agent because GitHub prefers one on release-asset downloads.
+/// An HTTP client for fetching release assets, built here so `reqwest` is a dependency of this
+/// crate and not of the binary. It carries a user-agent, which release downloads expect.
+///
+/// # Errors
+///
+/// When the client cannot be built.
 pub fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("orbistoun-corpus/", env!("CARGO_PKG_VERSION")))
@@ -442,7 +426,7 @@ pub fn client() -> Result<reqwest::blocking::Client> {
         .context("building an HTTP client")
 }
 
-/// SHA-256 of some bytes, lowercase hex - the pin format.
+/// SHA-256 of some bytes, lowercase hex: the pin format.
 pub fn hash_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(bytes);
@@ -454,21 +438,29 @@ pub fn hash_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Read a manifest from `corpus/sources.toml`.
+/// Reads a manifest from `corpus/sources.toml`.
+///
+/// # Errors
+///
+/// When the file cannot be read or parsed.
 pub fn load(path: &Path) -> Result<Manifest> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Write a manifest back, so freshly pinned hashes persist.
+/// Writes a manifest back, so freshly pinned hashes persist.
+///
+/// # Errors
+///
+/// When the manifest cannot be serialised or written.
 pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
     let text = toml::to_string_pretty(manifest).context("serialising the manifest")?;
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Write bytes to `target`, creating parent directories, via a temp file and rename so a killed
-/// fetch never leaves a truncated guest that a later run would treat as real.
+/// Writes bytes to `target`, creating parent directories, through a temporary file and a rename,
+/// so a killed fetch never leaves a truncated guest a later run would treat as real.
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
@@ -480,14 +472,13 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Unpacks a packaged title directory into `into` (worklog 842): every file, at its path in the
-/// archive, with a single top-level folder the whole archive sits in stripped - a packaged title is
-/// `SCSH00001/eboot.bin` and so on, and the corpus names the directory itself.
+/// Unpacks a packaged title directory into `into`: every file at its path in the archive, with a
+/// single top-level folder the whole archive sits in stripped, since the corpus names the
+/// directory itself.
 ///
-/// **A zip or a tar, told apart by their bytes** (worklog 846): the suite packages a large title as
-/// a plain tar under the same `-title-prospero.zip` name, and what a file is named is not what it
-/// is. Only an entry's *enclosed* name is used either way, so an entry naming `..` or an absolute
-/// path is refused rather than written outside `into`.
+/// A zip or a tar, told apart by their bytes rather than the file name. Only an entry's enclosed
+/// name is used, so an entry naming `..` or an absolute path is refused rather than written
+/// outside `into`.
 ///
 /// # Errors
 ///
@@ -532,7 +523,7 @@ pub fn unpack_title(bytes: &[u8], into: &Path) -> Result<usize> {
     Ok(written)
 }
 
-/// One entry of a packaged title: its enclosed path, and its bytes - `None` for a directory.
+/// One entry of a packaged title: its enclosed path, and its bytes (`None` for a directory).
 struct PackedEntry {
     path: PathBuf,
     contents: Option<Vec<u8>>,
@@ -559,9 +550,9 @@ fn zip_entries(bytes: &[u8]) -> Result<Vec<PackedEntry>> {
     Ok(entries)
 }
 
-/// A tar's regular files and directories, each by a path refused unless every component of it is
-/// an ordinary name - no root, no `..`, no drive - so nothing lands outside the title. Links and
-/// other special entries are skipped: a packaged title is files.
+/// A tar's regular files and directories. A path is refused unless every component is an
+/// ordinary name (no root, no `..`, no drive), so nothing lands outside the title. Links and
+/// other special entries are skipped.
 fn tar_entries(bytes: &[u8]) -> Result<Vec<PackedEntry>> {
     let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
     let mut entries = Vec::new();
@@ -597,9 +588,8 @@ fn tar_entries(bytes: &[u8]) -> Result<Vec<PackedEntry>> {
 
 /// Where one attempt to obtain an asset points.
 ///
-/// **Classified from the string rather than declared**, so a manifest can list a sibling checkout
-/// and a release URL side by side without a person also learning a keyword for each. Bare strings
-/// are what makes the fallback list readable, and reading them is this code's job (D664).
+/// Classified from the string rather than declared, so a manifest lists a sibling checkout and
+/// a release URL side by side as bare strings (D664).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     /// A path on this machine, resolved relative to the repository root.
@@ -611,9 +601,8 @@ pub enum Origin {
 impl Origin {
     /// Which kind of origin a manifest entry names.
     ///
-    /// Only `http://` and `https://` are URLs. A Windows path begins `C:\`, which contains a
-    /// colon and is emphatically not a scheme - checking for `://` rather than `:` is the whole
-    /// difference, and it is why this is a function with a test rather than an inline guess.
+    /// Only `http://` and `https://` are URLs: a Windows path such as `C:\` contains a colon and is
+    /// not a scheme.
     #[must_use]
     pub fn classify(origin: &str) -> Self {
         if origin.starts_with("http://") || origin.starts_with("https://") {
@@ -633,16 +622,15 @@ pub struct Attempt<T> {
     pub used: String,
     /// The ones tried before it, and why each did not answer.
     ///
-    /// **Kept rather than discarded.** A sibling checkout that is absent and a release that
-    /// answers 404 are different problems with different fixes, and a fallback that reports only
-    /// its success hides the fact that the fast path is broken.
+    /// An absent sibling checkout and a release that answers 404 have different fixes, so a
+    /// fallback reports what failed as well as what succeeded.
     pub failed: Vec<(String, String)>,
 }
 
 /// Walks `origins` in order and answers from the first that succeeds.
 ///
-/// Pure: `attempt` does the fetching, so the ordering, the reporting and the give-up condition are
-/// all testable without a network or a filesystem - the shape principle 8 asks for.
+/// Pure: `attempt` does the fetching, so the ordering, reporting and give-up condition are
+/// testable without a network or a filesystem.
 ///
 /// # Errors
 ///
@@ -681,8 +669,8 @@ mod tests {
         writer.finish().expect("the zip finishes").into_inner()
     }
 
-    /// **A packaged title unpacks as the title directory, its one top folder stripped** (worklog
-    /// 842): `SCSH00001/eboot.bin` lands at `<into>/eboot.bin`, subdirectories kept.
+    /// A packaged title unpacks as the title directory with its one top folder stripped,
+    /// subdirectories kept.
     #[test]
     fn a_packaged_title_unpacks_with_its_top_folder_stripped() {
         let dir = std::env::temp_dir().join(format!("corpus-unpack-{}", std::process::id()));
@@ -701,7 +689,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **An entry naming a path outside the title is refused, and nothing is written.**
+    /// A zip entry naming a path outside the title is refused, and nothing is written.
     #[test]
     fn an_entry_escaping_the_title_is_refused() {
         let dir = std::env::temp_dir().join(format!("corpus-escape-{}", std::process::id()));
@@ -711,7 +699,7 @@ mod tests {
         assert!(!dir.exists());
     }
 
-    /// A tar holding `entries` (name, contents), each name written into its header as given - so a
+    /// A tar holding `entries` (name, contents), each name written into its header as given, so a
     /// test can name a path the builder's own checks would refuse.
     fn tar_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
@@ -729,8 +717,8 @@ mod tests {
         builder.into_inner().expect("the tar finishes")
     }
 
-    /// **A title packaged as a tar under a `.zip` name unpacks the same** (worklog 846): the suite
-    /// ships its large titles that way, and the bytes, not the name, say which it is.
+    /// A title packaged as a tar under a `.zip` name unpacks the same: the bytes, not the name, say
+    /// which it is.
     #[test]
     fn a_title_packaged_as_a_tar_unpacks_like_a_zip() {
         let dir = std::env::temp_dir().join(format!("corpus-tar-{}", std::process::id()));
@@ -745,7 +733,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A tar entry naming a path outside the title is refused, and nothing is written.**
+    /// A tar entry naming a path outside the title is refused, as are bytes that are neither.
     #[test]
     fn a_tar_entry_escaping_the_title_is_refused() {
         let dir = std::env::temp_dir().join(format!("corpus-tar-escape-{}", std::process::id()));
@@ -756,11 +744,7 @@ mod tests {
         assert!(unpack_title(b"neither a zip nor a tar", &dir).is_err());
     }
 
-    /// **An origin is a local path or a URL, and nothing has to say which.**
-    ///
-    /// Written first. The manifest lists origins as bare strings so a person can paste a release
-    /// URL beside a sibling checkout without also learning a `kind` keyword - so the classifying
-    /// is this code's job, and getting it wrong means trying to open a URL as a file (D664).
+    /// An origin is classified as a local path or a URL from the bare string.
     #[test]
     fn an_origin_knows_whether_it_is_a_url_or_a_path() {
         assert_eq!(
@@ -775,8 +759,7 @@ mod tests {
             Origin::classify("../obscene/build/prospero"),
             Origin::Path("../obscene/build/prospero".to_owned())
         );
-        // A Windows path is not a URL, and `C:` is not a scheme. The colon is what makes this
-        // worth a test rather than a one-liner.
+        // A Windows path is not a URL, and `C:` is not a scheme.
         assert_eq!(
             Origin::classify(r"D:\builds\probe"),
             Origin::Path(r"D:\builds\probe".to_owned())
@@ -803,10 +786,7 @@ mod tests {
         );
     }
 
-    /// **All of them failing is an error naming every attempt**, not a silent skip.
-    ///
-    /// The negative case, and the one the manifest shape exists for: a sibling checkout that is
-    /// not there and a release that 404s should say both, so the next person knows which to fix.
+    /// Every origin failing is an error naming every attempt, not a silent skip.
     #[test]
     fn every_origin_failing_reports_every_reason() {
         let tried: Result<Attempt<u8>, Vec<(String, String)>> =
@@ -841,12 +821,14 @@ mod tests {
         }
     }
 
+    /// A file's stem becomes its title directory.
     #[test]
     fn a_stem_becomes_the_title_directory() {
         assert_eq!(Source::stem("elfldr_v0.26.elf"), "elfldr_v0.26");
         assert_eq!(Source::stem("etaHEN_2.5B.bin"), "etaHEN_2.5B");
     }
 
+    /// A github asset's URL is the release download path.
     #[test]
     fn a_github_asset_url_is_the_release_download_path() {
         assert_eq!(
@@ -855,6 +837,7 @@ mod tests {
         );
     }
 
+    /// Each guest gets a directory of its own under its source.
     #[test]
     fn the_target_is_one_directory_per_guest() {
         let t = source(KIND_GITHUB_RELEASE).path_for(Path::new("titles"), "elfldr_v0.26.elf");
@@ -865,6 +848,7 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// A manifest survives a round trip through TOML.
     #[test]
     fn a_manifest_round_trips_through_toml() {
         let mut m = Manifest::default();

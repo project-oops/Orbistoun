@@ -1,27 +1,10 @@
 //! Grading a change against a spec, rather than against whether the guest survived it.
 //!
-//! # Why this is the piece that matters
-//!
-//! The naming loop brute-forces billions of candidates and has never produced a wrong name -
-//! not because the generator is clever, but because **the oracle cannot be fooled**. A
-//! candidate hashes to the import or it does not.
-//!
-//! The fix loop had the balance backwards: a careful generator and `FURTHER`, which answers
-//! "did the guest get past something" and says nothing at all once a run stops faulting
-//! (D301). A careful generator behind a weak oracle is the arrangement that produces confident
-//! wrong answers.
-//!
-//! The conformance probe grades **checks against a spec**, each announced by name.
-//! `037-math/sqrt` passing means sqrt is *correct*, not that the guest survived it. That is a
-//! fitness function, and with one in hand the generator is free to get **dumber** rather than
-//! smarter - which is the only arrangement this project has ever put a machine inside (D302).
-//!
-//! # What a verdict may and may not say
-//!
-//! A check that goes from failing to passing is evidence. A check that goes the other way is
-//! a **refusal**, not a trade: this project has no way to weigh one function's correctness
-//! against another's, and a change that fixes two things and breaks one is not an improvement
-//! anybody here can justify keeping.
+//! `FURTHER` says the guest got past something and nothing once a run stops faulting (D301). The
+//! conformance probe grades named checks against a spec: `037-math/sqrt` passing means sqrt is
+//! correct. With an oracle that cannot be fooled, the generator of changes can stay simple (D303).
+//! A check that goes from failing to passing is evidence; one that goes the other way refuses the
+//! change, since one function's correctness cannot be weighed against another's.
 
 use std::collections::BTreeMap;
 
@@ -29,9 +12,8 @@ use orbistoun_probe::{Record, Status};
 
 /// What a probe run concluded, check by check.
 ///
-/// Keyed by the check's own identifier - `section/name` - because that is what the probe
-/// announces and what a person reads in a report. Comparing counts alone would let a change
-/// that broke one check and fixed another look like no change at all.
+/// Keyed by the check's own identifier, `section/name`, as the probe announces it. Comparing counts
+/// alone would let a change that broke one check and fixed another look like no change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Score {
     /// Every check the run reached, and what it concluded.
@@ -42,7 +24,7 @@ impl Score {
     /// Reads a probe transcript.
     ///
     /// Lines that are not results are ignored rather than refused: a transcript carries
-    /// negotiation, metadata and free text, and none of it grades anything.
+    /// negotiation, metadata and free text.
     #[must_use]
     pub fn read(transcript: &str) -> Self {
         let mut checks = BTreeMap::new();
@@ -79,9 +61,8 @@ impl Score {
                 _ => {}
             }
         }
-        // **A check that stopped running counts as broken.** A change that makes the probe die
-        // earlier removes checks from the report, and a shorter report is not a cleaner one -
-        // reading it as "nothing regressed" is the failure this whole file exists to prevent.
+        // A check that stopped running counts as broken: a probe that dies earlier writes a shorter
+        // report, not a cleaner one.
         for (check, before) in &self.checks {
             if *before == Status::Pass && !later.checks.contains_key(check) {
                 broken.push(check.clone());
@@ -96,18 +77,15 @@ impl Score {
 pub struct Verdict {
     /// Checks that were failing and now pass.
     pub fixed: Vec<String>,
-    /// Checks that were passing and now do not, **including ones that stopped running**.
+    /// Checks that were passing and now do not, including ones that stopped running.
     pub broken: Vec<String>,
 }
 
 impl Verdict {
     /// Whether a change is worth keeping.
     ///
-    /// **Both halves, and the second is not negotiable.** Something has to improve, or the
-    /// change is unevidenced; and nothing may regress, because this project has no way to
-    /// weigh one function's correctness against another's. A change that fixes two checks and
-    /// breaks one is not an improvement anybody here can justify - it is a trade nobody has
-    /// the exchange rate for.
+    /// Something has to improve, or the change is unevidenced, and nothing may regress, because one
+    /// function's correctness cannot be weighed against another's.
     #[must_use]
     pub fn is_an_improvement(&self) -> bool {
         !self.fixed.is_empty() && self.broken.is_empty()
@@ -136,19 +114,17 @@ impl Verdict {
 
 /// How one guest fared, for grading a change against a corpus rather than a spec.
 ///
-/// **The oracle when nobody wrote a check.** A probe grades what somebody thought to test, and
-/// nobody will ever test every entry point - but every title on a machine is an independent
-/// guest with its own expectations of the same functions, and a corpus of them is a regression
-/// suite that grows with whoever is running it rather than with this repository (D303).
+/// A probe grades only what somebody thought to test; every title on a machine is an independent
+/// guest with its own expectations of the same functions, so a corpus of them is a regression suite
+/// that grows with its user (D303).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reach {
     /// Distinct imports the guest called before it stopped.
     pub reached: usize,
     /// Whether it stopped at an address it asked for, rather than in non-code.
     ///
-    /// **The signal that makes reach trustworthy.** An illegal instruction, a breakpoint or a
-    /// stack overflow means the guest was *derailed* rather than helped, and a change that
-    /// buys reach while derailing something has broken it (D303).
+    /// An illegal instruction, a breakpoint or a stack overflow means the guest was derailed, and a
+    /// change that buys reach while derailing something has broken it.
     pub touched: bool,
     /// Whether it faulted at all.
     pub faulted: bool,
@@ -169,10 +145,9 @@ impl Corpus {
 
     /// What changed between this corpus and a later one.
     ///
-    /// **Reach up somewhere, down nowhere, and nothing newly derailed.** One guest getting
-    /// further is ordinary and a wrong answer can buy it; several agreeing while none regresses
-    /// is a different class of claim, which is the two-sentinel argument applied to guests
-    /// (D283, D303).
+    /// Reach up somewhere, down nowhere, and nothing newly derailed (D303). One guest getting
+    /// further is ordinary and a wrong answer can buy it; several agreeing while none regresses is
+    /// a stronger claim.
     #[must_use]
     pub fn against(&self, later: &Self) -> Verdict {
         let mut fixed = Vec::new();
@@ -181,8 +156,8 @@ impl Corpus {
             let Some(before) = self.guests.get(title) else {
                 continue;
             };
-            // Derailing is a regression whatever it did to reach: a guest running in non-code
-            // has been broken, and how far it got before that is not a measurement of anything.
+            // Derailing is a regression whatever it did to reach: how far a guest running in
+            // non-code got is not a measurement.
             if before.touched && !after.touched {
                 broken.push(format!("{title} (derailed into non-code)"));
             } else if after.reached < before.reached {
@@ -233,11 +208,7 @@ mod tests {
         assert!(before.against(&after).is_an_improvement());
     }
 
-    /// **Derailing is a regression however far the guest got.**
-    ///
-    /// A guest running in non-code has been broken by the change, and how far it reached
-    /// before that is not a measurement of anything. Without this, a patch that wrecks one
-    /// title while buying reach in it reads as an improvement (D303).
+    /// Derailing is a regression however far the guest got.
     #[test]
     fn a_guest_derailed_into_non_code_is_a_regression_even_if_it_reached_further() {
         let mut before = super::Corpus::default();
@@ -330,11 +301,7 @@ mod tests {
         assert!(verdict.say().contains("a/one"), "{}", verdict.say());
     }
 
-    /// **A check that stops running counts as broken.**
-    ///
-    /// A change that makes the probe die earlier produces a shorter report, and a shorter
-    /// report is not a cleaner one. Counting only what came back would read a crash as an
-    /// improvement, which is the exact shape of every failure in this project's decision log.
+    /// A check that stops running counts as broken, so a crash never reads as an improvement.
     #[test]
     fn a_check_that_disappears_is_a_regression_not_a_silence() {
         let before = Score::read(&transcript(&[("a/one", "pass"), ("a/two", "pass")]));

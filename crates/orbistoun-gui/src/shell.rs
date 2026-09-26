@@ -1,23 +1,8 @@
-//! The shell, drawn.
+//! The shell, drawn in our own presentation rather than an imitation of the vendor's.
 //!
-//! # What this is, and what it deliberately is not
-//!
-//! A console presents its library as a wall of tiles you move through with a pad, and this
-//! draws one. It is **our own presentation**: principle 2 keeps vendor names out of the
-//! tree, and reproducing a console's actual look would give back exactly the clean-room
-//! position the rest of the project is built to hold. Tiles in a grid is how every library
-//! since the CD era has been shown; a specific arrangement of them is somebody's design.
-//!
-//! # Why it holds no state
-//!
-//! Principle 13, applied inside a shim. This file takes what to draw and answers what
-//! somebody did; where the session stands, what a title is and whether a run may start are
-//! all decided elsewhere - in `orbistoun-shell` and the service. A view that owned a copy
-//! of "which title is selected" would be a second answer to a question the window already
-//! has one for.
-//!
-//! That is also what makes the list and the shell two presentations of one library rather
-//! than two libraries.
+//! It holds no state: it takes what to draw and answers what somebody did, and the session,
+//! the titles and whether a run may start are decided in `orbistoun-shell` and the service.
+//! The list and the shell are two presentations of one library.
 
 /// What somebody did in the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,19 +26,15 @@ pub(crate) enum Action {
 /// Which menu the shell button opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Menu {
-    /// A tap: what somebody wants nine times out of ten.
+    /// A tap: the everyday menu.
     Overlay,
-    /// A hold: the things somebody should not reach by accident.
+    /// A hold: actions that should not be reached by accident.
     Power,
 }
 
 /// Draws a menu over whatever is behind it.
 ///
-/// # Why two menus rather than one with a section in it
-///
-/// The hold exists so that ending a session is not one press away from resuming it. Putting
-/// both on one menu would give back exactly what the hold was for - and this is the menu
-/// somebody reaches while a title is running, so a misclick has a cost.
+/// Two menus, so ending a session is never one press away from resuming it.
 pub(crate) fn menu(ui: &mut egui::Ui, which: Menu, running: Option<&str>) -> Option<Action> {
     let mut action = None;
     egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -65,8 +46,7 @@ pub(crate) fn menu(ui: &mut egui::Ui, which: Menu, running: Option<&str>) -> Opt
                     ui.weak(module);
                 }
                 ui.separator();
-                // Resume first and largest: it is what the press was for most of the time,
-                // and it is the one that must not require aiming.
+                // Resume first and largest: it is the common case.
                 if ui.button("resume").clicked() {
                     action = Some(Action::Resume);
                 }
@@ -92,9 +72,7 @@ pub(crate) fn menu(ui: &mut egui::Ui, which: Menu, running: Option<&str>) -> Opt
                 if ui.button("back").clicked() {
                     action = Some(Action::Resume);
                 }
-                // Said rather than offered. A rest-mode entry that closed the emulator
-                // would be a button whose label is a claim about a feature that does not
-                // exist - principle 3, one level up from the emulator.
+                // Stated rather than offered as a button for a feature that does not exist.
                 ui.small("suspending a title to disk is not built");
             }
         }
@@ -104,10 +82,8 @@ pub(crate) fn menu(ui: &mut egui::Ui, which: Menu, running: Option<&str>) -> Opt
 
 /// One tile's worth of what the shell needs to know.
 ///
-/// Deliberately not `Row`: this takes the two fields a tile shows, so the shell cannot
-/// quietly start depending on the diagnostics the list view is built around. When a tile
-/// wants a third thing, adding it here is a decision somebody makes rather than one that
-/// has already happened.
+/// Not `Row`: only the fields a tile shows, so the shell does not depend on the list
+/// view's diagnostics.
 pub(crate) struct Tile<'a> {
     /// The cache key for the icon, which is the directory name.
     pub(crate) key: &'a str,

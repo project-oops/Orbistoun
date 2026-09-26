@@ -1,19 +1,9 @@
 //! Searching a candidate space for names that hash to wanted values.
 //!
-//! # A match is proof, and a miss proves nothing
-//!
-//! This is the rare part of the project with a real oracle. A candidate either hashes
-//! to a wanted value or it does not, and there is no judgement involved - so a reported
-//! name is correct, not probable. What the search cannot do is tell you a name does not
-//! exist; it only ever says "not in what was tried".
-//!
-//! That asymmetry is why the vocabulary is data. Extending it is the whole method.
-//!
-//! # Splitting the work
-//!
-//! Patterns are indexable, so a search is a range of integers. Threads take disjoint
-//! ranges and share nothing but the target set, which is read-only. No coordination, no
-//! locks, and the result is identical regardless of how many threads ran.
+//! The hash is a real oracle: a reported name is correct, not probable, while a miss says only
+//! that the name was not among those tried. That asymmetry is why the vocabulary is data.
+//! Patterns are indexable, so a search is a range of integers: threads take disjoint ranges,
+//! share only the read-only target set, and produce the same result however many ran.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
@@ -29,11 +19,8 @@ pub struct Solved {
     pub nid: Nid,
     /// The name that produces it.
     pub name: String,
-    /// Which of this repository's inputs produced it, and where.
-    ///
-    /// Recorded at the moment of discovery rather than reconstructed afterwards. A
-    /// provenance record assembled later is a reconstruction; one written by the code
-    /// that did the work is evidence (D073).
+    /// Which of this repository's inputs produced it, and where, recorded by the code that did the
+    /// work rather than reconstructed afterwards (D213).
     pub derivation: Derivation,
 }
 
@@ -78,16 +65,13 @@ impl Targets {
     }
 }
 
-/// How many candidates one thread takes before asking for more.
-///
-/// Large enough that the coordination cost disappears, small enough that threads finish
-/// within a similar time of each other.
+/// How many candidates one thread takes before asking for more: large enough to hide the
+/// coordination cost, small enough that threads finish close together.
 pub const CHUNK: u64 = 64 * 1024;
 
 /// Hashes a list of names, keeping those that match.
 ///
-/// Used for published standard-library names, where the list is fixed and short enough
-/// that splitting it would cost more than it saves.
+/// For published standard-library names, a fixed list too short to be worth splitting.
 pub fn solve_names<I, S>(
     hasher: &NidHasher,
     targets: &Targets,
@@ -122,18 +106,16 @@ where
 
 /// Searches every pattern, across `threads` threads.
 ///
-/// The result does not depend on the thread count: findings are collected into a map
-/// keyed by hash, so the same names come back whatever order they were found in.
+/// Findings are collected into a map keyed by hash, so the result does not depend on the
+/// thread count or the order names were found in.
 pub fn solve_patterns(
     hasher: &NidHasher,
     targets: &Targets,
     patterns: &[Pattern],
     threads: usize,
 ) -> (Vec<Solved>, SearchStats) {
-    // Gathered into one contiguous array before the threads start. `Pattern::len` is a
-    // field read now, but the patterns themselves are scattered across the heap, and the
-    // scan below touches every one of them for every candidate - so the lengths are
-    // worth having in a single cache line (D216).
+    // The lengths are gathered into one contiguous array before the threads start: the scan reads
+    // every pattern's length for every candidate.
     let lens: Vec<u64> = patterns.iter().map(Pattern::len).collect();
     let total: u64 = lens.iter().sum();
     if total == 0 || targets.is_empty() {
@@ -147,8 +129,7 @@ pub fn solve_patterns(
         );
     }
 
-    // Stamped once, outside the threads: a search is one act, and a name found at the
-    // start of it did not happen on a different day from one found at the end.
+    // Stamped once, outside the threads: a search is one act with one date.
     let today = orbistoun_nid::today();
     let next = std::sync::atomic::AtomicU64::new(0);
     let found: Mutex<BTreeMap<u64, Solved>> = Mutex::new(BTreeMap::new());
@@ -158,8 +139,7 @@ pub fn solve_patterns(
         for _ in 0..threads {
             scope.spawn(|| {
                 let mut mine: Vec<Solved> = Vec::new();
-                // One buffer for the whole thread. Allocating per candidate would make
-                // the allocator, not SHA-1, decide how long a billion-name search takes.
+                // One buffer per thread, so the allocator does not dominate a large search.
                 let mut name = Vec::with_capacity(64);
                 loop {
                     let start = next.fetch_add(CHUNK, std::sync::atomic::Ordering::Relaxed);
@@ -168,8 +148,7 @@ pub fn solve_patterns(
                     }
                     let end = start.saturating_add(CHUNK).min(total);
                     for index in start..end {
-                        // Locate the pattern this global index falls in. Patterns are
-                        // few, so a scan costs less than the bookkeeping to avoid it.
+                        // Locate the pattern this global index falls in; patterns are few, so a scan is cheapest.
                         let mut offset = index;
                         for (pattern, &len) in patterns.iter().zip(&lens) {
                             if offset < len {
@@ -178,14 +157,12 @@ pub fn solve_patterns(
                                         .expect("a candidate is a concatenation of strings");
                                     let nid = hasher.hash(text);
                                     if targets.wants(nid) {
-                                        // Allocated only on a match, which is rare
-                                        // enough to be free.
+                                        // Allocated only on a match, which is rare.
                                         mine.push(Solved {
                                             nid,
                                             name: String::from_utf8_lossy(&name).into_owned(),
-                                            // Pattern and index together identify this
-                                            // one candidate out of hundreds of millions,
-                                            // so the claim can be rechecked in isolation.
+                                            // Pattern and index together identify this one candidate, so the claim can be rechecked in
+                                            // isolation.
                                             derivation: Derivation::new(
                                                 Method::Generated {
                                                     pattern: pattern.name.clone(),
@@ -203,8 +180,7 @@ pub fn solve_patterns(
                     }
                 }
                 if !mine.is_empty() {
-                    // Locked once per thread at the end rather than per match, so the
-                    // hot path stays entirely local.
+                    // Locked once per thread at the end rather than per match, keeping the hot path local.
                     let mut shared = found
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -229,17 +205,11 @@ pub fn solve_patterns(
     (solved, stats)
 }
 
-/// Whether a recorded derivation actually produces the name it claims.
+/// Whether a recorded derivation produces the name it claims.
 ///
-/// **The audit primitive.** A stored derivation is a claim, and this is what turns it
-/// into a check. Verifying one is a single array lookup, so auditing a database of
-/// thousands costs less than a millisecond - which is what makes it reasonable to
-/// re-run on every commit rather than once, hopefully, before publishing (D073).
-///
-/// Returns `false` when the claim does not hold: the pattern does not exist in the
-/// current grammar, the index is out of range, or it produces a different name. All
-/// three mean the same thing to a reader - this repository, as it stands, does not
-/// derive that name the way the file says it does.
+/// The audit primitive: a stored derivation is a claim and this checks it with one array
+/// lookup, cheap enough to run on every commit (D213). `false` means the pattern does not
+/// exist in the current grammar, the index is out of range, or it produces a different name.
 pub fn verify(
     name: &str,
     derivation: &Derivation,
@@ -254,28 +224,20 @@ pub fn verify(
             .find(|p| &p.name == pattern)
             .and_then(|p| p.name_at(*index))
             .is_some_and(|produced| produced == name),
-        // **The rule, not the seed.** That the seed is itself a name this project holds is
-        // a property of the whole file rather than of one record, so it is checked where
-        // every record is in view. Here there is only one, and a check that could not see
-        // the rest would have to take the seed on trust while reporting it as verified
-        // (D606).
+        // The rule, not the seed: whether the seed is a held name is a property of the whole file,
+        // checked where every record is in view.
         Method::Affixed { seed, rule } => affixes.produces(seed, rule, name),
-        // None of these can be rechecked from this repository alone, which is the only
-        // material CI holds. That is not the same as unverifiable: a static harvest is
-        // reproducible by anyone with the module, deterministically, and a runtime one by
-        // anyone willing to run it. `Method::reproducible` says which, and the audit
-        // prints them by tier rather than lumping them together (D213). What none of them
-        // may do is count as re-derived here, because that would be the one lie this
-        // whole mechanism exists to prevent.
+        // None of these can be rechecked from this repository alone, which is all CI holds. They are
+        // reproducible by others (`Method::reproducible` says how, and the audit prints them by tier),
+        // but none counts as re-derived here.
         Method::Static { .. } | Method::Runtime { .. } | Method::Supplied { .. } => false,
     }
 }
 
 /// Searches the whole space for a derivation of `name`, for names with no record.
 ///
-/// Expensive - it walks every candidate - and that is the point: it answers "could this
-/// repository have produced this name at all?" with no help from the file being
-/// audited. A name it cannot account for is precisely the one that needs explaining.
+/// Expensive by design: it answers whether this repository could produce the name at all, with
+/// no help from the file being audited.
 pub fn derive(name: &str, patterns: &[Pattern], standard: &[String]) -> Option<Derivation> {
     let today = orbistoun_nid::today();
     if standard.iter().any(|n| n == name) {
@@ -287,10 +249,8 @@ pub fn derive(name: &str, patterns: &[Pattern], standard: &[String]) -> Option<D
         ));
     }
     for pattern in patterns {
-        // **Computed, not searched.** `name_at` reads the index as a mixed-radix number, so
-        // recovering it is the same arithmetic backwards - and walking `0..len()` instead was a
-        // linear scan of a space measured in trillions, which took five hours on thirty-three
-        // names and did not finish (D304).
+        // Computed, not searched: `name_at` reads the index as a mixed-radix number, so `index_of`
+        // is the same arithmetic backwards, where a linear walk of the space would not finish.
         if let Some(index) = pattern.index_of(name) {
             {
                 return Some(Derivation::new(
@@ -315,8 +275,7 @@ mod tests {
     use crate::Pattern;
     use orbistoun_nid::{Derivation, Method, NidHasher};
 
-    /// An arbitrary suffix. The real one is a runtime input and deliberately absent
-    /// from the tree (D006); nothing here depends on its value.
+    /// An arbitrary suffix; nothing here depends on its value.
     fn hasher() -> NidHasher {
         NidHasher::new(vec![0x01, 0x02, 0x03, 0x04])
     }
@@ -341,10 +300,10 @@ mod tests {
         )
     }
 
+    /// A name in the space is found, and is the right one.
     #[test]
     fn a_name_in_the_space_is_found_and_is_the_right_one() {
-        // The one place in this project with a real oracle: the hash either agrees or
-        // it does not, so a match is proof rather than a guess.
+        // The hash either agrees or it does not, so a match is proof.
         let h = hasher();
         let wanted = h.hash("sceKernelOpen");
         let targets = Targets::new([wanted]);
@@ -363,10 +322,10 @@ mod tests {
         assert_eq!(stats.wanted, 1);
     }
 
+    /// The result does not depend on the thread count.
     #[test]
     fn the_result_is_the_same_however_many_threads_ran() {
-        // Threads take disjoint ranges and merge into a map keyed by hash, so a
-        // different split cannot change the answer - only how long it takes.
+        // Disjoint ranges merged into a map keyed by hash: a different split changes only the time.
         let h = hasher();
         let targets = Targets::new([h.hash("sceAudioClose"), h.hash("sceKernelRead")]);
         let patterns = [pattern(&[
@@ -381,10 +340,10 @@ mod tests {
         assert_eq!(single.len(), 2);
     }
 
+    /// A name outside the space is simply not found.
     #[test]
     fn a_name_outside_the_space_is_simply_not_found() {
-        // A miss proves nothing at all - only that it was not in what was tried. That
-        // asymmetry is why the vocabulary is data rather than code.
+        // A miss proves only that the name was not among those tried.
         let h = hasher();
         let targets = Targets::new([h.hash("sceSomethingNobodyGuessed")]);
         let patterns = [pattern(&[&["sce"], &["Kernel"], &["Open"]])];
@@ -395,10 +354,10 @@ mod tests {
         assert_eq!(stats.wanted, 1, "still reported as wanted");
     }
 
+    /// An empty target set searches nothing.
     #[test]
     fn an_empty_target_set_searches_nothing_rather_than_everything() {
-        // Hashing millions of candidates against nothing is pure waste, and it takes
-        // long enough to look like a hang.
+        // Hashing candidates against nothing is waste, and long enough to look like a hang.
         let h = hasher();
         let patterns = [pattern(&[&["a", "b"], &["c", "d"]])];
         let (solved, stats) = solve_patterns(&h, &Targets::new([]), &patterns, 4);
@@ -406,10 +365,10 @@ mod tests {
         assert_eq!(stats.tried, 0);
     }
 
+    /// A plain name list resolves too.
     #[test]
     fn a_plain_name_list_resolves_too() {
-        // Published standard-library names are not guesses, so they get searched
-        // directly rather than generated.
+        // Published standard-library names are searched directly rather than generated.
         let h = hasher();
         let targets = Targets::new([h.hash("memcpy")]);
         let (solved, stats) = solve_names(&h, &targets, ["malloc", "memcpy", "free"], &standard());
@@ -418,19 +377,19 @@ mod tests {
         assert_eq!(stats.tried, 3);
     }
 
+    /// Each hash is reported once, even if two names collide.
     #[test]
     fn each_hash_is_reported_once_even_if_two_names_collide() {
-        // A truncated hash can collide. Reporting both would put two names on one
-        // import and make the database ambiguous.
+        // A truncated hash can collide; reporting both would put two names on one import.
         let h = hasher();
         let targets = Targets::new([h.hash("dup")]);
         let (solved, _) = solve_names(&h, &targets, ["dup", "dup", "dup"], &standard());
         assert_eq!(solved.len(), 1);
     }
+    /// A solved name records where it came from.
     #[test]
     fn a_solved_name_records_where_it_came_from() {
-        // Written by the code that did the work, not reconstructed later. A provenance
-        // record assembled afterwards is a reconstruction; this is evidence.
+        // Written by the code that did the work, not reconstructed later.
         let h = hasher();
         let targets = Targets::new([h.hash("sceKernelOpen")]);
         let patterns = [pattern(&[&["sce"], &["Kernel"], &["Open", "Close"]])];
@@ -449,9 +408,10 @@ mod tests {
         }
     }
 
+    /// A recorded derivation verifies against the grammar.
     #[test]
     fn a_recorded_derivation_verifies_against_the_grammar() {
-        // The audit primitive: a claim becomes a check.
+        // A claim becomes a check.
         let patterns = [pattern(&[&["sce"], &["Kernel"], &["Open", "Close"]])];
         let standard = vec!["memcpy".to_owned()];
 
@@ -481,10 +441,10 @@ mod tests {
         );
     }
 
+    /// A derivation naming a pattern the grammar lacks fails verification.
     #[test]
     fn a_derivation_naming_a_pattern_that_no_longer_exists_fails() {
-        // Grammars change. A name whose derivation stopped being reproducible is
-        // exactly what an audit exists to surface, rather than quietly passing.
+        // A derivation the current grammar no longer reproduces is what an audit surfaces.
         let patterns = [pattern(&[&["a"], &["b"]])];
         let stale = Derivation::new(
             Method::Generated {
@@ -502,6 +462,7 @@ mod tests {
         ));
     }
 
+    /// An out-of-range index fails rather than wrapping.
     #[test]
     fn an_out_of_range_index_fails_rather_than_wrapping() {
         let patterns = [pattern(&[&["a"], &["b"]])];
@@ -521,11 +482,10 @@ mod tests {
         ));
     }
 
+    /// Nothing outside this repository verifies mechanically.
     #[test]
     fn nothing_outside_this_repository_verifies_mechanically() {
-        // All three are legitimate; none can be rechecked from this repository alone,
-        // which is the only material CI holds. Calling any of them re-derived would be
-        // the one lie this whole mechanism exists to prevent.
+        // All three are legitimate, and none can be rechecked from this repository alone.
         let harvested = Derivation::new(
             Method::Static {
                 by: orbistoun_nid::StaticSource::ModuleStrings,
@@ -557,17 +517,16 @@ mod tests {
             assert!(!d.method.is_mechanically_checkable());
         }
 
-        // But they are not the same thing, and the audit must not treat them alike.
+        // They are still different, and the audit treats them differently.
         assert!(harvested.method.is_our_own_work());
         assert!(ran.method.is_our_own_work());
         assert!(!supplied.method.is_our_own_work());
     }
 
+    /// The provenance tiers separate static harvesting from running something.
     #[test]
     fn the_tiers_separate_static_harvesting_from_running_something() {
-        // The distinction the old single `observed` value could not make. 137 of the 154
-        // names carrying it had never run anything, while its own documentation said
-        // "watching something run" (D213).
+        // Static harvesting and running something are distinct tiers (D213).
         use orbistoun_nid::{Evidence, Reproducible};
 
         let harvested = Method::Static {
@@ -583,8 +542,7 @@ mod tests {
         assert_eq!(ran.evidence(), Evidence::Runtime);
         assert_ne!(harvested.evidence(), ran.evidence());
 
-        // And the tiers are ordered by what somebody else has to hold, which is what the
-        // audit sorts by.
+        // The tiers are ordered by what somebody else has to hold, which is what the audit sorts by.
         assert!(harvested.reproducible() < ran.reproducible());
         assert!(Reproducible::FromRepository < harvested.reproducible());
         assert!(
@@ -596,10 +554,10 @@ mod tests {
         );
     }
 
+    /// An unrecorded name can be re-derived from scratch.
     #[test]
     fn an_unrecorded_name_can_be_re_derived_from_scratch() {
-        // Answers "could this repository have produced this name at all?" with no help
-        // from the file being audited.
+        // Could this repository have produced this name at all, with no help from the audited file?
         let patterns = [pattern(&[&["sce"], &["Kernel"], &["Open", "Close"]])];
         let standard = vec!["memcpy".to_owned()];
 

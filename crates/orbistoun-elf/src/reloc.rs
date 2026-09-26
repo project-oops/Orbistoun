@@ -1,21 +1,11 @@
 //! Relocations: the entries that turn a linked image into a placed one.
 //!
-//! Standard `Elf64_Rela` throughout - the vendor adds nothing here. Two tables carry
-//! them, and the split matters:
-//!
-//! - **`DT_RELA`** holds data relocations: absolute addresses baked into the image
-//!   that must be adjusted for wherever it actually landed.
-//! - **`DT_JMPREL`** holds the procedure linkage table: one slot per imported
-//!   function. **These are where imports become calls** - writing a host address into
-//!   a slot is what D005 means by "interception is linking".
-//!
-//! # Only four types matter to get started
-//!
-//! An image placed at a base needs `RELATIVE` (adjust an internal pointer), `64` and
-//! `GLOB_DAT` (write a symbol address), and `JUMP_SLOT` (write a function address).
-//! TLS relocations need thread-local storage to exist first and are deliberately not
-//! handled - reported as unsupported rather than silently skipped, since a skipped
-//! relocation leaves a pointer that looks valid and is not.
+//! Standard `Elf64_Rela` throughout. `DT_RELA` holds data relocations, absolute addresses
+//! adjusted for where the image landed; `DT_JMPREL` holds the procedure linkage table, one
+//! slot per imported function, where writing a host address is the interception (D005).
+//! Placement needs `RELATIVE`, `64`, `GLOB_DAT` and `JUMP_SLOT`. TLS relocations are
+//! reported separately rather than skipped, since a skipped relocation leaves a pointer
+//! that looks valid and is not.
 
 use zerocopy::{FromBytes, Immutable, KnownLayout, little_endian};
 
@@ -26,17 +16,17 @@ pub const RELA_SIZE: usize = 24;
 pub mod kind {
     /// Write `symbol + addend`.
     pub const ABS64: u32 = 1;
-    /// Write `symbol` - a data symbol's address.
+    /// Write `symbol`: a data symbol's address.
     pub const GLOB_DAT: u32 = 6;
-    /// Write `symbol` - a function address, in a PLT slot.
+    /// Write `symbol`: a function address, in a PLT slot.
     pub const JUMP_SLOT: u32 = 7;
-    /// Write `base + addend` - an internal pointer adjusted for placement.
+    /// Write `base + addend`: an internal pointer adjusted for placement.
     pub const RELATIVE: u32 = 8;
-    /// TLS module id. Needs thread-local storage to exist.
+    /// TLS module id.
     pub const DTPMOD64: u32 = 16;
-    /// TLS offset within a module. Needs thread-local storage to exist.
+    /// TLS offset within a module.
     pub const DTPOFF64: u32 = 17;
-    /// TLS offset from the thread pointer. Needs thread-local storage to exist.
+    /// TLS offset from the thread pointer.
     pub const TPOFF64: u32 = 18;
 }
 
@@ -63,7 +53,7 @@ impl Elf64Rela {
         (self.info.get() >> 32) as u32
     }
 
-    /// Whether this type is one the loader can apply today.
+    /// Whether this type is one the loader applies directly.
     pub fn is_supported(&self) -> bool {
         matches!(
             self.kind(),
@@ -71,7 +61,7 @@ impl Elf64Rela {
         )
     }
 
-    /// Whether this type needs thread-local storage to exist first.
+    /// Whether this type is a thread-local relocation.
     pub fn is_tls(&self) -> bool {
         matches!(self.kind(), kind::DTPMOD64 | kind::DTPOFF64 | kind::TPOFF64)
     }
@@ -79,9 +69,9 @@ impl Elf64Rela {
 
 /// Parses a relocation table.
 ///
-/// A trailing partial entry is ignored rather than treated as an error: the table
-/// length comes from the dynamic section and a rounding disagreement should not make an
-/// otherwise-loadable image unloadable.
+/// A trailing partial entry is ignored rather than treated as an error: the table length
+/// comes from the dynamic section, and a rounding disagreement does not make an image
+/// unloadable.
 pub fn parse_table(bytes: &[u8]) -> Vec<Elf64Rela> {
     bytes
         .chunks_exact(RELA_SIZE)
@@ -91,16 +81,15 @@ pub fn parse_table(bytes: &[u8]) -> Vec<Elf64Rela> {
 
 /// A tally of what a relocation table contains.
 ///
-/// Reported rather than silently acted on: knowing *how many* relocations were skipped
-/// and why is the difference between "this image is not ready" and "this image loaded
-/// and then behaved strangely".
+/// Reported rather than silently acted on, separating "this image is not ready" from "this
+/// image loaded and then behaved strangely".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RelocationTally {
     /// Entries applied.
     pub applied: usize,
     /// Entries bound to zero because the symbol was weak and unanswered.
     pub weak_zero: usize,
-    /// Entries needing thread-local storage, which does not exist yet.
+    /// Thread-local entries the loader could not answer.
     pub tls_deferred: usize,
     /// Entries of a type this loader does not implement.
     pub unsupported: usize,
@@ -124,7 +113,7 @@ impl RelocationTally {
 mod tests {
     use super::{RELA_SIZE, RelocationTally, kind, parse_table};
 
-    /// Builds a relocation entry. **Generated, never extracted** (D051).
+    /// Builds a relocation entry, generated (D051).
     fn rela(offset: u64, sym: u32, kind: u32, addend: i64) -> Vec<u8> {
         let mut v = Vec::with_capacity(RELA_SIZE);
         v.extend_from_slice(&offset.to_le_bytes());
@@ -133,10 +122,9 @@ mod tests {
         v
     }
 
+    /// `info` splits into a symbol index and a type the right way round.
     #[test]
     fn info_splits_into_a_symbol_index_and_a_type() {
-        // Getting this backwards produces relocations that look plausible and write
-        // nonsense, so it is worth asserting directly.
         let table = parse_table(&rela(0x1000, 42, kind::JUMP_SLOT, 0));
         assert_eq!(table.len(), 1);
         assert_eq!(table[0].symbol_index(), 42);
@@ -144,14 +132,14 @@ mod tests {
         assert_eq!(table[0].offset.get(), 0x1000);
     }
 
+    /// A negative addend survives parsing as signed.
     #[test]
     fn a_negative_addend_survives_the_round_trip() {
-        // Addends are signed. Reading one as unsigned turns a small backwards offset
-        // into an enormous forwards one.
         let table = parse_table(&rela(0, 0, kind::RELATIVE, -8));
         assert_eq!(table[0].addend.get(), -8);
     }
 
+    /// Supported and TLS types are told apart.
     #[test]
     fn supported_and_tls_types_are_distinguished() {
         for k in [kind::ABS64, kind::GLOB_DAT, kind::JUMP_SLOT, kind::RELATIVE] {
@@ -166,6 +154,7 @@ mod tests {
         }
     }
 
+    /// Several entries parse in order.
     #[test]
     fn several_entries_parse_in_order() {
         let mut bytes = Vec::new();
@@ -177,20 +166,21 @@ mod tests {
         assert_eq!(table[3].offset.get(), 24);
     }
 
+    /// A trailing partial entry is ignored.
     #[test]
     fn a_trailing_partial_entry_is_ignored_rather_than_failing() {
-        // The table length comes from the dynamic section; a rounding disagreement
-        // should not make an otherwise-loadable image unloadable.
         let mut bytes = rela(0x1000, 1, kind::RELATIVE, 0);
         bytes.extend_from_slice(&[0xAB; 7]);
         assert_eq!(parse_table(&bytes).len(), 1);
     }
 
+    /// An empty table parses to nothing.
     #[test]
     fn an_empty_table_parses_to_nothing() {
         assert!(parse_table(&[]).is_empty());
     }
 
+    /// The tally is complete only when every entry was applied.
     #[test]
     fn a_tally_reports_completeness_honestly() {
         let complete = RelocationTally {
@@ -201,8 +191,7 @@ mod tests {
         assert!(complete.complete());
         assert_eq!(complete.total(), 12);
 
-        // One deferred entry means the image is not ready, even though nothing failed.
-        // A pointer left unrelocated looks valid and is not.
+        // One deferred entry means the image is not ready, although nothing failed.
         let partial = RelocationTally {
             applied: 10,
             tls_deferred: 1,

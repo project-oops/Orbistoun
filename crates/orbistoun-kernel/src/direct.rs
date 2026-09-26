@@ -1,98 +1,56 @@
 //! Direct memory: the physical address space a guest allocates out of.
 //!
-//! The target exposes its memory as a flat physical range that a guest carves up
-//! itself - reserve a span, then map it into the virtual address space separately. It is
-//! not `malloc`; it is closer to a physical allocator the application drives.
+//! The target exposes its memory as a flat physical range that a guest carves up itself:
+//! reserve a span, then map it into the virtual address space separately. Guests walk this map
+//! with `sceKernelDirectMemoryQuery` before anything else, so the walk must terminate.
 //!
-//! # Why this is the first thing implemented
-//!
-//! Measurement, not guesswork. Across four commercial executables,
-//! `sceKernelDirectMemoryQuery` is **99.9% of every call a guest makes** - one of them
-//! called it four hundred million times in ten seconds. That is a guest walking the
-//! memory map, being told nothing, and asking again. Nothing else a guest wants matters
-//! until it can find out what memory exists.
-//!
-//! # The model
-//!
-//! A sorted list of non-overlapping regions covering the whole physical range, each
-//! either free or taken. Query walks it; allocation splits a free region; release merges
-//! neighbours back. Deliberately simple - the guest does the interesting placement work,
-//! and this only has to answer honestly about what it has done so far.
-//!
-//! # What is deliberately not modelled
-//!
-//! Memory *types* (the target distinguishes several, with different caching behaviour)
-//! are recorded and otherwise ignored. Honouring them means nothing until there is a GPU
-//! that cares, and inventing behaviour for them now would be exactly the plausible
-//! output principle 3 warns about.
+//! The model is a sorted list of non-overlapping regions covering the whole range, each free
+//! or taken. Query walks it, allocation splits a free region, release merges neighbours. Memory
+//! types are recorded and otherwise ignored, since nothing consumes them.
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// The default total direct memory a guest may allocate from - the **retail** figure.
+/// The default total direct memory a guest may allocate from: the retail figure (D697).
 ///
-/// **Measured twice, at two different values, because it depends on the guest.** A retail eboot
-/// leg on real hardware called `sceKernelGetDirectMemorySize` and it answered `0x3_0000_0000` -
-/// twelve gibibytes (obSCEne `020-memory/direct-size`, sweep `20260915-125124`, `REQ-...5d1c`). An
-/// earlier conformance/homebrew run answered `0x1_4000_0000` - five gibibytes (D398). Both are
-/// hardware measurements of the same call; they differ because a retail title and a homebrew
-/// payload are handed different budgets by the platform's sandbox, the same way their filesystem
-/// and network reach differ.
-///
-/// This is the default because the corpus and every memory wall in it are retail: PPSA04263 asks
-/// for 4.51 GiB after taking ~4 GiB, which a five-gibibyte pool refuses and a twelve-gibibyte pool
-/// answers - moving that title from a `NoMemory` fault to its recorded position exactly (worklog
-/// 574, 601). A homebrew leg sets [`Settings::pool_bytes`] to the five-gibibyte figure through its
-/// config; the value is a setting rather than a constant for precisely that reason.
-///
-/// **Verified to matter, before it was known.** A guest reads this and walks the map against it:
-/// changing it from 8 GiB to 6 GiB moved the second query a guest made from `0x200000000` to
-/// `0x180000000`, exactly tracking (D398), so the reported size and the pool it hands out must be
-/// the same number - which is why both come from one setting.
+/// On the hardware `sceKernelGetDirectMemorySize` answers `0x3_0000_0000` (12 GiB) to a retail
+/// title and `0x1_4000_0000` (5 GiB) to a homebrew payload (obSCEne `020-memory/direct-size`);
+/// the sandbox hands the two classes different budgets. A homebrew leg sets
+/// [`Settings::pool_bytes`] to [`HOMEBREW_DIRECT_MEMORY_SIZE`]. A guest walks the map against
+/// the reported size, so the reported size and the pool come from one setting.
 pub const DIRECT_MEMORY_SIZE: u64 = 0x3_0000_0000;
 
-/// The direct-memory pool a **homebrew or conformance** guest is handed, five gibibytes.
+/// The direct-memory pool a homebrew or conformance guest is handed, five gibibytes.
 ///
-/// The value D398 measured, kept because it is the right one for that guest class and a homebrew
-/// leg should set [`Settings::pool_bytes`] to it. Not the default: the corpus is retail (see
-/// [`DIRECT_MEMORY_SIZE`]).
+/// A homebrew leg sets [`Settings::pool_bytes`] to it; the default is the retail
+/// [`DIRECT_MEMORY_SIZE`].
 pub const HOMEBREW_DIRECT_MEMORY_SIZE: u64 = 0x1_4000_0000;
 
-/// The flexible-memory available figure at launch, before the guest maps any. **Measured, and now
-/// applied as a separate budget** (D444).
+/// The flexible memory available at launch, before the guest maps any (D444).
 ///
-/// obSCEne's `020-memory/flexible-available` answered `0x1b40_0000` on hardware (~437 MiB), against
-/// `flexible-configured`'s [`FLEXIBLE_CONFIGURED`] in the same run
-/// (`reports/hardware/console-klog.01092026.txt`). Both are the **system default**: every resident title
-/// carries an empty `PT_SCE_PROCPARAM` mem-param, the same one obSCEne carries, so none overrides the
-/// budget and obSCEne measured it under exactly the condition every title launches under (D442). So both
-/// transfer, system-wide like [`DIRECT_MEMORY_SIZE`] and `RESERVED_LOW`.
-///
-/// Flexible memory is a **separate space** from the direct pool - obSCEne maps it clear of the pool - so
-/// it is tracked here as its own budget rather than read off the direct map as it was before (D273): the
-/// old reading answered `~5 GiB` where obSCEne under orbistoun expected `0x1b40_0000`, off by an order of
-/// magnitude. `available` is this figure minus what the guest has mapped ([`flexible_available`]).
+/// obSCEne's `020-memory/flexible-available` answers `0x1b40_0000` (about 437 MiB) on the
+/// hardware. It is the system default: titles carry an empty `PT_SCE_PROCPARAM` mem-param, so
+/// none overrides it. Flexible memory is a separate budget from the direct pool; `available`
+/// is this figure minus what the guest has mapped ([`flexible_available`]).
 pub const FLEXIBLE_MEMORY_SIZE: u64 = 0x1b40_0000;
 
-/// The configured flexible-memory total - the ceiling the available figure counts down from. **Measured.**
+/// The configured flexible-memory total, the ceiling the available figure counts down from.
 ///
-/// obSCEne's `020-memory/flexible-configured` answered `0x1c00_0000` on hardware (448 MiB;
-/// `reports/hardware/console-klog.01092026.txt`), `0xc0_0000` (12 MiB) above the available figure - the
-/// share the system had already mapped when obSCEne asked. System-wide for the same reason as
-/// [`FLEXIBLE_MEMORY_SIZE`]: no title overrides it.
+/// obSCEne's `020-memory/flexible-configured` answers `0x1c00_0000` (448 MiB) on the hardware,
+/// `0xc0_0000` above the available figure: the share the system has mapped at launch.
 pub const FLEXIBLE_CONFIGURED: u64 = 0x1c00_0000;
 
-/// Flexible-memory bytes the guest has mapped, so [`flexible_available`] falls as it should rather than
-/// answering a constant a guest that mapped memory would catch lying.
+/// Flexible-memory bytes the guest has mapped, so [`flexible_available`] falls as memory is
+/// mapped.
 static FLEXIBLE_MAPPED: AtomicU64 = AtomicU64::new(0);
 
-/// The configured flexible-memory total. Constant: the ceiling does not move as memory is mapped.
+/// The configured flexible-memory total, which does not move as memory is mapped.
 pub fn flexible_configured() -> u64 {
     FLEXIBLE_CONFIGURED
 }
 
-/// The flexible memory available to map now - the launch figure minus what the guest has mapped.
+/// The flexible memory available to map now: the launch figure minus what the guest has mapped.
 pub fn flexible_available() -> u64 {
     FLEXIBLE_MEMORY_SIZE.saturating_sub(FLEXIBLE_MAPPED.load(Ordering::Relaxed))
 }
@@ -102,15 +60,15 @@ pub fn record_flexible_map(len: u64) {
     FLEXIBLE_MAPPED.fetch_add(len, Ordering::Relaxed);
 }
 
-/// Returns `len` bytes to the flexible budget on release. Saturating, so a release that does not match a
-/// map cannot drive the counter below zero and hand back more than was ever taken.
+/// Returns `len` bytes to the flexible budget on release, saturating so an unmatched release
+/// cannot hand back more than was taken.
 pub fn record_flexible_release(len: u64) {
     let _ = FLEXIBLE_MAPPED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |mapped| {
         Some(mapped.saturating_sub(len))
     });
 }
 
-/// Resets the flexible-memory budget. For tests, so one does not see another's mappings.
+/// Resets the flexible-memory budget, so one test does not see another's mappings.
 #[cfg(test)]
 pub fn reset_flexible() {
     FLEXIBLE_MAPPED.store(0, Ordering::Relaxed);
@@ -118,8 +76,8 @@ pub fn reset_flexible() {
 
 /// Alignment every direct-memory boundary satisfies.
 ///
-/// The vendor's direct memory is handed out in 16 KiB units, which is also what
-/// [`orbistoun_core::DIRECT_MEMORY_ALIGN`] records for the address-space layer.
+/// Direct memory is handed out in 16 KiB units, which [`orbistoun_core::DIRECT_MEMORY_ALIGN`]
+/// also records for the address-space layer.
 pub const DIRECT_ALIGN: u64 = orbistoun_core::DIRECT_MEMORY_ALIGN;
 
 /// One span of the physical range.
@@ -131,7 +89,7 @@ pub struct Region {
     pub end: u64,
     /// Whether a guest has taken it.
     pub allocated: bool,
-    /// The memory type the guest asked for, recorded and not yet acted on.
+    /// The memory type the guest asked for, recorded and otherwise unused.
     pub memory_type: u32,
 }
 
@@ -167,9 +125,7 @@ impl DirectMemory {
 
     /// A range laid out the way `shape` describes.
     ///
-    /// Separate from [`Self::new`] so the default stays the thing every existing
-    /// measurement was taken against, and a different shape is something somebody asked
-    /// for (D218).
+    /// Separate from [`Self::new`], which is the plain whole-range layout.
     pub fn with_shape(size: u64, shape: MapShape) -> Self {
         Self {
             regions: shape.regions(size),
@@ -183,11 +139,9 @@ impl DirectMemory {
 
     /// The region containing `offset`, or the first one after it.
     ///
-    /// **This is what a guest enumerating memory actually asks.** It walks by handing
-    /// back the end of what it last saw, so a query that only answered for offsets
-    /// inside a region would stall the walk at the first gap - and a guest that cannot
-    /// finish a walk repeats it, which is exactly the four-hundred-million-call loop
-    /// this set out to fix.
+    /// A guest walks by handing back the end of what it last saw, so a query that only answered
+    /// for offsets inside a region would stall the walk at the first gap and the guest would repeat
+    /// it indefinitely.
     pub fn query(&self, offset: u64) -> Option<Region> {
         self.regions
             .iter()
@@ -197,12 +151,10 @@ impl DirectMemory {
 
     /// Takes `len` bytes, searching from `search_start`.
     ///
-    /// Returns the physical address, or `None` when nothing large enough is free. First
-    /// fit: the guest decides placement policy, and a cleverer strategy here would only
-    /// disagree with it.
+    /// Returns the physical address, or `None` when nothing large enough is free. First fit: the
+    /// guest decides placement policy.
     pub fn allocate(&mut self, search_start: u64, len: u64, memory_type: u32) -> Option<u64> {
-        // Checked, not panicking: this is reachable from a guest call, and an unwind
-        // across that boundary is undefined behaviour rather than a panic message (D156).
+        // Checked, not panicking: this is reachable from a guest call (D156).
         let len = len.checked_next_multiple_of(DIRECT_ALIGN)?;
         if len == 0 {
             return None;
@@ -222,9 +174,8 @@ impl DirectMemory {
             return None;
         }
 
-        // Replace the free region with up to three: the untouched head, the new
-        // allocation, and the untouched tail. Empty ones are dropped rather than kept,
-        // because a zero-length region in the list would be walked past forever.
+        // Replace the free region with up to three: the untouched head, the new allocation, and the
+        // untouched tail. Empty ones are dropped, because a zero-length region would stall a walk.
         let replacement: Vec<Region> = [
             Region {
                 start: region.start,
@@ -254,20 +205,16 @@ impl DirectMemory {
 
     /// Takes `len` bytes at a caller-chosen alignment.
     ///
-    /// Separate from [`DirectMemory::allocate`] because an alignment stronger than the
-    /// pool's own changes where a region can start, not just how big it is - and a caller
-    /// asking for one is asking because its hardware requires it. Silently ignoring that
-    /// hands back an address that works everywhere except where it matters.
+    /// Separate from [`DirectMemory::allocate`] because a stronger alignment changes where a region
+    /// can start, not only its size.
     pub fn allocate_aligned(&mut self, len: u64, align: u64, memory_type: u32) -> Option<u64> {
         let align = align.max(DIRECT_ALIGN);
-        // Not a power of two is a caller error, not something to round into shape:
-        // rounding would answer a question that was not asked.
+        // Not a power of two is a caller error; rounding would answer a question that was not asked.
         if !align.is_power_of_two() {
             return None;
         }
-        // Searched by walking candidate starts rather than by asking for the first fit
-        // and adjusting: adjusting upward can push the end past the region it was chosen
-        // from, which is how an allocator hands out memory belonging to something else.
+        // Walks candidate starts rather than adjusting a first fit upward, which could push the end
+        // past the region it was chosen from.
         let mut search = 0;
         loop {
             let region = self
@@ -285,9 +232,7 @@ impl DirectMemory {
 
     /// Gives back a span, merging it with any free neighbours.
     ///
-    /// Merging matters: without it a guest that allocates and frees repeatedly leaves
-    /// the list fragmented into thousands of adjacent free regions, and every subsequent
-    /// walk gets slower for no reason a reader could see.
+    /// Without merging, repeated allocate and free fragments the list and every later walk slows.
     pub fn release(&mut self, start: u64, len: u64) -> bool {
         let end = start.saturating_add(len);
         let Some(index) = self
@@ -330,14 +275,10 @@ impl DirectMemory {
 
     /// The largest single allocation that could still be placed at `align`.
     ///
-    /// Distinct from [`Self::available`], which sums every free byte and so answers a question
-    /// no allocation asks: a pool with two gibibytes free in two separate regions cannot place
-    /// one span of a gibibyte and a half, and an alignment large enough to push a start past a
-    /// region's end takes that region out of reach entirely.
-    ///
-    /// **This is what makes an out-of-memory answer diagnosable.** Without it a refusal is the
-    /// same value whether the pool is full, fragmented, or merely being asked for an alignment
-    /// nothing can satisfy - three different problems with three different fixes.
+    /// Distinct from [`Self::available`], which sums every free byte: free space split across
+    /// regions, or an alignment that pushes a start past a region's end, can leave far less
+    /// placeable. This lets an out-of-memory answer say whether the pool is full, fragmented or
+    /// asked for an unsatisfiable alignment.
     pub fn largest_free_at(&self, align: u64) -> u64 {
         if !align.is_power_of_two() {
             return 0;
@@ -353,10 +294,8 @@ impl DirectMemory {
 
 /// Renders regions for a diagnostic, listing at most `most` of them.
 ///
-/// Bounded because a pool a guest has fragmented holds thousands, and a message that printed
-/// every one would bury whatever it was written to say. The tail is counted rather than
-/// dropped silently - a reader who cannot see how much was elided cannot tell a short list
-/// from a truncated one.
+/// A fragmented pool can hold thousands of regions; the elided tail is counted so a truncated
+/// list is not mistaken for a short one.
 pub fn describe_regions(regions: &[Region], most: usize) -> String {
     let mut out = regions
         .iter()
@@ -379,68 +318,34 @@ pub fn describe_regions(regions: &[Region], most: usize) -> String {
 
 /// How the physical range is laid out before a guest has touched it.
 ///
-/// # The one variable a guest reacts to that has never been varied
-///
-/// PPSA04263 spends **99.9% of every call it makes** walking the memory map and rejecting
-/// what it sees - 852 million queries in twenty seconds, and it never reaches
-/// `sceKernelAllocateDirectMemory` at all. Three things about the answer have been swept
-/// and changed nothing: the return code (ten candidates, both signs), the third structure
-/// field (0..10), and whether the buffer is cleared at the end of the walk. One thing has
-/// never been swept: **the map has always been a single free region starting at zero**
-/// (D083).
-///
-/// That is not just an untried option, it is the reason the third-field sweep proves less
-/// than it appears to. A guest hunting for *a region matching some criterion* cannot
-/// distinguish "wrong value" from "wrong shape" when there is only ever one region to
-/// look at - the same underpowered-experiment shape as D187, where an `ok` sweep reported
-/// no change because the functions under test never saw it.
-///
-/// # And it makes the structure layout falsifiable for the first time
-///
-/// The second field is written as `end`. If the real structure carries `size` instead, a
-/// map of one region starting at zero writes **the same number either way** - so the
-/// current model cannot tell those layouts apart, and neither can any experiment run
-/// against it. Any map whose first region does not start at zero separates them
-/// immediately (D218).
+/// A diagnostic setting for the map a guest walks. Shapes other than the default vary the
+/// structure the guest sees: how many regions, whether the first starts at zero, and whether
+/// there is a gap. A map whose regions do not start at zero, or that has a gap, separates a
+/// guest reading the second query field as `end` from one reading it as `size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MapShape {
     /// One free region covering the whole range, from zero.
-    ///
-    /// The simplest thing that could work, and what every measurement so far was taken
-    /// against.
     Whole,
     /// A reserved block at the bottom, then free memory.
     ///
-    /// Real hardware does not hand a guest physical zero. If the guest is skipping or
-    /// rejecting a region at offset zero, this is what shows it - and because the free
-    /// region no longer starts at zero, `end` and `size` stop being the same number.
+    /// The hardware does not hand a guest physical zero (see `RESERVED_LOW`).
     ReservedLow,
-    /// Alternating taken and free blocks across the range.
-    ///
-    /// What a walk is actually *for*. If the guest wants somewhere specific among several
-    /// candidates, a map with one entry can never satisfy it however the entry is
-    /// labelled.
+    /// Alternating taken and free blocks across the range, for a guest looking for a specific
+    /// region among several.
     Fragmented,
     /// Free, then a hole nothing describes, then free.
     ///
-    /// **The only shape that can settle what the second field means.** In every other shape
-    /// each region begins exactly where the last ended, so a guest feeding back the previous
-    /// end and one feeding back `start + size` produce identical offsets - the two readings
-    /// are indistinguishable by construction, which is what D218 recorded as still open.
-    ///
-    /// A hole separates them: after a region ending at `E` with a gap to `S`, a guest reading
-    /// `end` queries `E` and one reading `start + size` queries something else. `Fragmented`
-    /// was believed to be this experiment and is not - it has more regions and no gap (D357).
+    /// The only shape that separates the two readings of the second field: after a region ending
+    /// at `E` with a gap to `S`, a guest reading `end` queries `E` and one reading `start + size`
+    /// queries something else. In every other shape each region begins where the last ended.
     Gapped,
 }
 
 impl MapShape {
     /// Every shape, by the name a diagnostic uses.
     ///
-    /// **One list, because two would drift.** The parser and the error message that lists the
-    /// choices read the same array, so a shape added to the enum and forgotten here is a
-    /// compile error rather than a value nothing accepts (D356).
+    /// The parser and the error message that lists the choices read this one array.
     pub const NAMES: [&str; 4] = ["whole", "reserved-low", "fragmented", "gapped"];
 
     /// The shape a diagnostic named, or nothing when it named none of them.
@@ -457,10 +362,7 @@ impl MapShape {
 
     /// The regions this shape starts a guest with.
     ///
-    /// Sizes are round numbers rather than measured ones, and that is the honest state:
-    /// nothing has established what the target's map looks like. They are chosen only to
-    /// be *structurally* different from each other, because what is being tested is the
-    /// shape, not the figures.
+    /// Sizes are round numbers chosen to be structurally different, not measured figures.
     pub fn regions(self, size: u64) -> Vec<Region> {
         let taken = |start: u64, end: u64| Region {
             start,
@@ -483,8 +385,8 @@ impl MapShape {
                 }
                 vec![taken(0, low), free(low, size)]
             }
-            // A hole between the two free spans, so the boundary arithmetic differs by the
-            // size of the hole and the guest's next query says which reading it uses.
+            // A hole between the two free spans, so the boundary arithmetic differs by the size of the
+            // hole and the guest's next query shows which reading it uses.
             Self::Gapped => {
                 let block = size / 8;
                 if block == 0 || block * 6 >= size {
@@ -511,48 +413,27 @@ impl MapShape {
 
 /// How much a shape holds back at the bottom of the range.
 ///
-/// **Measured.** obSCEne's `020-memory/allocate` on real hardware calls
-/// `sceKernelAllocateDirectMemory` with a search start of zero from a clean state and is answered
-/// `0x10000` - the first free physical offset, so the platform reserves the first `0x10000` of the
-/// direct range and never hands a guest physical zero (obSCEne `reports/hardware/console-report-klog.txt`
-/// and `ps5-full-run.txt`; a later allocation in the same run was answered `0xff0000`, above this
-/// floor). This was an arbitrary 512 MiB until that measurement retired the guess (D083, D218).
+/// obSCEne's `020-memory/allocate` calls `sceKernelAllocateDirectMemory` with a search start of
+/// zero from a clean state and the hardware answers `0x10000`, so the platform reserves the first
+/// `0x10000` of the direct range.
 const RESERVED_LOW: u64 = 0x1_0000;
 
 /// Memory behaviour that is a choice rather than a fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Settings {
-    /// Whether `sceKernelMapNamedDirectMemory` actually maps.
-    ///
-    /// **On, and the history is worth keeping.** It was off for one afternoon because
-    /// enabling it took PPSA28061 from 38 imports to 15 and moved the fault into host
-    /// code. That was not a bug in the mapping: guest calls were arriving on a misaligned
-    /// stack, every earlier import was small enough not to notice, and this was simply
-    /// the first one doing enough work for the compiler to use an instruction that cares
-    /// (D159).
-    ///
-    /// With the entry convention corrected it is worth +8 imports and +427 calls, and the
-    /// switch stays because turning a subsystem off is a useful thing to be able to do
-    /// when bisecting.
+    /// Whether `sceKernelMapNamedDirectMemory` maps. On by default; the switch exists for
+    /// bisecting.
     pub map_direct_memory: bool,
     /// What the physical map looks like before a guest touches it.
     ///
-    /// **Defaults to `ReservedLow` since 2026-09-01, because hardware measured it.** It was `Whole`
-    /// (one free region from zero) for as long as nothing had measured otherwise - the deliberately
-    /// conservative default D218 argued for. obSCEne's `020-memory/allocate` then answered `0x10000`
-    /// from a clean state, which is exactly the "the map does not start at zero" that `ReservedLow`
-    /// models, so that is now the default and `RESERVED_LOW` is the measured floor. The other
-    /// shapes remain for sweeping the questions the walk still leaves open (the `end`-vs-`size` field
-    /// meaning; the multi-region case).
+    /// Defaults to `ReservedLow`, the layout the hardware shows (`RESERVED_LOW`). The other shapes
+    /// are for sweeping the field-meaning and multi-region questions.
     pub map_shape: MapShape,
     /// How large the direct-memory pool is, and what `sceKernelGetDirectMemorySize` reports.
     ///
-    /// A setting rather than a constant because it is **guest-dependent**: a retail eboot leg
-    /// measured twelve gibibytes and a homebrew payload five, both on hardware (see
-    /// [`DIRECT_MEMORY_SIZE`]). Defaults to the retail figure. The pool the guest allocates from
-    /// and the size the query reports are the same field here, so they cannot describe different
-    /// machines - the invariant D398 established.
+    /// A setting because it depends on the guest class (see [`DIRECT_MEMORY_SIZE`]). The pool and
+    /// the reported size are one field, so they cannot describe different machines.
     pub pool_bytes: u64,
 }
 
@@ -579,23 +460,19 @@ pub fn configure(new: Settings) {
     }
 }
 
-/// The settings in force right now.
+/// The settings in force.
 pub fn configured() -> Settings {
     settings().lock().map(|s| *s).unwrap_or_default()
 }
 
 /// The one direct-memory map, shared by every guest thread.
 ///
-/// Global because the guest's own model is global: there is one physical range, and a
-/// thread that allocates from it must be visible to every other. A `Mutex` rather than
-/// anything cleverer because allocation is rare next to the work it enables, and the
-/// simplest correct thing is the right starting point.
+/// Global because the guest's model is global: one physical range, visible to every thread.
+/// A `Mutex`, because allocation is rare next to the work it enables.
 pub fn map() -> &'static Mutex<DirectMemory> {
     static MAP: OnceLock<Mutex<DirectMemory>> = OnceLock::new();
-    // Built from the settings in force, which are installed during setup and therefore
-    // before any guest call can reach this. Reading them here rather than at
-    // `configure` time keeps one initialisation path: a map built eagerly at startup and
-    // then reconfigured would be two, and the second would be the one nothing tested.
+    // Built lazily from the settings installed during setup, before any guest call can reach it,
+    // so there is one initialisation path.
     MAP.get_or_init(|| {
         let settings = configured();
         Mutex::new(DirectMemory::with_shape(
@@ -611,9 +488,8 @@ mod tests {
 
     #[test]
     fn flexible_budget_is_the_measured_pair_and_falls_as_it_is_mapped() {
-        // The property that matters: the two queries answer the measured hardware figures, and
-        // available falls by exactly what is mapped and is credited back on release - not a
-        // constant a guest that maps then re-queries would catch lying (D444).
+        // The two queries answer the hardware figures, and available falls by exactly what is mapped
+        // and is credited back on release (D444).
         use super::{
             FLEXIBLE_CONFIGURED, FLEXIBLE_MEMORY_SIZE, flexible_available, flexible_configured,
             record_flexible_map, record_flexible_release, reset_flexible,
@@ -659,8 +535,7 @@ mod tests {
 
     #[test]
     fn a_fresh_range_is_one_free_region_covering_everything() {
-        // A guest walking memory must see the whole range accounted for. A gap would
-        // read as memory that does not exist.
+        // A walk must see the whole range accounted for; a gap reads as memory that does not exist.
         let m = DirectMemory::new(1024 * DIRECT_ALIGN);
         assert_eq!(m.regions().len(), 1);
         assert_eq!(m.regions()[0].start, 0);
@@ -671,10 +546,8 @@ mod tests {
 
     #[test]
     fn every_shape_still_accounts_for_the_whole_range() {
-        // **The property that matters more than the shape.** A guest enumerates by feeding
-        // back the end of each region it is shown, so a gap between two regions reads as
-        // memory that does not exist and a walk that steps over it is a walk of a machine
-        // nobody has. Whatever a shape is testing, it must not accidentally test that.
+        // Whatever a shape tests, its regions must tile the range with no gap, since a guest walks by
+        // feeding back each region's end.
         use super::MapShape;
 
         let size = 8 * 1024 * 1024 * 1024;
@@ -699,9 +572,8 @@ mod tests {
 
     #[test]
     fn a_shape_that_will_not_fit_falls_back_rather_than_inventing_a_map() {
-        // A range smaller than what a shape holds back cannot be laid out that way. One
-        // free region is the honest answer; a truncated or overlapping map would be a
-        // machine that does not exist, described confidently.
+        // A range smaller than what a shape holds back is laid out as one free region rather than a
+        // truncated or overlapping map.
         use super::MapShape;
 
         for shape in [MapShape::ReservedLow, MapShape::Fragmented] {
@@ -713,9 +585,8 @@ mod tests {
 
     #[test]
     fn a_query_past_the_end_of_a_region_returns_the_next_one() {
-        // How a guest walks: it hands back the end of what it last saw. Answering only
-        // for offsets *inside* a region stalls the walk, and a guest that cannot finish
-        // a walk starts it again - which is the loop this exists to break.
+        // A guest walks by handing back the end of what it last saw; the query must answer for that
+        // offset.
         let mut m = DirectMemory::new(16 * DIRECT_ALIGN);
         m.allocate(0, 4 * DIRECT_ALIGN, 0).expect("allocate");
 
@@ -728,7 +599,7 @@ mod tests {
 
     #[test]
     fn a_walk_terminates() {
-        // The property that matters most. If a walk can loop, the guest loops with it.
+        // A walk must terminate; if it can loop, the guest loops with it.
         let mut m = DirectMemory::new(64 * DIRECT_ALIGN);
         m.allocate(0, DIRECT_ALIGN, 0).expect("allocate");
         m.allocate(8 * DIRECT_ALIGN, DIRECT_ALIGN, 0)
@@ -760,8 +631,8 @@ mod tests {
 
     #[test]
     fn a_request_is_rounded_up_to_the_alignment() {
-        // Handing back an unaligned span would put the guest's own mappings at addresses
-        // the address-space layer refuses.
+        // An unaligned span would put the guest's mappings at addresses the address-space layer
+        // refuses.
         let mut m = DirectMemory::new(64 * DIRECT_ALIGN);
         m.allocate(0, 1, 0).expect("allocate");
         assert_eq!(m.query(0).expect("region").len(), DIRECT_ALIGN);
@@ -769,8 +640,7 @@ mod tests {
 
     #[test]
     fn a_request_larger_than_anything_free_is_refused_not_partially_met() {
-        // A short allocation reported as success is the worst possible answer: the guest
-        // writes past the end of what it was given.
+        // A short allocation reported as success lets the guest write past what it was given.
         let mut m = DirectMemory::new(4 * DIRECT_ALIGN);
         assert!(m.allocate(0, 64 * DIRECT_ALIGN, 0).is_none());
         assert_eq!(m.available(), 4 * DIRECT_ALIGN, "nothing was consumed");
@@ -778,8 +648,7 @@ mod tests {
 
     #[test]
     fn releasing_merges_neighbours_so_the_list_does_not_fragment() {
-        // Without merging, allocate-and-free in a loop leaves thousands of adjacent free
-        // regions and every later walk gets slower for no visible reason.
+        // Without merging, allocate-and-free in a loop leaves many adjacent free regions.
         let mut m = DirectMemory::new(64 * DIRECT_ALIGN);
         let a = m.allocate(0, DIRECT_ALIGN, 0).expect("a");
         let b = m.allocate(0, DIRECT_ALIGN, 0).expect("b");
@@ -791,7 +660,7 @@ mod tests {
 
     #[test]
     fn releasing_something_that_was_never_allocated_is_refused() {
-        // Silently accepting it would mark a region free that a guest is still using.
+        // Accepting it would mark free a region a guest is still using.
         let mut m = DirectMemory::new(16 * DIRECT_ALIGN);
         assert!(!m.release(0, DIRECT_ALIGN));
         m.allocate(0, DIRECT_ALIGN, 0).expect("allocate");
@@ -801,10 +670,7 @@ mod tests {
         );
     }
 
-    /// **A region list long enough to bury its own message says how much it left out.**
-    ///
-    /// Silent truncation is the failure here: a reader cannot tell a pool with three regions
-    /// from one with three thousand whose tail was dropped.
+    /// A region list too long to print says how much it left out.
     #[test]
     fn a_long_region_list_is_cut_short_and_admits_it() {
         let m = DirectMemory::with_shape(DIRECT_MEMORY_SIZE, MapShape::Fragmented);
@@ -818,10 +684,9 @@ mod tests {
         assert!(cut.contains("taken"), "allocation is still distinguished");
     }
 
-    /// **An alignment nothing can satisfy is not the same as a full pool, and says so.**
+    /// An alignment nothing can satisfy is distinguishable from a full pool.
     ///
-    /// Both refuse, and before `largest_free_at` both refused with the same value and no way to
-    /// tell them apart. The pool here is empty in every case; only the alignment moves.
+    /// The pool is empty in every case; only the alignment moves.
     #[test]
     fn the_largest_placeable_span_shrinks_as_the_alignment_grows() {
         let m = DirectMemory::with_shape(DIRECT_MEMORY_SIZE, MapShape::ReservedLow);
@@ -846,16 +711,10 @@ mod tests {
         assert_eq!(m.largest_free_at(3), 0);
     }
 
-    /// **The largest allocation a real title has been seen to ask for is answered.**
+    /// A large single direct-memory request a title makes fits the default pool.
     ///
-    /// PPSA04263 asks for `0x1_20F0_0000` in one call, as its first and only direct-memory
-    /// request, and orbistoun answered `NoMemory` - after which the guest faulted on the next
-    /// instruction. The pool is `0x1_4000_0000` and the default shape holds back only
-    /// `RESERVED_LOW` at the bottom, so the request fits with half a gibibyte to spare and the
-    /// refusal is the allocator's, not the pool's.
-    ///
-    /// Written with the title's own number rather than a round one: a rounded length would sit
-    /// on the alignment boundary and miss whatever the real one lands on.
+    /// Uses the title's own length rather than a round one, so the alignment arithmetic is the
+    /// real one.
     #[test]
     fn the_largest_allocation_a_title_asks_for_fits_the_default_pool() {
         let mut m = DirectMemory::with_shape(DIRECT_MEMORY_SIZE, MapShape::ReservedLow);

@@ -1,19 +1,11 @@
 //! An image instruction is not always eight bytes, and the decoder has to know.
 //!
-//! The image family may name its address registers **individually** rather than as a consecutive
-//! range. The extra register numbers go in dwords appended to the instruction, and two bits of
-//! the first word say how many. A reference compiler emits that form readily - it does so in
-//! preference to moving a register, which it did on the first program written to ask - so it is
-//! not a corner nobody reaches.
-//!
-//! Reading such an instruction as eight bytes starts the next decode in the middle of this one
-//! and desynchronises the rest of the shader. That is the same failure a missed trailing literal
-//! causes, and `hostile.rs` guards the literal case for exactly this reason.
-//!
-//! # Where the bytes came from
-//!
-//! Measured, not written. Each encoding below is what the reference assembler produced for the
-//! instruction in its comment, on this project's target (worklog 577).
+//! The image family may name its address registers individually rather than as a
+//! consecutive range; the extra register numbers go in dwords appended to the instruction,
+//! and two bits of the first word count them. A reference compiler emits this form readily.
+//! Reading such an instruction as eight bytes desynchronises the rest of the shader, as a
+//! missed trailing literal does (`hostile.rs`). Each encoding below is the reference
+//! assembler's output for the printed instruction on this project's target.
 
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 
@@ -27,10 +19,9 @@ struct Measured {
 
 /// The four forms that establish the rule, from the same assembler run.
 ///
-/// The first is the ordinary consecutive form and is eight bytes. The rest name their addresses
-/// individually, and their first bytes differ from it **only** in the two bits that say how many
-/// extra dwords follow - which is what makes this a measurement of that field rather than of
-/// four unrelated instructions.
+/// The first is the ordinary consecutive form, eight bytes. The rest name their addresses
+/// individually and differ from it in their first bytes only in the two bits counting extra
+/// dwords, so together they measure that field.
 const MEASURED: [Measured; 4] = [
     Measured {
         encoding: &[0x08, 0x01, 0x90, 0xf0, 0x00, 0x00, 0x61, 0x00],
@@ -58,13 +49,10 @@ const MEASURED: [Measured; 4] = [
     },
 ];
 
-/// **Each of these decodes as exactly one instruction, of exactly its own length.**
+/// Each of these decodes as exactly one instruction, of exactly its own length.
 ///
-/// Two claims per case, and the second is the one that matters. A decoder reading a twelve-byte
-/// instruction as eight would report *two* instructions here, the second assembled out of the
-/// tail of the first - and it would keep doing that for the rest of the shader. Asserting the
-/// count alone would not catch a length that is wrong in a way that happens to land on a
-/// boundary, so the length is asserted too.
+/// The length is asserted as well as the count, since a wrong length can land on a
+/// boundary.
 #[test]
 fn an_image_instruction_is_as_long_as_the_assembler_made_it() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
@@ -99,11 +87,7 @@ fn an_image_instruction_is_as_long_as_the_assembler_made_it() {
     }
 }
 
-/// **A stream of them stays in step.**
-///
-/// The failure this is really about is not one instruction being reported at the wrong length -
-/// it is everything after it being garbage. So the four are concatenated and the decode has to
-/// find four, in order, at the right offsets.
+/// A stream of them stays in step: four concatenated decode as four, at their offsets.
 #[test]
 fn a_stream_of_image_instructions_stays_in_step() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");

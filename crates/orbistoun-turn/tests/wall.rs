@@ -5,38 +5,22 @@
 //! ```
 //!
 //! Opt-in, because it boots a commercial title thirteen times. Needs a release build of
-//! `orbistoun-cli` and a title on disk; both are checked for and the test says which is
-//! missing rather than failing obscurely.
+//! `orbistoun-cli` and a title on disk; both are checked for, and the test says which is missing.
 //!
-//! # The target
-//!
-//! `libkernel::0x6abac2f3dc6f8cee`, called immediately before the fault at
-//! `image+0xafc959` in PPSA02664 and PPSA03416. `docs/PROJECT_STATUS.md` records what is
-//! known: `arg1 = 0x100000`, the same megabyte as `rdx`; `arg3 = 0x40000` alignment; and
-//! `0x100000 - 0x20 = 0xfffe0` is the faulting address exactly. The guest indexes
-//! `base + size - 0x20` from a base of **zero**, and that zero is neither the stub's
-//! return nor unwritten memory.
-//!
-//! So the question is which argument holds the base it expected filled - and that is
-//! what a sweep answers, by planting a sentinel in each and seeing which one the fault
-//! follows.
-//!
-//! # Its own data directory
-//!
-//! Traces go to a temporary root rather than the machine's, so thirteen runs do not
-//! overwrite whatever was there and the newest-trace rule cannot pick up an unrelated
-//! run that happened to overlap.
+//! The target is the import called immediately before the fault at `image+0xafc959` in PPSA02664
+//! and PPSA03416: `arg1 = 0x100000`, the same megabyte as `rdx`, `arg3 = 0x40000` alignment, and
+//! `0x100000 - 0x20 = 0xfffe0` is the faulting address. The guest indexes `base + size - 0x20` from
+//! a base of zero, so the sweep plants a sentinel in each argument to find which one holds the base
+//! it expected filled. Traces go to a temporary root, so the runs neither overwrite the machine's
+//! traces nor pick up an unrelated one.
 
 use orbistoun_turn::experiment::{Finding, investigate, sweep};
 use orbistoun_turn::trial::{GuestTrial, traces_in};
 
 /// The import called immediately before the fault.
 ///
-/// **By name, and it used to be by hash.** A target matches against an import's label, so
-/// `0x6abac2f3dc6f8cee` addressed this function for as long as nothing had named it - and
-/// stopped the moment the string harvester did, because the label became
-/// `libkernel::sceKernelReserveVirtualRange` and no longer contains the hash. The sweep then
-/// planted nothing twenty-four times and said so (D287).
+/// By name: a target matches against an import's label, and once the function is named the label no
+/// longer contains its hash.
 const TARGET: &str = "sceKernelReserveVirtualRange";
 
 /// The title whose wall this is.
@@ -45,6 +29,7 @@ const TITLE: &str = "../../titles/PPSA02664-app0/eboot.bin";
 /// A release build, because thirteen debug boots is not a loop anybody waits for.
 const BINARY: &str = "../../target/release/orbistoun-cli.exe";
 
+/// The sweep of the live wall's preceding call runs and plants something.
 #[test]
 #[ignore = "boots a commercial title thirteen times; opt-in via --ignored"]
 fn sweep_the_live_wall() {
@@ -65,9 +50,8 @@ fn sweep_the_live_wall() {
     eprintln!("WALL  target={TARGET}\n title={TITLE}");
     let (finding, outcomes) = investigate(&mut trial, TARGET).expect("the sweep runs");
 
-    // Zipped with the sweep that produced them rather than derived from the index: the
-    // arithmetic assumed two runs per slot, and a second dimension made it four - so it
-    // reported slots 8 to 11 on a six-argument call (D286).
+    // Zipped with the sweep that produced them rather than derived from the index, since the sweep
+    // has two dimensions (D286).
     for (experiment, outcome) in sweep(TARGET).iter().zip(outcomes.iter()) {
         eprintln!(
             "  arg{} sentinel {:#x}{}: fault={:?} planted={} refused={}",
@@ -92,8 +76,8 @@ fn sweep_the_live_wall() {
             "  *** arg{slot} is the out-parameter. The guest faults at arg{slot} {} {:#x}{}.",
             if *offset < 0 { "-" } else { "+" },
             offset.unsigned_abs(),
-            // Stated, because a finding that needed the call forced to succeed is a different
-            // and weaker claim than one that held whatever it answered (D286).
+            // Stated, because a finding that needed the call forced to succeed is a weaker claim
+            // than one that held whatever it answered.
             answer.map_or(String::new(), |a| format!(
                 ", but only when the call answers {a:#x}"
             ))
@@ -147,13 +131,9 @@ fn sweep_the_live_wall() {
         )),
     }
 
-    // **Deliberately not asserted.** Which slot it is, or whether it is any of them, is a
-    // fact about the guest rather than about this code - a test that failed on it would
-    // be reporting the wrong thing, and `Unmoved` is a real and useful result.
-    //
-    // What is asserted is that the experiment happened: a sweep where nothing planted has
-    // measured nothing, and reporting that as "not this function" is the failure the
-    // whole `NeverPlanted` distinction exists to prevent.
+    // Not asserted: which slot, or whether any, is a fact about the guest, and `Unmoved` is a real
+    // result. What is asserted is that the experiment happened, since a sweep where nothing planted
+    // measured nothing.
     assert!(
         !matches!(finding, Finding::NeverPlanted),
         "no write reached {TARGET} - the sweep measured nothing"

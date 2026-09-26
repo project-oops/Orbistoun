@@ -1,22 +1,10 @@
 //! Settings, the title library, and what the service can say about a module.
 //!
-//! # Why the service and not a shim
-//!
-//! Principle 13: the CLI, the window and worker mode are interaction shims, and shared
-//! orchestration lives here. So this is where the behaviour actually is - which means a
-//! shim's tests would be testing a pass-through, and a bug here would be a bug in all three
-//! at once.
-//!
-//! # What is covered and what is not
-//!
-//! Everything that answers a question about bytes or about the filesystem. Not the parts
-//! that place an image, spawn threads or write a run report: those change process-wide state
-//! or need an address space, and a test that reserved one would be testing the host's
-//! allocator as much as anything here.
-//!
-//! The module fixtures are assembled byte by byte for the same reason as
-//! `orbistoun-elf`'s: no title can be in this repository, and a hand-built file can be wrong
-//! in exactly one way at a time.
+//! The service holds the behaviour the shims share (D034), so it is tested here rather than through
+//! a shim. Covered: everything that answers a question about bytes or the filesystem. Not covered:
+//! placing an image, spawning threads or writing a run report, which change process-wide state or
+//! need an address space. Module fixtures are assembled byte by byte, because no title can be in
+//! this repository and a hand-built file is wrong in one way at a time.
 
 use orbistoun_service::{
     FileConfig, LibrarySettings, Service, ServiceConfig, TitleEntry, read_title_metadata,
@@ -65,10 +53,8 @@ fn shaped_module() -> Vec<u8> {
     )
 }
 
-/// A service with nothing configured beyond the defaults.
-///
-/// `paths: None` disables reporting, which is what an inspection wants: nothing here should
-/// write a run artifact as a side effect of being asked a question.
+/// A service with nothing configured beyond the defaults. `paths: None` disables reporting, so
+/// asking a question writes no run artifact.
 fn service() -> Service {
     Service::new(ServiceConfig::default())
 }
@@ -76,8 +62,7 @@ fn service() -> Service {
 /// A directory this test owns, named after what it is for.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("orbistoun-service-test-{name}"));
-    // Removed first, so a previous run's leftovers cannot make a test pass or fail for
-    // reasons this run knows nothing about.
+    // Removed first, so a previous run's leftovers cannot decide the result.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     dir
@@ -95,13 +80,10 @@ fn title_at(root: &Path, name: &str, param_json: Option<&str>) {
     }
 }
 
-// --- settings -------------------------------------------------------------------------------
+// Settings.
 
-/// A relative library root is resolved against the data root, not the working directory.
-///
-/// **The working directory is not a property of the installation** - it is a property of how
-/// somebody happened to start the program. Same binary, same settings file, three different
-/// libraries, and the window reports the difference as "no titles here".
+/// A relative library root is resolved against the data root, not the working directory, which
+/// depends on how the program was started.
 #[test]
 fn a_relative_library_root_is_resolved_against_the_data_root() {
     let settings = LibrarySettings::default();
@@ -119,9 +101,6 @@ fn a_relative_library_root_is_resolved_against_the_data_root() {
 }
 
 /// An absolute root is used exactly as given.
-///
-/// The ordinary case once somebody has pointed the window at their own folder: set once,
-/// saved, and found afterwards by every build from every launcher.
 #[test]
 fn an_absolute_library_root_is_used_as_given() {
     let absolute = if cfg!(windows) {
@@ -139,11 +118,8 @@ fn an_absolute_library_root_is_used_as_given() {
     );
 }
 
-/// A missing settings file is the defaults, and a malformed one is an error.
-///
-/// **Deliberately not silent.** A malformed file that quietly fell back to defaults would
-/// look exactly like a setting that had no effect - and observing an effect is the entire
-/// point of these being in a file at all.
+/// A missing settings file is the defaults, and a malformed one is an error rather than a silent
+/// fallback that would look like a setting with no effect.
 #[test]
 fn a_missing_settings_file_is_the_defaults_and_a_broken_one_is_not() {
     let dir = scratch("config");
@@ -165,8 +141,6 @@ fn a_missing_settings_file_is_the_defaults_and_a_broken_one_is_not() {
 }
 
 /// A file naming one setting is valid, and the rest default.
-///
-/// A configuration that must be complete to be valid is one nobody edits.
 #[test]
 fn a_settings_file_naming_one_thing_leaves_the_rest_alone() {
     let dir = scratch("partial");
@@ -190,9 +164,6 @@ fn a_settings_file_naming_one_thing_leaves_the_rest_alone() {
 }
 
 /// Settings survive a round trip through the file they are written to.
-///
-/// The property that makes a starting file worth writing: a shim emits the defaults, a
-/// person edits one line, and what comes back is what they meant.
 #[test]
 fn settings_survive_being_written_and_read_back() {
     let dir = scratch("roundtrip");
@@ -213,7 +184,7 @@ fn settings_survive_being_written_and_read_back() {
     assert_eq!(read_back.library.root, "my-titles");
 }
 
-// --- the title library ------------------------------------------------------------------------
+// The title library.
 
 /// A title is a directory with an entry file in it, and nothing else counts.
 #[test]
@@ -235,10 +206,7 @@ fn a_title_is_a_directory_holding_an_entry_file() {
     assert!(found[0].module.is_file());
 }
 
-/// A library that cannot be read says which path it was, not just that it failed.
-///
-/// `io::Error` carries no path, so the bare message is "the system cannot find the path
-/// specified" - which is not an answer to the only question the reader has.
+/// A library that cannot be read says which path it was; `io::Error` carries none.
 #[test]
 fn an_unreadable_library_names_the_path_in_the_error() {
     let missing = scratch("missing").join("definitely-not-here");
@@ -310,10 +278,8 @@ fn a_missing_default_language_falls_back_to_a_name_that_is_there() {
     );
 }
 
-/// Metadata that is missing, malformed, or names nothing is simply absent.
-///
-/// A title with unreadable metadata is still a title somebody can run, so none of these is
-/// an error - they are the ordinary case for anything homebrew.
+/// Metadata that is missing, malformed, or names nothing is absent, not an error: the ordinary case
+/// for homebrew.
 #[test]
 fn unreadable_metadata_is_absent_rather_than_an_error() {
     let root = scratch("nometadata");
@@ -339,10 +305,7 @@ fn unreadable_metadata_is_absent_rather_than_an_error() {
     assert_eq!(read_title_metadata(&root.join("no-parameters")), None);
 }
 
-/// A title always has something to call it.
-///
-/// **Never a blank**: a library row with no label is unusable, and the fallback has to be
-/// the directory name because that is the one thing always present.
+/// A title always has something to call it, falling back to the directory name.
 #[test]
 fn a_title_always_has_a_name_to_show() {
     let root = scratch("display");
@@ -389,7 +352,7 @@ fn a_title_entry_falls_back_without_reading_anything() {
     assert_eq!(entry.display_name(), "SOMEDIR");
 }
 
-// --- what the service can say about a module ----------------------------------------------------
+// What the service can say about a module.
 
 /// A module's structure is reported without executing or fully parsing it.
 #[test]
@@ -445,10 +408,8 @@ fn inspecting_a_path_that_is_not_there_names_it() {
     );
 }
 
-/// A module with no dynamic table has no imports to explain, and says so rather than
-/// reporting none.
-///
-/// An empty import list reads as "needs nothing", which is never true of a real module.
+/// A module with no dynamic table says it has no imports to explain, rather than reporting none,
+/// which would read as "needs nothing".
 #[test]
 fn a_module_with_no_imports_refuses_rather_than_reporting_none() {
     let bytes = shaped_module();
@@ -461,12 +422,10 @@ fn a_module_with_no_imports_refuses_rather_than_reporting_none() {
     assert!(service.import_labels(&bytes).is_err());
 }
 
-// --- what the service declares -------------------------------------------------------------------
+// What the service declares.
 
-/// The service declares functions, and every one of them has a distinct hash.
-///
-/// A collision would make two functions indistinguishable at resolution time, which is a
-/// silent wrong-function-called bug.
+/// The service declares functions, and every one of them has a distinct hash, so none is
+/// indistinguishable at resolution time.
 #[test]
 fn every_declared_symbol_has_its_own_hash() {
     let service = service();
@@ -508,10 +467,8 @@ fn every_declared_symbol_has_its_own_hash() {
     );
 }
 
-/// The service hashes a name the same way it resolves one.
-///
-/// A name hashed with a different suffix from the one the registry resolves against produces
-/// a NID that matches nothing - silently, as an unresolved import rather than as an error.
+/// The service hashes a name the same way it resolves one; a different suffix would produce a NID
+/// that silently matches nothing.
 #[test]
 fn a_name_hashes_to_the_value_the_registry_knows_it_by() {
     let service = service();
@@ -549,10 +506,8 @@ fn the_default_policy_can_be_written_out_and_is_loud_by_default() {
     assert_eq!(count, 0, "a default policy overrides nothing");
 }
 
-/// With no database configured, nothing claims to know how many names there are.
-///
-/// `None` and `Some(0)` are different facts - one is "no database", the other is "a database
-/// with nothing in it" - and a shim reports them differently.
+/// With no database configured, nothing claims to know how many names there are: `None` and
+/// `Some(0)` are different facts.
 #[test]
 fn an_absent_symbol_database_reports_nothing_rather_than_zero() {
     assert_eq!(service().symbol_db_len(), None);

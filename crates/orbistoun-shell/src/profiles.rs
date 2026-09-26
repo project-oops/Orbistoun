@@ -1,13 +1,9 @@
-//! Named console profiles: a `Machine`, measured, under a name.
+//! Named machine profiles: a measured `Machine` under a name.
 //!
-//! A run against a specific console needs its firmware, its release string, its generation and
-//! kind - and typing those on every invocation is both tedious and a place for a transcription
-//! error to creep in. A profile bundles them under a name (`prospero-cex-12.40`), so `--profile` sets
-//! the whole machine at once from a value this project measured and cited.
-//!
-//! The profiles live in `data/machine-profiles.toml`, keyed by name, with fields matching
-//! `Machine`'s own kebab-case serialisation - so a profile is deserialised straight into a
-//! `Machine` with no separate mapping to drift.
+//! A profile bundles firmware, release string, generation and kind under a name
+//! (`prospero-cex-12.40`), so `--profile` sets the whole machine from measured values. The
+//! profiles live in `data/machine-profiles.toml`, with fields matching `Machine`'s own
+//! kebab-case serialisation, so a profile deserialises straight into a `Machine`.
 
 use orbistoun_core::machine::Machine;
 
@@ -24,9 +20,11 @@ fn table() -> &'static toml::Table {
 
 /// The machine a named profile presents, or `None` if there is no such profile.
 ///
-/// The name is the exact table key - `prospero-cex-12.40`. A profile deserialises into a `Machine`
-/// directly; a key that is present but malformed is a bug in the data file, so it panics rather
-/// than being silently skipped.
+/// The name is the exact table key, such as `prospero-cex-12.40`.
+///
+/// # Panics
+///
+/// If the profile is present but malformed, which is a defect in the data file.
 #[must_use]
 pub fn machine(name: &str) -> Option<Machine> {
     let value = table().get(name)?.clone();
@@ -56,7 +54,8 @@ mod tests {
             "12.40 in the packed form call 649 answers"
         );
         assert_eq!(m.kernel_release, "0.0-prototype", "what sysctl returned");
-        // The software version is a *different* number from the 12.40 firmware (D420).
+        // The system-software version is a distinct measured number from the 12.40 release
+        // and is never derived from it.
         let sw = m
             .software_version
             .as_ref()
@@ -66,8 +65,8 @@ mod tests {
             "what sceKernelGetSystemSwVersion reports"
         );
         assert_eq!(sw.packed, 0x1309_0001, "and its packed integer");
-        // The three knobs `135-sysctl/names` read back that belong to a machine rather than to
-        // the platform: the kernel's build banner, its SDK number and the hardware model (D675).
+        // The knobs `135-sysctl/names` reads back that belong to a machine rather than the
+        // platform: the kernel build banner, its SDK number and the hardware model (D675).
         assert_eq!(
             m.kernel_version, "r226974/releases/12.40 Nov 27 2025 02:23:38",
             "kern.version, as the console wrote it"

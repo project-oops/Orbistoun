@@ -1,34 +1,11 @@
 //! The descriptor's own settings: what a guest reads back and what it sets.
 //!
-//! # Why an unimplemented `fcntl` is worse than most
-//!
-//! It is a **pair**. A guest reads the flags, changes one bit, and writes them back - so a
-//! placeholder answer to `F_GETFL` does not stay where it was put. `zftpd` did exactly that
-//! with its web listener:
-//!
-//! ```text
-//! fcntl(5, F_GETFL)            -> 0x7fff0005   an orbistoun placeholder
-//! fcntl(5, F_SETFL, 0x7fff0005)               handed straight back
-//! close(5)
-//! ```
-//!
-//! Which is D125 in its purest form: a function answering an error code where a caller
-//! expects data, and the damage happening one call later under a different name.
-//!
-//! # What is honoured and what is only remembered
-//!
-//! `O_NONBLOCK` is **honoured**: it is set on the underlying socket, so an `accept` or a
-//! `read` that would have waited answers straight away instead. That is the one flag a
-//! server's event loop depends on, and reporting it set while blocking anyway would hang the
-//! loop on the first connection that went away.
-//!
-//! `FD_CLOEXEC` is **remembered and does nothing**, which is honest here rather than lazy:
-//! nothing in this emulator ever `exec`s, so there is no moment at which the flag could have
-//! an effect. It reads back as it was set, because a guest that sets it and checks it is
-//! entitled to a consistent answer.
-//!
-//! Every other command is refused. A lock, an owner, a seal - each would need machinery
-//! nothing here has, and answering success would tell a guest it held a lock it does not.
+//! A guest reads the flags, changes one bit and writes them back, so a placeholder answer to
+//! `F_GETFL` is handed straight back to `F_SETFL` (D125). `O_NONBLOCK` is honoured on the
+//! underlying socket, since a server's event loop depends on it. `FD_CLOEXEC` is remembered
+//! and reads back as set, with no effect because nothing here ever `exec`s. Every other
+//! command is refused: answering success for a lock, an owner or a seal would claim machinery
+//! nothing here has.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
@@ -40,9 +17,8 @@ const FAILED: u64 = -1_i64 as u64;
 
 /// One command or flag, read from the harvested `sys/sys/fcntl.h`.
 ///
-/// A name the table cannot answer becomes a command no guest can ask for, so the call is
-/// refused rather than matching whatever happened to be zero - which is `F_DUPFD`, the one
-/// command where a wrong match would hand back a working descriptor.
+/// A name the table cannot answer becomes a command no guest can ask for, rather than zero,
+/// which is `F_DUPFD` and would hand back a working descriptor.
 fn number(section: &str, name: &str) -> u64 {
     /// A value no guest can pass in a 32-bit argument.
     const UNNAMEABLE: u64 = u64::MAX;
@@ -54,16 +30,14 @@ fn number(section: &str, name: &str) -> u64 {
 
 /// The flags each descriptor has been given, by descriptor.
 ///
-/// **Kept here rather than in the descriptor table** because they outlive nothing: a guest
-/// setting a flag on a descriptor it then closes has said something about that descriptor
-/// number, and the next `open` to reuse the number must not inherit it. So [`forget`] is
-/// called from `close`.
+/// Kept here rather than in the descriptor table and dropped by [`forget`] on `close`, so the
+/// next `open` that reuses the number does not inherit them.
 fn held() -> &'static Mutex<BTreeMap<u64, Flags>> {
     static HELD: OnceLock<Mutex<BTreeMap<u64, Flags>>> = OnceLock::new();
     HELD.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Empties the descriptor-flag table between tests - see [`crate::descriptor::clear`].
+/// Empties the descriptor-flag table between tests; see [`crate::descriptor::clear`].
 #[cfg(test)]
 pub(crate) fn clear() {
     if let Ok(mut held) = held().lock() {
@@ -91,10 +65,8 @@ pub(crate) fn forget(fd: u64) {
 
 /// What a descriptor is set to, or the default for one nothing has touched.
 ///
-/// **`O_RDWR` is the default and it is a claim.** Everything this crate hands a guest is
-/// opened for both directions or is a socket, which is bidirectional - so it is true of every
-/// descriptor that exists here. A read-only file would need this to say so, and there is not
-/// one yet.
+/// `O_RDWR` is the default: everything this crate hands a guest is opened for both
+/// directions or is a socket.
 fn flags_of(fd: u64) -> Flags {
     held()
         .lock()
@@ -130,8 +102,7 @@ fn fcntl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return flags.status;
     }
     if command == number("fcntl", "F_SETFL") {
-        // **The bit that has to be real.** Everything else here is bookkeeping; this one
-        // decides whether the guest's event loop blocks.
+        // The bit that has to be real: it decides whether the guest's event loop blocks.
         let nonblocking = argument & number("fcntl", "O_NONBLOCK") != 0;
         if !crate::descriptor::set_nonblocking(fd, nonblocking) {
             return FAILED;
@@ -156,15 +127,14 @@ fn fcntl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if command == number("fcntl", "F_DUPFD_CLOEXEC") {
             copied.descriptor |= number("fcntl", "FD_CLOEXEC");
         } else {
-            // A plain duplicate does not carry the close-on-exec flag, which is the whole
-            // difference between the two commands.
+            // A plain duplicate does not carry the close-on-exec flag.
             copied.descriptor &= !number("fcntl", "FD_CLOEXEC");
         }
         remember(copy, copied);
         return copy;
     }
     // A command nothing here performs. Refused rather than answered zero: a guest told its
-    // lock was taken behaves quite differently from one told it was not.
+    // lock was taken behaves differently from one told it was not.
     FAILED
 }
 
@@ -196,21 +166,18 @@ mod tests {
         assert_eq!(number("O_NONBLOCK"), 0x0004);
     }
 
-    /// **A descriptor nothing opened is refused**, rather than given flags of its own.
-    ///
-    /// This is the half that matters: the bug this module exists for was a guest reading a
-    /// value back out of a call that had no descriptor to speak about.
+    /// A descriptor nothing opened is refused rather than given flags of its own.
     #[test]
     fn a_descriptor_that_is_not_open_is_refused() {
         let answered = call([9999, number("F_GETFL"), 0, 0, 0, 0]);
         assert_eq!(answered, super::FAILED);
     }
 
-    /// **What is set reads back**, which is the pair that was broken.
+    /// What is set reads back.
     #[test]
     fn a_flag_set_on_a_standard_stream_reads_back() {
-        // Serialised: the flag table is a process-wide static that another test's setup resets, and a
-        // reset landing between this set and get would read the flag back as zero.
+        // Serialised: the flag table is a process-wide static that another test's setup
+        // resets.
         let _guard = crate::exclusively();
         // A standard stream, because it is open without anything having to open it.
         let out = 1;

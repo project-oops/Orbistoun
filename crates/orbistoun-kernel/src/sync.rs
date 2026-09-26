@@ -1,28 +1,13 @@
 //! Guest synchronisation primitives.
 //!
-//! # Why a host `Mutex` cannot be used directly
+//! The guest locks in one call and unlocks in another, with arbitrary guest code between, so no
+//! host frame can hold a `MutexGuard` for the critical section. Each lock is a host mutex over a
+//! small state plus a condition variable; the host mutex is held only while the state is
+//! inspected. Ownership is tracked, so a recursive lock re-taken by its owner does not deadlock
+//! and a non-recursive one is not silently granted.
 //!
-//! Rust's mutex hands out a guard whose lifetime *is* the critical section, which is
-//! exactly the property that makes it safe and exactly the property that makes it
-//! unusable here. The guest locks in one call and unlocks in a different one, with
-//! arbitrary guest code - possibly other calls into this crate - in between. There is no
-//! host frame to hold a guard in.
-//!
-//! So the lock is built from a mutex over a small state and a condition variable: the
-//! host mutex is held only while the state is inspected, never across the guest's
-//! critical section. That also makes it honest about ownership, which matters more than
-//! it sounds - a recursive lock taken twice by one thread must not deadlock, and a
-//! non-recursive one taken twice must not silently succeed.
-//!
-//! # What the guest holds
-//!
-//! The address of a zeroed block this crate owns, written into the location the guest
-//! passed to the init call - the same shape as a thread handle, and for the same reason
-//! (see `thread::ThreadHandle`). A small integer would be cheaper and would fault the
-//! moment a guest read a field through it.
-//!
-//! The block's contents are never written, because the real layout is not known from any
-//! lawful source. Reading a field gives zero rather than something invented.
+//! The guest holds the address of a zeroed block this crate owns, as with thread handles (see
+//! `thread::ThreadHandle`). The block is never written, since the real layout is not known.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,11 +24,8 @@ pub const NO_MUTEX: MutexHandle = 0;
 
 /// What a guest holds for a semaphore.
 ///
-/// **A different shape from a mutex handle, and that is the whole point of the type.** A
-/// mutex is a `void *` and a semaphore is an `int` written through an out-pointer: four
-/// bytes, not eight (obSCEne, D210). Sharing `MutexHandle` for both meant this crate wrote
-/// a host pointer through a pointer to a four-byte field, putting the top half of it in
-/// whatever the guest kept next door.
+/// A mutex is a `void *` but a semaphore is an `int` written through an out-pointer: four bytes,
+/// not eight, so it has its own type (D272).
 pub type SemaphoreHandle = i32;
 
 /// Sentinel for "no semaphore here".
@@ -54,46 +36,39 @@ pub const NO_SEMAPHORE: SemaphoreHandle = 0;
 pub enum Recursion {
     /// A second acquisition by the owner is an error.
     ///
-    /// The default because it is POSIX's, and because the alternative turns a real
-    /// double-lock bug in the guest into silence.
+    /// The default, as in POSIX, so a double-lock bug in the guest is not silent.
     #[default]
     Forbidden,
     /// The owner may acquire it repeatedly, and must release it as many times.
     Allowed,
-    /// A second acquisition by the owner is reported as a deadlock, not blocked and not
-    /// allowed. The platform's error-checking mutex, measured to answer a distinct code from a
-    /// plain busy on a self-`trylock` (015-sync/mutex-recursion).
+    /// A second acquisition by the owner is reported as a deadlock, neither blocked nor allowed.
+    ///
+    /// The platform's error-checking mutex answers a self-`trylock` with a code distinct from busy.
     Errorcheck,
 }
 
-/// The three answers an acquisition can give, which a two-state `bool` could not hold: the owner
-/// re-taking a `Forbidden` lock is *busy*, and re-taking an `Errorcheck` one is a *deadlock*, and
-/// the platform gives those two different codes.
+/// The three answers an acquisition can give.
+///
+/// The owner re-taking a `Forbidden` lock is busy and re-taking an `Errorcheck` one is a
+/// deadlock, and the platform gives those two different codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acquisition {
     /// Taken - free, or a recursive re-take by the owner.
     Locked,
-    /// Not taken: held by another thread, taken by the owner of a non-recursive lock, or -
-    /// under [`Blocking::Until`] - still held when the deadline passed.
+    /// Not taken: held by another thread, taken by the owner of a non-recursive lock, or, under
+    /// [`Blocking::Until`], still held when the deadline passed.
     ///
-    /// **Which of those it was follows from the patience the caller asked for**, so it is not
-    /// a fourth variant. A caller that passed [`Blocking::Never`] and got this was refused
-    /// because the lock was busy; one that passed a deadline ran out of time. Only the caller
-    /// knows which error name the guest is owed, and it is the caller that has to say it.
+    /// The caller knows which patience it asked for, so it knows whether this means busy or timed
+    /// out and which error the guest is owed.
     Busy,
     /// The owner re-taking an error-checking lock, which is a deadlock it is told about.
     Deadlock,
 }
 
-// --- how long a call is willing to wait --------------------------------------------------
-
 /// How long an acquisition may wait for what it wants.
 ///
-/// **One parameter where there were three spellings.** Taking a lock, taking a semaphore and
-/// taking a read-write lock are the same operation at different levels of patience, and each
-/// had said so differently: the mutex by having a second entry point, the semaphore by having
-/// a third, the read-write lock by a bare `bool`. A timed acquisition would have made that a
-/// fourth spelling of one idea, so it became this instead.
+/// One parameter for locks, semaphores and read-write locks, which are the same operation at
+/// different levels of patience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Blocking {
     /// Take it if it is free this instant; refuse rather than wait.
@@ -102,8 +77,7 @@ pub enum Blocking {
     Forever,
     /// Wait until this moment, then give up.
     ///
-    /// **An instant, not a span**, because a span is ambiguous about when it started - see
-    /// `wait_while` for the bug that distinction prevents.
+    /// An instant rather than a span, so repeated wakes cannot restart it (see `wait_while`).
     Until(Instant),
 }
 
@@ -113,18 +87,10 @@ pub enum Blocking {
 /// which is a refusal under [`Blocking::Never`], an expired deadline under
 /// [`Blocking::Until`], and a poisoned host mutex under any of them.
 ///
-/// # Why the deadline is re-read every turn
-///
-/// **Handing the whole remaining span to each `wait_timeout` would restart the clock on every
-/// spurious wake.** A condition variable may wake a waiter with nothing to show for it - and
-/// this module's do, because every release notifies all of them - so a lock under contention
-/// would be waited on far past the deadline by a call that was asked to give up. Computing
-/// what is left from a fixed instant is what makes the total bounded rather than each turn.
-///
-/// A deadline already past is a wait of no time rather than an error: the predicate above has
-/// already had its look, so a lock that is free is still taken by a call that arrived late.
-/// That is what POSIX asks for - the timeout of a `pthread_mutex_timedlock` is not consulted
-/// when the mutex can be locked at once.
+/// The remaining span is recomputed from the fixed deadline each turn: every release here
+/// notifies all waiters, and handing the whole span to each `wait_timeout` would restart the
+/// clock on every empty wake. A deadline already past is a wait of no time, not an error, as
+/// POSIX specifies for `pthread_mutex_timedlock` on a free mutex.
 fn wait_while<'a, T>(
     signal: &Condvar,
     mut guard: MutexGuard<'a, T>,
@@ -139,17 +105,9 @@ fn wait_while<'a, T>(
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 let (next, outcome) = signal.wait_timeout(guard, remaining).ok()?;
                 guard = next;
-                // Timed out *and still blocked*: a wake that arrives with the deadline is
-                // honoured if it brought what was wanted, which costs nothing and spares a
-                // caller a spurious failure at the boundary.
-                //
-                // **And the clock is asked rather than the flag.** `wait_timeout` reports a
-                // timeout from the platform's own timer, which on this host is coarser than
-                // `Instant` and can say so a fraction of a millisecond before the deadline
-                // `Instant` measures - eighty milliseconds asked for, 79.88 waited. Believing
-                // the flag gives a guest back a timeout it did not ask for yet, which is a
-                // small wrong answer that a caller computing from it accumulates. Under load it
-                // is also what made three timing tests flake all session (D614).
+                // Give up only when still blocked and the clock, not the timeout flag, says the deadline has
+                // passed. `wait_timeout` reports a timeout from the platform timer, which can be slightly
+                // coarser than `Instant` and fire a fraction of a millisecond early.
                 if outcome.timed_out() && blocked(&guard) && Instant::now() >= deadline {
                     return None;
                 }
@@ -187,10 +145,8 @@ impl GuestMutex {
 
     /// Takes the lock, waiting as long as `until` allows.
     ///
-    /// **The self-relock check comes before any waiting**, and must: a non-recursive lock
-    /// being taken again by the thread that already owns it can never become free by
-    /// waiting, so waiting there would deadlock against ourselves and look like a hang in
-    /// the guest. It is answered the same way however patient the caller is.
+    /// The self-relock check comes before any waiting: a non-recursive lock re-taken by its owner
+    /// can never become free, so it is answered the same way however patient the caller is.
     fn acquire(&self, by: ThreadHandle, until: Blocking) -> Acquisition {
         let Ok(mut held) = self.state.lock() else {
             return Acquisition::Busy;
@@ -215,10 +171,8 @@ impl GuestMutex {
 
     /// Releases the lock.
     ///
-    /// Returns `false` when the caller does not hold it. **Refusing rather than
-    /// releasing** is the point: unlocking somebody else's lock would let two guest
-    /// threads into the same critical section, and the corruption that follows would be
-    /// attributed to whatever they were protecting rather than to here (principle 3).
+    /// Returns `false` when the caller does not hold it; releasing somebody else's lock would let
+    /// two guest threads into one critical section.
     fn unlock(&self, by: ThreadHandle) -> bool {
         let Ok(mut held) = self.state.lock() else {
             return false;
@@ -237,22 +191,14 @@ impl GuestMutex {
 
 /// A counting semaphore the guest holds across calls.
 ///
-/// # Why this is here now and was not before
-///
-/// Phase 5 says build the synchronisation primitives when a guest asks for one, and one
-/// finally did: `sceKernelCreateSema` is the single import whose error return aborted two
-/// titles during static initialisation, and its name came out of a *third* title's own
-/// bytes (D193).
-///
-/// Same shape as [`GuestMutex`] and for the same reason: the guest creates it in one call
-/// and uses it in another, so the object outlives any host guard. A `Condvar` carries the
-/// waiters, and the count is plain because every operation on it happens under the lock.
+/// Same shape as [`GuestMutex`]: the guest creates it in one call and uses it in another. A
+/// `Condvar` carries the waiters, and the count is plain because every operation on it happens
+/// under the lock.
 #[derive(Debug)]
 struct GuestSemaphore {
     state: Mutex<u32>,
     available: Condvar,
-    /// The most the count may reach. Nothing enforces it yet; recorded so a signal past
-    /// the ceiling can be refused rather than silently accepted once the guest does one.
+    /// The most the count may reach, so a signal past the ceiling can be refused.
     ceiling: u32,
     name: String,
 }
@@ -267,16 +213,10 @@ impl GuestSemaphore {
         }
     }
 
-    /// Takes one, waiting as long as `until` allows.
-    /// Takes `need` at once, or none at all.
+    /// Takes `need` at once or none at all, waiting as long as `until` allows.
     ///
-    /// **`need` used to be ignored and one was always taken.** A console measured all four
-    /// interesting cases and disagreed on two of them: asking for two where one is left
-    /// answers `BUSY` there and answered `OK` here, taking the one and leaving the caller
-    /// believing it held two (D610).
-    ///
-    /// All-or-nothing, which is what makes it a counting semaphore rather than a queue: a
-    /// caller that asked for two and got one has no way to say so and no way to give it back.
+    /// All-or-nothing, as on the hardware: asking for two where one is left answers busy. A caller
+    /// granted part of a request could neither tell nor give it back.
     fn take(&self, need: u32, until: Blocking) -> bool {
         let Ok(count) = self.state.lock() else {
             return false;
@@ -290,19 +230,15 @@ impl GuestSemaphore {
 
     /// How many are free right now.
     ///
-    /// **A snapshot, and true only of the instant it was taken** - anything may take one
-    /// before the caller acts on the answer. That is the standard's own position on
-    /// `sem_getvalue`, which says the value may already be stale when it is returned, so
-    /// answering it is not a weaker contract than the platform's.
+    /// A snapshot that may be stale when returned, which is the standard's own contract for
+    /// `sem_getvalue`.
     fn value(&self) -> Option<u32> {
         self.state.lock().ok().map(|count| *count)
     }
 
     /// Returns `n`, refusing to exceed the ceiling.
     ///
-    /// **Refused rather than clamped.** Silently capping would let a guest that has lost
-    /// count carry on as though it had not, and the imbalance would surface as a hang
-    /// somewhere with no connection to here (principle 3).
+    /// Refused rather than clamped, so a guest that has lost count is told.
     fn signal(&self, n: u32) -> bool {
         let Ok(mut count) = self.state.lock() else {
             return false;
@@ -319,14 +255,10 @@ impl GuestSemaphore {
     }
 }
 
-/// Every semaphore the guest has made.
 /// The next semaphore handle.
 ///
-/// A counter, not a leaked pointer. Mutex handles are host addresses, which is fine for a
-/// `void *` and impossible for an `int` - a 48-bit address truncated to four bytes collides
-/// with every other semaphore that shares its low half, and does so silently.
-///
-/// Starts at one, so zero keeps meaning "nothing here" for a field a guest zeroed.
+/// A counter, not a pointer: a 48-bit address truncated to a four-byte `int` could collide with
+/// another semaphore's. Starts at one, so zero means "nothing here" for a field a guest zeroed.
 fn next_semaphore_handle() -> SemaphoreHandle {
     static NEXT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -351,8 +283,7 @@ pub fn create_semaphore(initial: u32, ceiling: u32, name: &str) -> SemaphoreHand
 
 /// Runs `f` against a semaphore, with the table released first.
 ///
-/// The same rule the mutex table follows, and for the same reason: holding the table
-/// across a blocking wait deadlocks every thread that would have signalled it.
+/// Holding the table across a blocking wait would deadlock every thread that could signal it.
 fn with_semaphore<R>(handle: SemaphoreHandle, f: impl FnOnce(&GuestSemaphore) -> R) -> Option<R> {
     let found = semaphores().lock().ok()?.get(&handle).map(Arc::clone);
     found.map(|s| f(&s))
@@ -387,9 +318,8 @@ pub fn semaphore_name_of(handle: SemaphoreHandle) -> Option<String> {
 
 /// Every lock the guest has made.
 ///
-/// The locks are behind an `Arc` so one can be taken *out* of the table and used with
-/// the table released - see [`with`], where that is the difference between working and
-/// deadlocking the whole process.
+/// Locks are behind an `Arc` so one can be taken out of the table and used with the table
+/// released (see [`with`]).
 fn table() -> &'static Mutex<BTreeMap<MutexHandle, Arc<GuestMutex>>> {
     static TABLE: OnceLock<Mutex<BTreeMap<MutexHandle, Arc<GuestMutex>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -414,11 +344,9 @@ pub fn create(recursion: Recursion, name: &str) -> MutexHandle {
 
 /// Runs `f` against a lock, or answers `None` if the handle names nothing.
 ///
-/// **The table lock is released before `f` runs**, and the first version of this got it
-/// wrong. Holding the table across a blocking acquisition deadlocks the entire process:
-/// the waiter sleeps on the lock's condition variable still holding the table, so the
-/// owner cannot reach the table to release it, so the waiter never wakes. It passed
-/// every single-threaded test.
+/// The table lock is released before `f` runs. Holding it across a blocking acquisition would
+/// deadlock the process: the waiter sleeps holding the table, so the owner cannot reach the table
+/// to release the lock.
 fn with<R>(handle: MutexHandle, f: impl FnOnce(&GuestMutex) -> R) -> Option<R> {
     let found = table().lock().ok()?.get(&handle).map(Arc::clone);
     found.map(|m| f(&m))
@@ -426,9 +354,8 @@ fn with<R>(handle: MutexHandle, f: impl FnOnce(&GuestMutex) -> R) -> Option<R> {
 
 /// Takes a lock, waiting as long as `until` allows.
 ///
-/// `None` when the handle names nothing; otherwise the outcome, which distinguishes a busy
-/// lock from a self-deadlock on an error-checking one. See [`Acquisition::Busy`] for why a
-/// deadline that expired and a lock that was simply held share one answer.
+/// `None` when the handle names nothing; otherwise the outcome, which distinguishes a busy lock
+/// from a self-deadlock on an error-checking one (see [`Acquisition::Busy`]).
 pub fn acquire(handle: MutexHandle, by: ThreadHandle, until: Blocking) -> Option<Acquisition> {
     with(handle, |m| m.acquire(by, until))
 }
@@ -450,8 +377,6 @@ pub fn name_of(handle: MutexHandle) -> Option<String> {
     with(handle, |m| m.name.clone())
 }
 
-// --- condition variables -------------------------------------------------------------
-
 /// What a guest holds for a condition variable.
 pub type CondHandle = u64;
 
@@ -463,9 +388,8 @@ struct GuestCond {
     signal: Condvar,
     /// How many wakes are owed.
     ///
-    /// **Counted rather than relying on the host notify alone.** A guest may signal before
-    /// anybody waits, and a count makes what happens next explicit rather than leaving it
-    /// to host scheduling.
+    /// Counted rather than relying on the host notify alone, so a signal sent before anybody waits
+    /// is kept.
     pending: Mutex<u64>,
 }
 
@@ -474,10 +398,7 @@ fn conds() -> &'static Mutex<BTreeMap<CondHandle, Arc<GuestCond>>> {
     TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// A block this crate owns, whose address the guest holds as a handle.
-///
-/// The same shape as a mutex handle and for the same reason: a small integer would be
-/// cheaper and would fault the moment a guest read a field through it.
+/// A block this crate owns, whose address the guest holds as a handle, as for a mutex.
 fn new_handle() -> u64 {
     orbistoun_mem::blocks::block(4)
 }
@@ -506,31 +427,19 @@ fn with_cond<R>(handle: CondHandle, f: impl FnOnce(&GuestCond) -> R) -> Option<R
 
 /// Waits until signalled, or until `timeout` passes when one is given.
 ///
-/// **The guest mutex is not touched here.** POSIX requires the wait to release it
-/// atomically and reacquire it on return; these are independent objects in this crate, so
-/// the caller does that around this call. A signal arriving in the gap is lost, where on
-/// the platform it would not be - recorded rather than hidden.
+/// The guest mutex is not touched here: POSIX releases and reacquires it atomically around the
+/// wait, and the caller does both around this call, so a signal arriving in that gap is lost
+/// where on the platform it would not be.
 ///
-/// # Why this loops rather than trusting a single wake
-///
-/// **A condition variable may wake a waiter with nothing to show for it**, and the first
-/// version of this returned "signalled" for any wake at all. Under a loaded parallel test run
-/// that produced two failures - an untimed waiter reporting it had been signalled before
-/// anybody signalled, and a timed wait on a condition variable nothing ever touched reporting
-/// success. Both passed when run alone, which is what a spurious wakeup looks like.
-///
-/// So the count is the condition and the wake is only a prompt to re-read it - the same
-/// discipline `wait_while` applies to every other primitive here, and for the same reason.
-/// The deadline is re-read each turn so a run of spurious wakes cannot extend the total wait.
+/// The owed-wake count is the condition and a wake only prompts a re-read, because a condition
+/// variable may wake a waiter spuriously. The deadline is re-read each turn so repeated wakes
+/// cannot extend the total wait.
 pub fn cond_wait(handle: CondHandle, timeout: Option<Duration>) -> Option<bool> {
     with_cond(handle, |c| {
         let Ok(mut pending) = c.pending.lock() else {
             return false;
         };
-        //
-        // A span so large the clock cannot represent the moment becomes no deadline at all,
-        // which is what a caller asking for it meant - and is nearer to the request than
-        // answering immediately would be.
+        // A span so large the clock cannot represent the moment becomes no deadline at all.
         let deadline = timeout.and_then(|span| Instant::now().checked_add(span));
         loop {
             if *pending > 0 {
@@ -592,8 +501,6 @@ pub fn cond_name_of(handle: CondHandle) -> Option<String> {
     with_cond(handle, |c| c.name.clone())
 }
 
-// --- read/write locks ----------------------------------------------------------------
-
 /// What a guest holds for a read/write lock.
 pub type RwlockHandle = u64;
 
@@ -643,8 +550,7 @@ fn with_rwlock<R>(handle: RwlockHandle, f: impl FnOnce(&GuestRwlock) -> R) -> Op
 
 /// Takes the lock for reading, blocking while a writer holds it.
 ///
-/// **Readers do not wait for other readers**, which is the whole point of the type: a
-/// shared lock that queued readers behind each other would be a mutex wearing another name.
+/// Readers do not wait for other readers.
 pub fn rwlock_read(handle: RwlockHandle, until: Blocking) -> Option<bool> {
     with_rwlock(handle, |l| {
         let Ok(state) = l.state.lock() else {
@@ -675,10 +581,9 @@ pub fn rwlock_write(handle: RwlockHandle, until: Blocking) -> Option<bool> {
 
 /// Releases whichever way it was held.
 ///
-/// **Not told which**, because the guest unlock is one call for both - so a writer release
-/// is inferred from the writer flag and anything else decrements the readers. A release by
-/// somebody holding nothing is reported rather than ignored: it is a real bug in the guest
-/// and silence would let it corrupt whatever the lock was protecting.
+/// The guest unlock is one call for both, so a writer release is inferred from the writer flag
+/// and anything else decrements the readers. A release by somebody holding nothing is reported
+/// as the guest bug it is.
 pub fn rwlock_unlock(handle: RwlockHandle) -> Option<bool> {
     with_rwlock(handle, |l| {
         let Ok(mut state) = l.state.lock() else {
@@ -708,8 +613,6 @@ pub fn rwlock_name_of(handle: RwlockHandle) -> Option<String> {
     with_rwlock(handle, |l| l.name.clone())
 }
 
-// --- barriers ------------------------------------------------------------------------
-
 /// What a guest holds for a barrier.
 pub type BarrierHandle = u64;
 
@@ -720,8 +623,8 @@ struct GuestBarrier {
     needed: u32,
     /// Arrived so far, and which round this is.
     ///
-    /// The round number stops a fast thread re-entering the barrier and being counted
-    /// twice while a slow one has not yet woken from the previous release.
+    /// The round number stops a fast thread re-entering the barrier from being counted into a round
+    /// a slow one has not yet left.
     state: Mutex<(u32, u64)>,
     released: Condvar,
 }
@@ -733,8 +636,7 @@ fn barriers() -> &'static Mutex<BTreeMap<BarrierHandle, Arc<GuestBarrier>>> {
 
 /// Creates a barrier that releases once `needed` threads have arrived.
 ///
-/// A count of zero would never release, which is a hang rather than an error - so it is
-/// treated as one, which releases immediately and is visible.
+/// A count of zero would never release, so it is treated as one.
 pub fn create_barrier(needed: u32, name: &str) -> BarrierHandle {
     let handle = new_handle();
     if let Ok(mut table) = barriers().lock() {
@@ -787,73 +689,37 @@ pub fn barrier_name_of(handle: BarrierHandle) -> Option<String> {
     Some(found.name.clone())
 }
 
-// --- event queues --------------------------------------------------------------------
-
 /// What a guest holds for an event queue.
 pub type EqueueHandle = u64;
 
 /// A guest event queue: a named place events are delivered to and waited on.
-///
-/// # It has a queue now, and the note that said otherwise was stale
-///
-/// This said PPSA02664 *"never waits - `sceKernelWaitEqueue` is called zero times since the flip
-/// count stopped lying (D516)"*, and declined the storage on those grounds. **That stopped being
-/// true.** The title creates **four** queues, not two, and calls `sceKernelWaitEqueue` 839 times
-/// in an honest run - 12,924 once it is past the shader wall. It was the largest unimplemented
-/// call in the run by two orders of magnitude, and it was waiting for a flip completion nothing
-/// ever posted (D560).
-///
-/// So the reader arrived, and the storage follows it rather than preceding it - which is what
-/// the original note was protecting and is why it was right to write the number down.
 struct GuestEqueue {
     name: String,
     /// Events registered against this queue as `(identifier, udata)`, in arrival order.
     ///
-    /// `udata` is carried because `kevent` **echoes it back** on every delivery - it is the
-    /// caller's own opaque word, and the one field of a delivered event whose value is not a
-    /// guess here (D560).
+    /// `udata` is the caller's own opaque word, which `kevent` echoes back on every delivery
+    /// (D560).
     registered: Mutex<Vec<(u64, u64)>>,
     /// Events posted and not yet collected, oldest first.
     pending: Mutex<VecDeque<PendingEvent>>,
-    /// Waits begun against this queue, and events delivered out of it.
+    /// Waits begun against this queue.
     ///
-    /// **Counted because starvation is invisible without it.** A queue that is waited on and
-    /// never posted to reads, in every other record, exactly like a queue nobody uses - and it
-    /// is the difference between a guest that is idle and a guest that is stuck (D615).
+    /// A queue waited on and never posted to is a stuck thread, and without this count it looks like
+    /// an unused queue.
     waited: AtomicU64,
     /// Events actually handed to a caller.
     delivered: AtomicU64,
-    /// Signalled when something is posted, so a wait can be a wait.
-    ///
-    /// Without this `sceKernelWaitEqueue` returned success the instant it was asked, having
-    /// delivered nothing - so a guest looping until an event arrives spun instead of blocking:
-    /// 3,853 waits against 44 flips in one run (D613).
+    /// Signalled when something is posted, so a wait blocks until an event arrives.
     arrived: Condvar,
 }
 
 /// One event, in the fields a guest reads back out of a delivered one.
 ///
-/// # Where the layout comes from
-///
-/// `sceKernelWaitEqueue` is `kevent(2)`, and the target kernel is FreeBSD-derived, so
-/// `struct kevent` is the citable reference - the strongest oracle this project has
-/// (principle 1). The fields and their order are FreeBSD's:
-///
-/// ```text
-/// 0x00  u64  ident     what the event is about
-/// 0x08  i16  filter    which kind of event
-/// 0x0a  u16  flags     action flags
-/// 0x0c  u32  fflags    filter-specific flags
-/// 0x10  i64  data      filter-specific data
-/// 0x18  u64  udata     the caller's own opaque word
-/// ```
-///
-/// **The size is the open question, and it is named rather than assumed away.** FreeBSD 12 added
-/// `uint64_t ext[4]`, taking the structure from 0x20 to 0x40 bytes. Everything above is common to
-/// both, so a guest reading only these fields cannot tell them apart - and the one observed call
-/// passes a buffer this project dumped 32 zeroed bytes from, which is consistent with 0x20 and
-/// does not establish it. [`EVENT_BYTES`] is the value in play; if a guest ever reads past 0x20
-/// the rival is the first thing to try (D560).
+/// `sceKernelWaitEqueue` is `kevent(2)` on a FreeBSD-derived kernel, so the layout is FreeBSD's
+/// `struct kevent` (D560): `ident` u64 at 0x00, `filter` i16 at 0x08, `flags` u16 at 0x0a,
+/// `fflags` u32 at 0x0c, `data` i64 at 0x10, `udata` u64 at 0x18. FreeBSD 12 appended
+/// `uint64_t ext[4]`, making it 0x40 bytes; the fields here are common to both, and
+/// [`EVENT_BYTES`] uses the 0x20 form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingEvent {
     /// What the event is about - for a flip, the video-out port handle.
@@ -870,10 +736,9 @@ pub struct PendingEvent {
     pub udata: u64,
 }
 
-/// How many bytes one delivered event occupies.
+/// How many bytes one delivered event occupies: the pre-FreeBSD-12 `struct kevent`.
 ///
-/// The pre-FreeBSD-12 `struct kevent`. See [`PendingEvent`] for why the larger variant is
-/// recorded as a rival rather than ruled out.
+/// The 0x40-byte form is the alternative if a guest reads past 0x20.
 pub const EVENT_BYTES: usize = 0x20;
 
 impl PendingEvent {
@@ -917,9 +782,8 @@ pub fn create_equeue(name: &str) -> EqueueHandle {
 
 /// Registers `identifier` against a queue, answering whether the queue exists.
 ///
-/// **The handle is checked**, which is the whole reason the table exists: a registration against
-/// a queue nobody created is a guest holding a handle orbistoun never gave it, and accepting it
-/// would report success for a queue that will never deliver anything.
+/// A registration against a queue nobody created is refused, rather than reporting success for
+/// a queue that will never deliver anything (D524).
 pub fn register_event(handle: EqueueHandle, identifier: u64) -> bool {
     register_event_with_udata(handle, identifier, 0)
 }
@@ -941,15 +805,9 @@ pub fn register_event_with_udata(handle: EqueueHandle, identifier: u64, udata: u
 
 /// Posts an event to every queue that registered `ident`, answering how many took it.
 ///
-/// # Why registration decides, rather than the caller naming a queue
-///
-/// A guest registers interest and then waits; the thing that *completes* - a flip, here - knows
-/// what happened but not who asked. Routing by the registered identifier is what lets the video
-/// layer post a completion without knowing which of four queues a title chose to wait on, which
-/// is exactly the coupling a subsystem should not have (D560).
-///
-/// **Zero returned is a real answer.** It means nothing had registered for this, so the
-/// completion had no reader - which is a fact worth having rather than a silent no-op.
+/// Routing by registered identifier lets the completing subsystem (a flip, for example) post
+/// without knowing which queue a title waits on. Zero means nothing had registered, so the
+/// completion had no reader.
 pub fn post_event(ident: u64, event: PendingEvent) -> usize {
     let Ok(table) = equeues().lock() else {
         return 0;
@@ -964,36 +822,30 @@ pub fn post_event(ident: u64, event: PendingEvent) -> usize {
         };
         drop(ids);
         if let Ok(mut pending) = queue.pending.lock() {
-            // The caller's own word, echoed back the way `kevent` echoes it - the one field of
-            // a delivered event this project is not guessing at.
+            // The caller's own word, echoed back the way `kevent` echoes it.
             pending.push_back(PendingEvent { udata, ..event });
             posted += 1;
             drop(pending);
-            // **Woken after the push and outside the lock.** A waiter that wakes to an empty
-            // queue goes straight back to sleep, which is correct and wasteful; one that is
-            // never woken waits for ever.
+            // Woken after the push and outside the lock. A waiter that wakes to an empty queue sleeps
+            // again; one that is never woken waits forever.
             queue.arrived.notify_all();
         }
     }
     posted
 }
 
-/// Posts an event to **every** queue, ignoring what is registered.
+/// Posts an event to every queue, ignoring what is registered.
 ///
-/// For one diagnostic and nothing else - `ORBISTOUN_FLIP_TO_ALL`, which asks what a guest blocked
-/// on a queue nothing feeds would do if that wait completed. It is not a delivery rule; it is a
-/// way of putting a question to the guest (D620).
-///
-/// Returns how many queues it reached, like [`post_event`], so the caller can say what it did.
+/// Only for the `ORBISTOUN_FLIP_TO_ALL` diagnostic, which asks what a guest blocked on a queue
+/// nothing feeds would do if that wait completed. Returns how many queues it reached, like
+/// [`post_event`].
 pub fn post_event_everywhere(event: PendingEvent) -> usize {
     let Ok(table) = equeues().lock() else {
         return 0;
     };
     let mut posted = 0;
     for queue in table.values() {
-        // The registration's `udata` where there is one, so a queue that *was* registered still
-        // gets the word it asked for. A queue with none gets the event as given, zero included -
-        // which is the honest answer to "nobody said what this should carry".
+        // The registration's `udata` where there is one; a queue with none gets the event as given.
         let udata = queue
             .registered
             .lock()
@@ -1010,37 +862,29 @@ pub fn post_event_everywhere(event: PendingEvent) -> usize {
     posted
 }
 
-/// Collects up to `wanted` events from a queue, oldest first.
+/// Collects up to `wanted` events from a queue, oldest first, without blocking.
 ///
-/// Empty when the queue has none, and **that is not an error**: `kevent` with nothing ready
-/// reports zero delivered, and a caller that asked for one and got none is told so rather than
-/// handed a fabricated event. What this deliberately does *not* do is block - see
-/// `sceKernelWaitEqueue`, where the reasoning belongs (D560).
+/// Empty when the queue has none, which is not an error: `kevent` with nothing ready reports
+/// zero delivered.
 pub fn take_events(handle: EqueueHandle, wanted: usize) -> Vec<PendingEvent> {
     wait_events(handle, wanted, Blocking::Never).unwrap_or_default()
 }
 
 /// Collects up to `wanted` events, waiting for the first one if the caller asked to.
 ///
-/// # Why waiting is the whole point
-///
 /// `sceKernelWaitEqueue` is `kevent(2)`, which blocks until at least one event is ready or the
-/// timeout elapses. Orbistoun collected whatever happened to be there and answered success
-/// either way, so a guest looping *until an event arrives* never blocked - it spun, and every
-/// iteration read an event array nothing had written. One run: 3,853 waits against 44 flips,
-/// and an out-parameter left exactly as the caller set it, which is the D171 shape (D613).
+/// timeout elapses, so a guest looping until an event arrives blocks rather than spins.
 ///
-/// `None` means nothing arrived within the caller's patience - which is a different answer from
-/// an empty vector, and the difference is what lets the call refuse rather than claim success.
-/// A handle naming no queue is also `None`; the caller checks that first.
+/// `None` means nothing arrived within the caller's patience, distinct from an empty vector so
+/// the call can refuse rather than claim success. A handle naming no queue is also `None`; the
+/// caller checks that first.
 pub fn wait_events(
     handle: EqueueHandle,
     wanted: usize,
     until: Blocking,
 ) -> Option<Vec<PendingEvent>> {
     let queue = equeues().lock().ok()?.get(&handle).map(Arc::clone)?;
-    // Counted before the wait, not after, so a wait that never returns is still counted as
-    // having happened - which is the case this exists to make visible.
+    // Counted before the wait, so a wait that never returns is still counted.
     queue.waited.fetch_add(1, Ordering::Relaxed);
     let pending = queue.pending.lock().ok()?;
     let mut pending = wait_while(&queue.arrived, pending, until, VecDeque::is_empty)?;
@@ -1075,16 +919,11 @@ pub fn equeue_summary() -> Vec<EqueueTraffic> {
 
 /// What one event queue was used for, for a run report.
 ///
-/// The three numbers together answer a question none of them answers alone: a queue with
-/// registrations and no waits is set up and unused, a queue with waits and no deliveries is a
-/// thread that is stuck, and one with both is working (D615).
+/// Registrations with no waits is a queue set up and unused; waits with no deliveries is a stuck
+/// thread; both is a working queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EqueueTraffic {
-    /// The handle the guest holds, which is what every argument dump shows.
-    ///
-    /// **Carried so the two records join.** Working out which named queue a dumped handle
-    /// belonged to meant inferring it from the wait counts, and an inference is exactly what a
-    /// report should be saving a reader (D615).
+    /// The handle the guest holds, which is what every argument dump shows, so the two records join.
     pub handle: EqueueHandle,
     /// What the guest called it.
     pub name: String,
@@ -1096,26 +935,17 @@ pub struct EqueueTraffic {
     pub delivered: u64,
 }
 
-// --- libSceUlt runtimes and resource pools --------------------------------------------
-
 /// What a guest holds for an Ult runtime or waiting-queue pool.
 pub type UltHandle = u64;
 
 /// A libSceUlt object a guest constructed: a runtime, or a pool of waiting-queue resources.
 ///
-/// # Why there is a table rather than a bare `Ok`
-///
-/// The same reason D524 gave the event queues one: a handle that means nothing lets a guest pass
-/// back something orbistoun never issued and be told it is fine. The name is the guest's own -
-/// PPSA28061 builds a `"sample runtime"` and a `"waiting queue"` - and a run report reading those
-/// back is how a person sees what a title set up (D564).
-///
-/// **The counts are recorded and not acted on.** How many fibres a runtime can hold is a property
-/// of a scheduler that is not built; storing what was asked for is what lets the work-area size
-/// and the create agree with each other.
+/// Issued from a table so a handle the guest passes back can be checked (D524); the guest's own
+/// name is kept for the run report. The counts are recorded, not acted on, since no fibre
+/// scheduler exists; storing them keeps the work-area size and the create consistent.
 struct GuestUltObject {
     name: String,
-    /// The first count the caller sized it by - threads, in both observed calls.
+    /// The first count the caller sized it by: threads.
     threads: u64,
     /// The second - sync objects for a pool, worker threads for a runtime.
     second: u64,
@@ -1160,8 +990,6 @@ pub fn ult_object_summary() -> Vec<(String, u64, u64)> {
         .collect()
 }
 
-// --- event flags ---------------------------------------------------------------------
-
 /// What a guest holds for an event flag.
 pub type EventFlagHandle = u64;
 
@@ -1201,9 +1029,8 @@ fn with_event_flag<R>(handle: EventFlagHandle, f: impl FnOnce(&GuestEventFlag) -
 
 /// Tests the pattern without waiting, answering the bits at the moment of the test.
 ///
-/// **A handle naming nothing and a pattern that is simply not set are different answers**,
-/// which is why this nests: the first is a bad handle and the second is an ordinary miss,
-/// and a guest branches differently on each.
+/// Nested because a handle naming nothing (a bad handle) and a pattern not set (an ordinary miss)
+/// are different answers.
 pub fn event_flag_poll(handle: EventFlagHandle, wanted: u64, all: bool) -> Option<Option<u64>> {
     with_event_flag(handle, |e| {
         let bits = *e.bits.lock().ok()?;
@@ -1218,11 +1045,9 @@ pub fn event_flag_poll(handle: EventFlagHandle, wanted: u64, all: bool) -> Optio
 
 /// Whether the handle names an event flag at all.
 ///
-/// **Separate from polling it, because the order the checks happen in is measured.** A console
-/// answers `0x80020003` to a poll on a handle it never issued *even when the mode is also
-/// invalid*, and `0x80020016` to a bad mode on a handle it did - so the handle is looked at
-/// first, and a caller that validated the mode before the handle would answer the wrong one of
-/// two codes it otherwise gets right (D610).
+/// Separate from polling because the hardware checks the handle first: `0x80020003` for a handle
+/// it never issued even when the mode is also invalid, and `0x80020016` for a bad mode on a valid
+/// handle.
 pub fn event_flag_exists(handle: EventFlagHandle) -> bool {
     with_event_flag(handle, |_| ()).is_some()
 }
@@ -1246,11 +1071,8 @@ pub fn event_flag_set(handle: EventFlagHandle, pattern: u64) -> Option<bool> {
 /// for a handle naming nothing, inner [`None`] for a timeout, inner [`Some`] for the pattern found
 /// (before any clear).
 ///
-/// **This is where a guest thread actually blocks**, on the same [`Condvar`] [`event_flag_set`]
-/// wakes, so a thread waiting on an event another thread sets is parked rather than spinning - which
-/// is what an unimplemented wait had a guest doing, calling it hundreds of thousands of times
-/// (PPSA04263). The `bits` lock is released across the wait by the condvar and re-taken on wake, so a
-/// setter is never shut out.
+/// The thread parks on the [`Condvar`] that [`event_flag_set`] notifies. The `bits` lock is
+/// released across the wait, so a setter is never shut out.
 pub fn event_flag_wait(
     handle: EventFlagHandle,
     wanted: u64,
@@ -1259,9 +1081,8 @@ pub fn event_flag_wait(
     clear_pat: bool,
     timeout: Option<Duration>,
 ) -> Option<Option<u64>> {
-    // The Arc is cloned out with the table released first, exactly as `with_event_flag` does, so the
-    // table is not held across the wait - only this flag's own `bits` lock is, and the condvar frees
-    // that while parked.
+    // The Arc is cloned out with the table released, as in `with_event_flag`, so only this flag's
+    // `bits` lock is involved in the wait.
     let found = event_flags().lock().ok()?.get(&handle).map(Arc::clone)?;
     let mut bits = found.bits.lock().ok()?;
     let matches = |value: u64| {
@@ -1324,14 +1145,11 @@ pub fn event_flag_name_of(handle: EventFlagHandle) -> Option<String> {
     with_event_flag(handle, |e| e.name.clone())
 }
 
-// --- waiting on an address ------------------------------------------------------------
-
 /// What a wait on an address came back with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressWait {
-    /// The word already held something other than what the caller expected, so there was
-    /// nothing to sleep for. Not a failure: the guest re-reads the word next, which is the
-    /// whole contract - the wake may have come before the wait did.
+    /// The word already held something other than what the caller expected, so there was nothing
+    /// to sleep for. Not a failure: the guest re-reads the word, since the wake may have come first.
     Mismatch,
     /// A wake on this address arrived while sleeping.
     Woken,
@@ -1346,11 +1164,9 @@ struct AddressQueue {
     waiting: u32,
     /// Wakes granted and not yet collected by a sleeper.
     ///
-    /// **Never more than `waiting`.** A wake with nobody asleep leaves nothing behind - that
-    /// is the futex contract, in which the word carries the state and the wake only ends a
-    /// sleep. A wait that arrives after the wake it needed re-reads the word, sees it changed,
-    /// and does not sleep; one that reads the old value sleeps until the *next* wake. Keeping a
-    /// stray token would wake a later, unrelated sleeper for no reason.
+    /// Never more than `waiting`: a wake with nobody asleep leaves nothing behind, as in the futex
+    /// contract, where the word carries the state and a wake only ends a sleep (D573). A stray token
+    /// would wake a later, unrelated sleeper.
     tokens: u32,
 }
 
@@ -1360,12 +1176,11 @@ struct AddressWaiters {
     woken: Condvar,
 }
 
-/// Every address anything has ever waited on.
+/// Every address anything has waited on.
 ///
-/// Entries are never removed. Dropping one while a sleeper still holds its `Arc` would leave
-/// that sleeper on a queue no wake can find - a lost wakeup with nothing in a trace to say so.
-/// The set is bounded by the distinct addresses a guest waits on, which for the one title
-/// measured is thirteen (D573).
+/// Entries are never removed: dropping one while a sleeper still holds its `Arc` would leave that
+/// sleeper on a queue no wake can find. The set is bounded by the distinct addresses a guest
+/// waits on.
 fn address_waiters() -> &'static Mutex<BTreeMap<u64, Arc<AddressWaiters>>> {
     static TABLE: OnceLock<Mutex<BTreeMap<u64, Arc<AddressWaiters>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -1373,22 +1188,17 @@ fn address_waiters() -> &'static Mutex<BTreeMap<u64, Arc<AddressWaiters>>> {
 
 /// How a wait finds out about, and runs, a signal raised on the sleeping thread.
 ///
-/// # Why hooks rather than a call into the crate root
-///
-/// This module deliberately knows nothing about guest memory or guest threads - `wait_on_address`
-/// takes its word-read as a closure precisely so the module can be tested against a word it owns
-/// (principle 8). Running a guest signal handler is further outside that boundary again: it needs
-/// the handler table and a way to call guest code, both of which live above here. Inverted down
-/// as function pointers, the same shape as the thread-start hook.
-///
-/// Absent - a unit test, a run with no signals - a wait behaves exactly as it did.
+/// This module knows nothing about guest memory or guest threads, and running a guest signal
+/// handler needs the handler table and a way to call guest code, both above here. So they are
+/// installed as function pointers, like the thread-start hook. Without them a wait ignores
+/// signals.
 #[derive(Debug, Clone, Copy)]
 pub struct SignalDelivery {
-    /// Whether the calling thread has a signal waiting. Must be lock-free: it is called from
-    /// inside a condition-variable predicate, under the queue's own lock.
+    /// Whether the calling thread has a signal waiting. Lock-free, because it is called inside a
+    /// condition-variable predicate under the queue's own lock.
     pub pending: fn() -> bool,
-    /// Runs whatever is waiting on the calling thread. Called with **no lock held**, because it
-    /// runs guest code and that code may take any lock in here.
+    /// Runs whatever is waiting on the calling thread. Called with no lock held, because it runs
+    /// guest code that may take any lock in here.
     pub deliver: fn(),
 }
 
@@ -1414,14 +1224,10 @@ fn deliver_signal() {
 
 /// Nudges every address queue, so a thread with a signal pending re-tests its predicate.
 ///
-/// **Every queue, not the target's.** A raise knows which thread it is aimed at and not which
-/// word that thread is asleep on - nothing records the pairing, and recording it would be a
-/// second table to keep true. Waking all of them costs one predicate re-test per sleeper, which
-/// sends every thread but the target straight back to sleep, and it happens once per raise
-/// rather than once per call.
-///
-/// The queue's own lock is taken before notifying so the flag cannot be set in the gap between a
-/// sleeper's last predicate test and its sleep.
+/// Every queue, because a raise knows its target thread but not which word it sleeps on.
+/// Each other sleeper re-tests once and sleeps again, once per raise. The queue's lock is
+/// taken before notifying, so the flag cannot be set between a sleeper's last test and its
+/// sleep.
 pub fn nudge_address_waiters() {
     let queues: Vec<Arc<AddressWaiters>> = match address_waiters().lock() {
         Ok(table) => table.values().cloned().collect(),
@@ -1449,15 +1255,10 @@ fn address_queue(address: u64) -> Option<Arc<AddressWaiters>> {
 /// Sleeps while the word at `address` holds `expected`, until a wake on the same address or
 /// patience runs out.
 ///
-/// `read` fetches the word. It is called **under the queue's lock**, which is the one thing
-/// that makes this correct rather than merely usual: a waker writes the word and then wakes,
-/// and a sleeper that read the old value has already joined the queue before the lock is
-/// released into the sleep - so the wake finds it. Read before taking the lock, the wake could
-/// land in the gap and the sleeper would wait for a second wake that never comes. That is why
-/// the read is a closure rather than a value the caller looked up first.
-///
-/// The read is a closure for a second reason, the one principle 8 gives: guest memory stays in
-/// the crate root, and this module can then be tested with a word it owns.
+/// `read` fetches the word under the queue's lock, so a waker that writes the word and then
+/// wakes always finds a sleeper that read the old value; a read before the lock could miss the
+/// wake. As a closure it also keeps guest memory in the crate root and lets this module be
+/// tested with a word it owns (D573).
 ///
 /// `None` only for a host lock that is poisoned or a word that could not be read.
 pub fn wait_on_address(
@@ -1472,33 +1273,27 @@ pub fn wait_on_address(
         return Some(AddressWait::Mismatch);
     }
     state.waiting += 1;
-    // **A loop, because a signal is not a wake.** A thread woken to run a handler has not had
-    // its word written and is still waiting for what it came for, so it runs the handler and
-    // goes back to sleep. Written as a wake it would return `Woken` to a guest whose condition
-    // is still false (D652).
+    // A loop, because a signal is not a wake: a thread woken to run a handler still waits for its
+    // word, so it runs the handler and sleeps again (D652).
     let state = loop {
         let Some(woken) = wait_while(&queue.woken, state, until, |q| {
             q.tokens == 0 && !signal_pending()
         }) else {
             break None;
         };
-        // **The signal first, even when a wake arrived with it.** Hardware runs the handler
-        // whatever else was happening; breaking out on the token would leave the signal pending
-        // until some later wait, which for a thread that never waits again is never.
+        // The signal first, even when a wake arrived with it; otherwise it stays pending until a later
+        // wait, which may never come.
         if !signal_pending() {
             break Some(woken);
         }
-        // The lock is dropped first: the handler is guest code and may call anything in this
-        // module, including a wait on this very queue.
+        // The lock is dropped first: the handler is guest code and may wait on this very queue.
         drop(woken);
         deliver_signal();
         state = queue.state.lock().ok()?;
     };
     let Some(mut state) = state else {
-        // Gave up, and the guard went with it. Re-take the lock to leave the queue - and
-        // if a wake landed in that gap it counted this thread, so a token no remaining
-        // sleeper can claim is this thread's and is collected rather than left to wake a
-        // stranger later.
+        // Gave up and dropped the guard. Re-take the lock to leave the queue; a wake that landed in the
+        // gap counted this thread, so its token is collected here rather than left for a stranger.
         let mut state = queue.state.lock().ok()?;
         state.waiting -= 1;
         if state.tokens > state.waiting {
@@ -1514,8 +1309,8 @@ pub fn wait_on_address(
 
 /// Wakes up to `count` threads asleep on `address`, and says how many that was.
 ///
-/// Zero is the ordinary answer, not an error: a wake races the wait by design, and the word
-/// is what carries the state. `None` only for a poisoned host lock.
+/// Zero is the ordinary answer: a wake races the wait by design and the word carries the state.
+/// `None` only for a poisoned host lock.
 pub fn wake_on_address(address: u64, count: u32) -> Option<u32> {
     let queue = address_waiters().lock().ok()?.get(&address).cloned();
     let Some(queue) = queue else {
@@ -1549,9 +1344,8 @@ mod tests {
 
     #[test]
     fn a_handle_is_memory_the_guest_can_read_through() {
-        // A small integer handle faults the moment a guest reads a field through it -
-        // which is exactly how an unimplemented `scePthreadSelf` was caught, returning
-        // an error code that a title then dereferenced.
+        // A small integer handle faults when a guest reads a field through it, so the handle is a real
+        // readable block.
         let m = create(Recursion::Forbidden, "dereferenced");
         assert_ne!(m, super::NO_MUTEX);
         assert_eq!(m % 8, 0, "and it must be aligned for a word read");
@@ -1585,8 +1379,7 @@ mod tests {
 
     #[test]
     fn a_non_recursive_lock_refuses_its_owner_rather_than_deadlocking() {
-        // Blocking here would deadlock the thread against itself and read as a hang in
-        // the guest, with nothing naming the cause.
+        // Blocking here would deadlock the thread against itself.
         let m = create(Recursion::Forbidden, "once");
         assert_eq!(acquire(m, 1, Blocking::Forever), Some(Acquisition::Locked));
         assert_eq!(
@@ -1598,8 +1391,7 @@ mod tests {
 
     #[test]
     fn a_recursive_lock_counts_its_acquisitions() {
-        // Releasing on the first unlock would let another thread in while the owner
-        // still believes it is inside the critical section.
+        // Releasing on the first unlock would let another thread in while the owner is still inside.
         let m = create(Recursion::Allowed, "nested");
         assert_eq!(acquire(m, 1, Blocking::Forever), Some(Acquisition::Locked));
         assert_eq!(acquire(m, 1, Blocking::Forever), Some(Acquisition::Locked));
@@ -1615,8 +1407,7 @@ mod tests {
 
     #[test]
     fn a_thread_cannot_release_a_lock_it_does_not_hold() {
-        // The failure this prevents is two guest threads inside one critical section,
-        // where the corruption gets blamed on whatever they were protecting.
+        // Otherwise two guest threads could be inside one critical section.
         let m = create(Recursion::Forbidden, "owned");
         assert_eq!(acquire(m, 1, Blocking::Forever), Some(Acquisition::Locked));
         assert_eq!(unlock(m, 2), Some(false), "not this thread's to release");
@@ -1629,8 +1420,7 @@ mod tests {
 
     #[test]
     fn an_unknown_handle_is_a_miss_rather_than_a_success() {
-        // A stub that reported success on a lock nobody made would let every guest
-        // thread through every critical section it names.
+        // Success on a lock nobody made would let every guest thread through.
         assert_eq!(acquire(0, 1, Blocking::Forever), None);
         assert_eq!(unlock(u64::MAX, 1), None);
     }
@@ -1649,15 +1439,15 @@ mod tests {
 
     #[test]
     fn a_lock_remembers_the_name_the_guest_gave_it() {
-        // Traces of unnamed locks are near-useless: every one looks the same.
+        // Names make locks distinguishable in a trace.
         let m = create(Recursion::Forbidden, "render-queue");
         assert_eq!(name_of(m).as_deref(), Some("render-queue"));
     }
 
     #[test]
     fn a_lock_actually_excludes_a_real_thread() {
-        // Every test above runs on one thread, where a lock that did nothing at all
-        // would still pass. This one blocks a second host thread on it.
+        // The tests above run on one thread, where a lock that did nothing would still pass; this one
+        // blocks a second host thread on it.
         use std::sync::atomic::{AtomicBool, Ordering};
         static ENTERED: AtomicBool = AtomicBool::new(false);
 
@@ -1698,8 +1488,7 @@ mod tests {
 
     #[test]
     fn signalling_past_the_ceiling_is_refused_rather_than_clamped() {
-        // Clamping would let a guest that has lost count carry on as though it had not,
-        // and the imbalance would surface as a hang with no connection to here.
+        // Clamping would let a guest that has lost count carry on as though it had not.
         let h = super::create_semaphore(0, 2, "bounded");
         assert_eq!(super::semaphore_signal(h, 2), Some(true));
         assert_eq!(super::semaphore_signal(h, 1), Some(false));
@@ -1707,22 +1496,15 @@ mod tests {
 
     #[test]
     fn a_handle_that_names_nothing_answers_none_rather_than_a_default() {
-        // `Some(false)` would read as "the operation failed"; `None` says the handle was
-        // never one of ours, which is a different bug in a different place.
+        // `None` says the handle was never issued, a different fault from a refused operation.
         assert_eq!(super::semaphore_wait(0x7fff_beef, 1, Blocking::Never), None);
         assert!(!super::semaphore_destroy(0x7fff_beef));
     }
 
-    /// The two handle spaces are different **types**, not merely different tables.
+    /// A semaphore handle survives the four-byte write the guest's `int` receives.
     ///
-    /// This test used to pass a mutex handle to a semaphore call and assert it found
-    /// nothing. It no longer compiles, which is a better answer: a semaphore handle is an
-    /// `int` and a mutex handle is a `void *` (obSCEne, D210), so mixing them is now a build
-    /// error rather than a lookup that happens to miss.
-    ///
-    /// What is left to check is the part types cannot: that a semaphore handle stays small
-    /// enough to survive the four-byte write the guest's `int` receives. A host pointer does
-    /// not, which is precisely what this crate was writing before.
+    /// Mixing semaphore and mutex handles is a type error; this checks what types cannot, that a
+    /// semaphore handle stays small where a host pointer would not.
     #[test]
     fn a_semaphore_handle_fits_the_int_the_guest_holds() {
         let s = super::create_semaphore(1, 1, "a semaphore");
@@ -1736,7 +1518,7 @@ mod tests {
             ),
             s
         );
-        // Round-trips through the four bytes the guest actually keeps.
+        // Round-trips through the four bytes the guest keeps.
         #[allow(clippy::cast_possible_truncation)]
         let narrowed = s as i32;
         assert_eq!(
@@ -1745,19 +1527,11 @@ mod tests {
         );
     }
 
-    /// **A delivered event puts each field where FreeBSD's `struct kevent` puts it.**
+    /// A delivered event puts each field where FreeBSD's `struct kevent` puts it.
     ///
-    /// The layout is the whole reason delivery was deferred (D524), so it is asserted field by
-    /// field at its offset rather than by a round trip - a round trip through this project's own
-    /// encoder would agree with itself whatever the offsets were.
-    ///
-    /// # What this cannot assert
-    ///
-    /// **That the console's structure is FreeBSD's.** This pins what orbistoun writes against
-    /// the citable reference it was written from; the target is free to disagree, and D468 is
-    /// this project watching exactly that happen to the ctype tables. It also cannot see the
-    /// FreeBSD 12 variant, which appends `ext[4]` and leaves every offset here unchanged - that
-    /// rival is recorded on [`PendingEvent`] and is invisible to any test of these six fields.
+    /// Asserted field by field at its offset, since a round trip through this project's own encoder
+    /// would agree with itself whatever the offsets were. It pins what orbistoun writes against the
+    /// reference, not that the hardware agrees.
     #[test]
     fn a_delivered_event_matches_the_published_kevent_layout() {
         let bytes = super::PendingEvent {
@@ -1783,12 +1557,10 @@ mod tests {
         assert_eq!(bytes.len(), super::EVENT_BYTES);
     }
 
-    /// **A completion reaches only the queues that registered for it.**
+    /// A completion reaches only the queues that registered for it.
     ///
-    /// The routing property the video layer depends on: a flip knows its port and not which of
-    /// four queues a title chose, so registration is what decides. A post that reached every
-    /// queue would deliver flip completions to the queue a title uses for something else, and
-    /// nothing downstream could tell.
+    /// A flip knows its port, not which queue a title waits on, so registration decides; a post to
+    /// every queue would deliver completions to queues used for something else.
     #[test]
     fn a_posted_event_reaches_only_queues_that_registered_for_it() {
         let listening = super::create_equeue("listening");
@@ -1813,7 +1585,7 @@ mod tests {
         );
     }
 
-    /// **Nobody registered means nobody is told, and that is reported rather than swallowed.**
+    /// A post nobody registered for reaches no queue, and says so.
     #[test]
     fn a_completion_with_no_reader_posts_to_nothing() {
         let ident = 0x5151;
@@ -1832,12 +1604,9 @@ mod tests {
         );
     }
 
-    /// **The caller's own word is echoed from its registration, not from the poster.**
+    /// The caller's own word is echoed from its registration, not from the poster.
     ///
-    /// `kevent` hands `udata` back untouched, and it is the one field of a delivered event that
-    /// is not a guess here. The poster does not know it - a flip knows the port, not what the
-    /// waiter asked to have handed back - so taking it from the post would return zero for ever
-    /// and look exactly like a title that passed zero.
+    /// The poster does not know `udata`, so taking it from the post would always return zero.
     #[test]
     fn the_registrations_udata_is_what_comes_back() {
         let queue = super::create_equeue("echo");
@@ -1864,10 +1633,7 @@ mod tests {
         );
     }
 
-    /// **Events come back oldest first, and no more than were asked for.**
-    ///
-    /// A guest asking for one at a time - which PPSA02664 does - must not have the queue
-    /// drained, and must not be handed the newest event while an older one waits behind it.
+    /// Events come back oldest first, and no more than were asked for.
     #[test]
     fn events_are_delivered_oldest_first_and_bounded_by_the_request() {
         let queue = super::create_equeue("ordered");
@@ -1902,10 +1668,9 @@ mod tests {
         );
     }
 
-    /// **A wait on a queue nobody created is not an empty queue.**
+    /// A wait on a queue nobody created is not an empty queue.
     ///
-    /// The distinction the caller acts on: nothing ready is an ordinary poll, an unknown handle
-    /// is a guest holding something orbistoun never issued.
+    /// Nothing ready is an ordinary poll; an unknown handle is a value orbistoun never issued.
     #[test]
     fn an_unknown_queue_is_distinguishable_from_an_empty_one() {
         let real = super::create_equeue("real");
@@ -1920,8 +1685,8 @@ mod tests {
 
 #[cfg(test)]
 mod address_tests {
-    //! The futex contract, and each test states the failure it exists to catch. The word is a
-    //! test-owned atomic rather than guest memory, which is what the read closure is for.
+    //! The futex contract. The word is a test-owned atomic rather than guest memory, which the
+    //! read closure allows.
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1963,7 +1728,7 @@ mod address_tests {
 
     #[test]
     fn a_word_that_already_changed_is_not_waited_on() {
-        // The wake came first and the word says so. Sleeping here is the lost-wakeup hang.
+        // The wake came first and the word says so; sleeping here would be a lost wakeup.
         let address = fresh_address();
         let got = wait_on_address(address, 0, || Some(1), Blocking::Forever);
         assert_eq!(got, Some(AddressWait::Mismatch));
@@ -1992,10 +1757,8 @@ mod address_tests {
 
     #[test]
     fn a_wake_with_nobody_asleep_is_not_remembered() {
-        // The futex contract: the word carries the state, the wake only ends a sleep. A token
-        // kept from this wake would end the timed wait below early, and the assertion on
-        // `TimedOut` is what would catch that - this test was watched failing with the guard
-        // in `wake_on_address` removed.
+        // The word carries the state and the wake only ends a sleep. A token kept from this wake would
+        // end the timed wait below early, which the `TimedOut` assertion catches.
         let address = fresh_address();
         assert_eq!(wake_on_address(address, 1), Some(0));
         let until = Blocking::Until(Instant::now() + Duration::from_millis(40));
@@ -2010,9 +1773,7 @@ mod address_tests {
 
     #[test]
     fn a_wake_of_one_leaves_the_other_asleep() {
-        // Waking everybody on a count of one is a spurious wakeup the guest did not ask for,
-        // and a guest whose thread pool hands out work one wake at a time would run two
-        // workers on one job.
+        // A count of one wakes one thread; waking more is a spurious wakeup the guest did not ask for.
         let address = fresh_address();
         let word = Arc::new(AtomicU64::new(0));
         let first = sleeper(address, &word);
@@ -2045,8 +1806,7 @@ mod address_tests {
 
     #[test]
     fn a_wake_asking_for_more_than_are_asleep_reports_what_it_woke() {
-        // The answer is what happened, not what was asked for - a guest counting wakes
-        // against workers would otherwise be told about workers that do not exist.
+        // The answer is how many woke, not how many were asked for.
         let address = fresh_address();
         let word = Arc::new(AtomicU64::new(0));
         let asleep = sleeper(address, &word);
@@ -2071,8 +1831,7 @@ mod address_tests {
 
     #[test]
     fn an_unreadable_word_is_a_miss_rather_than_a_sleep() {
-        // Sleeping on a word that could not be read would be waiting for a wake on an address
-        // the guest may not even own, forever, with nothing naming the cause.
+        // A word that cannot be read is not slept on.
         let address = fresh_address();
         assert_eq!(
             wait_on_address(address, 0, || None, Blocking::Forever),

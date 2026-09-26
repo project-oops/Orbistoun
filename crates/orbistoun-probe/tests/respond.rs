@@ -11,9 +11,7 @@ use orbistoun_probe::{Capability, Outcome, Provenance, Record, Refusal, Status};
 
 /// A stream that reads from a script and writes into a buffer.
 ///
-/// Both halves in one type because `Responder` takes a single stream, exactly as a socket
-/// is a single stream. Splitting them in the test would test a shape the real thing does
-/// not have.
+/// Both halves in one type because `Responder` takes a single stream, as a socket is.
 struct Wire {
     incoming: Cursor<Vec<u8>>,
     outgoing: Vec<u8>,
@@ -98,14 +96,12 @@ fn serve(script: &str, answers: Fake) -> Vec<String> {
         .collect()
 }
 
-// --- the writer -------------------------------------------------------------------------
+// The writer.
 
 /// Everything written can be read back as the same thing.
 ///
-/// The one property that matters for a responder: obSCEne's parser is the audience, and
-/// this crate's parser is the closest available stand-in for it. A record that survives the
-/// round trip is one whose field order and token spellings agree with the reader that has
-/// been checked against real transcripts.
+/// This crate's parser, checked against real transcripts, stands in for obSCEne's, so a
+/// round trip confirms field order and token spellings.
 #[test]
 fn every_record_survives_being_written_and_read_back() {
     let records = vec![
@@ -204,8 +200,7 @@ fn every_record_survives_being_written_and_read_back() {
 
 /// A record whose grade was absent stays absent.
 ///
-/// Writing a default onto it would manufacture provenance, and a consumer cannot tell an
-/// invented grade from a measured one - which is the failure this crate is arranged around.
+/// Writing a default would manufacture provenance a consumer cannot tell from a measured one.
 #[test]
 fn an_ungraded_result_is_not_given_a_grade_on_the_way_out() {
     let line = render(&Record::Res {
@@ -223,7 +218,7 @@ fn an_ungraded_result_is_not_given_a_grade_on_the_way_out() {
     assert!(provenance.is_none(), "it came back graded");
 }
 
-// --- the exchange -----------------------------------------------------------------------
+// The exchange.
 
 #[test]
 fn negotiation_answers_with_capabilities_and_what_this_is() {
@@ -284,9 +279,7 @@ fn the_right_secret_negotiates() {
 
 /// The acknowledgement precedes the work it acknowledges.
 ///
-/// Not a stylistic ordering. A command that ends the responder must already have been
-/// acknowledged, because an `ack` with no `done` after it names the command that did the
-/// killing and a silent connection names nothing.
+/// An `ack` with no `done` after it names the command that ended the responder.
 #[test]
 fn a_command_is_acknowledged_before_it_is_carried_out() {
     let lines = serve("CMD|1|hello|1\nCMD|2|call|0x1000|0x1\n", Fake::default());
@@ -363,8 +356,7 @@ fn an_unknown_verb_is_refused_by_name() {
 
 /// A sequence number that does not advance is refused.
 ///
-/// It is how a replayed or duplicated command shows up, and answering it twice would put
-/// two results against one number in the transcript.
+/// A replayed or duplicated command must not put two results against one number.
 #[test]
 fn a_sequence_that_does_not_advance_is_refused() {
     let lines = serve("CMD|1|hello|1\nCMD|1|report\n", Fake::default());

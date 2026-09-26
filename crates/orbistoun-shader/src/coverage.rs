@@ -1,29 +1,10 @@
 //! Coverage across a corpus, and the worklist that falls out of it.
 //!
-//! # Two different questions
-//!
-//! *Can we decode this instruction?* and *can we translate it?* are separate, and
-//! conflating them hides the second behind the first. An instruction the table
-//! recognises is still untranslatable until something knows what SPIR-V to emit for
-//! it, so [`CorpusCoverage`] tracks both and reports them apart.
-//!
-//! # Rank by shaders blocked, not by occurrences
-//!
-//! This is the one judgement in the module and it decides what gets worked on.
-//!
-//! An instruction appearing ten thousand times inside a single shader blocks exactly
-//! one shader. An instruction appearing once each in four hundred shaders blocks four
-//! hundred. Ranking by raw frequency puts the first at the top of the list and would
-//! have you spend a week unblocking one shader.
-//!
-//! So the primary key is **how many distinct shaders contain it**. Occurrence count
-//! is kept as a tiebreak and as context, not as the ranking.
-//!
-//! # Deterministic ordering
-//!
-//! Everything here is a `BTreeMap`. These reports exist to be diffed between runs,
-//! and hash iteration order would make every report differ from the last for no
-//! reason - which trains a reader, human or otherwise, to ignore the diff.
+//! Decoding and translating are tracked apart: an instruction the table recognises is
+//! untranslatable until something emits SPIR-V for it. Blockers rank by how many distinct
+//! shaders contain them, with occurrences as a tiebreak - an instruction used ten thousand
+//! times in one shader blocks one shader. Every map is a `BTreeMap` so reports diff
+//! cleanly between runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,15 +13,14 @@ use crate::encoding::EncodingTable;
 
 /// Identifies a kind of instruction.
 ///
-/// Ordering is derived and deliberate: it makes the maps below stable, so two runs
-/// over the same corpus produce byte-identical reports.
+/// The derived ordering keeps the maps below stable, so two runs over the same corpus
+/// produce byte-identical reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OpcodeKey {
     /// Index into the encoding table, or `None` for an unrecognised family.
     pub encoding: Option<u16>,
-    /// Opcode within the family. For an unrecognised family this holds the top byte
-    /// of the instruction word instead, so unknowns can still be grouped and counted
-    /// rather than collapsing into one undifferentiated bucket.
+    /// Opcode within the family. For an unrecognised family this holds the top byte of
+    /// the instruction word, so unknowns group by encoding space.
     pub opcode: u32,
 }
 
@@ -60,8 +40,7 @@ impl OpcodeKey {
 /// What one shader contains.
 #[derive(Debug, Clone)]
 pub struct ShaderSummary {
-    /// Content hash, so a shader is identified by what it is rather than by when it
-    /// was seen.
+    /// Content hash, so a shader is identified by what it is.
     pub id: String,
     /// Instructions found.
     pub instructions: usize,
@@ -73,28 +52,17 @@ pub struct ShaderSummary {
     pub trustworthy: bool,
     /// What an actual translation of this shader said, when one was attempted.
     ///
-    /// [`None`] means nobody asked a translator - a pure decode census, which is the
-    /// useful shape before a translator exists and is what the unit tests here use.
+    /// [`None`] means no translator ran: a pure decode census.
     pub translated: Option<bool>,
 }
 
 impl ShaderSummary {
     /// Whether this shader translates whole.
     ///
-    /// The only status that matters for "will this shader render": partial support for a
-    /// shader is no support for a shader.
-    ///
-    /// **A real verdict wins over the estimate**, because the estimate is a claim about
-    /// opcodes and translation refuses for more reasons than an opcode. Two GL cube pixel
-    /// shaders had every opcode on the supported list and translated none of the way
-    /// through - one stopped at a register outside the register file, the next at a
-    /// memory base nobody has measured - and this reported them complete while the
-    /// submission pipeline reported nothing translated (worklogs 545, 550). That is the
-    /// same failure this project already forbids one level down: reporting more than the
-    /// measurement supports.
-    ///
-    /// The estimate remains the answer when no translation was attempted. It is a bound
-    /// rather than a verdict, and [`crate::report::summary`] says which it is showing.
+    /// Partial support for a shader is no support. A translation verdict wins over the
+    /// opcode estimate, because translation refuses for reasons other than opcodes
+    /// (registers outside the register file, unmeasured memory bases). With no translation
+    /// attempted the estimate is a bound, and [`crate::report::summary`] says so.
     pub const fn is_complete(&self) -> bool {
         match self.translated {
             Some(verdict) => verdict,
@@ -105,25 +73,11 @@ impl ShaderSummary {
 
 /// Roughly what it would cost to unblock an instruction.
 ///
-/// # Why the ranking needs this at all
-///
-/// Ranking purely by shaders blocked answers "what would help most" and says nothing
-/// about what is *reachable*. The two came apart the first time this list had real data
-/// in it: the instruction blocking the most shaders was an export, which needs a whole
-/// render-target model, while the one blocking fewest was an ordinary multiply-add that
-/// took twenty minutes. A single ordered list puts a week of work above a morning's and
-/// offers no way to tell.
-///
-/// # Why two tiers and not a score
-///
-/// A number - blocked divided by effort - would rank them precisely and the precision
-/// would be invented. Nothing here can measure effort, and a ratio built from a guess
-/// reads like a measurement. Two tiers claim only what is actually known: whether the
-/// work is *ordinary*, or whether it is waiting on a subsystem that does not exist.
-///
-/// The tier is not decided here either. This crate knows *what* blocks a shader; only the
-/// translator knows *why*, and it already keeps that in its blocked-instruction table
-/// with a reason attached. The caller joins the two.
+/// Ranking by shaders blocked alone says what would help most, not what is reachable:
+/// an export needing a render-target model can outrank an ordinary multiply-add. Two
+/// tiers claim only what is known - ordinary work, or work waiting on a subsystem -
+/// where a score would invent a precision nothing measures. The translator's
+/// blocked-instruction table supplies the tier; the caller joins the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Effort {
     /// Ordinary work: an instruction to translate, with an oracle available.
@@ -131,8 +85,7 @@ pub enum Effort {
     Ordinary,
     /// Waiting on a subsystem that has not been built.
     ///
-    /// Sorted after ordinary work, so a list read top to bottom offers what can be done
-    /// now before what cannot.
+    /// Sorted after ordinary work, so the list offers what can be done now first.
     Subsystem,
 }
 
@@ -143,39 +96,29 @@ pub struct Blocker {
     pub key: OpcodeKey,
     /// Roughly what it would cost to unblock.
     pub effort: Effort,
-    /// How many distinct shaders contain it. **The ranking key, within an effort tier.**
+    /// How many distinct shaders contain it: the ranking key within an effort tier.
     pub shaders_blocked: usize,
     /// How many times it appears across the corpus. Context, not ranking.
     pub occurrences: usize,
     /// Whether the encoding table recognises it at all.
     ///
-    /// Separates "we do not know what this instruction is" from "we know and cannot
-    /// translate it yet" - different work, and the first is usually a table fix.
+    /// Separates an unknown instruction (usually a table fix) from a known one the
+    /// translator does not handle.
     pub decodable: bool,
 }
 
 /// Every blocker treated as ordinary work.
 ///
-/// For tests and callers that have no translator to ask. It is a named function rather
-/// than a closure at each call site so the assumption is visible: a report built with
-/// this one cannot distinguish reachable work from work waiting on a subsystem.
+/// For tests and callers with no translator to ask. A named function keeps the
+/// assumption visible: such a report cannot separate reachable work from blocked work.
 pub fn all_ordinary(_key: OpcodeKey) -> Effort {
     Effort::Ordinary
 }
 
 /// A run's coverage, reduced to what is worth comparing against the next one.
 ///
-/// # Why a shader corpus needs a progress block at all
-///
-/// The import side of this project has one and it is the thing that makes the work
-/// iterable: every run ends with `FURTHER`, `same` or `BACK`, so a change either moved
-/// something or it did not, and nobody has to hold two numbers in their head between
-/// runs. The shader side has had the same loop available all along - rank what blocks,
-/// implement the top entry, run again - and no way to say whether it worked except
-/// reading two figures off consecutive screens.
-///
-/// This is that missing half. It is deliberately the *same vocabulary*, because they are
-/// the same loop pointed at different material.
+/// Gives the shader corpus the same `FURTHER`, `same` or `BACK` verdict as the import
+/// side (D129), so each change to the translator reads as moved or not.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     /// Shaders in the corpus every instruction of which translates.
@@ -188,19 +131,15 @@ pub struct Summary {
     pub instructions: usize,
     /// Whether `complete` counts shaders a translator was actually run over.
     ///
-    /// The field exists so two runs measured differently are not compared. It was added
-    /// when `complete` stopped meaning "every opcode is supported" and started meaning
-    /// "a translation succeeded", which moved this corpus from two to zero without a line
-    /// of the translator changing - and the comparison called that `BACK`, a regression
-    /// that had not happened. A stored record from before the change carries `false` by
-    /// default, which is exactly what it measured.
+    /// Runs measured differently are not compared: a count of opcode-supported shaders
+    /// and a count of translated shaders differ without the translator changing. A
+    /// stored record without the field reads `false`, which is what it measured.
     #[serde(default)]
     pub attempted: bool,
     /// What still blocks something, by name where one is known.
     ///
-    /// Kept so a run can say *which* blocker went away, not only that the count fell. A
-    /// count that stays the same while the contents change is a real thing - one blocker
-    /// implemented, another uncovered behind it - and it reads as no progress.
+    /// Names which blocker went away: an unchanged count can hide one blocker implemented
+    /// and another uncovered behind it.
     pub blockers: Vec<String>,
 }
 
@@ -218,8 +157,7 @@ pub struct Movement {
     /// Blockers that were not there last time and are now.
     ///
     /// Not a regression: implementing one blocker routinely uncovers the next instruction
-    /// in a shader that could not be reached past it. Reported separately so that reads
-    /// as progress rather than as breakage.
+    /// in a shader, and it is reported separately so it reads as progress.
     pub uncovered: Vec<String>,
 }
 
@@ -230,7 +168,7 @@ pub enum Verdict {
     FirstRun,
     /// More shaders translate completely, or more instructions do.
     Further,
-    /// Fewer. Worth knowing immediately rather than three changes later.
+    /// Fewer, reported on the run that caused it.
     Back,
     /// Nothing moved.
     Same,
@@ -239,9 +177,7 @@ pub enum Verdict {
 impl Verdict {
     /// The label a run prints beside the summary.
     ///
-    /// Loud for the ones that matter and quiet for the ones that do not, matching the
-    /// import side exactly - `FURTHER` is the only thing this project is trying to
-    /// produce, so it should be findable by eye in a wall of output.
+    /// Matches the import side's labels; `FURTHER` is loud so it stands out in output.
     pub const fn label(self) -> &'static str {
         match self {
             Self::FirstRun => "",
@@ -273,10 +209,8 @@ impl Summary {
 
     /// Compares this run with the previous one.
     ///
-    /// **Completeness first, instructions second.** A run that translates one more whole
-    /// shader has moved further than one that translates three more instructions across
-    /// shaders that still do not run, because a shader is the unit that can be checked
-    /// against hardware and an instruction is not.
+    /// Completeness first, instructions second: a whole shader is the unit that can be
+    /// checked against hardware.
     pub fn movement(&self, previous: Option<&Self>) -> Movement {
         let Some(previous) = previous else {
             return Movement {
@@ -288,11 +222,8 @@ impl Summary {
             };
         };
 
-        // **Two runs that measured different things are not compared.** Reporting a
-        // delta between a count of shaders whose opcodes were all supported and a count
-        // of shaders that actually translate names a movement neither run observed, and
-        // this project has a rule about a message coming from the branch that determined
-        // it. There is nothing to compare against, which is what `FirstRun` says.
+        // Two runs that measured different things are not compared; a delta between
+        // them names a movement neither observed.
         if self.attempted != previous.attempted {
             return Movement {
                 verdict: Verdict::FirstRun,
@@ -358,13 +289,10 @@ impl CorpusCoverage {
 
     /// Folds one shader's decode in, with no translation attempted.
     ///
-    /// `supported` answers whether a translator can emit code for a given kind.
-    /// Passing a closure that always returns `false` gives a pure decode census,
-    /// which is the useful shape before any translator exists.
-    ///
-    /// Prefer [`observe_translated`](Self::observe_translated) wherever a translator can
-    /// actually be run: what this can report about a whole shader is a bound, and the
-    /// difference between the bound and the verdict is exactly where shaders hide.
+    /// `supported` answers whether a translator can emit code for a given kind; one
+    /// that always returns `false` gives a pure decode census. Prefer
+    /// [`observe_translated`](Self::observe_translated) wherever a translator can run,
+    /// since this reports only a bound on a whole shader.
     pub fn observe(
         &mut self,
         id: &str,
@@ -394,8 +322,7 @@ impl CorpusCoverage {
             let key = OpcodeKey {
                 encoding: instruction.encoding,
                 // For an unrecognised family the opcode field is meaningless, so the
-                // top byte stands in - it groups unknowns by their encoding space
-                // instead of collapsing them all together.
+                // top byte groups unknowns by encoding space.
                 opcode: if instruction.is_known() {
                     instruction.opcode
                 } else {
@@ -412,9 +339,8 @@ impl CorpusCoverage {
                 translatable += 1;
             }
 
-            // Only unsupported kinds are worth tracking: a supported instruction is
-            // not a blocker, and recording it would bury the list under the ones that
-            // already work.
+            // Only unsupported kinds are tracked: a supported instruction is not a
+            // blocker.
             if !is_translatable {
                 let stats = self.per_key.entry(key).or_default();
                 stats.occurrences += 1;
@@ -437,13 +363,9 @@ impl CorpusCoverage {
 
     /// Blockers, cheapest-and-most-blocking first.
     ///
-    /// This is the worklist. The top entry is the instruction whose support would unblock
-    /// the most shaders **among those that can be worked on now** - see [`Effort`] for
-    /// why that qualifier is the whole point.
-    ///
-    /// `effort_of` decides the tier. It is a parameter because this crate can see what
-    /// blocks a shader and not why: the reason lives with the translator, which keeps it
-    /// alongside the instruction it refuses.
+    /// The top entry is the instruction whose support unblocks the most shaders among
+    /// those workable now (see [`Effort`]). `effort_of` decides the tier, because the
+    /// reason an instruction is refused lives with the translator.
     pub fn ranked_blockers(&self, effort_of: impl Fn(OpcodeKey) -> Effort) -> Vec<Blocker> {
         let mut blockers: Vec<Blocker> = self
             .per_key
@@ -456,9 +378,8 @@ impl CorpusCoverage {
                 decodable: stats.decodable,
             })
             .collect();
-        // Effort first, so everything that can be done now sorts above everything that
-        // cannot. Within a tier it is shaders blocked, occurrences as a tiebreak, then
-        // the key itself so the order is total and two runs agree exactly.
+        // Effort first, then shaders blocked, occurrences, and the key itself, so the
+        // order is total and two runs agree exactly.
         blockers.sort_by(|a, b| {
             a.effort
                 .cmp(&b.effort)
@@ -476,16 +397,15 @@ impl CorpusCoverage {
 
     /// Shaders that could be translated in full.
     ///
-    /// The headline number, and the only one that maps onto something visible: a
-    /// shader is either translatable or it is not, and partial credit renders nothing.
+    /// The headline number: partial support for a shader renders nothing.
     pub fn complete_shaders(&self) -> usize {
         self.shaders.iter().filter(|s| s.is_complete()).count()
     }
 
     /// Shaders whose decode could not be trusted.
     ///
-    /// Reported separately because it usually indicates a table problem rather than
-    /// an unsupported instruction, and the two need different work.
+    /// Reported separately because it usually indicates a table fault rather than an
+    /// unsupported instruction.
     pub fn untrustworthy_shaders(&self) -> usize {
         self.shaders.iter().filter(|s| !s.trustworthy).count()
     }
@@ -496,8 +416,8 @@ mod tests {
 
     /// A summary with the figures a test cares about and defaults elsewhere.
     ///
-    /// Measured by translation, because that is what a run does now; the one test about
-    /// comparing across a change of basis builds its own.
+    /// Measured by translation; the test comparing across a change of basis builds its
+    /// own.
     fn summary(complete: usize, translatable: usize, blockers: &[&str]) -> super::Summary {
         super::Summary {
             complete,
@@ -509,12 +429,7 @@ mod tests {
         }
     }
 
-    /// **Two runs that measured different things report no comparison, not a regression.**
-    ///
-    /// The estimate counts shaders whose every opcode is supported; the verdict counts
-    /// shaders that translate. This corpus went from two to zero the day it started asking
-    /// the translator, with nothing in the translator changed - and a plain delta called
-    /// that `BACK`, which names a movement neither run observed.
+    /// Two runs that measured different things report no comparison, not a regression.
     #[test]
     fn a_run_measured_differently_from_the_last_is_not_compared_with_it() {
         let estimated = super::Summary {
@@ -535,14 +450,14 @@ mod tests {
         );
     }
 
+    /// A first run reports `FirstRun`, not `same`.
     #[test]
     fn a_run_with_nothing_to_compare_against_says_so() {
-        // Rather than reporting `same`, which would claim a comparison that did not
-        // happen and read as "your change did nothing".
         let now = summary(7, 112, &["exp"]);
         assert_eq!(now.movement(None).verdict, super::Verdict::FirstRun);
     }
 
+    /// One more whole shader is `FURTHER`, and the cleared blocker is named.
     #[test]
     fn one_more_whole_shader_is_further() {
         let before = summary(6, 110, &["exp", "v_fmac_f32_e32"]);
@@ -556,20 +471,17 @@ mod tests {
         assert!(movement.uncovered.is_empty());
     }
 
+    /// More translatable instructions without a whole shader is still `FURTHER`.
     #[test]
     fn more_instructions_without_a_whole_shader_is_still_further() {
-        // Partial credit renders nothing, so completeness leads - but a run that
-        // translated three more instructions has still moved, and calling that `same`
-        // would make a real change look like a wasted one.
         let before = summary(6, 110, &[]);
         let now = summary(6, 113, &[]);
         assert_eq!(now.movement(Some(&before)).verdict, super::Verdict::Further);
     }
 
+    /// Fewer complete shaders is `BACK`.
     #[test]
     fn losing_ground_is_reported_immediately() {
-        // `BACK` exists so a regression surfaces on the run that caused it rather than
-        // three changes later, when it is attributable to nothing in particular.
         let before = summary(7, 112, &[]);
         let now = summary(6, 110, &[]);
         let movement = now.movement(Some(&before));
@@ -578,12 +490,9 @@ mod tests {
         assert_eq!(movement.complete_delta, -1);
     }
 
+    /// A blocker uncovered behind a cleared one reads as progress, with both named.
     #[test]
     fn a_blocker_uncovered_behind_another_is_not_a_regression() {
-        // Implementing one blocker routinely reveals the next instruction in a shader
-        // that could not be reached past it. The blocker count is unchanged and the work
-        // moved, so the two lists are reported apart - a count alone would read as
-        // nothing having happened.
         let before = summary(6, 110, &["v_fmac_f32_e32"]);
         let now = summary(6, 111, &["image_sample"]);
         let movement = now.movement(Some(&before));
@@ -593,7 +502,7 @@ mod tests {
         assert_eq!(movement.uncovered, ["image_sample"]);
     }
     use super::all_ordinary;
-    /// The built-in operand table. Every decode needs one now that operands are read.
+    /// The built-in operand table, which every decode needs.
     fn operands() -> crate::operand::OperandTable {
         crate::operand::OperandTable::builtin().expect("built-in operand table")
     }
@@ -625,12 +534,10 @@ mod tests {
         0x7E00_0000 | (opcode << 9)
     }
 
+    /// Blockers rank by shaders blocked, not raw frequency.
     #[test]
     fn ranking_is_by_shaders_blocked_not_by_raw_frequency() {
-        // The judgement the module exists to encode. Opcode 1 appears fifty times but
-        // in a single shader; opcode 2 appears three times across three shaders.
-        // Ranking by frequency would put opcode 1 first and have you spend the effort
-        // unblocking exactly one shader.
+        // Opcode 1 appears fifty times in one shader; opcode 2 once in each of three.
         let table = table();
         let mut coverage = CorpusCoverage::new();
         let never = |_| false;
@@ -657,10 +564,9 @@ mod tests {
         assert_eq!(ranked[1].occurrences, 50, "frequency is kept as context");
     }
 
+    /// A supported instruction is not a blocker.
     #[test]
     fn a_supported_instruction_is_not_a_blocker() {
-        // Otherwise the worklist fills with things that already work and the real
-        // blockers sink out of sight.
         let table = table();
         let mut coverage = CorpusCoverage::new();
         let supported = |key: OpcodeKey| key.opcode == 1;
@@ -676,10 +582,9 @@ mod tests {
         assert_eq!(ranked[0].key.opcode, 2);
     }
 
+    /// Undecodable and untranslatable blockers are reported apart.
     #[test]
     fn undecodable_and_untranslatable_are_reported_apart() {
-        // Different work: the first is usually a table fix, the second is a translator
-        // feature. Collapsing them would send someone to the wrong file.
         let table = table();
         let mut coverage = CorpusCoverage::new();
         coverage.observe(
@@ -693,10 +598,9 @@ mod tests {
         assert!(decodable.contains(&false), "the unrecognised one");
     }
 
+    /// A shader is complete only when every instruction translates.
     #[test]
     fn a_shader_counts_as_complete_only_when_every_instruction_translates() {
-        // Partial support for a shader renders nothing, so partial credit would be
-        // actively misleading about how close anything is.
         let table = table();
         let mut coverage = CorpusCoverage::new();
         let only_one = |key: OpcodeKey| key.opcode == 1;
@@ -714,11 +618,10 @@ mod tests {
         assert_eq!(coverage.complete_shaders(), 1);
     }
 
+    /// A desynchronised decode never counts as complete, since it may have missed
+    /// instructions.
     #[test]
     fn an_untrustworthy_decode_never_counts_as_complete() {
-        // A desynchronised decode might have missed instructions entirely, so
-        // "everything I saw was supported" is not the same claim as "this shader is
-        // supported".
         let table = table();
         let mut coverage = CorpusCoverage::new();
         // Unrecognised word desynchronises; supported() says yes to everything.
@@ -731,10 +634,9 @@ mod tests {
         assert_eq!(coverage.untrustworthy_shaders(), 1);
     }
 
+    /// Unrecognised instructions group by encoding space rather than one bucket.
     #[test]
     fn unrecognised_instructions_group_by_encoding_space_rather_than_collapsing() {
-        // All unknowns sharing one bucket would say "there are unknowns" and nothing
-        // about how many distinct kinds, which is what decides how much work is left.
         let table = table();
         let mut coverage = CorpusCoverage::new();
         coverage.observe(

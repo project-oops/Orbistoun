@@ -5,17 +5,9 @@ use orbistoun_service::Service;
 
 /// Asks a probe one question.
 ///
-/// # Why the answer is printed rather than interpreted
-///
-/// This is the rawest surface onto the protocol and it stays that way deliberately. It
-/// prints what came back and does not decide what it means - no grading, no knowledge
-/// entry, no judgement about whether the value is usable. Those are decisions with rules
-/// attached, and a command whose whole job is "ask the console" should not quietly make
-/// them.
-///
-/// What it will not do is flatter a non-answer. `died`, `timeout` and `lost` print as
-/// themselves and carry no value, because the probe dying is the normal case here and a
-/// tool that rendered it as a result would be the one thing this whole effort is against.
+/// The rawest surface onto the protocol: it prints what came back and does not grade it, file it or
+/// judge it. `died`, `timeout` and `lost` print as themselves with no value, since the probe dying
+/// is a normal outcome and not a result.
 pub(crate) fn cmd_ask(
     address: &str,
     key: Option<&str>,
@@ -42,18 +34,16 @@ pub(crate) fn cmd_ask(
     let answer = client.command(verb, &borrowed);
     let _ = client.bye();
 
-    // Rendering the answer as knowledge is the whole point of asking: a value that stays in
-    // a terminal has to be asked for again tomorrow. Only a `call` produces one - `read` and
-    // `report` establish other things, and pretending otherwise would file a byte count as a
-    // function's return value.
+    // Only a `call` renders as knowledge: `read` and `report` establish other things, and filing
+    // them would put a byte count where a return value belongs.
     if as_knowledge {
         return render_asked(&answer, verb, arguments, origin);
     }
 
     match answer {
         Ok(answer) => {
-            // Records that arrived before the answer - `bytes` from a read, or a report's
-            // stream - are shown, because they are frequently the point of the question.
+            // Records that arrived before the answer - `bytes` from a read, or a report's stream -
+            // are often the point of the question.
             for record in &answer.records {
                 println!("{record:?}");
             }
@@ -87,12 +77,8 @@ pub(crate) fn cmd_ask(
 
 /// Renders a live answer as the knowledge entry it would become.
 ///
-/// # Why only a `call`
-///
-/// The rule is about what a *function returns*. A `read` establishes what some memory holds
-/// and a `report` establishes a suite's results; filing either as a return value would put a
-/// byte count where a function's answer belongs. So anything else says so rather than
-/// producing a plausible entry.
+/// Only a `call`: the rule is about what a function returns. A `read` establishes memory contents
+/// and a `report` a suite's results, so anything else says so instead of producing an entry.
 fn render_asked(
     answer: &std::result::Result<
         orbistoun_probe::client::Answer,
@@ -123,10 +109,8 @@ fn render_asked(
         .first()
         .map_or_else(|| "<unknown>".to_owned(), |address| format!("{address:#x}"));
 
-    // The return kind decides whether the guest may use it, and nothing here knows it: this
-    // command was given an address, not a name. So it records only, which is the safe
-    // reading - not knowing what a function returns is exactly when handing its value over
-    // is most dangerous.
+    // The return kind decides whether the guest may use the value, and this command was given an
+    // address, not a name. So it records only, the safe reading when the return kind is unknown.
     let asked = orbistoun_probe::Asked {
         symbol,
         arguments: parsed.iter().skip(1).copied().collect(),
@@ -146,16 +130,9 @@ fn render_asked(
 
 /// Drives a live session and writes the transcript out.
 ///
-/// # Why the file is the point
-///
-/// The session is the interface; the corpus is the product. A run that answers questions
-/// and leaves nothing on disk has produced nothing, and everything downstream - grading,
-/// findings, knowledge entries - reads files rather than sockets. So this connects, runs
-/// the probe's suite, and writes what it saw.
-///
-/// The operator's assertion about the machine is written into the file as a comment,
-/// because a transcript that has to be joined against a memory of who ran it is a
-/// transcript nobody can grade later.
+/// Everything downstream - grading, findings, knowledge entries - reads files, not sockets, so a
+/// session that leaves nothing on disk produced nothing. The operator's assertion about the machine
+/// is written into the file as a comment so the transcript can be graded later.
 pub(crate) fn cmd_session(
     address: &str,
     key: Option<&str>,
@@ -181,14 +158,12 @@ pub(crate) fn cmd_session(
         .map_err(|e| anyhow::anyhow!("negotiating with {address}: {e}"))?;
     println!("session {session}");
 
-    // Only what it announced. Sending a reserved verb and waiting to be refused puts a
-    // command on the wire that this probe does not implement, and on a target that faults
-    // easily that is not free.
+    // Only what the probe announced: a reserved verb it does not implement is not sent.
     if client.can(&orbistoun_probe::Capability::Report) {
         match client.report() {
             Ok(answer) => println!("report {}", answer.outcome),
-            // A command that did not answer is not an error in the client - it is the
-            // finding. It is recorded and the session continues to a clean close.
+            // A command that did not answer is the finding, not a client error. It is recorded and
+            // the session closes cleanly.
             Err(e) => println!("report failed: {e}"),
         }
     } else {
@@ -224,9 +199,7 @@ pub(crate) fn cmd_session(
 
 /// Reads a probe transcript and reports what it establishes.
 ///
-/// Deliberately read-only and deliberately file-based. A gate that needs a console plugged
-/// in is a gate that fails for everyone else, so the corpus is the interface and the socket
-/// is somebody else's problem (D207).
+/// Read-only and file-based, so the gate needs no hardware attached (D207).
 pub(crate) fn cmd_probe(
     path: &std::path::Path,
     device: Option<String>,
@@ -241,20 +214,14 @@ pub(crate) fn cmd_probe(
     let transcript = orbistoun_probe::Transcript::read(&text)
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
 
-    // The operator's assertion, or the absence of one. Nothing here reads the machine
-    // identity off the records: a probe running inside an emulator reports that emulator's
-    // version as the platform's, so `target|console` on the wire is a claim somebody typed
-    // and not evidence of anything.
+    // The operator's assertion, or its absence. A probe inside an emulator reports that emulator's
+    // version as the platform's, so `target|console` on the wire is a claim, not evidence.
     let origin = if let Some(device) = device {
         {
-            // One question, not two. A name this project knows to be a stand-in stays one
-            // without the operator saying so twice; anything else is taken at its word only
-            // when `--is-target` says so.
-            //
-            // The list is of stand-ins rather than targets on purpose: an unrecognised name
-            // defaults to *not the target*, so an emulator nobody has listed is demoted
-            // rather than promoted. A wrong demotion is recoverable; the other direction is
-            // the one that corrupts a knowledge base.
+            // A name known to be a stand-in stays one; anything else is the target only when
+            // `--is-target` says so. The list names stand-ins rather than targets, so an unlisted
+            // emulator is demoted: a wrong demotion is recoverable, a wrong promotion corrupts the
+            // knowledge base.
             let target = is_target && !orbistoun_probe::Origin::is_known_stand_in(&device);
             if is_target && !target {
                 println!("note      `{device}` is a known stand-in, so --is-target was ignored");
@@ -263,9 +230,8 @@ pub(crate) fn cmd_probe(
         }
     } else {
         {
-            // Nothing typed, nothing claimed. This is the safe default and the common case:
-            // the session is recorded in full and every result grades as an assumption,
-            // which is exactly what "nobody said what this ran on" means.
+            // Nothing asserted, nothing claimed: the session is recorded in full and every result
+            // grades as an assumption.
             if is_target {
                 println!("note      --is-target names nothing without --device, so it was ignored");
             }
@@ -284,8 +250,8 @@ pub(crate) fn cmd_probe(
         return print_knowledge(&transcript, &origin);
     }
 
-    // Facts first, and named. A count says how much was learned; this says what, and a
-    // function with a measured return value is the only form this project can act on.
+    // Facts first, and named: a function with a measured return value is the form this project can
+    // act on.
     let findings = transcript.findings(&origin);
     let facts: Vec<_> = findings.iter().filter(|f| f.is_fact()).collect();
     if !facts.is_empty() {
@@ -313,10 +279,8 @@ pub(crate) fn cmd_probe(
         print_divergences(&transcript, reference)?;
     }
 
-    // Symbols, separately from results, but graded the same way and by the same origin.
-    // They used to be printed ungraded on the reasoning that a name resolving on a stand-in
-    // is still spelled correctly - which is the stand-in's mined name list speaking, not the
-    // platform (D246).
+    // Symbols, separately from results, graded the same way by the same origin: a name resolving on
+    // a stand-in reflects the stand-in's name list, not the platform (D246).
     let symbols = transcript.symbols(&origin);
     if !symbols.is_empty() {
         let absent = symbols.iter().filter(|s| !s.present).count();
@@ -325,18 +289,15 @@ pub(crate) fn cmd_probe(
             symbols.len() - absent
         );
         for symbol in &symbols {
-            // Whichever the record carried, named for what it is. A `sym` record says how
-            // the symbol is reached and a `resolve` record says where it landed; printing
-            // either under one unlabelled bracket would make them look like one field with
-            // inconsistent contents (D245).
+            // Named for what the record carried: a `sym` record says how the symbol is reached, a
+            // `resolve` record says where it landed.
             let detail = match (&symbol.availability, &symbol.address) {
                 (Some(how), _) => format!("via {how}"),
                 (None, Some(at)) => format!("at {at}"),
                 (None, None) => "no detail recorded".to_owned(),
             };
-            // Said on the line, not inferred from the header. A fact that may source a
-            // name and one that may not look identical otherwise, and the whole naming
-            // rule turns on the difference (D242, D246).
+            // Said on the line: a fact that may source a name and one that may not otherwise look
+            // identical (D246).
             let source = if symbol.may_source_a_name() {
                 ""
             } else {
@@ -351,10 +312,8 @@ pub(crate) fn cmd_probe(
         }
     }
 
-    // A call that was announced and never concluded. Listed separately and never counted
-    // as a failure: the probe said what it was about to do and did not come back, so
-    // nothing was concluded about it. Reporting that as a failing check would be recording
-    // an outcome nobody observed.
+    // Calls that were announced and never concluded. Listed separately and never counted as
+    // failures: nothing was observed about them.
     let unfinished = transcript.attempted_without_result();
     if !unfinished.is_empty() {
         println!("\nannounced and never concluded - each one ended the probe");
@@ -365,19 +324,11 @@ pub(crate) fn cmd_probe(
     Ok(())
 }
 
-/// Prints what the run measured, per section, and decodes the one section this project
-/// can act on directly.
+/// Prints what the run measured, per section, and decodes the one section this project can act on
+/// directly.
 ///
-/// # Why the tally comes before the detail
-///
-/// `measure` is the most numerous record kind in every report this project has been given,
-/// and until D605 none of them were read at all: they parsed into `Record::Other` and were
-/// dropped, while the reader printed a record count that was perfectly correct. Nothing was
-/// wrong except that the largest thing in the file was invisible.
-///
-/// So the tally is the point. It says what a section measured *and* that this reader made
-/// nothing of it, which is the honest report of a consumer that lags its source - and it
-/// names the next thing worth teaching this command to read (principle 3).
+/// The tally says what each section measured and that this reader decoded nothing from it, so
+/// unread `measure` records stay visible and name what to teach this command next.
 fn print_measurements(
     transcript: &orbistoun_probe::Transcript,
     origin: &orbistoun_probe::Origin,
@@ -405,17 +356,11 @@ fn print_measurements(
     print_kernel_exports(&exports, service);
 }
 
-/// Prints the console's own kernel export table against the names this project holds.
+/// Prints the kernel export table the probe read, against the names this project holds.
 ///
-/// # The two things this table says that nothing else does
-///
-/// **Which hashes the platform exports at all.** A hash from an import table is one a title
-/// asked for; a hash from here is one the platform offers whether or not anything has ever
-/// imported it. That is the census a collision search can never reach (D245).
-///
-/// **Which of them are the same function.** Two hashes at one address are one function under
-/// two names, and given a name for either the other is a *variant* of it - which is a
-/// candidate a search can test, where a bare hash is not.
+/// It shows which hashes the platform exports whether or not anything imported them, a census no
+/// collision search reaches, and which hashes share an address: two hashes at one address are one
+/// function, so a name for either makes the other a testable variant.
 fn print_kernel_exports(exports: &[orbistoun_probe::KernelExport], service: &Service) {
     let name_of = |export: &orbistoun_probe::KernelExport| -> Option<&str> {
         service.symbol_name(export.nid)
@@ -423,9 +368,8 @@ fn print_kernel_exports(exports: &[orbistoun_probe::KernelExport], service: &Ser
 
     let named = exports.iter().filter(|e| name_of(e).is_some()).count();
     let addresses: std::collections::BTreeSet<u64> = exports.iter().map(|e| e.vaddr).collect();
-    // The grade is the same for every entry in the table, so it is said once rather than
-    // repeated on 2,443 lines - but it is said, because a table read off a stand-in and one
-    // read off the target are the same bytes and different evidence (D246).
+    // The grade is the same for every entry, so it is stated once: a table read off a stand-in and
+    // one read off the target are the same bytes and different evidence (D246).
     let grade = exports
         .first()
         .map_or("?", |export| export.known_by.label());
@@ -439,9 +383,8 @@ fn print_kernel_exports(exports: &[orbistoun_probe::KernelExport], service: &Ser
         println!("  no symbol database loaded, so nothing could be named");
     }
 
-    // **The naming lead, and the only part of this worth a person's attention.** An alias
-    // group with one side named says the unnamed side is a variant of a name we hold, which
-    // is the difference between a hash to guess at and a hash to derive.
+    // The naming lead: an alias group with one side named makes the unnamed side a variant of a
+    // name we hold, a hash to derive rather than guess.
     let aliases = orbistoun_probe::export_aliases(exports);
     let leads: Vec<_> = aliases
         .iter()
@@ -472,20 +415,9 @@ fn print_kernel_exports(exports: &[orbistoun_probe::KernelExport], service: &Ser
 
 /// Whether the kernel export table answers a hash the corpus could not name.
 ///
-/// # Why this is the question, and not "how many are unnamed"
-///
-/// The table carries 2,443 hashes and this project can name 2,231 of them. **The 212 it cannot are
-/// not the interesting set** - they are names orbistoun has no vocabulary for and no guest has
-/// asked about. The interesting set is the intersection: a hash a *running guest* calls, that this
-/// project cannot name, and that the console's own export table holds an address for.
-///
-/// Four such hashes exist in this corpus. One is `libkernel::0x04df812afad225d7`, which PPSA28061
-/// calls and then `abort`s seventy-seven bytes later - a check-and-give-up whose only blocker is
-/// the name (D636). A summary line saying "212 not named" cannot answer whether that hash is one
-/// of them, which is the whole reason the table was asked for (D642).
-///
-/// Silent when the table answers none of them, because that is the ordinary case and a line that
-/// fires every run is one people learn to skip.
+/// The useful set is the intersection: a hash a running guest calls, that this project cannot name,
+/// and that the export table holds an address for. A count of unnamed exports cannot say whether a
+/// given wanted hash is among them. Silent when the table answers none.
 fn print_wanted_exports(
     exports: &[orbistoun_probe::KernelExport],
     service: &Service,
@@ -508,8 +440,8 @@ fn print_wanted_exports(
         found.len()
     );
     for (label, nid, vaddr) in &found {
-        // **The address, because that is what makes it a lead.** Another hash at the same address
-        // is an alias, and an alias with a named side names this one.
+        // The address is what makes it a lead: another hash at the same address is an alias, and an
+        // alias with a named side names this one.
         let alias = exports
             .iter()
             .filter(|e| e.vaddr == *vaddr && e.nid.as_raw() != *nid)
@@ -523,12 +455,9 @@ fn print_wanted_exports(
     }
 }
 
-/// Hashes a guest here has actually called and nothing can name, from the persisted traces.
+/// Hashes a guest here has called and nothing can name, from the persisted traces.
 ///
-/// **The intersection is the point.** A kernel export table this project cannot fully name is
-/// ordinary; a hash a *running guest* called, that nothing can name, and that the table holds an
-/// address for, is a lead. Read from the same traces `worklist` ranks, so the two agree about
-/// what "unnamed" means (D642).
+/// Read from the same traces `worklist` ranks, so the two agree on what "unnamed" means.
 fn hashes_a_guest_wanted(paths: &orbistoun_paths::Paths) -> Vec<(String, u64)> {
     let Ok(entries) = std::fs::read_dir(paths.traces_dir()) else {
         return Vec::new();
@@ -559,14 +488,9 @@ fn hashes_a_guest_wanted(paths: &orbistoun_paths::Paths) -> Vec<(String, u64)> {
 
 /// Prints the checks two transcripts disagree about, worst first.
 ///
-/// # What "worst" means here
-///
-/// A check that **passed on the reference and failed here** is a defect with a sentence attached.
-/// One that passed there and merely partially passed here is a lead. One that disagrees in any
-/// other direction is usually a difference in what was reachable, and is listed last.
-///
-/// A check only one side ran is not listed at all: that is a difference in reach, not in
-/// behaviour, and reporting it as a defect buries the ones that are (D622).
+/// A check that passed on the reference and failed here is a defect; one that passed there and
+/// partially passed here is a lead; any other disagreement is usually a difference in reach and is
+/// listed last. A check only one side ran is not listed: that is reach, not behaviour.
 fn print_divergences(
     subject: &orbistoun_probe::Transcript,
     reference: &std::path::Path,
@@ -593,10 +517,8 @@ fn print_divergences(
         return Ok(());
     }
     let groups = group_divergences(&diverged);
-    // The count of the one class that is unambiguously a defect, **and how many distinct
-    // things it is saying**. Ninety-nine of one sweep's hundred and fifteen were the same
-    // sentence about a different absent library, and "115 defects, each with its own words"
-    // was true of sixteen of them. A count of items is not a count of findings (D624).
+    // The count of defects, and how many distinct sentences they carry: many are often the same
+    // sentence about different absent libraries.
     let defects = diverged
         .iter()
         .filter(|d| d.reference == Status::Pass && d.subject == Status::Fail)
@@ -628,10 +550,8 @@ struct DivergenceGroup<'a> {
 
 /// Collects divergences that differ only in which check said them.
 ///
-/// **Ordered smallest group first**, inside each transition class in the order the classes
-/// first appear. A finding one check made is the specific one; a finding ninety-nine made is a
-/// census of what this build does not have, and printing it first buries the other sixteen -
-/// which is the same reason a check only one side ran is not listed at all (D622, D624).
+/// Ordered smallest group first within each transition class, in the order classes first appear: a
+/// finding one check made is specific, and a large group is a census of what this build lacks.
 fn group_divergences<'a>(diverged: &'a [orbistoun_probe::Divergence]) -> Vec<DivergenceGroup<'a>> {
     let mut order: Vec<(&orbistoun_probe::Status, &orbistoun_probe::Status)> = Vec::new();
     let mut groups: Vec<DivergenceGroup<'a>> = Vec::new();
@@ -664,9 +584,8 @@ fn group_divergences<'a>(diverged: &'a [orbistoun_probe::Divergence]) -> Vec<Div
 
 /// Prints one group: the transition, the sentence, and who said it.
 ///
-/// A group of one reads exactly as it always did. A larger one leads with its size, because
-/// the size is the finding - "ninety-nine libraries are absent" is one fact about the build,
-/// not ninety-nine facts about ninety-nine libraries.
+/// A larger group leads with its size, because the size is the finding: one fact about the build,
+/// not one per library.
 fn print_divergence_group(group: &DivergenceGroup<'_>) {
     /// How many members of a family to name before summarising the rest.
     const NAMED: usize = 3;
@@ -698,16 +617,10 @@ fn print_divergence_group(group: &DivergenceGroup<'_>) {
 
 /// Prints what the target says about itself, marked as self-reported.
 ///
-/// # Why the state is shown and not just the value
-///
-/// All three states can read `unknown` and they are three different findings: the platform
-/// has no such query, the probe has not wired one up yet, or here is a real number. A
-/// display that collapsed them would show one blank where there are three, and only one of
-/// them is anybody's bug.
-///
-/// Marked as the target's own account throughout. Inside an emulator every field answers as
-/// that emulator chooses, so none of this is machine identity - that is asserted by the
-/// operator and appears above, separately and labelled.
+/// Three states can all read `unknown` - the platform has no such query, the probe has not wired
+/// one, or a real value - and only one is anybody's defect. Inside an emulator every field answers
+/// as the emulator chooses, so this is not machine identity; that is the operator's assertion,
+/// printed separately.
 fn print_self_report(transcript: &orbistoun_probe::Transcript) {
     use orbistoun_probe::Confidence;
 
@@ -726,18 +639,9 @@ self-reported by the target (not evidence of what it is)"
             Confidence::Absent => "  [this platform has no such query]",
             Confidence::Unrecognised(other) => &format!("  [state {other:?} - unrecognised]"),
         };
-        // `generation` carries two readings a display can get wrong, so both are named
-        // here rather than left in a document the reader does not have open.
-        //
-        // `both` is a positive observation - two driver stacks present - and it
-        // deliberately names no console, because presence is not implementation.
-        //
-        // The parenthetical is **evidence, not recency**: `agc` and `gnm` are the graphics
-        // drivers the inference keyed on. It used to read `(current)` / `(previous)`, which
-        // stops being true the day a sixth generation ships and cannot be corrected in an
-        // archived report (obSCEne D147). Nothing here parsed those words - the value is
-        // rendered verbatim - so the change needed no code; the note is so a reader does
-        // not take a driver name for a version.
+        // `generation` has two readings a display can get wrong. `both` means two driver stacks are
+        // present and names no hardware, because presence is not implementation. The parenthetical
+        // names the graphics drivers the inference keyed on (`agc`, `gnm`) - evidence, not recency.
         let note = if field.field == "generation" {
             match field.value.as_str() {
                 "both" => "  [two driver stacks present; this names no console]",
@@ -753,11 +657,10 @@ self-reported by the target (not evidence of what it is)"
     }
 }
 
-/// Prints each area of the platform and how much of it came out green.
+/// Prints each area of the platform and how much of it passed.
 ///
-/// A single total says how much was checked and nothing about what is *understood*. The
-/// same count spread thinly across every area and concentrated in one are completely
-/// different situations, and only the second means a subsystem can be relied on.
+/// A single total says how much was checked, not what is understood; the same count spread thin or
+/// concentrated in one area are different situations.
 fn print_sections(transcript: &orbistoun_probe::Transcript) {
     let sections = transcript.sections();
     if sections.is_empty() {
@@ -769,9 +672,7 @@ fn print_sections(transcript: &orbistoun_probe::Transcript) {
         .count();
     println!("\nareas {green} of {} wholly green", sections.len());
     for section in &sections {
-        // A skip is shown rather than folded into the total, because it is a check that
-        // did not run - the section did not establish what it claims to, and rounding a
-        // skip up is how a subsystem gets relied on for something nobody tested.
+        // A skip is shown, not folded into the total: it is a check that did not run.
         let counts = [
             ("pass", section.pass),
             ("partial", section.partial),
@@ -779,9 +680,8 @@ fn print_sections(transcript: &orbistoun_probe::Transcript) {
             ("skip", section.skip),
         ]
         .into_iter()
-        // `pass` is shown even at zero: a section reporting no passes is the interesting
-        // case, and omitting the number would leave it looking like a section with no
-        // checks rather than one where nothing worked.
+        // `pass` is shown even at zero, so a section where nothing passed does not look like a
+        // section with no checks.
         .filter(|(label, count)| *count > 0 || *label == "pass")
         .map(|(label, count)| format!("{count} {label}"))
         .collect::<Vec<_>>()
@@ -799,10 +699,8 @@ fn print_sections(transcript: &orbistoun_probe::Transcript) {
     }
 }
 
-/// Prints what produced the answers, before any of the answers.
-///
-/// First and not as a footnote. A number read without knowing which machine produced it is
-/// the failure this project has already paid for once.
+/// Prints what produced the answers, before any of the answers: a number is meaningless without the
+/// machine that produced it.
 fn print_origin(transcript: &orbistoun_probe::Transcript, origin: &orbistoun_probe::Origin) {
     println!("machine {} (operator-asserted)", origin.describe());
     if origin.is_target {
@@ -817,9 +715,7 @@ fn print_origin(transcript: &orbistoun_probe::Transcript, origin: &orbistoun_pro
 
     for session in &transcript.sessions {
         println!("session {}", session.session);
-        // What produced the answers, printed first and not as a footnote. A number read
-        // without knowing which device produced it is the failure this project has already
-        // paid for once.
+        // What produced the answers, printed first.
         for (key, value) in &session.parts {
             println!("  {key:<9} {value}");
         }
@@ -830,10 +726,8 @@ fn print_origin(transcript: &orbistoun_probe::Transcript, origin: &orbistoun_pro
             .collect();
         capabilities.sort();
         println!("  can {}", capabilities.join(", "));
-        // What the session claimed, printed as a claim. It is worth seeing next to the
-        // operator's assertion precisely when the two disagree - an emulator announcing
-        // `console` under an operator who said otherwise is the case this whole
-        // distinction exists for.
+        // What the session claimed, printed as a claim: it matters most when it disagrees with the
+        // operator's assertion.
         if let Some(claimed) = session.claimed_target() {
             println!("  claimed {claimed} (the probe's own word, not evidence)");
         }
@@ -847,8 +741,8 @@ fn print_knowledge(
     origin: &orbistoun_probe::Origin,
 ) -> Result<()> {
     let findings = transcript.findings(origin);
-    // Grouped by library, because that is how the knowledge base is filed, and
-    // rendered through its own serialiser so what is printed is what would be written.
+    // Grouped by library, as the knowledge base is filed, and rendered through its own serialiser
+    // so what is printed is what would be written.
     let mut by_library: std::collections::BTreeMap<
         String,
         orbistoun_hle::knowledge::KnowledgeFile,

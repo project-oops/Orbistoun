@@ -1,32 +1,12 @@
 //! Source and output modifiers on the vector ALU's long-form encoding.
 //!
-//! # Why these get their own module
-//!
-//! They are not operands, so the operand solver never sees them, and they are not the
-//! opcode, so the encoding table never sees them either. They sit in bits that both
-//! layers correctly ignore - and every one of them changes the answer.
-//!
-//! `v_add_f32_e64 v0, v1, -v2` and `v_add_f32_e64 v0, v1, v2` differ by one bit and
-//! compute different things. A translator that read the operands and stopped would emit
-//! the second for both, and the shader would run, and every subtraction the compiler
-//! expressed as an addition of a negated operand would come out with the wrong sign.
-//! That is the single most likely way this crate could be quietly wrong at scale, which
-//! is why the positions below were read off a reference assembler rather than
-//! transcribed.
-//!
-//! # What is applied and what is refused
-//!
-//! `neg` and `abs` are applied - they are per-source, common, and cheap. The output
-//! multiplier is **refused**, because implementing it wrongly is worse than not implementing
-//! it and it has not appeared in a guest yet. An instruction carrying one is an error naming
-//! it, never a silent drop.
-//!
-//! `clamp` is **read, and applied only where its meaning is known** (worklog 834): on a
-//! long-form instruction whose result is a 32-bit float, in a stage whose `DX10_CLAMP` mode is
-//! known, it clamps the result to `[0, 1]`. That is how a compiler folds GLSL's
-//! `clamp(x, 0.0, 1.0)` into the instruction producing `x`, and Neverball's pixel shaders do. On
-//! an integer result the same bit saturates instead, and on every other path it is still refused
-//! by name.
+//! These bits are neither operands nor opcode, so the operand solver and encoding table
+//! ignore them, yet each changes the result: `v_add_f32_e64 v0, v1, -v2` differs from the
+//! unnegated form by one bit. The positions were read from a reference assembler. `neg` and
+//! `abs` are applied. The output multiplier is refused by name. `clamp` is applied only on a
+//! long-form instruction with a 32-bit float result, in a stage whose `DX10_CLAMP` mode is
+//! known, where it clamps to `[0, 1]` (how a compiler folds `clamp(x, 0.0, 1.0)`); on an
+//! integer result the same bit saturates, and everywhere else it is refused.
 
 use orbistoun_shader::Instruction;
 
@@ -34,11 +14,9 @@ use crate::TranslateError;
 
 /// Bit position of the first source's absolute-value flag, in the first word.
 ///
-/// **Only in the sub-encoding that has one.** The other puts a scalar destination in
-/// these same bits, and reading them there turns a carry-out register into a set of
-/// modifiers - `vcc` is 106, whose low three bits are 010, so it presents as "the second
-/// source is an absolute value". Which sub-encoding an opcode uses is a property of the
-/// opcode and nothing in the instruction says it.
+/// Only in the sub-encoding that has one. The other puts a scalar destination in these bits,
+/// and `vcc` (106, low bits 010) would read as "the second source is absolute". Which
+/// sub-encoding an opcode uses is a property of the opcode, not the instruction.
 const ABS_SHIFT: u32 = 8;
 /// Bit position of the clamp flag, in the first word.
 const CLAMP_SHIFT: u32 = 15;
@@ -66,9 +44,8 @@ impl Modifiers {
     ///
     /// # Errors
     ///
-    /// The clamp flag or a non-zero output multiplier. Both change the result, and
-    /// ignoring one produces a shader that computes something close to right - which is
-    /// harder to find than one that refuses.
+    /// The clamp flag or a non-zero output multiplier: ignoring either computes something close
+    /// to right, which is harder to find than a refusal.
     ///
     /// `has_scalar_destination` says which sub-encoding this opcode uses. When it does,
     /// there are no absolute-value flags to read: those bits are the second destination.
@@ -80,8 +57,8 @@ impl Modifiers {
     }
 
     /// Reads the modifiers as [`Modifiers::read`] does, but reports the clamp flag in
-    /// [`Modifiers::clamp`] instead of refusing it - for the one caller that applies it or refuses
-    /// it itself, knowing the instruction's result type and the stage's mode (worklog 834).
+    /// [`Modifiers::clamp`] instead of refusing it, for the caller that knows the result type
+    /// and the stage's mode.
     ///
     /// # Errors
     ///
@@ -98,9 +75,7 @@ impl Modifiers {
         has_scalar_destination: bool,
         allow_clamp: bool,
     ) -> Result<Self, TranslateError> {
-        // A short-form instruction has no second word and carries no modifiers. Absent
-        // is the same as none here, which is the one place in this crate where that is
-        // true - the flags genuinely do not exist in the short encoding.
+        // A short-form instruction has no second word and no modifier flags.
         let Some(second) = instruction.second_word else {
             return Ok(Self::default());
         };

@@ -1,13 +1,10 @@
 //! Naming the way a worker died.
 //!
-//! Guest code faulting is the expected outcome for a long time yet, so the exit status
-//! of a dead worker is a primary diagnostic rather than an edge case. A bare number
-//! means nothing to a reader; "access violation" says immediately that the guest
-//! dereferenced something unmapped, and "breakpoint" says a trap instruction was
-//! executed - which is a different bug entirely, though *which* bug needs the address
-//! and this table has none of them (D576).
+//! The exit status of a dead worker is a primary diagnostic, so it is rendered as the fault it
+//! names rather than a bare number. The table is keyed on the exit code alone and has no
+//! address, so it never says which cause a breakpoint had.
 //!
-//! Pure, and therefore testable without killing anything - the D016 pattern.
+//! Pure, and testable without killing anything (D016).
 
 /// A fault this maps by name, with the platform code that identifies it.
 ///
@@ -35,10 +32,8 @@ const FAULTS: &[(u32, &str)] = &[
     (0xC000_008C, "array bounds exceeded"),
     (
         0x8000_0003,
-        // No address reaches here - this table is keyed on the exit code alone - so it
-        // must not name a cause. Stub padding is one thing a breakpoint can be; a trap
-        // the guest executed itself is another, and the fault record is what tells them
-        // apart (D576).
+        // No address reaches this table, so it names no cause: the fault record tells stub
+        // padding from a trap the guest executed.
         "breakpoint - a trap instruction; the fault record says whether it was stub padding",
     ),
 ];
@@ -116,10 +111,9 @@ pub fn describe(code: Option<i32>, signal: Option<i32>) -> String {
 mod tests {
     use super::describe;
 
+    /// A memory fault is named rather than left as a number.
     #[test]
     fn a_memory_fault_is_named_rather_than_left_as_a_number() {
-        // The commonest outcome by far while the operating system underneath the guest
-        // is still being written. A bare number tells a reader nothing.
         #[cfg(windows)]
         let described = describe(Some(0xC000_0005_u32 as i32), None);
         #[cfg(unix)]
@@ -131,12 +125,10 @@ mod tests {
         );
     }
 
+    /// A breakpoint reads as a trap instruction, not a bad pointer, without naming which kind of
+    /// trap it was.
     #[test]
     fn a_breakpoint_is_distinguished_from_a_memory_fault() {
-        // Different bug entirely: a trap instruction rather than a bad pointer.
-        // Collapsing the two would send a reader looking in the wrong place. What this
-        // does *not* assert is which kind of breakpoint it was - that needs the address,
-        // which reaches the fault record and not this table (D576).
         #[cfg(windows)]
         let described = describe(Some(0x8000_0003_u32 as i32), None);
         #[cfg(unix)]
@@ -148,11 +140,10 @@ mod tests {
         );
     }
 
+    /// An unrecognised status is reported as its number: hex on Windows, where exception codes
+    /// are written that way, decimal on Unix.
     #[test]
     fn an_unknown_status_still_reports_the_number() {
-        // Guessing would be worse than saying plainly that it is not recognised.
-        // Windows renders these in hex, matching how its exception codes are written
-        // everywhere else; Unix exit codes are conventionally decimal.
         let described = describe(Some(42), None);
         #[cfg(windows)]
         let expected = "2a";
@@ -161,10 +152,9 @@ mod tests {
         assert!(described.contains(expected), "got: {described}");
     }
 
+    /// A clean exit without a verdict is reported as a worker defect, distinct from a fault.
     #[test]
     fn a_clean_exit_without_a_verdict_is_reported_as_such() {
-        // Distinct from a fault: the worker chose to stop and simply did not say why,
-        // which is a bug in the worker rather than in the guest.
         let described = describe(Some(0), None);
         assert!(described.contains("cleanly"), "got: {described}");
     }

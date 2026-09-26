@@ -1,33 +1,12 @@
 //! The parts of the C++ runtime that can be answered without an unwinder.
 //!
-//! # The dividing line
-//!
-//! A guest's C++ runtime asks this layer for three quite different things, and only two of
-//! them can be given honestly:
-//!
-//! - **Allocation.** `operator new` in its aligned and `nothrow` forms is the ordinary heap
-//!   wearing a C++ name, and is implemented here as such.
-//! - **Ending the program.** `std::terminate`, a pure virtual call, and the runtime's family
-//!   of throw helpers all **never return**. They can therefore be answered exactly, by ending
-//!   the run and saying which one it was - see below.
-//! - **Exceptions themselves** - `__cxa_throw`, `__cxa_begin_catch`, the personality routine,
-//!   the vtables and type-info objects. These need a stack unwinder, which this project does
-//!   not have, and they are deliberately left unimplemented (see the worklog for the list).
-//!
-//! # Why a throw is a stop rather than a return
-//!
-//! The runtime's `_Xlength_error`, `_Xout_of_range`, `_Xbad_alloc` and their siblings exist to
-//! throw a specific exception. Their C++ declarations are `[[noreturn]]`, and the caller's code
-//! is generated on that promise: the instruction after the call is unreachable, and the state
-//! the caller was in is not one it expects to continue from.
-//!
-//! So there are two possible answers and only one of them is honest. **Returning** lets the
-//! guest carry on from a point its own compiler proved unreachable, with whatever half-built
-//! object provoked the throw - a silent wrong continuation, which is the failure principle 3
-//! exists to prevent. **Stopping** cannot deliver the exception to a `catch` the guest may
-//! have had, and says so plainly instead. A guest that would have caught it is reported as
-//! stopping at a throw it could have handled, which is a legible gap; the alternative is an
-//! illegible one (D473).
+//! `operator new` in its aligned and `nothrow` forms is the ordinary heap under a C++ name.
+//! `std::terminate`, a pure virtual call and the runtime's throw helpers never return, so they
+//! end the run and name which one it was: their callers are compiled on the `[[noreturn]]`
+//! promise, and returning would continue from a point the compiler proved unreachable. A guest
+//! that would have caught the exception is reported as stopping at the throw (D473).
+//! `__cxa_throw`, `__cxa_begin_catch`, the personality routine and the type-info objects need a
+//! stack unwinder and are not implemented here.
 //!
 //! Reference: the Itanium C++ ABI (<https://itanium-cxx-abi.github.io/cxx-abi/abi.html>) for
 //! the `__cxa_*` names and `_Unwind_Resume`, and ISO/IEC 14882 for `std::terminate` and the
@@ -39,8 +18,7 @@ use crate::{c_len, ptr};
 
 /// Ends the run, naming the C++ operation that could not be completed.
 ///
-/// One place, so every never-returning entry point reports the same way and none of them can
-/// quietly grow a `return` instead.
+/// One place, so every never-returning entry point reports the same way.
 fn stop_for(what: &str, detail: Option<String>) -> u64 {
     let line = detail.map_or_else(
         || format!("the guest reached {what}, which does not return"),
@@ -56,7 +34,7 @@ fn message(address: u64) -> Option<String> {
     if address == 0 {
         return None;
     }
-    // SAFETY: a guest-supplied string under the identity mapping (D014), bounded.
+    // SAFETY: a guest-supplied string under the identity mapping, bounded.
     let len = unsafe { c_len(address) };
     // SAFETY: `c_len` established `len` readable bytes.
     let bytes = unsafe { std::slice::from_raw_parts(ptr(address).cast_const(), len) };
@@ -65,9 +43,8 @@ fn message(address: u64) -> Option<String> {
 
 /// `operator new(size, nothrow_t)` - allocation that answers null rather than throwing.
 ///
-/// Reference: ISO/IEC 14882 [new.delete.single]. **The one `operator new` that is allowed to
-/// answer null**, which is why it is worth having separately: the throwing form's caller does
-/// not check, and this form's caller does.
+/// Reference: ISO/IEC 14882 [new.delete.single]. The one `operator new` whose caller checks
+/// for null.
 fn operator_new_nothrow(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::allocate(usize::try_from(args[0]).unwrap_or(usize::MAX), 0)
 }
@@ -83,18 +60,15 @@ fn operator_new_aligned(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `operator delete(pointer, align_val_t)` - the counterpart to the aligned `new`.
 ///
-/// The alignment is ignored for the same reason a sized delete's size is: the heap records
-/// what it handed out, and the caller's figure is at best a duplicate of it.
+/// The alignment is ignored, as a sized delete's size is: the heap records what it handed out.
 fn operator_delete_aligned(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::free(args)
 }
 
 /// `std::get_new_handler()` - the handler `operator new` calls when it cannot allocate.
 ///
-/// Reference: ISO/IEC 14882 [alloc.errors]. **Null is the correct answer**, not a placeholder:
-/// the standard says the initial handler is a null pointer, and nothing in this guest has
-/// called `set_new_handler` because that function is not imported. Answering an address would
-/// be handing the runtime something to call.
+/// Reference: ISO/IEC 14882 [alloc.errors]. Null is the correct answer: the initial handler
+/// is null, and `set_new_handler` is not imported.
 fn get_new_handler(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
@@ -116,9 +90,8 @@ fn pure_virtual(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `_Unwind_Resume(exception)` - continues an unwind already in progress.
 ///
-/// Reference: Itanium C++ ABI 2.5.3. Reached only from a landing pad that has finished its
-/// cleanup and wants the unwind to carry on. There is no unwinder here to carry it on with,
-/// and returning would resume the guest **inside a frame that has already been torn down**.
+/// Reference: Itanium C++ ABI 2.5.3. Reached from a landing pad that finished its cleanup;
+/// returning would resume the guest inside a frame already torn down.
 fn unwind_resume(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     stop_for("_Unwind_Resume with no unwinder to resume into", None)
 }
@@ -155,9 +128,8 @@ fn xbad_function_call(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `std::_Throw_C_error(code)` - throws the `std::system_error` for a C error number.
 ///
-/// The number is reported rather than translated: the mapping from it to a condition is the
-/// runtime's own, and naming a condition this layer has not established would be inventing
-/// one. The raw value is what a reader can look up.
+/// The raw number is reported, not translated: the mapping to a condition is the runtime's
+/// own.
 fn throw_c_error(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     stop_for(
         "a throw of std::system_error",

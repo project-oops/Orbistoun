@@ -4,17 +4,9 @@
 //! cargo test -p orbistoun-turn --release --test turn -- --ignored --nocapture
 //! ```
 //!
-//! # What this is proving
-//!
-//! `docs/THE_LOOP.md` marks two boxes as a person's: *read the top finding* and *write
-//! the code*. This runs a real title, takes the findings the run produced, and does
-//! everything the first box would have led to - without the person.
-//!
-//! What it deliberately does **not** do is the second box. Every step it declines to take
-//! says why, in a sentence, and "a function needs implementing" is the commonest of them.
-//! That is the honest shape of the result: the loop can now reach the wall and exhaust
-//! every question it knows how to ask about it, and then it stops, because what comes next
-//! is somebody writing code.
+//! This runs a real title, takes the findings the run produced and does everything reading them
+//! would lead to, without a person. Writing code is not automated: every step it declines says why,
+//! and "a function needs implementing" is the commonest.
 
 use orbistoun_report::diagnose::findings;
 use orbistoun_report::trace::CallTrace;
@@ -24,6 +16,7 @@ use orbistoun_turn::turn::{Step, plan, turn};
 const TITLE: &str = "../../titles/PPSA02664-app0/eboot.bin";
 const BINARY: &str = "../../target/release/orbistoun-cli.exe";
 
+/// One turn runs a real title's plan through `turn::turn` and produces work from its findings.
 #[test]
 #[ignore = "boots a commercial title many times; opt-in via --ignored"]
 fn one_turn_with_nobody_reading_the_findings() {
@@ -40,7 +33,7 @@ fn one_turn_with_nobody_reading_the_findings() {
     let mut trial = GuestTrial::new(BINARY, TITLE, &traces)
         .with_env(orbistoun_env::DATA_DIR.name, data.path().to_string_lossy());
 
-    // The run itself. Everything after this is what a person would have done with it.
+    // The run itself; everything after this is what a person would have done with it.
     let baseline = trial.spawn(&[]).expect("a baseline run");
     let trace = newest_trace(&traces);
     let found = findings(&trace);
@@ -67,10 +60,8 @@ fn one_turn_with_nobody_reading_the_findings() {
     );
 
     let started = std::time::Instant::now();
-    // **Run the plan, rather than re-implementing it here.** This loop used to be a second
-    // copy of the dispatcher: a match over every step kind, in a test, drifting from the one
-    // in the crate. `turn::turn` is what a real caller uses, so exercising anything else
-    // proves nothing about the thing that ships (D289).
+    // Runs the plan through `turn::turn`, the function a real caller uses, rather than a second
+    // copy of the dispatcher (D289).
     let taken = turn(&mut trial, &plan).expect("the plan runs");
     for result in &taken {
         eprintln!("  {}", result.say());
@@ -87,10 +78,8 @@ fn one_turn_with_nobody_reading_the_findings() {
         started.elapsed().as_secs_f64()
     );
 
-    // **The assertion is that it got somewhere, not that it got anywhere in particular.**
-    // What the guest does is a fact about the guest. What is this code's to guarantee is
-    // that a run with findings produced work rather than an empty plan - the failure this
-    // whole module exists to prevent is a dispatcher that quietly does nothing.
+    // Asserted: a run with findings produced work rather than an empty plan. Where the guest got to
+    // is a fact about the guest.
     assert!(!found.is_empty(), "the run produced no findings at all");
     assert!(!plan.is_empty(), "findings produced no plan");
     assert!(

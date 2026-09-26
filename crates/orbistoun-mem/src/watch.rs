@@ -1,19 +1,12 @@
-//! Whether guest memory has been written since a point (worklog 851).
+//! Whether guest memory has been written since a point.
 //!
-//! Something that keeps a copy of guest memory - the colour target a frame was last written back
-//! to, a texture's texels - has to know whether the guest has changed it since. Comparing every byte
-//! answers that exactly and costs a pass over the bytes each time it is asked, which for an 8 MB
-//! target in a title submitting fifty times a frame was a large share of every submission.
-//!
-//! The host can answer instead: guest memory is reserved write-watched, and the host keeps a record
-//! of which pages have been written - by the guest, by orbistoun, by anything in the process. This
-//! turns those records into points in time: [`mark`] says "now" for a range, [`written_since`] says
-//! whether any of its pages were written after a mark. Several askers share one record, so each
-//! harvest is kept, per page, as the epoch it was harvested in, rather than reset out from under an
-//! asker that has not looked yet.
-//!
-//! `None` means the host cannot say - the range is not write-watched, or this is not Windows - and
-//! an asker then compares the bytes, as it did before. Never an answer it did not measure.
+//! A copy of guest memory (a colour target written back at a flip, a texture's texels) has to
+//! know whether the guest changed it since. Guest memory is reserved write-watched, and the host
+//! records which pages anything in the process wrote. [`mark`] says "now" for a range and
+//! [`written_since`] says whether any of its pages were written after a mark; each harvest is
+//! kept per page as its epoch, so several askers share one host record. `None` means the host
+//! cannot say (the range is not watched, or the host is not Windows), and the asker compares
+//! bytes instead.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -170,9 +163,8 @@ mod tests {
     use crate::Protection;
     use crate::platform::reserve;
 
-    /// **A write after a mark is seen, a write before it is not, and two askers do not disturb each
-    /// other** (worklog 851) - the guard is only worth anything if it reports the write it exists to
-    /// catch, so the write is made and must be seen.
+    /// A write after a mark is seen, a write before it is not, and two askers do not disturb each
+    /// other.
     #[test]
     fn writes_after_a_mark_are_seen_and_before_it_are_not() {
         #[allow(

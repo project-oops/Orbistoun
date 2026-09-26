@@ -1,27 +1,10 @@
-//! What the loop measured, in a form somebody can send you.
+//! What the loop measured, in a form somebody can send.
 //!
-//! # Why this is evidence rather than settings
-//!
-//! `learned.toml` began as a local cache of policy the loop worked out. That is enough to run
-//! and not enough to **send**, and sending is the point: someone running orbistoun as a
-//! binary, with no repository and no source, produces exactly these measurements - and they
-//! are worth more to this project than most of what it can generate itself.
-//!
-//! The third oracle in `CLAUDE.md` is *"the guest itself - a 1-bit oracle per call site.
-//! Expensive per query (a boot)."* Expensive **per person**. A hundred people turning the loop
-//! on titles nobody here owns is the same oracle at a hundred times the rate, costing this
-//! repository nothing and holding no title data (D297).
-//!
-//! # What makes one safe to receive
-//!
-//! It is checkable. A measurement is derived from running a binary the submitter owns, is
-//! reproducible by anyone with the same title, and makes a claim that is **falsifiable by a
-//! command** - which is the standard this project already sets for writing anything down, and
-//! a stronger contribution model than reviewing a diff.
-//!
-//! A maintainer without the title cannot check one, and does not have to: it is accepted as
-//! `assumed` and promoted when somebody who owns the title confirms it. That ladder is what
-//! [`Oracle`] is for.
+//! `learned.toml` holds measurements, not settings: anyone running the orbistoun binary on a
+//! title they own produces them, with no repository and no title data changing hands (D297).
+//! A measurement is reproducible by anyone with the same title and falsifiable by a command. A
+//! maintainer without the title accepts it as `assumed`, and it is promoted when an owner of the
+//! title confirms it, which is what [`Oracle`] is for.
 
 use std::collections::HashMap;
 
@@ -44,19 +27,14 @@ pub struct Measurement {
     pub function: String,
     /// The library that declares it.
     ///
-    /// **Recorded because the loop already knew it and was dropping it.** A finding names
-    /// `libkernel::sceKernelReserveVirtualRange`; the measurement kept only the second half,
-    /// and everything downstream then had to work the first half out again. Nothing could:
-    /// the only lookup available is built *from* the knowledge files, so it can place a
-    /// function that already has an entry and never a new measurement - which is precisely
-    /// the case that needs placing (D328).
+    /// Recorded from the finding, because the only other lookup is built from the knowledge files
+    /// and cannot place a function that has no entry yet.
     #[serde(default)]
     pub library: String,
     /// Which guest demonstrated it.
     ///
-    /// **Load-bearing.** `region_bytes` is established against one title and another may index
-    /// further, so an entry that did not say which guest it came from would read as a fact
-    /// about the platform. It is a fact about a run (D297).
+    /// `region_bytes` is established against one title and another may index further, so the entry
+    /// is a fact about a run, not the platform (D297).
     pub measured: String,
     /// When, so a reader can tell a fresh claim from one that predates a rewrite.
     pub on: String,
@@ -71,15 +49,12 @@ pub struct Measurement {
     pub answers: Option<StubReturn>,
     /// A region to give the guest, and how it should arrive.
     ///
-    /// **One concept, two deliveries.** Writing a base through an argument and returning one
-    /// are the same behaviour arriving differently, which is what lets the loop try both and
-    /// compare rather than following whichever rule it happened to have (D300).
+    /// Writing a base through an argument and returning one are the same behaviour delivered
+    /// differently, so the loop can try both and compare (D300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<StubRegion>,
-    /// Claims this rests on that nothing measured.
-    ///
-    /// **Never dropped.** These were printed to a terminal and lost before this file existed,
-    /// and they are the difference between a measurement and an assertion.
+    /// Claims this rests on that nothing measured. Never dropped: they separate a measurement from
+    /// an assertion.
     #[serde(default)]
     pub assumes: Vec<String>,
 }
@@ -90,14 +65,13 @@ pub struct Measurement {
 pub enum Evidence {
     /// The guest reached code it could not reach before.
     ///
-    /// Enough only for a change to what a function **answers**. A wrong answer that buys
-    /// progress shows up as a wall that moved; a wrong write does not show up at all until
-    /// something unrelated breaks.
+    /// Enough only for a change to what a function answers: a wrong answer shows up as a moved
+    /// wall, while a wrong write shows up only when something unrelated breaks.
     Further,
     /// A conformance check covering this function passed.
     ///
-    /// Required for anything that touches guest memory - the only oracle here that says
-    /// *correct* rather than *proceeded*.
+    /// Required for anything that touches guest memory; the only oracle here that says correct
+    /// rather than proceeded.
     ConformanceCheck,
 }
 
@@ -106,8 +80,7 @@ impl Learned {
     ///
     /// # Errors
     ///
-    /// When the file exists and cannot be parsed. **Deliberately not silent**: a malformed file
-    /// that fell back to empty would look exactly like a machine that had measured nothing.
+    /// When the file exists and cannot be parsed; a malformed file never reads as empty.
     pub fn load(path: &std::path::Path) -> Result<Self, HleError> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -134,10 +107,7 @@ impl Learned {
         Ok(toml::to_string_pretty(self)?)
     }
 
-    /// Adds a measurement, replacing any earlier one for the same function.
-    ///
-    /// **Replaced rather than appended**, because two entries for one function are two claims
-    /// about the same thing and nothing here can say which is current. The newer run measured
+    /// Adds a measurement, replacing any earlier one for the same function: the newer run measured
     /// the newer emulator.
     pub fn record(&mut self, measurement: Measurement) {
         self.measurements
@@ -147,12 +117,8 @@ impl Learned {
 
     /// The policy these measurements imply.
     ///
-    /// **Derived, never stored.** A measurement is a claim about a guest and a policy is a
-    /// decision about a machine; deriving one from the other keeps the distinction that makes
-    /// the file submittable in the first place (D297).
-    ///
-    /// `default_return` is untouched - it governs every function nothing here measured, so a
-    /// file of measurements has nothing to say about it.
+    /// Derived, never stored: a measurement is a claim about a guest, a policy a decision about a
+    /// machine (D297). `default_return` is untouched, since it governs functions nothing measured.
     #[must_use]
     pub fn policy(&self) -> StubPolicy {
         let mut overrides = HashMap::new();
@@ -165,11 +131,8 @@ impl Learned {
             if let Some(region) = measurement.region {
                 regions.insert(measurement.function.clone(), region);
             }
-            // **The half this conversion used to drop.** A measurement records how it was
-            // established and the policy it implied did not, so every derived answer arrived
-            // downstream indistinguishable from one somebody typed - and the compatibility
-            // record, which asks exactly that question, could only answer "an override exists"
-            // (D557).
+            // Each answer carries how it was established into the policy, so the compatibility record can
+            // tell a measured answer from a typed one (D557).
             if measurement.answers.is_some() || measurement.region.is_some() {
                 known.insert(measurement.function.clone(), measurement.known);
             }
@@ -184,13 +147,8 @@ impl Learned {
 
     /// How this file and another disagree, function by function.
     ///
-    /// **What makes receiving one safe.** A submitted measurement is checked by re-deriving it
-    /// locally and comparing, not by trusting it - which is the same shape `audit --repair`
-    /// already has for names, and the reason a policy entry is a better contribution than a
-    /// diff (D297).
-    ///
-    /// Only the *claim* is compared - what it answers, what it writes. `on`, `by` and `measured`
-    /// differ between any two machines by construction and say nothing about agreement.
+    /// A submitted measurement is checked by re-deriving it locally and comparing (D297). Only the
+    /// claim is compared; `on`, `by` and `measured` differ between any two machines.
     #[must_use]
     pub fn disagreements(&self, other: &Self) -> Vec<Disagreement> {
         let mine: HashMap<&str, &Measurement> = self
@@ -223,9 +181,7 @@ impl Learned {
 pub enum Disagreement {
     /// This machine has no measurement for it.
     ///
-    /// **Not a refutation.** It usually means the title is absent or the run never reached the
-    /// call, and reporting it as a contradiction would turn "we did not look" into "it is
-    /// wrong" - the distinction the whole `known_by` vocabulary exists to hold.
+    /// Not a refutation: usually the title is absent or the run never reached the call.
     NotMeasuredHere {
         /// The function the submission names.
         function: String,
@@ -265,11 +221,7 @@ mod tests {
         }
     }
 
-    /// A file survives being written and read back.
-    ///
-    /// The property that makes it submittable at all: what leaves one machine is what arrives
-    /// at another, including the assumptions - which are the difference between a measurement
-    /// and an assertion.
+    /// A file survives being written and read back, assumptions included.
     #[test]
     fn a_measurement_survives_a_round_trip() {
         let mut learned = Learned::default();
@@ -337,26 +289,17 @@ mod tests {
 
         let mut unknown = Learned::default();
         unknown.record(measurement("sceBar", 0x2000));
-        // **Not a refutation.** "We never looked" and "it is wrong" are different facts.
+        // Not a refutation: "not looked at" and "wrong" are different facts.
         assert!(matches!(
             here.disagreements(&unknown).as_slice(),
             [super::Disagreement::NotMeasuredHere { .. }]
         ));
     }
 
-    /// **The provenance of a measurement survives the trip into a policy.**
+    /// The provenance of a measurement reaches the policy it implies.
     ///
-    /// This conversion is the single place a fact's origin was being dropped: a measurement
-    /// says how it was established and the policy it implied did not, so every derived answer
-    /// arrived downstream indistinguishable from one somebody typed into a file. The
-    /// compatibility record asks exactly that question and could only ever answer "an override
-    /// exists" (D557).
-    ///
-    /// # What this cannot assert
-    ///
-    /// **That the label is true.** A sweep writes `guest-observed` because that is what a sweep
-    /// can see; nothing here checks that claim, and nothing could - it is the measurement's own
-    /// account of itself. What is checked is that the account is not thrown away.
+    /// Whether the label is true is the measurement's own account; what is checked is that the
+    /// account is kept (D557).
     #[test]
     fn a_measurements_provenance_reaches_the_policy_it_implies() {
         let mut learned = Learned::default();
@@ -374,12 +317,8 @@ mod tests {
         );
     }
 
-    /// **A region counts as an entry even when nothing is answered.**
-    ///
-    /// A region writes a base into guest memory behind a byte count nothing measured - this
-    /// file's own entry says so in its `assumes`. The count that decided whether a run was
-    /// honest read `overrides.len()` and never looked at regions, so a policy that wrote memory
-    /// and answered nothing reported zero and read as an unassisted run (D557).
+    /// A region counts as an entry even when nothing is answered, so a policy that only writes
+    /// memory is not reported as an unassisted run.
     #[test]
     fn a_policy_that_only_writes_memory_is_still_a_policy_that_helps() {
         let mut learned = Learned::default();
@@ -400,11 +339,8 @@ mod tests {
         );
     }
 
-    /// **A symbol decided for two ways is one entry, not two.**
-    ///
-    /// `specific` and `propping` count symbols so they can be compared with each other and with
-    /// `imports`. Counting an answer and a region separately would report two props where one
-    /// function was helped, and the number would drift from the thing it is compared against.
+    /// A symbol decided for two ways is one entry, not two, so counts stay comparable with
+    /// `imports`.
     #[test]
     fn one_symbol_answered_and_written_is_counted_once() {
         let mut learned = Learned::default();
@@ -417,12 +353,8 @@ mod tests {
         assert_eq!(policy.propping(), 1);
     }
 
-    /// **An entry nobody labelled reads as a guess, which is the safe direction.**
-    ///
-    /// `known` is a second map beside the answers, so the two can drift - a name in `overrides`
-    /// with no entry in `known`. That case defaults to [`Oracle::Assumed`], so drift can only
-    /// ever call a run *less* honest than it was. The opposite default would let a policy become
-    /// honest by losing information, which is the failure worth designing against (D557).
+    /// An entry with no label reads as a guess, so drift between the maps can only make a run
+    /// look less honest, never more.
     #[test]
     fn an_unlabelled_answer_is_a_guess_rather_than_evidence() {
         let mut policy = crate::StubPolicy::default();
@@ -442,11 +374,7 @@ mod tests {
         );
     }
 
-    /// **A measured answer does not prop a run up.**
-    ///
-    /// The point of the whole change, stated at the level that decides it. Nothing in the
-    /// corpus is here yet - today's only learned entry is `guest-observed` - so this is the
-    /// mechanism proved against a measurement the project does not have rather than one it does.
+    /// A measured answer is knowledge rather than a prop.
     #[test]
     fn an_answer_measured_on_hardware_is_knowledge_rather_than_a_prop() {
         let mut learned = Learned::default();

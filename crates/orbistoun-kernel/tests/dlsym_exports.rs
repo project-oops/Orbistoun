@@ -1,26 +1,16 @@
-//! `sceKernelDlsym` answers for a symbol the guest's own binary exports.
+//! `sceKernelDlsym` answers for a symbol the guest's own binary exports (D517).
 //!
-//! # Why this is its own binary
-//!
-//! The hash suffix the kernel resolves against is a `OnceLock` - the loader sets it once per
-//! process, and the first setter wins. A test that sets it decides for every other test in the
-//! same binary, so this one gets its own.
-//!
-//! # What sent it here
-//!
-//! PPSA02664 asks `dlsym` for exactly one name, `scriptingGetMem`, and **its own executable
-//! exports it** - the eboot's export table has that one entry and nothing else. Orbistoun
-//! resolved `dlsym` against the thunk table alone, which holds what orbistoun implements, so
-//! the guest was told its own symbol did not exist (D517).
+//! The hash suffix the kernel resolves against is a `OnceLock` set once per process, first
+//! setter wins, so this test has a binary of its own.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
-/// A suffix of this test's own, so the hash it computes and the hash the kernel computes
-/// agree for a reason rather than by both happening to use the shipped one.
+/// A suffix of this test's own, so the test's hash and the kernel's agree because they share
+/// it, not because both use the shipped one.
 const SUFFIX: &[u8] = b"a-test-suffix-for-hashing";
 
-/// Where the pretend export lives. Nothing is executed, so any address will do - but not one
-/// that could be confused with a real answer, and not zero.
+/// Where the pretend export lives. Nothing is executed, so any non-zero address that cannot be
+/// mistaken for a real answer will do.
 const EXPORT_AT: u64 = 0x0000_1234_5678_0000;
 
 fn implementation(name: &str) -> GuestFn {
@@ -54,15 +44,9 @@ impl Text {
 
 /// A name the guest's own binary exports resolves; one nothing exports still does not.
 ///
-/// # What this asserts and what it cannot
-///
-/// It asserts the **lookup**: that a name hashed with the loader's suffix finds the address
-/// registered under that hash, and is written through the caller's out-parameter. It cannot
-/// assert that the address is executable or that calling it does anything - nothing here
-/// places a module, and the value is a marker rather than code.
-///
-/// It also pins the negative in the same test, because a lookup that answered everything
-/// would pass the positive half and be worse than no lookup at all.
+/// This asserts the lookup and the out-parameter write, not that the address is executable:
+/// no module is placed and the value is a marker. The negative half catches a lookup that
+/// answers everything.
 #[test]
 fn a_symbol_the_guest_exports_resolves_and_one_nothing_exports_does_not() {
     let nid = orbistoun_nid::NidHasher::new(SUFFIX.to_vec())

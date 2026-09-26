@@ -1,24 +1,9 @@
 //! Every captured exchange, read against the protocol.
 //!
-//! # Why these files are here rather than referenced
-//!
-//! They are copies of obSCEne's `docs/examples/protocol/`, taken deliberately. A test that
-//! reads a sibling checkout fails for anyone without one, and a build-time dependency
-//! between the two projects is the coupling D207 exists to prevent. The contract is the
-//! specification plus these transcripts; a transcript is data, so copying it is the right
-//! kind of duplication and copying code would be the wrong kind.
-//!
-//! If they drift, that is a fact worth discovering here rather than against hardware.
-//!
-//! # What passing means
-//!
-//! That this crate can read what a real probe emits, without a probe. The transcripts cover
-//! negotiation, a call that returns, a call that dies, a timeout, a refusal, a memory read,
-//! blob and run, reset, no-reset, and a malformed sequence - which is the whole grammar
-//! including every path that is *not* a clean answer.
-//!
-//! Those paths are the point. A consumer that only handles success is one that turns a
-//! crash into a plausible number.
+//! The fixtures are copies of obSCEne's `docs/examples/protocol/`, since a test must not
+//! read a sibling checkout (D207); a transcript is data, so copying it is the right kind
+//! of duplication. They cover the whole grammar, including every path that is not a clean
+//! answer: a call that dies, a timeout, a refusal, reset and a malformed sequence.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -51,9 +36,8 @@ fn transcripts() -> Vec<(String, String)> {
 
 #[test]
 fn every_captured_exchange_parses() {
-    // The blunt one. A line the grammar does not cover is either a protocol this crate
-    // cannot read or a transcript that has drifted from the specification, and both are
-    // worth failing over.
+    // A line the grammar does not cover means an unreadable protocol or a drifted
+    // transcript; either fails.
     let all = transcripts();
     assert!(
         all.len() >= 10,
@@ -70,12 +54,8 @@ fn every_captured_exchange_parses() {
 
 #[test]
 fn a_command_that_did_not_answer_carries_no_value() {
-    // The single most important rule in the protocol, and the reason this crate models
-    // outcomes the way it does.
-    //
-    // `died` is not `returned 0`. There is no field on the non-answering variants for a
-    // value to hide in, so this asserts the property holds across every real transcript
-    // rather than only in the type.
+    // `died` is not `returned 0`: the non-answering variants carry no value, asserted across
+    // every real transcript as well as in the type.
     for (name, text) in transcripts() {
         let transcript = Transcript::read(&text).expect("parses");
         for exchange in &transcript.exchanges {
@@ -112,7 +92,7 @@ fn a_command_that_did_not_answer_carries_no_value() {
 
 #[test]
 fn a_value_that_answered_is_readable_and_a_death_is_not() {
-    // The other direction, so the rule above cannot be satisfied by refusing everything.
+    // The other direction, so the rule above is not met by refusing everything.
     let text = std::fs::read_to_string(fixtures().join("03-died.txt")).expect("fixture");
     let transcript = Transcript::read(&text).expect("parses");
 
@@ -140,9 +120,8 @@ fn a_value_that_answered_is_readable_and_a_death_is_not() {
 
 #[test]
 fn a_restart_is_visible_as_a_new_session() {
-    // A faulting command ends the probe, and the protocol makes the discontinuity legible
-    // rather than papering over it. Two sessions in one transcript is what that looks like,
-    // and a consumer that merged them would attribute one process's answers to another.
+    // A faulting command ends the probe, so one transcript holds two sessions, which must
+    // not be merged.
     let text = std::fs::read_to_string(fixtures().join("03-died.txt")).expect("fixture");
     let transcript = Transcript::read(&text).expect("parses");
 
@@ -158,7 +137,7 @@ fn a_restart_is_visible_as_a_new_session() {
         .collect();
     assert_eq!(identifiers.len(), 2, "a restart means a fresh identifier");
 
-    // And the metadata follows the session it names, not whichever came last.
+    // The metadata follows the session it names, not whichever came last.
     for session in &transcript.sessions {
         assert_eq!(
             session.parts.get("target").map(String::as_str),
@@ -170,10 +149,8 @@ fn a_restart_is_visible_as_a_new_session() {
 
 #[test]
 fn what_produced_an_answer_is_always_recorded() {
-    // Without it a number measured on a stand-in and read later as authoritative for the
-    // real target is a wrong answer with no way to see that it is wrong. This project has
-    // already lost months to exactly that, pointed at the wrong GPU generation with nothing
-    // in the record saying so.
+    // Every session records its target, so a number measured on a stand-in is never read
+    // as authoritative for the real target.
     for (name, text) in transcripts() {
         let transcript = Transcript::read(&text).expect("parses");
         for session in &transcript.sessions {
@@ -193,9 +170,8 @@ fn what_produced_an_answer_is_always_recorded() {
 
 #[test]
 fn a_stand_in_target_announces_that_it_cannot_resolve() {
-    // Capability negotiation earning its keep. The Deck has none of the platform's
-    // libraries, so a question about library behaviour is refused rather than answered
-    // wrongly - and a consumer discovers that here instead of assuming it.
+    // A stand-in without the platform's libraries refuses a library question rather than
+    // answering it wrongly.
     let text = std::fs::read_to_string(fixtures().join("01-hello.txt")).expect("fixture");
     let transcript = Transcript::read(&text).expect("parses");
     let session = transcript.sessions.first().expect("one session");
@@ -218,9 +194,8 @@ fn a_stand_in_target_announces_that_it_cannot_resolve() {
 
 #[test]
 fn a_repeated_sequence_is_refused_without_an_acknowledgement() {
-    // The one place the acknowledge-first rule yields, and it yields to the rule that makes
-    // acknowledgement useful: an `ack` is keyed by sequence, so acknowledging a repeat puts
-    // two on the wire bearing one key.
+    // A repeated sequence is not acknowledged: an `ack` is keyed by sequence, so a second
+    // one would share the key.
     let text = std::fs::read_to_string(fixtures().join("10-bad-sequence.txt")).expect("fixture");
     let transcript = Transcript::read(&text).expect("parses");
 
@@ -241,9 +216,8 @@ fn a_repeated_sequence_is_refused_without_an_acknowledgement() {
         );
     }
 
-    // A sequence that is not a number at all is readable rather than a parse failure -
-    // the protocol specifies that case, so a transcript capturing it has to be loadable
-    // or the case cannot be tested.
+    // A sequence that is not a number is readable rather than a parse failure, since the
+    // protocol specifies that case.
     assert!(
         transcript
             .exchanges
@@ -255,9 +229,8 @@ fn a_repeated_sequence_is_refused_without_an_acknowledgement() {
 
 #[test]
 fn an_unknown_record_is_kept_rather_than_dropped() {
-    // The protocol permits new record kinds and new fields within a version, and requires
-    // a consumer to ignore what it does not recognise. Ignoring is not discarding: a reader
-    // built today must not silently delete what a newer probe said.
+    // The protocol permits new record kinds within a version; an unrecognised one is kept,
+    // not discarded.
     let line = "OBS|weather|drizzle|7";
     let parsed = orbistoun_probe::parse_line(line).expect("an unknown record still parses");
     match parsed {
@@ -271,8 +244,7 @@ fn an_unknown_record_is_kept_rather_than_dropped() {
 
 #[test]
 fn a_non_answer_carrying_a_value_is_refused_at_the_door() {
-    // Defence in depth. The type makes it unrepresentable; this makes a transcript that
-    // tries it fail loudly rather than being quietly normalised into something readable.
+    // The type makes a value on `died` unrepresentable; a transcript that carries one fails.
     let line = "OBS|done|3|died|0x0|";
     let error =
         orbistoun_probe::parse_line(line).expect_err("a died outcome with a value must be refused");
@@ -284,15 +256,9 @@ fn a_non_answer_carrying_a_value_is_refused_at_the_door() {
 
 #[test]
 fn a_hardware_result_is_measured_only_when_the_operator_asserted_is_target() {
-    // The rule that decides whether a number becomes a fact about this platform, and the
-    // correction that mattered most: it does NOT turn on what the session claimed.
-    //
-    // A probe cannot certify its own machine. Running inside an emulator, its call to the
-    // platform's version query returns the emulator's chosen version - so a probe that
-    // announced `target|console` would be putting an emulator's answer in a console's
-    // badge, and it would look exactly like a measurement of real hardware.
-    //
-    // The operator is the only one who knows whether the thing on the desk is a console.
+    // Whether a number becomes a fact about the platform turns on what the operator
+    // asserted, not on what the session claimed: a probe inside an emulator reports the
+    // emulator's answers.
     use orbistoun_hle::knowledge::Oracle;
     use orbistoun_probe::Provenance;
 
@@ -312,8 +278,7 @@ fn a_hardware_result_is_measured_only_when_the_operator_asserted_is_target() {
         "nobody said what ran, so nothing can be a measurement of the target"
     );
 
-    // The rest of the mapping does not depend on the machine: a specification says what it
-    // says wherever it was read.
+    // The rest of the mapping does not depend on the machine.
     for (probe, expected) in [
         (Provenance::Spec, Oracle::Published),
         (Provenance::Documented, Oracle::Published),
@@ -327,12 +292,7 @@ fn a_hardware_result_is_measured_only_when_the_operator_asserted_is_target() {
 
 #[test]
 fn a_result_written_before_provenance_existed_claims_nothing() {
-    // The record format gained the field after some kinds were already being written, and
-    // its own documentation says the table drifted and a parser written against it would
-    // have been wrong about half the stream.
-    //
-    // So an absent field is absent, not a default. Inventing a grade for a record that
-    // never carried one is the same error as recording a value for a call that died.
+    // An absent provenance field is absent, not a default grade.
     use orbistoun_probe::{Line, Provenance, Record, Status};
 
     let old = "OBS|res|000-boot/write-rejects-bad-fd|pass|0xffffffff80020009|";
@@ -358,14 +318,8 @@ fn a_result_written_before_provenance_existed_claims_nothing() {
 
 #[test]
 fn a_corpus_has_no_commands_in_it_and_its_results_still_count() {
-    // The artefact that matters is records all the way down.
-    //
-    // A session transcript is the *interface* - commands and replies. What gets committed
-    // is the report a run produced, and it contains no `CMD|` lines at all. A reader that
-    // only looked inside exchanges found nothing in the file that actually matters, which
-    // is what this crate did until a real report was pointed at it.
-    // One directory up: this is a report, not a protocol transcript, and keeping it out of
-    // `protocol/` stops the grammar tests treating it as one.
+    // A committed report is records only, with no `CMD|` lines. It sits one directory up,
+    // outside `protocol/`, so the grammar tests do not treat it as a transcript.
     let path = fixtures()
         .parent()
         .expect("fixtures root")
@@ -384,8 +338,7 @@ fn a_corpus_has_no_commands_in_it_and_its_results_still_count() {
 
     let established = transcript.established(&Origin::asserted("console", "13.520.001", true));
     assert!(established.total() > 0, "a corpus establishes something");
-    // This particular report predates the provenance field, so nothing in it is graded -
-    // and the honest reading is that it establishes no facts, not that it establishes 47.
+    // This report has no provenance field, so it establishes no facts.
     assert_eq!(established.ungraded, established.total());
     assert_eq!(
         established.facts(),
@@ -396,14 +349,9 @@ fn a_corpus_has_no_commands_in_it_and_its_results_still_count() {
 
 #[test]
 fn a_result_becomes_a_finding_only_when_something_named_the_function() {
-    // The step from "this check passed" to "this function returns this". A `res` names its
-    // check and never the function; the `try` before it does, and pairing them is what
-    // turns a report into something the emulator can act on.
-    //
-    // Constructed rather than captured, and said so plainly: the fixtures in `protocol/`
-    // are real exchanges and this is not one. Building a plausible transcript and filing it
-    // beside them would make a fabrication indistinguishable from evidence, which is the
-    // failure this whole crate is shaped around.
+    // A `res` names its check, never the function; the `try` before it does, and pairing
+    // them says what a function returns. Constructed inline rather than filed beside the
+    // captured fixtures, so it is never mistaken for evidence.
     let text = "OBS|hello|1|abc123|call,resolve,report
 OBS|part|abc123|target|console
 OBS|part|abc123|firmware|13.520.001
@@ -425,8 +373,7 @@ OBS|res|010-fs/orphan|pass|0x1||hardware
     assert_eq!(finding.value, "0xfffffffe");
     assert!(finding.is_fact(), "measured on the target");
 
-    // And the citation says on what, because "measured" without saying where is the claim
-    // this project has already been burned by.
+    // The citation says what the value was measured on.
     let origin = Origin::asserted("console", "13.520.001", true);
     let cites = finding.cites(&origin);
     assert!(cites.contains("console"), "{cites}");
@@ -435,9 +382,8 @@ OBS|res|010-fs/orphan|pass|0x1||hardware
 
 #[test]
 fn a_probes_own_claim_about_its_machine_decides_nothing() {
-    // Identical records, and the probe claims `console` in every case. The only thing that
-    // differs is what the operator asserted - which is the whole point, because the claim
-    // is not evidence and therefore cannot be what decides.
+    // Identical records claiming `console`; only the operator's assertion differs, and it
+    // decides.
     let text = concat!(
         "OBS|hello|1|abc123|call,report\n",
         "OBS|part|abc123|target|console\n",
@@ -478,9 +424,7 @@ fn a_probes_own_claim_about_its_machine_decides_nothing() {
 
 #[test]
 fn a_call_that_was_announced_and_never_concluded_is_not_a_failure() {
-    // It is not a `fail`, and it must never be counted as one: the probe said what it was
-    // about to do and did not come back, so nothing was concluded. Reporting it as a
-    // failing check would record an outcome nobody observed.
+    // A check that never concluded is not a `fail`: nothing was observed.
     let text = std::fs::read_to_string(
         fixtures()
             .parent()
@@ -499,11 +443,9 @@ fn a_call_that_was_announced_and_never_concluded_is_not_a_failure() {
         "the run announced this check and never reported on it: {unfinished:?}"
     );
 
-    // The distinction this test was written too coarsely to see at first: several checks
-    // exercise one function, so the *symbol* can have a concluded result sitting beside an
-    // unconcluded check. Here the missing-path case passed and the null-path case is the
-    // last line in the file - the run ended inside it, which is precisely the failure the
-    // handover notes warn about.
+    // Several checks exercise one function, so a symbol can have a concluded result beside
+    // an unconcluded check: here the missing-path case passed and the run ended inside the
+    // null-path case.
     assert!(
         transcript
             .findings(&Origin::asserted("console", "13.520.001", true))
@@ -522,12 +464,8 @@ fn a_call_that_was_announced_and_never_concluded_is_not_a_failure() {
 
 #[test]
 fn a_generated_entry_satisfies_the_knowledge_base_s_own_provenance_rules() {
-    // The check that makes this conversion trustworthy: the knowledge base already knows
-    // what a well-formed entry looks like, and it is asked rather than second-guessed.
-    //
-    // `provenance_faults` is the same function that fails the build for a hand-written
-    // entry, so an entry generated from a probe record is held to exactly the standard a
-    // person would be.
+    // `provenance_faults`, which fails the build for a hand-written entry, also checks an
+    // entry generated from a probe record.
     let graded = |target: &str| {
         let text = format!(
             concat!(
@@ -539,8 +477,7 @@ fn a_generated_entry_satisfies_the_knowledge_base_s_own_provenance_rules() {
             ),
             target
         );
-        // The operator asserts the machine. `console` is asserted as real hardware;
-        // anything else is not, which is what the grading turns on.
+        // The operator asserts the machine: only `console` is asserted as the target.
         let origin = Origin::asserted(target, "13.520.001", target == "console");
         let transcript = Transcript::read(&text).expect("parses");
         let finding = transcript.findings(&origin).pop().expect("one finding");
@@ -561,10 +498,8 @@ fn a_generated_entry_satisfies_the_knowledge_base_s_own_provenance_rules() {
         entry.provenance_faults()
     );
 
-    // The same observation from a stand-in: demoted, and now it must cite *nothing*. The
-    // run it came from is still recorded - in the note and as an explicit assumption -
-    // because where a guess came from is worth knowing and the citation field is reserved
-    // for what has actually been established.
+    // The same observation from a stand-in is demoted and cites nothing; its run is still
+    // recorded in the note and as an explicit assumption.
     let (entry, _) = graded("deck");
     assert_eq!(
         entry.known_by,
@@ -594,10 +529,8 @@ fn a_generated_entry_satisfies_the_knowledge_base_s_own_provenance_rules() {
         "{:?}",
         entry.provenance_faults()
     );
-    // One stated question, counted once. This asserted two - the entry's own itemised
-    // assumption *plus* a whole-function penalty for resting on a guess - which was the
-    // double count that made `knows` report 80 open questions where `questions` reported
-    // 70. An entry that itemises is counted by its items (D239).
+    // One stated question, counted once: an entry that itemises its assumptions is counted
+    // by its items, with no extra whole-function penalty.
     assert_eq!(
         entry.open_questions(),
         entry.assumptions.len(),
@@ -608,9 +541,8 @@ fn a_generated_entry_satisfies_the_knowledge_base_s_own_provenance_rules() {
 
 #[test]
 fn an_ungraded_record_produces_an_entry_that_claims_nothing() {
-    // Most of the existing corpus is ungraded - the field arrived after those runs. Such a
-    // record claims nothing, so the entry must not claim anything either, and in particular
-    // must not be graded `assumed`: that is still a grade, and nobody assigned it.
+    // An ungraded record claims nothing, so its entry is not graded either, not even
+    // `assumed`.
     let text = "OBS|hello|1|abc123|call,report
 OBS|part|abc123|target|console
 OBS|try|010-fs/open|libkernel|sceKernelOpen
@@ -636,15 +568,8 @@ OBS|res|010-fs/open|pass|0x80020002|
 
 #[test]
 fn a_symbol_resolving_is_a_fact_even_from_a_stand_in() {
-    // The asymmetry that keeps symbols out of `Finding`.
-    //
-    // A return value depends on arguments, on state, and on the part. Existence does not: a
-    // name that resolves resolves, so a `present` from a stand-in still establishes that
-    // the name is spelled correctly and lives in that library - even though nothing it
-    // returns there can be trusted for the target.
-    //
-    // Grading both the same way would either throw away a usable fact or promote an
-    // unusable one, so they are separate types and only one is demoted by part.
+    // Existence does not depend on arguments or state, so symbols are their own type
+    // rather than a `Finding`; a stand-in's result is still recorded, graded by origin.
     let text = std::fs::read_to_string(fixtures().join("03-died.txt")).expect("fixture");
     let transcript = Transcript::read(&text).expect("parses");
 
@@ -664,10 +589,7 @@ fn a_symbol_resolving_is_a_fact_even_from_a_stand_in() {
 
 #[test]
 fn anything_that_is_not_the_word_present_is_not_a_claim_that_it_is() {
-    // `presence` is read as an exact word rather than "not absent". A target that answers
-    // something this version has never seen is saying something it does not understand, and
-    // reading an unrecognised answer as `present` would invent the one fact the record was
-    // being consulted for.
+    // `presence` is read as an exact word; an unrecognised answer is not `present`.
     use orbistoun_probe::{Line, Record};
 
     for (answer, expected) in [("present", true), ("absent", false), ("maybe", false)] {
@@ -686,19 +608,9 @@ fn anything_that_is_not_the_word_present_is_not_a_claim_that_it_is() {
 
 #[test]
 fn record_kinds_with_no_real_material_are_left_unparsed_on_purpose() {
-    // These are in the record format's table and appear in **no** output this project has
-    // ever seen - not in the captured exchanges, not in the example report. Writing parsers
-    // for them would be transcribing a document rather than reading evidence, which is the
-    // thing every other table here is built to avoid.
-    //
-    // Nothing is lost by waiting: an unrecognised kind is kept verbatim, so material
-    // arriving later is readable before anyone writes code for it. This test pins that, and
-    // it is the reason the gap is safe rather than an oversight.
-    //
-    // **`measure` used to be on this list and has graduated.** Three reports arrived
-    // carrying 3,319 of them, which is the whole of what this test was waiting for; it is
-    // read by `tests/measure.rs` now. The rest stay here on the same terms, and the same
-    // thing should happen to each of them when material turns up (D605).
+    // These kinds are in the record format's table but in no captured output, so they have
+    // no parser; an unrecognised kind is kept verbatim and stays readable. A kind gets a
+    // parser once real output carries it, as `measure` did (`tests/measure.rs`).
     use orbistoun_probe::{Line, Record};
 
     for line in [
@@ -719,10 +631,7 @@ fn record_kinds_with_no_real_material_are_left_unparsed_on_purpose() {
 
 #[test]
 fn a_skip_is_not_green() {
-    // A skip is a check that did not run, so the section did not establish what it claims
-    // to establish. Rounding one up to green is how a subsystem gets relied on for
-    // something nobody tested - which is the same error as reading a death as a return
-    // value, one level up.
+    // A skip is a check that did not run, so a section with one is not green.
     let text = "OBS|section|010-kernel|Kernel core|Whether the kernel answers at all.
 OBS|sectiontally|010-kernel|3|0|0|0
 OBS|section|035-libc|C runtime|Whether the C library behaves.
@@ -745,9 +654,8 @@ OBS|sectiontally|035-libc|5|0|0|2
 
 #[test]
 fn a_section_missing_half_its_records_still_appears() {
-    // A section with no tally, and a tally naming no section, are incomplete reports rather
-    // than absent ones. Dropping either would shrink the denominator, which flatters the
-    // result in the one direction nobody should be flattered.
+    // A section with no tally, and a tally naming no section, are incomplete rather than
+    // absent; dropping either would shrink the denominator.
     let text = "OBS|section|050-audio|Audio|Whether anything comes out.
 OBS|sectiontally|060-input|1|0|1|0
 ";
@@ -774,9 +682,8 @@ OBS|sectiontally|060-input|1|0|1|0
 
 #[test]
 fn the_real_report_shows_where_it_stopped() {
-    // The per-area view earning its keep on real material. The filesystem section is the
-    // one the run died inside: it reports no passes, and the check that never concluded is
-    // in it. A single total would have shown neither.
+    // The run died inside the filesystem section: it reports no passes and holds the check
+    // that never concluded.
     let text = std::fs::read_to_string(
         fixtures()
             .parent()
@@ -805,25 +712,9 @@ fn the_real_report_shows_where_it_stopped() {
 
 #[test]
 fn a_read_arrives_in_chunks_and_is_assembled_by_offset() {
-    // This test used to assert the opposite, and that was the point of it.
-    //
-    // The captured exchange carried sixty-five hexadecimal digits for a thirty-two byte
-    // read - one character spare, so the run could not be a whole number of bytes. Rather
-    // than work around it, the defect was pinned as a *passing* test, so that correcting it
-    // upstream would fail here and say what to replace it with. It did exactly that.
-    //
-    // Kept, inverted, as the guard on the shape that actually matters.
-    //
-    // # The shape
-    //
-    // A read longer than sixteen bytes comes back as **several `bytes` records**, each no
-    // more than sixteen bytes, carrying an ascending decimal offset. The consumer
-    // concatenates them by offset; `done|returned|<len>` is the total, not the size of any
-    // one record.
-    //
-    // Assembling by offset rather than by arrival order is the part worth pinning. Arrival
-    // order is very nearly always offset order, which is exactly what makes a consumer that
-    // relies on it work right up until it does not.
+    // A read longer than sixteen bytes comes back as several `bytes` records of at most
+    // sixteen bytes, each with an ascending decimal offset. The consumer assembles them by
+    // offset, not arrival order; `done|returned|<len>` is the total length.
     let text = std::fs::read_to_string(fixtures().join("06-read.txt")).expect("fixture");
     let transcript = Transcript::read(&text).expect("parses");
     let memory = transcript.memory();
@@ -839,12 +730,11 @@ fn a_read_arrives_in_chunks_and_is_assembled_by_offset() {
     );
     assert_eq!(memory.address, Some(0x8003_f510));
 
-    // The first chunk, then the second - and the boundary is where the offsets say, not
-    // where the records happened to appear.
+    // The first chunk, then the second, split where the offsets say.
     assert_eq!(&memory.bytes[..4], &[0x35, 0x00, 0x00, 0x00]);
     assert_eq!(&memory.bytes[16..20], &[0x37, 0x00, 0x00, 0x00]);
 
-    // And the command's own answer is the total length rather than a chunk's.
+    // The command's own answer is the total length rather than a chunk's.
     let read = transcript
         .exchanges
         .iter()
@@ -855,12 +745,8 @@ fn a_read_arrives_in_chunks_and_is_assembled_by_offset() {
 
 #[test]
 fn chunks_are_assembled_by_offset_even_when_they_arrive_out_of_order() {
-    // The property the fixture cannot demonstrate, because its chunks arrive in order.
-    //
-    // Nothing in the protocol promises they will, and a consumer that concatenated in
-    // arrival order would be right almost always - which is the worst kind of wrong, since
-    // the one time it is not right produces a buffer that is the correct length, full of
-    // real bytes, in the wrong sequence.
+    // Chunks out of order, which the fixture cannot show: the protocol does not promise
+    // arrival order.
     let text = concat!(
         "OBS|bytes|read/0x1000|(memory)|contents|16|deadbeefdeadbeefdeadbeefdeadbeef
 ",
@@ -880,11 +766,8 @@ fn chunks_are_assembled_by_offset_even_when_they_arrive_out_of_order() {
 
 #[test]
 fn the_three_ways_of_not_knowing_stay_three_things() {
-    // All three states can carry the value `unknown`, and they mean entirely different
-    // things: the platform has no such query, the probe has not wired one up yet, or here
-    // is a real reading. Collapsing them keeps the least useful part of the record - a
-    // consumer would show one blank where there are three distinct findings, and only one
-    // of them is anybody's bug.
+    // All three confidence states can carry `unknown` with different meanings: no such
+    // query on the platform, a query the probe does not implement, or a real reading.
     use orbistoun_probe::Confidence;
 
     let text = concat!(
@@ -911,9 +794,8 @@ fn the_three_ways_of_not_knowing_stay_three_things() {
     assert!(!report[1].confidence.is_reading());
     assert!(!report[2].confidence.is_reading());
 
-    // A state this version has never seen stays unrecognised rather than being resolved
-    // into one of the others. Reading it as `absent` would blame the platform for something
-    // it may well do; reading it as `known` would treat an unknown confidence as a reading.
+    // A state this version has never seen stays unrecognised rather than becoming one of
+    // the others.
     assert_eq!(
         report[3].confidence,
         Confidence::Unrecognised("drizzling".to_owned())
@@ -923,12 +805,8 @@ fn the_three_ways_of_not_knowing_stay_three_things() {
 
 #[test]
 fn the_targets_account_of_itself_never_reaches_a_grade() {
-    // `sysinfo` is observation, not provenance. Inside an emulator every field answers as
-    // the emulator chooses - `memory|known|441M` is that emulator's number wearing the
-    // target's badge, which is the self-reported-firmware trap one layer along.
-    //
-    // The separation is structural rather than a habit: nothing in `Origin` can be reached
-    // from a record, so a future reader cannot wire one to the other by accident.
+    // `sysinfo` is observation, not provenance: inside an emulator every field answers as
+    // the emulator chooses. Nothing in `Origin` is reachable from a record.
     let text = concat!(
         "OBS|hello|1|abc123|report\n",
         "OBS|sysinfo|generation|known|5\n",
@@ -939,7 +817,7 @@ fn the_targets_account_of_itself_never_reaches_a_grade() {
     let transcript = Transcript::read(text).expect("parses");
     assert_eq!(transcript.self_report().len(), 2, "both are read");
 
-    // The target says it is a console on that firmware. Nobody asked the operator, so
+    // The target claims to be the hardware on that firmware; with no operator assertion,
     // nothing is measured.
     let unasserted = transcript.findings(&Origin::unasserted());
     assert!(
@@ -947,24 +825,15 @@ fn the_targets_account_of_itself_never_reaches_a_grade() {
         "a target claiming its own generation and firmware settles nothing"
     );
 
-    // And with the operator saying otherwise, the operator wins.
+    // With the operator saying otherwise, the operator wins.
     let emulator = Origin::asserted("shadPS4", "", false);
     assert!(!transcript.findings(&emulator)[0].is_fact());
 }
 
 #[test]
 fn an_unknown_outcome_degrades_without_ever_becoming_an_answer() {
-    // Two rules meeting, and neither yielding.
-    //
-    // Report enum values are OPEN: obSCEne may add an outcome word without bumping the
-    // format version, so a reader that refused the line would break on a stream it was told
-    // to expect. It has to parse.
-    //
-    // And a command that did not answer is NEVER recorded as having answered. An outcome
-    // nobody here understands has not been understood, so it cannot be a result.
-    //
-    // Both hold: the line parses, and the outcome carries no value and does not answer.
-    // Degrading is not the same as assuming the best.
+    // Report enum values are open, so an unknown outcome word parses; and an outcome not
+    // understood is not a result, so it carries no value and does not answer.
     use orbistoun_probe::{Line, Record};
 
     let Ok(Line::Record(Record::Done { outcome, .. })) =
@@ -980,18 +849,14 @@ fn an_unknown_outcome_degrades_without_ever_becoming_an_answer() {
     assert!(!outcome.answered(), "not understood is not answered");
     assert_eq!(outcome.value(), None, "and it carries no result");
 
-    // It came *from* the probe, so the probe observed something - this reader simply cannot
-    // say what. That is a different fact from silence and must not be filed with it.
+    // It came from the probe, so the probe observed something, which is not silence.
     assert_eq!(outcome.observed_by(), ObservedBy::Probe);
 }
 
 #[test]
 fn a_grade_this_version_cannot_read_is_not_the_same_as_no_grade() {
-    // An absent field means the record predates grading and claims nothing. An unrecognised
-    // value means the record claims something and this reader cannot say what.
-    //
-    // Both end ungraded - but only one of them means *the consumer is out of date*, and
-    // filing them together would hide the signal that this crate needs updating.
+    // An absent field claims nothing; an unrecognised value claims something this reader
+    // cannot parse. Both end ungraded, but only the second means this reader is out of date.
     use orbistoun_hle::knowledge::Oracle;
     use orbistoun_probe::Provenance;
 
@@ -1002,8 +867,7 @@ fn a_grade_this_version_cannot_read_is_not_the_same_as_no_grade() {
         "a value that was given and not understood is not absence"
     );
 
-    // And it grades as the weakest thing available, never the strongest: an unknown word
-    // must not become a measurement on the strength of being unfamiliar.
+    // It grades as the weakest grade, never a measurement.
     let asserted = Origin::asserted("console", "13.520.001", true);
     assert_eq!(
         Provenance::Unrecognised("triangulated".to_owned()).oracle(&asserted),
@@ -1014,14 +878,9 @@ fn a_grade_this_version_cannot_read_is_not_the_same_as_no_grade() {
 
 #[test]
 fn generation_says_both_rather_than_collapsing_to_unknown() {
-    // The correction this thread asked for, arriving on the wire.
-    //
-    // `both` is a positive observation - two driver stacks present, the fingerprint of a
-    // stub-everything loader as much as of real back-compatibility - and it is now distinct
-    // from `absent|unknown`, which is the absence. They were the same record before.
-    //
-    // `both` deliberately names no console: presence is not implementation, and naming one
-    // from a stub is the bug the field was corrected to stop making.
+    // `both` is a positive observation of two driver stacks, distinct from `absent|unknown`.
+    // It names no generation: a stub-everything loader shows it too, and presence is not
+    // implementation.
     use orbistoun_probe::Confidence;
 
     let text = concat!(
@@ -1047,23 +906,15 @@ fn generation_says_both_rather_than_collapsing_to_unknown() {
 
 /// The generation parenthetical is carried verbatim, whatever it says.
 ///
-/// obSCEne changed `5 (current)` / `4 (previous)` to `5 (agc)` / `4 (gnm)` because the old
-/// pair had an expiry date: "current" stops being true the day a sixth generation ships, and
-/// an archived report cannot be corrected. The new parenthetical is the *evidence* - the
-/// graphics driver the inference keyed on.
-///
-/// **This test exists because that change is the one the open-enum rule does not cover.**
-/// Report enum values may be appended without a version bump; changing an existing value is
-/// a different act. It cost nothing here only because this reader never parsed the
-/// parenthetical, and pinning that is what stops somebody adding a parse later and quietly
-/// re-acquiring the expiry date (bridge, obSCEne D147).
+/// Both spellings of the parenthetical read (`5 (current)` and `5 (agc)`), because the open
+/// enum rule does not cover a changed existing value and archived reports keep the old one.
+/// The parenthetical is evidence, never parsed.
 #[test]
 fn the_generation_parenthetical_is_carried_verbatim() {
     for (wire, expected) in [
         ("OBS|sysinfo|generation|known|5 (agc)\n", "5 (agc)"),
         ("OBS|sysinfo|generation|known|4 (gnm)\n", "4 (gnm)"),
-        // The old spellings must still read, because archived transcripts carry them and a
-        // report should still be readable when it is read.
+        // The old spellings still read, because archived transcripts carry them.
         ("OBS|sysinfo|generation|known|5 (current)\n", "5 (current)"),
         ("OBS|sysinfo|generation|known|both\n", "both"),
     ] {
@@ -1085,16 +936,8 @@ fn the_generation_parenthetical_is_carried_verbatim() {
 
 #[test]
 fn a_stand_in_is_real_hardware_and_is_still_not_the_target() {
-    // The bug this rename fixed, pinned so it cannot come back.
-    //
-    // The field was called `real_hardware`, and a Steam Deck **is** real hardware. Somebody
-    // connecting one and reading that name accurately would have asserted it, and every
-    // Deck measurement would have been graded as a fact about the console - the silent
-    // promotion the whole mechanism exists to prevent, reachable by an honest reading of
-    // the field's own name.
-    //
-    // The question was never whether the silicon was real. It is whether the silicon was
-    // the thing being emulated.
+    // The question is whether the silicon is the thing being emulated, not whether it is
+    // real: a real stand-in device must not be graded as the target.
     use orbistoun_probe::Origin;
 
     for stand_in in ["deck", "Steam Deck", "shadPS4", "host", "some-new-emulator"] {
@@ -1104,17 +947,13 @@ fn a_stand_in_is_real_hardware_and_is_still_not_the_target() {
         );
     }
 
-    // And the list names stand-ins rather than targets on purpose: something nobody has
-    // listed is not promoted by default. A wrong demotion is recoverable; the other
-    // direction corrupts a knowledge base.
+    // The list names stand-ins rather than targets, so an unlisted name is not promoted.
     assert!(
         !Origin::is_known_stand_in("console"),
         "the target itself is not on the stand-in list"
     );
-    // A name matching nothing on the list is not recognised, and that is the case the
-    // caller must handle rather than relying on this. Substring matching catches anything
-    // containing `emulator`, which is broad and still not exhaustive - somebody will name
-    // one something else, and the safe default has to live at the call site.
+    // A name matching nothing is not recognised; substring matching is not exhaustive, so
+    // the safe default lives at the call site.
     assert!(
         !Origin::is_known_stand_in("mystery-box"),
         "an unlisted name is not recognised here, so the caller defaults it to `not the target`"
@@ -1123,21 +962,15 @@ fn a_stand_in_is_real_hardware_and_is_still_not_the_target() {
 
 #[test]
 fn a_handle_is_recorded_and_not_handed_to_the_guest() {
-    // The carve-out D225 turns on, and the reason it keys on the return kind rather than on
-    // whether a function "looks pure".
-    //
-    // A status code means the same thing in any address space. A handle does not: the
-    // console hands back a value from its own, the guest dereferences it, and dies somewhere
-    // unrelated hours later. Certainly wrong, and it looks right - the one failure this
-    // project has no cheap detector for.
+    // Keyed on the return kind (D225): a status code means the same in any address space,
+    // while a handle from the target's process is meaningless in the guest's.
     use orbistoun_hle::knowledge::Returns;
     use orbistoun_probe::{Use, usable};
 
     assert_eq!(usable(Some(Returns::Status)), Use::Return);
 
-    // Everything that is not a plain status is recorded only - including, and especially,
-    // a return kind nobody has established. Not knowing what a function returns is exactly
-    // when handing its value over is most dangerous.
+    // Everything that is not a plain status is recorded only, including an unestablished
+    // return kind.
     assert_eq!(usable(None), Use::RecordOnly, "unknown is not permission");
     for kind in [Returns::Handle, Returns::Pointer] {
         assert_eq!(usable(Some(kind)), Use::RecordOnly, "{kind:?}");
@@ -1146,13 +979,8 @@ fn a_handle_is_recorded_and_not_handed_to_the_guest() {
 
 #[test]
 fn a_live_answer_records_the_divergence_beside_the_measurement() {
-    // The measurement is real - a console ran that function with those arguments and
-    // returned that value. What is *not* established is that the guest would have seen the
-    // same answer, because the probe's process has not done what the guest did.
-    //
-    // A weaker grade would lose the first half; a bare `measured` would lose the second. So
-    // the grade stays and the caveat travels beside it, where it also counts as a worklist
-    // item rather than a footnote.
+    // The measurement is real, but the guest's process state differs from the probe's, so
+    // the grade stays and a caveat travels beside it as an open question.
     use orbistoun_probe::{Asked, Origin, Outcome, Use};
 
     let asked = Asked {
@@ -1218,8 +1046,7 @@ fn a_recorded_only_answer_says_why_it_was_withheld() {
 
 #[test]
 fn a_call_that_died_records_the_death_and_never_a_value() {
-    // The shape of most first attempts. Asking killed the probe, which is a fact about the
-    // function worth keeping - and there is no value, so none is written.
+    // Asking killed the probe: a fact about the function, with no value written.
     use orbistoun_probe::{Asked, Origin, Outcome, Use};
 
     let entry = Asked {
@@ -1249,24 +1076,14 @@ fn a_call_that_died_records_the_death_and_never_a_value() {
 
 /// The probe's by-name census reaches this reader as an existence fact.
 ///
-/// # Why this test is worth more than it looks
-///
-/// obSCEne emits **two** records with the same first three fields: `sym`, whose fourth
-/// field is how the symbol is reached, and `resolve`, whose fourth is where it landed.
-/// This reader had an arm for `sym` only, so every `resolve` record was carried as
-/// `Record::Other` - kept, correctly, and contributing no symbol fact at all.
-///
-/// That is the census. It answers for symbols **no title imports**, which is the one thing
-/// no collision search over this repository's own candidates can ever reach, and it was
-/// arriving and going nowhere (D245).
-///
-/// The line below is the exact shape `obs_report_resolve` writes: `OBS`, the kind, then
-/// library, symbol, `present`/`absent`, address.
+/// obSCEne emits `sym` (how a symbol is reached) and `resolve` (where it landed) with the
+/// same first three fields; both are read. The census covers symbols no title imports. The
+/// line below is the shape `obs_report_resolve` writes: `OBS`, the kind, library, symbol,
+/// `present`/`absent`, address.
 #[test]
 fn a_resolve_record_is_read_as_an_existence_fact() {
-    // Joined rather than written as one literal with `\` continuations: those collapse
-    // under `cargo fmt` and bake the source indentation into the string, which this
-    // project has a check for and which broke this test's first draft (D184).
+    // Joined rather than one literal with `\` continuations, which bake the source
+    // indentation into the string.
     let text = [
         "OBS|resolve|libkernel|sceKernelAllocateDirectMemory|present|0x8000a1c0",
         "OBS|resolve|libkernel|sceKernelNoSuchThing|absent|0x0",
@@ -1292,14 +1109,14 @@ fn a_resolve_record_is_read_as_an_existence_fact() {
         "a resolve record does not say how it is reached, and must not claim to"
     );
 
-    // Absence is a fact too, and the one that costs a candidate list nothing to check.
+    // Absence is a fact too.
     let absent = symbols
         .iter()
         .find(|s| s.symbol == "sceKernelNoSuchThing")
         .expect("present");
     assert!(!absent.present);
 
-    // And the older record still behaves, carrying availability and no address.
+    // The `sym` record carries availability and no address.
     let sym = symbols
         .iter()
         .find(|s| s.symbol == "printf")
@@ -1310,17 +1127,9 @@ fn a_resolve_record_is_read_as_an_existence_fact() {
 
 /// A stand-in cannot name anything, however confidently it resolves.
 ///
-/// # The channel this closes
-///
-/// D242 refuses name lists mined from other emulator projects. A `resolve` answered by one
-/// of those emulators is that same list speaking: its symbol table is where the mined names
-/// went. Ungraded, "present on shadPS4" would have entered this project as a probe
-/// measurement - the strongest provenance it has - having come from the source the rule
-/// exists to exclude.
-///
-/// The grading input is already in the transcript. `Origin::is_target` asks whether the
-/// silicon was *the thing being emulated*, which is the right question and not the same as
-/// whether it was real hardware (D246).
+/// A `resolve` answered by another emulator is that emulator's symbol table speaking, so
+/// it must not source a name (D246). `Origin::is_target` asks whether the silicon was the
+/// thing being emulated, not whether it was real hardware.
 #[test]
 fn only_the_target_may_source_a_name() {
     let text = [
@@ -1335,8 +1144,7 @@ fn only_the_target_may_source_a_name() {
 
     for origin in [
         Origin::unasserted(),
-        // Real silicon, and not the thing being emulated. The distinction the field name
-        // was changed to make.
+        // Real silicon, and not the thing being emulated.
         Origin::asserted("steam deck", "", false),
     ] {
         for fact in transcript.symbols(&origin) {
@@ -1349,7 +1157,7 @@ fn only_the_target_may_source_a_name() {
         }
     }
 
-    // The console itself, and only then.
+    // The target itself, and only then.
     let on_target = Origin::asserted("PS5", "", true);
     let facts = transcript.symbols(&on_target);
     assert_eq!(facts.len(), 2);
@@ -1358,7 +1166,7 @@ fn only_the_target_may_source_a_name() {
         "a present from the target is a naming source: {facts:?}"
     );
 
-    // Absence never sources a name either - there is no name in it to take.
+    // Absence never sources a name either.
     let absent =
         Transcript::read("OBS|resolve|libkernel|sceKernelNothing|absent|0x0").expect("parses");
     assert!(

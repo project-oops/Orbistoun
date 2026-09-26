@@ -1,18 +1,8 @@
 //! Video output HLE - libSceVideoOut.
 //!
-//! Owns the swapchain and the flip queue: the guest registers buffers, then
-//! submits flips and waits on their completion. Getting flip completion wrong is
-//! the classic cause of a title that boots, renders one correct frame, and then
-//! appears to freeze.
-//!
-//! Together with `orbistoun-gpu` this is the pair that produces the first visible
-//! output, which makes it the natural first milestone after the loader.
-//!
-//! # Status
-//!
-//! Open, close and buffer registration; the flip queue as a counter that completes on submit,
-//! which is what a headless emulator with no scanout can honestly model - enough for a guest that
-//! polls flip completion to proceed rather than hang.
+//! Owns the display ports and the flip queue: the guest registers buffers, submits flips and
+//! waits on their completion. With no scanout, a flip completes when it is accepted, so a guest
+//! that polls flip completion proceeds rather than hangs (D516).
 
 use orbistoun_hle::guest_module;
 
@@ -25,25 +15,18 @@ guest_module! {
         "sceVideoOutClose" => 1,
         "sceVideoOutRegisterBuffers" => 6,
         "sceVideoOutSubmitFlip" => 4,
-        // Arity 3, read off the guest's own call: `arg0` is an event-queue handle orbistoun
-        // issued, `arg1` is `0x1` - the port handle its own `sceVideoOutOpen` answered - and
-        // `arg2` is the caller's opaque word, `0x0` here (D560).
+        // Arity 3: an event-queue handle orbistoun issued, the port handle `sceVideoOutOpen`
+        // answered, and the caller's opaque word.
         "sceVideoOutAddFlipEvent" => 3,
         "sceVideoOutSetFlipRate" => 2,
         "sceVideoOutConfigureOutput" => 4,
         "sceVideoOutGetFlipStatus" => 2,
-        // Arity 1: the handle and nothing else, the same shape as `sceVideoOutClose`. The
-        // guest passes it `0x1` - the port `sceVideoOutOpen` answered - and the registers
-        // after it carry leftovers, two of them identical (D516).
+        // Arity 1: the port handle, the same shape as `sceVideoOutClose`.
         "sceVideoOutIsFlipPending" => 1,
         "sceVideoOutGetResolutionStatus" => 2,
-        // Confirmed by hash against a real import (D167): the guest was calling this with
-        // our unimplemented code as the port to register against.
         "sceVideoOutRegisterBuffers2" => 6,
-        // PPSA02664 imports these and makes each twice from two title modules, and they reach
-        // orbistoun undeclared (D500). Declared at arity 6 - the trampoline's full capture, the
-        // shape `agc.rs` uses until a call is measured - and **not** implemented, so the loud stub
-        // policy answers them by name rather than letting them arrive as bare hashes.
+        // Declared at the trampoline's full arity 6 and not implemented, so the stub policy answers
+        // them by name rather than as bare hashes.
         "sceVideoOutSetBufferAttribute2" => 6,
         "sceVideoOutGetOutputStatus" => 6,
     }
@@ -57,29 +40,25 @@ const OK: u64 = 0;
 
 /// Video-out error codes, base `0x8029_0000`.
 ///
-/// A family distinct from the kernel's `0x8002_00xx`, and measured on hardware where noted. A
-/// video-out call that refuses answers one of these rather than a `GuestError` placeholder -
-/// which, for a call whose result a guest tests against zero, would otherwise read as a valid
-/// handle or a good status (D125).
+/// A family distinct from the kernel's `0x8002_00xx`. A refusing video-out call answers one of
+/// these, not a `GuestError` placeholder, which a guest testing against zero would read as a valid
+/// handle or status (D426).
 mod video_error {
     /// A handle that names no open port. Measured: `080-video/flip-rate-rejects-bad-handle` records
-    /// `sceVideoOutSetFlipRate` refusing a bad handle with `0x8029_000b`. Assumed uniform across the
-    /// family until each call's own refusal is measured against hardware.
+    /// `sceVideoOutSetFlipRate` refusing a bad handle with `0x8029_000b`; assumed uniform across
+    /// the family.
     pub(super) const INVALID_HANDLE: u64 = 0x8029_000b;
-    /// The output is already open, so a second open of it is refused rather than handed a second
-    /// handle. Measured: obSCEne's display path records `sceVideoOutOpen` of the held main output
-    /// answering `0x8029_0009` - the handle-still-held trap (D169).
+    /// The output is already open, so a second open is refused. Measured: obSCEne's display path
+    /// records `sceVideoOutOpen` of the held main output answering `0x8029_0009`.
     pub(super) const ALREADY_OPEN: u64 = 0x8029_0009;
 }
 
 /// The shape of a registered buffer set, decoded from its attribute block.
 ///
-/// A flipped buffer is an address; reading its bytes as an image needs its extent, format and
-/// tiling, and that is what a guest wrote into the attribute block with
-/// `sceVideoOutSetBufferAttribute2` before registering it. The
-/// values sit at the offsets obSCEne `-83df` measured on hardware; pitch (offsets `0x0`, `0x8`,
-/// `0x14`) read zero in both measured passes and is deliberately absent here rather than assigned a
-/// byte nobody identified. Zeroed until a set is registered with a filled block.
+/// Reading a flipped buffer as an image needs its extent, format and tiling, which the guest
+/// writes into the attribute block with `sceVideoOutSetBufferAttribute2`. The fields sit at
+/// hardware-measured offsets. Pitch (offsets `0x0`, `0x8`, `0x14`) reads zero in every measured
+/// pass and is not modelled. Zeroed until a set is registered with a filled block.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferShape {
     /// Tiling mode: `0` tiled, `1` linear (attribute offset `0x4`).
@@ -94,18 +73,15 @@ pub struct BufferShape {
 
 /// Display ports the guest can open.
 ///
-/// A handle is an index into this, offset so zero is never a valid one - callers test a
-/// video-out handle against zero and negative values, and a handle of zero would be read
-/// as "not open" by code that is holding a perfectly good port.
+/// A handle is an index into this, offset so zero is never valid: callers test a handle against
+/// zero and negative values.
 mod port {
     use std::sync::{Mutex, OnceLock};
 
     /// One display port.
     ///
-    /// The bus and index are recorded because **ownership reads them**: a console refuses a second
-    /// open of an output that is already open, and answering that needs to know which output a
-    /// handle stands for. An earlier version recorded the bus for trace-readability alone and
-    /// dropped it when nothing read it; this brings it back for a reader that exists.
+    /// The bus and index identify the output, which the ownership check reads: a second open of an
+    /// output that is already open is refused.
     #[derive(Default)]
     pub(super) struct Port {
         /// Which output bus this port opened.
@@ -116,33 +92,29 @@ mod port {
         pub open: bool,
         /// How many buffers have been registered against it.
         pub registered: u64,
-        /// How many flips have completed - the count `sceVideoOutGetFlipStatus` reports, and what
-        /// a guest polls to learn a submitted flip has been picked up.
+        /// How many flips have completed - the count `sceVideoOutGetFlipStatus` reports and a guest
+        /// polls.
         pub flips: u64,
         /// The guest addresses of the buffers registered against this port, in index order. Empty
-        /// until the guest registers a set. These are the frames themselves: a renderer needs an
-        /// address the guest agreed to write into, and framebuffer diffing needs bytes to read - both
-        /// live here (REQ-...6a86).
+        /// until the guest registers a set. These are the frames a renderer writes and a reader
+        /// reads back.
         pub buffers: Vec<u64>,
-        /// The `attribute` pointer (`arg4`) the guest passed to `sceVideoOutRegisterBuffers`, which
-        /// describes the buffers' pixel format, extent and tiling. Kept because a `presented` rung
-        /// (REQ-...9b1f) cannot read a flipped buffer's bytes without knowing its extent and layout,
-        /// and that is what this points at. Zero until a set is registered.
+        /// The `attribute` pointer (`arg4`) the guest passed to `sceVideoOutRegisterBuffers`,
+        /// describing the buffers' pixel format, extent and tiling. Zero until a set is registered.
         pub attribute: u64,
-        /// The buffer set's shape - extent, format and tiling - decoded from the attribute block at
-        /// register time (REQ-...a6b3). The pointer above is where it was read from; this is what a
-        /// `presented` rung reads without dereferencing it again. Zeroed until a set with a filled
-        /// attribute block is registered.
+        /// The buffer set's shape, decoded from the attribute block at register time, so a reader
+        /// does not dereference the guest pointer again. Zeroed until a set with a filled block is
+        /// registered.
         pub shape: super::BufferShape,
-        /// The buffer index the guest last submitted a flip for, if any - which of [`Self::buffers`]
-        /// it last asked to present.
+        /// The buffer index the guest last submitted a flip for: which of [`Self::buffers`] it last
+        /// asked to present.
         pub last_flip: Option<u64>,
     }
 
     /// The handle of the port that most recently completed a flip, or zero for none.
     ///
-    /// A run has one output today, but a reader wanting *the* flipped frame should not have to guess
-    /// which port that was, so `submit_flip` records it here and `last_flipped_buffer` reads it.
+    /// `submit_flip` records it and `last_flipped_buffer` reads it, so a reader of the flipped
+    /// frame need not guess the port.
     fn last_flipped_handle() -> &'static std::sync::atomic::AtomicU64 {
         static HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         &HANDLE
@@ -154,8 +126,8 @@ mod port {
     }
 
     /// For the port that last flipped, the guest address of the buffer it presented and the decoded
-    /// [`BufferShape`](super::BufferShape) registered with it - `(address, shape)` - or `None` if
-    /// none has flipped, or the flipped index has no registered buffer.
+    /// [`BufferShape`](super::BufferShape) registered with it, or `None` if none has flipped or the
+    /// flipped index has no registered buffer.
     pub(super) fn last_flipped_buffer() -> Option<(u64, super::BufferShape)> {
         let handle = last_flipped_handle().load(std::sync::atomic::Ordering::Relaxed);
         with(handle, |p| {
@@ -167,7 +139,7 @@ mod port {
     }
 
     /// Every port ever opened. Index plus [`FIRST`] is the handle; a closed one stays, so handles
-    /// are never renumbered (D169's reasoning, unchanged).
+    /// are never renumbered.
     fn table() -> &'static Mutex<Vec<Port>> {
         static TABLE: OnceLock<Mutex<Vec<Port>>> = OnceLock::new();
         TABLE.get_or_init(|| Mutex::new(Vec::new()))
@@ -175,8 +147,8 @@ mod port {
 
     /// Every flip this process has completed, across every port ever opened.
     ///
-    /// Closed ports are included deliberately: a guest that opened an output, presented, and
-    /// closed it did present, and a total that forgot would say it had not.
+    /// Closed ports are included: a guest that opened an output, presented and closed it did
+    /// present.
     pub(super) fn flips() -> u64 {
         table()
             .lock()
@@ -185,24 +157,20 @@ mod port {
 
     /// The first handle handed out.
     ///
-    /// Small and positive. Unlike a thread or file handle this one is **not** an address:
-    /// the guest passes it back as an integer and compares it against zero, and nothing
-    /// observed dereferences it (D169).
+    /// Small and positive, and not an address: the guest compares it against zero and passes it
+    /// back, and never dereferences it (D151).
     pub(super) const FIRST: u64 = 1;
 
     /// Why an open did not hand back a handle.
     pub(super) enum OpenFailure {
-        /// The output is already open; a console refuses a second open of it.
+        /// The output is already open; the hardware refuses a second open of it.
         AlreadyOpen,
         /// The table could not be reached.
         Unavailable,
     }
 
-    /// Opens an output, or says why not.
-    ///
-    /// An output already open is **refused** rather than handed a second handle, which is what a
-    /// console does (D169) - so a guest that opens the same output twice sees the second refused,
-    /// exactly as it would on hardware.
+    /// Opens an output, or says why not. An output already open is refused rather than handed a
+    /// second handle, as the hardware does.
     pub(super) fn open(bus: u64, index: u64) -> Result<u64, OpenFailure> {
         let mut table = table().lock().map_err(|_| OpenFailure::Unavailable)?;
         if table
@@ -229,32 +197,12 @@ mod port {
 
 /// `sceVideoOutOpen(user, bus, index, param)`.
 ///
-/// # Why this is implemented before anything can display
-///
-/// Not to show a frame - nothing here draws. To stop the guest carrying an error code
-/// around as a display handle.
-///
-/// Unimplemented, this answered `0x7FFF0001`, and the trace showed the guest passing that
-/// straight into `sceVideoOutRegisterBuffers2` as the port to register against. That is
-/// D125's failure with a display attached: our own placeholder travelling through the
-/// guest as data, arriving somewhere with no relation to where it came from.
-///
-/// A small positive integer is the right shape here, and deliberately **not** an address.
-/// Thread, lock and file handles are addresses because the guest dereferences them
-/// (D151); a video-out handle is compared against zero and passed back, and nothing
-/// observed reads through it.
-///
-/// # A second open of the same output is refused
-///
-/// `(bus, index)` names an output, and opening one that is already open answers
-/// [`video_error::ALREADY_OPEN`] rather than a fresh handle - which is what a console does, and
-/// what a guest that already holds the output expects. It is why obSCEne's resolution probe, which
-/// opens the main output a second time while the display path still holds it, is refused on
-/// hardware and now here too (D169).
+/// Answers a small positive handle, not an address, which the guest compares against zero and
+/// passes back to later video-out calls. `(bus, index)` names an output, and opening one that is
+/// already open answers [`video_error::ALREADY_OPEN`], as the hardware does.
 fn video_out_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    // **Before the port table is touched.** A category denied the scanout never opens one on the
-    // console, so opening here and refusing later would leave a port a guest could still use
-    // (D662).
+    // Before the port table is touched: a category denied the scanout never opens a port, so
+    // opening here and refusing later would leave a usable port (D662).
     if let Some(refused) = refuse_scanout(orbistoun_core::category::presented()) {
         return refused;
     }
@@ -268,19 +216,17 @@ fn video_out_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// What a category is refused the scanout with, or [`None`] where it may open one.
 ///
-/// A separate function from the call so the decision is testable without a port table, which is
-/// the shape principle 8 asks for: a pure decision plus a thin effectful wrapper.
+/// A pure decision separate from the call, so it is testable without a port table.
 fn refuse_scanout(category: orbistoun_core::category::Category) -> Option<u64> {
     orbistoun_core::category::scanout_refusal(category).map(u64::from)
 }
 
 /// `sceVideoOutClose(handle)`.
 ///
-/// The port is left in the table rather than removed: handles are indices, and removing
-/// one would either renumber the rest or leave a hole that a later open would reuse -
-/// and a reused display handle is a bug nobody would look for.
+/// The port stays in the table: handles are indices, and removing one would renumber the rest or
+/// leave a hole a later open would reuse.
 fn video_out_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    // Closed, so its output can be opened again - the ownership check in `port::open` reads this.
+    // Closed, so its output can be opened again; the ownership check in `port::open` reads this.
     match port::with(args[0], |p| {
         p.registered = 0;
         p.open = false;
@@ -290,27 +236,19 @@ fn video_out_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// The most buffers one registration binds. A display set is small - a handful of frames a guest
-/// cycles through - so a count beyond this is a garbage argument, and this bounds the read of the
-/// guest's address array rather than following an arbitrary count into unmapped memory. A defensive
-/// ceiling, not a hardware maximum.
+/// The most buffers one registration binds. A display set is a handful of frames, so this bounds
+/// the read of the guest's address array against a garbage count. A defensive ceiling, not a
+/// hardware maximum.
 const MAX_REGISTERED_BUFFERS: usize = 16;
 
 /// `sceVideoOutRegisterBuffers(handle, index, addresses, count, attribute)`.
 ///
-/// Records the buffers a port has been given (their guest addresses, at the indices the guest names)
-/// and answers success. **The addresses are now kept** (REQ-...6a86): they are the frames, and a
-/// renderer needs an address the guest agreed to write into while framebuffer diffing needs bytes to
-/// read, so both come from here. `index` (`args[1]`) is where in the set they land; `addresses`
-/// (`args[2]`) is the array of `count` guest addresses; `attribute` (`args[4]`) is kept too - it
-/// describes the buffers' format, extent and tiling, which a `presented` rung needs to read a flipped
-/// frame back and know its layout (REQ-...9b1f).
+/// Records the guest addresses of the buffers at the indices the guest names, and the attribute
+/// pointer describing their format, extent and tiling. `index` (`args[1]`) is where in the set
+/// they land; `addresses` (`args[2]`) is the array of `count` guest addresses.
 ///
-/// Answering success rather than refusing is a deliberate choice and a reversible one. A guest that
-/// cannot register buffers stops setting up its display; one that believes it can proceeds to submit
-/// flips, which is where the GPU layer will eventually be reached. A **null** address array is the one
-/// case refused: it registers buffers a renderer could never read, so it earns the video-out error
-/// rather than storing a row of zeros.
+/// Answers success, so a guest proceeds to submit flips. A null address array is refused with the
+/// video-out error, since it registers buffers nothing could read.
 fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, start_index, addresses, count, attribute) =
         (args[0], args[1], args[2], args[3], args[4]);
@@ -327,22 +265,18 @@ fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceVideoOutRegisterBuffers2(handle, _, _, buffers, count, attribute, ...)`.
 ///
-/// The v2 registration, and **not** the v1 shape one handler could serve for both. Where v1 hands a
-/// raw `void*[]` of addresses at arg2, v2 hands an array of `SceVideoOutBuffer` structs at **arg3** -
-/// `{ data, metadata, reserved[2] }`, 32 bytes each, the buffer's address in `data` at offset 0 -
-/// with the count at arg4 and the attribute at arg5, and arg2 zero. Binding both to
-/// `video_out_register_buffers` read that zero arg2 as the address array and refused the call with
-/// `INVALID_HANDLE`, so an open-toolchain display - which registers this way - got a non-zero `rrc`,
-/// set its error, and reported itself *not ready* one call before it would have gone ready (the
-/// cube, worklog 808). This reads the addresses from the struct array's `data` fields.
+/// The v2 registration, a different shape from v1: arg2 is zero, and arg3 is an array of
+/// `SceVideoOutBuffer` structs `{ data, metadata, reserved[2] }`, 32 bytes each with the buffer's
+/// address in `data` at offset 0. The count is arg4 and the attribute arg5. The addresses are read
+/// from the structs' `data` fields.
 fn video_out_register_buffers2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, start_index, buffers, count, attribute) =
         (args[0], args[1], args[3], args[4], args[5]);
     if buffers == 0 {
         return video_error::INVALID_HANDLE;
     }
-    // v2 hands a `SceVideoOutBuffer[]`: the address is the `data` field at the start of each 32-byte
-    // struct, so the stride is the struct size and the address sits at its offset zero.
+    // v2 hands a `SceVideoOutBuffer[]`: the address is the `data` field at offset zero of each
+    // 32-byte struct.
     // SAFETY: the guest's buffer array, `count` entries by the call's contract, clamped.
     let read = unsafe {
         read_buffer_addresses(
@@ -360,8 +294,8 @@ fn video_out_register_buffers2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// in `data` at offset 0 (agc_display.c).
 const SCE_VIDEO_OUT_BUFFER_SIZE: u64 = 32;
 
-/// How many buffers a register call maps, clamped so a guest cannot ask this to read past the end of
-/// its own set or the port's capacity.
+/// How many buffers a register call maps, clamped so a guest cannot read past the end of its own
+/// set or the port's capacity.
 fn clamp_count(start_index: u64, count: u64) -> usize {
     let start = usize::try_from(start_index)
         .unwrap_or(MAX_REGISTERED_BUFFERS)
@@ -385,12 +319,11 @@ unsafe fn read_buffer_addresses(array: u64, count: usize, stride: u64) -> Vec<u6
         .collect()
 }
 
-/// Records a registered buffer set against `handle`: the addresses from `start_index`, the count on
-/// the port, and the shape decoded from `attribute`. The shared body of both register entry points,
-/// which differ only in how the guest hands over the addresses.
+/// Records a registered buffer set against `handle`: the addresses from `start_index`, the count
+/// on the port, and the shape decoded from `attribute`. The shared body of both register calls.
 ///
-/// The shape is decoded by the caller while the guest still holds the block; a zero pointer, or a
-/// block a guest never filled, decodes to a zeroed shape rather than a fault.
+/// A zero pointer, or a block the guest never filled, decodes to a zeroed shape rather than a
+/// fault.
 fn register_buffer_set(
     handle: u64,
     start_index: u64,
@@ -418,8 +351,8 @@ fn register_buffer_set(
 }
 
 /// Decodes the shape a guest wrote into an attribute block with
-/// [`sceVideoOutSetBufferAttribute2`](video_out_set_buffer_attribute2), at the offsets obSCEne
-/// `-83df` measured. A zero pointer yields a zeroed [`BufferShape`].
+/// [`sceVideoOutSetBufferAttribute2`](video_out_set_buffer_attribute2), at the measured offsets.
+/// A zero pointer yields a zeroed [`BufferShape`].
 ///
 /// # Safety
 ///
@@ -442,20 +375,11 @@ unsafe fn decode_attribute(attribute: u64) -> BufferShape {
 /// `sceVideoOutSetBufferAttribute2(attr, pixelformat, tiling, width, height, option, [dcc_control,
 /// dcc_clear_color])`.
 ///
-/// Fills the caller's attribute block with the buffer set's shape, at the offsets obSCEne `-83df`
-/// measured on hardware: tiling at `0x4`, width at `0xc`, height at `0x10`, option at `0x18`,
-/// format at `0x20`. It writes **only** those, and only the bytes each occupies - the pitch bytes
-/// (`0x0`, `0x8`, `0x14`) read zero in both measured passes and are left untouched rather than
-/// assigned a meaning nobody measured, and nothing past the measured 80-byte extent is touched.
-///
-/// The DCC fields (`0x28`, `0x30`) are the seventh and eighth arguments, which arrive on the guest
-/// stack past the six registers the trampoline captures, so they too are left as the caller had
-/// them. The values a `presented` rung needs - extent, format, tiling - are all in the six, so
-/// this decodes to a usable shape without them.
-///
-/// This is what `-420c` deferred: it kept the attribute pointer without decoding, because the
-/// layout was unmeasured. It is measured now, so `video_out_register_buffers` decodes the block a
-/// flip presents, and `last_flipped_buffer` answers a frame's extent instead of a bare pointer.
+/// Fills the caller's attribute block at the hardware-measured offsets: tiling at `0x4`, width at
+/// `0xc`, height at `0x10`, option at `0x18`, format at `0x20`. It writes only those bytes. The
+/// pitch bytes (`0x0`, `0x8`, `0x14`) and anything past the measured 80-byte extent are left
+/// untouched. The DCC fields (`0x28`, `0x30`) are the seventh and eighth arguments, on the guest
+/// stack past the six captured registers, so they are left as the caller had them.
 fn video_out_set_buffer_attribute2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (attr, pixelformat, tiling, width, height, option) =
         (args[0], args[1], args[2], args[3], args[4], args[5]);
@@ -476,21 +400,12 @@ fn video_out_set_buffer_attribute2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceVideoOutSubmitFlip(handle, buffer_index, flip_mode, flip_arg)`.
 ///
-/// # A flip completes the instant it is submitted
+/// On hardware a flip is queued and completes at the next vertical blank. There is no scanout
+/// here, so a flip completes as soon as it is accepted and the count advances now (D516). A guest
+/// polling [`video_out_get_flip_status`] sees it move and proceeds.
 ///
-/// On hardware a flip is *queued*, and its completion count moves when a presenter picks it up at
-/// the next vertical blank. There is no presenter and no vblank here - nothing scans a buffer out -
-/// so the honest model for a headless run is that a flip completes as soon as it is accepted: the
-/// count advances now. A guest that submits a flip and then polls [`video_out_get_flip_status`] for
-/// the count to move past what it was sees it move, and proceeds, rather than spinning on a frame
-/// that a real display would have shown and this one never will.
-///
-/// `buffer_index` (`args[1]`) **is** recorded now, as the port's last-flipped index (REQ-...6a86): it
-/// is which of the registered buffers the guest last asked to present, and a renderer reads that one
-/// back. `flip_mode` and `flip_arg` stay unmodelled: when a flip is shown is a property of a scanout
-/// that does not exist, and inventing a `flip_arg` echo nothing reads would be state carried for no
-/// reader. What advancing the count buys - the guest getting past its present loop - is the whole
-/// point (as with buffer registration above).
+/// `buffer_index` is recorded as the port's last-flipped index. `flip_mode` is not modelled:
+/// when a flip is shown is a property of a scanout that does not exist.
 fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, buffer_index, flip_arg) = (args[0], args[1], args[3]);
     if port::with(handle, |p| {
@@ -501,37 +416,29 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     {
         return video_error::INVALID_HANDLE;
     }
-    // Record which port flipped, so a reader of the presented frame does not have to guess (9b1f).
+    // Record which port flipped, so a reader of the presented frame need not guess.
     port::note_flipped(handle);
-    // **The frame the guest presents, shown** (worklog 841): the installed observer is handed the
-    // buffer it asked to scan out, which is what a display would show now.
+    // The installed observer is handed the buffer the guest asked to scan out.
     if let Some(observe) = FLIP_OBSERVER.get()
         && let Some((address, shape)) = last_flipped_buffer()
     {
         observe(address, shape);
     }
-    // **And the completion is posted**, which is the half that was missing. A flip completing
-    // with nobody told is how PPSA02664 came to call `sceKernelWaitEqueue` 839 times against a
-    // queue nothing ever delivered to: it registered a flip event, submitted, and waited on a
-    // completion this crate had already performed and never announced (D560).
+    // Post the completion to the queues registered for this port, so a guest waiting on a flip
+    // event is told.
     //
-    // **The diagnostic goes first, and it is the whole of what it does.** `ORBISTOUN_FLIP_TO_ALL`
-    // posts to every queue rather than the registered ones, which asks a guest blocked on a queue
-    // nothing feeds what it would do if that wait completed. Off by default and recorded as an
-    // intervention, so a verdict taken under it is not a measurement of the emulator (D620).
+    // `ORBISTOUN_FLIP_TO_ALL` posts to every queue instead, to ask what a guest blocked on an
+    // unfed queue does when its wait completes. It is off by default and recorded as an
+    // intervention, so a verdict under it is not a measurement (D227).
     let completion = orbistoun_kernel::sync::PendingEvent {
         ident: handle,
-        // **Unestablished, and left at zero rather than invented.** A real flip event
-        // carries a filter identifying it as a video-out completion, and no lawful source
-        // here gives that value. A guest that branches on it will take the wrong branch and
-        // say so by where it stops, which is a better outcome than a fabricated constant
-        // that looks right (principle 3).
+        // The filter identifying a video-out completion is unestablished and left at zero rather
+        // than invented (D010).
         filter: 0,
         flags: 0,
         fflags: 0,
-        // The flip argument the caller supplied. It is the only per-flip value the guest
-        // provided and `data` is the only field shaped to carry it - an assumption, not a
-        // reading, and the first thing to change if the guest disagrees.
+        // The caller's flip argument, the only per-flip value the guest supplies. Carrying it in
+        // `data` is an assumption.
         data: i64::from_ne_bytes(flip_arg.to_ne_bytes()),
         // Replaced by the registration's own word on delivery.
         udata: 0,
@@ -540,21 +447,16 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         orbistoun_kernel::sync::post_event_everywhere(completion);
         return OK;
     }
-    // Routed by the port handle, because that is what `sceVideoOutAddFlipEvent` registered.
-    // Nothing here knows which queue asked - that is the registration's business.
+    // Routed by the port handle, which is what `sceVideoOutAddFlipEvent` registered.
     orbistoun_kernel::sync::post_event(handle, completion);
     OK
 }
 
 /// `sceVideoOutAddFlipEvent(equeue, handle, udata)`.
 ///
-/// Registers a flip completion against an event queue, so [`video_out_submit_flip`] has somewhere
-/// to post. Identified by the **port handle**, which is what the guest passes and what the flip
-/// knows about itself.
-///
-/// **Both handles are checked.** A registration naming a port this crate never opened, or a queue
-/// the kernel never created, is a guest holding a handle orbistoun never issued - and answering
-/// success would promise a delivery that cannot happen.
+/// Registers a flip completion against an event queue, keyed by the port handle, so
+/// [`video_out_submit_flip`] has somewhere to post. Both handles are checked: success for a port
+/// or queue orbistoun never issued would promise a delivery that cannot happen.
 fn video_out_add_flip_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (equeue, handle, udata) = (args[0], args[1], args[2]);
     if port::with(handle, |_| ()).is_none() {
@@ -569,22 +471,10 @@ fn video_out_add_flip_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceVideoOutIsFlipPending(handle)`.
 ///
-/// # Always zero, and that is this crate's own model rather than a convenient answer
-///
-/// [`video_out_submit_flip`] completes a flip the instant it is accepted, because there is no
-/// presenter and no vertical blank here - nothing scans a buffer out. A queue that empties on
-/// submit is a queue with nothing in it, so the count of flips queued and not yet presented is
-/// zero at every moment a guest can observe it. This is the same sentence as the one already
-/// written above `video_out_submit_flip`, read from the other end.
-///
-/// **It is a count, not a verdict, which is why the stub was fatal.** Unimplemented, this
-/// answered the placeholder `0x7fff_0001` - and a guest testing "are any flips pending?" reads
-/// that as a hundred and thirty-four million of them. PPSA02664 loops on this and
-/// `sceKernelWaitEqueue` until it reads zero: **1,294,359 iterations in one run**, and it never
-/// calls `sceVideoOutSubmitFlip`, so there was never anything pending to drain (D125, D516).
-///
-/// A bad handle answers the port error rather than zero. Zero is a real count and would tell a
-/// guest that a port it does not have is idle.
+/// Always zero for an open port: [`video_out_submit_flip`] completes a flip when it is accepted,
+/// so no flip is ever queued and not yet presented (D516). The answer is a count, so a
+/// placeholder would read as a huge number of pending flips. A bad handle answers the port error,
+/// since zero would tell a guest that a port it does not have is idle.
 fn video_out_is_flip_pending(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match port::with(args[0], |_| ()) {
         // Nothing is ever queued, so nothing is ever pending.
@@ -595,20 +485,9 @@ fn video_out_is_flip_pending(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceVideoOutConfigureOutput(handle, ...)`.
 ///
-/// # Accepted against a real port, and not modelled
-///
-/// Exactly [`video_out_set_flip_rate`]'s bargain, one line below: what an output is configured
-/// *to* is a property of a scanout that does not exist here, so there is nothing to model and
-/// nothing to read back. The handle is still checked, because a guest configuring a port
-/// orbistoun never opened is holding a handle it was never given.
-///
-/// PPSA02664 passes the port handle `0x1`, the one this crate's own `sceVideoOutOpen`
-/// answered, then registers buffers and submits a flip - which is where getting further
-/// leads (D562).
-///
-/// **This is a setter, not a filler**, and that is why it is implemented where
-/// `sceVideoOutSetBufferAttribute2` beside it is not: nothing here promises to write into the
-/// caller's memory, so reporting success promises nothing it does not do.
+/// Accepted against a real port and not modelled, like [`video_out_set_flip_rate`]: an output's
+/// configuration is a property of a scanout that does not exist here. The handle is checked. It
+/// is a setter that writes nothing into caller memory, so success promises nothing unperformed.
 fn video_out_configure_output(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match port::with(args[0], |_| ()) {
         Some(()) => OK,
@@ -618,9 +497,8 @@ fn video_out_configure_output(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceVideoOutSetFlipRate(handle, rate)`.
 ///
-/// The rate at which queued flips are presented. With no scanout there is nothing to pace, so the
-/// rate is accepted against a real port and not modelled - a guest that sets it goes on to submit
-/// flips, which is where getting further leads.
+/// With no scanout there is nothing to pace, so the rate is accepted against a real port and not
+/// modelled.
 fn video_out_set_flip_rate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match port::with(args[0], |_| ()) {
         Some(()) => OK,
@@ -630,23 +508,15 @@ fn video_out_set_flip_rate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The offset of the completed-flip count in the flip-status structure.
 ///
-/// Zero: it is the structure's first field, and a guest reads it there - obSCEne assembles a
-/// `uint64` from `status[0..8]`. It is the one field with a citable position (the count is the
-/// documented head of `SceVideoOutFlipStatus`); the rest of the structure is not modelled, because
-/// no lawful source here establishes its layout and nothing observed reads past the count.
+/// Zero: the count is the documented first field of `SceVideoOutFlipStatus`, and obSCEne reads a
+/// `uint64` from `status[0..8]`. The rest of the structure has no established layout.
 const FLIP_COUNT_OFFSET: usize = 0;
 
 /// `sceVideoOutGetFlipStatus(handle, status)`.
 ///
-/// Writes the port's completed-flip count into the caller's status structure, at
-/// [`FLIP_COUNT_OFFSET`]. That is the field a guest polls to learn a submitted flip has been picked
-/// up; with [`video_out_submit_flip`] completing a flip on submit, the count a caller reads back is
-/// the number of flips it has submitted.
-///
-/// **Only the count is written.** The structure has more fields on hardware - a timestamp, the
-/// current buffer - but no citable source here gives their offsets, and writing a guessed layout is
-/// the invention this project refuses (principle 3). A caller reading a field this does not write
-/// gets whatever it left there, which for obSCEne is the zero it cleared the buffer to.
+/// Writes the port's completed-flip count at [`FLIP_COUNT_OFFSET`]; with flips completing on
+/// submit, this is the number of flips submitted. Only the count is written: the structure's other
+/// fields have no citable offsets (D010), so a caller reading them gets what it left there.
 fn video_out_get_flip_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, status) = (args[0], args[1]);
     let Some(flips) = port::with(handle, |p| p.flips) else {
@@ -658,9 +528,8 @@ fn video_out_get_flip_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if at == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    // SAFETY: a guest-supplied status buffer under the identity mapping (D014), which the guest
-    // passed for exactly this write; written unaligned because the guest promises no alignment
-    // (obSCEne reads the field back a byte at a time for the same reason).
+    // SAFETY: a guest-supplied status buffer in identity-mapped guest memory, passed for this
+    // write; written unaligned because the guest promises no alignment.
     unsafe {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u64>(at + FLIP_COUNT_OFFSET),
@@ -670,37 +539,21 @@ fn video_out_get_flip_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// The display resolution this run presents, in pixels.
+/// The display resolution this run presents, in pixels (D425).
 ///
-/// 1080p, which is what obSCEne itself renders at and calls "the resolution every output supports";
-/// its hardware runs bring a `1920x1080` framebuffer up and present a frame through it. So this is a
-/// size the console demonstrably drives, not a guess - a concrete target a title can lay a render
-/// buffer out against, without claiming to be any particular panel's native size. Held as constants
-/// rather than a machine-profile field for now, because one resolution is enough to get a title past
-/// its display setup; it moves to the profile the moment a run needs a different one, the way the
-/// firmware and software versions already do.
+/// 1920x1080, the resolution the hardware brings its framebuffer up at for obSCEne's display
+/// runs: a size the hardware drives, not any panel's native size.
 const PRESENTED_WIDTH: u32 = 1920;
 /// Companion to [`PRESENTED_WIDTH`].
 const PRESENTED_HEIGHT: u32 = 1080;
 
 /// `sceVideoOutGetResolutionStatus(handle, status)`.
 ///
-/// Fills the caller's status structure with the resolution this run presents: a title reads it to
-/// size a render target, and obSCEne dumps it as a layout probe.
-///
-/// # The value is corroborated; the structure layout is assumed
-///
-/// obSCEne's `130-layout/resolution-status` skips on every hardware run on record - but *not*
-/// because the console is headless. The display comes up (`OBS|display|ready|1920x1080`) and a frame
-/// reaches it; the test skips because obSCEne's own display path already opened and holds the main
-/// output, so the test's *second* `sceVideoOutOpen` is refused (`0x8029_0009`) and it never reaches
-/// this call. So there is no byte dump of the structure to hold a layout against. `width` and
-/// `height` are the documented leading two `uint32`s of `SceVideoOutResolutionStatus` in the open
-/// homebrew SDKs, and those are the fields a title reads; the rest of the structure has no lawful
-/// layout here and is left as the caller prepared it, exactly as [`video_out_get_flip_status`]
-/// writes only the count. The `1920x1080` value is corroborated by the hardware display header; the
-/// field offsets remain `assumed` from a public document until a run that does not already hold the
-/// output can dump the real structure.
+/// Fills the caller's status structure with the resolution this run presents (D425). `width` and
+/// `height` are the documented leading two `uint32`s of `SceVideoOutResolutionStatus`, assumed from
+/// public documentation: no hardware dump of the structure exists, because obSCEne's display path
+/// holds the main output and its second open is refused. The rest of the structure is left as the
+/// caller prepared it.
 fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, status) = (args[0], args[1]);
     if port::with(handle, |_| ()).is_none() {
@@ -712,16 +565,15 @@ fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if at == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    // SAFETY: a guest-supplied status buffer under the identity mapping (D014); `width` is written
-    // at its documented offset 0, unaligned because the guest promises no alignment.
+    // SAFETY: a guest-supplied status buffer in identity-mapped guest memory; `width` at its
+    // documented offset 0, unaligned because the guest promises no alignment.
     unsafe {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u32>(at),
             PRESENTED_WIDTH,
         );
     }
-    // SAFETY: the same buffer, `height` at its documented offset 4 - inside the structure the guest
-    // passed, one field past the width just written.
+    // SAFETY: the same buffer, `height` at its documented offset 4, inside the structure.
     unsafe {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u32>(at + 4),
@@ -733,39 +585,28 @@ fn video_out_get_resolution_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// How many flips the guest has had accepted against a real port.
 ///
-/// # What this number is, and what it is not
-///
-/// It is the count of flips **accepted against a real port** - a submission with a handle this
-/// crate never issued is refused and never reaches it. That is what makes it worth ranking on
-/// where a call count is not: a guest reaches its first flip only by opening an output, setting
-/// its attributes, registering buffers and configuring it, and none of that can be spun.
-///
-/// **It is not a count of frames displayed.** Nothing scans a buffer out here, and a flip
-/// completes the instant it is accepted because there is no vertical blank to wait for - the
-/// model `video_out_submit_flip` already documents. A guest that reaches this has got a frame
-/// to the layer that would present it, which is a distance, not a picture.
+/// A submission with a handle this crate never issued is refused and not counted, so reaching a
+/// flip means the guest opened an output and registered buffers. It is not a count of frames
+/// displayed: nothing scans out, and a flip completes when accepted.
 #[must_use]
 pub fn flips_accepted() -> u64 {
     port::flips()
 }
 
 /// For the port that last completed a flip, the guest address of the buffer it presented and the
-/// decoded [`BufferShape`] registered with those buffers - `(address, shape)`.
+/// decoded [`BufferShape`] registered with it - `(address, shape)`.
 ///
-/// This is what a `presented` rung reads (REQ-...9b1f): the address is where the frame's bytes are,
-/// and the shape gives their extent, format and tiling, without which the bytes cannot be read as an
-/// image or even sized. The shape was decoded at register time from the attribute block the guest
-/// filled with `sceVideoOutSetBufferAttribute2`, so a reader here need not dereference a guest
-/// pointer again (REQ-...a6b3). `None` until a guest has submitted a flip against a port whose
-/// flipped index has a registered buffer.
+/// The address locates the frame's bytes and the shape gives their extent, format and tiling. The
+/// shape is decoded at register time, so no guest pointer is dereferenced here. `None` until a
+/// flip is submitted against a port whose flipped index has a registered buffer.
 #[must_use]
 pub fn last_flipped_buffer() -> Option<(u64, BufferShape)> {
     port::last_flipped_buffer()
 }
 
-/// What sees each presented frame: the flipped buffer's guest address and shape, handed over as the
-/// guest submits the flip (worklog 841). Installed by whoever can show a frame - the worker, which
-/// streams it to a front end - so this crate names no display of its own (principle 12).
+/// What sees each presented frame: the flipped buffer's guest address and shape, handed over as
+/// the guest submits the flip. Installed by whoever can show a frame, so this crate names no
+/// display of its own.
 pub type FlipObserver = fn(u64, BufferShape);
 
 static FLIP_OBSERVER: std::sync::OnceLock<FlipObserver> = std::sync::OnceLock::new();
@@ -775,10 +616,8 @@ pub fn install_flip_observer(observer: FlipObserver) {
     let _ = FLIP_OBSERVER.set(observer);
 }
 
-/// Implementations this crate provides, by symbol name.
-///
-/// Names rather than hashes: the hash is derived from the name, so a table written in
-/// hashes could not be read by a person or checked against the declarations above.
+/// Implementations this crate provides, by symbol name. Names rather than hashes, so the table can
+/// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceVideoOutOpen", video_out_open),
@@ -805,16 +644,9 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 #[cfg(test)]
 mod tests {
 
-    /// **A category denied the scanout is refused before a port is ever opened.**
+    /// A category denied the scanout is refused with its exact code before a port is opened (D662).
     ///
-    /// Written first, and it is the branch no title in the corpus reaches: everything with a
-    /// `param.json` declares a big app. A guard nothing exercises is a guard nobody knows
-    /// anything about, so the test constructs the case rather than waiting for a title to
-    /// (D662).
-    ///
-    /// Asserted on the refusal and on its exact code, because the code is what a guest branches
-    /// on - "it failed" and "it failed with `0x80290001`" are different facts to whoever is
-    /// reading the guest's next move.
+    /// No title in the corpus reaches this branch, so the test constructs the case.
     #[test]
     fn a_category_without_the_scanout_cannot_open_a_port() {
         use orbistoun_core::category::Category;
@@ -843,35 +675,29 @@ mod tests {
         a
     }
 
-    /// A flip records the process-global "last flipped port", so the tests that submit one run in
-    /// turn - otherwise `last_flipped_buffer` could read a handle another test set. A poisoned lock is
-    /// recovered rather than cascading a panic.
+    /// Serialises the tests that submit a flip, since the last flipped port is process-global. A
+    /// poisoned lock is recovered rather than cascading a panic.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// **The attribute block fills, decodes, and its shape reads back through the flipped buffer.**
+    /// The attribute block fills, decodes, and its shape reads back through the flipped buffer.
     ///
-    /// a6b3, subsuming 420c: `sceVideoOutSetBufferAttribute2` writes the buffer's shape into the
-    /// caller's block at the offsets obSCEne `-83df` measured; `video_out_register_buffers` decodes
-    /// it and keeps both the pointer and the shape; and `last_flipped_buffer` answers the flipped
-    /// address paired with that shape - extent, format and tiling - instead of a bare pointer. Two
-    /// passes, the two `-83df` ran: 1920x1080 tiled and 3840x2160 linear. And a byte past the 80 the
-    /// call writes is left exactly as it was, because the call touches only the measured extent.
+    /// Two passes, 1920x1080 tiled and 3840x2160 linear. A byte past the 80 the call writes stays
+    /// unchanged.
     #[test]
     fn the_attribute_block_fills_decodes_and_reads_back_its_shape() {
         let _guard = serial();
 
-        // A real 256-byte block the guest "owns": the fill writes into it and the decode reads from
-        // it, both by its real address under the identity mapping. Pre-poisoned so an untouched byte
-        // is recognisable.
+        // A 256-byte block the guest owns, addressed directly through the identity mapping.
+        // Pre-poisoned so an untouched byte is recognisable.
         let mut block = [0x5a_u8; 256];
         let attr = block.as_mut_ptr() as usize as u64;
         let format = 0x8000_0000_0000_0000_u64;
 
-        // Fill: 1920x1080, tiled (0), the cube's own format. args[4] height, args[5] option.
+        // Fill: 1920x1080, tiled (0). args[4] height, args[5] option.
         let mut fill = args([attr, format, 0, 1920]);
         fill[4] = 1080;
         assert_eq!(
@@ -880,8 +706,8 @@ mod tests {
             "the attribute block is filled"
         );
 
-        // Bus 5: buses 1/3/4/6/7 are taken by tests that hold a port open, so this and its second
-        // pass (bus 8) pick their own to avoid the already-open refusal in a parallel suite.
+        // Bus 5: other tests hold ports on buses 1/3/4/6/7, and the second pass uses bus 8, so the
+        // already-open refusal cannot fire in a parallel suite.
         let handle = open_on(5);
         let addresses: [u64; 3] = [0x2_0100_0000, 0x2_0101_0000, 0x2_0102_0000];
         let mut reg = args([handle, 0, addresses.as_ptr() as u64, 3]);
@@ -947,24 +773,22 @@ mod tests {
         );
     }
 
-    /// **RegisterBuffers2 reads addresses from the `SceVideoOutBuffer` struct array, not v1's args.**
+    /// RegisterBuffers2 reads addresses from the `SceVideoOutBuffer` struct array, not v1's
+    /// arguments.
     ///
-    /// The v2 call hands an array of 32-byte `SceVideoOutBuffer` structs (address in `data` at offset
-    /// 0) at arg3, the count at arg4 and the attribute at arg5 - and a zero at arg2, where v1 keeps
-    /// its address array. Binding both entry points to one handler read that zero arg2 as the
-    /// addresses and refused the call, which is why the open-toolchain display never went ready. This
-    /// registers through the struct array and checks the `data` addresses come back in order.
+    /// arg2 is zero, where v1 keeps its address array; the addresses must come back in order from
+    /// the structs' `data` fields.
     #[test]
     fn register_buffers2_reads_addresses_from_the_struct_array() {
         let _guard = serial();
         let handle = open_on(9);
-        // Two SceVideoOutBuffer structs laid out as [data, metadata, reserved0, reserved1] each; only
-        // the data field - the first quadword of each 32-byte struct - is read.
+        // Two SceVideoOutBuffer structs laid out as [data, metadata, reserved0, reserved1]; only
+        // the data field, the first quadword of each, is read.
         let structs: [u64; 8] = [0x2_0300_0000, 0, 0, 0, 0x2_0301_0000, 0, 0, 0];
         let buffers = structs.as_ptr() as usize as u64;
 
         let mut a = [0_u64; GUEST_ARG_REGISTERS];
-        a[0] = handle; // arg2 stays zero, exactly as the SDK calls it
+        a[0] = handle; // arg2 stays zero, as the SDK calls it
         a[3] = buffers;
         a[4] = 2;
         // arg5 (attribute) zero: decode yields a zeroed shape without a fault.
@@ -980,26 +804,21 @@ mod tests {
         );
     }
 
-    /// Opens a distinct output so the shared, process-wide port table cannot make two tests
-    /// collide on ownership. `[user, bus, index, param]`; each test picks its own bus.
+    /// Opens a distinct output so the shared port table cannot make two tests collide on
+    /// ownership. `[user, bus, index, param]`; each test picks its own bus.
     fn open_on(bus: u64) -> u64 {
         video_out_open(&args([0, bus, 0, 0]))
     }
 
-    /// **Registering buffers stores their addresses in order, and a flip records which one.**
-    ///
-    /// The whole of `-6a86`: a renderer needs an address the guest agreed to write into, and it was
-    /// being discarded. Three addresses at a known triple must come back in order, and the flip must
-    /// record the index it presented. The null-array case is the guard, watched failing: a guest that
-    /// registers "buffers" at address zero is refused rather than storing a row of zeros a renderer
-    /// would read as frames.
+    /// Registering buffers stores their addresses in order, a flip records which one, and a null
+    /// address array is refused rather than stored as zeros.
     #[test]
     fn registering_buffers_stores_their_addresses_and_a_flip_records_the_index() {
         let _guard = serial();
         let handle = open_on(6);
         assert!(handle >= port::FIRST, "a port opened");
 
-        // Guest memory is host memory (identity mapping), so this array's pointer is a guest address.
+        // Guest memory is identity-mapped, so this array's pointer is a guest address.
         let addresses: [u64; 3] = [0x2_0000_0000, 0x2_0001_0000, 0x2_0002_0000];
         let ptr = addresses.as_ptr() as u64;
         assert_eq!(
@@ -1035,18 +854,10 @@ mod tests {
         );
     }
 
-    /// **Nothing is ever pending, including straight after a submit.**
+    /// Nothing is ever pending, including straight after a submit.
     ///
-    /// The other end of the same sentence as [`super::video_out_submit_flip`]: a flip completes
-    /// the instant it is accepted, so a queue of flips-not-yet-presented is a queue that is
-    /// always empty. Asserted *after* a submit as well as before, because "zero because nothing
-    /// was submitted" and "zero because the model completes on submit" are different claims and
-    /// only the second one is this crate's.
-    ///
-    /// **What this cannot prove:** that hardware answers zero here. It does not - a real port
-    /// has a scanout and a flip really is pending until the next vertical blank. This asserts
-    /// the model orbistoun can honestly implement with no scanout at all, which is the same
-    /// model the flip count already uses.
+    /// Asserted after a submit as well as before, because the property is that the model completes
+    /// on submit, not that nothing was submitted.
     #[test]
     fn nothing_is_ever_pending_because_a_flip_completes_on_submit() {
         let _guard = serial();
@@ -1067,9 +878,6 @@ mod tests {
     }
 
     /// A handle no port answers is refused, not told it is idle.
-    ///
-    /// Zero is a **count**, so answering it for a bad handle tells a guest that a port it does
-    /// not have has nothing pending - which is the failure D125 is about, one value along.
     #[test]
     fn a_bad_handle_is_refused_rather_than_reported_idle() {
         assert_eq!(
@@ -1078,13 +886,7 @@ mod tests {
         );
     }
 
-    /// **A submitted flip completes now, and the status reports the count a guest polls.**
-    ///
-    /// This is the whole reason the section exists: a guest submits a flip and waits for the count
-    /// to move past what it was. If it never moves, the guest spins on a frame that will never be
-    /// shown - which is what an unimplemented `GetFlipStatus` did, and where obSCEne's video run
-    /// faulted. Asserted through the count a caller reads back, at offset 0, because that is the
-    /// field obSCEne assembles from `status[0..8]`.
+    /// A submitted flip completes now, and the status reports the count a guest polls at offset 0.
     #[test]
     fn a_flip_completes_on_submit_and_the_count_is_readable() {
         let _guard = serial();
@@ -1116,10 +918,8 @@ mod tests {
         );
     }
 
-    /// **Every flip call refuses a handle that was never opened with the video-out code**, not a
-    /// placeholder a caller reads as a count. `080-video/flip-rate-rejects-bad-handle` measured the
-    /// console answering `0x8029_000b`; a `GuestError` placeholder (`0x7fff_0003`) both reads wrong
-    /// and refuses with the wrong code, the D125 shape this crate exists to avoid.
+    /// Every flip call refuses a handle that was never opened with the measured video-out code
+    /// `0x8029_000b`, not a placeholder a caller reads as a count.
     #[test]
     fn the_flip_calls_refuse_an_unopened_handle_with_the_video_code() {
         let _guard = serial();
@@ -1141,11 +941,7 @@ mod tests {
         );
     }
 
-    /// **A second open of the same output is refused with the console's already-open code.**
-    ///
-    /// obSCEne's display path holds the main output, and its resolution probe opens it again; on
-    /// hardware that second open is refused (`0x8029_0009`) and the probe skips. Without this,
-    /// orbistoun handed out a second handle and the probe ran where hardware could not (D169, D425).
+    /// A second open of the same output is refused with the already-open code `0x8029_0009`.
     #[test]
     fn a_second_open_of_a_held_output_is_refused() {
         let first = open_on(7);
@@ -1157,12 +953,8 @@ mod tests {
         );
     }
 
-    /// **The resolution status writes the presented width and height at their documented offsets.**
-    ///
-    /// The two fields a title reads to size a render target, at 0 and 4. Assumed from public docs -
-    /// no hardware run has ever reached this call - so the guard is only that the two known fields
-    /// are what this run presents, not a claim about the rest of the structure. An unopened handle
-    /// is refused, not answered with a placeholder that reads as a dimension.
+    /// The resolution status writes the presented width and height at offsets 0 and 4, and an
+    /// unopened handle is refused (D425).
     #[test]
     fn the_resolution_status_reports_the_presented_size() {
         let handle = open_on(3);

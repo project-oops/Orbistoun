@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 
 /// `turn` - take every mechanical step one run's findings call for.
 ///
-/// **The shim holds no logic.** Everything decided here is decided by `orbistoun-turn`; this
-/// resolves where things are, spawns itself as the guest runner, and prints (principle 13).
+/// Every decision is made in `orbistoun-turn`; this resolves locations, spawns itself as the guest
+/// runner, and prints (D034).
 pub(crate) fn cmd_turn(
     path: &std::path::Path,
     record: bool,
@@ -18,9 +18,8 @@ pub(crate) fn cmd_turn(
 ) -> Result<()> {
     use orbistoun_turn::{experiment::Finding, trial::GuestTrial, turn};
 
-    // **A verifying turn runs where nothing has been learned.** An applied measurement removes
-    // the wall it was measured at, so re-deriving it from this machine's own state finds
-    // nothing - and applying one would make it permanently unverifiable (D298).
+    // A verifying turn runs where nothing has been learned: an applied measurement removes the wall
+    // it was measured at, so re-deriving it from this machine's state would find nothing (D297).
     let scratch = verify
         .is_some()
         .then(tempfile::tempdir)
@@ -41,13 +40,12 @@ pub(crate) fn cmd_turn(
     let traces = paths.traces_dir();
     std::fs::create_dir_all(&traces).with_context(|| format!("creating {}", traces.display()))?;
 
-    // Spawns *this* binary as the guest runner, which is what worker mode already does:
-    // the runner is then literally the same build and cannot be a stale copy.
+    // Spawns this binary as the guest runner, as worker mode does, so the runner is the same build.
     let binary = std::env::current_exe().context("finding this executable")?;
     let mut trial = GuestTrial::new(&binary, path, &traces)
         .with_symbols(symbols_db.map(std::path::Path::to_path_buf));
     if let Some(dir) = &scratch {
-        // The child reads its own learned file too, so the isolation has to reach it.
+        // The child reads its own learned file too, so the isolation reaches it.
         trial = trial.with_env(orbistoun_env::DATA_DIR.name, dir.path().to_string_lossy());
     }
 
@@ -73,19 +71,12 @@ pub(crate) fn cmd_turn(
         println!("  {}", result.say());
     }
 
-    // **Always, and this used to need a flag.** A turn that measured a contract and was given
-    // no flag printed it and wrote nothing - so the measurement existed only in a terminal,
-    // which `CLAUDE.md` names as already lost. Three titles were diagnosed this way and two of
-    // the results went nowhere.
-    //
-    // Writing a proposal is inert: a file nothing applies, undone by deleting it. **Applying**
-    // changes what the next run does, which is why that still needs `--apply` and an oracle
-    // behind it. Emitting and applying are different acts and only one of them needed gating
-    // (D355).
-    // Asked after the findings, because a question is what a turn does when the run itself
-    // has stopped producing mechanical steps - and it costs boots, so it goes last (D356).
+    // Asked after the findings: a question is what a turn does once the run stops producing
+    // mechanical steps, and it costs boots (D356).
     attempt_questions(&mut trial, &baseline)?;
 
+    // Proposals are always written: a file nothing applies is inert. Only applying policy needs
+    // `--apply` (D355).
     let proposed = write_proposals(path, &plan, &taken)?;
     if proposed > 0 {
         println!(
@@ -122,13 +113,10 @@ pub(crate) fn cmd_turn(
 
 /// Writes what a turn measured into the learned policy.
 ///
-/// **Underneath what a person wrote, never over it.** The file is folded in by the worker with
-/// `StubPolicy::absorb`, which keeps every deliberate entry - so the worst a wrong guess costs
-/// is a run, and deleting the file is a complete undo (D296).
-///
-/// Refuses to write a patch whose evidence has not been earned. A patch that touches guest
-/// memory needs a conformance check covering it; a moved wall is not enough, because a wrong
-/// write is invisible until something unrelated breaks (principle 3).
+/// Underneath what a person wrote: the worker folds the file in with `StubPolicy::absorb`, which
+/// keeps every deliberate entry, so deleting the file is a complete undo (D296). A patch that
+/// writes guest memory needs a conformance check covering it; a moved wall is not enough, because a
+/// wrong write is invisible until something unrelated breaks.
 fn apply_patches(
     paths: &orbistoun_paths::Paths,
     title: &std::path::Path,
@@ -139,9 +127,9 @@ fn apply_patches(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut written = 0_usize;
 
-    // **What the probe said before anything was applied.** A measurement that declares it needs
-    // a conformance check is graded against this; one that does not is kept on reach alone
-    // (D296, D302). Absent probe, absent gate - and said out loud rather than quietly downgraded.
+    // What the probe said before anything was applied. A measurement that declares it needs a
+    // conformance check is graded against this; one that does not is kept on reach alone. With no
+    // probe there is no gate, and that is reported.
     let binary = std::env::current_exe().context("finding this executable")?;
     let probe = probe_module();
     let before = if let Some(path) = &probe {
@@ -153,9 +141,8 @@ fn apply_patches(
         None
     };
 
-    // **And every guest this machine has.** The probe grades what somebody wrote a check
-    // for; the corpus grades what a change does to guests nobody wrote anything for, which
-    // is the case title mining is actually about (D303).
+    // And every guest this machine has: the corpus grades what a change does to guests nobody wrote
+    // a check for (D303).
     let titles = corpus_titles();
     let corpus_before = corpus_score(&binary, &titles, paths.data_root());
     println!(
@@ -164,9 +151,8 @@ fn apply_patches(
     );
 
     for measurement in measurements(title, plan, taken) {
-        // **Said, not assumed.** The evidence a measurement needs is a property of what it
-        // claims, and announcing it is what stops "the wall moved" being read as "the
-        // behaviour is right" (D296).
+        // Said, not assumed: announcing the evidence a measurement needs keeps "the wall moved"
+        // from reading as "the behaviour is right".
         println!(
             "
   measured {}: needs {:?}",
@@ -185,9 +171,8 @@ fn apply_patches(
         )
         .context("writing the patch to grade")?;
 
-        // **Every guest votes, and one regression refuses the change.** Nothing here can weigh
-        // one guest's correctness against another's, so a patch that helps three and breaks
-        // one is a trade nobody has the exchange rate for (D303).
+        // Every guest votes, and one regression refuses the change: nothing here can weigh one
+        // guest's correctness against another's (D303).
         let corpus_after = corpus_score(&binary, &titles, scratch.path());
         let on_the_corpus = corpus_before.against(&corpus_after);
         println!("    corpus: {}", on_the_corpus.say());
@@ -197,7 +182,7 @@ fn apply_patches(
         }
 
         // A patch that hands the guest memory cannot be judged on reach alone: a wrong write is
-        // invisible until something unrelated breaks, which is principle 3's opening sentence.
+        // invisible until something unrelated breaks.
         let needs_a_spec =
             measurement.evidence == orbistoun_hle::learned::Evidence::ConformanceCheck;
         let kept = match (needs_a_spec, before.as_ref(), probe.as_ref()) {
@@ -207,9 +192,8 @@ fn apply_patches(
                 println!("    probe: {}", verdict.say());
                 verdict.is_an_improvement()
             }
-            // **Falls back to the corpus rather than refusing outright.** Refusing every
-            // memory-handing patch on a machine without a probe would leave the common case -
-            // somebody mining a title - unable to keep anything at all (D303).
+            // Falls back to the corpus rather than refusing: without a probe, refusing every
+            // memory-handing patch would leave title mining unable to keep anything.
             (true, ..) => {
                 println!("    no probe; kept on the corpus alone, which cannot say *correct*");
                 !on_the_corpus.fixed.is_empty()
@@ -240,10 +224,8 @@ fn apply_patches(
 
 /// How every guest on this machine fared, for grading a change against a corpus.
 ///
-/// **The oracle when nobody wrote a check.** A probe grades what somebody thought to test, and
-/// title mining is the point - a person runs a commercial title, it dies on a stub, and there
-/// is no check for it and nobody to write one. Every other title they own is an independent
-/// guest with its own expectations of the same function, so the corpus is the suite (D303).
+/// The oracle when nobody wrote a check: every other title is an independent guest with its own
+/// expectations of the same function, so the corpus is the suite (D303).
 fn corpus_score(
     binary: &std::path::Path,
     titles: &[std::path::PathBuf],
@@ -252,10 +234,8 @@ fn corpus_score(
     use orbistoun_turn::conformance::{Corpus, Reach};
 
     let mut corpus = Corpus::default();
-    // **Where the child writes its traces, not somewhere of our choosing.** The worker resolves
-    // its own trace directory from `ORBISTOUN_DATA_DIR`; handing the trial a different one made
-    // every run report "no trace was written", which the loop below skipped in silence - so a
-    // sweep of seven guests graded none of them and reported that nothing had changed.
+    // Where the child writes its traces: the worker resolves its trace directory from
+    // `ORBISTOUN_DATA_DIR`, so reading anywhere else finds no traces.
     let traces = orbistoun_turn::trial::traces_in(data_dir);
     std::fs::create_dir_all(&traces).ok();
     for title in titles {
@@ -264,9 +244,8 @@ fn corpus_score(
         let outcome = match orbistoun_turn::experiment::Trial::spawn_axes(&mut trial, &[]) {
             Ok(outcome) => outcome,
             Err(e) => {
-                // **Said, not skipped.** A guest that could not be run says nothing about the
-                // change - and a sweep that quietly graded fewer guests than it claimed is how
-                // "no regression" comes to mean "nobody looked" (principle 3).
+                // Said, not skipped: a guest that could not be run says nothing about the change,
+                // and a sweep must not grade fewer guests than it claims.
                 println!("    {} could not be run: {e}", title.display());
                 continue;
             }
@@ -304,8 +283,8 @@ fn corpus_titles() -> Vec<std::path::PathBuf> {
 
 /// Where the conformance probe lives, if it has been put there.
 ///
-/// **A title like any other**, so the gate needs no special path handling and a machine without
-/// it is not broken - it simply cannot grade anything that asks to be graded, and says so.
+/// A title like any other, so it needs no special path handling; a machine without it cannot grade
+/// what asks to be graded, and says so.
 const PROBE_TITLE: &str = "PPSA99980";
 
 /// The probe, if this machine's shared title library has it.
@@ -318,10 +297,8 @@ fn probe_module() -> Option<std::path::PathBuf> {
 
 /// Runs the conformance probe and reads what it graded.
 ///
-/// **The oracle the fix loop was missing.** `FURTHER` says the guest got past something and
-/// says nothing once it stops faulting; the probe grades checks against a spec, by name. With
-/// one in hand a generator is free to be dumb, which is the arrangement the naming loop has
-/// always had and the fix loop never did (D302).
+/// `FURTHER` says only that the guest got past something; the probe grades checks against a
+/// specification, by name (D303).
 fn probe_score(
     binary: &std::path::Path,
     probe: &std::path::Path,
@@ -342,20 +319,15 @@ fn probe_score(
 
 /// How far the probe is allowed to run when it is being used as a gate.
 ///
-/// Generous: a budget that stops it early removes checks from the report, and a shorter report
-/// reads as "nothing regressed" when it means "we stopped looking" - which the verdict counts
-/// as a regression precisely so this cannot pass silently.
+/// Generous: a budget that stops it early removes checks from the report, and the verdict counts
+/// missing checks as a regression.
 const PROBE_CALL_BUDGET: u64 = 2_000_000;
 
 /// `turn --verify` - re-derive a submitted file locally and report where it disagrees.
 ///
-/// **This is what makes receiving one safe.** A measurement is checked by measuring again, not
-/// by trusting it, which is why a policy entry is a better contribution than a diff: the claim
-/// is falsifiable by a command (D297).
-///
-/// "Not measured here" is reported and is **not** a refutation - it usually means the title is
-/// absent or the run never reached the call, and reporting it as a contradiction would turn
-/// "we did not look" into "it is wrong".
+/// A measurement is checked by measuring again, so the claim is falsifiable by a command (D297).
+/// "Not measured here" is reported and is not a refutation: it usually means the title is absent or
+/// the run never reached the call.
 fn verify_against(
     paths: &orbistoun_paths::Paths,
     title: &std::path::Path,
@@ -400,24 +372,19 @@ fn verify_against(
 
 /// Prints what a turn earned as the command that would record it.
 ///
-/// **Printed, not run.** A sweep's conclusion is admissible; changing a tracked file stays a
-/// deliberate act somebody reviews as a diff (D291).
+/// Printed, not run: changing a tracked file stays a deliberate act reviewed as a diff (D291).
 fn print_learn_command(library: Option<&str>, learned: &orbistoun_hle::knowledge::Record) {
     use std::fmt::Write as _;
 
     /// Where a library was not carried by the label, since `learn` insists on one.
     const UNATTRIBUTED: &str = "libkernel";
 
-    // A quoted argument, in a form a shell will hand over whole. Inner double quotes become
-    // single ones rather than being escaped: these strings are English sentences this code
-    // wrote, so there is nothing to preserve and a quoting scheme that survives copy-paste
-    // is worth more than fidelity to a character nothing puts there.
+    // A quoted argument a shell hands over whole. Inner double quotes become single ones: these are
+    // sentences this code wrote, and copy-paste safety matters more than the character.
     let quote = |s: &str| format!("\"{}\"", s.replace('"', "'"));
 
-    // One line per argument, continued with a backslash a shell reads - **not** a Rust string
-    // continuation, which `cargo fmt` collapses while baking the source indentation into the
-    // rendered text. That is D184, and the first draft of this function tripped the guard
-    // written for it.
+    // One line per argument, continued with a shell backslash, not a Rust string continuation,
+    // which `cargo fmt` collapses while baking the source indentation into the text.
     let mut out = format!(
         "\n  orbistoun-cli learn {} --library {} --known guest-observed",
         learned.function,
@@ -434,20 +401,10 @@ fn print_learn_command(library: Option<&str>, learned: &orbistoun_hle::knowledge
 
 /// Attempts the highest-ranked open question that names its own experiment.
 ///
-/// # Why a turn asks a question at all
-///
-/// The dispatcher is driven by run reports - what crashed, this time. That leaves the other
-/// half of what this project knows unread: 277 open questions, ranked by how often a guest
-/// calls the function, each written by somebody who had just failed to answer it. The first
-/// of them blocks 67.5% of every call the corpus makes, names its own experiment, and the
-/// apparatus for that experiment has existed unwired since D218.
-///
-/// So a turn now ends by asking one. Not all of them - a question costs boots, and the
-/// ranking exists precisely because they are not equally worth asking (D356).
-///
-/// **Reported rather than concluded.** What comes back is what each run did; deciding that a
-/// shape is *the* shape needs the guest to accept it and get further, which is a judgement
-/// this prints the evidence for rather than making.
+/// Run reports cover what crashed; the open questions, ranked by how often a guest calls the
+/// function, are the other half of what is unknown. One question per turn, because each costs boots
+/// (D356). The result is reported, not concluded: deciding a shape is right needs the guest to
+/// accept it and get further.
 fn attempt_questions(
     trial: &mut orbistoun_turn::trial::GuestTrial,
     baseline: &orbistoun_turn::experiment::Outcome,
@@ -467,9 +424,8 @@ fn attempt_questions(
         let (calls, _) = called.get(&f.name).copied().unwrap_or((0, 0));
         let open = asked.len();
         for label in &f.answerable_by {
-            // **A label nothing recognises is an error, not a silence.** A knowledge file
-            // naming an experiment this build does not have is a claim nobody can act on, and
-            // dropping it quietly is how it stays that way (principle 3).
+            // A label nothing recognises is an error: a knowledge file naming an experiment this
+            // build lacks is a claim nobody can act on.
             let Some(answers) = Answers::named(label) else {
                 println!(
                     "  ! {} names an experiment nothing here has: {label}",
@@ -496,10 +452,8 @@ fn attempt_questions(
         "  asking the top open question - {} ({} calls in the corpus)",
         question.function, question.calls
     );
-    // **Not one question, because a label is attached to the function.** Printing
-    // `asked.first()` paired the experiment with whichever open question happened to be first,
-    // which on the top-ranked entry was about argument 1 while the experiment varies the map.
-    // A false pairing reads as an answer to the wrong thing (D356).
+    // Every open question on the function, because the experiment belongs to the function; pairing
+    // it with one question could pair it with the wrong one.
     println!(
         "    {}; the axes below say what each run asks",
         question.asked
@@ -515,16 +469,14 @@ fn attempt_questions(
         let outcome = trial
             .spawn_axes(&axes)
             .map_err(|e| anyhow::anyhow!("a question could not be asked: {e}"))?;
-        // The same vocabulary the diagnostic axes report in, so a reader is not asked to
-        // learn a second one - and the same distinction between a fault that moved and a
-        // guest that was broken earlier (D331).
+        // The same vocabulary the diagnostic axes report in, with the same distinction between a
+        // fault that moved and a guest broken earlier.
         let change = orbistoun_turn::axis::compare(baseline, &outcome, outcome.planted);
         println!("    {asked}");
         println!("      {}", describe_change(&change));
 
-        // **And what the run was for.** Reach answers "did it crash differently"; the question
-        // asked which boundary the guest feeds back, and that is arithmetic on the offsets it
-        // queried against the map it was shown - both now in the trace (D357).
+        // And what the run was for: which boundary the guest feeds back, computed from the offsets
+        // it queried against the map it was shown, both in the trace (D357).
         if matches!(answers, Answers::MapShape) {
             if let Ok(trace) = trial.trace() {
                 let map = queried_map(&trace);
@@ -532,10 +484,7 @@ fn attempt_questions(
                 match orbistoun_turn::question::walked_by(&map, &queried) {
                     orbistoun_turn::question::Reading::WalksBy(walk) => {
                         println!("      *** it walks by {walk:?} - the question is answered");
-                        // **Written down, not printed.** The loop just established something
-                        // nothing in this project knew, and a finding that exists only as
-                        // terminal output is already lost - the same rule that made a turn
-                        // emit proposals for what it measured (D355, D358).
+                        // Written down as a proposal, not only printed (D357).
                         match write_answer(&question.function, walk, &map) {
                             Ok(true) => println!("      recorded as a proposal in patches/"),
                             Ok(false) => {}
@@ -554,21 +503,10 @@ fn attempt_questions(
 
 /// Writes an answered question into `patches/`, as a change to the entry that asked it.
 ///
-/// # Why an answer is a patch and not a knowledge write
-///
-/// The loop measured something nothing here knew. That is exactly what a **proposal** is for:
-/// inert, undone by deleting it, and promoted by somebody who reads it - the ladder D322
-/// settled. Writing it straight into a tracked knowledge file would be the loop editing the
-/// project's own record of what it knows, without anybody seeing the diff.
-///
-/// `known_by = "measured"` rather than `guest-observed`, and the distinction is real: the
-/// guest was not merely watched, it was **put in a situation constructed to separate two
-/// readings** and its answer was arithmetic. That is the second-strongest oracle this project
-/// has, behind a published standard.
-///
-/// Returns whether anything was written. Nothing is, when the entry already records the
-/// answer - re-proposing a settled question every run is how a `patches/` directory becomes
-/// noise nobody reads (D358).
+/// A proposal is inert, undone by deleting it, and promoted by a person reading it (D322).
+/// `known_by = "measured"`: the guest was put in a situation constructed to separate two readings
+/// and its answer was arithmetic. Returns whether anything was written; nothing is when the entry
+/// already records the answer.
 fn write_answer(
     function: &str,
     walk: orbistoun_turn::question::Walk,
@@ -591,8 +529,8 @@ fn write_answer(
             "the guest walks the map by feeding back the NEXT REGION'S START"
         }
     };
-    // Already settled, so nothing to propose. Checked on the sentence rather than the
-    // function, because an entry can carry several answers.
+    // Already settled. Checked on the sentence rather than the function, because an entry can carry
+    // several answers.
     if existing.contains(says) {
         return Ok(false);
     }
@@ -606,12 +544,8 @@ fn write_answer(
                 p[0].1, p[1].0
             )
         });
-    // **One sentence, built once**, because it is both the thing written and the thing checked
-    // for when deciding whether this question is already settled.
-    // **Named arguments, not implicit captures.** `concat!` produces a macro call rather than
-    // a literal, and implicit capture only works on a literal - so `{says}` inside one is
-    // "there is no argument named says". Naming them keeps both the capture and the
-    // one-line-literal rule the prose gate enforces (D362).
+    // One sentence, built once: it is both what is written and what is checked for. Named
+    // arguments, because `concat!` is a macro call, not a literal, and cannot capture implicitly.
     let says = format!(
         concat!(
             "MEASURED: {says}, established by running the title against a map with a gap in it ",
@@ -625,9 +559,8 @@ fn write_answer(
     let quoted = format!("\"{}\"", says.replace('\\', "\\\\").replace('"', "\\\""));
 
     let display = path.display().to_string().replace('\\', "/");
-    // **Joined where the key exists, added where it does not.** The first version always
-    // inserted, producing `duplicate key edge_cases in table function` from a patch that
-    // `git apply` accepted without complaint (D358).
+    // Joined where the key exists, added where it does not, so the table never gets a duplicate
+    // `edge_cases` key.
     let diff = match orbistoun_turn::patch::key_line_of(&existing, bare, "edge_cases") {
         Some(at) => {
             let line = existing.lines().nth(at).unwrap_or_default();
@@ -638,9 +571,8 @@ fn write_answer(
                 &display,
                 &existing,
                 at,
-                // Trimmed, because a multi-line array leaves `rest` empty and the join would
-                // end the line with a space - which `git apply` warns about and a reviewer
-                // has to look twice at.
+                // Trimmed: a multi-line array leaves `rest` empty, and the line would end in a
+                // space.
                 format!("edge_cases = [{quoted}, {rest}").trim_end(),
             )
         }
@@ -695,9 +627,8 @@ fn write_answer(
 
 /// The physical memory map a run recorded presenting.
 ///
-/// Read from the trace rather than recomputed from the shape that was asked for: a shape whose
-/// regions did not fit falls back, and recomputing would compare offsets against a map the
-/// guest was never shown (D357).
+/// Read from the trace, not recomputed from the requested shape: a shape whose regions did not fit
+/// falls back, and the guest saw the fallback (D357).
 fn queried_map(trace: &serde_json::Value) -> Vec<(u64, u64, bool)> {
     trace
         .pointer("/conditions/memory_map")
@@ -719,13 +650,8 @@ fn queried_map(trace: &serde_json::Value) -> Vec<(u64, u64, bool)> {
 
 /// Every first argument the guest passed to one import, in call order.
 ///
-/// **In order, and duplicates kept.** A walk is a sequence, and a guest that queries the same
-/// offset twice is saying something a set would discard.
-///
-/// **From `tail`, not `calls`.** `calls` is a summary - one row per import with a count and no
-/// arguments - so reading it found no offsets at all and reported "the guest queried fewer than
-/// two" for a title making twenty million of exactly those calls. `tail` is the ordered record
-/// that carries them (D357).
+/// In order with duplicates, because a walk is a sequence. From `tail`, the ordered record that
+/// carries arguments; `calls` is one summary row per import with no arguments.
 fn queried_offsets(trace: &serde_json::Value, function: &str) -> Vec<u64> {
     let bare = function.rsplit("::").next().unwrap_or(function);
     trace
@@ -766,20 +692,9 @@ fn describe_change(change: &orbistoun_turn::axis::Change) -> String {
 
 /// Writes what a turn measured as inert proposals, and says how many.
 ///
-/// # Why this needs no flag
-///
-/// A proposal is a file nothing applies. It changes no behaviour, it is undone by deleting
-/// it, and `patches/` is not tracked - so the caution that gates `--apply` does not reach it.
-/// That caution is about **policy**, which decides what the next run does; producing the
-/// artefact is not that act (D355).
-///
-/// What it replaces is worse than a flag: a turn given neither flag printed its findings and
-/// wrote nothing, so a measured contract survived only as terminal output. `CLAUDE.md` is
-/// explicit that anything existing only in a conversation is already lost, and two of three
-/// titles diagnosed in one sitting lost their results exactly that way.
-///
-/// Skipped where the turn measured nothing - an empty `patches/` directory would say a turn
-/// had run and found nothing worth proposing, which is a different claim from not having run.
+/// A proposal changes no behaviour, is undone by deleting it, and `patches/` is untracked, so it
+/// needs no flag (D355). Skipped when the turn measured nothing, since an empty directory would
+/// claim a turn ran and found nothing.
 fn write_proposals(
     title: &std::path::Path,
     plan: &[orbistoun_turn::turn::Step],
@@ -804,8 +719,8 @@ fn write_proposals(
 
     let mut written = 0;
     for measurement in &measured {
-        // No library, no file to aim a diff at. A measurement recorded before the field
-        // existed genuinely does not say which knowledge file it belongs in (D328).
+        // No library, no file to aim a diff at: a measurement recorded without one does not say
+        // which knowledge file it belongs in.
         if measurement.library.is_empty() {
             continue;
         }
@@ -813,8 +728,7 @@ fn write_proposals(
         let Ok(existing) = std::fs::read_to_string(&path) else {
             continue;
         };
-        // One claim per function. An entry already there means somebody promoted this, and
-        // re-proposing it asks a reviewer to decide which of two is current.
+        // One claim per function: an existing entry means this was already promoted.
         if existing.contains(&format!("name = \"{}\"", measurement.function)) {
             continue;
         }
@@ -828,9 +742,8 @@ fn write_proposals(
         )
         .with_context(|| format!("writing the patch for {}", measurement.function))?;
 
-        // Replaced rather than appended, for the reason `Learned::record` gives: two entries
-        // for one function are two claims about the same thing and nothing here can say which
-        // is current. The newer turn measured the newer emulator.
+        // Replaced rather than appended, as in `Learned::record`: two entries for one function
+        // cannot be ordered, and the newer turn measured the newer emulator.
         held.proposal.retain(|p| p.file != file);
         held.proposal.push(orbistoun_submit::Proposal {
             file,

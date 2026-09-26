@@ -1,39 +1,10 @@
-//! Connecting to a probe: ask it things, read what it says.
+//! The probe window: a live session with a conformance probe running elsewhere.
 //!
-//! # Why this exists as its own window
-//!
-//! Everything else in this application looks at files that already exist - a title, a
-//! trace, a report from a run that finished. This is the one surface that asks a live
-//! question of something running elsewhere and gets an answer back, and the difference
-//! matters enough to keep it separate rather than folding it into a detail panel.
-//!
-//! # What is on the other end
-//!
-//! **A probe, and nothing more specific than that.** It may be running on the target
-//! platform, on a stand-in, or inside another emulator, and this window cannot tell which -
-//! a probe cannot certify its own machine. So nothing here says "hardware" or names a
-//! device: it says *probe*, which is the one thing that is actually known.
-//!
-//! What it is running on is the operator's to assert, it belongs to the corpus rather than
-//! to a connection, and it is deliberately not asked for here.
-//!
-//! # What it will not do
-//!
-//! **Flatter a non-answer.** `died`, `timeout` and `lost` are rendered as themselves and
-//! never as a value. The probe dying is the *normal* case here - a well-formed but fatal
-//! address is called, not refused - so a window that showed a death as a blank result, or
-//! as a zero, would be lying about the single thing it exists to observe.
-//!
-//! **Decide what an answer means.** Grading belongs to the corpus path, where the operator
-//! has said what machine this is. A value here is what came off the wire and is labelled as
-//! that.
-//!
-//! # Threading
-//!
-//! The connection lives on a worker thread and speaks to the interface through a channel.
-//! A socket read blocks for as long as its budget allows - thirty seconds by default - and
-//! a frame that waited on one would freeze the whole application on a probe that has gone
-//! quiet, which is the exact condition worth watching.
+//! The other end is a probe and nothing more specific: it cannot certify what machine it
+//! runs on, so nothing here says "hardware". `died`, `timeout` and `lost` are shown as
+//! themselves and never as a value, since a probe dying on a fatal call is a normal result.
+//! Values are shown as they came off the wire; grading belongs to the corpus path. The
+//! connection runs on its own thread, because a socket read blocks for its whole budget.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
@@ -71,8 +42,8 @@ enum Request {
 
 /// One line of the exchange.
 ///
-/// Kept as a kind rather than pre-formatted text so the view can colour a death differently
-/// from a result without parsing its own output back.
+/// Kept as a kind rather than formatted text, so the view can colour a non-answer
+/// differently from a result.
 pub(crate) enum Entry {
     /// Something the operator sent.
     Sent(String),
@@ -111,9 +82,8 @@ pub(crate) struct Panel {
     from_worker: Option<Receiver<Event>>,
     /// Whether a command is outstanding.
     ///
-    /// One command in flight at a time is a protocol requirement, not a simplification:
-    /// with two outstanding and a probe that has just died, nothing says which one killed
-    /// it - and that attribution is the finding.
+    /// One command in flight at a time is a protocol requirement: if the probe dies, the
+    /// command that caused it must be unambiguous.
     busy: bool,
 }
 
@@ -130,12 +100,8 @@ impl Panel {
 
     /// Starts a worker and negotiates.
     ///
-    /// The worker is handed a context so it can ask for a repaint **when it has something
-    /// to say**. The first version polled instead - a repaint every two hundred
-    /// milliseconds for as long as a session was open - which redraws the window
-    /// continuously whether or not anything happened, and shows as a cursor that will not
-    /// settle. A timer is the wrong instrument for an event that already knows when it
-    /// occurred.
+    /// The worker is handed a context so it requests a repaint when it has something to
+    /// say, rather than the window repainting on a timer.
     fn connect(&mut self, ctx: &egui::Context) {
         let address = if self.address.contains(':') {
             self.address.clone()
@@ -159,9 +125,7 @@ impl Panel {
 
     /// Drains whatever the worker has said since the last frame.
     ///
-    /// Non-blocking on purpose. A frame that waited on a socket would freeze the window on
-    /// a probe that has gone quiet, and a probe going quiet is a thing worth being able to
-    /// watch happen.
+    /// Non-blocking, so a probe that goes quiet does not freeze the window.
     pub(crate) fn poll(&mut self) {
         let Some(from_worker) = self.from_worker.as_ref() else {
             return;
@@ -195,8 +159,8 @@ impl Panel {
                     for record in &records {
                         self.log.push(Entry::Received(format!("{record:?}")));
                     }
-                    // The distinction the whole window is for. A command that answered gets
-                    // its value; one that did not gets said so, and never a value.
+                    // A command that answered gets its value; one that did not is labelled
+                    // as a non-answer, never a value.
                     let text = if detail.is_empty() {
                         outcome.to_string()
                     } else {
@@ -241,9 +205,8 @@ impl Panel {
             return;
         };
 
-        // Refused here rather than on the wire. A client that sends a verb the probe never
-        // announced has already put a command it does not implement in front of a target
-        // that faults easily - and being told "no" afterwards does not take it back.
+        // Refused here rather than on the wire: a verb the probe never announced must not
+        // reach a target that faults easily.
         if let Some(needed) = capability_for(verb) {
             if !self.can(&needed) {
                 self.log.push(Entry::Note(format!(
@@ -346,9 +309,8 @@ impl Panel {
             .show(ui, |ui| {
                 for (field, confidence, value) in &self.self_report {
                     ui.label(field);
-                    // The three ways of not knowing stay three things. All of them can read
-                    // `unknown`, and a display that collapsed them would show one blank
-                    // where there are three different findings.
+                    // The three ways of not knowing stay distinct, though each can read
+                    // `unknown`.
                     match confidence {
                         Confidence::Known => {
                             ui.label(value);
@@ -384,9 +346,7 @@ impl Panel {
                         Entry::Returned(text) => {
                             ui.monospace(egui::RichText::new(text).strong());
                         }
-                        // Deliberately marked. A death is the normal case and it is not a
-                        // result; the one thing this window must never do is let it read
-                        // like one.
+                        // Marked, so a non-answer never reads like a result.
                         Entry::NonAnswer(text) => {
                             ui.monospace(
                                 egui::RichText::new(format!("{text}  (no result)"))
@@ -419,8 +379,7 @@ impl Panel {
             }
         });
 
-        // The verbs worth one click, and only the ones this probe announced. A button for
-        // something reserved would be a button that exists to be refused.
+        // One-click verbs, only those this probe announced.
         ui.horizontal(|ui| {
             ui.weak("quick:");
             for (label, text, capability) in [
@@ -466,8 +425,7 @@ fn worker(
 ) {
     /// Sends an event and asks for the frame that will show it.
     ///
-    /// Both together, always: an event delivered without a repaint sits unseen until the
-    /// pointer happens to move, and a repaint without an event is the flicker.
+    /// Both together: an event without a repaint sits unseen until the pointer moves.
     macro_rules! announce {
         ($event:expr) => {{
             let _ = events.send($event);
@@ -493,8 +451,8 @@ fn worker(
             });
         }
         Err(e) => {
-            // A wrong or stale key lands here as a clean refusal rather than a broken wire,
-            // which is worth saying plainly because the secret is replaced by a restart.
+            // A wrong or stale key arrives as a clean refusal; the secret changes when the
+            // probe restarts.
             announce!(Event::Closed(match e {
                 ClientError::Refused(orbistoun_probe::Refusal::Unauthorised) => {
                     "refused: the key was wrong or stale - a restart replaces it".to_owned()

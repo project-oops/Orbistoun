@@ -1,37 +1,13 @@
 //! What a guest is told about a file, and how it lists a directory.
 //!
-//! # The problem this module has that the others do not
+//! The FreeBSD checkout is newer than the target, and `struct stat` and `struct dirent`
+//! changed shape in between (`st_dev`, `st_nlink` and `d_fileno` widened, fields reordered,
+//! `d_off` added). Writing the modern layout for an older guest puts the size at the wrong
+//! offset. Both layouts are in the checkout (`freebsd11_stat`, `freebsd11_dirent`), so which
+//! one the target uses is `ORBISTOUN_STAT_LAYOUT`, defaulting to the older one (D374).
 //!
-//! Everything else here is read out of the FreeBSD checkout and used. These two cannot be,
-//! because **the checkout is a newer FreeBSD than the target**, and these are exactly the two
-//! structures that changed shape in between:
-//!
-//! ```text
-//! struct stat     st_dev went 32-bit to 64-bit, st_nlink 16-bit to 64-bit, fields reordered
-//! struct dirent   d_fileno went 32-bit to 64-bit, and d_off was added
-//! ```
-//!
-//! Writing the modern layout for an older guest puts the file size at the wrong offset. That
-//! is not a call that fails - it is a file server reporting the wrong size for every file, and
-//! nothing anywhere saying so.
-//!
-//! # Both layouts are in the same header, so the choice is a setting
-//!
-//! `sys/sys/stat.h` carries `struct freebsd11_stat` beside `struct stat`, and
-//! `sys/sys/dirent.h` carries `struct freebsd11_dirent` beside `struct dirent`. Both are
-//! citable from one checkout, so neither is a guess about what a structure *is* - the only
-//! open question is **which one this target uses**, and that is a hypothesis the guest is the
-//! only oracle for (principle 5, D374).
-//!
-//! So it is `ORBISTOUN_STAT_LAYOUT`, defaulting to the older one because the target's user
-//! space predates the change, and a run can try the other without a rebuild.
-//!
-//! # What is filled in, and what is honestly zero
-//!
-//! Size, type and the three timestamps come from the host and are true. Ownership, device
-//! numbers, inode numbers and generation counts are **zero**: they describe a filesystem this
-//! is not, and a plausible number there is a fact about nothing that a guest might print or
-//! compare.
+//! Size, type and the three timestamps come from the host. Ownership, device, inode and
+//! generation numbers are zero: they describe a filesystem this is not.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
@@ -56,7 +32,7 @@ pub const S_IFCHR: u32 = 0o020_000;
 /// The permission bits reported for a device.
 ///
 /// `0444`: readable by anyone and writable by nobody, which is what [`crate::device`]
-/// actually enforces rather than what a console would say.
+/// enforces.
 const DEVICE_MODE: u32 = 0o444;
 
 /// `DT_DIR`, from `sys/sys/dirent.h`.
@@ -67,10 +43,9 @@ pub const DT_REG: u8 = 8;
 
 /// The permission bits reported for everything.
 ///
-/// **`0755` for a directory and `0644` for a file**, which is what the mount model actually
-/// enforces at the only granularity it has: everything readable, and writable only under the
-/// storage the installation owns. `chmod` records that a mode cannot be honoured; this is the
-/// same fact from the reading side.
+/// `0755` for a directory and `0644` for a file: what the mount model enforces at the only
+/// granularity it has, everything readable and writable only under the storage the
+/// installation owns.
 const DIRECTORY_MODE: u32 = 0o755;
 
 /// The permission bits reported for a file.
@@ -81,8 +56,8 @@ const FILE_MODE: u32 = 0o644;
 pub enum Layout {
     /// The layout FreeBSD used through release 11, and the default.
     ///
-    /// Chosen because the target's user space predates the change, which is a **hypothesis**
-    /// rather than a measurement - and the reason this is a setting at all.
+    /// The target's user space predates the change; this is a hypothesis, which is why the
+    /// layout is a setting.
     FreeBsd11,
     /// The layout in the checkout the constants are harvested from.
     Current,
@@ -152,8 +127,8 @@ fn facts_about(host: &std::path::Path) -> Option<Facts> {
 
 /// Writes a `struct stat` where a guest asked for one.
 ///
-/// Every field this cannot know is left zero, which is the honest content: device and inode
-/// numbers describe a filesystem this is not.
+/// Every field this cannot know is left zero: device and inode numbers describe a filesystem
+/// this is not.
 fn write_stat(at: u64, facts: Facts) -> bool {
     let layout = Layout::configured();
     let mut block = vec![0_u8; layout.stat_len()];
@@ -162,8 +137,8 @@ fn write_stat(at: u64, facts: Facts) -> bool {
     match layout {
         Layout::FreeBsd11 => {
             block[8..10].copy_from_slice(&(facts.mode as u16).to_le_bytes());
-            // One link, because every path here names one file. Zero would say the file is
-            // unlinked and waiting to be reclaimed, which is a different thing.
+            // One link, since every path here names one file; zero would say the file is
+            // unlinked.
             block[10..12].copy_from_slice(&1_u16.to_le_bytes());
             put_timespec(&mut block, 24, seconds, nanos);
             put_timespec(&mut block, 40, seconds, nanos);
@@ -183,9 +158,8 @@ fn write_stat(at: u64, facts: Facts) -> bool {
             block[128..132].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
         }
     }
-    // Blocks allocated, derived from the size rather than asked of the host: what a host
-    // really allocated is about its filesystem, and a guest that multiplies this by the
-    // block size expects it to cover the file.
+    // Blocks allocated, derived from the size so a guest multiplying by the block size covers
+    // the file.
     let blocks = facts.size.div_ceil(u64::from(BLOCK_SIZE));
     let blocks_at = match layout {
         Layout::FreeBsd11 => 80,
@@ -199,8 +173,8 @@ fn write_stat(at: u64, facts: Facts) -> bool {
     if destination == 0 {
         return false;
     }
-    // SAFETY: a guest-supplied `struct stat *` under the identity mapping (D014), written
-    // with exactly the number of bytes the chosen layout says one has.
+    // SAFETY: a guest-supplied `struct stat *` under the identity mapping, written with
+    // exactly the number of bytes the chosen layout says one has.
     unsafe {
         std::ptr::copy_nonoverlapping(
             block.as_ptr(),
@@ -220,7 +194,7 @@ fn put_timespec(block: &mut [u8], at: usize, seconds: u64, nanos: u32) {
     block[at + 8..at + 16].copy_from_slice(&u64::from(nanos).to_le_bytes());
 }
 
-/// `stat(path, buffer)` - what a guest is told about a path.
+/// `stat(path, buffer)`: what a guest is told about a path.
 ///
 /// Reference: POSIX.1-2008 `stat(2)`; the structure from `sys/sys/stat.h`, and which
 /// generation of it is a setting (D374).
@@ -239,26 +213,12 @@ fn stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceKernelStat(path, buffer)` - the vendor-named form of [`stat`].
+/// `sceKernelStat(path, buffer)`: the vendor-named form of [`stat`].
 ///
-/// # Why this is not just [`stat`] registered under a second name
-///
-/// **The two disagree about failure, and only about failure.** POSIX `stat` answers `-1`; a
-/// `sceKernel*` call answers a vendor code in the `0x8002_00xx` family, which is what
-/// `sceKernelMkdir` beside it already does. Registering the POSIX function under the vendor
-/// name would hand a caller `-1` - `0xffff_ffff_ffff_ffff` - where it tests for a negative
-/// 32-bit vendor error, and the two are not the same number (D125, D525).
-///
-/// The success path and the structure it writes are shared, so which generation of
-/// `struct stat` a guest is given stays one decision (D374) rather than two that can drift.
-///
-/// `ENOENT` for a path nothing answers, which is what the failure is: `facts_of` returns
-/// nothing only when neither a host file nor a mount point is behind the name.
-///
-/// **Written here and registered in `lib.rs`.** The machinery it shares with [`stat`] lives in
-/// this module; the *name* belongs to `libkernel_fs`, which is where it is declared. Putting the
-/// registration beside the POSIX ones offered it under the wrong library, and the crate's own
-/// `every_implementation_is_also_declared_here_or_says_why_not` refused it (D525).
+/// The two differ only on failure (D525): POSIX `stat` answers `-1`, a `sceKernel*` call a
+/// vendor code in the `0x8002_00xx` family, which a caller tests as a negative 32-bit value.
+/// The success path and the `struct stat` it writes are shared. `ENOENT` for a path nothing
+/// answers. Registered in `lib.rs` under `libkernel_fs`, the library that declares the name.
 pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
     let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
@@ -281,13 +241,8 @@ pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// What a guest is told about a path, host directory or mount point.
 ///
-/// **A mount point is a directory with no host behind it.** `/` is the case that matters: it
-/// holds `app0` and `data` and no host directory holds either, so asking the host about it
-/// answers nothing and a guest is told the root does not exist (D385).
-///
-/// Its times are zero and its size is zero, which is the honest content - it is not a
-/// directory on any disk, so there is no modification time to report and inventing one would
-/// be a fact about nothing.
+/// A mount point is a directory with no host behind it: `/` holds `app0` and `data` and no
+/// host directory holds either. Its times and size are zero, since it is on no disk.
 fn facts_of(guest: &str) -> Option<Facts> {
     if let Some(host) = crate::mount::resolve_existing(guest)
         && let Some(facts) = facts_about(&host)
@@ -302,28 +257,25 @@ fn facts_of(guest: &str) -> Option<Facts> {
         });
     }
     if crate::device::named(guest).is_some() {
-        // A character device: no size, no times. `S_IFCHR` rather than `S_IFREG`, because a
-        // caller that stats it before reading is asking exactly this question - a program
-        // told the kernel log is a regular file of size zero concludes there is nothing in
-        // it (D389).
+        // A character device: no size, no times. `S_IFCHR` rather than `S_IFREG`, since a
+        // program told the kernel log is a regular file of size zero concludes it is empty
+        // (D389).
         return Some(Facts {
             mode: S_IFCHR | DEVICE_MODE,
             size: 0,
             modified: (0, 0),
         });
     }
-    // A path the guest asked about and this could not answer. Recorded rather than only
-    // refused: it is a path something real wanted, spelled by the thing that wanted it, which
-    // is the only kind of evidence there is about what the mount table is missing (D387).
+    // A path the guest asked about and this could not answer, recorded as evidence of what
+    // the mount table is missing (D387).
     crate::wanted::note(guest);
     None
 }
 
-/// `lstat(path, buffer)` - the same, without following a symbolic link.
+/// `lstat(path, buffer)`: the same, without following a symbolic link.
 ///
-/// **The same as `stat` here, and that is stated.** Nothing a guest can reach through a mount
-/// is a symbolic link this created, and following one out of a mount is already refused by
-/// path resolution - so the distinction the call exists to make has nothing to act on.
+/// The same as `stat` here: nothing reachable through a mount is a symbolic link this
+/// created, and following one out of a mount is refused by path resolution.
 ///
 /// Reference: POSIX.1-2008 `lstat(2)`.
 fn lstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -332,8 +284,8 @@ fn lstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// What an open descriptor's host metadata says, in the [`Facts`] this module writes.
 ///
-/// Shared by [`fstat`] and [`kernel_fstat`] so the `struct stat` a descriptor is described by stays
-/// one decision, exactly as the path forms share [`facts_of`] (D374, D525).
+/// Shared by [`fstat`] and [`kernel_fstat`] so the `struct stat` a descriptor is described by
+/// stays one decision (D525).
 fn facts_from_descriptor(data: &std::fs::Metadata) -> Facts {
     let modified = data
         .modified()
@@ -351,7 +303,7 @@ fn facts_from_descriptor(data: &std::fs::Metadata) -> Facts {
     }
 }
 
-/// `fstat(fd, buffer)` - the same, by descriptor.
+/// `fstat(fd, buffer)`: the same, by descriptor.
 ///
 /// Reference: POSIX.1-2008 `fstat(2)`.
 fn fstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -368,16 +320,11 @@ fn fstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceKernelFstat(fd, buffer)` - the vendor-named form of [`fstat`].
+/// `sceKernelFstat(fd, buffer)`: the vendor-named form of [`fstat`].
 ///
-/// The same relationship to `fstat` that [`kernel_stat`] has to `stat` (D525): the success path and
-/// the `struct stat` it writes are shared through [`facts_from_descriptor`], and only failure
-/// differs. POSIX answers `-1`; a `sceKernel*` call answers a vendor `0x8002_00xx` code - a
-/// descriptor with no open file behind it is `EBADF`, a buffer that cannot be written is `EFAULT`.
-///
-/// `fstat` and `sceKernelStat` were both already served, but this libkernel name was not wired, so
-/// the guest that called it read whatever its stack held where an unwritten `struct stat` should be
-/// - the D171 failure this crate exists to close, and PPSA04263 is one such caller (worklog 761).
+/// Related to `fstat` as [`kernel_stat`] is to `stat` (D525): the success path is shared
+/// through [`facts_from_descriptor`], and failure is a vendor `0x8002_00xx` code: `EBADF` for
+/// a descriptor with no open file, `EFAULT` for a buffer that cannot be written.
 pub(crate) fn kernel_fstat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(facts) = crate::descriptor::facts(args[0])
         .as_ref()
@@ -400,9 +347,8 @@ struct Directory {
     remaining: std::vec::IntoIter<(String, bool)>,
     /// The buffer `readdir` answers a pointer to.
     ///
-    /// **One buffer per directory, reused.** `readdir` answers a pointer the caller reads
-    /// and does not free, valid until the next call on the same directory - so a fresh
-    /// allocation per entry would leak one per file in the listing.
+    /// One buffer per directory, reused: `readdir` answers a pointer valid until the next call
+    /// on the same directory, so a fresh allocation per entry would leak.
     entry: Vec<u8>,
 }
 
@@ -412,7 +358,7 @@ fn directories() -> &'static Mutex<BTreeMap<u64, Directory>> {
     OPEN.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Empties the open-directory table between tests - see [`crate::descriptor::clear`].
+/// Empties the open-directory table between tests; see [`crate::descriptor::clear`].
 #[cfg(test)]
 pub(crate) fn clear() {
     if let Ok(mut open) = directories().lock() {
@@ -420,11 +366,10 @@ pub(crate) fn clear() {
     }
 }
 
-/// `opendir(path)` - answers a handle a guest walks with `readdir`.
+/// `opendir(path)`: answers a handle a guest walks with `readdir`.
 ///
-/// **A handle is an address**, for the same reason `fopen`'s is (D165): a guest dereferences
-/// what it gets, so an error code there is a wild pointer. The listing is taken once, at open,
-/// which is what a directory stream is - a snapshot a program iterates.
+/// The handle is an address, since a guest dereferences it (D151). The listing is taken once
+/// at open: a directory stream is a snapshot a program iterates.
 ///
 /// Reference: POSIX.1-2008 `opendir(3)`.
 fn opendir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -450,13 +395,13 @@ fn opendir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     handle
 }
 
-/// A guest directory's entries, `(name, is a directory)`, `.` and `..` first - or `None` when the
-/// guest path is no directory here. The one listing `opendir` and `getdirentries` both read
-/// (worklog 842), so a directory cannot list differently through the two.
+/// A guest directory's entries, `(name, is a directory)`, `.` and `..` first, or `None` when
+/// the guest path is no directory here. Both `opendir` and `getdirentries` read it, so a
+/// directory lists the same through either.
 pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
-    // **The mount points first, then the host's own entries.** A path can be both: a mount
-    // at `/system_data/priv` makes `/system_data` a directory that no host holds, and if
-    // something is *also* mounted at `/system_data` its files belong in the same listing.
+    // The mount points first, then the host's own entries. A path can be both: a mount at
+    // `/system_data/priv` makes `/system_data` a directory, and anything also mounted there
+    // belongs in the same listing.
     let mut below = crate::mount::mounts_under(guest);
     if crate::device::is_directory(guest) {
         below.extend(crate::device::in_directory());
@@ -470,8 +415,7 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
     }
 
     let mut entries: Vec<(String, bool)> = Vec::new();
-    // `.` and `..` first, because a listing has them and a program counting entries or
-    // skipping them expects to see them.
+    // `.` and `..` first, as a program counting or skipping them expects.
     entries.push((".".to_owned(), true));
     entries.push(("..".to_owned(), true));
     for name in below {
@@ -482,7 +426,7 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
     {
         for found in reading.flatten() {
             let name = found.file_name().to_string_lossy().into_owned();
-            // A mount point already listed wins: it is what the guest can actually enter.
+            // A mount point already listed wins: it is what the guest can enter.
             if entries.iter().any(|(held, _)| *held == name) {
                 continue;
             }
@@ -493,7 +437,7 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
     Some(entries)
 }
 
-/// `readdir(handle)` - the next entry, or null at the end.
+/// `readdir(handle)`: the next entry, or null at the end.
 ///
 /// Reference: POSIX.1-2008 `readdir(3)`; the structure from `sys/sys/dirent.h`, and which
 /// generation of it is the same setting `stat` uses (D374).
@@ -506,7 +450,7 @@ fn readdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     };
     let Some((name, is_directory)) = directory.remaining.next() else {
-        // Null at the end, which is how the loop a guest wrote terminates.
+        // Null at the end terminates the guest's loop.
         return 0;
     };
 
@@ -533,7 +477,7 @@ fn readdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     directory.entry.as_ptr() as u64
 }
 
-/// `closedir(handle)` - gives the listing back.
+/// `closedir(handle)`: gives the listing back.
 ///
 /// Reference: POSIX.1-2008 `closedir(3)`.
 fn closedir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -589,12 +533,7 @@ mod tests {
         std::ffi::CString::new(text).expect("a path")
     }
 
-    /// **sceKernelFstat answers a vendor code, not POSIX -1, when the descriptor is bad.**
-    ///
-    /// The D525 distinction the crate exists to keep: POSIX `fstat` answers `-1`, a `sceKernel*` call
-    /// answers a `0x8002_00xx` vendor code, and a guest testing for a negative 32-bit vendor error
-    /// never matches `-1` (`0xffff_ffff_ffff_ffff`). Asserted on the failure, because that is the only
-    /// thing that differs between the two forms - the success path they share is exercised elsewhere.
+    /// `sceKernelFstat` answers a vendor code, not POSIX -1, for a bad descriptor (D525).
     #[test]
     fn kernel_fstat_answers_a_vendor_code_on_a_bad_descriptor() {
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
@@ -614,22 +553,10 @@ mod tests {
         );
     }
 
-    /// **The vendor form succeeds like the POSIX one and fails differently**, which is the
-    /// only reason it is separate code.
+    /// The vendor stat fails with a vendor code, never -1 (D525).
     ///
-    /// # What this asserts
-    ///
-    /// That a missing path answers a `0x8002_00xx` vendor code and **not** `-1`. Registering
-    /// the POSIX function under the vendor name would have handed a caller
-    /// `0xffff_ffff_ffff_ffff` where it tests a negative 32-bit vendor error, and those are not
-    /// the same number (D125, D525).
-    ///
-    /// # What it cannot assert
-    ///
-    /// Which errno the console answers for a missing path. Nothing has measured it. `ENOENT` is
-    /// what the failure *is* here - neither a host file nor a mount point is behind the name -
-    /// and the test pins the family and the sign, which is what a caller branches on, rather
-    /// than a specific code no run has established.
+    /// Pins the family and the sign, which a caller branches on. The specific errno the
+    /// hardware answers for a missing path is unmeasured; `ENOENT` is what the failure is here.
     #[test]
     fn the_vendor_stat_refuses_with_a_vendor_code_and_never_minus_one() {
         let _guard = exclusively();
@@ -637,9 +564,8 @@ mod tests {
         let mut buffer = [0_u8; 256];
         let at = buffer.as_mut_ptr() as usize as u64;
 
-        // Called directly rather than through this module's table: the body lives here and the
-        // name is offered by `libkernel_fs`, which is the split the crate's own declaration
-        // guard insisted on (D525).
+        // Called directly: the body lives here and the name is registered by
+        // `libkernel_fs`.
         let good = path("/data/save.bin");
         assert_eq!(
             super::kernel_stat(&[good.as_ptr() as usize as u64, at, 0, 0, 0, 0]),
@@ -665,7 +591,7 @@ mod tests {
         );
     }
 
-    /// **The size is at the offset the chosen layout says**, which is the whole risk here.
+    /// A file's size lands at the offset the chosen layout gives it.
     #[test]
     fn a_files_size_lands_where_the_layout_puts_it() {
         let _guard = exclusively();
@@ -740,7 +666,7 @@ mod tests {
         assert_eq!(buffer[0], 0xAA, "and nothing is written");
     }
 
-    /// **The listing a file server walks**, including the two entries every directory has.
+    /// A directory opens, walks with `.` and `..` included, and closes.
     #[test]
     fn a_directory_can_be_opened_walked_and_closed() {
         let _guard = exclusively();
@@ -794,7 +720,7 @@ mod tests {
         assert_eq!(call("readdir", [0xDEAD, 0, 0, 0, 0, 0]), 0);
     }
 
-    /// The two layouts really do differ, which is why the setting exists.
+    /// The two layouts put fields in different places.
     #[test]
     fn the_two_layouts_put_things_in_different_places() {
         assert_ne!(

@@ -1,36 +1,12 @@
 //! Trapping on an access to guest memory, and saying which instruction made it.
 //!
-//! The expensive half of the pair [`crate::watch`] describes. A snapshot says *which bytes
-//! ended up different*; this says *which instruction touched them, and how often*. Both are
-//! kept, because they answer different questions and the cheap one is still the one to run
-//! first (D223, D276).
-//!
-//! # What this is for
-//!
-//! The question at the `image+0xafc959` wall is no longer "did anything fill this slot in?".
-//! The snapshot answered that, and the answer was no. It is "**who read the slot nobody
-//! filled?**", and only a trap per access can answer it.
-//!
-//! # The two compose
-//!
-//! Run the snapshot first: it names every word in a structure that nobody wrote. Take up to
-//! four of those addresses and arm them here on the next run. Each hit reports the
-//! instruction that consumed the empty slot, its offset in a named region, and the value it
-//! saw. Neither step reads the guest's code, which is what makes the pipeline mechanical.
-//!
-//! # What the hardware costs
-//!
-//! Four watchpoints, of one, two, four or eight bytes, each aligned to its own length. Those
-//! are properties of x86 debug registers rather than choices made here, so a request that
-//! breaks one is **refused with the reason** rather than quietly rounded into something that
-//! would watch the wrong bytes.
-//!
-//! # A trap, not a fault
-//!
-//! A data breakpoint fires *after* the access completes, so the instruction pointer belongs
-//! to the **next** instruction. Naming the one that actually did it needs its length, and
-//! length comes from decoding it - which is disassembly of a vendor binary, refused by
-//! principle 1. So every line here says `after the access at`, never `at` (D277).
+//! The counterpart of [`crate::watch`] (D276): a snapshot names the words nobody wrote, and up to
+//! four of those addresses are armed here on the next run, each hit reporting the instruction
+//! that touched the word and the value it saw. The hardware has four debug registers, each
+//! watching one, two, four or eight bytes aligned to its length, so a request that breaks those
+//! rules is refused with the reason rather than rounded. A data breakpoint fires after the
+//! access, and naming the exact instruction would need decoding guest code, so every report says
+//! "after the access at", never "at".
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -43,9 +19,8 @@ pub const MAX_WATCHPOINTS: usize = 4;
 
 /// How many distinct instruction sites are remembered before hits are only counted.
 ///
-/// A watched word inside a loop is touched thousands of times from a handful of places, so
-/// the interesting quantity is the set of places rather than the stream of accesses. Sites
-/// beyond this are counted by [`dropped`] rather than silently discarded.
+/// A watched word in a loop is touched many times from a few places, so the set of places is
+/// what is kept. Sites beyond this are counted by [`dropped`], not discarded silently.
 const MAX_SITES: usize = 32;
 
 /// What kind of access is trapped.
@@ -53,32 +28,26 @@ const MAX_SITES: usize = 32;
 pub enum Kind {
     /// Only writes. Answers "who filled this in?".
     Write,
-    /// Reads or writes. Answers "who consumed this?" - the question at the wall.
+    /// Reads or writes. Answers "who consumed this?".
     ///
-    /// x86 has no read-only encoding, so asking for reads gets writes as well. Said here
-    /// rather than discovered from a report with more lines in it than expected.
+    /// x86 has no read-only encoding, so asking for reads gets writes as well.
     Access,
     /// Execution reaching an address, answering "what were the arguments when this was called?".
     ///
-    /// The one kind that watches *code* rather than data. It fires **before** the instruction
-    /// runs, so it captures the register state a function is entered with - which is how the
-    /// value a guest computes and hands to something like `tlsf_add_pool` becomes readable
-    /// without disassembling the guest to find where it came from (D458). It is **one-shot**:
-    /// the first hit snapshots the registers and then disarms itself, so the instruction runs
-    /// and the guest carries on - no resume-flag or single-step dance, and no infinite re-trap.
+    /// It fires before the instruction runs, so it captures the register state a function is
+    /// entered with (D458). It is one-shot: the first hit snapshots the registers and disarms, so
+    /// the instruction runs and the guest carries on with no re-trap.
     Execute,
 }
 
 impl Kind {
     /// The `R/W` field the debug-control register wants.
     ///
-    /// Only the Windows arming path writes a debug-control register, so this is dead weight
-    /// off Windows and gated to say so rather than left to read as unused.
+    /// Only the Windows arming path writes a debug-control register, so it is gated to Windows.
     #[cfg(windows)]
     const fn bits(self) -> u64 {
         match self {
-            // Execute is `0b00`: the debug register breaks on an instruction fetch at the
-            // address rather than a data access to it.
+            // Execute is `0b00`: a break on an instruction fetch at the address.
             Self::Execute => 0b00,
             Self::Write => 0b01,
             Self::Access => 0b11,
@@ -119,8 +88,7 @@ pub struct Request {
 impl Request {
     /// The `LEN` field the debug-control register wants.
     ///
-    /// The encoding is not sequential - four bytes is `0b11` and eight is `0b10` - which is
-    /// exactly the sort of table worth writing out rather than computing.
+    /// The encoding is not sequential: four bytes is `0b11` and eight is `0b10`.
     const fn length_bits(self) -> Option<u64> {
         match self.length {
             1 => Some(0b00),
@@ -151,13 +119,9 @@ impl Request {
 
 /// Reads a list of requests, or says what is wrong with it.
 ///
-/// `<addr>[+len][:kind]`, comma-separated. Length defaults to eight, because a guest
-/// structure is made of words and that is the shape the snapshot reports. Kind defaults to
-/// `rw`, because "who consumed this?" is the question this exists for.
-///
-/// **Refuses rather than skips.** A watchpoint that was requested and not armed reports a
-/// run under a diagnostic that did nothing, which is the failure every diagnostic in this
-/// crate is built to avoid (D185, D218).
+/// `<addr>[+len][:kind]`, comma-separated. Length defaults to eight, the word the snapshot
+/// reports; kind defaults to `rw`. A request that cannot be armed is refused rather than
+/// skipped, so a run never reports a watchpoint that did nothing.
 ///
 /// # Errors
 ///
@@ -177,9 +141,8 @@ pub fn parse(raw: &str) -> Result<Vec<Request>, Error> {
             Some((address, length)) => (address, number(length)?),
             None => (site, 8),
         };
-        // An execute breakpoint watches an instruction fetch, which the hardware encodes as
-        // LEN=00 - one byte - whatever the instruction's real length. Force it, so a caller
-        // need not know the encoding and a stray `+len` cannot ask for something the mode forbids.
+        // An execute breakpoint watches an instruction fetch, which the hardware encodes as LEN=00
+        // whatever the instruction's length, so the length is forced to one.
         let length = if kind == Kind::Execute { 1 } else { length };
         let request = Request {
             address: number(address)?,
@@ -207,41 +170,39 @@ fn number(raw: &str) -> Result<u64, Error> {
     parsed.map_err(|_| Error::NotANumber(text.to_owned()))
 }
 
-// --- What was armed, so a hit can be described -------------------------------
+// What was armed, so a hit can be described.
 
 /// Address of each armed watchpoint, or zero.
 static ARMED_ADDRESS: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 /// Length of each, parallel to [`ARMED_ADDRESS`].
 static ARMED_LENGTH: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 /// One when the slot is an execute breakpoint, zero for a data one, parallel to
-/// [`ARMED_ADDRESS`]. An execute hit snapshots registers and disarms; a data hit records the
-/// accessing instruction. The two are told apart here rather than by re-deriving from `Dr7`.
+/// [`ARMED_ADDRESS`], so the handler need not derive it from `Dr7`.
 static ARMED_EXECUTE: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 
-// --- The one-shot execute snapshot -------------------------------------------
+// The one-shot execute snapshot.
 
 /// The address of the first execute-breakpoint hit, plus one so zero means "not yet hit".
 static EXEC_RIP: AtomicU64 = AtomicU64::new(0);
 /// The sixteen registers captured at that first hit, in [`Registers`] field order.
 static EXEC_REGS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
-/// How many times any execute breakpoint fired, which says whether the first hit was the only
-/// one - a function called once versus a hot one.
+/// How many times any execute breakpoint fired, which tells a function called once from a hot
+/// one.
 static EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Where each execute slot was armed, kept after the slot disarms so it can still be reported.
 static EXEC_SLOT_AT: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 /// How many times each execute slot fired, across every thread it was armed on.
 ///
-/// Per slot, not one total - a total printed beside the first hit's address reads two
-/// breakpoints hit once each as one breakpoint hit twice.
+/// Per slot, so two breakpoints hit once each never read as one hit twice.
 static EXEC_SLOT_HITS: [AtomicU64; MAX_WATCHPOINTS] =
     [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
 
 /// Records an execute-breakpoint hit: counts it, and on the first snapshots the registers the
 /// instruction was about to run with.
 ///
-/// Allocation-free (atomics only), because this runs on the guest's own stack from the
-/// exception handler. `compare_exchange` on the rip makes exactly one caller the first, so the
-/// registers stored are the ones that belong to the rip stored (D458).
+/// Allocation-free, because it runs on the guest's own stack from the exception handler.
+/// `compare_exchange` on the rip makes exactly one caller the first, so the registers stored
+/// belong to the rip stored.
 fn note_execute(rip: u64, registers: &Registers) {
     use Ordering::{Relaxed, Release};
     EXEC_COUNT.fetch_add(1, Relaxed);
@@ -290,11 +251,11 @@ pub fn armed() -> bool {
     ARMED_ADDRESS.iter().any(|a| a.load(Ordering::Relaxed) != 0)
 }
 
-// --- Where hits are recorded -------------------------------------------------
+// Where hits are recorded.
 
 /// Which watchpoint the site belongs to, plus one. Zero means the slot is free.
 static SITE_SLOT: [AtomicU64; MAX_SITES] = [const { AtomicU64::new(0) }; MAX_SITES];
-/// The instruction pointer *after* the access (D277).
+/// The instruction pointer after the access.
 static SITE_AFTER: [AtomicU64; MAX_SITES] = [const { AtomicU64::new(0) }; MAX_SITES];
 /// What the watched word held the first time this site touched it.
 static SITE_FIRST: [AtomicU64; MAX_SITES] = [const { AtomicU64::new(0) }; MAX_SITES];
@@ -302,15 +263,14 @@ static SITE_FIRST: [AtomicU64; MAX_SITES] = [const { AtomicU64::new(0) }; MAX_SI
 static SITE_LAST: [AtomicU64; MAX_SITES] = [const { AtomicU64::new(0) }; MAX_SITES];
 /// How many times this site touched it.
 static SITE_COUNT: [AtomicU64; MAX_SITES] = [const { AtomicU64::new(0) }; MAX_SITES];
-/// Accesses from a site the table had no room for. **Reported, never silent.**
+/// Accesses from a site the table had no room for, which are reported.
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Traps that arrived without the platform saying which watchpoint fired.
 ///
-/// The debug-status register reaches a handler through the exception context, and whether
-/// that context carries the debug registers is the platform's business rather than ours. If
-/// it ever does not, the access is real and the attribution is missing - which is a thing to
-/// **say**, not a thing to guess at by picking the first armed slot.
+/// Whether the exception context carries the debug-status register is the platform's business;
+/// when it does not, the access is real and its attribution missing, which is reported rather
+/// than guessed.
 static UNATTRIBUTED: AtomicU64 = AtomicU64::new(0);
 
 /// Accesses that arrived from more distinct instructions than the table holds.
@@ -320,8 +280,7 @@ pub fn dropped() -> u64 {
 
 /// Reads the watched bytes, for a report that says what the instruction saw.
 ///
-/// Zero-extended when fewer than eight, which is what a one-, two- or four-byte watchpoint
-/// is asking about anyway.
+/// Zero-extended when fewer than eight bytes.
 fn value_at(address: u64, length: u64) -> u64 {
     let Ok(at) = usize::try_from(address) else {
         return 0;
@@ -331,9 +290,8 @@ fn value_at(address: u64, length: u64) -> u64 {
     };
     let pointer = std::ptr::with_exposed_provenance::<u8>(at);
     let wide = take.min(8);
-    // SAFETY: this is the address the arming step put in a debug register, and the hardware
-    // has just trapped an access to it - so the bytes are mapped, and a region accessed a
-    // moment ago cannot have been unmapped between the trap and here.
+    // SAFETY: the arming step put this address in a debug register and the hardware has just
+    // trapped an access to it, so the bytes are mapped and cannot have been unmapped since.
     let seen = unsafe { std::slice::from_raw_parts(pointer, wide) };
     let mut bytes = [0_u8; 8];
     bytes[..wide].copy_from_slice(seen);
@@ -342,9 +300,8 @@ fn value_at(address: u64, length: u64) -> u64 {
 
 /// Records one access, and says whether it came from a site never seen before.
 ///
-/// **Allocation-free**, because this runs from an exception handler on the guest's own
-/// stack, where allocating risks deadlocking against whatever was interrupted - the same
-/// rule the fault reporter already works under.
+/// Allocation-free, because it runs from an exception handler on the guest's own stack, where
+/// allocating risks deadlocking against whatever was interrupted.
 fn record(slot: usize, after: u64) -> bool {
     let tag = slot as u64 + 1;
     let value = value_at(
@@ -363,8 +320,7 @@ fn record(slot: usize, after: u64) -> bool {
             SITE_FIRST[index].store(value, Ordering::Relaxed);
             SITE_LAST[index].store(value, Ordering::Relaxed);
             SITE_COUNT[index].store(1, Ordering::Relaxed);
-            // Last, so a reader of the table never sees a claimed slot whose fields are
-            // still the previous run's zeros.
+            // Last, so a reader never sees a claimed slot whose fields are still zero.
             SITE_SLOT[index].store(tag, Ordering::Relaxed);
             return true;
         }
@@ -375,8 +331,8 @@ fn record(slot: usize, after: u64) -> bool {
 
 /// Every site that touched a watched address, as lines a person reads.
 ///
-/// Ordered by watchpoint and then by discovery, so the first line for an address is the
-/// first instruction that ever touched it - which is the one the question is usually about.
+/// Ordered by watchpoint and then by discovery, so the first line for an address is the first
+/// instruction that touched it.
 pub fn sites() -> Vec<String> {
     let mut lines = Vec::new();
     for (slot, armed_at) in ARMED_ADDRESS.iter().enumerate() {
@@ -412,9 +368,8 @@ pub fn sites() -> Vec<String> {
             ));
         }
         if !any {
-            // As interesting as a hit. A watched word nothing ever touched says the guest is
-            // not reading the field the hypothesis was about, and omitting the line would
-            // read as a diagnostic that had not run (D218).
+            // A watched word nothing touched says the guest is not reading that field, and a
+            // missing line would read as a diagnostic that had not run.
             lines.push(format!("  {address:#x}: never touched"));
         }
     }
@@ -435,16 +390,14 @@ pub fn sites() -> Vec<String> {
 
 /// Whether the summary has already been printed.
 ///
-/// A run ends once, but the trace is persisted from whichever path got there - a fault, the
-/// clock, the call budget, or an ordinary return - and more than one can fire as a process
-/// comes apart. One summary, from whichever arrives first.
+/// The trace is persisted from whichever ending fires (a fault, the clock, the call budget or a
+/// return), and more than one can fire as a process comes apart; the first one prints.
 static SUMMARISED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Prints what every watchpoint saw, once, at whatever ends the run.
 ///
-/// Silent when nothing was armed *and* no execute breakpoint fired - an ordinary run reads
-/// exactly as it did before. An execute breakpoint disarms itself on its one hit, so `armed()`
-/// is false by the end; the snapshot it left is what says it did anything, so it is checked too.
+/// Silent when nothing was armed and no execute breakpoint fired. An execute breakpoint disarms
+/// on its hit, so the snapshot it left is checked too.
 pub fn summarise() {
     let fired_execute = EXEC_RIP.load(Ordering::Relaxed) != 0;
     if (!armed() && !fired_execute) || SUMMARISED.swap(true, Ordering::Relaxed) {
@@ -458,9 +411,8 @@ pub fn summarise() {
 
 /// The register snapshot an execute breakpoint captured, as lines, or nothing if none fired.
 ///
-/// The point of the whole execute mode: the state a function was entered with, so the value a
-/// guest computed and passed - the size to `tlsf_add_pool`, say - is read straight off the
-/// arguments rather than chased back through code that cannot be disassembled (D458).
+/// The state a function was entered with, so a value the guest computed and passed is read off
+/// the arguments (D458).
 fn execute_snapshot() -> Vec<String> {
     let rip = EXEC_RIP.load(Ordering::Relaxed);
     if rip == 0 {
@@ -484,7 +436,7 @@ fn execute_snapshot() -> Vec<String> {
         r14: EXEC_REGS[14].load(Ordering::Relaxed),
         r15: EXEC_REGS[15].load(Ordering::Relaxed),
     };
-    // One line per execute breakpoint, with its own count - a breakpoint that never fired says so.
+    // One line per execute breakpoint, with its own count; one that never fired says so.
     let mut lines: Vec<String> = EXEC_SLOT_AT
         .iter()
         .zip(&EXEC_SLOT_HITS)
@@ -517,13 +469,12 @@ fn located(address: u64) -> String {
     }
 }
 
-// --- Arming, and the exception that follows ----------------------------------
+// Arming, and the exception that follows.
 
 /// Arms the requested watchpoints on the thread that is about to become the guest.
 ///
-/// Returns what was armed, in the words the run conditions will carry. The caller states the
-/// outcome out loud either way, because a diagnostic that was asked for and did not run must
-/// never read like an ordinary run.
+/// Returns what was armed, in the words the run conditions carry. The caller states the outcome
+/// either way, so a diagnostic that did not run never reads like an ordinary run.
 ///
 /// # Errors
 ///
@@ -547,11 +498,9 @@ static REQUESTED: std::sync::OnceLock<Vec<Request>> = std::sync::OnceLock::new()
 
 /// Arms the run's watchpoints on the calling thread: a guest thread spawned after entry.
 ///
-/// Debug registers are per thread, so a watchpoint armed only on the entry thread misses every
-/// access from a spawned one and reports the watched range as never touched.
-///
-/// Called from the per-thread start hook; a thread that cannot be armed says so rather than
-/// running as though it were watched.
+/// Debug registers are per thread, so a watchpoint armed only on the entry thread would miss
+/// every access from a spawned one. Called from the per-thread start hook; a thread that cannot
+/// be armed says so.
 pub fn arm_this_thread() {
     let Some(requests) = REQUESTED.get() else {
         return;
@@ -564,44 +513,38 @@ pub fn arm_this_thread() {
 /// What a debug exception was, and what the handler must do to resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trap {
-    /// Not one of ours - a debugger's or a runtime's. Let another handler see it.
+    /// Not one of ours, but a debugger's or a runtime's. Let another handler see it.
     NotOurs,
     /// A data watchpoint fired; the access is recorded and the guest resumes unchanged.
     Data,
     /// One or more execute breakpoints fired; the guest resumes, and the handler must clear
-    /// these `Dr7` enable bits so the one-shot does not re-trap the same instruction forever.
+    /// these `Dr7` enable bits so the one-shot does not re-trap the same instruction.
     Execute {
-        /// The bits to clear in `Dr7` - the `L` enable bit of each fired execute slot.
+        /// The bits to clear in `Dr7`: the `L` enable bit of each fired execute slot.
         disarm: u64,
     },
 }
 
 /// Handles a debug exception: records the access and lets the guest carry on.
 ///
-/// `debug_status` is the debug-status register, whose low four bits say which watchpoints
-/// fired - and more than one can, for a single access two of them cover. `after` is the
-/// instruction pointer the exception carried: the *next* instruction for a data watchpoint
-/// (which fires after the access), and the breakpoint instruction itself for an execute one
-/// (which fires before it). `registers` is the guest state, snapshotted for an execute hit.
-///
-/// The guest **continues**. Unlike an access violation, where carrying on would leave a guest
-/// running with corrupt state, a trapped access has already happened and everything is intact.
+/// `debug_status` is the debug-status register, whose low four bits say which watchpoints fired;
+/// more than one can, for an access two of them cover. `after` is the instruction pointer the
+/// exception carried: the next instruction for a data watchpoint, which fires after the access,
+/// and the breakpoint instruction itself for an execute one. `registers` is the guest state,
+/// snapshotted for an execute hit. The guest continues, since a trapped access has already
+/// happened and left everything intact.
 pub fn note(debug_status: u64, after: u64, registers: &Registers) -> Trap {
     /// The low four bits, one per watchpoint, saying which of them fired.
     const FIRED: u64 = 0b1111;
 
     if !armed() {
-        // Not ours. Debuggers and language runtimes raise debug exceptions routinely, and
-        // swallowing one that belongs to somebody else would break them.
+        // Not ours: debuggers and language runtimes raise debug exceptions routinely.
         return Trap::NotOurs;
     }
-    // **The handler's own read of the watched word is a watched access.** A debug register
-    // stays live while its handler runs, and x86 sets the resume flag only for instruction
-    // breakpoints - so reading the word to say what the instruction saw traps, which reads
-    // it again, until the process dies having reported nothing (D278).
-    //
-    // Still ours, so the nested trap resumes the guest rather than falling through to the
-    // next handler. Released at the end of the outermost call.
+    // The handler's own read of the watched word is a watched access: the debug register stays
+    // live while the handler runs, and x86 sets the resume flag only for instruction breakpoints.
+    // The nested trap is still ours and resumes the guest. Released at the end of the outermost
+    // call.
     if REENTERED.swap(true, Ordering::Relaxed) {
         return Trap::Data;
     }
@@ -618,17 +561,14 @@ pub fn note(debug_status: u64, after: u64, registers: &Registers) -> Trap {
 
 /// Whether the handler is already running, so its own reads do not re-enter it.
 ///
-/// A flag rather than clearing and restoring the control register around the read: writing
-/// the register back can fail halfway, which would leave a run with watchpoints that had
-/// silently stopped working - the same shape of wrong answer this whole module exists to
-/// refuse. A flag cannot half-succeed (D278).
+/// A flag rather than clearing and restoring the control register around the read, since
+/// writing the register back can fail halfway and leave watchpoints silently disarmed.
 static REENTERED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Charges one trap to the watchpoints that fired. Answers `(ours, disarm)`: whether any were
 /// ours, and the `Dr7` enable bits of the fired execute slots the handler must clear.
 ///
-/// Split out so the re-entrancy flag in [`note`] has exactly one place to be released, rather
-/// than one per early return.
+/// Split out so the re-entrancy flag in [`note`] is released in one place.
 fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
     if fired == 0 {
         UNATTRIBUTED.fetch_add(1, Ordering::Relaxed);
@@ -641,11 +581,9 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
             continue;
         }
         if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
-            // Execute: counted against its own slot, the first hit anywhere snapshots the state
-            // the instruction was entered with, and the slot disarms on the thread that hit it -
-            // a one-shot per thread, so the instruction runs and the guest carries on. The slot
-            // stays known, because every guest thread carries these and a hit on a
-            // second thread is still ours to count, not a stranger's exception.
+            // Execute: counted against its own slot, the first hit anywhere snapshots the entry
+            // state, and the slot disarms on the thread that hit it. Every guest thread carries
+            // these, so a hit on a second thread is still ours to count.
             ours = true;
             EXEC_SLOT_HITS[slot].fetch_add(1, Ordering::Relaxed);
             note_execute(after, registers);
@@ -665,9 +603,8 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
 
 /// Says a new instruction touched a watched address, as it happens.
 ///
-/// Printed live rather than only summarised, because the run may end in a fault that kills
-/// the process, and a finding that only exists in a summary nobody reaches is not a finding.
-/// Bounded by the de-duplication in [`record`]: one line per instruction, not per access.
+/// Printed live, because the run may end in a fault that kills the process before the summary.
+/// One line per instruction, not per access, bounded by the de-duplication in [`record`].
 fn announce(slot: usize, after: u64) {
     use std::io::Write as _;
 
@@ -696,16 +633,14 @@ mod imp {
 
     /// Everything below the per-watchpoint fields.
     ///
-    /// Bits eight and nine are `LE`/`GE`, which older parts wanted set for data breakpoints
-    /// to be reported exactly. Modern ones ignore them; setting them costs nothing and means
-    /// the value does not depend on which part it runs on.
+    /// Bits eight and nine are `LE`/`GE`, which older parts want set for exact data breakpoints and
+    /// modern ones ignore; setting them makes the value independent of the part.
     const DR7_EXACT: u64 = 0x0000_0300;
 
     /// The flag that says only the debug registers are being read or written.
     ///
-    /// Written out rather than imported: a context flag naming the wrong subset silently
-    /// writes the wrong half of a thread's state, and a constant that is visible is a
-    /// constant that can be checked against the manual.
+    /// Written out rather than imported, so it can be checked against the manual: a flag naming the
+    /// wrong subset would write the wrong half of a thread's state.
     const CONTEXT_DEBUG_REGISTERS: u32 = 0x0010_0010;
 
     /// Duplicate the handle with the same access the source has.
@@ -728,12 +663,8 @@ mod imp {
 
     /// Sets the debug registers on the calling thread.
     ///
-    /// # Why another thread does it
-    ///
-    /// `SetThreadContext` on a running thread is only defined when that thread is suspended,
-    /// and a thread cannot suspend itself. So a helper is spawned to suspend this one, write
-    /// the registers, and resume it - the textbook shape, rather than the widely-copied
-    /// version that sets its own context and works until it does not.
+    /// `SetThreadContext` is only defined on a suspended thread, and a thread cannot suspend
+    /// itself, so a helper thread suspends this one, writes the registers and resumes it.
     pub(super) fn arm(requests: &[Request]) -> Result<String, Error> {
         use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle};
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
@@ -746,8 +677,7 @@ mod imp {
 
         // SAFETY: the pseudo-handle for the calling process, which is always valid.
         let process = unsafe { GetCurrentProcess() };
-        // SAFETY: the pseudo-handle for the calling thread, which is valid in this thread -
-        // and this thread is the one about to become the guest, which is the point.
+        // SAFETY: the pseudo-handle for the calling thread, which is valid in this thread.
         let thread = unsafe { GetCurrentThread() };
 
         let mut duplicated = std::ptr::null_mut();
@@ -768,9 +698,8 @@ mod imp {
             return Err(Error::ThreadHandle);
         }
 
-        // Carried as a number because a raw handle is not `Send`. It is a value the operating
-        // system owns rather than a pointer this process may dereference, so moving it across
-        // a thread boundary as an integer is exactly what it is.
+        // Carried as a number because a raw handle is not `Send`; it is an operating-system value,
+        // never dereferenced by this process.
         let carried = duplicated.expose_provenance();
         let outcome = std::thread::spawn(move || write_registers(carried, control, addresses))
             .join()
@@ -812,8 +741,8 @@ mod imp {
         // local of the right type with its flags set to the subset being read.
         let read = unsafe { GetThreadContext(handle, &raw mut context) };
         if read == 0 {
-            // SAFETY: as above. Resuming matters more than the error being returned, because
-            // a thread left suspended hangs the run with nothing said.
+            // SAFETY: as above. Resuming comes before returning the error, since a thread left
+            // suspended hangs the run.
             unsafe { ResumeThread(handle) };
             return Err(Error::ReadDebugRegisters);
         }
@@ -847,12 +776,8 @@ mod imp {
     use super::Request;
     use crate::Error;
 
-    /// Not implemented away from Windows yet.
-    ///
-    /// The equivalent is `ptrace(PTRACE_POKEUSER)` into the debug-register area, which needs
-    /// a tracer process rather than a thread arming itself. Saying so plainly beats a
-    /// function that returns success and arms nothing - which is the one outcome a
-    /// diagnostic must never have (D185).
+    /// Not implemented away from Windows, where it needs `ptrace(PTRACE_POKEUSER)` from a tracer
+    /// process. It refuses rather than reporting success and arming nothing.
     pub(super) fn arm(_requests: &[Request]) -> Result<String, Error> {
         Err(Error::WatchpointsUnsupported)
     }
@@ -862,6 +787,7 @@ mod imp {
 mod tests {
     use super::{Kind, MAX_WATCHPOINTS, parse};
 
+    /// A bare address watches an eight-byte word for reads and writes.
     #[test]
     fn an_address_alone_watches_a_word_for_reads_and_writes() {
         let parsed = parse("0x4000019e9c00").expect("a bare address is a request");
@@ -871,6 +797,7 @@ mod tests {
         assert_eq!(parsed[0].kind, Kind::Access);
     }
 
+    /// A length and a kind are both read.
     #[test]
     fn a_length_and_a_kind_are_both_read() {
         let parsed = parse("0x1000+4:w").expect("length and kind are optional, not exclusive");
@@ -878,6 +805,7 @@ mod tests {
         assert_eq!(parsed[0].kind, Kind::Write);
     }
 
+    /// Several requests are separated by commas, with spaces allowed.
     #[test]
     fn several_are_separated_by_commas() {
         let parsed = parse("0x1000, 0x2000+1:w ,0x3008").expect("a list, spaces and all");
@@ -885,16 +813,17 @@ mod tests {
         assert_eq!(parsed[2].address, 0x3008);
     }
 
+    /// An unaligned address is refused with the reason, since the hardware would watch other
+    /// bytes.
     #[test]
     fn an_unaligned_address_is_refused_with_the_reason() {
-        // The hardware would watch a different eight bytes than the ones asked for, and a
-        // diagnostic watching the wrong address answers the question confidently and wrongly.
         let refused = parse("0x1004")
             .expect_err("an eight-byte watch needs eight-byte alignment")
             .to_string();
         assert!(refused.contains("aligned"), "{refused}");
     }
 
+    /// A length the debug registers cannot encode is refused.
     #[test]
     fn a_length_the_hardware_cannot_encode_is_refused() {
         let refused = parse("0x1000+16")
@@ -903,21 +832,23 @@ mod tests {
         assert!(refused.contains("one, two, four or eight"), "{refused}");
     }
 
+    /// More requests than debug registers are refused rather than truncated.
     #[test]
     fn more_than_the_hardware_has_is_refused_rather_than_truncated() {
-        // Truncating would arm four of five and report as though all five had run.
         let refused = parse("0x1000,0x2000,0x3000,0x4000,0x5000")
             .expect_err("five into four does not go")
             .to_string();
         assert!(refused.contains(&MAX_WATCHPOINTS.to_string()), "{refused}");
     }
 
+    /// An empty request is no requests, not an error.
     #[test]
     fn nothing_requested_is_no_requests_rather_than_an_error() {
         let parsed = parse("").expect("an unset variable is not a mistake");
         assert!(parsed.is_empty());
     }
 
+    /// The control word matches the manual's layout, including the non-sequential length encoding.
     #[cfg(windows)]
     #[test]
     fn the_control_word_matches_the_manual() {
@@ -933,8 +864,8 @@ mod tests {
         }]);
         assert_eq!(one, 0x0000_0300 | 1 | (0b11 << 16) | (0b10 << 18));
 
-        // A four-byte write watchpoint in slot one lands four bits further up, and four
-        // bytes encodes as `0b11` rather than `0b10` - the part of the table worth a test.
+        // A four-byte write watchpoint in slot one lands four bits further up, and four bytes
+        // encodes as `0b11`.
         let two = control(&[
             Request {
                 address: 0x1000,
@@ -951,7 +882,7 @@ mod tests {
     }
 
     /// An execute breakpoint is spelled `:x`, and its length is forced to one byte whatever was
-    /// asked - the hardware watches an instruction fetch as LEN=00 regardless of instruction size.
+    /// asked, as the hardware encodes an instruction fetch.
     #[test]
     fn an_execute_breakpoint_is_one_byte_however_it_is_asked() {
         let parsed = parse("0x400000afcc08:x").expect("an execute breakpoint");
@@ -962,8 +893,8 @@ mod tests {
         assert_eq!(anyway[0].length, 1);
     }
 
-    /// Each execute breakpoint is counted against itself: two slots fire, one of them twice (a
-    /// second thread), and the counts come back per slot.
+    /// Each execute breakpoint is counted against itself: two slots fire, one of them twice, and
+    /// the counts come back per slot.
     #[test]
     fn execute_hits_are_counted_per_breakpoint() {
         use super::{EXEC_SLOT_HITS, Registers, Request, attribute, execute_snapshot, remember};
@@ -1000,9 +931,8 @@ mod tests {
         assert!(lines.contains("0x4000000000b2") && lines.contains("hit 2 time(s)"));
     }
 
-    /// **An execute breakpoint encodes as R/W=00, LEN=00** - the part of the control word a
-    /// data watchpoint never exercises, and the one a typo would turn into a data breakpoint on
-    /// the code, which watches the wrong thing silently.
+    /// An execute breakpoint encodes as R/W=00, LEN=00, the part of the control word a data
+    /// watchpoint never exercises.
     #[cfg(windows)]
     #[test]
     fn an_execute_breakpoint_encodes_as_a_fetch() {
@@ -1014,8 +944,8 @@ mod tests {
             length: 1,
             kind: Kind::Execute,
         }]);
-        // Local enable in bit 0, R/W0 = 0b00 at bit 16, LEN0 = 0b00 at bit 18, over the
-        // exact-match bits - i.e. nothing but the enable above the base.
+        // Local enable in bit 0, R/W0 = 0b00 at bit 16, LEN0 = 0b00 at bit 18, over the exact-match
+        // bits.
         assert_eq!(encoded, 0x0000_0300 | 1);
     }
 }

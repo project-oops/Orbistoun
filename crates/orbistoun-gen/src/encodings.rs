@@ -1,32 +1,16 @@
 //! Solving each encoding family's identifying bits from assembled samples.
 //!
-//! `crates/orbistoun-shader/data/encodings.toml` says, for each family: which bits identify
-//! it, where its opcode sits, and how wide its instructions are. Those rows were
-//! hand-transcribed from a published reference, and when the project's target generation
-//! turned out to be the wrong one (D139) three of them were silently wrong in the worst
-//! possible way - this generation's long-form vector format sits exactly where the previous
-//! one's interpolation format did, so a long-form arithmetic instruction decoded as an
-//! interpolation and nothing said so.
+//! `crates/orbistoun-shader/data/encodings.toml` says, for each family, which bits
+//! identify it, where its opcode sits and how wide its instructions are. Those bit patterns
+//! are solved from assembled bytes, as the per-opcode operand layouts are (D085), rather
+//! than transcribed from a reference.
 //!
-//! So the rows are solved here instead, the same way the per-opcode operand layouts are
-//! (D085): assemble instructions, look at the bytes, and derive the answer.
+//! Family membership is declared by a person: `families/VOP3.s` holds instructions the
+//! published reference places in that family. The mask, value, opcode position and width,
+//! and instruction width are all solved.
 //!
-//! # What is transcribed and what is solved
-//!
-//! **Membership is declared by a person.** `families/VOP3.s` holds instructions a reader of
-//! the published reference says belong to that family. Reading a specification and writing
-//! code from it is ordinary engineering.
-//!
-//! **Every bit pattern is solved.** The mask, the value, the opcode's position and width,
-//! and the instruction width all come from the assembled bytes. Nothing here reads a number
-//! out of a reference, which is the derivation D085 refuses.
-//!
-//! # This reports; it does not write
-//!
-//! `data/encodings.toml` is not purely generated. It carries the reasoning behind each row
-//! and citations into the published reference, which is where a wrong row gets *corrected*
-//! from - so a person edits it, acting on what this says. Overwriting it would throw that
-//! away and leave a table nobody could check without the document that produced it.
+//! This reports rather than writes, because the table also carries hand-maintained
+//! reasoning and citations for each row.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -40,7 +24,7 @@ use crate::solve;
 /// One family, solved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Family {
-    /// The probe file's stem - `VOP3`, `SOP1`.
+    /// The probe file's stem, such as `VOP3` or `SOP1`.
     pub(crate) name: String,
     /// Bits that identify the family.
     pub(crate) mask: u32,
@@ -81,7 +65,7 @@ fn probe_files(dir: &Path) -> Result<Vec<(String, String)>> {
             .with_context(|| format!("reading {}", path.display()))?;
         entries.push((stem.to_owned(), text));
     }
-    // Sorted, so a run is reproducible and a diff between two runs means something.
+    // Sorted, so a run is reproducible.
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     anyhow::ensure!(!entries.is_empty(), "no family probes in {}", dir.display());
     Ok(entries)
@@ -133,13 +117,10 @@ pub(crate) fn run(source: &Source, dir: &Path, record: Option<&Path>) -> Result<
     }
 
     for (family, samples) in &probed {
-        // Three steps, in this order because each needs the one before it.
-        //
-        // The opcode's *start* comes from the probe file's operand variation. Its mask comes
-        // from what separates this family from the others - not from what is constant within
-        // it, which the probes cannot answer. Only then can the range between the two be
-        // swept for the rest of the family, and the opcode's *width* solved from a sample
-        // set that actually reaches the top of the range.
+        // Three steps, each needing the one before: the opcode's start from the probes'
+        // operand variation, the mask from what separates this family from the others, then
+        // a sweep of the range between them to solve the opcode's width from samples that
+        // reach the top of the range.
         let firsts: Vec<u32> = samples
             .iter()
             .filter_map(|(_, w)| w.first().copied())
@@ -151,11 +132,9 @@ pub(crate) fn run(source: &Source, dir: &Path, record: Option<&Path>) -> Result<
             continue;
         }
 
-        // Bounded by whichever prefix is *longer*: what separates this family from the
-        // others, or what its own probes hold constant. Too loose and the sweep walks into a
-        // neighbouring format and brings its instructions back as members of this one; too
-        // tight and it cannot reach the opcodes the probes missed. The longer of the two is
-        // the only bound that is safe in both directions.
+        // Bounded by the longer of two prefixes: what separates this family from the
+        // others, or what its own probes hold constant. Looser would sweep into a
+        // neighbouring format; tighter would miss opcodes the probes did not name.
         let others: Vec<Vec<u32>> = probed
             .iter()
             .filter(|(name, _)| *name != family)
@@ -219,8 +198,7 @@ mod tests {
 
     /// The report lists problems as well as answers.
     ///
-    /// A run that solved nine families and could not solve the tenth is not a success, and
-    /// printing only the nine is how that becomes invisible.
+    /// An unsolved family must be visible beside the solved ones.
     #[test]
     fn problems_are_reported_alongside_answers() {
         let report = Report {

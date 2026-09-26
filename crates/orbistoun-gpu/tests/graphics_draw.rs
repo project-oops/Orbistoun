@@ -1,19 +1,11 @@
-//! A Type 0 (Universal Graphics Queue) 3D primitive-draw command stream, decoded end to end.
+//! A graphics-queue 3D primitive-draw command stream, decoded end to end.
 //!
-//! # What this proves, and against what
-//!
-//! obSCEne's sweep `20260912-003916` ran a full 3D primitive draw on a Type 0 graphics queue on
-//! live hardware - NGG primitive shader, scan-converter rasterisation, pixel shader, MRT0 export -
-//! and asked orbistoun to decode "Type 0 PM4 draw packet streams with GFX10 CB context registers
-//! and UCONFIG GE registers without warnings/errors" (REQ-...0640Z-9a41).
-//!
-//! The stream below is assembled from that request's exact opcode and register list: the CB colour
-//! target context registers, the SPI PS-input context registers, the UCONFIG GE / VGT registers,
-//! the instance count, and the `DRAW_INDEX_AUTO` that issues the triangle. It is a constructed
-//! stream, not a raw capture (the real DCB is ~1.9 KB of runtime addresses), so what it establishes
-//! is the *decode path*: that every opcode a graphics draw uses is known, that the walk consumes the
-//! stream exactly, and that the register writes land on the registers their bases imply. An unknown
-//! opcode or a bad length is what "decodes with warnings" would mean, and the walk reports both.
+//! The stream is constructed from the opcode and register list of a hardware primitive draw (NGG
+//! primitive shader, rasterisation, pixel shader, MRT0 export): the CB colour target and SPI
+//! PS-input context registers, the UCONFIG GE/VGT registers, the instance count and the
+//! `DRAW_INDEX_AUTO` that issues the triangle. It checks the decode path: every opcode is known,
+//! the walk consumes the stream exactly, and the register writes land on the registers their bases
+//! imply.
 
 use orbistoun_gpu::{PacketKind, Vocabulary, register_writes, walk};
 
@@ -22,12 +14,12 @@ fn push(stream: &mut Vec<u8>, dword: u32) {
     stream.extend_from_slice(&dword.to_le_bytes());
 }
 
-/// Builds the draw stream from 9a41's opcode/register list.
+/// Builds the draw stream.
 ///
-/// Each `SET_*_REG` here is a count-1 packet - header, register offset, one value - which is the
-/// `sceAgcDcbSet{Cx,Uc}RegisterDirect` shape obSCEne measured (`bytes-advanced 0xc`). Values are the
-/// request's measured ones where it gave them (`CB_COLOR0_ATTRIB2 = 0x000fc03f` for 64x64,
-/// `SPI_PS_INPUT_ENA = 0x2`, `VGT_PRIMITIVE_TYPE = 0x4` DI_PT_TRILIST, `GE_CNTL = 0x8040`).
+/// Each `SET_*_REG` is a count-1 packet - header, register offset, one value - the
+/// `sceAgcDcbSet{Cx,Uc}RegisterDirect` shape obSCEne measured (`bytes-advanced 0xc`). Values are
+/// the measured ones (`CB_COLOR0_ATTRIB2 = 0x000fc03f` for 64x64, `SPI_PS_INPUT_ENA = 0x2`,
+/// `VGT_PRIMITIVE_TYPE = 0x4` DI_PT_TRILIST, `GE_CNTL = 0x8040`).
 fn graphics_draw_stream() -> Vec<u8> {
     let mut s = Vec::new();
 
@@ -62,9 +54,7 @@ fn graphics_draw_stream() -> Vec<u8> {
     s
 }
 
-/// **The graphics draw stream walks cleanly, with no unknown packet and nothing left over.**
-///
-/// This is the 9a41 acceptance for the decode side: a Type 0 draw stream decodes without warnings.
+/// The graphics draw stream walks cleanly, with no unknown packet and nothing left over.
 #[test]
 fn a_type0_draw_stream_walks_without_warnings() {
     let stream = graphics_draw_stream();
@@ -106,11 +96,10 @@ fn a_type0_draw_stream_walks_without_warnings() {
     );
 }
 
-/// **The register-setting packets resolve to real register writes, by value.**
+/// The register-setting packets resolve to real register writes, by value.
 ///
-/// The five `SET_*_REG` packets must produce five register writes carrying the values the request
-/// specified. Asserting by value (which the stream controls) rather than by absolute register number
-/// keeps the test independent of the base offsets while still proving the writes were decoded.
+/// The five `SET_*_REG` packets produce five writes carrying the specified values. Asserting by
+/// value keeps the test independent of the base offsets.
 #[test]
 fn the_draw_registers_are_captured() {
     let stream = graphics_draw_stream();
@@ -138,14 +127,12 @@ fn the_draw_registers_are_captured() {
     }
 }
 
-/// **An indexed draw stream walks too: `DRAW_INDEX_2` after its index-width setup.**
+/// An indexed draw stream walks too: `DRAW_INDEX_2` after its index-width setup.
 ///
-/// 9a41's stream above issues `DRAW_INDEX_AUTO` (0x2d); a `sceAgcDcbDrawIndex` stream issues
-/// `DRAW_INDEX_2` (0x27) after a `SET_UCONFIG_REG_INDEX` (0x7a) that selects the index-buffer entry
-/// width. Both opcodes and the index-size selector are measured (`166-agc/dcb-draw-index`,
-/// `166-agc/dcb-set-index-size`); this confirms the command processor consumes such a stream whole,
-/// with the indexed draw recognised as a command rather than falling through as an unknown packet
-/// (6e78).
+/// A `sceAgcDcbDrawIndex` stream issues `DRAW_INDEX_2` (0x27) after a `SET_UCONFIG_REG_INDEX`
+/// (0x7a) selecting the index width, both measured (`166-agc/dcb-draw-index`,
+/// `166-agc/dcb-set-index-size`). The indexed draw is recognised as a command, not an unknown
+/// packet.
 #[test]
 fn an_indexed_draw_stream_walks_without_warnings() {
     let mut s = Vec::new();

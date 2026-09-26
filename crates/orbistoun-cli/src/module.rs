@@ -11,9 +11,8 @@ pub(crate) fn cmd_symbols(service: &Service, filter: Option<&str>) {
     for d in service.declared_symbols() {
         let matches = filter.is_none_or(|f| d.library.contains(f) || d.symbol.contains(f));
         if matches {
-            // A leading marker rather than a trailing column: it lines up down the left
-            // edge, so "how much of this is real" is answerable by looking rather than
-            // by reading every row to the end.
+            // A leading marker lines up down the left edge, so the implemented share is visible at
+            // a glance.
             println!(
                 "{} {:#018x}  {:<16}  {:<40}  argc={}",
                 if d.implemented { "*" } else { " " },
@@ -93,8 +92,8 @@ pub(crate) fn cmd_inspect(service: &Service, path: &std::path::Path) -> Result<(
                         p.mem_param_vaddr
                     ),
                 }
-                // Raw, not interpreted: the field layout inside the block is not established
-                // from a citable source, so a value is shown at its offset and named nothing.
+                // Raw, not interpreted: no citable source establishes the field layout inside the
+                // block, so a value is shown at its offset and named nothing.
                 for (offset, value) in &p.mem_param_nonzero {
                     println!("    +{offset:#04x}       {value:#x}");
                 }
@@ -107,10 +106,7 @@ pub(crate) fn cmd_inspect(service: &Service, path: &std::path::Path) -> Result<(
     Ok(())
 }
 
-/// `report` - survey a module, persist a run report, and show the delta.
-///
-/// The operation the iterative loop uses: what does this need, and did the last change
-/// help.
+/// `report` - survey a module, persist a run report, and show the delta against the last one.
 pub(crate) fn cmd_report(service: &Service, path: &std::path::Path) -> Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -171,8 +167,8 @@ pub(crate) fn cmd_exports(
                 continue;
             }
         }
-        // Data is marked for the same reason a survey marks it: an importer that binds a data
-        // export as a function gets a thunk where it expects a value (D125, D307).
+        // Data exports are marked: an importer that binds a data export as a function gets a thunk
+        // where it expects a value (D307).
         let data = if e.kind == orbistoun_proto::ImportKind::Object {
             "  [data]"
         } else {
@@ -209,11 +205,10 @@ pub(crate) fn cmd_title_modules(
     report_placed(service, path, &found)
 }
 
-/// The `--linked` half: place the title's own modules **and relocate them**.
+/// The `--linked` half: place the title's own modules and relocate them.
 ///
-/// The step past `--placed`. A placed module has had its bytes copied and nothing else, so its
-/// internal pointers still read as link-time offsets; a relocated one is code the guest could
-/// actually be sent into.
+/// A placed module's internal pointers are still link-time offsets; a relocated one is code a guest
+/// could be sent into.
 fn report_linked(service: &Service, path: &std::path::Path) -> Result<()> {
     let bases = orbistoun_service::TitleBases {
         modules: orbistoun_worker::TITLE_MODULE_BASE,
@@ -236,9 +231,8 @@ fn report_linked(service: &Service, path: &std::path::Path) -> Result<()> {
             slot.count
         );
     }
-    // Each segment's file-backed and zeroed halves, which is the `.data`/`.bss` split the
-    // loader already knows and nothing surfaced. An address inside the copied part came from
-    // the file; one past it is `.bss` and is zero because that is what `.bss` means.
+    // Each segment's file-backed and zeroed halves, the `.data`/`.bss` split. An address inside the
+    // copied part came from the file; one past it is `.bss` and zero.
     for (library, image) in linked.placed.images() {
         for segment in image.segments() {
             println!(
@@ -266,7 +260,7 @@ fn report_linked(service: &Service, path: &std::path::Path) -> Result<()> {
 
 /// The `--placed` half: place them, and say which imports would bind into them.
 ///
-/// **Placed, not relocated.** This reports; it hands nothing to a guest.
+/// Placed, not relocated: this reports and hands nothing to a guest.
 fn report_placed(
     service: &Service,
     path: &std::path::Path,
@@ -345,11 +339,8 @@ pub(crate) fn cmd_imports(service: &Service, path: &std::path::Path) -> Result<(
     let survey = service.survey_path(path)?;
     println!("entry {:#x}", survey.entry);
     for i in &survey.imports {
-        // **Data is marked, because for data the answer is wrong in kind.** An
-        // unresolved function is something orbistoun has not written yet; an import
-        // naming data that lands on a thunk has been given instruction bytes to
-        // dereference, and a listing that showed the two identically would hide the
-        // worse of them (D307).
+        // Data imports are marked because a thunk is the wrong kind of answer for them: the guest
+        // dereferences instruction bytes (D307).
         let data = if i.kind == orbistoun_proto::ImportKind::Object {
             "  [data]"
         } else {
@@ -374,11 +365,8 @@ pub(crate) fn cmd_imports(service: &Service, path: &std::path::Path) -> Result<(
         survey.unresolved()
     );
     if data > 0 {
-        // **This used to end "and orbistoun has no other one yet", which stopped being true
-        // in D323.** The loader reserves one zeroed page per data import and the resolver
-        // consults it before the thunk table, so a listing that still described the gap was
-        // telling a reader to go and fix something already fixed - and this is the surface
-        // somebody checks first (D510).
+        // The loader gives each data import its own zeroed page, consulted before the thunk table
+        // (D323).
         eprintln!(
             concat!(
                 "{} of them name data, not a function - a thunk is the wrong kind of answer ",

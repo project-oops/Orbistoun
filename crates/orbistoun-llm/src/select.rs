@@ -1,28 +1,10 @@
 //! Choosing a model for a machine.
 //!
-//! Pure arithmetic over [`Catalog`] and [`Host`] - no filesystem, no network, no
-//! accelerator. That is on purpose: this is the decision that spends somebody's
-//! bandwidth and then either loads or does not, and it should be checkable without
-//! owning any of the machines it decides for.
-//!
-//! # The rule
-//!
-//! **The largest auto-eligible model that fits.** A strong machine gets a strong model
-//! with no configuration; a weak one stays usable. Sizing is against the pool the
-//! model will actually live in - VRAM on an accelerator, system RAM on CPU - because
-//! those are different numbers and a model sized against the wrong one is sized
-//! against nothing.
-//!
-//! # The rule when nothing is measurable
-//!
-//! The catalogue's `default` entry, not the largest and not the smallest.
-//!
-//! Being wrong upward costs a multi-gigabyte download followed by a load failure,
-//! which is the worst place to discover a mistake. Being wrong downward costs
-//! quality, quietly and forever. The `default` entry is the choice that makes the
-//! first mistake unlikely without making the second one automatic - and because the
-//! selection is recorded in the config it can be re-tuned later, whereas a download
-//! cannot be un-spent.
+//! Pure arithmetic over [`Catalog`] and [`Host`], so the decision is checkable without owning
+//! the machines it decides for. The rule is the largest auto-eligible model that fits the pool
+//! it will live in: VRAM on an accelerator, system RAM on CPU. When nothing is measurable it is
+//! the catalogue's `default` entry: guessing high costs a multi-gigabyte download and a load
+//! failure, guessing low costs quality, and the recorded choice can be re-tuned later.
 
 use crate::catalog::{Catalog, Offline};
 use crate::host::Host;
@@ -37,10 +19,7 @@ pub enum Device {
     Gpu,
 }
 
-/// Why a model was chosen, so the choice can be explained rather than just applied.
-///
-/// A run report that says "qwen3-4b" tells you nothing about whether that was a
-/// measurement or a shrug. This says which.
+/// Why a model was chosen, so a report shows whether the choice was measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Basis {
     /// Sized against a measured accelerator memory figure.
@@ -49,8 +28,8 @@ pub enum Basis {
     MeasuredRam(u32),
     /// Sized against a core count, because memory was not reported.
     CoreCount(u32),
-    /// Memory was measured and would have allowed more, but the processor would not
-    /// have got through it fast enough to be useful.
+    /// Memory would have allowed more, but the processor would not work through it fast enough
+    /// to be useful.
     CpuSpeedCapped {
         /// System memory, which was not the binding constraint.
         ram_mb: u32,
@@ -98,18 +77,16 @@ pub struct Choice<'a> {
     pub basis: Basis,
 }
 
-/// How many cores it takes before a CPU-only machine is trusted with the default
-/// rather than the smallest model.
+/// How many cores it takes before a CPU-only machine is trusted with the default rather than
+/// the smallest model.
 ///
-/// Not a measurement. It is a threshold that has to be *somewhere*, and eight is where
-/// a desktop stops being a thin client. Recorded as a named constant so that when it
-/// turns out to be wrong there is one place to change and something to point at.
+/// A chosen threshold, not a measurement.
 pub const CORES_FOR_DEFAULT: u32 = 8;
 
 /// Picks a model for this machine.
 ///
-/// Returns `None` only when the catalogue holds no offline models at all, which is a
-/// catalogue problem rather than a host problem and is reported as one by the caller.
+/// Returns `None` only when the catalogue holds no offline models, which the caller reports as
+/// a catalogue problem.
 pub fn recommend<'a>(catalog: &'a Catalog, host: &Host) -> Option<Choice<'a>> {
     // An accelerator that reported its memory: size against that pool.
     if let Some(accelerator) = &host.accelerator {
@@ -121,12 +98,11 @@ pub fn recommend<'a>(catalog: &'a Catalog, host: &Host) -> Option<Choice<'a>> {
                 basis: Basis::MeasuredVram(vram),
             });
         }
-        // An accelerator too small for anything in the catalogue is not a reason to
-        // refuse - it is a reason to run on the CPU, which is always present.
+        // An accelerator too small for anything means running on the CPU, not refusing.
     }
 
-    // No accelerator, or one nothing fits in. Size against system memory - and then
-    // against how fast that memory can be worked through, which is a different question.
+    // No accelerator, or one nothing fits in: size against system memory, then cap by how fast
+    // the processor works through it.
     if let Some(ram) = host.ram_mb {
         let ceiling = cpu_ceiling(catalog, host.cpu_cores);
         if let Some(model) =
@@ -145,10 +121,8 @@ pub fn recommend<'a>(catalog: &'a Catalog, host: &Host) -> Option<Choice<'a>> {
                 },
             });
         }
-        // Measured, and too small for even the smallest entry. Say so by falling
-        // through to the smallest rather than returning nothing: the model may still
-        // load, and refusing outright would make a low-memory machine unusable on the
-        // strength of a table this crate wrote about itself.
+        // Measured and too small for the smallest entry: the smallest is still offered, since it may
+        // load and refusing would make a low-memory machine unusable.
         if let Some(model) = catalog.smallest_auto() {
             return Some(Choice {
                 model,
@@ -158,7 +132,7 @@ pub fn recommend<'a>(catalog: &'a Catalog, host: &Host) -> Option<Choice<'a>> {
         }
     }
 
-    // Memory unknown. Cores are the only other signal, and they are a weak one.
+    // Memory unknown: cores are the only other signal, and a weak one.
     if let Some(cores) = host.cpu_cores {
         let model = if cores >= CORES_FOR_DEFAULT {
             catalog.balanced_default()
@@ -183,15 +157,9 @@ pub fn recommend<'a>(catalog: &'a Catalog, host: &Host) -> Option<Choice<'a>> {
 
 /// The largest footprint worth running on a processor with this many cores.
 ///
-/// **Fitting and being usable are different questions, and only the first is about
-/// memory.** Thirty-two gigabytes holds a four-billion-parameter model easily and then
-/// works through it at about one token per second - measured, not assumed: a round of
-/// three hundred and twenty tokens took four minutes on sixteen cores.
-///
-/// So memory is a floor and this is a ceiling. Above [`CORES_FOR_DEFAULT`] the
-/// catalogue's balanced entry is the most that is worth running; below it, the smallest.
-/// Deliberately the same shape as the unmeasured-memory rule, because it is the same
-/// judgement - a core count says how much work per second, not how much will fit.
+/// Memory is the floor and this is the ceiling: a large model fits in ample RAM but runs at
+/// about a token per second on a CPU. At [`CORES_FOR_DEFAULT`] and above the balanced entry is
+/// the most worth running; below it, the smallest.
 fn cpu_ceiling(catalog: &Catalog, cores: Option<u32>) -> u32 {
     let model = match cores {
         Some(cores) if cores >= CORES_FOR_DEFAULT => catalog.balanced_default(),
@@ -200,10 +168,8 @@ fn cpu_ceiling(catalog: &Catalog, cores: Option<u32>) -> u32 {
     model.map_or(u32::MAX, |m| m.min_ram_mb)
 }
 
-/// The largest auto-eligible model satisfying `fits`.
-///
-/// Ordered by declared footprint rather than by download size: footprint is what
-/// decides whether it loads, and the two are correlated but not identical.
+/// The largest auto-eligible model satisfying `fits`, ordered by declared footprint, which is
+/// what decides whether it loads.
 fn largest_fitting(catalog: &Catalog, fits: impl Fn(&Offline) -> bool) -> Option<&Offline> {
     catalog
         .offline
@@ -235,8 +201,7 @@ mod tests {
         let catalog = Catalog::default();
         let choice = recommend(&catalog, &with_vram(24_000)).expect("a model");
         assert_eq!(choice.device, Device::Gpu);
-        // The largest *auto* entry, not the largest entry: a hand-pick-only model must
-        // never be chosen by a machine simply for being big enough.
+        // The largest auto entry: a hand-pick-only model is never chosen for a machine being big enough.
         assert!(choice.model.auto, "{}", choice.model.id);
         let largest_auto = catalog
             .offline
@@ -247,10 +212,7 @@ mod tests {
         assert_eq!(choice.model.id, largest_auto.id);
     }
 
-    /// A hand-pick-only model is never selected automatically, however big the box.
-    ///
-    /// This is the whole point of the `auto` flag. Without it the catalogue could only
-    /// express "runnable", and "runnable but a bad default" would have nowhere to live.
+    /// A hand-pick-only model is never selected automatically, however big the machine.
     #[test]
     fn a_hand_pick_model_is_never_chosen_automatically() {
         let catalog = Catalog::default();
@@ -259,9 +221,6 @@ mod tests {
     }
 
     /// A tiny accelerator falls through to the CPU rather than refusing.
-    ///
-    /// An integrated part with 256 MB reported is a real machine. Returning nothing
-    /// would make it a machine with no AI at all, when it has a CPU like every other.
     #[test]
     fn an_accelerator_too_small_for_anything_falls_through_to_cpu() {
         let catalog = Catalog::default();
@@ -281,12 +240,7 @@ mod tests {
         );
     }
 
-    /// **A processor is capped by what it can work through, not by what it can hold.**
-    ///
-    /// Thirty-two gigabytes fits every model in the catalogue and runs the larger ones
-    /// at about a token per second. Sizing by capacity alone picked a
-    /// four-billion-parameter model for a CPU and made a round take four minutes -
-    /// measured, on sixteen cores. Memory is the floor; the core count is the ceiling.
+    /// A processor is capped by the core count, not by how much memory it has.
     #[test]
     fn a_cpu_is_capped_by_cores_not_by_how_much_memory_it_has() {
         let catalog = Catalog::default();
@@ -322,11 +276,7 @@ mod tests {
         assert_eq!(choice.model.id, catalog.smallest_auto().expect("one").id);
     }
 
-    /// Sizing on CPU is against system memory, not against VRAM.
-    ///
-    /// The two figures differ by an order of magnitude on an ordinary desktop. Using
-    /// the VRAM column for a CPU decision would choose the largest model in the
-    /// catalogue on any machine with 16 GB, which is most of them.
+    /// Sizing on CPU is against system memory, not VRAM.
     #[test]
     fn a_cpu_machine_is_sized_against_system_memory() {
         let catalog = Catalog::default();
@@ -352,10 +302,7 @@ mod tests {
         assert_eq!(choice.model.id, catalog.smallest_auto().expect("one").id);
     }
 
-    /// Nothing measurable gets the catalogue default, and says so.
-    ///
-    /// The `basis` is the part that matters: a report saying only "qwen3-1.7b" cannot
-    /// be told apart from a measured choice, and the two deserve different confidence.
+    /// An unmeasured machine gets the catalogue default, and the basis says so.
     #[test]
     fn an_unmeasured_machine_gets_the_default_and_says_why() {
         let catalog = Catalog::default();

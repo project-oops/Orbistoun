@@ -1,15 +1,10 @@
-//! End-to-end: a command stream's shaders reach the census corpus.
+//! End to end: a command stream's shaders reach the census corpus.
 //!
-//! The pieces each had tests, but the chain that matters - a submitted command stream, the
-//! shader addresses hiding in its register writes, the shaders those addresses point at,
-//! and the content-addressed corpus the census ranks - had none, because nothing connected
-//! them (`registers` calls them "two tools that never meet"). `capture_shaders` is that
-//! connection, and this drives it with a hand-built stream and a fake address space so the
-//! whole path can be checked on a machine with no title and no GPU.
-//!
-//! The oracle is exact: a stream that names one shader address, a memory that holds a known
-//! shader there, and a corpus that must end up holding exactly those bytes under their
-//! content id - then the census, reading only the corpus, must see the one shader.
+//! `capture_shaders` connects a submitted command stream, the shader addresses in its register
+//! writes, the shaders at those addresses, and the content-addressed corpus the census ranks. This
+//! drives it with a hand-built stream and a fake address space: a stream naming one shader
+//! address, a memory holding a known shader there, and a corpus that must hold exactly those bytes
+//! under their content id, which the census then reads.
 
 use orbistoun_gpu::pipeline::{GuestMemory, capture_shaders};
 use orbistoun_shader::{
@@ -203,9 +198,8 @@ fn the_same_shader_captured_twice_is_stored_once() {
 
 #[test]
 fn an_address_that_names_no_shader_is_a_reported_miss_not_a_capture() {
-    // The register mapping is a hypothesis. When it produces an address memory cannot
-    // honour, that is evidence about the mapping and must be reported, not swallowed - and
-    // it must never become a captured shader read out of whatever happened to be there.
+    // An address memory cannot honour is evidence about the register mapping: it is reported, never
+    // captured as whatever bytes happened to be there.
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let vocab = vocabulary();

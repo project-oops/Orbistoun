@@ -1,8 +1,8 @@
 //! Turning a survey into a persisted, diffed run report.
 //!
-//! The report is the machine-readable contract (D046). This module is where a survey
-//! becomes one: it stamps the inputs that make a run reproducible, writes it beside
-//! previous runs, and produces the diff that says whether anything changed.
+//! The report is the machine-readable contract (D046). This module stamps the inputs that make a
+//! run reproducible, writes the report beside previous runs, and produces the diff that says
+//! whether anything changed.
 
 use std::path::Path;
 
@@ -17,10 +17,8 @@ use crate::{Service, ServiceError};
 pub struct RunOutput {
     /// The report for this run.
     pub report: RunReport,
-    /// The delta against the previous run of the same title, if there was one.
-    ///
-    /// `None` on a title's first run - which is information, not a failure: there is
-    /// simply nothing to compare against yet.
+    /// The delta against the previous run of the same title, if there was one. `None` on a title's
+    /// first run, which has nothing to compare against.
     pub diff: Option<RunDiff>,
     /// Where the report was written, if reporting is enabled.
     pub written_to: Option<std::path::PathBuf>,
@@ -28,9 +26,8 @@ pub struct RunOutput {
 
 /// Content hash identifying a title.
 ///
-/// Hashes the **executable**, never the directory: a title directory can be tens of
-/// gigabytes, and the executable is both small enough and the semantically right thing -
-/// it is what changes when a title is patched (D048).
+/// Hashes the executable, never the directory: a title directory can be tens of gigabytes, and the
+/// executable is what changes when a title is patched (D048).
 pub fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha1::new();
     h.update(bytes);
@@ -56,17 +53,15 @@ pub(crate) fn emit(
         policy_hash: content_hash(policy_toml.as_bytes()),
         overrides: std::collections::BTreeMap::new(),
         binary_version: env!("CARGO_PKG_VERSION").to_owned(),
-        // `option_env!` is a macro and needs a literal, so this is the one name in the
-        // tree that cannot be taken from `orbistoun-env`. Declared there anyway, so the
-        // listing and the typo check both know about it (D221).
+        // `option_env!` needs a literal, so this is the one name not taken from `orbistoun-env`. It
+        // is declared there anyway, for the listing and the typo check (D221).
         binary_commit: option_env!("ORBISTOUN_COMMIT")
             .unwrap_or("unknown")
             .to_owned(),
     };
 
-    // The run id's suffix disambiguates two runs landing in the same millisecond.
-    // Derived from the title hash so it is stable and needs no randomness, which
-    // would make reports irreproducible.
+    // The run id's suffix disambiguates two runs in the same millisecond. Derived from the title
+    // hash so it is stable and needs no randomness.
     let suffix = u32::from_str_radix(&inputs.title_hash[..4], 16).unwrap_or(0);
     let mut report = RunReport::started(RunId::new(now_unix_ms, suffix), now_unix_ms, inputs);
     report.reached(orbistoun_proto::Phase::ContainerParsed);
@@ -98,6 +93,7 @@ pub(crate) fn emit(
 mod tests {
     use super::content_hash;
 
+    /// The content hash is stable and distinguishes content.
     #[test]
     fn the_content_hash_is_stable_and_distinguishes_content() {
         assert_eq!(content_hash(b"abc"), content_hash(b"abc"));
@@ -105,10 +101,10 @@ mod tests {
         assert_eq!(content_hash(b"abc").len(), 40, "hex sha1");
     }
 
+    /// An empty input still hashes to a full identity.
     #[test]
     fn an_empty_input_still_hashes() {
-        // A zero-byte file is a legitimate thing to be handed, and hashing it must not
-        // produce an empty identity that collides with "no title".
+        // A zero-byte file must not hash to an empty identity that collides with "no title".
         assert_eq!(content_hash(b"").len(), 40);
         assert_ne!(content_hash(b""), content_hash(b"x"));
     }

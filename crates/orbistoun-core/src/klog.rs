@@ -1,49 +1,20 @@
-//! The kernel's own log, which this emulator is in a position to write.
+//! The kernel's own log, which this emulator writes.
 //!
-//! # Why there is something true to serve here
-//!
-//! `klogsrv` exists to forward `/dev/klog` to a socket. It runs under orbistoun, binds its
-//! port, accepts a connection - and then has nothing to send, because there is no
-//! `/dev/klog`. The payload works; the device does not exist.
-//!
-//! **It does not have to be invented.** `/dev/klog` is where a FreeBSD kernel says what it is
-//! doing to the programs running on it, and orbistoun *is* the kernel those programs are
-//! running on. Every line it already writes about a guest - a system call it could not serve,
-//! a name nothing implements, a path it does not hold, a fault - is exactly that: the kernel
-//! talking about the process. Publishing it is not a fabrication, it is the one thing here
-//! that has a genuine claim to the name (D389).
-//!
-//! # What goes in, and what deliberately does not
-//!
-//! Kernel-boundary events only: what the guest asked the kernel for and could not have. Not
-//! the guest's own `printf` output, which is its stdout and belongs there; not this project's
-//! progress reporting about *itself*, which is a fact about the emulator rather than about
-//! the process it is running.
-//!
-//! The distinction matters because a guest may read this back and act on it. A log that mixes
-//! "your call failed" with "orbistoun loaded 30086 symbol names" is a log whose reader cannot
-//! tell which lines are about it.
-//!
-//! # Bounded, and lossy at the front
-//!
-//! A ring: when it is full the oldest line goes. A kernel log is a *tail* - `dmesg` shows you
-//! the end of it - and a reader that connects late has always missed the beginning. Blocking
-//! the guest to preserve a line nobody has read yet would be the wrong trade in the other
-//! direction.
+//! `/dev/klog` is where a FreeBSD kernel reports to the programs running on it, and orbistoun
+//! is that kernel. Its lines about a guest - a system call it could not serve, a name nothing
+//! implements, a path it does not hold, a fault - are published here (D389). Only
+//! kernel-boundary events go in: not the guest's own stdout, and not the emulator's reporting
+//! about itself, since a guest may read this back. It is a ring that drops the oldest line when
+//! full, because a kernel log is a tail and the guest is never blocked to preserve a line.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
-/// How many lines the log keeps.
-///
-/// Enough that a client connecting after a payload has started still sees what it did; small
-/// enough that a guest in a loop cannot grow this without bound.
+/// How many lines the log keeps: enough for a client connecting after a payload started,
+/// small enough that a guest in a loop cannot grow it without bound.
 const KEPT_LINES: usize = 512;
 
-/// Bytes one line may hold before it is cut.
-///
-/// A kernel log line is short by convention, and a reader parsing them is entitled to assume
-/// they stay that way.
+/// Bytes one line may hold before it is cut; kernel log lines are short by convention.
 const LONGEST_LINE: usize = 512;
 
 /// The log, and what has not been read out of it yet.
@@ -53,10 +24,7 @@ struct Log {
     lines: VecDeque<String>,
     /// Bytes of the front line already handed over, for a reader whose buffer was too small.
     consumed: usize,
-    /// How many lines were dropped because the ring was full.
-    ///
-    /// Counted so the gap can be *said* rather than silently closed: a log that quietly skips
-    /// is one whose reader draws conclusions from an order that never happened.
+    /// How many lines were dropped because the ring was full, so the gap can be reported.
     dropped: u64,
 }
 
@@ -68,12 +36,8 @@ fn log() -> &'static Mutex<Log> {
 
 /// Writes one line to the kernel log.
 ///
-/// # Where this must not be called from
-///
-/// **Not the syscall dispatcher**, and not anything else running on the guest's own stack:
-/// this takes a lock and allocates a string, which is what put a fault in the middle of the
-/// first syscall a guest ever made here (D381). The reporting layer reads records and writes
-/// lines; that is where this belongs.
+/// Never called from the syscall dispatcher or anything else on the guest's own stack: this
+/// takes a lock and allocates (D381). The reporting layer is where it belongs.
 pub fn note(line: &str) {
     let Ok(mut log) = log().lock() else {
         return;
@@ -93,11 +57,9 @@ pub fn note(line: &str) {
 
 /// Reads waiting bytes into `into`, answering how many.
 ///
-/// Zero means nothing is waiting, which a caller reads as *not ready yet* rather than as an
-/// end of file - a kernel log has no end while the kernel is running.
-///
-/// A line longer than the space left is split across calls rather than dropped, which is why
-/// the log remembers how much of the front line has gone.
+/// Zero means nothing is waiting (not ready, rather than end of file). A line longer than the
+/// space left is split across calls, which is why the log tracks how much of the front line
+/// has gone.
 pub fn read_into(into: &mut [u8]) -> usize {
     let Ok(mut log) = log().lock() else {
         return 0;
@@ -107,8 +69,7 @@ pub fn read_into(into: &mut [u8]) -> usize {
         let Some(front) = log.lines.front() else {
             break;
         };
-        // The newline is part of the line as far as a reader is concerned, so it is appended
-        // here rather than stored - a stored one would be lost to `truncate`.
+        // The newline is appended here rather than stored, where `truncate` would lose it.
         let whole = format!("{front}\n");
         let consumed = log.consumed.min(whole.len());
         let rest = &whole.as_bytes()[consumed..];
@@ -141,11 +102,7 @@ pub fn dropped() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    /// The log is one per process, so these tests share it.
-    ///
-    /// **They failed in parallel and passed alone**, which is the worst way for a test to be
-    /// wrong: one test drained what another had just written, so the failure depended on
-    /// scheduling. Each takes this and starts from empty, the way the mount tests already do.
+    /// The log is one per process, so these tests share it; each takes this and starts empty.
     static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Takes the log for the length of a test, and empties it first.
@@ -172,10 +129,7 @@ mod tests {
         assert_eq!(super::read_into(&mut into), 0, "and nothing is left");
     }
 
-    /// **A line longer than the reader's buffer is split, not dropped.**
-    ///
-    /// The case a naive ring gets wrong: a reader with a small buffer would otherwise lose
-    /// the tail of every long line and never know.
+    /// A line longer than the reader's buffer is split across reads, not dropped.
     #[test]
     fn a_line_longer_than_the_buffer_continues_next_read() {
         let _guard = alone();
@@ -192,7 +146,7 @@ mod tests {
         assert_eq!(std::str::from_utf8(&seen).expect("text"), "abcdefghij\n");
     }
 
-    /// Nothing waiting is zero, which is *not ready* rather than an end of file.
+    /// Nothing waiting reads zero, meaning not ready rather than end of file.
     #[test]
     fn an_empty_log_reads_zero() {
         let _guard = alone();

@@ -1,29 +1,17 @@
-//! Claims the knowledge base makes about *other* documents, checked against them.
+//! Claims the knowledge base makes about other documents, checked against those documents.
 //!
-//! # The two failures this is here for
-//!
-//! **A claim about a function that does not exist.** Thirty-three entries said their semantics
-//! follow "the POSIX analogue of the same name". Nine were event-flag and semaphore calls -
-//! `sceKernelCreateEventFlag`, `sceKernelWaitSema` and their family - and POSIX has no function
-//! of any of those names. It was the only open question `sceKernelWaitSema` had, so nothing
-//! recorded that two of its three arguments are ignored (D540).
-//!
-//! **A measurement filed as a thing nobody knows.** `scePthreadMutexUnlock` carried an
-//! assumption beginning *"CONFIRMED ON HARDWARE"*. `questions` ranks assumptions and obSCEne's
-//! backlog is generated from that ranking, so the queue was asking a console to establish
-//! something a console had already established, in a sentence that said so (D541).
-//!
-//! Both are wrong *on their face*, before anybody argues about the platform - which is what
-//! makes them testable at all.
+//! Two kinds of claim are wrong on their face and therefore testable: a stated POSIX namesake that
+//! does not exist, and a hardware measurement filed as an open assumption. `questions` ranks
+//! assumptions and obSCEne's backlog is generated from that ranking, so a measurement filed there
+//! asks the hardware again for an answer it has already given.
 
 use std::collections::BTreeSet;
 
 /// Sentences that assert this entry has a namesake in the C library.
 ///
-/// **A list, not a rule.** Matching prose is how you write a check that silently stops
-/// matching, so this names the exact wordings in use and nothing else. A claim written afresh
-/// slips past - and becomes its own premise, which `questions --premises` shows as a group of
-/// one, which is how the next one gets found (D538).
+/// A list of the exact wordings in use, not a pattern: a pattern over prose stops matching
+/// silently. A new wording slips past and shows up in `questions --premises` as a group of one
+/// (D538).
 const CLAIMS_A_NAMESAKE: &[&str] = &[
     "Semantics follow the POSIX analogue of the same name.",
     "Modelled on the POSIX call of the same shape.",
@@ -31,14 +19,13 @@ const CLAIMS_A_NAMESAKE: &[&str] = &[
     "Inferred from the name and the POSIX call it resembles.",
 ];
 
-/// The sentence asserting the opposite, which is equally checkable and equally wrong if wrong.
+/// The sentence asserting the opposite, equally checkable.
 const CLAIMS_NO_NAMESAKE: &str = "There is no POSIX function of this name:";
 
-/// Sentences an assumption must never contain, because they announce evidence.
+/// Sentences an assumption never contains, because they announce evidence.
 ///
-/// An `assumptions` line is by definition something nobody has established. One saying a
-/// console returned a value is a fact, and belongs in `edge_cases` where the rest of the
-/// hardware absorption puts them - not in the queue that asks hardware for answers.
+/// An assumption is something nobody has established. A hardware result belongs in `edge_cases`,
+/// where the hardware absorption files them.
 const ANNOUNCES_A_MEASUREMENT: &[&str] = &[
     "CONFIRMED ON HARDWARE",
     "Measured on hardware",
@@ -48,14 +35,10 @@ const ANNOUNCES_A_MEASUREMENT: &[&str] = &[
 
 /// Every name a vendor-spelled function could be named after, by spelling alone.
 ///
-/// **Prefix strips and a case fold - a transformation of the name, never a judgement about
-/// behaviour.** `scePthreadCondWait` gives `pthread_cond_wait`; `sceKernelWrite` gives `write`
-/// as well as `kernel_write`, because the vendor prefix is `sceKernel` for the file calls and
-/// `sce` for the pthread ones, and which it is cannot be decided from the name.
-///
-/// Deliberately generous: several candidates, and a hit on any of them passes. A narrow rule
-/// would fire on `sceKernelWrite` - whose POSIX namesake is plainly `write` - and a guard that
-/// fires falsely is one somebody weakens the next time it does.
+/// Prefix strips and a case fold, never a judgement about behaviour: `scePthreadCondWait` gives
+/// `pthread_cond_wait`; `sceKernelWrite` gives both `write` and `kernel_write`, because the prefix
+/// is `sceKernel` for file calls and `sce` for pthread calls and the name does not say which. The
+/// candidates are generous because a guard that fires falsely gets weakened.
 fn spellings_of(vendor: &str) -> BTreeSet<String> {
     fn snake(name: &str) -> String {
         let mut out = String::with_capacity(name.len() + 4);
@@ -98,29 +81,17 @@ fn harvest() -> BTreeSet<&'static str> {
     names
 }
 
-/// **A claimed POSIX namesake exists, and a denied one does not.**
+/// A claimed POSIX namesake exists, and a denied one does not.
 ///
-/// # What this asserts
-///
-/// Both directions, because both are claims about the same citable list. An entry saying its
-/// semantics follow the POSIX function of the same name must spell into a harvested name; an
-/// entry saying there is no POSIX function of its name must not.
-///
-/// The second direction is not symmetry for its own sake - the nine entries D540 corrected now
-/// carry that negative sentence, and if one were later given to a function that *does* have a
-/// namesake it would be as wrong as what it replaced.
-///
-/// # What it cannot assert
-///
-/// **That a claim it passes is true.** `pthread_cond_wait` being in the harvest says the name
-/// is real. It says nothing about whether the platform's call behaves like it, which is exactly
-/// what these entries are admitting nobody knows. This catches the claim that is wrong before
-/// anybody goes near a console, not the one that is merely unverified.
+/// An entry saying its semantics follow the POSIX function of the same name must spell into a
+/// harvested name; an entry saying there is none must not. A pass says the name is real, not that
+/// the platform's call behaves like it.
 #[test]
 fn a_claimed_posix_namesake_exists_and_a_denied_one_does_not() {
     let standard = harvest();
 
-    // The widening must not have neutered the check: the names that prompted it still fail.
+    // The broad spelling rule still rejects the event-flag and semaphore calls, which have no POSIX
+    // namesake.
     for gone in [
         "sceKernelWaitSema",
         "sceKernelCreateEventFlag",
@@ -196,27 +167,11 @@ fn a_claimed_posix_namesake_exists_and_a_denied_one_does_not() {
     );
 }
 
-/// **An open question does not announce its own answer.**
+/// An open question does not announce its own answer.
 ///
-/// # What this asserts
-///
-/// That no `assumptions` line says a console measured something. `questions` ranks assumptions
-/// and obSCEne's backlog is generated from that ranking, so a measurement sitting there spends
-/// hardware time re-establishing what is already established - and it is the entries with the
-/// most evidence that are most likely to carry one, because somebody had a result to write down
-/// and put it where the reasoning already was.
-///
-/// The hardware absorption already files its results in `edge_cases`; this catches the
-/// hand-written ones. It fails on `scePthreadMutexUnlock` as it stood before D541, whose
-/// assumption began "CONFIRMED ON HARDWARE".
-///
-/// # What it cannot assert
-///
-/// That an assumption is genuinely open. A measurement described *without* any of these words -
-/// "the console answers zero here" - reads as an assumption and passes. And it cannot tell a
-/// stale assumption from a live one: the same entry carried "it is a structure worth testing
-/// for, not an established encoding" about a rule D398 had measured months earlier, and nothing
-/// in that sentence announces anything.
+/// No `assumptions` line says the hardware measured something; such a line spends hardware time
+/// re-establishing a known result. A measurement described without any of these words passes, and a
+/// stale assumption is indistinguishable from a live one.
 #[test]
 fn an_open_question_does_not_announce_a_measurement() {
     let mut announcing = Vec::new();
@@ -240,38 +195,12 @@ fn an_open_question_does_not_announce_a_measurement() {
     );
 }
 
-/// **An entry holding a measurement does not report that nothing is known about it.**
+/// An entry holding a measurement does not report that nothing is known about it.
 ///
-/// # What this asserts
-///
-/// That no entry prints [`NOTHING_ESTABLISHED`] while carrying a hardware result in its edge
-/// cases. That sentence is what an entry says when `known_by` is a guess and it itemises
-/// nothing (D239); an entry a console has answered is not that, whatever else remains open.
-///
-/// Six were in exactly that state - `sceGnmDispatchDirect`, `sceKernelGetSystemSwVersion`,
-/// `sceVideoOutSetFlipRate` and three more - each with reasoning in its implementation, a
-/// measured value in its edge cases, and a record saying nothing had been established. They
-/// survived five ticks of auditing the ask list because `questions` ranks by call count and
-/// these have between none and eleven, so they sat at the bottom of every list that was read
-/// from the top (D542).
-///
-/// # Why this and not the wider rule
-///
-/// The obvious rule is that an entry with a measurement may not be `assumed` at all. That
-/// fires on **22** entries, and sixteen of them are right: a console answering one behaviour
-/// does not establish the rest, and check 10 exists precisely to stop one measured fact
-/// promoting an entry past the questions it still lists. `known_by` describes the entry.
-///
-/// The six are different because they claim *nothing at all* is known, which the entry itself
-/// disproves two lines above. That is a contradiction rather than a judgement, which is what
-/// makes it testable.
-///
-/// # What it cannot assert
-///
-/// That the sixteen are labelled correctly - it does not look at them. And it cannot catch the
-/// same contradiction stated any other way: an entry with a measured value described in prose
-/// that does not begin `Measured on hardware:` is invisible here, because that prefix is what
-/// the hardware absorption writes and this checks the absorption's own output.
+/// No entry prints [`NOTHING_ESTABLISHED`] while its edge cases carry a hardware result. An entry
+/// with a measurement may still be `assumed` - one measured behaviour does not settle the others it
+/// lists - but claiming nothing is known contradicts the entry itself. Only measurements written
+/// with the absorption's `Measured on hardware:` prefix are seen here.
 #[test]
 fn an_entry_holding_a_measurement_does_not_say_nothing_is_established() {
     let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();

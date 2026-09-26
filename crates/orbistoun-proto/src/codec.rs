@@ -1,32 +1,24 @@
 //! One transport: newline-delimited JSON.
 //!
-//! Deliberately in its own module, and deliberately simple. The protocol in the
-//! parent module is the contract; this is one way of moving it, chosen because a
-//! human can read a captured stream with no tooling and because a stalled worker's
-//! last message is visible in a pipe dump.
-//!
-//! Newline framing is safe here because JSON escapes literal newlines inside strings,
-//! so no message body can contain the delimiter. That is asserted below rather than
-//! assumed, since it is the one property the whole framing rests on.
+//! The protocol in the parent module is the contract; this is one way of moving it, chosen because
+//! a captured stream reads without tooling. Newline framing is safe because JSON escapes literal
+//! newlines inside strings, so no message body contains the delimiter; a test asserts it.
 
 use std::io::{self, BufRead, Write};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Writes one message followed by a newline, and flushes.
-///
-/// Flushing per message is deliberate: an unflushed final message before a crash is
-/// exactly the one worth having.
+/// Writes one message followed by a newline, and flushes, so the last message before a crash is not
+/// lost in a buffer.
 pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io::Result<()> {
     let mut line = serde_json::to_string(message).map_err(io::Error::other)?;
     debug_assert!(
         !line.contains('\n'),
         "serialised message contained a raw newline, which would corrupt framing"
     );
-    // The line and its terminator in **one** write: a writer shared between threads (the
-    // worker's stdout, which a presented frame is announced on mid-run) then interleaves
-    // only between whole messages, never inside one.
+    // The line and its terminator go in one write, so a writer shared between threads interleaves
+    // only between whole messages.
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     writer.flush()
@@ -34,8 +26,8 @@ pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io:
 
 /// Reads one message, or `None` at end of stream.
 ///
-/// A malformed line is an error rather than a skip: silently dropping a message the
-/// peer believes it sent produces a desynchronised stream and an unfalsifiable bug.
+/// A malformed line is an error rather than a skip: dropping a message the peer believes it sent
+/// desynchronises the stream.
 pub fn read_message<R: BufRead, T: DeserializeOwned>(reader: &mut R) -> io::Result<Option<T>> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -60,6 +52,7 @@ mod tests {
     use std::io::{BufReader, Cursor};
     use std::path::PathBuf;
 
+    /// A message round-trips through the framing.
     #[test]
     fn a_message_round_trips_through_the_framing() {
         let mut buf = Vec::new();
@@ -73,6 +66,7 @@ mod tests {
         assert_eq!(got, Some(sent));
     }
 
+    /// Several messages stream in order.
     #[test]
     fn several_messages_stream_in_order() {
         let mut buf = Vec::new();
@@ -101,7 +95,7 @@ mod tests {
         );
     }
 
-    /// The property the entire framing rests on.
+    /// Embedded newlines cannot split a frame.
     #[test]
     fn embedded_newlines_cannot_corrupt_the_frame() {
         let mut buf = Vec::new();
@@ -110,9 +104,7 @@ mod tests {
         };
         write_message(&mut buf, &sent).expect("write");
 
-        // Exactly one frame on the wire, despite three newlines in the payload.
-        // Expressed as a split rather than a byte count: it states the property
-        // directly ("one frame plus an empty tail") instead of inferring it.
+        // One frame plus an empty tail, despite three newlines in the payload.
         let frames: Vec<_> = buf.split(|b| *b == b'\n').collect();
         assert_eq!(
             frames.len(),
@@ -126,6 +118,7 @@ mod tests {
         assert_eq!(got, Some(sent), "and the payload survived intact");
     }
 
+    /// End of stream reads as `None`, not an error.
     #[test]
     fn end_of_stream_reads_as_none_not_an_error() {
         let mut reader = BufReader::new(Cursor::new(Vec::new()));
@@ -133,15 +126,16 @@ mod tests {
         assert!(got.is_none());
     }
 
+    /// A malformed line is an error, not a skip.
     #[test]
     fn a_malformed_line_is_an_error_not_a_silent_skip() {
-        // Dropping a message the peer believes it sent desynchronises the stream and
-        // produces a bug nobody can reproduce.
+        // A dropped message would desynchronise the stream.
         let mut reader = BufReader::new(Cursor::new(b"{not json}\n".to_vec()));
         let err = read_message::<_, Request>(&mut reader).expect_err("must not skip");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
+    /// Terminal events survive the wire.
     #[test]
     fn terminal_events_survive_the_wire() {
         let mut buf = Vec::new();

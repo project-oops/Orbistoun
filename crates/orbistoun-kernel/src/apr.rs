@@ -1,27 +1,12 @@
-//! Delivering the bytes the asynchronous file path was asked for.
+//! Asynchronous file reads (`sceKernelApr*`), delivered through a reader installed from above.
 //!
-//! # Why this is a hook and not a call
+//! These functions are file I/O under the `libkernel` name. Reading a file belongs to
+//! `orbistoun-fs`, a sibling crate, so the layer that depends on both installs the reader here
+//! rather than one crate reaching across (D536).
 //!
-//! The three `sceKernelApr*` functions are file I/O under the `libkernel` name, and this crate
-//! declares `libkernel`. Reading a file is `orbistoun-fs`, which is a **sibling subsystem** -
-//! the same relation `orbistoun-libc` has, and the reason the clocks moved down to
-//! `orbistoun-hle` rather than one crate reaching across (D536).
-//!
-//! Splitting `libkernel` across two crates would be the alternative and is a bigger change than
-//! this earns: nothing else does it, and a library with two owners is a new concept rather than
-//! a new function. So the reader is installed from above, by the layer that already depends on
-//! both - the same inversion `on_guest_stop` uses, for the same reason (D160).
-//!
-//! # It is an experiment, and it says so
-//!
-//! Nothing here is established. The guest submits a command buffer whose header claims one
-//! command of twenty bytes and whose storage is entirely zero, having never called the library
-//! function that would put a command there (D587). Delivering the file it resolved *anyway* is a
-//! guess about what the buffer means, and the guest is the only thing that can grade it.
-//!
-//! So it is off unless asked for, and `ORBISTOUN_APR_DELIVER` is declared as intervening: a
-//! verdict under it carries the caveat the run report prints, because a wall that moves under an
-//! intervention is not a diagnosis (D224, D226, D227).
+//! Delivery is a guess: the guest submits a command buffer whose storage is all zero, and this
+//! delivers the file it last resolved. It runs only under `ORBISTOUN_APR_DELIVER`, which is
+//! declared as intervening so a verdict under it carries the caveat (D227).
 
 use std::sync::{Mutex, OnceLock};
 
@@ -43,9 +28,8 @@ pub fn on_file_read(reader: Reader) {
 
 /// The paths the last resolve call was asked about.
 ///
-/// **Remembered because the submit call does not carry them.** The guest resolves a path, builds
-/// a buffer, and submits it - and what the buffer says about *which* file is exactly the part
-/// that is not established. Using the last resolved path is the guess this whole module is.
+/// Kept because the submit call does not carry a path; a submit is assumed to be about the last
+/// resolved one.
 fn resolved() -> &'static Mutex<Vec<String>> {
     static RESOLVED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     RESOLVED.get_or_init(|| Mutex::new(Vec::new()))
@@ -66,14 +50,14 @@ pub(crate) fn last_resolved() -> Option<String> {
 /// Reads `path` into `[address, address + most)`, answering how many bytes arrived.
 ///
 /// [`None`] when nothing installed a reader, which is a different finding from a file that read
-/// zero bytes - and the caller says which.
+/// zero bytes.
 pub(crate) fn deliver(path: &str, address: u64, most: u64) -> Option<usize> {
     READER.get().and_then(|read| read(path, address, most))
 }
 
 /// Looks a guest path up in the title's index, answering an identifier and a size.
 ///
-/// Installed from above like [`on_file_read`], and for the same reason: the index is a file.
+/// Installed from above like [`on_file_read`], because the index is a file.
 type Lookup = fn(&str) -> Option<(u64, u64)>;
 
 /// The installed lookup, if anything installed one.
@@ -86,8 +70,7 @@ pub fn on_index_lookup(lookup: Lookup) {
 
 /// What the index says about `path`, or nothing.
 ///
-/// [`None`] when there is no index or the path is not in it - both of which are answers a guest
-/// can be told honestly, and neither of which is a size invented to fill the gap.
+/// [`None`] when there is no index or the path is not in it; no size is invented.
 pub(crate) fn look_up(path: &str) -> Option<(u64, u64)> {
     LOOKUP.get().and_then(|look| look(path))
 }

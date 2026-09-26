@@ -1,13 +1,8 @@
 //! Executable memory for emitted code.
 //!
-//! Deliberately *not* fixed-address: placement is `orbistoun-mem`'s problem and is
-//! already solved. This asks only "can emitted bytes run", so it takes whatever
-//! address the OS offers.
-//!
-//! Write permission and execute permission are never held at the same time. The bytes
-//! are written while the page is writable, then it is flipped to read-execute. That is
-//! not ceremony - W^X is enforced by default on some platforms, and code that assumes
-//! RWX works will fail there in a way that looks like a corrupt instruction stream.
+//! Not fixed-address: placement belongs to `orbistoun-mem`, and this takes whatever address
+//! the OS offers. Write and execute are never held together: bytes are written while the page
+//! is writable, then it is flipped to read-execute, because some platforms enforce W^X.
 
 use std::io;
 
@@ -39,8 +34,7 @@ impl ExecutableBuffer {
 
     /// Address of the first instruction, as a guest-visible integer.
     ///
-    /// The mapping is identity, so a host address and a guest address are the same
-    /// number - which is what makes this meaningful rather than a cast for convenience.
+    /// Guest and host addresses are the same number, so this is the address the guest calls.
     pub fn address(&self) -> u64 {
         self.ptr as usize as u64
     }
@@ -78,8 +72,8 @@ mod imp {
                 "no code to execute",
             ));
         }
-        // SAFETY: a null base lets the OS choose the address; the call validates its
-        // own arguments and returns null on failure.
+        // SAFETY: a null base lets the OS choose the address; the call validates its own arguments
+        // and returns null on failure.
         let ptr = unsafe {
             VirtualAlloc(
                 std::ptr::null(),
@@ -93,13 +87,13 @@ mod imp {
         }
         let ptr = ptr.cast::<u8>();
 
-        // SAFETY: the allocation is at least `code.len()` bytes, writable, freshly
-        // obtained, and cannot overlap the source slice.
+        // SAFETY: the allocation is at least `code.len()` bytes, writable, freshly obtained, and
+        // cannot overlap the source slice.
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len()) };
 
         let mut previous = 0_u32;
-        // SAFETY: the range is exactly the allocation made above, and `previous` is a
-        // valid out-parameter the call is required to write.
+        // SAFETY: the range is exactly the allocation made above, and `previous` is a valid
+        // out-parameter the call writes.
         let ok = unsafe {
             VirtualProtect(
                 ptr.cast(),
@@ -120,8 +114,8 @@ mod imp {
     }
 
     pub(super) fn release(ptr: *mut u8, _len: usize) {
-        // SAFETY: the pointer came from VirtualAlloc above and is released once, from
-        // Drop. MEM_RELEASE requires a size of zero.
+        // SAFETY: the pointer came from VirtualAlloc above and is released once, from Drop.
+        // MEM_RELEASE requires a size of zero.
         unsafe {
             VirtualFree(ptr.cast(), 0, MEM_RELEASE);
         }
@@ -141,8 +135,8 @@ mod imp {
                 "no code to execute",
             ));
         }
-        // SAFETY: a null hint lets the kernel choose; an anonymous private mapping
-        // backs no file and aliases nothing.
+        // SAFETY: a null hint lets the kernel choose; an anonymous private mapping backs no file
+        // and aliases nothing.
         let ptr = unsafe {
             mmap_anonymous(
                 std::ptr::null_mut(),
@@ -154,11 +148,11 @@ mod imp {
         .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
         let ptr = ptr.cast::<u8>();
 
-        // SAFETY: the mapping is at least `code.len()` bytes, writable, freshly
-        // obtained, and cannot overlap the source slice.
+        // SAFETY: the mapping is at least `code.len()` bytes, writable, freshly obtained, and
+        // cannot overlap the source slice.
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len()) };
 
-        // W^X: drop write before adding execute, rather than ever holding both.
+        // W^X: drop write before adding execute.
         // SAFETY: the range is exactly the mapping made above.
         let flipped = unsafe {
             mprotect(
@@ -178,8 +172,8 @@ mod imp {
     }
 
     pub(super) fn release(ptr: *mut u8, len: usize) {
-        // SAFETY: the pointer and length come from the mapping above and are unmapped
-        // once, from Drop.
+        // SAFETY: the pointer and length come from the mapping above and are unmapped once, from
+        // Drop.
         unsafe {
             let _ = munmap(ptr.cast(), len);
         }
@@ -190,15 +184,17 @@ mod imp {
 mod tests {
     use super::ExecutableBuffer;
 
+    /// Empty code is refused.
     #[test]
     fn empty_code_is_refused_rather_than_producing_an_unusable_buffer() {
         assert!(ExecutableBuffer::new(&[]).is_err());
     }
 
+    /// A buffer reports the length it was given.
     #[test]
     fn a_buffer_reports_the_length_it_was_given() {
-        // 0x48 0xB8 .. is `movabs rax, 0`, then `ret` - a valid, harmless sequence, so
-        // this stays a test about the buffer rather than about instruction encoding.
+        // `movabs rax, 0` then `ret`: a valid, harmless sequence, so this tests the buffer rather
+        // than instruction encoding.
         let code = [0x48_u8, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xC3];
         let buf = ExecutableBuffer::new(&code).expect("allocate");
         assert_eq!(buf.len(), code.len());

@@ -1,41 +1,17 @@
 //! Acting on what the project has already written down as unknown.
 //!
-//! # The gap this closes
-//!
-//! The dispatcher is driven entirely by **run reports** - what crashed, this time. It has
-//! never read the other half of what this project knows: `orbistoun-cli questions` prints 277
-//! open questions, ranked by how often a guest calls the function, and every one of them was
-//! written by somebody who had just finished failing to answer it.
-//!
-//! The first entry is the one that matters most by a wide margin:
-//!
-//! ```text
-//! 500031 calls in 4 module(s)   libkernel::sceKernelDirectMemoryQuery
-//!   ? The map shape the guest will accept is unknown: it completes the walk,
-//!     finds nothing it wants, and starts again.
-//! ```
-//!
-//! That question names its own experiment - show the guest a different map - and the
-//! apparatus has existed since D218: `MapShape` with three variants, and **nothing that ever
-//! selected between them**. The instrument was built, the question was recorded, and no code
-//! joined the two. A turn would report *a person must write code* while the experiment sat
-//! one env var away.
-//!
-//! # Why matching on prose is the wrong design, and what is done instead
-//!
-//! A question is written for a person, so classifying one by its words is guesswork that
-//! looks like a rule - and a rule that silently fails to match reads exactly like a question
-//! nobody can act on. So a knowledge entry says which experiment answers it, in a field, and
-//! this maps that field to a step. Anything unlabelled is reported as needing a person, with
-//! the question quoted, which is what the dispatcher already does for a gap it has no rule for
-//! (principle 3, D356).
+//! Besides run reports, the knowledge base holds open questions, ranked by how often a guest calls
+//! the function (`orbistoun-cli questions`). A question is written for a person, so classifying it
+//! by its words is guesswork; instead a knowledge entry names the experiment that answers it in a
+//! field, and this maps that field to a step. An unlabelled question is reported as needing a
+//! person, with the question quoted (D356).
 
 use crate::axis::Axis;
 
 /// An experiment a knowledge entry says would answer one of its open questions.
 ///
-/// **A closed set rather than free text**, so a new one is a compile error here rather than a
-/// label nothing recognises. The names are what a knowledge file writes.
+/// A closed set rather than free text, so a new one is a compile error here rather than a label
+/// nothing recognises. The names are what a knowledge file writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answers {
     /// Run the title against each physical map shape and read what it queries next.
@@ -64,9 +40,8 @@ impl Answers {
 
     /// The axes that answer it, in the order they should be run.
     ///
-    /// **Every shape, exhaustively**, for the reason the argument sweep is exhaustive: a boot
-    /// costs a fraction of a second and a prior that saves nothing is not worth having. Three
-    /// shapes is three boots.
+    /// Every shape, exhaustively, as the argument sweep is: a boot costs a fraction of a second, so
+    /// a prior that saves boots is not worth having.
     #[must_use]
     pub fn axes(self) -> Vec<Vec<Axis>> {
         match self {
@@ -74,9 +49,8 @@ impl Answers {
                 .into_iter()
                 .map(|shape| vec![Axis::MapShape { shape }])
                 .collect(),
-            // Four words of the destination struct, which is the most the hardware watches at
-            // once. The address is not known until the call is made, so this is one axis
-            // rather than a sweep - the watchpoint reports what it saw.
+            // Four words of the destination struct, the most the hardware watches at once. The
+            // address is not known until the call is made, so this is one axis rather than a sweep.
             Self::ReadsTheBuffer => vec![vec![Axis::Watch {
                 base: 0,
                 words: WATCHED_WORDS,
@@ -92,14 +66,12 @@ const WATCHED_WORDS: usize = 4;
 
 /// The map shapes a sweep runs, by name.
 ///
-/// Named here rather than imported so this crate keeps no dependency on the kernel - the
-/// strings are the diagnostic's own vocabulary, and the worker refuses one it does not know
-/// rather than falling back silently (D356).
+/// Named here rather than imported, so this crate keeps no dependency on the kernel; the worker
+/// refuses a name it does not know rather than falling back silently.
 fn orbistoun_kernel_shapes() -> Vec<&'static str> {
-    // **`gapped` last and it is the one that decides.** The others are contiguous, so they
-    // cannot separate the two readings by construction - they are run because a shape that
-    // changes the guest's behaviour at all is worth knowing about, not because they answer
-    // this (D357).
+    // `gapped` is the one that decides (D357): the others are contiguous and cannot separate the
+    // two readings, and are run because a shape that changes the guest's behaviour at all is worth
+    // knowing.
     vec!["whole", "reserved-low", "fragmented", "gapped"]
 }
 
@@ -112,8 +84,7 @@ pub struct Question {
     pub asked: String,
     /// How many times the corpus called that function.
     ///
-    /// **The ranking, and it is not arbitrary.** A question about a function nothing calls can
-    /// wait; the one at the top of this order blocks 67.5% of every call recorded.
+    /// The ranking: a question about a function nothing calls can wait.
     pub calls: u64,
     /// The experiment that would answer it, where the entry names one.
     pub answers: Option<Answers>,
@@ -129,8 +100,7 @@ impl Question {
 
 /// The questions worth attempting, most-called first.
 ///
-/// **Only the labelled ones, and the rest are not hidden.** A question with no experiment
-/// named is still a question; the caller reports it rather than this filtering it away, so
+/// Only the labelled ones. The caller reports the rest rather than this filtering them away, so
 /// "nothing to do" and "nothing labelled" stay different facts.
 #[must_use]
 pub fn attemptable(questions: &[Question]) -> Vec<&Question> {
@@ -145,22 +115,15 @@ pub fn attemptable(questions: &[Question]) -> Vec<&Question> {
 
 /// What a question's run is read for, and what each reading would mean.
 ///
-/// # Why an experiment needs this and not just axes
-///
-/// [`Answers::axes`] says what to *run*. Without a companion saying what to *read*, a turn can
-/// only report what every diagnostic reports - the fault moved, the guest reached further -
-/// and those answer a question about crashing, not the question that was asked.
-///
-/// The map-shape question is the case that makes it obvious. Whether the guest accepts a map
-/// is not visible in reach at all: it walks every shape correctly and restarts. What separates
-/// the two live readings of the second field is **which offset it queries next**, and that is
-/// arithmetic on numbers already in the trace (D357).
+/// [`Answers::axes`] says what to run; this says what to read. Fault and reach answer a question
+/// about crashing, not whether the guest accepts a map: that shows in which offset it queries next,
+/// which is arithmetic on numbers already in the trace (D357).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reading {
     /// Which boundary the guest feeds back when it walks a map.
     ///
-    /// Settled only by a map with a hole in it: where every region begins where the last
-    /// ended, `end` and `start + size` are the same number and no run can separate them.
+    /// Settled only by a map with a hole in it: where every region begins where the last ended,
+    /// `end` and `start + size` are the same number and no run can separate them.
     WalksBy(Walk),
     /// Nothing in the run distinguished the possibilities.
     Undecided(&'static str),
@@ -169,23 +132,18 @@ pub enum Reading {
 /// Which value a guest feeds back to walk a memory map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Walk {
-    /// The end of the region it was shown - so a hole is skipped.
+    /// The end of the region it was shown, so a hole is skipped.
     End,
-    /// Where the next region starts - so a hole is stepped over to its far side.
+    /// Where the next region starts, so a hole is stepped over to its far side.
     NextStart,
 }
 
 /// Reads which boundary a guest walked by, from the offsets it queried.
 ///
-/// # What makes this decidable
-///
-/// Given a map with a hole - a region ending at `E`, the next starting at `S > E` - a guest
-/// that feeds back the end queries `E`, and one that feeds back the next start queries `S`.
-/// Two different numbers, both in the trace, and no judgement in between.
-///
-/// **Undecided is an answer and is reported as one.** Where the map is contiguous the two
-/// readings coincide by construction, and saying so is the whole point: a run that could not
-/// have separated them must not be recorded as having failed to.
+/// Given a map with a hole (a region ending at `E`, the next starting at `S > E`), a guest that
+/// feeds back the end queries `E` and one that feeds back the next start queries `S`. Where the map
+/// is contiguous the readings coincide, and the answer is `Undecided`, so a run that could not
+/// separate them is never recorded as having failed to.
 #[must_use]
 pub fn walked_by(map: &[(u64, u64, bool)], queried: &[u64]) -> Reading {
     let holes: Vec<(u64, u64)> = map
@@ -226,10 +184,7 @@ mod tests {
         }
     }
 
-    /// **A question with no experiment named is not attempted, and not hidden either.**
-    ///
-    /// Filtering it away here would make "we have no rule for this" indistinguishable from
-    /// "there is nothing to ask", which is the distinction `Step::Person` exists to hold.
+    /// A question with no experiment named is not attempted, and not hidden either.
     #[test]
     fn only_a_question_naming_its_experiment_is_attempted() {
         let all = vec![
@@ -243,10 +198,7 @@ mod tests {
         assert_eq!(all.len(), 2, "and it is still in the list to report");
     }
 
-    /// **Ranked by how often a guest calls the function.**
-    ///
-    /// A question about something nothing calls can wait. The top of this order is what blocks
-    /// two thirds of every call in the corpus.
+    /// Questions are ranked by how often a guest calls the function.
     #[test]
     fn the_most_called_question_is_attempted_first() {
         let all = vec![
@@ -277,12 +229,7 @@ mod tests {
         assert_eq!(Answers::named(""), None);
     }
 
-    /// **A contiguous map cannot answer the question, and says so.**
-    ///
-    /// Where each region begins where the last ended, feeding back an end and feeding back the
-    /// next start produce identical numbers. A run under such a map has not failed to decide -
-    /// it could not have decided, and recording those as the same thing is how a question stays
-    /// open while looking asked (D218, D357).
+    /// A contiguous map cannot answer the question, and says so (D357).
     #[test]
     fn a_map_with_no_hole_cannot_separate_the_two_readings() {
         let contiguous = [(0, 0x1000, false), (0x1000, 0x4000, true)];
@@ -293,10 +240,8 @@ mod tests {
         ));
     }
 
-    /// **A hole decides it, and the decision is arithmetic.**
-    ///
-    /// Region ends at 0x2000, next begins at 0x4000. A guest feeding back the end queries
-    /// 0x2000; one feeding back the next start queries 0x4000. Both numbers are in the trace.
+    /// A hole decides it by arithmetic: region ends at 0x2000, next begins at 0x4000, and the
+    /// queried offset says which boundary the guest fed back.
     #[test]
     fn a_hole_separates_walking_by_end_from_walking_by_next_start() {
         let gapped = [(0, 0x2000, false), (0x4000, 0x8000, false)];

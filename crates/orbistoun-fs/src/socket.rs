@@ -1,43 +1,15 @@
 //! BSD sockets, mapped onto the host's.
 //!
-//! # Why this is the milestone rather than another subsystem
+//! `pros check` reads a service as up when a TCP connect to its port succeeds, so a guest
+//! with a listening socket is a running service, and the guest brings its own protocol:
+//! orbistoun supplies sockets and file calls, never FTP. The calls map one-to-one onto host
+//! sockets, and every constant and structure is in the FreeBSD checkout the ABI table is
+//! harvested from. `sockaddr_in` starts with `sin_len` at offset 0 and the family at 1.
 //!
-//! `pros check` - the independent tool this project wants as its grader - does exactly one
-//! thing per service: `TcpStream::connect_timeout(...).is_ok()`. No handshake, no protocol.
-//! So a service reads as **up the moment the guest has a listening socket on its port**, and
-//! for `klogsrv` that means reaching its `listen` call and nothing more.
-//!
-//! And the deeper commands need no protocol work either: `ftpsrv` implements FTP, `klogsrv`
-//! writes the log. **orbistoun never implements FTP.** What it owes them is sockets and file
-//! calls; the guest brings its own protocol, which is the property that makes the grader
-//! worth having - every byte Prosperous sees was produced by guest code executing.
-//!
-//! # There is no oracle problem, and that is unusual here
-//!
-//! These map one-to-one onto the host's sockets, the interface is POSIX, and every constant
-//! and structure is in the FreeBSD checkout the ABI table is harvested from:
-//!
-//! ```text
-//! struct sockaddr_in {                     sys/netinet/in.h
-//!     uint8_t     sin_len;      offset 0
-//!     sa_family_t sin_family;   offset 1
-//!     in_port_t   sin_port;     offset 2   network byte order
-//!     struct in_addr sin_addr;  offset 4   network byte order
-//!     char        sin_zero[8];  offset 8
-//! };
-//! ```
-//!
-//! **`sin_len` is the byte that catches people.** Most platforms do not have it; this family
-//! does, and a shim written from memory of Linux would read the family from offset 0 and get
-//! a length.
-//!
-//! # A socket exists before it has anything to do
-//!
-//! `socket()` answers a descriptor that is not yet a host object - the host makes a listener
-//! by binding and listening in one step, and a stream by connecting. So a descriptor here
-//! starts *pending*, remembers what `bind` was told, and becomes a real host
-//! object at `listen` or `connect`. That is bookkeeping rather than a claim: the guest sees
-//! the sequence it wrote, and the host sees the sequence it accepts.
+//! `socket()` answers a descriptor that is not yet a host object: the host makes a listener
+//! by binding and listening in one step, and a stream by connecting. A descriptor starts
+//! pending, remembers what `bind` was told, and becomes a host object at `listen` or
+//! `connect`.
 
 use std::net::{
     Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener, TcpStream,
@@ -50,27 +22,21 @@ const OK: u64 = 0;
 
 /// Answered by a call that did not work.
 ///
-/// Negative one, which is what every one of these documents, and what a caller tests for.
+/// Negative one, as each of these documents and a caller tests for.
 const FAILED: u64 = -1_i64 as u64;
 
 /// What a socket call answers: the value a guest sees, or the POSIX `errno` that stopped it.
 ///
-/// # Why the number leaves the body
-///
-/// The two spellings of these calls agree on success and disagree on failure. A POSIX-named
-/// socket call answers `-1` and leaves the number in `errno`; `libSceNet` folds it into the
-/// return as `0x8041_0100 | errno`, which one obSCEne sweep measured three times over. A body
-/// that collapses to `-1` has already discarded the only part the vendor spelling needs - so
-/// the number travels out and each spelling encodes it. One implementation, two honest
-/// returns (D667).
+/// The two spellings of these calls agree on success and differ on failure: a POSIX-named
+/// call answers `-1` with the number in `errno`, and `libSceNet` folds it into the return as
+/// `0x8041_0100 | errno`. The number leaves the body so each spelling encodes it (D667).
 pub type Answer = Result<u64, u32>;
 
 /// The errno for a failure nothing here can name.
 ///
-/// **Zero is not an errno** - it is what `errno` holds when nothing went wrong - so a vendor
-/// code built from it cannot collide with a measured one, and a guest that switches on the
-/// result meets a code it does not know, which is exactly true. Answering a plausible
-/// `EINVAL` instead would be inventing a constant to make a failure look explained.
+/// Zero is not an errno, so a vendor code built from it cannot collide with a measured one;
+/// a guest meets a code it does not know, which is true. A plausible `EINVAL` would invent an
+/// explanation.
 pub const UNNAMED: u32 = 0;
 
 /// A body's answer in the POSIX spelling: the value, or `-1` with the number left to `errno`.
@@ -108,26 +74,18 @@ pub const SOCKADDR_IN_LEN: u64 = 16;
 ///     };                              28 bytes
 /// ```
 ///
-/// **The first four bytes are the same shape as the shorter form**, which is what makes
-/// reading either safe: the family is at offset one whichever it turns out to be, and it says
-/// which of the two the rest is.
+/// The first four bytes have the same shape as the shorter form: the family at offset one
+/// says which of the two the rest is.
 pub const SOCKADDR_IN6_LEN: u64 = 28;
 
 /// One address family or socket type, read from the harvested `sys/sys/socket.h`.
 ///
-/// # Why these stopped being written down
-///
-/// They were `pub const AF_INET: u64 = 2;` with a comment saying a test in `orbistoun-libc`
-/// checked them, because that was the only crate that could read the harvested table. It is
-/// no longer: the table moved down to `orbistoun-hle`, which is below both, so the number
-/// can simply be **read where it is used** (D385).
-///
 /// A name the table cannot answer becomes a value no guest can pass, so every comparison
-/// against it fails and the call is refused. That is the honest failure: a family this build
-/// cannot name is one it must not claim to serve.
+/// against it fails and the call is refused: a family this build cannot name is one it does
+/// not serve (D385).
 fn number(name: &str) -> u64 {
-    /// A family no `socket` call can be asking for, so an unnameable one refuses rather than
-    /// matching whatever happened to be zero.
+    /// A family no `socket` call can ask for, so an unnameable one refuses rather than
+    /// matching zero.
     const UNNAMEABLE: u64 = u64::MAX;
 
     orbistoun_hle::constants::abi_constant("socket", name)
@@ -143,9 +101,8 @@ pub fn af_inet() -> u64 {
 
 /// `AF_INET6`, from `sys/sys/socket.h`.
 ///
-/// Not served by any socket call here - it is named so that the two calls that *parse* an
-/// address can tell "a family I do not serve" from "text I cannot read", which a caller
-/// distinguishes and acts on differently.
+/// Not served by any socket call here; named so the two calls that parse an address can tell
+/// "a family I do not serve" from "text I cannot read".
 #[must_use]
 pub fn af_inet6() -> u64 {
     number("AF_INET6")
@@ -166,11 +123,8 @@ pub(crate) enum Socket {
         bound: Option<SocketAddr>,
         /// Whether the guest has asked for non-blocking, before there is anything to set it on.
         ///
-        /// **Remembered rather than refused**, because a server sets the option immediately
-        /// after `socket` and connects afterwards - which is the order obSCEne writes and the
-        /// order the check that caught this measures. Accepting the option and dropping it
-        /// left a blocking host socket behind a guest that believed otherwise, and a
-        /// would-block that never came reads as the peer hanging up (D667).
+        /// Remembered, because a server sets the option right after `socket` and connects
+        /// afterwards; the flag has to survive until there is a host socket (D667).
         nonblocking: bool,
     },
     /// Listening for connections.
@@ -179,17 +133,14 @@ pub(crate) enum Socket {
         listener: TcpListener,
         /// A connection `select` noticed and did not consume.
         ///
-        /// **`select` has to ask without taking.** The only way to find out whether a
-        /// listener has a connection waiting is to accept one, so the answer is kept here
-        /// and the guest's next `accept` takes it. Without this, a guest that selects and
-        /// then accepts would lose every connection to the call that only asked (D373).
+        /// `select` asks without taking: whether a listener has a connection is found by
+        /// accepting one, so it is kept here for the guest's next `accept` (D373).
         pending: Option<(TcpStream, SocketAddr)>,
         /// Whether the guest asked for non-blocking, carried forward to what `accept` answers.
         ///
-        /// **The host cannot be asked.** `TcpListener` has a setter and no getter, and `accept`
-        /// needs the answer twice: to decide whether waiting is allowed at all, and to hand the
-        /// accepted stream the same mode - which obSCEne's `102-net/accept-inherits` measures
-        /// the console doing.
+        /// `TcpListener` has a setter and no getter, and `accept` needs the answer to decide
+        /// whether to wait and to give the accepted stream the same mode, as the hardware does
+        /// (obSCEne `102-net/accept-inherits`).
         nonblocking: bool,
     },
     /// A connected stream, either accepted or connected.
@@ -198,39 +149,35 @@ pub(crate) enum Socket {
         stream: TcpStream,
         /// Whether the guest asked for non-blocking on it.
         ///
-        /// **Kept because `MSG_DONTWAIT` has to put it back.** Honouring that flag means making
-        /// the host socket non-blocking for exactly one call, and the host has a setter with no
-        /// getter - so a shim that restored by guessing would leave every later read
-        /// non-blocking, turning a guest's blocking `recv` into a busy loop somewhere else.
+        /// Kept because `MSG_DONTWAIT` makes the host socket non-blocking for one call and
+        /// has to restore it, and the host has a setter with no getter.
         nonblocking: bool,
     },
 }
 
 /// Reads a `sockaddr_in` a guest passed.
 ///
-/// Answers [`None`] for anything that is not an internet address of the right length, which
-/// is a refusal rather than a guess: a guest passing a family this cannot serve should be
-/// told so, not have its bytes reinterpreted.
+/// Answers [`None`] for anything that is not an internet address of the right length: a
+/// family this cannot serve is refused, not reinterpreted.
 ///
 /// # Safety
 ///
-/// `address` must point at `length` readable bytes of guest memory, which is the contract
-/// the real call has under the identity mapping (D014).
+/// `address` must point at `length` readable bytes of guest memory, the contract the real
+/// call has under the identity mapping.
 pub(crate) unsafe fn read_sockaddr(address: u64, length: u64) -> Option<SocketAddr> {
     if address == 0 || length < SOCKADDR_IN_LEN {
         return None;
     }
     let at = usize::try_from(address).ok()?;
     let base = std::ptr::with_exposed_provenance::<u8>(at);
-    // **The family first, and only the family.** Both forms put it at offset one, so this is
-    // in bounds for either - and which one it is decides how many more bytes may be read.
+    // The family first: both forms put it at offset one, and it decides how many more bytes
+    // may be read.
     //
     // SAFETY: the caller guarantees at least `SOCKADDR_IN_LEN` readable bytes, and two are
     // read here.
     let family = unsafe { std::slice::from_raw_parts(base, 2) };
 
-    // Offset 1, not 0. Offset 0 is `sin_len` on this family, which a shim written from
-    // memory of another platform would read as the family.
+    // Offset 1, not 0: offset 0 is `sin_len` on this family.
     let family = u64::from(family[1]);
     if family == af_inet() {
         // SAFETY: the caller guarantees `length` readable bytes and `length` is at least
@@ -242,8 +189,8 @@ pub(crate) unsafe fn read_sockaddr(address: u64, length: u64) -> Option<SocketAd
     }
     if family == af_inet6() {
         if length < SOCKADDR_IN6_LEN {
-            // The guest named the longer family and gave the shorter length. Refused rather
-            // than read past what it said it has.
+            // The guest named the longer family and gave the shorter length: refused rather
+            // than read past it.
             return None;
         }
         // SAFETY: the caller guarantees `length` readable bytes and the check above
@@ -261,28 +208,24 @@ pub(crate) unsafe fn read_sockaddr(address: u64, length: u64) -> Option<SocketAd
             scope,
         )));
     }
-    // A family this cannot serve. Refused rather than reinterpreted: a guest passing one it
-    // believes in should be told no, not have its bytes read as something else.
+    // A family this cannot serve: refused rather than reinterpreted.
     None
 }
 
 /// Writes a `sockaddr_in` where a guest asked for one, and updates its length.
 ///
-/// Both halves, because the interface is both: a caller passes the room it has and reads
-/// back how much was used, and writing the address without the length leaves it reading a
-/// size it set itself.
+/// Both halves, as the interface does: a caller passes the room it has and reads back how
+/// much was used.
 fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
     if address == 0 {
-        // Not an error. A caller that wants only the connection passes null, and every
-        // implementation accepts that.
+        // A caller that wants only the connection passes null, which is allowed.
         return true;
     }
     let Ok(at) = usize::try_from(address) else {
         return false;
     };
-    // **The whole structure, written whichever form it is.** A caller reads the family from
-    // what comes back and decides how much of it to believe, so a short write would be read
-    // as an address rather than as an absence.
+    // The whole structure, whichever form it is: a caller reads the family from it and
+    // decides how much to believe, so a short write would read as an address.
     let mut bytes = [0_u8; SOCKADDR_IN6_LEN as usize];
     let written = match value {
         SocketAddr::V4(v4) => {
@@ -303,9 +246,9 @@ fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
         }
     };
 
-    // SAFETY: a guest-supplied address under the identity mapping (D014), where the guest
-    // said it has room for a `sockaddr` of the family it is asking about - the same contract
-    // the real call has.
+    // SAFETY: a guest-supplied address under the identity mapping, where the guest said it
+    // has room for a `sockaddr` of the family it asks about, the same contract the real call
+    // has.
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -328,22 +271,16 @@ fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
     true
 }
 
-/// `socket(domain, type, protocol)` - a descriptor with nothing behind it yet.
+/// `socket(domain, type, protocol)`: a descriptor with nothing behind it yet.
 ///
-/// `AF_INET` and `AF_INET6` streams. Anything else is refused rather than quietly given a
-/// TCP socket: a guest asking for a datagram socket and receiving a stream would work for
-/// exactly as long as it took to send something.
-///
-/// **The family is not remembered here**, and it does not need to be: nothing exists behind
-/// the descriptor until `bind` names an address, and the address carries its own family. A
-/// guest that binds a four-byte address to a socket it asked for as sixteen-byte gets a
-/// listener on the address it actually named, which is what the host would do with it.
+/// `AF_INET` and `AF_INET6` streams; anything else is refused rather than given a TCP
+/// socket. The family is not remembered: the address `bind` names carries its own.
 ///
 /// Reference: POSIX.1-2008 `socket(2)`; `AF_INET`, `AF_INET6` and `SOCK_STREAM` from
 /// `sys/sys/socket.h`.
 pub fn socket(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let (domain, kind) = (args[0], args[1]);
-    // The type carries flags on this platform; the low bits are the type itself.
+    // The type carries flags on this platform; the low bits are the type.
     if (domain != af_inet() && domain != af_inet6()) || kind & 0xF != sock_stream() {
         return Err(UNNAMED);
     }
@@ -354,17 +291,15 @@ pub fn socket(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     .ok_or(UNNAMED)
 }
 
-/// `bind(fd, address, length)` - remembers where a socket is to listen.
+/// `bind(fd, address, length)`: remembers where a socket is to listen.
 ///
-/// **Remembered rather than performed.** The host makes a listening socket by binding and
-/// listening in one call, so this records the address and `listen` uses it. A guest sees the
-/// sequence it wrote either way, and the alternative - binding here and rebuilding at listen -
-/// would hold the port twice.
+/// Remembered rather than performed: the host binds and listens in one call, so `listen`
+/// uses the address; binding here and again at listen would hold the port twice.
 ///
 /// Reference: POSIX.1-2008 `bind(2)`.
 pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
-    // SAFETY: a guest-supplied `sockaddr` under the identity mapping (D014), with the
-    // length the guest itself passed.
+    // SAFETY: a guest-supplied `sockaddr` under the identity mapping, with the length the
+    // guest passed.
     let Some(wanted) = (unsafe { read_sockaddr(args[1], args[2]) }) else {
         return Err(UNNAMED);
     };
@@ -379,13 +314,10 @@ pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     .unwrap_or(Err(UNNAMED))
 }
 
-/// `listen(fd, backlog)` - the call that makes a service visible.
+/// `listen(fd, backlog)`: the call that makes a service visible.
 ///
-/// **This is the one `pros check` observes.** Nothing beyond it is needed for a service to
-/// read as up, because the check is a connect and nothing more.
-///
-/// The backlog is not honoured: the host's listener chooses its own, and passing a guest's
-/// number through would be reporting a queue depth this cannot promise.
+/// This is what `pros check` observes. The backlog is not honoured: the host's listener
+/// chooses its own.
 ///
 /// Reference: POSIX.1-2008 `listen(2)`.
 pub fn listen(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -400,17 +332,12 @@ pub fn listen(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let Ok(listener) = TcpListener::bind(wanted) else {
         return Err(UNNAMED);
     };
-    // The flag the guest set before there was anything to set it on, applied now that there
-    // is. Refusing here would be reporting the listener as unopenable for a reason that is
-    // orbistoun's bookkeeping rather than the guest's request.
+    // The flag the guest set before there was a host socket, applied now.
     if nonblocking {
         let _ = listener.set_nonblocking(true);
     }
-    // **Say a service came up, and where.** This is the moment `pros check` is waiting for - a
-    // guest with a listening socket on its port - and until now it happened silently. Naming the
-    // host address the listener actually bound (which is `wanted` mapped one-to-one onto the
-    // host, D-socket) lets an operator, or a driver, connect to the thing that just opened. To
-    // the kernel log too, so a `klogsrv` reader tailing it sees the service announce itself.
+    // Announce the service and the host address it bound, so an operator or a driver can
+    // connect, and to the kernel log for a `klogsrv` reader.
     if let Ok(addr) = listener.local_addr() {
         tracing::info!("guest listening on {addr}");
         let line = format!("orbistoun: guest listening on {addr}");
@@ -427,16 +354,11 @@ pub fn listen(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     .unwrap_or(Err(UNNAMED))
 }
 
-/// `accept(fd, address, length)` - takes the next connection.
+/// `accept(fd, address, length)`: takes the next connection.
 ///
-/// Blocks, as the interface does. A guest that calls this with nothing connecting waits, and
-/// the run's own time limit is what ends it - which is honest, and is the same reasoning
-/// `sleep` records.
-///
-/// **The descriptor table is released before the wait.** Blocking while holding it would
-/// freeze every other file call in the process, including the `select` on another thread that
-/// is waiting to say a connection arrived - so a listener is cloned, the table is dropped, and
-/// the wait happens outside it (D373).
+/// Blocks, as the interface does; the run's time limit ends a wait nothing answers. The
+/// descriptor table is released before the wait: the listener is cloned and the table
+/// dropped, so other file calls and a `select` on another thread keep running (D373).
 ///
 /// Reference: POSIX.1-2008 `accept(2)`.
 pub fn accept(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -470,18 +392,15 @@ pub fn accept(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let accepted = match next {
         Next::Already(ready) => Ok(ready),
         Next::Wait(listener) => {
-            // The mode the guest asked for, not the one a `select` probe happened to leave
-            // behind: a listener the guest set non-blocking must answer straight away, and one
-            // it did not must wait however long it takes.
+            // The mode the guest asked for, not the one a `select` probe left behind.
             let _ = listener.set_nonblocking(nonblocking);
             listener.accept()
         }
     };
     let (stream, peer) = match accepted {
         Ok(ready) => ready,
-        // Nothing waiting on a non-blocking listener. Measured as `EAGAIN` through the
-        // vendor encoding rather than guessed: it is the same condition, and the same code,
-        // as a would-block read (obSCEne `102-net/recv-would-block`).
+        // Nothing waiting on a non-blocking listener: `EAGAIN`, the same code as a would-block
+        // read (obSCEne `102-net/recv-would-block`).
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
             return Err(orbistoun_core::errno::AGAIN);
         }
@@ -490,9 +409,8 @@ pub fn accept(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     if !write_sockaddr(args[1], args[2], peer) {
         return Err(UNNAMED);
     }
-    // **Inherited, explicitly.** Hardware answers a would-block on a socket accepted from a
-    // non-blocking listener (`102-net/accept-inherits`), and whether the host does that by
-    // itself is a per-platform difference this must not be at the mercy of.
+    // Inherited explicitly: the hardware answers a would-block on a socket accepted from a
+    // non-blocking listener (`102-net/accept-inherits`), and hosts differ on it.
     let _ = stream.set_nonblocking(nonblocking);
     crate::descriptor::insert_socket(Socket::Stream {
         stream,
@@ -501,18 +419,17 @@ pub fn accept(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     .ok_or(UNNAMED)
 }
 
-/// `connect(fd, address, length)` - the other direction.
+/// `connect(fd, address, length)`: the other direction.
 ///
 /// Reference: POSIX.1-2008 `connect(2)`.
 pub fn connect(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
-    // SAFETY: a guest-supplied `sockaddr` under the identity mapping (D014).
+    // SAFETY: a guest-supplied `sockaddr` under the identity mapping.
     let Some(wanted) = (unsafe { read_sockaddr(args[1], args[2]) }) else {
         return Err(UNNAMED);
     };
-    // **Connected blocking, then set.** A non-blocking connect answers `EINPROGRESS` and
-    // finishes later, which is a second state this does not model - so the flag the guest
-    // asked for is applied to the finished stream instead. The difference a guest could see
-    // is the return of `connect` itself, and nothing measured has looked at it.
+    // Connected blocking, then set: a non-blocking connect answers `EINPROGRESS` and finishes
+    // later, a state this does not model, so the guest's flag is applied to the finished
+    // stream. Only the return of `connect` itself could differ.
     let Ok(stream) = TcpStream::connect(wanted) else {
         return Err(UNNAMED);
     };
@@ -530,34 +447,21 @@ pub fn connect(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     .unwrap_or(Err(UNNAMED))
 }
 
-/// `setsockopt(fd, level, option, value, length)` - accepted, and mostly not applied.
+/// `setsockopt(fd, level, option, value, length)`: accepted, and mostly not applied.
 ///
-/// # Why accepting is right and applying is not
-///
-/// A server's first act after `socket` is `setsockopt(SO_REUSEADDR)`, and **failing it stops
-/// the server**: a correct program checks, reports, and exits. So refusing outright would end
-/// every payload measured before it reached `bind`.
-///
-/// Applying it is a different matter. `SO_REUSEADDR` is what the host's listener does by
-/// default on the platforms this runs on, so honouring it changes nothing; the rest -
-/// timeouts, buffer sizes, keepalive - would need a per-option mapping this has no way to
-/// verify, and a wrong one is a socket behaving differently from what the guest asked for
-/// with nothing saying so.
-///
-/// So: accepted, recorded as not applied, and the knowledge file says which. That is the
-/// honest shape of "the call succeeded and the option did nothing".
+/// A server's first act after `socket` is `setsockopt(SO_REUSEADDR)`, and a failure stops
+/// it, so options are accepted. `SO_REUSEADDR` is the host listener's default; timeouts,
+/// buffer sizes and keepalive would need a per-option mapping this cannot verify. So they are
+/// accepted without effect, and the knowledge file says which.
 ///
 /// Reference: POSIX.1-2008 `setsockopt(2)`.
 pub fn setsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let (fd, level, optname, optval, optlen) = (args[0], args[1], args[2], args[3], args[4]);
-    // **The one option that is applied, because it is the one that was measured.** Hardware
-    // accepted `setsockopt(SOL_SOCKET, 0x1200, &1, 4)` and then answered a would-block on the
-    // socket it was set on, which is a pair of measurements no blocking socket can produce
-    // (obSCEne `102-net/nonblocking-option` and `102-net/recv-would-block`). Accepting it and
-    // doing nothing was the plausible answer; this is the measured one (D667).
+    // The one option applied, because it is measured: the hardware accepts
+    // `setsockopt(SOL_SOCKET, 0x1200, &1, 4)` and then answers a would-block on that socket
+    // (obSCEne `102-net/nonblocking-option`, `102-net/recv-would-block`) (D667).
     if level == SOL_SOCKET && optname == SO_NONBLOCKING {
-        // The value is the flag, read the way `setsockopt` documents: a non-zero `int` turns
-        // it on. A guest that passes no buffer is asking for the default, which is on.
+        // A non-zero `int` turns it on; a guest that passes no buffer gets the default, on.
         let wanted = read_option_flag(optval, optlen);
         return if crate::descriptor::set_nonblocking(fd, wanted) {
             Ok(OK)
@@ -565,14 +469,15 @@ pub fn setsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
             Err(UNNAMED)
         };
     }
-    // Kernel R/W primitive setsockopt(fd, IPPROTO_IPV6=0x29, IPV6_PKTINFO=0x2e, buf, 0x14)
+    // The kernel read interface: `setsockopt(fd, IPPROTO_IPV6=0x29, IPV6_PKTINFO=0x2e, buf,
+    // 0x14)` carries the kernel address to read next.
     if level == 0x29 && (optname == 0x2e || optname == 0x19) && optlen >= 12 && optval != 0 {
         let ptr = optval as *const u8;
         let mut kaddr_bytes = [0u8; 8];
-        // SAFETY: `optval` is a guest pointer with at least `optlen` bytes (>= 12, checked above);
-        // offsetting 4 into it stays inside that buffer.
+        // SAFETY: `optval` is a guest pointer with at least `optlen` bytes (at least 12,
+        // checked above); offsetting 4 into it stays inside that buffer.
         let source = unsafe { ptr.add(4) };
-        // SAFETY: `source` begins eight bytes that lie within the same >= 12-byte guest buffer, and
+        // SAFETY: `source` begins eight bytes within the same guest buffer of at least 12, and
         // the destination is a local eight-byte array, so the ranges cannot overlap.
         unsafe { std::ptr::copy_nonoverlapping(source, kaddr_bytes.as_mut_ptr(), 8) };
         let kaddr = u64::from_le_bytes(kaddr_bytes);
@@ -583,11 +488,9 @@ pub fn setsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     Ok(OK)
 }
 
-/// `getsockname(fd, address, length)` - where a socket actually ended up.
+/// `getsockname(fd, address, length)`: where a socket ended up.
 ///
-/// Worth having rather than stubbing: a server that binds to port zero asks the system which
-/// port it got, and prints it. Answering a made-up number would put a wrong port in front of
-/// whoever is trying to connect.
+/// A server that binds to port zero asks which port it got and prints it.
 ///
 /// Reference: POSIX.1-2008 `getsockname(2)`.
 pub fn getsockname(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -607,7 +510,7 @@ pub fn getsockname(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     }
 }
 
-/// `getpeername(fd, address, length)` - who is at the other end.
+/// `getpeername(fd, address, length)`: who is at the other end.
 ///
 /// Reference: POSIX.1-2008 `getpeername(2)`.
 pub fn getpeername(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -626,11 +529,10 @@ pub fn getpeername(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     }
 }
 
-/// `send(fd, buffer, length, flags)` - a write with flags nobody here honours.
+/// `send(fd, buffer, length, flags)`: a write with flags.
 ///
-/// The flags are ignored and that is stated: `MSG_OOB` and `MSG_DONTROUTE` are not things
-/// this can promise, and a guest relying on one would be misread. Every payload measured
-/// passes zero.
+/// Only `MSG_DONTWAIT` is honoured (see `wait_for`); `MSG_OOB` and `MSG_DONTROUTE` are not
+/// things this can promise.
 ///
 /// Reference: POSIX.1-2008 `send(2)`.
 pub fn send(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -640,7 +542,7 @@ pub fn send(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     crate::descriptor::socket_write(args[0], bytes, wait_for(args[3])).map(|n| n as u64)
 }
 
-/// `recv(fd, buffer, length, flags)` - a read with the same caveat about flags.
+/// `recv(fd, buffer, length, flags)`: a read with the same treatment of flags.
 ///
 /// Reference: POSIX.1-2008 `recv(2)`.
 pub fn recv(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -652,18 +554,14 @@ pub fn recv(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
 
 /// What a call's flags say about waiting.
 ///
-/// **`MSG_DONTWAIT` is the one flag here that is honoured**, and it is honoured because
-/// ignoring it did not merely answer wrong: obSCEne passes it, orbistoun waited, and the guest
-/// stopped for the rest of the run - eleven sections lost to one blocking read. The others are
-/// still ignored and the shims say so.
+/// `MSG_DONTWAIT` is honoured: ignoring it makes a guest that passes it wait forever on a
+/// blocking read (D667). The other flags are ignored.
 ///
 /// Reference: `MSG_DONTWAIT` from the harvested `sys/sys/socket.h`.
 fn wait_for(flags: u64) -> crate::descriptor::Wait {
     let dont_wait = number("MSG_DONTWAIT");
-    // **An unnameable constant is all-ones, and a mask of all-ones matches everything.** The
-    // refusal-by-impossible-value trick the families use does not carry over to a bitmask, so
-    // a table that could not answer would turn every flagged call non-blocking rather than
-    // none. Refused explicitly instead; the test below rules the case out anyway.
+    // An unnameable constant is all-ones, and a mask of all-ones matches everything, so it
+    // is refused explicitly rather than turning every flagged call non-blocking.
     if dont_wait == u64::MAX || flags & dont_wait == 0 {
         crate::descriptor::Wait::AsTheSocketIs
     } else {
@@ -671,7 +569,7 @@ fn wait_for(flags: u64) -> crate::descriptor::Wait {
     }
 }
 
-/// `shutdown(fd, how)` - stops one or both directions.
+/// `shutdown(fd, how)`: stops one or both directions.
 ///
 /// Reference: POSIX.1-2008 `shutdown(2)`; `SHUT_RD`, `SHUT_WR` and `SHUT_RDWR` are 0, 1 and
 /// 2, from `sys/sys/socket.h`.
@@ -692,8 +590,8 @@ pub fn shutdown(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
                 Err(UNNAMED)
             }
         }
-        // Shutting down something with no peer is the same condition `recv` meets there, and
-        // the console names it the same way.
+        // Nothing with a peer to shut down: the same condition `recv` meets there, named the
+        // same way.
         _ => Err(orbistoun_core::errno::NOT_CONNECTED),
     })
     .unwrap_or(Err(UNNAMED))
@@ -706,8 +604,8 @@ fn guest_bytes<'a>(address: u64, length: u64) -> Option<&'a [u8]> {
     }
     let at = usize::try_from(address).ok()?;
     let len = usize::try_from(length).ok()?;
-    // SAFETY: a guest-supplied buffer under the identity mapping (D014), with the length the
-    // guest itself passed - the same contract the real call has.
+    // SAFETY: a guest-supplied buffer under the identity mapping, with the length the guest
+    // passed, the same contract the real call has.
     Some(unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), len) })
 }
 
@@ -724,66 +622,52 @@ fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     })
 }
 
-/// `htonl(value)` - host byte order to network byte order, 32 bits.
+/// `htonl(value)`: host byte order to network byte order, 32 bits.
 ///
-/// Reference: POSIX.1-2008 `htonl(3)`. Network order is big-endian by definition and both the
-/// guest and this host are x86-64, so the conversion is a byte swap - stated rather than
-/// written as a no-op, because a no-op is what it would be on a big-endian host and is exactly
-/// the assumption that would be wrong there.
-///
-/// **Only the low thirty-two bits are meaningful.** The argument arrives in a 64-bit register
-/// and the high half is whatever the caller last had there.
+/// Reference: POSIX.1-2008 `htonl(3)`. Network order is big-endian and guest and host are
+/// x86-64, so the conversion is a byte swap, written as one rather than as a no-op that would
+/// be wrong on a big-endian host. Only the low 32 bits of the 64-bit argument register are
+/// meaningful.
 pub fn htonl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from((args[0] as u32).swap_bytes())
 }
 
-/// `htons(value)` - host to network, 16 bits. POSIX.1-2008 `htons(3)`.
+/// `htons(value)`: host to network, 16 bits. POSIX.1-2008 `htons(3)`.
 pub fn htons(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from((args[0] as u16).swap_bytes())
 }
 
-/// `ntohl(value)` - network to host, 32 bits. POSIX.1-2008 `ntohl(3)`.
+/// `ntohl(value)`: network to host, 32 bits. POSIX.1-2008 `ntohl(3)`.
 ///
-/// The same swap as [`htonl`]: the conversion is its own inverse, which is why the two are
-/// separate names for one operation rather than a pair.
+/// The same swap as [`htonl`], which is its own inverse.
 pub fn ntohl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from((args[0] as u32).swap_bytes())
 }
 
-/// `ntohs(value)` - network to host, 16 bits. POSIX.1-2008 `ntohs(3)`.
+/// `ntohs(value)`: network to host, 16 bits. POSIX.1-2008 `ntohs(3)`.
 pub fn ntohs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from((args[0] as u16).swap_bytes())
 }
 
-/// The socket options `getsockopt` can answer, by the section and name they are harvested under.
+/// The socket options `getsockopt` can answer, by the section and name they are harvested
+/// under.
 ///
-/// # Why a table rather than a blanket answer
-///
-/// An option this layer cannot read has no value to hand back, and inventing one is worse than
-/// failing: a caller reads what it is given and acts on it. So each option is either answered
-/// from the host socket or **refused by name**, and the refusal says which option was wanted so
-/// a trace names the next piece of work rather than two integers.
-///
-/// The values come from the harvested table rather than being written here (D350/D351), which
-/// also bounds what can be recognised at all: `TCP_NODELAY` lives in `netinet/tcp.h`, outside
-/// what the harvest reads, so it is refused as unknown rather than guessed at.
+/// An option this cannot read has no value to hand back, and a caller acts on what it is
+/// given, so each option is answered from the host socket or refused by name. The values
+/// come from the harvested table (D350); `TCP_NODELAY` is in `netinet/tcp.h`, outside the
+/// harvest, so it is refused as unknown.
 const READABLE_OPTIONS: &[(&str, &str)] = &[("socket", "SO_ERROR"), ("in", "IP_TTL")];
 
 /// The option level a socket's own settings live at.
-///
-/// Not read from the harvested header, and deliberately: `SOL_SOCKET` is `0xffff` there *and*
-/// in every measurement obSCEne took, so the two agree - but the pair below has no header entry
-/// to be read from, and splitting one constant across two provenances is how a level and an
-/// option end up disagreeing about which platform they describe.
+/// Not read from the harvested header: `SOL_SOCKET` is `0xffff` there and on hardware, but
+/// [`SO_NONBLOCKING`] has no header entry, and the level and the option share one provenance.
 const SOL_SOCKET: u64 = 0xffff;
 
 /// The option that turns non-blocking on, as this platform numbers it.
-///
-/// **Measured, not derived.** `0x1200` is not the FreeBSD `SO_*` numbering and nothing in the
-/// harvested headers names it; what establishes it is obSCEne's `102-net/nonblocking-option`,
-/// where hardware answered `0x0` to `setsockopt(SOL_SOCKET, 0x1200, &1, 4)` and `-1` to the
-/// `fcntl(F_SETFL, O_NONBLOCK)` that would be the portable way. The check tries `0x1100` as a
-/// fallback and the console refused it, so the value is settled rather than one of two.
+/// Measured, not derived: `0x1200` is not FreeBSD's `SO_*` numbering and no harvested header
+/// names it. On hardware (obSCEne `102-net/nonblocking-option`) `setsockopt(SOL_SOCKET,
+/// 0x1200, &1, 4)` answers `0x0`, `0x1100` is refused, and the portable
+/// `fcntl(F_SETFL, O_NONBLOCK)` answers `-1`.
 const SO_NONBLOCKING: u64 = 0x1200;
 
 /// The name of an option, for a report that would otherwise print a number.
@@ -796,8 +680,7 @@ fn option_name(option: u64) -> Option<&'static str> {
 
 /// Says which option a guest wanted and could not have, once per distinct option.
 ///
-/// Once, because options are typically set in a loop and the same refusal repeated forty times
-/// buries the rest of the report.
+/// Once, because options are typically set in a loop.
 fn refuse_option(level: u64, option: u64) -> Answer {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
@@ -821,9 +704,8 @@ fn refuse_option(level: u64, option: u64) -> Answer {
 
 /// The `int` behind a `setsockopt` value pointer, as a flag.
 ///
-/// A guest that passes no buffer is asking for the option's plain form, which for a flag is
-/// "on" - refusing that would be stricter than the interface, and the platform accepted the
-/// call in every form obSCEne tried.
+/// A guest that passes no buffer asks for the option's plain form, which for a flag is on;
+/// the platform accepts the call in every form tried.
 fn read_option_flag(value_at: u64, length: u64) -> bool {
     if value_at == 0 || length < 4 {
         return true;
@@ -831,18 +713,17 @@ fn read_option_flag(value_at: u64, length: u64) -> bool {
     let Ok(base) = usize::try_from(value_at) else {
         return true;
     };
-    // SAFETY: a guest-supplied option buffer under the identity mapping (D014), of at least
-    // the four bytes an `int` option occupies - which is what the length above checked.
+    // SAFETY: a guest-supplied option buffer under the identity mapping, of at least the four
+    // bytes an `int` option occupies, as the length check above established.
     let value = unsafe { std::ptr::read_unaligned(base as *const i32) };
     value != 0
 }
 
-/// `getsockopt(fd, level, option, value, length)` - POSIX.1-2008 `getsockopt(2)`.
+/// `getsockopt(fd, level, option, value, length)`: POSIX.1-2008 `getsockopt(2)`.
 ///
-/// Answers the options the host socket can report and refuses the rest by name. See
-/// `READABLE_OPTIONS`; the counterpart `setsockopt` takes the opposite tack for a reason
-/// stated there - a server exits if setting an option fails, whereas a server *reading* one
-/// gets a value it will act on, so a wrong answer is worse than a refusal.
+/// Answers the options the host socket can report and refuses the rest by name (see
+/// `READABLE_OPTIONS`). Unlike `setsockopt`, a wrong read is worse than a refusal, since the
+/// caller acts on the value.
 pub fn getsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let (fd, level, option, value, length) = (args[0], args[1], args[2], args[3], args[4]);
     let Some(name) = option_name(option) else {
@@ -853,9 +734,7 @@ pub fn getsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
             return None;
         };
         match name {
-            // **Reading `SO_ERROR` clears it**, which is the half a naive version drops: a
-            // caller polls it precisely to consume the pending error, and one that keeps
-            // answering the same error sees a socket that never recovers.
+            // Reading `SO_ERROR` clears it: a caller polls it to consume the pending error.
             "SO_ERROR" => Some(
                 stream
                     .take_error()
@@ -885,8 +764,8 @@ fn write_option(value_at: u64, length_at: u64, value: i32) -> bool {
     if value_at == 0 {
         return false;
     }
-    // SAFETY: a guest-supplied out-parameter under the identity mapping (D014). Four bytes,
-    // which is what an `int` option is - eight would take the caller's next variable (D272).
+    // SAFETY: a guest-supplied out-parameter under the identity mapping. Four bytes, the size
+    // of an `int` option; eight would overwrite the caller's next variable (D272).
     unsafe { std::ptr::write_unaligned(base as *mut i32, value) };
     if length_at != 0
         && let Ok(at) = usize::try_from(length_at)
@@ -897,12 +776,11 @@ fn write_option(value_at: u64, length_at: u64, value: i32) -> bool {
     true
 }
 
-/// `close(fd)` for a socket - what `sceNetSocketClose` is.
+/// `close(fd)` for a socket: what `sceNetSocketClose` is.
 ///
-/// **Not the same function as the kernel's `close`**, and the difference is only visible when
-/// it fails: `sceKernelClose` is measured answering `0x8002_0009` for a descriptor that is not
-/// open, so `EBADF` is the number, and each library numbers it in its own base. The success
-/// path is one table lookup and is shared.
+/// Differs from the kernel's `close` only on failure: `sceKernelClose` answers `0x8002_0009`
+/// for a descriptor that is not open, so `EBADF` is the number, and each library numbers it
+/// in its own base. The success path is shared.
 pub fn close(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     if crate::descriptor::close(args[0]) {
         Ok(OK)
@@ -913,13 +791,9 @@ pub fn close(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
 
 /// One `GuestFn` per errno-bearing body, in the POSIX spelling.
 ///
-/// A macro rather than a dozen copies of the same two lines. The conversion is a single rule,
-/// and written out per call it is exactly the sort of place one of them ends up answering `0`
-/// for a failure - which is the bug this whole change exists to stop.
-///
-/// `orbistoun-net` has the matching macro for the vendor spelling. Two macros rather than one
-/// shared one because the *rules* differ: this crate knows what POSIX returns, that one knows
-/// how `libSceNet` numbers an error, and neither has to learn the other's.
+/// A macro, so the conversion is one rule rather than a dozen copies that could drift.
+/// `orbistoun-net` has the matching macro for the vendor spelling; the two differ because this
+/// crate knows what POSIX returns and that one knows how `libSceNet` numbers an error.
 macro_rules! posix_spellings {
     ($($wrapper:ident => $body:ident,)*) => {
         $(
@@ -947,10 +821,8 @@ posix_spellings! {
 
 /// Implementations this module provides, by symbol name.
 ///
-/// **The POSIX spellings only.** The vendor twins live in `orbistoun-net`, which is the crate
-/// that declares `libSceNet` and the crate that knows how it encodes an error - the same rule
-/// D525 applies to `sceKernelStat`, whose body is next door and whose name is offered where it
-/// is declared.
+/// The POSIX spellings only. The vendor twins live in `orbistoun-net`, which declares
+/// `libSceNet` and knows how it encodes an error (D525).
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("htonl", htonl),
@@ -974,12 +846,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 
 #[cfg(test)]
 mod tests {
-    /// **The families are the header's**, which is now assertable in this crate.
-    ///
-    /// It used to be a test in `orbistoun-libc` comparing a number written out here against
-    /// the harvested table, because that was the only crate that could read it. The table
-    /// moved down and this reads it directly, so the test is about the reader rather than
-    /// about two copies agreeing (D385).
+    /// The families come from the harvested header (D385).
     #[test]
     fn the_families_come_from_the_header() {
         assert_eq!(af_inet(), 2, "AF_INET");
@@ -989,8 +856,7 @@ mod tests {
 
     /// A name the table cannot answer becomes one no guest can pass.
     ///
-    /// The failure that matters: a missing name defaulting to zero would make `F_DUPFD`-like
-    /// comparisons match by accident, so it defaults to a value nothing can send instead.
+    /// A missing name defaulting to zero would match by accident.
     #[test]
     fn an_unnameable_constant_matches_nothing() {
         assert_eq!(super::number("AF_NOSUCHTHING"), u64::MAX);
@@ -1018,8 +884,7 @@ mod tests {
         function(&args)
     }
 
-    /// **`sin_family` is at offset one.** A shim written from memory of another platform
-    /// reads offset zero and gets `sin_len`.
+    /// `sin_family` is read at offset one, not `sin_len` at zero.
     #[test]
     fn an_address_is_read_at_the_offsets_this_family_uses() {
         let bytes = sockaddr(9020, [127, 0, 0, 1]);
@@ -1049,10 +914,8 @@ mod tests {
         assert!(unsafe { super::read_sockaddr(bytes.as_ptr() as u64, 4) }.is_none());
     }
 
-    /// **The sequence a server writes, and the milestone at the end of it.**
-    ///
-    /// `socket`, `setsockopt`, `bind`, `listen` - and then a host connect succeeds, which is
-    /// exactly and entirely what `pros check` does.
+    /// A guest's `socket`, `setsockopt`, `bind`, `listen` opens a port a host connect reaches,
+    /// which is what `pros check` does.
     #[test]
     fn a_guest_can_open_a_port_that_something_else_can_connect_to() {
         let _guard = crate::exclusively();
@@ -1076,7 +939,7 @@ mod tests {
         );
         assert_eq!(call("listen", [fd, 8, 0, 0, 0, 0]), 0);
 
-        // Which port did it get? A server that binds to zero asks exactly this and prints it.
+        // A server that binds to zero asks which port it got.
         let mut got = [0_u8; SOCKADDR_IN_LEN as usize];
         let mut length = SOCKADDR_IN_LEN as u32;
         assert_eq!(
@@ -1097,7 +960,7 @@ mod tests {
         let port = u16::from_be_bytes([got[2], got[3]]);
         assert_ne!(port, 0, "the system chose one");
 
-        // The whole point: something outside can now connect.
+        // Something outside can now connect.
         let reached = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             std::time::Duration::from_secs(2),
@@ -1110,10 +973,8 @@ mod tests {
     /// Bytes written to an accepted connection come out the other end.
     #[test]
     fn what_a_guest_writes_to_an_accepted_connection_arrives() {
-        // Serialised and state-reset like the other suites: without it this ran while an escape test
-        // had the kernel-read address set, and an accepted descriptor of 4 turned `send` into the
-        // escape pipe's no-op - the guest's bytes vanished and the client's `read_exact` hung the
-        // whole suite forever (the fd-4 special case in `descriptor::write`).
+        // Serialised and state-reset like the other suites, so the kernel pipe address cannot
+        // turn an accepted descriptor 4 into a no-op.
         let _guard = crate::exclusively();
         let fd = call("socket", [af_inet(), super::sock_stream(), 0, 0, 0, 0]);
         let wanted = sockaddr(0, [127, 0, 0, 1]);
@@ -1136,8 +997,8 @@ mod tests {
             let mut stream =
                 std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(5))
                     .expect("connect");
-            // A bounded read, so a send that never arrives fails this test rather than hanging it and
-            // every test behind it - obSCEne's rule that anything which can block gets a timeout.
+            // A bounded read, so a send that never arrives fails this test rather than hanging
+            // the suite.
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .expect("a read timeout");
@@ -1190,15 +1051,11 @@ mod tests {
         assert!(crate::descriptor::close(fd));
     }
 
-    /// **A `recv` on a listening socket names the reason, and the reason is measured.**
+    /// A `recv` on a listening socket fails with `ENOTCONN` (D667).
     ///
-    /// Hardware answered `sceNetRecv` on a listener `0x8041_0139` (obSCEne
-    /// `102-net/recv-would-block`, package leg of sweep 20260909-234847), whose low byte is
-    /// `ENOTCONN`. Before this the body collapsed every failure to `-1`, so the vendor spelling
-    /// had nothing to encode and the check failed here while passing there (D667).
-    ///
-    /// Written first, and asserted on the errno rather than on "it failed": the whole value of
-    /// carrying one out of the body is that the two spellings can disagree about how to say it.
+    /// The hardware answers `sceNetRecv` on a listener `0x8041_0139` (obSCEne
+    /// `102-net/recv-would-block`). Asserted on the errno, since the two spellings encode it
+    /// differently.
     #[test]
     fn a_recv_on_a_listening_socket_is_refused_as_having_no_peer() {
         let _guard = crate::exclusively();
@@ -1222,27 +1079,17 @@ mod tests {
         assert!(crate::descriptor::close(fd));
     }
 
-    /// **Nothing arrived is not end-of-stream**, and the option that makes the difference is
-    /// the one hardware accepted.
+    /// With the non-blocking option, a `recv` with nothing arrived says would-block, not
+    /// end-of-stream (D667).
     ///
-    /// Two measurements meet here. `_setsockopt(0xffff, 0x1200, &1, 4)` answers `0x0`
-    /// (`102-net/nonblocking-option`), and a `sceNetRecv` on the socket it was set on answers
-    /// `0x8041_0123` - `EAGAIN` (`102-net/recv-would-block`). The second is what shows the
-    /// first was *applied* rather than merely accepted, because a blocking socket cannot
-    /// produce it.
-    ///
-    /// This build accepted the option and did nothing, then read a would-block as `Ok(0)` -
-    /// which a guest reads as the peer hanging up. Two plausible answers composing into a
-    /// closed connection is exactly the shape principle 3 forbids.
-    ///
-    /// **The option is set while the descriptor is still pending**, before `connect` makes a
-    /// host socket at all, because that is the order obSCEne writes and the flag has to
-    /// survive the object being created.
+    /// On hardware `setsockopt(0xffff, 0x1200, &1, 4)` answers `0x0` and a `sceNetRecv` on
+    /// that socket answers `0x8041_0123` (`EAGAIN`), which only an applied option produces. The
+    /// option is set while the descriptor is pending, before `connect`, as obSCEne does.
     #[test]
     fn a_non_blocking_recv_with_nothing_arrived_says_would_block() {
         let _guard = crate::exclusively();
         // A listener that accepts and then says nothing, so the guest's socket is connected
-        // and permanently empty.
+        // and empty.
         let quiet = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a host listener");
         let port = quiet.local_addr().expect("an address").port();
         let held = std::thread::spawn(move || quiet.accept().map(|(stream, _)| stream));
@@ -1272,12 +1119,7 @@ mod tests {
         drop(held.join().expect("the host side"));
     }
 
-    /// **The POSIX spelling still answers `-1`, whatever the body named.**
-    ///
-    /// The negative half of the same change: carrying an errno out of the body must not leak
-    /// into the POSIX return, because a caller of `bind` tests for `-1` and reads the number
-    /// from `errno`. A guard nobody has watched reject something is a guard nobody knows
-    /// anything about, so this asserts the value rather than "it failed".
+    /// The POSIX spelling answers `-1` whatever errno the body named.
     #[test]
     fn the_posix_spelling_answers_minus_one_whatever_the_body_named() {
         let _guard = crate::exclusively();
@@ -1296,8 +1138,7 @@ mod tests {
     /// A connected pair: a guest descriptor, and the host end held open and silent.
     ///
     /// Returned together because dropping the host end closes the connection, and a read on a
-    /// closed socket is a different condition from a read on an empty one - which is the
-    /// distinction every test below turns on.
+    /// closed socket differs from a read on an empty one.
     fn connected_and_quiet() -> (u64, std::net::TcpStream) {
         let quiet = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a host listener");
         let port = quiet.local_addr().expect("an address").port();
@@ -1318,12 +1159,9 @@ mod tests {
     /// `MSG_DONTWAIT`, from the harvested `sys/sys/socket.h`.
     const DONT_WAIT: u64 = 0x80;
 
-    /// **`MSG_DONTWAIT` is the header's number, and it is nameable.**
+    /// `MSG_DONTWAIT` is nameable from the harvested header.
     ///
-    /// The negative case for [`super::wait_for`]: an unnameable constant is `u64::MAX`, which
-    /// as a bitmask matches every flag a guest could pass rather than none. The refusal trick
-    /// that works for an address family inverts for a mask, so this asserts the table can
-    /// actually answer.
+    /// An unnameable constant is `u64::MAX`, which as a mask would match every flag.
     #[test]
     fn the_dont_wait_flag_comes_from_the_header() {
         assert_eq!(super::number("MSG_DONTWAIT"), DONT_WAIT, "MSG_DONTWAIT");
@@ -1334,17 +1172,10 @@ mod tests {
         );
     }
 
-    /// **A `MSG_DONTWAIT` read does not wait, on a socket nobody made non-blocking.**
+    /// A `MSG_DONTWAIT` read does not wait on a blocking socket (D667).
     ///
-    /// This is the flag obSCEne passes and this shim ignored, and ignoring it did not merely
-    /// answer wrong - it **hung the guest**. `102-net/recv-would-block` connects a plain
-    /// blocking socket and reads it with the flag; hardware answers `0x8041_0123` in three
-    /// microseconds, and orbistoun waited until the run's time limit ended it, taking the
-    /// remaining eleven sections with it (D667).
-    ///
-    /// A test that fails by hanging is a poor test, and this one would. It is still the right
-    /// assertion: the alternative is asserting on elapsed time, which is a flake on a loaded
-    /// machine and does not say what went wrong.
+    /// The hardware answers `0x8041_0123` at once (`102-net/recv-would-block`). A regression
+    /// fails by hanging; asserting on elapsed time instead would flake on a loaded machine.
     #[test]
     fn a_dont_wait_read_does_not_wait_on_a_blocking_socket() {
         let _guard = crate::exclusively();
@@ -1359,16 +1190,10 @@ mod tests {
         drop(host);
     }
 
-    /// **And it puts the socket back the way the guest left it.**
+    /// A `MSG_DONTWAIT` read leaves the socket's own mode as the guest set it.
     ///
-    /// The half that would rot silently. Honouring the flag means turning the host socket
-    /// non-blocking for one call, and a shim that forgot to restore afterwards would leave
-    /// every later read non-blocking - which looks identical here and turns a guest's blocking
-    /// `recv` into a busy loop somewhere else entirely.
-    ///
-    /// Asserted in the direction that breaks: the socket is set **non-blocking first**, so a
-    /// restore that hard-coded "blocking" would clobber it, and the second read would wait
-    /// instead of answering.
+    /// The socket is set non-blocking first, so a restore that hard-coded blocking would make
+    /// the second read wait.
     #[test]
     fn a_dont_wait_read_leaves_the_sockets_own_mode_alone() {
         let _guard = crate::exclusively();
@@ -1402,7 +1227,7 @@ mod byte_order {
         f(&regs)
     }
 
-    /// The swap is the whole function, and the answer is known exactly.
+    /// The conversions swap bytes.
     #[test]
     fn the_conversions_swap_bytes() {
         assert_eq!(call(htonl, 0x1234_5678), 0x7856_3412);
@@ -1411,17 +1236,14 @@ mod byte_order {
         assert_eq!(call(ntohs, 0x3412), 0x1234);
     }
 
-    /// **Only the low half is meaningful.** The argument arrives in a 64-bit register whose
-    /// upper bits are the caller's leftovers; reading them would answer a different number
-    /// every call for the same input.
+    /// Only the low half of the argument register is read.
     #[test]
     fn the_high_half_of_the_register_is_ignored() {
         assert_eq!(call(htonl, 0xFFFF_FFFF_1234_5678), 0x7856_3412);
         assert_eq!(call(htons, 0xFFFF_FFFF_FFFF_1234), 0x3412);
     }
 
-    /// Each conversion is its own inverse, which is why network order needs one operation
-    /// and not two.
+    /// Each conversion is its own inverse.
     #[test]
     fn each_conversion_is_its_own_inverse() {
         for value in [0_u64, 1, 0x0000_00FF, 0x1234_5678, 0xFFFF_FFFF] {

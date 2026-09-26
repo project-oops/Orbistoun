@@ -1,71 +1,13 @@
-//! The current generation's graphics API - libSceAgc and libSceAgcDriver.
+//! The current generation's graphics interface - `libSceAgc` and `libSceAgcDriver`.
 //!
-//! # Why this exists as names and nothing else
+//! Every name is read from a real guest's import table or measured on hardware (the
+//! shader-linkage builders). Every arity is 6, the trampoline's full capture, not a claim: a wrong
+//! arity only degrades a trace, while a wrong name matches no import.
 //!
-//! This crate declared `libSceGnmDriver` - the **previous** generation's interface - and
-//! nothing at all for the one titles on this generation actually call. A survey of what
-//! guests ask for found six `Agc` functions being called with no declaration anywhere in
-//! the project, so they were reported as `unknown::` and could not be counted, named or
-//! stubbed (D500).
-//!
-//! # Where these names come from
-//!
-//! **Real import tables, and a few names a measurement added.** Most names below are read
-//! from a module's own import table: PPSA02664 imports fifty-one from `libSceAgc` and five
-//! from `libSceAgcDriver`, and other modules of the corpus name five more `libSceAgcDriver`
-//! functions. The rest are the shader-linkage builders - `sceAgcCreateShader` and the
-//! interpolant/prim-state set - added because obSCEne's `-e4f1`/`-9a41` requests measured them
-//! on hardware, not because they appear in that import table. So none is derived from a
-//! pattern and hoped to match: each is either imported by a real guest or measured on a
-//! console, the strongest provenance available here - the same `orbistoun-input` documents
-//! for `libScePad`.
-//!
-//! # Status: names confirmed, arities not
-//!
-//! The asymmetry is the one `orbistoun-input` states and it holds for the same reason: a
-//! wrong arity degrades a call trace and cannot break a call - it is carried only into
-//! reports and trace shape, never into the call path - while a wrong *name* is a NID that
-//! matches no import and a shim nothing can reach.
-//!
-//! **Every arity here is 6, and that is not a claim that these take six arguments.** Six is
-//! the trampoline's full capture. With nothing established, recording every argument
-//! register loses no information, where guessing low silently discards the arguments - and
-//! for a command-buffer interface the arguments are buffer addresses and sizes, which is
-//! precisely what a trace of it is for.
-//!
-//! **Most of what is declared here is implemented; the rest are declarations** - the split is
-//! asserted in `tests/dcb_wiring.rs`, so the number lives in one place a prose comment cannot drift
-//! from. What the declarations buy is that a guest reaching the graphics interface is **named and
-//! counted** instead of vanishing into `unknown::`, and that the loud stub policy answers it
-//! rather than a placeholder a caller might read as a handle (D125).
-//!
-//! Ten are neither encoders nor skeletons but **measured returns**: the whole `sceAgc*Patch*` family
-//! answers the `0x0` obSCEne measured for each (`166-agc/patch-*`, REQ-...4386 and ...3d1e) rather
-//! than the placeholder the guest was carrying into a `memcpy`. They amend a packet in place, which
-//! is a GPU-submission detail the CPU flow does not read, so they share one handler that returns the
-//! measured success and writes nothing.
-//!
-//! Most are fully-measured encoders: each writes a packet whose bytes obSCEne measured on
-//! hardware, wired only once those bytes were known across more than one input. `sceAgcDcbDrawIndex`
-//! and `sceAgcDcbSetIndexSize`, which worklog 536 refused on a single input each, were later measured
-//! across more inputs and wired - the two draw-index body dwords placed, the index-size mapping taken
-//! from eight argument pairs. `sceAgcCbNop` is the simplest of them - a header-only packet that takes
-//! no arguments, measured whole.
-//!
-//! The rest are **reservation skeletons** rather than full encoders: `sceAgcDcbSetCxRegistersIndirect`
-//! (the producer the patch family fills), the Acquire/Release/DmaData/SetBase set, and the
-//! REQ-...a70f cluster wired from sweep `20260915-203058` (`CbDispatch`, the dispatch- and
-//! draw-indirect builders, `SetShRegistersIndirect`/`SetUcRegistersIndirect`,
-//! `StallCommandBufferParser`, and the Acb twins). Each reserves the measured extent and writes only
-//! the measured header - rebuilt from the opcode through [`packet::build::command_header`] - leaving
-//! the body zero. They earn their place not by encoding a packet but by handing the guest a real
-//! cursor where an unwired builder handed it a placeholder to `memcpy` through (D696, worklog 553,
-//! 600, 618) - the exact bodies wait on more argument passes.
-//!
-//! **This paragraph used to say "nothing here is implemented".** It was wrong for long
-//! enough that a gap analysis read it at its word and reported the surface as emptier than
-//! it is. A document claiming *less* than the code does is the mirror of the failure
-//! principle 3 names, and it misleads in the same direction: by being believed.
+//! The command builders write packets through the writer handle in `arg0`, as fully measured
+//! encoders or as reservation skeletons that write the measured header and extent with a zeroed
+//! body (D696). The `sceAgc*Patch*` family answers its measured `0x0`. Unimplemented names reach
+//! the stub policy by name. The implemented/declared split is pinned by `tests/dcb_wiring.rs`.
 
 use orbistoun_hle::guest_module;
 
@@ -85,14 +27,11 @@ guest_module! {
         "sceAgcCbSetShRegisterRangeDirect" => 6,
         "sceAgcCbSetShRegistersDirect" => 6,
         "sceAgcCreatePrimState" => 6,
-        // **Four, not six: the knowledge base already recorded an arity for this one** and
-        // the declaration defers to it. `declared_arity_and_recorded_arity_never_disagree`
-        // is the guard that said so, and it was right to - the record is the older claim.
+        // Arity four, deferring to the arity the knowledge base records for this name
+        // (`declared_arity_and_recorded_arity_never_disagree`).
         "sceAgcCreateShader" => 4,
-        // The shader-linkage set e4f1 asked for and 9a41 measured, implemented from those
-        // behaviours below. Arity 6 is the trampoline's full capture, not a claim - the real
-        // arities (mapping/vs/ps, link/sec/null/vs/ps) are recorded in the knowledge file's prose
-        // rather than as a number that would disagree with this one.
+        // The shader-linkage set, implemented below from measured behaviour. Arity 6 is the
+        // trampoline's full capture; the real arities are recorded in the knowledge file's prose.
         "sceAgcCreateInterpolantMapping" => 6,
         "sceAgcUpdateInterpolantMapping" => 6,
         "sceAgcUpdatePrimState" => 6,
@@ -149,44 +88,37 @@ use orbistoun_mem::guest;
 /// Successful return, as the guest reads it.
 const OK: u64 = 0;
 
-/// The `libSceAgc` error family's "bad argument" answer, from the guest's own validating wrapper
-/// which null-checks rdi/rsi/rdx and answers this for any of them (D556). Returned when a required
-/// pointer argument is null, rather than writing through it.
+/// The `libSceAgc` error family's "bad argument" answer, which the guest's own validating wrapper
+/// returns for a null rdi, rsi or rdx. Returned when a required pointer argument is null, rather
+/// than writing through it.
 const BAD_ARGUMENT: u64 = 0x8a6c_000a;
 
 /// `sceAgcCreateShader(out, header, bytecode, flags)`.
 ///
-/// **The object model is measured, not invented (obSCEne `166-agc/create-shader`, answering
-/// REQ-3c5e; sweeps `20260911-002219`/`010855`).** The call writes the *header's own address* into
-/// `*out` - the shader object **is** the guest-supplied header region (`shader-obj-ptr == arg1`,
-/// distance zero: guest-adjacent, no allocation) - then, within that object, sets `+0x10 = bytecode`
-/// (a pointer to arg2, distance zero from it), `+0x30 = 0`, and `+0x50 = 0`, and returns `0`.
-///
-/// It also converts the relative sub-object offset at `+0x8` (e.g. `0xd8`, observed in retail shader
-/// headers and measured in obSCEne `166-agc/create-shader` where `+0x8` becomes `header + 0xe0`/`0xd8`)
-/// into an absolute pointer within the header object, so render-state marshalling routines can
-/// dereference `[rsi + 0x8]->+0x28`.
+/// The object model is measured (obSCEne `166-agc/create-shader`): the shader object is the
+/// guest-supplied header region itself. The call writes the header's address into `*out`, sets
+/// `+0x10 = bytecode`, and returns `0`. It converts the self-relative offsets in the header
+/// (`+0x8` and its sub-table, and the group-pointer array) into absolute pointers within the
+/// object, so render-state routines can dereference them.
 fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, header, bytecode) = (args[0], args[1], args[2]);
     if out == 0 || header == 0 {
         return BAD_ARGUMENT;
     }
-    // SAFETY: `out` is the guest stack slot the call fills with the object pointer (D556).
+    // SAFETY: `out` is the guest stack slot the call fills with the object pointer, checked
+    // non-null.
     unsafe { guest::write_u64(out, header) };
     // SAFETY: `header` is the guest-owned object region (>= 0x130 bytes).
-    // obSCEne measured that hardware changes exactly 0x2c (44) bytes within the header
-    // (obSCEne 166-agc/create-shader):
-    // - +0x08: pointer to sub-table at header + off_8 + 8 (measured 0x7eeffb5a0 with off_8=0xd8)
+    // The hardware changes exactly 0x2c bytes within the header (obSCEne 166-agc/create-shader):
+    // - +0x08: pointer to the sub-table at header + off_8 + 8
     // - +0x10: bytecode pointer (arg2)
-    // - +0x18..+0x38: the group-pointer array; each slot holding a relative offset is relocated to a
-    //   header pointer (measured on the middle three, generalised to the array under the guard - see
-    //   the loop below and worklog 748)
-    // - Sub-table entries at sub_table[0..5]: relative offsets relocated to header pointers
-    // Note: +0x50 and other fields are asset metadata (e.g. counts) and are not touched.
+    // - +0x18..+0x38: the group-pointer array; each slot holding a relative offset is relocated
+    // - sub-table entries 0..5: relative offsets relocated to header pointers
+    // +0x50 and other fields are asset metadata and are not touched.
     unsafe { guest::write_u64(header.wrapping_add(0x10), bytecode) };
 
-    // SAFETY: `header` is the guest-owned object region, at least 0x130 bytes (the extent obSCEne
-    // measured), so the quadword at +0x8 is inside it.
+    // SAFETY: `header` is the guest-owned object region, at least 0x130 bytes (the measured
+    // extent), so the quadword at +0x8 is inside it.
     let off_8 = unsafe { guest::read_u64(header.wrapping_add(0x8)) }.unwrap_or(0);
     if off_8 != 0 && off_8 < 0x1000 {
         let sub_table = header.wrapping_add(off_8).wrapping_add(8);
@@ -194,56 +126,51 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         unsafe { guest::write_u64(header.wrapping_add(0x8), sub_table) };
         for i in 0..5 {
             let entry_addr = sub_table.wrapping_add(i * 8);
-            // SAFETY: `sub_table` is inside the guest's own header object - it is that object's
-            // own relative offset, rejected above unless it is non-zero and under 0x1000 - and
-            // `i * 8 < 40`, so the entry is within the region hardware itself dereferences here
-            // (measured, obSCEne 166-agc/create-shader). Unaligned for the field's sake.
+            // SAFETY: `sub_table` is inside the guest's own header object - its own relative
+            // offset, rejected above unless non-zero and under 0x1000 - and `i * 8 < 40`, so the
+            // entry is within the region the hardware dereferences. Unaligned for the field's sake.
             let rel = unsafe { guest::read_u64(entry_addr) }.unwrap_or(0);
             if rel != 0 && rel < 0x1000 {
-                // Self-relative, like every offset in this object: the entry's own address plus
-                // its offset (measured: obSCEne `166-agc/create-shader`, `shader-obj`).
-                // SAFETY: the same entry just read, written back as an absolute pointer.
+                // Self-relative, like every offset in this object: the entry's own address plus its
+                // offset (obSCEne `166-agc/create-shader`, `shader-obj`). SAFETY: the same entry
+                // just read, written back as an absolute pointer.
                 unsafe { guest::write_u64(entry_addr, entry_addr.wrapping_add(rel)) };
             }
         }
     }
 
-    // The five group-pointer slots at +0x18..+0x38 (the array the guest walks with stride 8,
-    // worklog 748). The measured shader (obSCEne 166-agc/create-shader) populated only the middle
-    // three, so the list was those; but a field that holds a relative offset *must* be relocated to
-    // become a valid pointer, and the guard below relocates exactly those and skips the rest. So
-    // scanning the whole array preserves the measured three-of-five behaviour (the endpoints were 0
-    // there, and 0 is skipped) and also handles headers that populate the endpoints - PPSA02664's,
-    // whose +0x18 holds a raw 0xa8 the walk dies on when it is left un-relocated (worklog 748). Not
-    // a value guessed: an offset in a pointer slot is a pointer-in-waiting, relocated or wrong.
+    // The five group-pointer slots at +0x18..+0x38, which the guest walks with stride 8. A slot
+    // holding a relative offset must be relocated to be a valid pointer, and the guard below
+    // relocates exactly those and skips zero, so a header populating only the middle three (the
+    // measured one) and one populating the endpoints are both handled.
     for &offset in &[0x18, 0x20, 0x28, 0x30, 0x38] {
         let field = header.wrapping_add(offset);
-        // SAFETY: `offset` is one of 0x18..0x38, inside the guest-owned header object whose measured
-        // extent is 0x130 bytes.
+        // SAFETY: `offset` is one of 0x18..0x38, inside the guest-owned header object whose
+        // measured extent is 0x130 bytes.
         let rel = unsafe { guest::read_u64(field) }.unwrap_or(0);
         if rel != 0 && rel < 0x1000 {
-            // Self-relative: the field's own address plus its offset. Measured: obSCEne
-            // `166-agc/create-shader` wrote `header + 0x90` back over `0x70` at `+0x20`, and
-            // `header + 0x60` over `0x38` at `+0x28`.
-            // SAFETY: the same field just read, written back as an absolute pointer.
+            // Self-relative: the field's own address plus its offset. Measured:
+            // `166-agc/create-shader` wrote `header + 0x90` over `0x70` at `+0x20`, and `header +
+            // 0x60` over `0x38` at `+0x28`. SAFETY: the same field just read, written back as an
+            // absolute pointer.
             unsafe { guest::write_u64(field, field.wrapping_add(rel)) };
         }
     }
     // SAFETY: `+0x20` is inside the guest-owned header object (extent 0x130), read after the loop
     // above relocated it.
     let registers = unsafe { guest::read_u64(header.wrapping_add(0x20)) }.unwrap_or(0);
-    // SAFETY: `registers` points into the same guest-owned header object - the relocation above
-    // made it a pointer into it - and `patch_program_address` writes only its first four dwords.
+    // SAFETY: `registers` points into the same guest-owned header object, as the relocation above
+    // made it, and `patch_program_address` writes only its first four dwords.
     unsafe { patch_program_address(registers, bytecode) };
     OK
 }
 
-/// Writes the program's address into the shader's register descriptor, as the console does.
+/// Writes the program's address into the shader's register descriptor, as the hardware does.
 ///
-/// The descriptor `+0x20` points at is `{reg, value, reg + 1, value}`, the program-address
-/// register pair. The console writes `payload >> 8` into the second dword, and nothing when the
-/// first dword names no register (measured: obSCEne `166-agc/create-shader`). The fourth dword
-/// takes `payload >> 40`, the pair's high register, as Mesa programs it (`ac_cmdbuf.c:318-324`).
+/// The descriptor `+0x20` points at is `{reg, value, reg + 1, value}`, the program-address register
+/// pair. The hardware writes `payload >> 8` into the second dword, and nothing when the first dword
+/// names no register (obSCEne `166-agc/create-shader`). The fourth dword takes `payload >> 40`, the
+/// pair's high register, as Mesa programs it (`ac_cmdbuf.c:318-324`).
 ///
 /// # Safety
 ///
@@ -271,11 +198,9 @@ const INTERPOLANT_ENTRIES: u64 = 32;
 
 /// Writes the default PS-input interpolant table at `at`: entry `i` is `(i << 32) | (0x191 + i)`.
 ///
-/// **Measured (obSCEne `166-agc/link-shaders`, sweep `20260912-003916`).** It is both
-/// `sceAgcCreateInterpolantMapping`'s default output and the interpolant half of
-/// `sceAgcLinkShaders`' link state - the first two entries came back `0x191` and `0x1_0000_0192`,
-/// which is exactly this rule. `0x191` is `SPI_PS_INPUT_CNTL_0`, so the default routes input `i`
-/// from attribute slot `i`.
+/// Measured (obSCEne `166-agc/link-shaders`): it is `sceAgcCreateInterpolantMapping`'s default
+/// output and the interpolant half of `sceAgcLinkShaders`' link state. `0x191` is
+/// `SPI_PS_INPUT_CNTL_0`, so the default routes input `i` from attribute slot `i`.
 ///
 /// # Safety
 ///
@@ -290,10 +215,9 @@ unsafe fn write_default_interpolants(at: u64) {
 
 /// Writes the low five bits of the dword at `sec_state + 0x14` to `topology`, preserving the rest.
 ///
-/// **Measured (obSCEne `166-agc/update-prim-state`).** The probe reads
-/// `*(uint32_t *)(sec_state + 0x14) & 0x1f` back after both create and update, so the primitive
-/// topology lives in those five bits. Read-modify-write rather than a bare store, because the guest
-/// owns the other twenty-seven bits.
+/// Measured (obSCEne `166-agc/update-prim-state`): the probe reads `*(uint32_t *)(sec_state +
+/// 0x14) & 0x1f` back after create and update. Read-modify-write, because the guest owns the other
+/// twenty-seven bits.
 ///
 /// # Safety
 ///
@@ -308,26 +232,23 @@ unsafe fn set_topology(sec_state: u64, topology: u32) {
 
 /// `sceAgcCreateInterpolantMapping(mapping, vs, ps)`.
 ///
-/// Fills `mapping` (arg0) with the 32-quadword PS-input table and returns `0`. With `vs`/`ps` both
-/// null the table is the default `(i << 32) | (0x191 + i)` (measured). obSCEne's non-null case
-/// "maps VS exports (`vs+0x38`) to PS inputs (`ps+0x30`)", but the *only* table hardware was
-/// measured writing is this default (the link-shaders capture), so the vs/ps-specific remap is not
-/// modelled - writing the default there rather than an invented remap keeps to principle 3.
+/// Fills `mapping` (arg0) with the 32-quadword PS-input table and returns `0`. The only table the
+/// hardware was measured writing is the default, so the vs/ps-specific remap is not modelled and
+/// the default is written for every input (D010).
 fn create_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mapping = args[0];
     if mapping == 0 {
         return BAD_ARGUMENT;
     }
-    // SAFETY: `mapping` is the guest-owned 256-byte out-buffer the call fills (obSCEne agc.c).
+    // SAFETY: `mapping` is the guest-owned 256-byte out-buffer the call fills.
     unsafe { write_default_interpolants(mapping) };
     OK
 }
 
 /// `sceAgcUpdateInterpolantMapping(mapping, vs, ps)`.
 ///
-/// Rewrites the active mapping table in place and returns `0` (obSCEne `166-agc/update-interpolant`).
-/// Modelled as the same default fill: an update with no measured remap re-establishes the default
-/// table rather than inventing a change.
+/// Rewrites the mapping table in place and returns `0` (obSCEne `166-agc/update-interpolant`).
+/// With no measured remap, the update re-establishes the default table.
 fn update_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mapping = args[0];
     if mapping == 0 {
@@ -341,9 +262,8 @@ fn update_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceAgcCreatePrimState(prim_state, sec_state, null, vs, topology)`.
 ///
 /// Records the primitive topology (arg4) in the low five bits of `sec_state + 0x14` and returns `0`
-/// (obSCEne `166-agc/update-prim-state`, which reads it back there). The `prim_state` buffer's own
-/// contents are not written: nothing measured says what the routing block holds, so it is left as
-/// the guest prepared it rather than filled with an invented layout.
+/// (obSCEne `166-agc/update-prim-state`). The `prim_state` routing block is left as the guest
+/// prepared it: its contents are unmeasured.
 fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (prim_state, sec_state, topology) = (args[0], args[1], args[4] as u32);
     if prim_state == 0 || sec_state == 0 {
@@ -356,9 +276,8 @@ fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceAgcUpdatePrimState(prim_state, sec_state, topology)`.
 ///
-/// Updates the topology (arg2) in the low five bits of `sec_state + 0x14` and returns `0` - the
-/// measured behaviour (`topo-orig` 4 becomes `topo-updated` 1 in `166-agc/update-prim-state`). The
-/// routing word at `prim_state + 0xc` that obSCEne notes is also touched is not written, its value
+/// Updates the topology (arg2) in the low five bits of `sec_state + 0x14` and returns `0`
+/// (`166-agc/update-prim-state`). The routing word at `prim_state + 0xc` is not written, its value
 /// being unmeasured.
 fn update_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (prim_state, sec_state, topology) = (args[0], args[1], args[2] as u32);
@@ -370,19 +289,15 @@ fn update_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// The stage-routing quadword `sceAgcLinkShaders` writes at `link_state + 0x108`.
-///
-/// Measured `0x0000_0002_0000_029b` (obSCEne `166-agc/link-shaders`, and stated in e4f1).
+/// The stage-routing quadword `sceAgcLinkShaders` writes at `link_state + 0x108`, measured in
+/// obSCEne `166-agc/link-shaders`.
 const LINK_STAGE_ROUTING: u64 = 0x0000_0002_0000_029b;
 
 /// `sceAgcLinkShaders(link_state, sec_state, null, vs, ps, ...)`.
 ///
-/// Fills `link_state` (arg0): the 256-byte interpolant table at `+0x0` (the same default the mapping
-/// calls write) and the stage-routing quadword `0x0000_0002_0000_029b` at `+0x108`, then returns
-/// `0`. **Measured** in `166-agc/link-shaders` (sweep `20260912-003916`): `link-state-interp`
-/// began `0x191`, `0x1_0000_0192`, and `link-state-routing` carried `0x0000_0002_0000_029b` eight
-/// bytes past the interpolants. The rest of the 32-byte routing block is unmeasured and left as the
-/// guest prepared it.
+/// Fills `link_state` (arg0) with the 256-byte interpolant table at `+0x0` and the stage-routing
+/// quadword at `+0x108`, then returns `0`, as measured in `166-agc/link-shaders`. The rest of the
+/// 32-byte routing block is unmeasured and left as the guest prepared it.
 fn link_shaders(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let link_state = args[0];
     if link_state == 0 {
@@ -398,60 +313,41 @@ fn link_shaders(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Field offsets within the command-buffer writer handle every `sceAgcDcb*`/`sceAgcCb*` builder
 /// takes in `arg0`.
 ///
-/// **Guest-observed, then confirmed by the library's own behaviour on hardware.** The shape was
-/// read off PPSA02664's stack. obSCEne then built a handle to that shape and called the real
-/// builders through it: they wrote correct packets and advanced the cursor by exactly what each
-/// builder's own `GetSize` had answered, across sixteen builders (worklog 534). Two offsets are
-/// confirmed harder still - poisoning `+0x20` with `0xCC` makes the library `call *0x20(%rdi)` and
-/// fault at `0xCCCCCCCCCCCCCCCC`, which is direct evidence it reads a function pointer there, and
-/// the same poison at `+0x30` underflows its space check first.
-///
-/// Not every field is used here. `+0x00` is the buffer start, `+0x08` one past its end, `+0x20` the
-/// overflow callback and `+0x30` a reserved-dword counter. This writes through the cursor and
-/// respects the limit; it does not touch the rest.
+/// Guest-observed, then confirmed on hardware: builders called through a handle of this shape
+/// write correct packets and advance the cursor by exactly their own `GetSize` answer. Poisoning
+/// `+0x20` makes the library call through it, so it holds a function pointer. `+0x00` is the
+/// buffer start, `+0x08` one past its end, `+0x20` the overflow callback and `+0x30` a
+/// reserved-dword counter. This writes through the cursor, respects the limit, and touches
+/// nothing else.
 mod dcb {
-    /// The write cursor - the field a builder advances, and the one that made the layout
-    /// checkable: `cur - begin` after a call is exactly the builder's own `GetSize` answer.
+    /// The write cursor, the field a builder advances: `cur - begin` after a call is exactly the
+    /// builder's own `GetSize` answer.
     pub(super) const CUR: u64 = 0x10;
     /// The limit a builder checks a packet against before writing it.
     pub(super) const LIMIT: u64 = 0x18;
 }
 
-// **A builder returns the address of the packet it just wrote.**
+// A builder returns the address of the packet it just wrote.
 //
-// obSCEne reports `0x200060078` from every builder, in every run, and worklog 538 first recorded
-// that as an opaque constant on the strength of its stability. It is not one. Its probe allocates
-// with `oops_mem_alloc`, and the arithmetic closes exactly: base `0x200060000` aligns to
-// `0x200060040`, the eight-byte count prefix puts the struct at `0x200060038`, and its command
-// buffer sits `0x40` further on - at `0x200060078`. Other allocations in the same sweep
-// (`0x200080000`, `0x200028000`) are in the same region. The value is a pointer into the probe's own
-// command buffer, constant only because that allocator is deterministic and every check resets the
-// writer before calling.
-//
-// **Which pointer is derived, not measured.** Every obSCEne check resets first, so `cur == begin` at
-// the call and "the packet's address" and "the buffer's start" fit the data equally. The packet's
-// address is taken here because it is the reading that makes the guest work: PPSA02664 passes a
-// builder's return straight into `sceAgcSetCxRegIndirectPatchAddRegisters`, and a family of
-// `sceAgc*Patch*` entry points exists to amend an already-written packet. Returning the buffer start
-// would let only the first packet in a buffer ever be patched. Settling it needs two builders called
-// without a reset between them, which is asked of obSCEne rather than guessed at (REQ-...c74f).
+// obSCEne's measurements reset the writer before each call, so "the packet's address" and "the
+// buffer's start" fit the data equally. The packet's address is taken because guests pass a
+// builder's return straight into `sceAgcSetCxRegIndirectPatchAddRegisters`, and the patch family
+// amends an already-written packet; the buffer start would let only the first packet be patched.
 
 /// Appends one packet to the writer handle at `dcb`, advancing its cursor by the packet's length.
 ///
-/// This is the effectful half that [`crate::packet::build`] deliberately does not have: the
-/// encoders there are pure and fully measured, and this places what they produce. Splitting it that
-/// way is why the encoders could land before the handle layout did.
+/// The effectful half that [`crate::packet::build`] does not have: the encoders there are pure,
+/// and this places what they produce.
 ///
-/// Refuses rather than overruns. When a packet will not fit, the real library calls the overflow
-/// callback at `+0x20` and grows the buffer; **this does not**, because calling a guest callback
-/// from a shim is a mechanism nothing has measured. It answers the loud placeholder instead, which
-/// is visible in a trace and cannot be mistaken for a firmware code (principle 3, D670).
+/// Refuses rather than overruns. When a packet does not fit, the real library calls the overflow
+/// callback at `+0x20`; calling a guest callback from a shim is unmeasured, so this answers the
+/// placeholder instead, which cannot be mistaken for a firmware code (D670).
 fn dcb_append(dcb: u64, words: &[u32]) -> u64 {
     if dcb == 0 || words.is_empty() {
         return BAD_ARGUMENT;
     }
     // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and the
-    // limit are quadwords at its `+0x10` and `+0x18`, the offsets hardware itself reads.
+    // limit are quadwords at its `+0x10` and `+0x18`, the offsets the hardware reads.
     let cur = unsafe { guest::read_u64(dcb.wrapping_add(dcb::CUR)) }.unwrap_or(0);
     // SAFETY: the same handle, the adjacent field.
     let limit = unsafe { guest::read_u64(dcb.wrapping_add(dcb::LIMIT)) }.unwrap_or(0);
@@ -499,9 +395,8 @@ fn dcb_set_index_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The register offset and value a `*RegisterDirect` builder takes packed into one quadword.
 ///
-/// **Measured** (`166-agc/dcb-set-cx-reg`, `dcb-set-uc-reg`): obSCEne passed
-/// `(value << 32) | offset` and the packet came back carrying the offset then the value, both
-/// unchanged.
+/// Measured (`166-agc/dcb-set-cx-reg`, `dcb-set-uc-reg`): `(value << 32) | offset` comes back in
+/// the packet as the offset then the value, both unchanged.
 const fn unpack_register_entry(entry: u64) -> (u16, u32) {
     (entry as u16, (entry >> 32) as u32)
 }
@@ -518,22 +413,13 @@ fn dcb_set_uc_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::set_uconfig_register(offset, value))
 }
 
-/// `sceAgcDcbSetCxRegistersIndirect(dcb, ...)` - reserve the packet a title patches, and hand back
-/// a real address for it.
+/// `sceAgcDcbSetCxRegistersIndirect(dcb, ...)` - reserves the packet a title patches and hands
+/// back its real address.
 ///
-/// # Why a skeleton rather than a full encoder
-///
-/// This is the producer half of the patch family that walls PPSA02664 and PPSA03416. Unwired, it
-/// answered the loud placeholder, the guest carried that placeholder as the packet's address into a
-/// `memcpy`, and the run died in `VCRUNTIME140.dll` (worklog 553, 594). The one thing it must do to
-/// clear that is what every other builder here does: append a correctly sized packet and return the
-/// **real cursor**, so the guest's `memcpy` and the patch that follows it land in command-buffer
-/// memory rather than on `0xf7ff0001`.
-///
-/// The packet body is not encoded from the arguments, and deliberately: `REQ-...4386` measured one
-/// producer call, which fixes the header and the 20-byte extent but not which argument becomes which
-/// body dword. The guest fills the body itself through `sceAgcSetCxRegIndirectPatchAddRegisters`, so
-/// the reservation is the part that has to be right and is the part that is measured.
+/// The producer half of the patch family. It appends a correctly sized packet and returns the real
+/// cursor, so the guest's `memcpy` and the patch that follows land in command-buffer memory. The
+/// header and 20-byte extent are measured; which argument becomes which body dword is not, and the
+/// guest fills the body itself through `sceAgcSetCxRegIndirectPatchAddRegisters` (D696).
 fn dcb_set_cx_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
@@ -541,62 +427,40 @@ fn dcb_set_cx_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// The `sceAgc*Patch*` family - amend an already-written packet in place, and **return the measured
-/// `0x0`**.
+/// The `sceAgc*Patch*` family - amend an already-written packet in place, and return the measured
+/// `0x0`.
 ///
-/// # One handler for ten entry points, because the measurement is one answer
-///
-/// obSCEne measured every patch in the family returning `0x0`, each across two argument passes
-/// (`166-agc/patch-*`, sweep `20260915-203058`, REQ-...3d1e; and `patch-cx-registers-indirect` in
-/// three earlier sweeps, REQ-...4386): the Cx/Sh/Uc register patches (`AddRegisters` and
-/// `SetAddress`), the two DmaData address patches, and the wait-reg-mem and end-of-pipe address
-/// patches. So they share one handler that answers that `0x0`.
-///
-/// # Why a return and not an encoder
-///
-/// It writes nothing to the packet. Each patch amends a specific field in place - a `SetAddress`
-/// writes an address, an `AddRegisters` extends the register run - but that is a GPU-submission
-/// detail the CPU-side flow does not read, and where the guest cares about the bytes it writes them
-/// itself (the Cx case: one eight-byte entry per call, worklog 614). What walled the guest was the
-/// *return*: unimplemented, each answered the placeholder, and the guest carried it as a pointer into
-/// a `memcpy` and faulted in host code (worklog 614). Answering the measured `0x0` is what clears
-/// that, and closing the whole family at once is what stops the wall moving one patch downstream each
-/// time (the exact shape worklog 614 hit after the Cx producer skeleton). The `packet` argument is
-/// not dereferenced, so a null needs no guard.
+/// obSCEne measures every patch in the family returning `0x0` across two argument passes
+/// (`166-agc/patch-*`): the Cx/Sh/Uc register patches (`AddRegisters` and `SetAddress`), the two
+/// DmaData address patches, and the wait-reg-mem and end-of-pipe address patches. The field each
+/// amends is a GPU-submission detail the CPU-side flow does not read, and a guest that needs the
+/// bytes writes them itself, so the one handler writes nothing. `packet` is not dereferenced, so a
+/// null needs no guard.
 fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
 /// `sceAgcDcbWaitUntilSafeForRendering(dcb, ...)` - a measured library-level no-op.
 ///
-/// obSCEne re-probed it (REQ-...4e91, sweeps `20260917-090300`/`101310`): 0 bytes and `rc 0x0` under
-/// every condition (bare writer and one prepared through `sceAgcDcbResetQueue`), its `GetSize` symbol
-/// absent from `libSceAgc`, `empty-encoding` true. So it emits nothing and answers the measured `0x0`.
-/// It writes nothing and dereferences no argument, so a null handle needs no guard - the same terms as
-/// the patch family, though it is a wait/sync no-op rather than a patch.
+/// obSCEne measures 0 bytes written and `0x0` returned under every condition, with no `GetSize`
+/// symbol in `libSceAgc`. It writes nothing and dereferences no argument, so a null handle needs
+/// no guard.
 fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
 /// Non-export inline query helper (`0x7d86501b8094ef57`).
 ///
-/// Disassembly of the call site at `0x4000000435b5` in PPSA02664 (Alex Kidd in Miracle World,
-/// worklog 725) reads as a `GetSize`: `arg0` is a pointer to an out-parameter where a byte size is
-/// written, which the caller aligns up to 8 (`add rbx, 7; and rbx, ~7`) and passes to buffer
-/// allocators.
-///
-/// The value written, `0xa8` (168), is **guest-observed, not a measured return.** It is the size the
-/// guest's `memcpy` reads at the wall this path dies on - the `+0xa8` read through a null pointer. On
-/// retail this NID is not exported: obSCEne `e245` and sweep `20260920-110931` (`166-agc/cb-unnamed-ef57`)
-/// both measured its import slot binding null and the call never being made (`call-executed 0x0`,
-/// `slot-is-null`), so there is no hardware return to measure. `0xa8` is the best-available stand-in
-/// for the size the title's own inlined helper computes, and worklog 725 showed planting it does not
-/// by itself clear the wall - it is a plausible value, held as such, not a fix dressed as one.
+/// At its call site the value written through `arg0` is used as a byte size, aligned up to 8 and
+/// passed to buffer allocators. The value, `0xa8` (168), is guest-observed, not a measured return:
+/// on the hardware this NID is not exported, its import slot binds null and the call is never made
+/// (`166-agc/cb-unnamed-ef57`). `0xa8` stands in for the size the title's own inlined helper
+/// computes.
 fn agc_phantom_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out = args[0];
     if out != 0 {
-        // SAFETY: `out` is the guest-supplied out-parameter stack slot (worklog 725),
-        // eight bytes long and aligned to hold the workload size.
+        // SAFETY: `out` is the guest-supplied out-parameter stack slot, eight bytes, holding the
+        // size.
         unsafe { guest::write_u64(out, 0xa8) };
     }
     OK
@@ -604,29 +468,20 @@ fn agc_phantom_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceAgcInit(state, version)` (and alias NID `0x53bbd82b51d172db`).
 ///
-/// Measured on live PS5 console hardware (FW 12.40, REQ-20260920T1425Z-a3f0, check `166-agc/init`):
-/// - Version 13 (0xd) returns `0x0` (OK).
-/// - Every other version returns `0x8a6c0004` (`SCE_AGC_ERROR_INVALID_VERSION`).
-/// - Writes 0 bytes to `arg0` (extent 0, changed 0, across sentinels and descriptors).
+/// Measured on Prospero-generation hardware (`166-agc/init`): version 13 (`0xd`) returns `0x0`,
+/// every other version `0x8a6c0004` (`SCE_AGC_ERROR_INVALID_VERSION`), and nothing is written to
+/// `arg0`.
 fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let version = args[1] as u32;
     if version == 13 { OK } else { 0x8a6c_0004 }
 }
 
-/// `sceAgcGetIsTrinityMode()` - whether the GPU is the later generation's faster revision.
+/// `sceAgcGetIsTrinityMode()` - whether the GPU is the faster revision of this generation.
 ///
-/// The graphics-side twin of `sceKernelIsNeoMode` (which the kernel answers from the presented
-/// machine): "Trinity" is obSCEne's own axis name for the faster Prospero revision, beside `orbis`,
-/// `neo` and `prospero`, so this asks "is this the Pro variant of this generation?". Answered from
-/// the presented machine (D394/D397), so a run presenting a base console gets `0` and one presenting
-/// the faster revision gets `1`, without a hardcode either way.
-///
-/// **Arity 0, answered in the register**, on the `sceKernelIsNeoMode` precedent and the same
-/// stale-argument reading that `sceAgcGetRegisterDefaults2` needed: the trace's `(ptr, ptr, ...)`
-/// shape is leftover registers, not a call that fills an out-parameter. **`known_by = assumed`**: it
-/// is the presented machine reported through a plausible SDK spelling, not a measured return - a
-/// non-zero placeholder here tells a base console it is the faster revision and can send it down a
-/// path that expects hardware it does not have, which is the danger this removes.
+/// The graphics-side twin of `sceKernelIsNeoMode`, answered from the presented machine (D394): `0`
+/// for a base machine, `1` for the faster revision. Arity 0, answered in the register; the
+/// trace's pointer-shaped arguments are stale registers. The return is assumed, not measured, and
+/// a non-zero placeholder would send a base machine down the faster revision's path.
 fn get_is_trinity_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from(
         orbistoun_core::machine::presented().platform()
@@ -634,72 +489,59 @@ fn get_is_trinity_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcCbNop(cb)` - a header-only no-op. Measured whole: `166-agc/cb-nop`.
-///
-/// The packet takes no arguments, so unlike the reservation skeletons this is the complete,
-/// measured encoding, not a stand-in. It is in the cluster the retail titles reach on their
-/// secondary command buffer (worklog 600).
+/// `sceAgcCbNop(cb)` - a header-only no-op, measured whole (`166-agc/cb-nop`). It takes no
+/// arguments, so this is the complete encoding.
 fn cb_nop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::nop())
 }
 
-/// `sceAgcDcbAcquireMem(dcb, ...)` - reserve the 32-byte ACQUIRE_MEM packet, cursor real, body zero.
+/// `sceAgcDcbAcquireMem(dcb, ...)` - reserves the 32-byte ACQUIRE_MEM packet, cursor real, body
+/// zero.
 ///
-/// Header and extent are measured (`166-agc/dcb-acquire-mem`); the argument-to-body mapping is a
-/// permutation the sweep summary does not pin, so the body is left zero on the same terms as the Cx
-/// producer (D696). PPSA02664 calls this three times on its secondary buffer, so a real cursor here
-/// is one fewer placeholder the cluster's patches carry (worklog 600).
+/// Header and extent are measured (`166-agc/dcb-acquire-mem`); the argument-to-body mapping is an
+/// unpinned permutation, so the body is zero (D696).
 fn dcb_acquire_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::acquire_mem_skeleton())
 }
 
-/// `sceAgcCbReleaseMem(cb, ...)` - reserve the 32-byte RELEASE_MEM packet, cursor real, body zero.
+/// `sceAgcCbReleaseMem(cb, ...)` - reserves the 32-byte RELEASE_MEM packet, cursor real, body zero.
 ///
-/// Header (`0xc0064900`) and extent measured (`166-agc/cb-release-mem`, sweep `20260915-174357`);
-/// the argument-to-body permutation is not, so the body is zero on the same terms as the AcquireMem
-/// and Cx-producer skeletons (D696). One fewer placeholder in the command-builder cluster the retail
-/// titles reach (worklog 600, REQ-...a70f).
+/// Header (`0xc0064900`) and extent are measured (`166-agc/cb-release-mem`); the argument-to-body
+/// permutation is not, so the body is zero (D696).
 fn cb_release_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::release_mem_skeleton())
 }
 
-/// `sceAgcDcbDmaData(dcb, ...)` - reserve the 28-byte DMA_DATA packet, cursor real, body zero.
+/// `sceAgcDcbDmaData(dcb, ...)` - reserves the 28-byte DMA_DATA packet, cursor real, body zero.
 ///
-/// Header (`0xc0055000`) and extent measured (`166-agc/dcb-dma-data`, sweep `20260915-174357`); the
-/// source/destination/size body is an argument permutation a single zero-argument pass cannot pin
-/// (and two captures disagreed on it this session), so it is left zero rather than encoded from one
-/// pass. The reservation is what moves the wall (REQ-...a70f).
+/// Header (`0xc0055000`) and extent are measured (`166-agc/dcb-dma-data`); the source, destination
+/// and size body is an argument permutation one zero-argument pass cannot pin, so it is zero.
 fn dcb_dma_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::dma_data_skeleton())
 }
 
-/// `sceAgcDcbSetBaseIndirectArgs(dcb, ...)` - reserve the 16-byte SET_BASE packet, cursor real,
+/// `sceAgcDcbSetBaseIndirectArgs(dcb, ...)` - reserves the 16-byte SET_BASE packet, cursor real,
 /// body zero.
 ///
-/// Header (`0xc0021100`) and extent measured (`166-agc/dcb-set-base-indirect-args`, sweep
-/// `20260915-174357`); the body carries the base-index selector and an address, which one pass
-/// cannot separate, so it is zeroed like the other skeletons (REQ-...a70f).
+/// Header (`0xc0021100`) and extent are measured (`166-agc/dcb-set-base-indirect-args`); the body
+/// carries a base-index selector and an address one pass cannot separate, so it is zeroed.
 fn dcb_set_base_indirect_args(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::set_base_indirect_args_skeleton())
 }
 
-/// `sceAgcDcbResetQueue(dcb, ...)` - reserve the measured 32-byte queue-reset writer-struct and hand
+/// `sceAgcDcbResetQueue(dcb, ...)` - reserves the measured 32-byte queue-reset stream and hands
 /// back a real cursor.
 ///
-/// Framing and extent measured (`166-agc/dcb-reset-queue`, sweep `20260910-174437`, REQ-...b7e4); the
-/// two marker-register values are address-shaped and left zero, on the skeleton discipline - see
-/// [`packet::build::reset_queue_skeleton`]. D559: PPSA02664 calls this on its writer before any other
-/// AGC use, so the reservation is what clears the wall the placeholder held.
+/// Framing and extent are measured (`166-agc/dcb-reset-queue`); the two marker-register values are
+/// address-shaped and left zero - see [`packet::build::reset_queue_skeleton`]. Guests call it on
+/// their writer before any other command builder.
 fn dcb_reset_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::reset_queue_skeleton())
 }
 
-// The REQ-...a70f cluster, wired as reservation skeletons from the headers and extents obSCEne
-// measured in sweep 20260915-203058: each hands the guest a real cursor where the unimplemented
-// builder handed it a placeholder to memcpy through (worklog 618). Every header is rebuilt from its
-// measured opcode through `command_header`, so it walks back to the packet it stands for; the body is
-// zero because a single argument pass does not pin the mapping, the same terms as the earlier
-// skeletons.
+// Reservation skeletons from measured headers and extents: each hands the guest a real cursor.
+// Every header is rebuilt from its measured opcode through `command_header`, so it walks back to
+// the packet it stands for; the body is zero because one argument pass does not pin the mapping.
 use packet::build::measured;
 
 /// `sceAgcCbDispatch(cb, ...)` - a compute dispatch. Header `0xc0031500`, 20 bytes.
@@ -718,8 +560,8 @@ fn dcb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcAcbDispatchIndirect(acb, ...)`. Header `0xc0021600`, 16 bytes (the Acb twin, one dword
-/// longer than the Dcb form - the measured extent, not an assumed one).
+/// `sceAgcAcbDispatchIndirect(acb, ...)`. Header `0xc0021600`, 16 bytes: the measured Acb form is
+/// one dword longer than the Dcb form.
 fn acb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
@@ -743,7 +585,7 @@ fn dcb_draw_index_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcDcbSetShRegistersIndirect(dcb, ...)`. Header `0xc0036300`, 20 bytes. On PPSA02664's path.
+/// `sceAgcDcbSetShRegistersIndirect(dcb, ...)`. Header `0xc0036300`, 20 bytes.
 fn dcb_set_sh_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
@@ -767,15 +609,14 @@ fn dcb_stall_command_buffer_parser(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcAcbAcquireMem(acb, ...)` - the Acb twin of `sceAgcDcbAcquireMem`, its header `0xc0065800`
-/// now dumped for the Acb form too (203058), so the twin is measured rather than assumed.
+/// `sceAgcAcbAcquireMem(acb, ...)` - the Acb twin of `sceAgcDcbAcquireMem`, with the same measured
+/// header `0xc0065800`.
 fn acb_acquire_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::acquire_mem_skeleton())
 }
 
-/// `sceAgcDcbPushMarker(dcb, label, ...)` - a debug marker. Measured 12-byte `SET_UCONFIG_REG`
-/// (`166-agc/dcb-push-marker`, sweep 20260915-174357), reserved as a skeleton so it hands a real
-/// cursor rather than the placeholder it was answering on PPSA02664's path (worklog 618).
+/// `sceAgcDcbPushMarker(dcb, label, ...)` - a debug marker. The measured 12-byte `SET_UCONFIG_REG`
+/// (`166-agc/dcb-push-marker`), reserved as a skeleton so it hands back a real cursor.
 fn dcb_push_marker(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::marker_skeleton())
 }
@@ -786,21 +627,22 @@ fn dcb_pop_marker(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::marker_skeleton())
 }
 
-/// `sceAgcDcbWaitRegMem(dcb, ...)` - wait on a register or memory word. The measured 56-byte compound
-/// of three packets (`166-agc/dcb-wait-reg-mem`), reserved with its headers and zeroed bodies.
+/// `sceAgcDcbWaitRegMem(dcb, ...)` - wait on a register or memory word. The measured 56-byte
+/// compound of three packets (`166-agc/dcb-wait-reg-mem`), reserved with its headers and zeroed
+/// bodies.
 fn dcb_wait_reg_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::wait_reg_mem_skeleton())
 }
 
 /// The largest register run this will read out of guest memory in one call.
 ///
-/// A packet's count field is fourteen bits, so a run longer than this cannot be encoded at all.
-/// Refusing here keeps a wild count from turning into a wild read.
+/// A packet's count field is fourteen bits, so a longer run cannot be encoded, and a wild count
+/// is refused instead of becoming a wild read.
 const MAX_REGISTER_RUN: u64 = 0x3ffe;
 
-/// `sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count)`. Measured:
-/// `166-agc/dcb-set-sh-reg-direct`, where the run was two registers and came back as
-/// `header, offset, value, value` - no marker, `n + 2` dwords.
+/// `sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count)`. Measured
+/// (`166-agc/dcb-set-sh-reg-direct`): a two-register run comes back as `header, offset, value,
+/// value`, with no marker, `n + 2` dwords.
 fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (offset, values, count) = (args[1], args[2], args[3]);
     if values == 0 || count == 0 || count > MAX_REGISTER_RUN {
@@ -809,7 +651,7 @@ fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mut run = Vec::with_capacity(count as usize);
     for i in 0..count {
         // SAFETY: `values` is the guest's own array of `count` dwords, the argument this call is
-        // defined by; `count` is bounded above so the walk cannot run away.
+        // defined by; `count` is bounded above.
         run.push(unsafe { guest::read_u32(values.wrapping_add(i * 4)) }.unwrap_or(0));
     }
     dcb_append(
@@ -818,23 +660,12 @@ fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// Implementations this crate provides for `libSceAgc`.
-///
-/// `sceAgcCreateShader` (object model, 3c5e) and the five shader-linkage calls e4f1 asked for, whose
-/// behaviours obSCEne measured once the 3D-draw sweeps settled (9a41, sweep `20260912-003916`): the
-/// interpolant mapping pair, the primitive-state pair, and the shader linker.
-///
 /// `sceAgcDcbDrawIndex(dcb, index_count, address, initiator)`.
 ///
-/// **Now measured whole** (`166-agc/dcb-draw-index`, sweep `20260914-222710`, answering the request
-/// worklog 536 left it out for). Called as `(3, 0x12345678, 0)` it wrote
-/// `0xc0042700, 3, 0x12345678, 0, 3, 0` - so the index count appears at **both** body[0] and
-/// body[3], and the third argument lands in body[4]. The two dwords worklog 536 could not place are
-/// placed.
-///
-/// One argument set, so what body[0] *means* is not established - only that this builder puts the
-/// count there. The published field order calls it `MAX_SIZE`, which is consistent and is not what
-/// this reproduces from.
+/// Measured whole (`166-agc/dcb-draw-index`): `(3, 0x12345678, 0)` wrote
+/// `0xc0042700, 3, 0x12345678, 0, 3, 0`, so the index count appears at `body[0]` and `body[3]` and
+/// the third argument lands in `body[4]`. One argument set fixes where this builder puts the count,
+/// not what `body[0]` means; the published field order calls it `MAX_SIZE`.
 fn dcb_draw_index(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (count, address, initiator) = (args[1] as u32, args[2], args[3] as u32);
     dcb_append(
@@ -843,10 +674,8 @@ fn dcb_draw_index(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcDcbSetIndexSize(dcb, type, flags)`.
-///
-/// **Measured across eight argument pairs**, which is what makes it implementable where worklog 536
-/// refused it on one: see [`packet::build::set_index_size`] for the mapping the sweep establishes.
+/// `sceAgcDcbSetIndexSize(dcb, type, flags)`, measured across eight argument pairs; see
+/// [`packet::build::set_index_size`] for the mapping.
 fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
@@ -854,38 +683,14 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// The command **builders** are wired through the writer handle in `arg0`: their encodings were
-/// measured (worklog 534 first, then extended across later sweeps) and implemented as pure encoders
-/// or measured reservation skeletons in [`crate::packet::build`], while the handle layout that places
-/// them was guest-observed and then confirmed by the library's own behaviour - see the `dcb` module
-/// below, which is private. The array below is the authoritative list; this prose does not restate
-/// its length, which would go stale as builders land (the count is pinned instead by
-/// `tests/dcb_wiring.rs`).
+/// Implementations this crate provides for `libSceAgc`.
 ///
-/// **The two that worklog 536 refused on a single input each have since been measured across more
-/// inputs and wired**, so each is a builder that is right rather than a guess:
-///
-/// - `sceAgcDcbDrawIndex` - the two body dwords worklog 536 could not place were read back on a
-///   later capture (`(3, 0x12345678, 0)` wrote `0xc0042700, 3, 0x12345678, 0, 3, 0`), placing the
-///   count at `body[0]` and `body[3]` and the argument at `body[4]`; `packet::build::draw_index_2` now
-///   encodes the whole packet.
-/// - `sceAgcDcbSetIndexSize` - measured across eight argument pairs, enough to establish the mapping
-///   `packet::build::set_index_size` uses rather than emit one measured packet for every call.
-///
-/// **`sceAgcDcbResetQueue` is wired as a measured reservation skeleton** (REQ-...b7e4): obSCEne
-/// measured its whole 32-byte writer-struct with zero arguments (`166-agc/dcb-reset-queue`), and
-/// [`packet::build::reset_queue_skeleton`] reproduces the framing - a NOP filler and two
-/// `SET_UCONFIG_REG` packets - while zeroing an address-shaped body a single zero-argument pass
-/// cannot separate from the probe's own writer-struct pointer. It is the first AGC call PPSA02664
-/// makes (D559), so the reservation clears a wall the placeholder held.
-///
-/// **`sceAgcDcbWaitUntilSafeForRendering` is wired as a measured no-op** (REQ-...4e91). Worklog 665
-/// refused it while its only measurement was the 35-builder sweep's `fail (wrote 0)` - a probe
-/// failure, not an empty encoding. The re-probe settled it: its `GetSize` symbol is absent from
-/// `libSceAgc`, and the builder wrote 0 bytes and returned `0x0` on a bare writer and on one prepared
-/// through `sceAgcDcbResetQueue` (sweeps `20260917-090300`/`101310`), `empty-encoding` true under
-/// every condition. So it is a library-level no-op, and `agc_no_op_returns_ok` answers the measured
-/// `0x0` and writes nothing - like the patch family, it dereferences nothing, so a null needs no guard.
+/// `sceAgcCreateShader` and the shader-linkage calls (interpolant mapping, primitive state, shader
+/// linker) implement measured behaviour. The command builders are wired through the writer handle
+/// in `arg0` (the private `dcb` module) as pure encoders or reservation skeletons from
+/// [`crate::packet::build`]. `sceAgcDcbWaitUntilSafeForRendering` and the patch family answer
+/// their measured `0x0` and write nothing. This array is the authoritative list; its size is
+/// pinned by `tests/dcb_wiring.rs`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("0x7d86501b8094ef57", agc_phantom_get_size),
@@ -913,7 +718,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
         ("sceAgcDcbResetQueue", dcb_reset_queue),
         ("sceAgcDcbWaitUntilSafeForRendering", agc_no_op_returns_ok),
-        // The REQ-...a70f cluster, reservation skeletons from measured headers (sweep 203058).
+        // Reservation skeletons from measured headers.
         ("sceAgcCbDispatch", cb_dispatch),
         ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),
         ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
@@ -935,7 +740,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDcbPushMarker", dcb_push_marker),
         ("sceAgcDcbPopMarker", dcb_pop_marker),
         ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
-        // The whole `sceAgc*Patch*` family - each measured to return 0x0 (REQ-...4386, ...3d1e).
+        // The whole `sceAgc*Patch*` family, each measured to return 0x0.
         (
             "sceAgcSetCxRegIndirectPatchAddRegisters",
             agc_patch_returns_ok,
@@ -989,18 +794,17 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 mod tests {
     use super::*;
 
-    /// **The measured object model is what the handler writes.** A guest hands `out` (a slot) and
-    /// `header` (its object buffer); after the call, `*out` is the header address, `+0x10` is the
-    /// bytecode pointer, and relative offsets (`+0x08`, `+0x20`, `+0x28`, `+0x30`, and sub-table
-    /// entries) are relocated to pointers within the header object (measured in obSCEne 166-agc/create-shader
-    /// and verified against retail Unity pipelines).
+    /// The measured object model is what the handler writes: `*out` is the header address, `+0x10`
+    /// the bytecode pointer, and the relative offsets (`+0x08`, `+0x20`, `+0x28`, `+0x30` and the
+    /// sub-table entries) become pointers within the header object.
     #[test]
     fn create_shader_fills_the_object_as_hardware_did() {
-        // A slot for the object pointer, and a 0x130-byte object buffer with retail-like offsets.
+        // A slot for the object pointer, and a 0x130-byte object buffer with offsets shaped like a
+        // retail shader header.
         let mut slot: u64 = 0;
         let mut object = [0u8; 0x130];
-        // Set up relative offsets as found in retail shader headers:
-        // +0x08: offset 0xd8 (points to sub-table at +0xe0)
+        // Relative offsets as retail shader headers carry them:
+        // +0x08: offset 0xd8 (points to the sub-table at +0xe0)
         object[0x8..0x10].copy_from_slice(&0xd8u64.to_le_bytes());
         object[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
         object[0x28..0x30].copy_from_slice(&0x38u64.to_le_bytes());
@@ -1035,8 +839,8 @@ mod tests {
             "+0x08 is the sub-table pointer"
         );
         assert_eq!(read_u64(0x10), bytecode, "+0x10 is the bytecode pointer");
-        // Each field becomes its own address plus its offset, as the console wrote back
-        // (measured: obSCEne `166-agc/create-shader`, `shader-obj`).
+        // Each field becomes its own address plus its offset, as the hardware writes back
+        // (obSCEne `166-agc/create-shader`, `shader-obj`).
         assert_eq!(
             read_u64(0x20),
             header + 0x20 + 0x70,
@@ -1064,17 +868,14 @@ mod tests {
         );
     }
 
-    /// **Every group-pointer slot that holds a relative offset is relocated, not just the middle
-    /// three.** The measured shader populated `+0x20/+0x28/+0x30`; a Unity header like PPSA02664's
-    /// populates the whole `+0x18..+0x38` array, and a slot left with its raw offset (`+0x18`'s `0xa8`)
-    /// is the pointer the workload walk dies reading (worklog 748). The guard relocates exactly the
-    /// slots holding offsets, so a populated endpoint is fixed up and an empty one (0) is left alone.
+    /// Every group-pointer slot that holds a relative offset is relocated, not just the middle
+    /// three, and an empty slot (0) is left alone.
     #[test]
     fn create_shader_relocates_every_populated_group_slot() {
         let mut slot: u64 = 0;
         let mut object = [0u8; 0x130];
         object[0x8..0x10].copy_from_slice(&0xd8u64.to_le_bytes());
-        // The full group array populated, endpoints included (PPSA02664's shape).
+        // The full group array populated, endpoints included.
         object[0x18..0x20].copy_from_slice(&0xa8u64.to_le_bytes());
         object[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
         object[0x28..0x30].copy_from_slice(&0x38u64.to_le_bytes());
@@ -1093,7 +894,7 @@ mod tests {
             b.copy_from_slice(&object[off..off + 8]);
             u64::from_le_bytes(b)
         };
-        // The endpoints the old three-entry list left raw are now absolute pointers.
+        // The endpoints are absolute pointers.
         assert_eq!(
             read_u64(0x18),
             header + 0x18 + 0xa8,
@@ -1109,8 +910,8 @@ mod tests {
         assert_eq!(read_u64(0x28), header + 0x28 + 0x38);
         assert_eq!(read_u64(0x30), header + 0x30 + 0x60);
 
-        // An empty slot (0) is left alone, not turned into `header + 0` - the guard, not a field list,
-        // is what keeps the measured three-of-five behaviour for a header without endpoint offsets.
+        // An empty slot (0) is left alone, not turned into `header + 0`: the guard, not a field
+        // list, decides what is relocated.
         let mut empty = [0u8; 0x130];
         empty[0x20..0x28].copy_from_slice(&0x70u64.to_le_bytes());
         let header2 = empty.as_mut_ptr() as u64;
@@ -1128,7 +929,7 @@ mod tests {
         assert_eq!(read2(0x38), 0, "an empty +0x38 is not turned into header+0");
     }
 
-    /// `create_shader` reproduces the console's byte diff (obSCEne `166-agc/create-shader`),
+    /// `create_shader` reproduces the hardware's byte diff (obSCEne `166-agc/create-shader`),
     /// including leaving a descriptor that names no register alone.
     #[test]
     fn create_shader_matches_the_consoles_byte_diff() {
@@ -1183,8 +984,8 @@ mod tests {
         assert_eq!(dword(&unregistered, 0x9c), 0);
     }
 
-    /// **A null out-parameter is refused, not dereferenced.** The guest's own wrapper answers
-    /// `0x8a6c000a` for a null pointer (D556); reproducing that is safer than writing through null.
+    /// A null out-parameter is refused with `0x8a6c000a`, the guest wrapper's own answer, not
+    /// dereferenced.
     #[test]
     fn create_shader_refuses_a_null_out_parameter() {
         let args = [0u64; GUEST_ARG_REGISTERS];
@@ -1201,9 +1002,8 @@ mod tests {
         u64::from_le_bytes(b)
     }
 
-    /// **The interpolant table is the measured `(i << 32) | (0x191 + i)`.** The first two entries
-    /// are what obSCEne read back from hardware (`0x191`, `0x1_0000_0192`), so a guest reading the
-    /// mapping sees the same routing the console wrote.
+    /// The interpolant table is the measured `(i << 32) | (0x191 + i)`; its first two entries are
+    /// the values read back from hardware.
     #[test]
     fn interpolant_mapping_writes_the_measured_default_table() {
         let mut table = [0xffu8; 256];
@@ -1228,9 +1028,8 @@ mod tests {
         );
     }
 
-    /// **LinkShaders writes the interpolant table plus the routing quadword at +0x108.** Both halves
-    /// are measured (`166-agc/link-shaders`): the interpolants at the front, `0x0000_0002_0000_029b`
-    /// eight bytes past them.
+    /// LinkShaders writes the interpolant table plus the routing quadword at +0x108, both measured
+    /// (`166-agc/link-shaders`).
     #[test]
     fn link_shaders_writes_interpolants_and_routing() {
         let mut link = [0u8; 0x120];
@@ -1251,9 +1050,8 @@ mod tests {
         );
     }
 
-    /// **Primitive topology lands in the low five bits of `sec_state + 0x14`, create then update.**
-    /// A create with `DI_PT_TRILIST` (4) then an update to `DI_PT_POINTLIST` (1) reproduces the
-    /// measured `topo-orig` 4 -> `topo-updated` 1, and the surrounding bits are preserved.
+    /// Primitive topology lands in the low five bits of `sec_state + 0x14`, create then update:
+    /// `DI_PT_TRILIST` (4) then `DI_PT_POINTLIST` (1), with the surrounding bits preserved.
     #[test]
     fn prim_state_records_topology_in_sec_state() {
         let mut prim = [0u8; 64];
@@ -1290,7 +1088,7 @@ mod tests {
         );
     }
 
-    /// **The phantom `0x7d86501b8094ef57` writes workload size 168 (0xa8) bytes into `*arg0`.**
+    /// The phantom `0x7d86501b8094ef57` writes the workload size 168 (0xa8) into `*arg0`.
     #[test]
     fn phantom_get_size_writes_workload_size() {
         let mut slot: u64 = 0;
@@ -1317,11 +1115,11 @@ mod tests {
         assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
     }
 
-    /// `sceAgcGetIsTrinityMode` answers from the presented machine: a base console is not the
-    /// faster revision, so it is `0` - the value that keeps a base guest off the Pro-only path.
+    /// `sceAgcGetIsTrinityMode` answers `0` for a base machine, keeping a base guest off the faster
+    /// revision's path.
     ///
-    /// Reads the process default (a retail base console, [`machine::presented`]) rather than
-    /// presenting one, so it does not race the process-global other tests may set.
+    /// Reads the process default ([`machine::presented`]) rather than presenting one, so it does
+    /// not race the process-global other tests may set.
     #[test]
     fn get_is_trinity_mode_is_false_on_a_base_console() {
         let args = [0u64; GUEST_ARG_REGISTERS];
@@ -1331,8 +1129,8 @@ mod tests {
             orbistoun_core::machine::Platform::Trinity,
             "the default machine is a base console"
         );
-        // Only assert the base answer when nothing has presented the faster revision, so a run
-        // that set the global to Trinity does not make this read as a failure.
+        // Only assert the base answer when nothing has presented the faster revision, so a run that
+        // set the global does not read as a failure.
         if orbistoun_core::machine::presented().platform()
             != orbistoun_core::machine::Platform::Trinity
         {

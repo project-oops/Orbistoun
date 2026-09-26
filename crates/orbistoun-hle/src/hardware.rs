@@ -1,26 +1,12 @@
-//! What a conformance run measured on the console, as data this project can be checked against.
+//! What a conformance run measured on the hardware, as data this project is checked against.
 //!
-//! # Why this is a separate file from the knowledge base
-//!
-//! A knowledge entry describes a function. A measurement describes **one observation of one
-//! condition**, and the difference is the whole point: an entry can be broadly right while a
-//! specific value is wrong, and only the second kind of claim can be turned into a test that
-//! passes or fails.
-//!
-//! The record shape comes from the probe - `check | subject | condition | observation | kind` -
-//! and carries the four things a checkable claim needs. That is what `res` records lack, which
-//! is why those are recorded as prose on a function and these are recorded as data.
-//!
-//! # Constant and varying, decided by the runs rather than by the kind
-//!
-//! Three captures of the same suite disagree on twenty-four of the two hundred and twenty-four
-//! measurements - timestamps, mapped addresses, elapsed microseconds, module handles, and the
-//! counter frequency, which is calibrated per boot. A measurement is marked
-//! [`Measurement::constant`] when **every run that took it agreed**, and that is an empirical
-//! answer rather than a judgement about what `ticks` ought to mean.
-//!
-//! **Only a constant measurement can be asserted.** A varying one is still recorded, because
-//! "this value moves between runs" is a fact worth keeping and no single run shows it.
+//! A knowledge entry describes a function; a measurement is one observation of one condition,
+//! which can become a test that passes or fails. The record shape is the probe's
+//! `check | subject | condition | observation | kind`. A measurement is
+//! [`Measurement::constant`] when every run that took it agreed, decided by the runs rather than
+//! by its kind; timestamps, addresses, handles and the per-boot counter frequency vary. Only a
+//! constant measurement can be asserted; a varying one is kept because the variation is a fact
+//! (D485).
 
 use serde::{Deserialize, Serialize};
 
@@ -43,8 +29,8 @@ pub struct Measurement {
     pub sources: Vec<String>,
     /// Whether every run that took this measurement agreed on it.
     ///
-    /// **False does not mean wrong.** It means the value is not a property of the platform,
-    /// so nothing may assert it - see [`Self::disagreed`] for what the other runs said.
+    /// False means the value is not a property of the platform, so nothing asserts it; see
+    /// [`Self::disagreed`].
     pub constant: bool,
     /// The other values seen, when the runs disagreed. Empty when they did not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -58,15 +44,11 @@ impl Measurement {
         parse_number(&self.observation)
     }
 
-    /// Every value any run reported for this, as numbers.
+    /// Every value any run reported for this, as numbers: the observation first, then the other
+    /// runs' values in generator order.
     ///
-    /// **For the measurements that are real but not constant.** A per-boot calibration is
-    /// not a property of the platform, so nothing may assert one particular value - but
-    /// "orbistoun answers a number no console ever reported" is still a defect, and asserting
-    /// membership of this set catches it while permitting the variation.
-    ///
-    /// The observation first, then whatever the other runs saw, in the order the generator
-    /// wrote them.
+    /// A varying value cannot be asserted, but answering a number no run reported is still a
+    /// defect, and membership of this set catches it.
     #[must_use]
     pub fn values(&self) -> Vec<u64> {
         std::iter::once(self.observation.as_str())
@@ -76,19 +58,12 @@ impl Measurement {
     }
 }
 
-/// Reads the leading number out of a field, hexadecimal when it says so and decimal otherwise.
+/// Reads the leading number out of a field, hexadecimal with a `0x` prefix and decimal
+/// otherwise.
 ///
-/// A `disagreed` entry carries its provenance after the value - `0x5f259b8e in ps5-full.txt`
-/// - so this takes the first whitespace-delimited token rather than the whole string.
-///
-/// # Why decimal is read at all
-///
-/// **It required the prefix, and the probe does not always write one.** `000-hw/sw-version`
-/// records `0` and `000-hw/tsc-frequency` records `1596300187`, so every measurement from
-/// those checks answered `None` - which a caller writing `.expect("a number")` finds
-/// immediately and a caller writing `.unwrap_or(0)` never finds at all. The second is the
-/// dangerous shape and is the reason this is a parse rather than a guess: `0x10` is sixteen,
-/// `10` is ten, and a field that is a word is still `None` (D611).
+/// A `disagreed` entry carries its provenance after the value (`0x5f259b8e in ps5-full.txt`),
+/// so only the first whitespace-delimited token is read. The probe writes some values in
+/// decimal (`000-hw/tsc-frequency`); a field that is a word is `None`, never zero.
 fn parse_number(text: &str) -> Option<u64> {
     let first = text.split_whitespace().next()?;
     first.strip_prefix("0x").map_or_else(
@@ -165,11 +140,7 @@ impl Measurements {
 mod tests {
     use super::Measurements;
 
-    /// A value written without a `0x` is decimal, and a value that is a word is neither.
-    ///
-    /// **Asserting on the refusal and on the base.** Reading `10` as sixteen would be a wrong
-    /// measurement that looks exactly like a right one, and reading a word as zero would be
-    /// worse - so the failing cases are what this pins (D611).
+    /// A value without `0x` is read as decimal, and a word is read as neither.
     #[test]
     fn a_measurement_is_read_in_the_base_it_was_written_in() {
         use super::parse_number;

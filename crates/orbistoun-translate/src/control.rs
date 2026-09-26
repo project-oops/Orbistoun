@@ -1,51 +1,12 @@
 //! The dispatch loop: guest control flow as a switch inside a loop.
 //!
-//! # The shape
-//!
-//! ```text
-//! entry:      pc = 0; branch header
-//! header:     loop-merge(merge, continue); branch-conditional (pc < blocks) dispatch merge
-//! dispatch:   selection-merge(after); switch pc -> arm0 | arm1 | … | default
-//! arm0:       <block 0's instructions>; pc = <successor>; branch after
-//! …
-//! default:    pc = exit; branch after
-//! after:      branch continue
-//! continue:   branch header
-//! merge:      <epilogue>; return
-//! ```
-//!
-//! # Why this rather than reconstructing structure
-//!
-//! SPIR-V requires structured control flow. The guest has none: a flat stream, signed
-//! offsets, and no obligation to be reducible. Recovering structure from that is a real
-//! compiler problem, and for irreducible flow there is no structure to recover - only a
-//! transformation that invents one.
-//!
-//! This shape needs no analysis at all. Every guest block becomes an arm, every branch
-//! becomes an assignment to the program counter, and the result is valid however tangled
-//! the guest's flow is - including backwards, into the middle of anything, and from
-//! several places at once (D110).
-//!
-//! It was the plan from the beginning, which is why the register file lives in memory:
-//! a SPIR-V result belongs to the block that produced it and cannot cross into another
-//! arm, so registers had to outlive a block. That decision was made for this.
-//!
-//! # A conditional branch adds no blocks
-//!
-//! The arm computes the condition and *selects* between two program counters. No merge
-//! block, no nesting, no second arm - the branch has already been turned into data by
-//! the time control leaves the switch. Every arm has exactly one predecessor and one
-//! successor, which is what makes the shape uniformly valid.
-//!
-//! # The cost
-//!
-//! Every guest block is a switch dispatch, and every register access is a load and a
-//! store. That is slow, and it is the same trade [`crate::Fidelity::Wavefront`] already
-//! makes: be correct first, and let the differential oracle check the fast paths later.
-//! A shader with one block still pays for the loop; collapsing that case is available
-//! whenever it is worth measuring, and is deliberately not done yet, because the
-//! single-block path is the one every existing test exercises and a second code path
-//! for it would be the under-tested one.
+//! SPIR-V requires structured control flow; guest code has none and may be irreducible.
+//! Every guest block becomes an arm of one `OpSwitch` on a program counter inside one loop.
+//! Each arm runs its block, assigns the counter its successor (a conditional branch selects
+//! between two values, adding no blocks) and branches to the continue path. The loop exits
+//! when the counter reaches the block count, into the merge block where the caller writes
+//! its epilogue. The shape is valid however tangled the guest flow (D098). Registers live in
+//! memory because a SPIR-V result cannot cross from one arm into another.
 
 use orbistoun_shader::{Decode, EncodingTable, Instruction};
 use orbistoun_spirv::{Id, op};
@@ -61,9 +22,7 @@ const NO_SELECTION_CONTROL: u32 = 0;
 
 /// Emits the whole function body, and leaves the builder inside the merge block.
 ///
-/// The caller's `finish` then appends its epilogue and return exactly as it did when the
-/// body was a straight line - which is why adding control flow did not change what a
-/// model reports.
+/// The caller's `finish` then appends its epilogue and return as for a straight-line body.
 pub fn emit<M: Model + ?Sized>(
     model: &mut M,
     decode: &Decode,
@@ -81,8 +40,8 @@ pub fn emit<M: Model + ?Sized>(
     };
     let blocks = blocks::split(decode, family_of)?;
     if blocks.is_empty() {
-        // Nothing to run. The merge block still has to exist, because `finish` writes
-        // its epilogue into it and a function with no blocks is not a function.
+        // Nothing to run. The merge block still exists, because `finish` writes its
+        // epilogue into it.
         let merge = model.builder().id();
         model.builder().function(op::LABEL, &[merge.0]);
         return Ok(0);
@@ -116,8 +75,8 @@ pub fn emit<M: Model + ?Sized>(
         op::ULESS_THAN,
         &[bool_type.0, running.0, current.0, limit.0],
     );
-    // The merge and continue targets are declared before the branch that needs them,
-    // which is what makes this a loop rather than a backward jump SPIR-V will reject.
+    // The merge and continue targets are declared before the branch, which makes this
+    // a loop rather than a backward jump SPIR-V rejects.
     model.builder().function(
         op::LOOP_MERGE,
         &[merge.0, continue_target.0, NO_LOOP_CONTROL],
@@ -134,8 +93,8 @@ pub fn emit<M: Model + ?Sized>(
         .function(op::SELECTION_MERGE, &[after.0, NO_SELECTION_CONTROL]);
     let mut switch = vec![selector.0, default.0];
     for (index, arm) in arms.iter().enumerate() {
-        // The literal is a plain word, not an identifier - which is why `OpSwitch` needs
-        // its own stride in the builder's shape table.
+        // The literal is a plain word, not an identifier, so `OpSwitch` has its own stride
+        // in the builder's shape table.
         switch.push(u32::try_from(index).unwrap_or(u32::MAX));
         switch.push(arm.0);
     }
@@ -148,9 +107,8 @@ pub fn emit<M: Model + ?Sized>(
         model.enter_block();
         let before = model.instructions();
         for instruction in &decode.instructions[block.first..block.end] {
-            // The terminating branch itself emits nothing here - where it goes is the
-            // program-counter assignment below, and translating it twice would be a
-            // second, contradictory answer.
+            // The terminating branch emits nothing here; its target is the program-counter
+            // assignment below.
             if is_terminator(instruction, &family_of) {
                 continue;
             }
@@ -164,10 +122,9 @@ pub fn emit<M: Model + ?Sized>(
     }
 
     // ---- default: a program counter no arm claims -------------------------------
-    // Unreachable by construction - the counter only ever holds an arm index or the
-    // exit value, and the exit value leaves at the header. It exists because `OpSwitch`
-    // requires a default, and it stops rather than falling into an arm, so a counter
-    // that somehow went wrong ends the shader instead of running an arbitrary block.
+    // Unreachable by construction: the counter holds an arm index or the exit value, which
+    // leaves at the header. `OpSwitch` requires a default, and it ends the shader rather
+    // than falling into an arm.
     model.builder().function(op::LABEL, &[default.0]);
     let limit = model.constant(exit);
     store_counter(model, limit);
@@ -230,9 +187,8 @@ fn successor<M: Model + ?Sized>(
             let not_taken = model.constant(index_of(fallthrough)?);
             let condition = branch_condition_value(model, last)?;
 
-            // A select rather than a second branch. The guest's conditional has become
-            // data by the time control leaves this arm, so the arm has one successor and
-            // the switch stays flat.
+            // A select rather than a second branch, so the arm has one successor and the
+            // switch stays flat.
             let u32_type = model.u32_type();
             let b = model.builder();
             let chosen = b.id();
@@ -264,8 +220,7 @@ fn branch_condition_value<M: Model + ?Sized>(
         Condition::ExecutionMaskNonZero => (model::EXEC_LOW_HALF, false),
         Condition::ConditionMaskZero => (model::VCC_LOW_HALF, true),
         Condition::ConditionMaskNonZero => (model::VCC_LOW_HALF, false),
-        // The condition code is one bit of state rather than a mask, so it is read
-        // directly rather than through the mask path below.
+        // The condition code is one bit of state rather than a mask, read directly.
         Condition::ScalarConditionClear | Condition::ScalarConditionSet => {
             let want_set = condition == Condition::ScalarConditionSet;
             return Ok(read_condition_code(model, want_set));
@@ -279,9 +234,9 @@ fn branch_condition_value<M: Model + ?Sized>(
     };
 
     let (low, high) = model.read_lane_mask(name)?;
-    // Only the lanes this model simulates. A one-lane fragment module's mask can carry bits for
-    // lanes it does not have - an all-ones entry mask, a whole-quad expansion - and none of them
-    // is a pixel this invocation computes, so "is any lane live" is asked of the ones it does.
+    // Only the lanes this model simulates. A one-lane fragment module's mask can carry bits
+    // for lanes it does not have (an all-ones entry mask, a whole-quad expansion), so "is any
+    // lane live" is asked of its own lanes.
     let lanes = model.lanes();
     let any = if lanes < 32 {
         let existing = model.constant((1 << lanes) - 1);

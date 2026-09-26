@@ -1,30 +1,11 @@
-//! The packet walker, held against command buffers a console actually produced.
+//! The packet walker, held against command buffers the hardware produced.
 //!
-//! # Why this test could not be written until today
-//!
-//! `packet.rs` is built from AMD's public documentation and says so, with a caveat and a
-//! prescription:
-//!
-//! > The values below are **transcribed and not yet verified line by line** against the published
-//! > document. [...] a walk over a real command buffer that desynchronises immediately is how a
-//! > mistake here announces itself.
-//!
-//! There were no real command buffers. There are now: obSCEne called four `libSceAgc` command
-//! builders on hardware - firmware 12.40, prospero, in a native title - and captured exactly
-//! what each wrote into a caller-supplied buffer (D565). This is that prescription, filled.
-//!
-//! # What makes it evidence rather than a fixture
-//!
-//! Each capture carries an **independently measured length**: obSCEne recorded how many bytes
-//! changed, without reference to any header field. So the walk has something to be wrong about.
-//! A length rule that is off by one, or a field in the wrong bits, walks off the end of a
-//! 28-byte buffer or stops short of it, and `PacketWalk` reports both.
-//!
-//! # What it cannot establish
-//!
-//! **That the transcription is right**, only that it agrees with four buffers. A rule that erred
-//! on packets none of these four contain would pass. Three of the four are a single packet, so
-//! the multi-packet case rests on one capture.
+//! `packet.rs` is transcribed from the GPU vendor's public documentation. obSCEne called
+//! `libSceAgc` command builders on hardware and captured what each wrote into a caller-supplied
+//! buffer, with an independently measured length: the bytes that changed, owing nothing to any
+//! header field. A length rule off by one, or a field in the wrong bits, walks off the end of a
+//! buffer or stops short, and `PacketWalk` reports both. Agreement with these buffers does not
+//! cover packets none of them contains.
 
 use orbistoun_gpu::packet::{PacketKind, walk};
 
@@ -32,13 +13,13 @@ use orbistoun_gpu::packet::{PacketKind, walk};
 struct Captured {
     /// The symbol that wrote it.
     name: &'static str,
-    /// Bytes obSCEne saw change - **measured, not derived from any header**.
+    /// Bytes obSCEne saw change - measured, not derived from any header.
     extent: usize,
     /// The bytes themselves.
     bytes: &'static [u8],
 }
 
-/// The four Class B builders, from `166-agc` in `reports/hardware/run-native-title.txt`.
+/// The four builders from obSCEne's `166-agc` checks in a native title.
 const CAPTURES: &[Captured] = &[
     Captured {
         name: "sceAgcCbNop",
@@ -74,11 +55,8 @@ const CAPTURES: &[Captured] = &[
     },
 ];
 
-/// **The transcribed length rule agrees with what hardware wrote.**
-///
-/// The whole point. Each buffer is walked and the packets must consume it **exactly** - no
-/// overrun, no desynchronisation, nothing left over. `sceAgcCbNop` is excluded and gets its own
-/// test below, because it is the one that does not fit.
+/// The transcribed length rule agrees with what hardware wrote: each buffer is consumed exactly,
+/// with no overrun, no desynchronisation and nothing left over. `sceAgcCbNop` has its own test.
 #[test]
 fn a_walk_of_a_measured_command_buffer_consumes_it_exactly() {
     for capture in CAPTURES.iter().filter(|c| c.name != "sceAgcCbNop") {
@@ -107,11 +85,8 @@ fn a_walk_of_a_measured_command_buffer_consumes_it_exactly() {
     }
 }
 
-/// **One builder emitted three packets, and that is the finding a parser must survive.**
-///
-/// A command-stream reader cannot assume one call is one packet. `sceAgcDcbWaitRegMem` writes 56
-/// bytes as 16 + 28 + 12, and the walk has to find all three - a rule that stopped after the
-/// first would still consume a plausible-looking prefix and report nothing wrong.
+/// One builder emits three packets: `sceAgcDcbWaitRegMem` writes 56 bytes as 16 + 28 + 12, and
+/// the walk finds all three rather than stopping at a plausible prefix.
 #[test]
 fn one_builder_can_emit_several_packets() {
     let wait = CAPTURES
@@ -137,16 +112,12 @@ fn one_builder_can_emit_several_packets() {
     assert_eq!(opcodes, vec![0x79, 0x3c, 0x79], "opcodes as measured");
 }
 
-/// **The no-op closes under the header-only rule, which it was the evidence for.**
+/// The no-op closes under the header-only rule.
 ///
-/// `sceAgcCbNop` wrote **four** bytes whose header carries a count of `0x3fff`. Under the rule the
-/// other builders obey that would describe a 65,540-byte packet, and this test used to record the
-/// disagreement rather than smooth it over. The GL cube capture settled it: its stream ends in
-/// sixteen of these words after the fence event, the hardware retired the fence every frame, and a
-/// walk that read them as 64 KiB packets overran the buffer. A count of all ones is a header-only
-/// packet, and now the walker says so.
-///
-/// Asserted as agreement now: if the rule ever regressed, this is the capture that would say.
+/// `sceAgcCbNop` writes four bytes whose header carries a count of `0x3fff`, which under the
+/// ordinary rule would describe a 65,540-byte packet. A count of all ones is a header-only packet:
+/// the GL cube capture ends in such words after its fence event, and the hardware retires the
+/// fence.
 #[test]
 fn the_no_op_closes_as_a_header_only_packet() {
     let nop = CAPTURES
@@ -167,26 +138,12 @@ fn the_no_op_closes_as_a_header_only_packet() {
     assert_eq!(walk.packets[0].length, 4);
 }
 
-/// **A header from live GPU memory, decoded the same by two independent readers.**
+/// A header from live GPU memory decodes the same in two independent readers.
 ///
-/// The four captures above are `libSceAgc` *command builders* - an API call, and the bytes it
-/// appended. This is a different provenance and a stronger cross-check: obSCEne's `170-gpu-capture`
-/// walked the **running compositor's** submitted command stream in kernel memory and decoded a
-/// live PM4 header with its own C reader, reporting `it_op 0x93`, `payload_dwords 0x59`. The header
-/// dword it captured is `0xc059_9328`.
-///
-/// So this is orbistoun's transcribed field layout (`TYPE_SHIFT`, `OPCODE_SHIFT`, `COUNT_SHIFT` and
-/// their masks) held against a *second implementation* that read the same bytes off hardware - the
-/// kind of agreement `packet.rs` was transcribed-but-unverified about, now reached from live memory
-/// rather than an API capture.
-///
-/// The body is ninety zero dwords: a padding, not a measurement. Only the header's field extraction
-/// is under test, because only the header was independently decoded - the window obSCEne captured is
-/// four dwords of a ninety-dword packet, so the body is not available to walk.
-///
-/// Reference: obSCEne `reports/hardware/payload-klog.obs.log`, section `170-gpu-capture/command-stream`
-/// (`AgcCompositor.elf`, pid 0x39), records `pm4-header 0xc0599328`, `pm4-opcode 0x93`,
-/// `pm4-count 0x59`.
+/// obSCEne's `170-gpu-capture` walked the running compositor's submitted command stream and decoded
+/// a live PM4 header with its own reader: `pm4-header 0xc0599328`, `pm4-opcode 0x93`, `pm4-count
+/// 0x59`. This holds orbistoun's field layout against that decode. The body is zero padding: only
+/// the header was captured, so only its field extraction is under test.
 #[test]
 fn a_live_memory_pm4_header_decodes_as_obscenes_own_reader_did() {
     // The captured header, then a body of the length its count field declares (90 dwords), zeroed.
@@ -221,12 +178,9 @@ fn a_live_memory_pm4_header_decodes_as_obscenes_own_reader_did() {
     );
 }
 
-/// The same builders, from a **second, independent** hardware run - obSCEne sweep
-/// `20260914-000606`, section `166-agc`, a native Prospero title. Different day, different
-/// firmware leg, and the probe called each builder with **different arguments** than the
-/// `run-native-title` capture above did (its bodies are the argument-cleared case, all zeros where
-/// the first run carried live addresses). Same structure regardless: the header opcode and the
-/// length rule cannot depend on the argument bytes, and a second witness is what shows that.
+/// The same builders from a second hardware run (`166-agc`, a native Prospero title), called with
+/// different arguments: its bodies are the argument-cleared case, all zeros where the first run
+/// carried live addresses. The header opcode and the length rule do not depend on the arguments.
 const CAPTURES_20260914: &[Captured] = &[
     Captured {
         name: "sceAgcDcbDmaData",
@@ -257,13 +211,9 @@ const CAPTURES_20260914: &[Captured] = &[
     },
 ];
 
-/// **A second hardware run walks the same, so the length rule does not ride on the arguments.**
-///
-/// The captures above (`run-native-title`) and these (`20260914-000606`) are the same builders
-/// called with different arguments. Each fresh buffer must still consume exactly, and the
-/// three-packet `WaitRegMem` - the case the first set could only witness once - must decompose the
-/// same way from bytes that share only its opcodes and lengths, not its body. That is the arm the
-/// single-capture note above asked for.
+/// A second hardware run walks the same, so the length rule does not ride on the arguments. The
+/// three-packet `WaitRegMem` decomposes the same way from bytes that share only its opcodes and
+/// lengths.
 #[test]
 fn an_independent_measurement_confirms_the_walk() {
     for capture in CAPTURES_20260914 {
@@ -290,7 +240,7 @@ fn an_independent_measurement_confirms_the_walk() {
         );
     }
 
-    // The multi-packet case, now on a second, argument-independent witness.
+    // The multi-packet case, on the argument-independent witness.
     let wait = CAPTURES_20260914
         .iter()
         .find(|c| c.name == "sceAgcDcbWaitRegMem")

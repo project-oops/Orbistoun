@@ -1,19 +1,8 @@
-//! What the window should open into.
+//! What the window opens into, decided from the command line and the stored setting.
 //!
-//! # Why this is not three lines of argument parsing in the window
-//!
-//! Principle 13: a shim holds no logic. "Which view, given these arguments and this
-//! setting" is a decision with four outcomes and three ways to be contradictory, and a
-//! window is the one place it cannot be tested - `--shell --list` together has to *refuse*,
-//! and nobody writes that test against a `main` that opens a window.
-//!
-//! So it is a pure function over an iterator of strings, and the window calls it.
-//!
-//! # Precedence
-//!
-//! An argument beats the stored setting, always. The setting is what somebody wants
-//! *usually*; an argument is what they want *this time*, and a launcher entry or a script
-//! that has to say which view it means would be useless if a preference could override it.
+//! A pure function over the arguments, so its outcomes and refusals are testable without a
+//! window. An argument always beats the stored setting, so a launcher entry or script gets
+//! the view it names.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,12 +12,10 @@ use serde::{Deserialize, Serialize};
 pub enum View {
     /// The library list, per-title inspection and run diagnostics.
     ///
-    /// The default, and it stays the default: it is the view the emulator is actually
-    /// worked on through, and somebody who has not asked for anything else is far more
-    /// likely to want a table of imports than a wall of tiles.
+    /// The default, because it is the view the emulator is developed through.
     #[default]
     List,
-    /// The shell, as a console presents itself.
+    /// The shell, as the system software presents itself.
     Shell,
 }
 
@@ -50,9 +37,7 @@ pub enum Start {
     In(View),
     /// Open and launch this title straight away.
     ///
-    /// Carries the view to fall back to, because a title that cannot be found has to leave
-    /// the window *somewhere* - and dropping to the shell when somebody's setting says list
-    /// would be a second surprise on top of the first.
+    /// Carries the view to fall back to when the title cannot be started.
     Title {
         /// The title as it was named on the command line.
         name: String,
@@ -70,8 +55,7 @@ pub enum Refusal {
     TitleWithoutName,
     /// A view and a title were asked for together.
     ///
-    /// **Refused rather than resolved.** A title implies a view once it exits, and picking
-    /// one silently means the flag somebody typed did something other than what it says.
+    /// Refused rather than resolved, so no flag silently does something other than it says.
     ViewAndTitle,
 }
 
@@ -104,10 +88,8 @@ pub const TITLE_FLAG: &str = "--title";
 
 /// Reads a command line, falling back to the stored default.
 ///
-/// Unrecognised arguments are **ignored rather than refused**: the window is re-executed
-/// with a worker flag (D033), and the frameworks underneath it take arguments of their own.
-/// Refusing what this module does not recognise would make it the arbiter of every other
-/// crate's command line.
+/// Unrecognised arguments are ignored: the window is re-executed with a worker flag (D033),
+/// and the frameworks underneath it take arguments of their own.
 ///
 /// # Errors
 ///
@@ -125,7 +107,7 @@ pub fn read<I: IntoIterator<Item = String>>(args: I, default: View) -> Result<St
                 } else {
                     View::List
                 };
-                // Repeating the same flag is somebody being emphatic, not contradictory.
+                // Repeating the same flag is not a contradiction.
                 if asked.is_some_and(|already| already != wanted) {
                     return Err(Refusal::TwoViews);
                 }
@@ -134,8 +116,7 @@ pub fn read<I: IntoIterator<Item = String>>(args: I, default: View) -> Result<St
             TITLE_FLAG => {
                 let named = arguments.next().ok_or(Refusal::TitleWithoutName)?;
                 // A flag where a name should be is a missing name, not a title called
-                // `--shell`. Catching it here turns a puzzling "no such title" into the
-                // thing that actually happened.
+                // `--shell`.
                 if named.starts_with("--") {
                     return Err(Refusal::TitleWithoutName);
                 }
@@ -164,20 +145,14 @@ mod tests {
         given.iter().map(|a| (*a).to_owned()).collect()
     }
 
-    /// **Nothing asked for means the stored setting decides.**
-    ///
-    /// The property the whole preference exists for: somebody who set the shell as their
-    /// default gets it by double-clicking, with no arguments anywhere.
+    /// With no arguments, the stored setting decides.
     #[test]
     fn an_empty_command_line_uses_the_stored_default() {
         assert_eq!(read(args(&[]), View::List), Ok(Start::In(View::List)));
         assert_eq!(read(args(&[]), View::Shell), Ok(Start::In(View::Shell)));
     }
 
-    /// **An argument beats the setting, in both directions.**
-    ///
-    /// Asserted both ways round, because a precedence bug that only reversed one of them
-    /// would pass a test that only checked the interesting direction.
+    /// An argument beats the setting, in both directions.
     #[test]
     fn an_argument_overrides_the_stored_default() {
         assert_eq!(
@@ -202,10 +177,7 @@ mod tests {
         );
     }
 
-    /// **Contradictory arguments are refused, not resolved.**
-    ///
-    /// Picking one silently is the failure worth preventing: the flag somebody typed would
-    /// do something other than what it says, and they would have no way to notice.
+    /// Contradictory arguments are refused, not resolved.
     #[test]
     fn asking_for_two_views_at_once_is_refused() {
         assert_eq!(
@@ -218,7 +190,7 @@ mod tests {
         );
     }
 
-    /// Saying the same thing twice is emphasis, not a contradiction.
+    /// A repeated flag is not a contradiction.
     #[test]
     fn repeating_one_flag_is_not_a_contradiction() {
         assert_eq!(
@@ -236,10 +208,7 @@ mod tests {
         );
     }
 
-    /// **A flag where a name should be is a missing name.**
-    ///
-    /// Without this, `--title --shell` launches a search for a title called `--shell` and
-    /// reports that it does not exist, which is true and useless.
+    /// A flag where a title name should be is a missing name.
     #[test]
     fn a_title_flag_with_nothing_after_it_is_refused() {
         assert_eq!(
@@ -252,11 +221,7 @@ mod tests {
         );
     }
 
-    /// Arguments belonging to something else are left alone.
-    ///
-    /// The window is re-executed with a worker flag and sits on frameworks that take their
-    /// own arguments; refusing what this does not recognise would make it the arbiter of
-    /// every other crate's command line.
+    /// Arguments belonging to the worker or the frameworks are left alone.
     #[test]
     fn arguments_this_does_not_own_are_ignored() {
         assert_eq!(

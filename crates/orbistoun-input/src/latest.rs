@@ -1,27 +1,10 @@
 //! What the pads are doing, as the window last said.
 //!
-//! # Why this is here and not filled in
-//!
-//! The window owns input, because the shell's own button has to be seen by something that
-//! is not the title (D326). The guest is in another process, so pad state has to travel -
-//! and this is where it lands.
-//!
-//! **Nothing reads it yet, and that is not an oversight** - though the reason has narrowed since
-//! this was written. The shim is no longer unimplemented: obSCEne measured the 120-byte extent
-//! and its contents at rest, so `scePadReadState` answers the whole of it (`100-input/read-extent`,
-//! sweep 20260909-110725). What it cannot do is answer anything *else*, because which offset
-//! inside those bytes carries the buttons is an inference from one at-rest image rather than a
-//! measurement.
-//!
-//! So the transport stays unconsumed for the original reason in its sharper form: the mechanism
-//! is ours and testable, the payload's *encoding* is a measurement, and mixing the two is what
-//! produces confident wrong answers (D345). It is one hardware run from being read -
-//! `REQ-20260910T0650Z-d1c4`, open, asks for a button held down.
-//!
-//! What that buys now is not nothing. The window sends what a **title is allowed to see** -
-//! the shell's own button stripped, and a neutral pad while the shell has focus - so the
-//! arbitration that was previously a tested function with no observable effect now has one,
-//! and [`withheld`] counts what arrived against what was consumed.
+//! The window owns input so the shell's own button is seen by something other than the title;
+//! the guest is in another process, so pad state travels and lands here. The window
+//! sends what a title may see: the shell button stripped, and a neutral pad while the shell has
+//! focus. Input crosses as a level, latest state per port (D345); `scePadReadState` reads it,
+//! and [`withheld`] counts arrivals against reads.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -30,9 +13,8 @@ use crate::pad::PadState;
 
 /// The most recent state of each port.
 ///
-/// **Latest wins rather than a queue.** Input is a level, not a stream of events: a title
-/// asks what the pad is doing *now*, and a backlog of stale frames is worse than none -
-/// it would replay presses that finished seconds ago.
+/// Latest wins rather than a queue: input is a level, and a backlog would replay presses
+/// that finished seconds ago.
 static PORTS: Mutex<Vec<PadState>> = Mutex::new(Vec::new());
 
 /// How many updates have arrived.
@@ -51,26 +33,20 @@ pub fn arrived(pads: &[PadState]) {
 
 /// What one port is doing, or a pad nobody is holding when there is no such port.
 ///
-/// **An absent port answers neutral rather than nothing.** A title that enumerates four pads
-/// and finds two configured should see two quiet pads, not an error - that is the state of a
-/// real machine with two controllers plugged in.
+/// An absent port answers neutral: a title enumerating four pads with two configured sees two
+/// quiet pads, as on a real machine with two controllers.
 pub fn port(index: usize) -> PadState {
     READ.fetch_add(1, Ordering::Relaxed);
     lock().get(index).copied().unwrap_or_else(PadState::neutral)
 }
 
-/// What one port is doing, **only when something has said** - the window or a script. `None`
-/// means no pad state has ever arrived, and a read then answers the measured at-rest image rather
-/// than a pad claiming to be connected (D713).
+/// What one port is doing, only when the window or a script has sent pad state. `None` means
+/// nothing has arrived, and a read then answers the measured at-rest image (D713).
 pub fn delivered(index: usize) -> Option<PadState> {
     (ARRIVED.load(Ordering::Relaxed) > 0).then(|| port(index))
 }
 
-/// How many updates arrived, and how many were read.
-///
-/// **The gap is the point.** Until a layout is measured the read count stays at zero however
-/// much input arrives, and a report saying so is the difference between a transport that is
-/// waiting for something and one that is quietly broken.
+/// How many updates arrived, and how many were read; the gap shows input nothing consumed.
 #[must_use]
 pub fn withheld() -> (u32, u32) {
     (
@@ -96,8 +72,8 @@ pub fn summarise() -> Option<String> {
 
 /// The guard, with a poisoned lock treated as ordinary.
 ///
-/// A panic on one guest thread must not turn every later pad read into a panic on another;
-/// what is behind it is a list of plain values with no invariant a partial write could break.
+/// A panic on one guest thread must not turn later pad reads into panics; the list holds plain
+/// values with no invariant a partial write could break.
 fn lock() -> std::sync::MutexGuard<'static, Vec<PadState>> {
     PORTS
         .lock()
@@ -121,14 +97,9 @@ mod tests {
 
     /// Serialises the tests that touch the port table.
     ///
-    /// **The table is process-global, because it describes one machine's controllers**, and
-    /// the harness runs tests in parallel. Without this, a test publishing one pad truncates
-    /// the table another test is asserting two ports of, and which one fails depends on
-    /// timing - a gate that fails once a day is a gate people stop reading.
-    ///
-    /// Fifth appearance of this hazard, after `orbistoun-abi`'s shared array, D323's fixed
-    /// addresses, the `.bss` fill cache and the format-fault counter. Where the shared thing
-    /// *is* what is under test, a lock is the fix; where it is not, passing it is (D372).
+    /// The table is process-global because it describes one machine's controllers, and the harness
+    /// runs tests in parallel. Where the shared thing is what is under test, a lock is the fix
+    /// (D324).
     pub(crate) fn exclusively() -> std::sync::MutexGuard<'static, ()> {
         static PORT_TABLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         PORT_TABLE
@@ -136,10 +107,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// **What arrives is what can be read back, port by port.**
-    ///
-    /// The one property the transport has to have, and the only one testable before a layout
-    /// exists to hand it to a guest.
+    /// What arrives is what is read back, port by port, and the read count is kept.
     #[test]
     fn what_arrives_is_what_is_read_back_and_the_gap_is_counted() {
         let _guard = exclusively();
@@ -152,18 +120,14 @@ mod tests {
 
         assert!(super::port(0).is_down(Button::South));
         assert!(super::port(1).is_down(Button::Start));
-        // **An absent port is a quiet pad, not an error.** A title enumerating four while two
-        // are configured should find two nobody is holding.
+        // An absent port is a quiet pad, not an error.
         assert_eq!(super::port(9), PadState::neutral());
 
         let (arrived, read) = super::withheld();
         assert!(arrived > 0 && read > 0);
     }
 
-    /// **Latest wins; there is no backlog of stale frames.**
-    ///
-    /// Input is a level rather than a stream. A queue would replay presses that finished
-    /// seconds ago, which is worse than losing them.
+    /// Latest wins; there is no backlog of stale frames.
     #[test]
     fn a_later_update_replaces_an_earlier_one() {
         let _guard = exclusively();

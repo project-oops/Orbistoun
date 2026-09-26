@@ -1,20 +1,11 @@
 //! What a published implementation of the same interface does, recorded so orbistoun can be
 //! diffed against it.
 //!
-//! # Where the records come from
-//!
-//! `tools/differential/reference.c` compiled and run wherever the reference library lives.
-//! It emits its **inputs** alongside its results, and the checker rebuilds the call from
-//! those - so the two sides cannot drift into comparing different things, which is the way a
-//! differential quietly stops being one.
-//!
-//! # What agreement here does and does not establish
-//!
-//! That orbistoun implements the published interface the way that library does. **Not** that
-//! the target does. The target's C library is FreeBSD-derived and this reference may not be,
-//! so where the two libraries would differ, agreement says nothing about the console - which
-//! is why a record lands at [`Oracle::Differential`] rather than `measured`, and why that
-//! tier stays probeable (D478, D479).
+//! The records come from `tools/differential/reference.c`, run wherever the reference library
+//! lives. It emits its inputs with its results and the checker rebuilds each call from them, so
+//! the two sides cannot drift into comparing different calls. Agreement shows orbistoun matches
+//! that library, not the target, whose C library is FreeBSD-derived; so a record lands at
+//! [`Oracle::Differential`] rather than `measured`, and stays probeable (D478).
 //!
 //! [`Oracle::Differential`]: crate::knowledge::Oracle::Differential
 
@@ -23,23 +14,20 @@ use std::collections::BTreeMap;
 /// One argument as the reference recorded passing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Argument {
-    /// A NUL-terminated string, as **bytes** rather than text.
+    /// A NUL-terminated string, as bytes rather than text.
     ///
-    /// The interesting subjects are bytes: `strcmp` compares as `unsigned char` by
-    /// definition, so `"\x80"` against `"a"` is positive and an implementation using a
-    /// signed char answers backwards. A `String` could not hold that case at all.
+    /// `strcmp` compares as `unsigned char`, so `"\x80"` against `"a"` is positive and a signed-char
+    /// implementation answers backwards; a `String` could not hold that case.
     Text(Vec<u8>),
     /// A raw byte blob, as plain hex.
     ///
-    /// **Element data cannot ride in a text field**: a four-byte `5` is `05 00 00 00`, and a
-    /// NUL-terminated field would stop at the first of those. Its own type, no escaping to
-    /// get wrong.
+    /// Element data contains NULs (a four-byte `5` is `05 00 00 00`), which a NUL-terminated field
+    /// would stop at.
     Bytes(Vec<u8>),
     /// A null pointer, which is a value and not a missing argument.
     ///
-    /// `strtok(NULL, ..)` means "carry on from where the last call stopped", and an empty
-    /// string means something else entirely. Both occur in the same sequence, so they need
-    /// to be different things in the record.
+    /// `strtok(NULL, ..)` continues from the last call, which an empty string does not, and both
+    /// occur in one sequence.
     Null,
     /// A signed integer, passed as written.
     Signed(i64),
@@ -50,9 +38,8 @@ pub enum Argument {
 impl Argument {
     /// Reads one `s:`, `i:` or `u:` field.
     ///
-    /// **`s:` takes the rest of the field verbatim**, including spaces and colons: a subject
-    /// like `"   42"` is exactly the input whose leading-space handling is worth checking, and
-    /// trimming it here would silently test a different case than the reference ran.
+    /// `s:` takes the rest of the field verbatim, spaces and colons included: `"   42"` is exactly
+    /// the input whose leading-space handling is being checked.
     #[must_use]
     pub fn parse(field: &str) -> Option<Self> {
         let (tag, rest) = field.split_at(field.find(':')? + 1);
@@ -69,10 +56,8 @@ impl Argument {
 
 /// Decodes a text field's `\xNN` escapes back to the bytes the reference passed.
 ///
-/// The format escapes anything that would not survive it - a high byte, a pipe, a backslash -
-/// so this is the other half of that, and a malformed escape answers `None` rather than
-/// dropping the byte. A case silently missing a character would be compared against the
-/// wrong input.
+/// The format escapes high bytes, pipes and backslashes. A malformed escape answers `None`
+/// rather than dropping the byte, so no case is compared against the wrong input.
 fn unescape(field: &str) -> Option<Vec<u8>> {
     let raw = field.as_bytes();
     let mut out = Vec::with_capacity(raw.len());
@@ -95,9 +80,7 @@ fn unescape(field: &str) -> Option<Vec<u8>> {
 
 /// Decodes a `b:` field's plain hex, which must be whole bytes.
 ///
-/// An odd digit count is refused rather than rounded: half a byte means the record was
-/// truncated, and a case built from a truncated array would be compared against the wrong
-/// input while looking like it worked.
+/// An odd digit count means a truncated record and is refused rather than rounded.
 fn hex_bytes(field: &str) -> Option<Vec<u8>> {
     if field.len() % 2 != 0 {
         return None;
@@ -128,7 +111,7 @@ pub struct Case {
 /// Every case one reference run produced.
 #[derive(Debug, Clone, Default)]
 pub struct Reference {
-    /// The library it ran against, as `glibc 2.39`. **Every record must cite this.**
+    /// The library it ran against, as `glibc 2.39`. Every record cites it.
     pub library: String,
     /// The cases, in the order the run made them.
     pub cases: Vec<Case>,
@@ -137,10 +120,8 @@ pub struct Reference {
 impl Reference {
     /// Reads one run's output.
     ///
-    /// Unknown record types are ignored rather than refused: a newer reference emitting more
-    /// than this understands should still be readable for the part it does understand.
-    /// A malformed *known* record is a different thing and is dropped with the case, because
-    /// a case missing its return value would otherwise compare against zero.
+    /// Unknown record types are ignored, so a newer reference stays readable. A malformed known
+    /// record drops its case, since a case missing its return value would compare against zero.
     #[must_use]
     pub fn parse(text: &str) -> Self {
         let mut out = Self::default();
@@ -190,10 +171,8 @@ impl Reference {
 
     /// The cases grouped into sequences, in the order they were recorded.
     ///
-    /// **A step is `name#N`.** Some functions cannot be described by one call - `strtok`
-    /// carries state between them - so those are recorded as numbered steps and have to be
-    /// replayed in order against one buffer. A case with no `#` is its own sequence of one,
-    /// so a caller can walk everything the same way.
+    /// A step is `name#N`: stateful functions such as `strtok` are recorded as numbered steps and
+    /// replayed in order against one buffer. A case with no `#` is a sequence of one.
     #[must_use]
     pub fn sequences(&self) -> Vec<(String, Vec<&Case>)> {
         let mut out: Vec<(String, Vec<&Case>)> = Vec::new();
@@ -246,11 +225,7 @@ mod tests {
         assert_eq!(case.out.get("end_offset").map(String::as_str), Some("0x2"));
     }
 
-    /// **A subject's leading spaces survive parsing**, because they are the case.
-    ///
-    /// `strtoul("   42")` is worth checking precisely for what it does with the whitespace.
-    /// Trimming the field here would compare a different call than the reference made and
-    /// report agreement about it.
+    /// A subject's leading spaces survive parsing, because they are the case under test.
     #[test]
     fn a_subject_keeps_the_whitespace_that_makes_it_interesting() {
         let run = "REF|case|x|strtoul|s:   42|i:10\nREF|ret|x|0x2a\n";
@@ -272,11 +247,7 @@ mod tests {
         );
     }
 
-    /// **A high byte survives the round trip**, which is the case a text field could not hold.
-    ///
-    /// `strcmp` compares as `unsigned char`, so `"\x80"` against `"a"` is positive - and an
-    /// implementation using a signed char answers backwards. Writing the byte raw made the
-    /// record file stop being text, so the format escapes it and this decodes it.
+    /// An escaped high byte decodes to the byte, which a raw text field could not carry.
     #[test]
     fn an_escaped_byte_decodes_to_the_byte() {
         let run = "REF|case|x|strcmp|s:\\x80|s:a\nREF|ret|x|0x1\n";
@@ -320,7 +291,7 @@ mod tests {
         );
     }
 
-    /// **Half a byte is a truncated record, and the case is dropped rather than guessed.**
+    /// Half a byte is a truncated record, and the case is dropped rather than guessed.
     #[test]
     fn an_odd_length_blob_is_refused() {
         let run = "REF|case|x|qsort|b:050|u:4|s:int32-asc\nREF|ret|x|0x0\n";
@@ -346,7 +317,7 @@ mod tests {
         assert_eq!(grouped[1].1.len(), 1, "a lone case is a sequence of one");
     }
 
-    /// **A null argument is not an empty string**, and the sequence needs both.
+    /// A null argument is distinct from an empty string.
     #[test]
     fn a_null_argument_is_distinct_from_an_empty_string() {
         let run = "REF|case|x|strtok|n:|s:\nREF|ret|x|0x0\n";

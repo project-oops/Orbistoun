@@ -1,13 +1,8 @@
-//! A **translated** interpolation, checked against the framebuffer.
+//! A translated interpolation, checked against the framebuffer (D555).
 //!
-//! `translated_export.rs` put a translated constant on the screen. This puts a translated
-//! *interpolated attribute* there: the guest reads `attr0.x` through `v_interp_p1_f32`, and the
-//! value that arrives is the one the pipeline interpolated from the vertex shader's varying
-//! (D555).
-//!
-//! The oracle gained the varying first, deliberately - a translated interpolation checked
-//! against a pipeline that interpolates nothing would have been verified against material this
-//! project generated (D554).
+//! The guest reads `attr0.x` through `v_interp_p1_f32`, and the value that arrives is the one the
+//! pipeline interpolated from the vertex shader's varying. The oracle carries a hand-written
+//! varying, so the translation is not checked against material it produced.
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::draw_with;
@@ -31,11 +26,9 @@ fn device_or_skip(what: &str) -> bool {
 
 /// A shader that reads four channels of attribute zero and exports them.
 ///
-/// `v_interp_p1_f32 vN, v0, attr0.<chan>` four times, then `exp mrt0 v0, v1, v2, v3`. Written as
-/// guest instruction words, so what is translated is the encoding rather than a convenience.
-///
-/// The VINTRP encoding is `0xC8000000`: destination at shift 18, source at shift 0, attribute at
-/// shift 10 and channel at shift 8 - the layout `opcode-operands.toml` solved.
+/// `v_interp_p1_f32 vN, v0, attr0.<chan>` four times, then `exp mrt0 v0, v1, v2, v3`, written as
+/// guest instruction words. The VINTRP encoding is `0xC8000000`: destination at shift 18, source at
+/// shift 0, attribute at shift 10 and channel at shift 8, as `opcode-operands.toml` records.
 fn interpolating_shader() -> Vec<u8> {
     let mut bytes = Vec::new();
     for (register, channel) in (0u32..4).enumerate() {
@@ -62,35 +55,14 @@ fn translated(stage: Stage) -> Result<Vec<u32>, TranslateError> {
     .map(|(module, _)| module)
 }
 
-/// **A translated interpolation reads the value the pipeline interpolated.**
+/// A translated interpolation reads the value the pipeline interpolated.
 ///
-/// # What this asserts
-///
-/// The vertex shader gives all three corners the same colour, so every barycentric weighting of
-/// them is that colour and the expected result is exact - it depends on no sample position and
-/// no rounding the driver chose. The translated fragment shader interpolates `attr0.x` through
-/// `.w`, exports them, and every pixel comes back that colour.
-///
-/// It is compared against the hand-written passthrough shader over the same geometry as well as
-/// against the expected bytes, so a failure says which of the two moved.
-///
-/// The clear is a colour neither shader writes, so a translation that produced nothing reads as
-/// a different answer rather than an absent one.
-///
-/// # What it cannot assert
-///
-/// **That `p1` and `p2` mean what this translation says.** Both halves of the guest's pair are
-/// translated as the whole interpolated value, on the reasoning that SPIR-V's input variable
-/// *is* the result and the two-step computation has no host equivalent. A shader that used
-/// `p1`'s intermediate for anything other than feeding `p2` would get a different number here -
-/// that is recorded as an assumption in `interpolate`, and this test cannot see it, because the
-/// shader it uses does exactly what a compiler emits.
-///
-/// **Nor that the barycentrics are honoured.** Both `vsrc` operands - the guest's I and J - are
-/// ignored; the host interpolates with its own. With equal corners that is unobservable, which
-/// is the same reason this test can be exact at all.
-///
-/// `v_interp_mov_f32` has its own test below.
+/// All three corners carry the same colour, so every barycentric weighting is that colour and the
+/// result is exact. The translated shader's frame is compared with the hand-written passthrough
+/// shader's as well as with the expected bytes, over a clear neither writes. Both halves of the
+/// guest's `p1`/`p2` pair translate as the whole interpolated value, and the guest's I and J
+/// operands are ignored in favour of the host's barycentrics; with equal corners neither is
+/// observable.
 #[test]
 fn a_translated_interpolation_reads_the_interpolated_value() {
     if !device_or_skip("a_translated_interpolation_reads_the_interpolated_value") {
@@ -128,13 +100,12 @@ fn a_translated_interpolation_reads_the_interpolated_value() {
     }
 }
 
-/// A shader that reads four channels of attribute zero **without interpolating** and exports them.
+/// A shader that reads four channels of attribute zero without interpolating, and exports them.
 ///
-/// `v_interp_mov_f32 vN, <parameter>, attr0.<chan>` four times, then `exp mrt0`. Same encoding
-/// as the interpolating one with the family's opcode field - two bits at shift 16 - set to two,
-/// and the parameter in the low byte. Both numbers are read off the committed fixture rather
-/// than written from a document: `unreached.gcn` holds `v_interp_mov_f32_e32 v4, p0, attr0.x`
-/// as `0xc8120002` and `v9, p10, attr31.w` as `0xc8267f00`.
+/// `v_interp_mov_f32 vN, <parameter>, attr0.<chan>` four times, then `exp mrt0`: the interpolating
+/// encoding with the opcode field (two bits at shift 16) set to two and the parameter in the low
+/// byte. Both are read off the committed fixture `unreached.gcn`, which holds `v_interp_mov_f32_e32
+/// v4, p0, attr0.x` as `0xc8120002` and `v9, p10, attr31.w` as `0xc8267f00`.
 fn parameter_move_shader(parameter: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (register, channel) in (0u32..4).enumerate() {
@@ -166,16 +137,12 @@ fn translated_move(parameter: u32, stage: Stage) -> Result<Vec<u32>, TranslateEr
 const P10: u32 = 0;
 const P0: u32 = 2;
 
-/// **A translated parameter move reads one corner's value, not a blend of three.**
+/// A translated parameter move reads one corner's value, not a blend of three.
 ///
-/// The test that distinguishes flat from interpolated, which is the whole content of this
-/// translation: the three corners are given *different* colours, so an interpolated read is a
-/// gradient and a flat read is one colour. Both are drawn here and compared with each other as
-/// well as against the expected bytes, so a failure says which moved.
-///
-/// The expected colour is the first corner's, which is the provoking vertex under the
-/// convention this host uses by default. If a device ever disagreed, this asserts uniformity
-/// too - and the two assertions fail differently, which is the point of having both.
+/// The corners carry different colours, so an interpolated read is a gradient and a flat read is
+/// one colour; both are drawn and compared. The expected colour is the first corner's, the
+/// provoking vertex under the host's default convention, and uniformity is asserted separately so
+/// the two failures differ.
 #[test]
 fn a_translated_parameter_move_reads_one_corner_flat() {
     if !device_or_skip("a_translated_parameter_move_reads_one_corner_flat") {
@@ -187,8 +154,7 @@ fn a_translated_parameter_move_reads_one_corner_flat() {
         [0.0, 1.0, 0.0, 1.0],
         [0.0, 0.0, 1.0, 1.0],
     ];
-    // Black, which neither corner is, so a draw that produced nothing reads as a different
-    // answer rather than as an absent one.
+    // Black, which no corner is, so a draw that produced nothing is a different answer.
     let clear = [0.0, 0.0, 0.0, 1.0];
 
     let vertex = interpolated_vertex_module(corners);
@@ -218,8 +184,8 @@ fn a_translated_parameter_move_reads_one_corner_flat() {
         "the flat value should be the first corner's, which is the provoking vertex"
     );
 
-    // The same attribute read the interpolating way is *not* one colour, which is what makes
-    // the assertion above a measurement of the decoration rather than of the geometry.
+    // The same attribute read the interpolating way is not one colour, so the assertion above
+    // measures the decoration rather than the geometry.
     let smooth = translated(Stage::Fragment).expect("the interpolation translated");
     let gradient =
         draw_with(&vertex, &smooth, clear, width, height).expect("the interpolated draw ran");
@@ -229,12 +195,10 @@ fn a_translated_parameter_move_reads_one_corner_flat() {
     );
 }
 
-/// **Moving an interpolation delta is refused, not answered with the attribute.**
+/// Moving an interpolation delta is refused, not answered with the attribute.
 ///
-/// `P10` and `P20` are differences between vertices. The host interpolates with its own
-/// barycentrics and offers no way to read the gradient it used, so there is nothing to
-/// translate - and answering with the attribute's value would be a plausible number that is
-/// wrong everywhere.
+/// `P10` and `P20` are differences between vertices. The host offers no way to read the gradient it
+/// used, and answering with the attribute's value would be a plausible wrong number.
 #[test]
 fn moving_an_interpolation_delta_is_refused() {
     assert!(
@@ -243,10 +207,8 @@ fn moving_an_interpolation_delta_is_refused() {
     );
 }
 
-/// **An interpolation in a compute dispatch is refused rather than read from nowhere.**
-///
-/// The control. A compute module has no fragment inputs, so there is nothing to interpolate
-/// from - and the failure that matters is not an error but a *read of something arbitrary*.
+/// An interpolation in a compute dispatch is refused rather than read from nowhere: a compute
+/// module has no fragment inputs.
 #[test]
 fn an_interpolation_without_a_fragment_input_is_refused() {
     assert!(

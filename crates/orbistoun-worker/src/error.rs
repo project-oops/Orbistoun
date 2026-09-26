@@ -29,7 +29,7 @@ pub enum Error {
     #[error("reading what was learned: {0}")]
     Learned(#[source] orbistoun_hle::HleError),
 
-    /// The console settings file could not be read.
+    /// The system settings file could not be read.
     #[error("reading what the console is set to: {0}")]
     ConsoleSettings(#[source] orbistoun_shell::ShellError),
 

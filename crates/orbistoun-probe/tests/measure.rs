@@ -1,26 +1,16 @@
 //! Reading `measure` records, and the export table one section of them carries.
 //!
-//! # Why these are written against a hand-built transcript
-//!
-//! The real reports are 300KB each and live in the sibling project. Copying one in for this
-//! would be copying evidence, not a specification - and a test that read a sibling checkout
-//! fails for anyone without one, which is the coupling D207 exists to prevent. What is
-//! pinned here is the *shape*: seven fields, one section name, a hash and an address.
-//!
-//! # What each of these is guarding against
-//!
-//! Every one asserts on a refusal or an absence, not on a count of passes. A reader that
-//! decoded anything eleven characters long, or that grade-stamped a measurement as though
-//! somebody had asserted a device, would pass any test that only counted what came back.
+//! Written against a hand-built transcript that pins the record shape (seven fields, a
+//! section name, a hash and an address), not against a sibling project's reports (D207).
+//! Each test asserts on a refusal or an absence, which a lenient reader would fail.
 
 use orbistoun_hle::knowledge::Oracle;
 use orbistoun_probe::{KEXPORT_SECTION, Origin, Transcript, export_aliases};
 
 /// A transcript carrying measurements, including a small export table.
 ///
-/// The two hashes at `0x8000006f0` are `getpeername` and `_getpeername` as a real console
-/// spells them - one function under two names, which is the fact the alias grouping exists
-/// to surface (D606).
+/// The two hashes at `0x8000006f0` are `getpeername` and `_getpeername`: one function under
+/// two names, which the alias grouping surfaces (D606).
 fn transcript() -> String {
     [
         "OBS|build|test-build|payload",
@@ -59,9 +49,7 @@ fn measurements_are_read_rather_than_carried_uninterpreted() {
 
 #[test]
 fn a_value_that_is_not_a_number_comes_back_as_none_rather_than_zero() {
-    // The failure this guards: a reader that parsed with `unwrap_or(0)` would turn "the
-    // probe wrote a word here" into "the probe measured zero", and nothing downstream could
-    // tell the two apart (principle 3).
+    // An unparseable value is refused, never read as zero.
     let text = [
         "OBS|build|test-build|payload",
         "OBS|measure|135-sysctl/names|kern.ostype|value|FreeBSD|text",
@@ -92,9 +80,7 @@ fn the_section_tally_names_every_section_including_ones_nothing_interprets() {
 
 #[test]
 fn a_measurement_is_only_measured_when_the_operator_asserted_the_target() {
-    // Same rule as every other fact: a number measured on a stand-in describes the stand-in
-    // (D246). Asserting on the demotion, because the promotion is the direction that
-    // corrupts a knowledge base.
+    // A number measured on a stand-in describes the stand-in (D246), so the grade is demoted.
     let transcript = read(&transcript());
     for measurement in transcript.measurements(&Origin::unasserted()) {
         assert_eq!(measurement.known_by, Oracle::Assumed);
@@ -126,9 +112,8 @@ fn the_export_table_decodes_to_the_hashes_a_name_search_can_use() {
 
 #[test]
 fn a_subject_that_is_not_an_encoded_hash_is_skipped_rather_than_decoded() {
-    // The failure this guards: eleven characters of anything decode to a plausible hash, and
-    // a plausible hash is the one error nothing downstream can notice. A section can carry a
-    // record shaped differently - so the reader has to refuse, not salvage.
+    // Any eleven characters decode to a plausible hash, so a differently shaped record is
+    // refused, not salvaged.
     let text = [
         "OBS|build|test-build|payload",
         &format!("OBS|measure|{KEXPORT_SECTION}|too-short|vaddr|0x800000690|offset"),
@@ -147,8 +132,7 @@ fn a_subject_that_is_not_an_encoded_hash_is_skipped_rather_than_decoded() {
         "only the well-formed record may survive, not five salvaged ones"
     );
     assert_eq!(exports[0].encoded, "+L22kkFiXok");
-    // And the records that were skipped are still counted as measurements, because they
-    // were measured - being unreadable by this decoder is not being absent.
+    // Skipped records still count as measurements: unreadable by this decoder is not absent.
     assert_eq!(
         transcript.measured_sections().get(KEXPORT_SECTION),
         Some(&6)
@@ -172,8 +156,7 @@ fn two_hashes_at_one_address_group_and_one_hash_does_not() {
 
 #[test]
 fn a_table_with_no_repeated_address_yields_no_aliases() {
-    // Asserting on the empty case. A grouping that returned every address would look
-    // identical on a table where every address really is shared, which is not this one.
+    // The empty case, which a grouping returning every address would fail.
     let text = [
         "OBS|build|test-build|payload",
         &format!("OBS|measure|{KEXPORT_SECTION}|TXFFFiNldU8|vaddr|0x800000010|offset"),

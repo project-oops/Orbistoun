@@ -1,32 +1,21 @@
 //! Finding the modules a title ships with itself.
 //!
-//! # Why this is a search rather than a lookup
-//!
-//! An executable's vendor tables name the libraries it imports from and say **nothing about
-//! where they live** - bare names, no paths, in both the library table and the module table
-//! (D482). So a loader given `Il2CppUserAssemblies` has to go and find it.
-//!
-//! The platform's own modules are in three fixed directories and are not this: they are
-//! resident, and a request for one is refused rather than loaded. What is left is the title's
-//! own tree, where the corpus is consistent - **the filename is the library name** - and where
-//! the directory is a convention of whatever built the title rather than anything the platform
-//! guarantees. Hence: search the tree for the name, do not walk to a path.
+//! An executable's vendor tables name the libraries it imports from with bare names and no paths
+//! (D482). The platform's own modules are resident and are not loaded from here. A title's own
+//! modules sit in its tree, where the filename is the library name and the directory is a
+//! convention of whatever built the title, so the loader searches the tree for the name.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Extensions a title's own module is shipped with.
-///
-/// Both are seen in the corpus; a title's own modules use `.prx` and the platform's own
-/// `.sprx`, but nothing guarantees a title follows that so both are searched.
+/// Extensions a title's own module is shipped with. Title modules use `.prx` and the platform's
+/// `.sprx`, but nothing guarantees a title follows that, so both are searched.
 const MODULE_EXTENSIONS: [&str; 2] = ["prx", "sprx"];
 
 /// How deep to look before giving up.
 ///
-/// Deep enough for every layout in the corpus - the deepest is `Media/Modules/` at two - with
-/// room to spare, and bounded so a title with a large data tree does not turn a load into a
-/// filesystem walk. A module that is deeper than this is reported as not found, which is the
-/// truth, rather than the search running on.
+/// Deeper than any layout in the corpus (`Media/Modules/` is two), and bounded so a large data tree
+/// does not turn a load into a filesystem walk. A module deeper than this is reported as not found.
 const MAX_DEPTH: usize = 6;
 
 /// A module the title ships, and the library name that asked for it.
@@ -40,14 +29,10 @@ pub struct TitleModule {
 
 /// Finds the file for each library name, under the title's own root.
 ///
-/// **Matched on the file's stem against the library name**, case-insensitively, with an
-/// exact-case match preferred where several files answer. The case-insensitive part is for the
-/// host filesystem rather than for the guest: every title in the corpus spells its filename
-/// exactly as it spells the import, including one that uses a lower-case `c` in both (D482).
-///
-/// A name nothing answers is simply absent from the result. That is not an error here - plenty
-/// of the names an executable imports from are the platform's, and those are supposed to be
-/// missing from the title's tree.
+/// Matched on the file's stem against the library name, case-insensitively, preferring an
+/// exact-case match. The case-insensitivity is for the host filesystem; titles spell the filename
+/// as they spell the import (D482). A name nothing answers is absent from the result, which is
+/// normal for the platform's own libraries.
 #[must_use]
 pub fn find(root: &Path, wanted: &[String]) -> Vec<TitleModule> {
     let candidates = shipped_modules(root);
@@ -57,8 +42,8 @@ pub fn find(root: &Path, wanted: &[String]) -> Vec<TitleModule> {
         let Some(matches) = candidates.get(&lowered) else {
             continue;
         };
-        // Exact case wins where the filesystem offered more than one spelling; otherwise the
-        // first, which is stable because the walk sorts.
+        // Exact case wins where the filesystem offered several spellings; otherwise the first,
+        // which is stable because the walk sorts.
         let chosen = matches
             .iter()
             .find(|p| {
@@ -79,9 +64,8 @@ pub fn find(root: &Path, wanted: &[String]) -> Vec<TitleModule> {
 
 /// Every module-shaped file under the title root, by lower-cased stem.
 ///
-/// Collected in one walk rather than one per name: a title imports from dozens of libraries
-/// and almost all of them are the platform's, so searching the tree per name would walk it
-/// dozens of times to find nothing.
+/// Collected in one walk: a title imports from dozens of libraries, almost all the platform's, so a
+/// walk per name would search the tree dozens of times for nothing.
 fn shipped_modules(root: &Path) -> BTreeMap<String, Vec<PathBuf>> {
     let mut found: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     let mut queue = vec![(root.to_path_buf(), 0_usize)];
@@ -132,10 +116,8 @@ mod tests {
         dir
     }
 
-    /// A module is found by the name that imports it, wherever the title put it.
-    ///
-    /// The corpus puts them under `Media/Modules/`, which is a convention of whatever built
-    /// the title and not a platform path - so the search must not depend on it.
+    /// A module is found by the name that imports it, wherever the title put it; `Media/Modules/`
+    /// is a build convention, not a platform path.
     #[test]
     fn a_module_is_found_by_name_wherever_it_sits() {
         let dir = title(&[
@@ -151,10 +133,7 @@ mod tests {
         assert!(found[0].path.ends_with("Il2CppUserAssemblies.prx"));
     }
 
-    /// **A name the title does not ship is absent, not an error.**
-    ///
-    /// Most of what an executable imports from is the platform's, and those are supposed to
-    /// be missing from the title's own tree. Reporting them would make every load look broken.
+    /// A name the title does not ship is absent, not an error.
     #[test]
     fn a_platform_library_is_simply_not_there() {
         let dir = title(&["Media/Modules/Il2CppUserAssemblies.prx"]);
@@ -166,11 +145,8 @@ mod tests {
         assert_eq!(found[0].library, "Il2CppUserAssemblies");
     }
 
-    /// The case a title actually uses is the case it gets back.
-    ///
-    /// One title in the corpus spells the library `Il2cppUserAssemblies` - lower-case `c` - in
-    /// its imports *and* in its filename. A match that normalised the answer would hand the
-    /// loader a name the executable never asked for.
+    /// The case a title uses is the case it gets back, such as `Il2cppUserAssemblies` with a
+    /// lower-case `c` in both import and filename.
     #[test]
     fn the_library_name_comes_back_as_the_executable_spells_it() {
         let dir = title(&["Media/Modules/Il2cppUserAssemblies.prx"]);
@@ -184,10 +160,7 @@ mod tests {
         );
     }
 
-    /// A file whose case differs from the import is still found, and the exact one preferred.
-    ///
-    /// The case-insensitive half is for the host filesystem, not the guest: a tree that
-    /// preserved case differently would otherwise turn a working title into a missing module.
+    /// A file whose case differs from the import is still found, and the exact one is preferred.
     #[test]
     fn an_exact_spelling_wins_where_the_filesystem_offers_two() {
         let dir = title(&["a/Il2CppUserAssemblies.prx", "b/il2cppuserassemblies.prx"]);

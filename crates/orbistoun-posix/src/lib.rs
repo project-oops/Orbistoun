@@ -1,42 +1,21 @@
 //! The POSIX-named half of the platform, delegated to what already implements it.
 //!
-//! # Why this library exists separately at all
-//!
 //! A title imports `pthread_create` from `libScePosix` and `scePthreadCreate` from
-//! `libkernel`, and they are two names for one behaviour. A NID is the hash of a name, so
-//! the POSIX spelling resolves to nothing unless it is declared - and forty-nine of them
-//! were being asked for and answered by nobody, while the vendor-named twins beside them
-//! were implemented and working (D349).
-//!
-//! # Delegation, not reimplementation
-//!
-//! Each served name resolves to the **same function pointer** the vendor name resolves to,
-//! looked up from `orbistoun-kernel`'s own table at startup. Nothing is copied, so the two
-//! spellings cannot drift, and a fix to one is a fix to both by construction rather than by
-//! anybody remembering.
-//!
-//! Arities come from the vendor declaration for the same reason.
-//!
-//! # What the return convention costs, stated
-//!
-//! POSIX answers `0` or an errno; the vendor-named calls answer their own codes. **The
-//! success paths coincide** - both are zero - and the failure paths do not.
-//!
-//! Nothing here invents an errno. A failure returns this project's placeholder, which
-//! deliberately avoids the high bit so it can never be mistaken for an established value
-//! (principle 3). A guest testing `!= 0` takes its error path correctly; one switching on
-//! specific errno values falls to its default branch rather than matching the wrong case.
-//! That is a worse answer than a real errno and a much better one than a plausible guess,
-//! and it improves the day somebody reads the values out of a citable source.
+//! `libkernel`: two names for one behaviour, and a NID is the hash of a name, so the POSIX
+//! spelling resolves only if it is declared. Each served name resolves to the same function
+//! pointer as its vendor twin, looked up from the implementing crate at startup, so the two
+//! cannot drift; arities come from the vendor declaration (D349). Success paths coincide
+//! (both zero). A failure returns this project's placeholder rather than an invented errno,
+//! so a guest testing `!= 0` takes its error path and one switching on errno values falls to
+//! its default branch.
 
 use orbistoun_core::GuestFn;
 use orbistoun_hle::guest_module;
 
 guest_module! {
     "libScePosix" {
-        // Every name here is imported by a title in the library. Arities for the served
-        // ones are taken from the vendor-named function each delegates to, so the two
-        // cannot disagree; the rest are provisional.
+        // Every name here is imported by a title from this library. Served names take the arity of
+        // the vendor function they delegate to; the rest are provisional.
         "close" => 1,
         "open" => 3,
         "pthread_attr_destroy" => 1,
@@ -46,8 +25,8 @@ guest_module! {
         "pthread_attr_setstacksize" => 2,
         "pthread_cond_broadcast" => 1,
         "pthread_cond_destroy" => 1,
-        // Two arguments, not the three its vendor twin takes: `scePthreadCondInit` ends in
-        // a name and the POSIX call does not (D385).
+        // Two arguments, not the three its vendor twin takes: `scePthreadCondInit` ends in a name
+        // and the POSIX call does not.
         "pthread_cond_init" => 2,
         "pthread_cond_signal" => 1,
         "pthread_cond_wait" => 2,
@@ -62,24 +41,19 @@ guest_module! {
         "pthread_mutexattr_setprotocol" => 2,
         "pthread_mutexattr_settype" => 2,
         "pthread_self" => 0,
-        // `(thread, policy, const struct sched_param *)` in both spellings, so they delegate;
-        // PPSA04263 imports the setter under this name.
+        // `(thread, policy, const struct sched_param *)` in both spellings, so they delegate.
         "pthread_getschedparam" => 3,
         "pthread_setschedparam" => 3,
         "read" => 3,
-        // Measured, not assumed: seventeen of the twenty-five open-toolchain payloads
-        // import it, and it is the POSIX spelling of a call this project already serves.
+        // Imported by most open-toolchain payloads; the POSIX spelling of a call already served.
         "write" => 3,
-        // The two time calls. Implemented in `orbistoun-libc` and declared here, because
-        // here is where a title was measured importing them - one declaration per symbol,
-        // and which crate holds the code is a separate question.
+        // The time calls, implemented in `orbistoun-libc` and declared here, where a title imports
+        // them (D367).
         "clock_gettime" => 2,
         "gettimeofday" => 2,
-        // The sockets, implemented in `orbistoun-fs` next to the descriptor table they
-        // share with files (D371). Eight of these were measured being imported from this
-        // library by a title; `accept`, `listen` and `getpeername` were not, and are here
-        // because their eight siblings are - which is an inference, and is recorded as one
-        // in the knowledge file rather than passed off as a measurement.
+        // The sockets, implemented in `orbistoun-fs` beside the descriptor table they share with
+        // files (D371). `accept`, `listen` and `getpeername` are declared by inference from their
+        // imported siblings, recorded as an inference in the knowledge file.
         "socket" => 3,
         "bind" => 3,
         "listen" => 2,
@@ -92,14 +66,12 @@ guest_module! {
         "send" => 4,
         "recv" => 4,
         "shutdown" => 2,
-        // Waiting, and printing an address. Both were measured being imported from this
-        // library by a title, and both are implemented in `orbistoun-fs` beside the
-        // descriptor table they ask about (D367).
+        // Waiting, and printing an address: imported from this library, implemented in
+        // `orbistoun-fs` beside the descriptor table (D367).
         "select" => 5,
         "inet_ntop" => 4,
-        // The timed acquisitions. The POSIX ones take an ABSOLUTE deadline as their last
-        // argument and the `_np` pair a RELATIVE span, which is why each has its own
-        // entry point rather than a shared one with a flag (worklog 315).
+        // The timed acquisitions. The POSIX ones take an absolute deadline as their last argument
+        // and the `_np` pair a relative span, so each has its own entry point.
         "pthread_mutex_timedlock" => 2,
         "posix_pthread_mutex_timedlock" => 2,
         "pthread_rwlock_timedrdlock" => 2,
@@ -115,7 +87,7 @@ guest_module! {
         "pthread_cond_reltimedwait_np" => 3,
         "posix_pthread_cond_reltimedwait_np" => 3,
         // The POSIX timed condition wait and the once-only initialiser.
-        // `pthread_cond_timedwait` takes an ABSOLUTE deadline as its third argument.
+        // `pthread_cond_timedwait` takes an absolute deadline as its third argument.
         "pthread_cond_timedwait" => 3,
         "posix_pthread_cond_timedwait" => 3,
         "pthread_once" => 2,
@@ -174,10 +146,8 @@ guest_module! {
         "pthread_condattr_destroy" => 1,
         "posix_pthread_condattr_destroy" => 1,
         "posix_pthread_equal" => 2,
-        // The `posix_`-prefixed family: the same POSIX functions under the names this
-        // library also exports them by. Each arity is its unprefixed twin's, because it is
-        // the same signature - unlike the vendor twins, which end in a name argument the
-        // POSIX form has no place for (D385). See D475 for what is assumed here.
+        // The `posix_`-prefixed family: the same POSIX functions under the names this library also
+        // exports them by, each with its unprefixed twin's arity (D475).
         "posix_clock_gettime" => 2,
         "posix_close" => 1,
         "posix_fstat" => 2,
@@ -247,10 +217,9 @@ guest_module! {
         "posix_sleep" => 1,
         "posix_stat" => 2,
         "posix_write" => 3,
-        // Descriptor and mapping calls, implemented under their POSIX names beside the
-        // file calls in `orbistoun-fs`. Arities are the POSIX signatures.
-        // `flock`, `msync`, `getrlimit`, `getsockopt` and the `getdents` family are
-        // deliberately absent - see the worklog for why each is refused rather than guessed.
+        // Descriptor and mapping calls, implemented under their POSIX names beside the file calls
+        // in `orbistoun-fs`. Arities are the POSIX signatures. `flock`, `msync`, `getrlimit`,
+        // `getsockopt` and the `getdents` family are refused rather than guessed.
         "creat" => 2,
         "readv" => 3,
         "writev" => 3,
@@ -260,11 +229,9 @@ guest_module! {
         "fdatasync" => 1,
         "getpagesize" => 0,
         "madvise" => 3,
-        // Byte order, which is one operation under four names. One argument each.
+        // Byte order, one operation under four names. One argument each.
         "htonl" => 1, "htons" => 1, "ntohl" => 1, "ntohs" => 1,
-        // Delegated to the vendor twin each names, whose arity was checked against the
-        // POSIX one first. Two candidates were refused for failing that check - see the
-        // note beside them in `DELEGATED`.
+        // Delegated to the named vendor twin, whose arity matches the POSIX one.
         "inet_pton" => 3,
         "mprotect" => 3,
         "pthread_attr_getdetachstate" => 2,
@@ -273,8 +240,8 @@ guest_module! {
         "pthread_attr_setguardsize" => 2,
         "pthread_attr_setinheritsched" => 2,
         "pthread_attr_setschedpolicy" => 2,
-        // POSIX arities: the rwlock init takes a lock and attributes, the barrier init a
-        // barrier, attributes and a count. Neither takes the name their vendor twins do.
+        // POSIX arities: the rwlock init takes a lock and attributes, the barrier init a barrier,
+        // attributes and a count. Neither takes the name their vendor twins do.
         "pthread_rwlock_init" => 2,
         "pthread_barrier_init" => 3,
         "pthread_barrier_destroy" => 1,
@@ -289,46 +256,35 @@ guest_module! {
         "pthread_rwlock_trywrlock" => 1,
         "pthread_rwlock_unlock" => 1,
         "pthread_rwlock_wrlock" => 1,
-        // Two more with vendor-named twins already implemented. `lseek` and `munmap` were
-        // measured being imported here, and both delegate exactly as `read` and `close` do.
+        // Imported here, and delegating exactly as `read` and `close` do.
         "lseek" => 3,
         "munmap" => 2,
         "mmap" => 6,
         // FreeBSD's own underscored spellings, which its C library uses internally so that a
-        // program replacing `open` does not break `fopen`. The payloads import both, and
-        // they are the same function - so they delegate to the same one.
+        // program replacing `open` does not break `fopen`. The same function, so the same delegate.
         "_open" => 3,
         "_close" => 1,
         "_read" => 3,
-        // Two thread calls with no vendor-named twin, written under their POSIX names in
-        // `orbistoun-kernel` where the thread registry is, and declared here where a title
-        // was measured importing them (D367).
+        // Thread calls with no vendor-named twin, written under their POSIX names in
+        // `orbistoun-kernel` beside the thread registry (D367).
         "pthread_detach" => 1,
         "pthread_exit" => 1,
-        // `fstat` was measured being imported here; `stat`, `lstat` and the three directory
-        // calls are declared in `libc`, where FreeBSD puts them and where no title contradicts
-        // it (D367).
+        // `fstat` is imported here; `stat`, `lstat` and the directory calls are declared in `libc`,
+        // where FreeBSD puts them (D367).
         "fstat" => 2,
-        // Imported and not served: no vendor-named equivalent is implemented yet. Most
-        // are sockets, which belong to a library this project does not model at all.
-        //
-        // **This list shrinks as things get served, and a row left here after that shadows
-        // the real one** - the registry takes the last declaration of a name, so a stale
-        // zero-arity row silently replaced a correct arity three times before
-        // `no_name_is_declared_twice` was written to catch it.
+        // Imported and not served: no vendor-named equivalent is implemented. Most are sockets.
+        // The registry takes the last declaration of a name, so a row left here after its name is
+        // served shadows the real arity; `no_name_is_declared_twice` catches it.
         "pthread_equal" => 2,
-        // Thread-specific-data keys, now served: an mspace-booted Unity title reached its
-        // Intel TBB scheduler, which builds its per-thread state on these (D453). Written
-        // under their POSIX names in `orbistoun-kernel` beside the thread registry.
+        // Thread-specific-data keys, written under their POSIX names in `orbistoun-kernel` beside
+        // the thread registry (D453).
         "pthread_getspecific" => 1,
         "pthread_key_create" => 2,
         "pthread_key_delete" => 1,
         "pthread_setspecific" => 2,
         "recvfrom" => 0,
-        // POSIX unnamed semaphores, now served: PPSA21564's engine builds its condition
-        // variable on one, and unimplemented `sem_init` answered a placeholder its assert
-        // rejected (D455). Written under their POSIX names in `orbistoun-kernel` beside the
-        // vendor semaphore calls.
+        // POSIX unnamed semaphores, written under their POSIX names in `orbistoun-kernel` beside
+        // the vendor semaphore calls.
         "sem_init" => 3,
         "sem_wait" => 1,
         "sem_trywait" => 1,
@@ -342,10 +298,9 @@ guest_module! {
 
 /// Which POSIX name is served by which vendor-named function.
 ///
-/// **A table rather than a convention.** The names mostly transform mechanically -
-/// `pthread_mutex_lock` to `scePthreadMutexLock` - and mostly is the problem: three of the
-/// forty-nine break the pattern, and a rule with exceptions applied by code would serve the
-/// wrong function silently. Every pair here was checked against the implemented set.
+/// A table rather than a naming rule: the names mostly transform mechanically
+/// (`pthread_mutex_lock` to `scePthreadMutexLock`), and the exceptions would be served the
+/// wrong function silently.
 const DELEGATED: &[(&str, &str)] = &[
     ("close", "sceKernelClose"),
     ("open", "sceKernelOpen"),
@@ -356,11 +311,9 @@ const DELEGATED: &[(&str, &str)] = &[
     ("pthread_attr_setstacksize", "scePthreadAttrSetstacksize"),
     ("pthread_cond_broadcast", "scePthreadCondBroadcast"),
     ("pthread_cond_destroy", "scePthreadCondDestroy"),
-    // **Three that do not delegate to their vendor twin**, and the arity is why. Each
-    // vendor call ends in a name the POSIX one has no argument for, so delegating meant
-    // reading a register the caller never set - which faulted the first guest to reach it
-    // on a stale value (D385). They are written under their POSIX names in
-    // `orbistoun-kernel`, beside the vendor ones they wrap.
+    // Three that do not delegate to their vendor twin: each vendor call ends in a name the
+    // POSIX one has no argument for, so delegating would read a register the caller never set.
+    // They are written under their POSIX names in `orbistoun-kernel`.
     ("pthread_cond_init", "pthread_cond_init"),
     ("pthread_cond_signal", "scePthreadCondSignal"),
     ("pthread_cond_wait", "scePthreadCondWait"),
@@ -382,15 +335,13 @@ const DELEGATED: &[(&str, &str)] = &[
     ("pthread_setschedparam", "scePthreadSetschedparam"),
     ("read", "sceKernelRead"),
     ("write", "sceKernelWrite"),
-    // **Two entries where the two names are the same**, and that is not a mistake. These
-    // are POSIX functions with no vendor-named twin: the implementation is a C library one
-    // and lives in `orbistoun-libc` under its own name. The delegation still earns its
-    // place, because it is what binds a declaration here to code over there - and the test
-    // below refuses a delegation that names nothing.
+    // Entries where both names are the same: POSIX functions with no vendor-named twin,
+    // implemented under their own name in `orbistoun-libc`. The entry binds the declaration
+    // here to that code, and the test below refuses one that names nothing.
     ("clock_gettime", "clock_gettime"),
     ("gettimeofday", "gettimeofday"),
-    // The sockets, same-named for the same reason: there is no vendor-named twin, and the
-    // implementation is a POSIX one living beside the descriptor table.
+    // The sockets, same-named for the same reason: no vendor-named twin, and a POSIX
+    // implementation beside the descriptor table.
     ("socket", "socket"),
     ("bind", "bind"),
     ("listen", "listen"),
@@ -419,16 +370,10 @@ const DELEGATED: &[(&str, &str)] = &[
     ("pthread_setspecific", "pthread_setspecific"),
     ("pthread_getspecific", "pthread_getspecific"),
     ("pthread_key_delete", "pthread_key_delete"),
-    // The read-write locks, barriers and the remaining attribute accessors, each
-    // delegating to the vendor function that already implements it.
-    //
-    // **Every one of these had its arity checked against the POSIX signature before it
-    // was added**, and two candidates failed: `scePthreadBarrierInit` takes four
-    // arguments to POSIX's three, and `scePthreadRwlockInit` three to POSIX's two -
-    // both because the vendor call ends in a name the POSIX one has no argument for.
-    // Delegating those would read a register the caller never set, which is the fault
-    // D385 cost an evening to. They are absent here deliberately, and stay unimplemented
-    // until they are written under their POSIX names beside the three above.
+    // The read-write locks, barriers and remaining attribute accessors, each delegating to the
+    // vendor function that implements it, with arities checked against the POSIX signature.
+    // `scePthreadBarrierInit` and `scePthreadRwlockInit` take a trailing name argument, so
+    // their POSIX spellings have their own entry points below.
     ("inet_pton", "__inet_pton"),
     ("mprotect", "sceKernelMprotect"),
     (
@@ -449,9 +394,8 @@ const DELEGATED: &[(&str, &str)] = &[
         "pthread_attr_setschedpolicy",
         "scePthreadAttrSetschedpolicy",
     ),
-    // The two inits batch 4 refused, now resolvable: each has a POSIX-signature
-    // entry point of its own, so neither reads the trailing name argument its vendor twin
-    // takes. That was the whole reason for the refusal (D385, worklog 305).
+    // The two inits with a POSIX-signature entry point of their own, so neither reads the
+    // trailing name argument its vendor twin takes.
     ("pthread_rwlock_init", "posix_pthread_rwlock_init"),
     ("pthread_barrier_init", "posix_pthread_barrier_init"),
     ("pthread_barrier_destroy", "scePthreadBarrierDestroy"),
@@ -469,10 +413,8 @@ const DELEGATED: &[(&str, &str)] = &[
     ("pthread_rwlock_trywrlock", "scePthreadRwlockTrywrlock"),
     ("pthread_rwlock_unlock", "scePthreadRwlockUnlock"),
     ("pthread_rwlock_wrlock", "scePthreadRwlockWrlock"),
-    // The `posix_`-prefixed family, each delegating to the unprefixed function that
-    // already implements it. Assumed rather than published: the semantics follow the
-    // POSIX analogue of the same name, and the failure *convention* is not established
-    // (D475).
+    // The `posix_`-prefixed family, each delegating to the unprefixed function that implements
+    // it. The semantics follow the POSIX analogue; the failure convention is assumed (D475).
     ("posix_clock_gettime", "clock_gettime"),
     ("posix_close", "sceKernelClose"),
     ("posix_fstat", "fstat"),
@@ -596,7 +538,7 @@ const DELEGATED: &[(&str, &str)] = &[
     ("getpagesize", "getpagesize"),
     ("madvise", "madvise"),
     // The attribute accessors: POSIX-named implementations in the kernel, and the
-    // `posix_`-prefixed spelling of each pointing at the same one (D475).
+    // `posix_`-prefixed spelling of each pointing at the same one.
     ("pthread_attr_getguardsize", "pthread_attr_getguardsize"),
     (
         "posix_pthread_attr_getguardsize",
@@ -780,14 +722,13 @@ const DELEGATED: &[(&str, &str)] = &[
 
 /// Implementations this crate provides, by symbol name.
 ///
-/// Built by looking each vendor name up in the crate that implements it, so a function that
-/// moved or was renamed produces an **empty entry rather than a wrong one** - and the test
-/// below refuses that.
+/// Built by looking each vendor name up in the crate that implements it, so a moved or
+/// renamed function produces an empty entry rather than a wrong one, which the test below
+/// refuses.
 #[must_use]
 pub fn implementations() -> Vec<(&'static str, GuestFn)> {
-    // Both crates, because the delegates are split across them - threads and time in the
-    // kernel, files in the filesystem shim. Assuming one crate held them all is what the
-    // test below caught.
+    // Both crates: the delegates are split across the kernel (threads, time) and the
+    // filesystem shim (files).
     let mut serving: Vec<(&'static str, GuestFn)> = orbistoun_kernel::implementations().to_vec();
     serving.extend_from_slice(orbistoun_fs::implementations());
     serving.extend(orbistoun_libc::implementations());
@@ -821,9 +762,9 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
 
 /// The POSIX file calls whose failures are reported the POSIX way: `-1` with `errno` set.
 ///
-/// Measured for `open` (a missing path gives `ENOENT`) and `close` (`close(-1)` gives `EBADF`) -
-/// the `open` and `close` records in `libScePosix.toml`. `read` and `write` are assumed to follow
-/// the same convention as POSIX-named exports of the same family.
+/// Measured for `open` (a missing path gives `ENOENT`) and `close` (`close(-1)` gives `EBADF`):
+/// the `open` and `close` records in `libScePosix.toml`. `read` and `write` are assumed to
+/// follow the same convention.
 const FILE_CALLS: [(&str, &str, GuestFn); 4] = [
     ("open", "sceKernelOpen", posix_open),
     ("close", "sceKernelClose", posix_close),
@@ -839,8 +780,8 @@ fn file_call(index: usize, args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) ->
     let twin = FILE_TWINS.get().and_then(|twins| twins[index]);
     match twin {
         Some(twin) => orbistoun_libc::posix_failure(twin(args)),
-        // Unreachable - a wrapper is registered only when its twin was found - and answered with
-        // the project's placeholder rather than an errno picked for it.
+        // Unreachable, since a wrapper is registered only when its twin was found; answered with
+        // the project's placeholder rather than a chosen errno.
         None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
 }
@@ -867,16 +808,12 @@ fn posix_write(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    /// **Every delegation finds the function it names.**
-    ///
-    /// `implementations` filters, so a vendor name that was renamed or moved would quietly
-    /// produce a shorter list and a POSIX name answered by nobody - the same shape as the
-    /// bug this crate exists to fix. Asserted as an exact count, not "at least one".
+    /// Every delegation finds the function it names, asserted exactly, so a renamed vendor
+    /// function cannot leave a POSIX name answered by nobody.
     #[test]
     fn every_delegation_resolves_to_a_real_implementation() {
         let served = super::implementations();
-        // **Names the offenders.** A bare count says a delegation is broken and leaves finding
-        // it to a reader; with 160 rows that is the difference between a fix and an afternoon.
+        // Names the offenders rather than only counting them.
         let missing: Vec<String> = super::DELEGATED
             .iter()
             .filter(|(posix, _)| !served.iter().any(|(name, _)| name == posix))
@@ -892,7 +829,7 @@ mod tests {
     /// `close(-1)` answers `-1` with `errno = EBADF`, not the vendor twin's `0x8002_0009`.
     #[test]
     fn a_posix_file_call_fails_with_errno_not_a_vendor_code() {
-        /// `EBADF`, from FreeBSD `sys/sys/errno.h` - the value the console reported.
+        /// `EBADF`, from FreeBSD `sys/sys/errno.h`, the value the hardware reports.
         const EBADF: i32 = 9;
         let served = super::implementations();
         let close = served
@@ -925,9 +862,7 @@ mod tests {
         }
     }
 
-    /// **No POSIX name is served twice, and none collides with its own delegate.**
-    ///
-    /// A duplicate would mean the registry's last-wins rule picks one silently.
+    /// No POSIX name is served twice, and none collides with its own delegate.
     #[test]
     fn no_name_is_delegated_twice() {
         let mut seen = std::collections::BTreeSet::new();
@@ -936,21 +871,9 @@ mod tests {
         }
     }
 
-    /// **No name is *declared* twice either**, which is the half the guard above missed.
-    ///
-    /// It said "a duplicate would mean the registry's last-wins rule picks one silently"
-    /// and then checked the delegation table, where a duplicate is harmless because the
-    /// rows are identical. The list that rule actually applies to is this module's
-    /// declarations, and three names were duplicated there when this was written:
-    /// `pthread_cond_timedwait` and `pthread_attr_setschedpolicy` each had a live arity
-    /// shadowed by a stale zero from the not-served list, and `sched_yield` was declared
-    /// twice over.
-    ///
-    /// **Nothing observable broke**, and that is the point: arity is metadata for the
-    /// trace and the gap report rather than for dispatch, so the wrong one is invisible
-    /// until somebody reads a trace of a timed wait and finds it took no arguments. A
-    /// guard checking a different table from the one it named is the exact failure
-    /// principle 3 records of the tools themselves.
+    /// No name is declared twice: the registry keeps the last declaration, so a duplicate would
+    /// silently shadow a live arity with a stale one. Arity feeds the trace and gap report, not
+    /// dispatch, so the shadowing is otherwise invisible.
     #[test]
     fn no_name_is_declared_twice() {
         let mut seen = std::collections::BTreeSet::new();

@@ -3,22 +3,11 @@
 use anyhow::Result;
 use orbistoun_service::Service;
 
-/// `env` - every variable this build reads, and what is set right now.
-///
-/// # Why this is a command and not a paragraph in a document
-///
-/// It was a paragraph in a document, hand-copied from three decision entries, and that is a
-/// second list. The registry is the first one, so this prints from it - a variable added
-/// anywhere appears here without anybody remembering to write it down (D221).
-///
-/// Settings and diagnostics are separated because they are different kinds of thing: one
-/// configures the emulator, the other changes the program in order to learn something and
-/// is meant to go away afterwards.
 /// Prints the firmware skeleton's libkernel layout: every export's stub kind and any overrun.
 ///
-/// Uses the same pure planner the worker places from, so what this prints is what a run lays
-/// down. The implemented set comes from the service's declared symbols, so an export shows as a
-/// trampoline exactly when a run would give it one.
+/// Uses the same pure planner the worker places from, so this prints what a run lays down. The
+/// implemented set comes from the service's declared symbols, so an export shows as a trampoline
+/// exactly when a run gives it one.
 pub(crate) fn cmd_firmware_layout(service: &Service, all: bool) {
     use orbistoun_firmware::SlotKind;
 
@@ -71,8 +60,8 @@ pub(crate) fn cmd_firmware_layout(service: &Service, all: bool) {
             }
             None => String::new(),
         };
-        // By default a full 1,867-line dump is noise; show the anchor, the unimplemented ones
-        // (the work list) and any collision unless asked for everything.
+        // By default show only the anchor, the unimplemented exports and any collision; the full
+        // layout is noise unless asked for.
         let worth_showing = all
             || p.kind == SlotKind::Anchor
             || p.kind == SlotKind::Unimplemented
@@ -98,6 +87,11 @@ pub(crate) fn cmd_firmware_layout(service: &Service, all: bool) {
     }
 }
 
+/// `env` - every variable this build reads, and what is set right now.
+///
+/// Printed from the registry, so a new variable appears without a second list to maintain (D221).
+/// Settings configure the emulator; diagnostics change the program to learn something and are
+/// temporary.
 pub(crate) fn cmd_env() {
     use orbistoun_env::Kind;
 
@@ -117,9 +111,8 @@ pub(crate) fn cmd_env() {
         println!();
         println!("{heading}");
         for var in orbistoun_env::REGISTRY.iter().filter(|v| v.kind == kind) {
-            // The current value, because "what are the names" and "what is set" are the
-            // same question in practice - somebody reads this when a run did not do what
-            // they expected, and a stale variable from an earlier shell is a real cause.
+            // The current value too: a stale variable from an earlier shell is a common reason a
+            // run misbehaves.
             let state = var
                 .get()
                 .map_or_else(|| "-".to_owned(), |value| format!("= {value}"));
@@ -129,14 +122,12 @@ pub(crate) fn cmd_env() {
         }
     }
 
-    // The other half of "what configures a run", because somebody reading this list is
-    // asking that question and the environment is the smaller half of the answer.
+    // The other half of what configures a run.
     println!();
     println!("most settings live in config.toml, not here - see `orbistoun-cli paths`");
 
-    // **The reason the registry exists**, printed where somebody will see it rather than
-    // only inside a run. A misspelled variable is not an error - it is an absence, so the
-    // run reports an ordinary result and is believed.
+    // A misspelled variable is an absence, not an error, so the run looks ordinary; the registry
+    // reports it here.
     let unknown = orbistoun_env::unknown();
     if !unknown.is_empty() {
         println!();
@@ -152,11 +143,8 @@ pub(crate) fn cmd_env() {
 
 /// `serve` - answer the conformance probe's command protocol.
 ///
-/// # Why the key is printed rather than configured
-///
-/// It is generated per start and shown once, which is the same shape obSCEne uses and for
-/// the same reason: a secret compiled in is shared by everyone holding the binary, and a
-/// secret read from a file is one that outlives the reason it was created.
+/// The key is generated per start and printed once, as obSCEne does: a compiled-in secret is shared
+/// by everyone with the binary, and a secret in a file outlives its purpose.
 ///
 /// # Errors
 ///
@@ -164,8 +152,8 @@ pub(crate) fn cmd_env() {
 pub(crate) fn cmd_serve(service: &Service, bind: &str, no_key: bool, once: bool) -> Result<()> {
     use std::net::TcpListener;
 
-    // Refused rather than warned about. The two decisions - "no password" and "anything on
-    // this network may invoke this" - are separate, and only the first one was made here.
+    // Refused rather than warned: "no password" and "reachable from the network" are separate
+    // choices, and only the first was made.
     if no_key && !is_loopback(bind) {
         anyhow::bail!(
             "--no-key on {bind} would leave this open to anything on the network - bind to loopback, or drop --no-key"
@@ -177,8 +165,7 @@ pub(crate) fn cmd_serve(service: &Service, bind: &str, no_key: bool, once: bool)
         .local_addr()
         .map_or_else(|_| bind.to_owned(), |a| a.to_string());
 
-    // Once, before anything can connect. A secret minted per connection is one no driver
-    // could have presented, which would make the check unpassable rather than secure.
+    // Minted once, before anything connects; a per-connection secret could never be presented.
     let secret = (!no_key).then(orbistoun_service::respond::ServiceAnswers::generate_secret);
 
     println!("listening  {shown}");
@@ -195,14 +182,13 @@ pub(crate) fn cmd_serve(service: &Service, bind: &str, no_key: bool, once: bool)
             .peer_addr()
             .map_or_else(|_| "unknown".to_owned(), |a| a.to_string());
         println!("session {peer}");
-        // A fresh backend per connection so the *session identifier* is new, carrying the
-        // same secret so the key printed above stays the one that works.
+        // A fresh backend per connection for a new session identifier, with the same secret so the
+        // printed key keeps working.
         let per_session =
             orbistoun_service::respond::ServiceAnswers::with_secret(service, secret.clone());
         let mut responder = orbistoun_probe::respond::Responder::new(stream, per_session);
         if let Err(e) = responder.serve() {
-            // Not fatal. A driver that disconnects mid-command is ordinary, and taking the
-            // listener down with it would make every dropped connection look like a crash.
+            // Not fatal: a driver disconnecting mid-command is ordinary.
             println!("session ended: {e}");
         }
         if once {
@@ -220,24 +206,19 @@ fn is_loopback(bind: &str) -> bool {
         .is_ok_and(|mut addresses| addresses.all(|address| address.ip().is_loopback()))
 }
 
+/// `paths` - show where orbistoun reads and writes.
 pub(crate) fn cmd_paths() {
     let paths = orbistoun_paths::Paths::resolve();
-    // Read from the one list rather than re-typed here. This was a second hand-written
-    // enumeration of the same directories, which meant a new writable location could pass
-    // the containment test and still never appear in the answer to "where did it go?"
-    // (D215).
+    // Read from the one list of named directories, so every writable location appears here.
     let named = paths.named_dirs();
-    // Measured, not typed. A ten-wide column was right until `screenshots` arrived and
-    // pushed its own path out of line - the same class of thing as the list above, one
-    // step smaller.
+    // Measured, so every path lines up.
     let width = named
         .iter()
         .map(|(name, _)| name.len())
         .chain(["build", "mode", "data", "config", "library"].map(str::len))
         .max()
         .unwrap_or(10);
-    // Which build this is, first. A path listing is what someone reads when an answer
-    // surprised them, and the second question is always "which binary said that".
+    // The build first: the next question after a surprising answer is which binary gave it.
     println!("{:<width$} {}", "build", orbistoun_env::build::line());
     println!(
         "{:<width$} {}",
@@ -253,10 +234,8 @@ pub(crate) fn cmd_paths() {
         println!("{name:<width$} {}", dir.display());
     }
     println!("{:<width$} {}", "config", paths.config_file().display());
-    // The one location here that is *read* rather than written, and the one nobody could
-    // find out. A relative library root is joined to the data root above rather than to
-    // the working directory, so "where does it look for titles" has a single answer -
-    // which is exactly what it did not have (D228).
+    // The one location that is read rather than written. A relative library root joins the data
+    // root, not the working directory (D038).
     let library = orbistoun_service::FileConfig::load(&paths.config_file())
         .unwrap_or_default()
         .library

@@ -1,55 +1,24 @@
 //! Asking every configured engine the same question, and ordering them by the answer.
 //!
-//! # Why the obvious measurement is the wrong one
-//!
-//! A benchmark that ranks by speed picks the worst engine here, and this was measured
-//! rather than reasoned about. Asked for twelve words a round, a four-billion-parameter
-//! model on a local accelerator produced **two**, and an installed coding assistant
-//! produced twelve - while being the *slower* of the two per call. Ordering by latency
-//! would have promoted the one that answers quickly and says almost nothing.
-//!
-//! It is also the wrong axis for a second reason. What a round actually costs is the
-//! **sweep** - billions of candidates hashed against the work list - and the model is a
-//! rounding error beside it. Shaving four seconds off a call that precedes seven minutes
-//! of hashing buys nothing.
-//!
-//! So the ranking is **how much usable material came back**, and latency breaks ties.
-//!
-//! # The caller scores, because only the caller knows what it accepts
-//!
-//! [`usable_words`] here is strict - a JSON array or nothing. That was the only scorer for
-//! one afternoon and it was **unfair to the engines it judged**: the proposal loop reads a
-//! reply with three fallbacks, taking quoted strings and then bare tokens, so an engine
-//! that scored zero here would have contributed there. A benchmark stricter than its
-//! consumer measures the benchmark (D335).
-//!
-//! So [`measure`] takes a scoring function and the strict one is only a default. Whatever
-//! a caller actually accepts is what it should rank on.
-//!
-//! This is deliberately not a quality judgement either way. Whether a word is *good* is
-//! settled by the NID hash further down the line, and nothing here anticipates that.
+//! Engines are ranked by how much usable material came back, with latency only breaking ties:
+//! the sweep that follows each round dominates its cost, and the fastest engine can be the one
+//! that says least. [`measure`] takes the caller's scoring function, because only the caller
+//! knows what it accepts; the strict [`usable_words`] is a default. Whether a word is good is
+//! settled later by the NID hash, not here.
 
 use std::time::{Duration, Instant};
 
 use crate::engine::Request;
 
-/// Words asked for, which is also the best possible score.
-///
-/// The same number the proposal loop asks for, so the measurement is of the question that
-/// actually gets asked rather than a smaller one that might behave differently.
+/// Words asked for, which is also the best possible score; the same number the proposal loop
+/// asks for.
 pub const ASKED: usize = 12;
 
 /// A question for a caller that has none of its own.
 ///
-/// **Deliberately not the default, and the first version of this module got it wrong.**
-/// A short, easy question does not discriminate: asked plainly for twelve nouns, a local
-/// four-billion-parameter model returned twelve and tied the engine that beats it - then
-/// returned *two* when asked the real question, which carries library context, decomposed
-/// examples, a sample of the existing vocabulary and the constraint that none of it may be
-/// repeated. A benchmark whose question is easier than the work measures nothing about the
-/// work (D334).
-///
-/// So [`measure`] takes the request, and a caller with a real one should pass it.
+/// Not the real one: a short, easy question does not discriminate between engines. The real
+/// question carries library context, decomposed examples, a vocabulary sample and the rule
+/// that none may be repeated, and a caller with it should pass it to [`measure`] (D334).
 #[must_use]
 pub fn fallback_request() -> Request {
     Request::new(concat!(
@@ -64,14 +33,10 @@ pub fn fallback_request() -> Request {
 pub struct Measurement {
     /// The registry entry this is about.
     pub id: String,
-    /// Usable words returned, out of [`ASKED`].
-    ///
-    /// The ranking key. Zero means it answered with something that was not a list of
-    /// words, or did not answer at all.
+    /// Usable words returned, out of [`ASKED`]: the ranking key. Zero means the reply was not a
+    /// list of words, or there was none.
     pub usable: usize,
-    /// How long the call took.
-    ///
-    /// The tiebreak, never the key - see the module note.
+    /// How long the call took: the tiebreak, never the key.
     pub took: Duration,
     /// Why it scored nothing, when it did.
     pub failure: Option<String>,
@@ -95,9 +60,7 @@ impl Measurement {
 
 /// Counts the words in a reply, in the shape it was asked for.
 ///
-/// Strict about the shape and lenient about nothing: an engine that was asked for a JSON
-/// array and returned prose has not done what was asked, and scoring it on the words that
-/// happen to appear in its apology would rank politeness.
+/// Strict: an engine asked for a JSON array that returned prose has not done what was asked.
 #[must_use]
 pub fn usable_words(text: &str) -> usize {
     novel_words(text, &std::collections::BTreeSet::new())
@@ -105,18 +68,12 @@ pub fn usable_words(text: &str) -> usize {
 
 /// The same, discounting words the caller already has.
 ///
-/// **This is the axis that actually separates engines, and finding that out took three
-/// measurements.** Ranking by speed picks the one that says least. Ranking by *volume*
-/// does not discriminate at all - two engines that differ six to one in the loop both
-/// returned twelve of twelve here, twice. What the loop values is words it does not
-/// already hold, because a proposal already in the vocabulary is refused before it costs
-/// anything, and that is what this counts (D334).
-///
-/// `known` is compared lowercased, so casing cannot smuggle a repeat past it.
+/// The axis that separates engines: a proposal already in the vocabulary is refused before it
+/// costs anything (D334). `known` is compared lowercased, so casing cannot pass a repeat.
 #[must_use]
 pub fn novel_words(text: &str, known: &std::collections::BTreeSet<String>) -> usize {
     let trimmed = text.trim();
-    // A fenced block is still an array, and every model in reach emits one sometimes.
+    // A fenced block is still an array, and models emit one.
     let inner = trimmed
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
@@ -141,18 +98,15 @@ pub fn novel_words(text: &str, known: &std::collections::BTreeSet<String>) -> us
 
 /// Puts the best first: most usable words, then quickest.
 ///
-/// Stable, so entries that tie keep the order the registry had. That matters because a tie
-/// is common - two engines that both answer fully - and reshuffling them on every run
-/// would make the ladder look unstable when nothing had changed.
+/// Stable, so ties keep the registry's order and the ladder does not reshuffle between runs.
 pub fn rank(measurements: &mut [Measurement]) {
     measurements.sort_by(|a, b| b.usable.cmp(&a.usable).then_with(|| a.took.cmp(&b.took)));
 }
 
 /// Times one call and scores what came back.
 ///
-/// Takes the engine and the request rather than finding either, so the scoring is testable
-/// against a canned reply and the whole of this module can be exercised with no model
-/// present - and so the question can be the caller's real one.
+/// Takes the engine and the request, so scoring is testable against a canned reply with no
+/// model, and the question can be the caller's real one.
 #[must_use]
 pub fn measure(
     id: &str,
@@ -170,14 +124,9 @@ pub fn measure(
                 id: id.to_owned(),
                 usable,
                 took,
-                // Two different nothings, and a person reading the list wants to know
-                // which: a reply in the wrong shape, or a reply of things already held.
-                // **With what it said.** "Nothing usable" names the shape and withholds
-                // the evidence, and the evidence is the whole of what a reader needs to
-                // tell a model that cannot follow a format from an engine that is broken.
-                // Measured: an in-process model scored zero and the quote showed why - it
-                // answered coherently, wrapped in prose, behind a `<think>` block the
-                // managed path suppresses and this one cannot (D335).
+                // Two different nothings - a reply in the wrong shape, or of words already held - reported
+                // with a quote of what the engine said, so a reader can tell a format failure from a broken
+                // engine.
                 failure: (usable == 0)
                     .then(|| format!("nothing usable - it said: {}", glimpse(&text))),
             }
@@ -191,11 +140,7 @@ pub fn measure(
     }
 }
 
-/// As much of a reply as fits on one line, with newlines flattened.
-///
-/// Short on purpose: this goes in a summary line beside four others, and a model that
-/// answered with three paragraphs has already said what a reader needs to know by the end
-/// of the first clause.
+/// As much of a reply as fits on one line, with newlines flattened, for a summary line.
 fn glimpse(text: &str) -> String {
     const ROOM: usize = 90;
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -223,11 +168,7 @@ mod tests {
         }
     }
 
-    /// **More words beats faster, and this is the whole point of the module.**
-    ///
-    /// Measured on real engines: a local model answered quicker and offered two words
-    /// where an installed command offered twelve. A benchmark ordered by latency promotes
-    /// the first of those, which is the wrong engine and would be chosen automatically.
+    /// More usable words outranks a faster answer.
     #[test]
     fn more_usable_words_outranks_a_faster_answer() {
         let mut all = vec![
@@ -271,17 +212,14 @@ mod tests {
         assert_eq!(usable_words(r#"["One", "Two", "Three"]"#), 3);
     }
 
-    /// A fenced block is still an array - every model in reach emits one sometimes.
+    /// A fenced block is still an array.
     #[test]
     fn a_fenced_array_is_still_an_array() {
         assert_eq!(usable_words("```json\n[\"One\", \"Two\"]\n```"), 2);
         assert_eq!(usable_words("```\n[\"One\"]\n```"), 1);
     }
 
-    /// **Prose scores nothing, however helpful it is.**
-    ///
-    /// An engine asked for a JSON array that returns a sentence has not done what was
-    /// asked, and counting the words in its apology would rank politeness.
+    /// Prose scores nothing, however helpful it is.
     #[test]
     fn prose_scores_nothing() {
         assert_eq!(
@@ -291,10 +229,7 @@ mod tests {
         assert_eq!(usable_words(""), 0);
     }
 
-    /// **Words the caller already has score nothing.**
-    ///
-    /// The axis that separates engines in the loop, where a proposal already in the
-    /// vocabulary is refused before it costs anything.
+    /// Words the caller already has score nothing.
     #[test]
     fn words_already_held_do_not_count() {
         let known = ["buffer", "handle"]
@@ -308,7 +243,7 @@ mod tests {
         );
     }
 
-    /// **A wrong-shaped reply is quoted, so a reader can tell why it was wrong.**
+    /// A wrong-shaped reply is quoted, so a reader can tell why it was wrong.
     #[test]
     fn a_reply_in_the_wrong_shape_is_quoted() {
         let said = super::glimpse(

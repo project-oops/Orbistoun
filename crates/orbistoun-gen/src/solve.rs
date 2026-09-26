@@ -1,21 +1,14 @@
-//! The bit arithmetic, as pure functions.
+//! The bit arithmetic, as pure functions testable with no toolchain installed.
 //!
-//! # Why this is its own module
-//!
-//! Everything here takes numbers and returns numbers. No subprocess, no filesystem, no
-//! assembler - so all of it is testable with no toolchain installed, which matters because
-//! **this is where a mistake does the most damage**: a mask one bit too wide silently drops
-//! every member of a family whose opcode uses the bit it over-claimed, and the symptom is a
-//! real instruction decoding as a different real instruction.
+//! A mask one bit too wide drops every family member whose opcode uses that bit, and a real
+//! instruction then decodes as a different one.
 
 use std::collections::BTreeMap;
 
 /// The longest run of bits from 31 downward that every word agrees on.
 ///
-/// Stops at the first disagreement rather than collecting every constant bit. A mask with a
-/// hole would still classify these samples and would be fitting the sample set instead of
-/// the format - and the first instruction outside the set would land in the wrong family,
-/// which is the failure this whole area exists to prevent.
+/// Stops at the first disagreement rather than collecting every constant bit: a mask with
+/// a hole fits the samples rather than the format.
 #[must_use]
 pub(crate) fn prefix_mask(words: &[u32]) -> u32 {
     let Some(&first) = words.first() else {
@@ -37,15 +30,10 @@ pub(crate) fn prefix_mask(words: &[u32]) -> u32 {
 
 /// The shortest prefix that tells this family apart from every other declared one.
 ///
-/// **Derived across families rather than within one, and that is the whole point.** Bits
-/// that are constant *within* a family are indistinguishable from bits that *identify* it
-/// when the samples all sit in one corner of the opcode range - which is how a mask comes
-/// out too wide.
-///
-/// Asking what separates the families instead makes the answer independent of which opcodes
-/// anyone happened to probe. It can only be as good as the set of families declared; a
-/// format nobody has written a probe file for is not separated from, and the fixture
-/// differential is what catches that.
+/// Derived across families rather than within one: bits constant within a family look
+/// like identifying bits when the samples sit in one corner of the opcode range. The answer
+/// is only as good as the declared families; the fixture differential catches a format with
+/// no probe file.
 #[must_use]
 pub(crate) fn separating_mask(mine: &[u32], others: &[Vec<u32>]) -> u32 {
     for bits in 1_u32..=32 {
@@ -68,9 +56,8 @@ pub(crate) fn separating_mask(mine: &[u32], others: &[Vec<u32>]) -> u32 {
 
 /// Where the opcode sits: constant per mnemonic, varying between mnemonics.
 ///
-/// `None` when the samples cannot decide - one mnemonic, or a field that is not
-/// contiguous. **Absent beats guessed**: a wrong opcode position reads a real instruction
-/// as a different real instruction.
+/// `None` when the samples cannot decide (one mnemonic, or a non-contiguous field), since a
+/// wrong opcode position decodes a real instruction as a different one.
 #[must_use]
 pub(crate) fn opcode_field(samples: &[(String, Vec<u32>)], mask: u32) -> Option<(u32, u32)> {
     let mut by_mnemonic: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
@@ -107,16 +94,10 @@ pub(crate) fn opcode_field(samples: &[(String, Vec<u32>)], mask: u32) -> Option<
         return None;
     }
 
-    // The *span* between the lowest and highest differing bit, not the set of differing
-    // bits. Four mnemonics do not exercise all eight bits of an opcode field - opcodes
-    // 0x01, 0x02, 0x03 and 0x41 differ in bits 0, 1 and 6, and demanding that the differing
-    // bits be contiguous rejects a field that is perfectly ordinary.
-    //
-    // Filling the span is safe because the bits inside it have already survived two
-    // filters: they are constant across every operand variation of every mnemonic, and they
-    // sit below the prefix that separates this family from the others. An operand bit could
-    // still hide there if no probe ever varied it, which is why the sweep runs before this
-    // is trusted - it brings back far more of the range than a person writes.
+    // The span between the lowest and highest differing bit, not the set: opcodes 0x01,
+    // 0x02, 0x03 and 0x41 differ only in bits 0, 1 and 6. The bits inside are constant
+    // across every operand variation and below the separating prefix; an operand bit no
+    // probe varied could still hide there, so the sweep runs before this is trusted.
     let shift = candidate.trailing_zeros();
     let width = (32 - candidate.leading_zeros()) - shift;
     Some((shift, width))
@@ -124,21 +105,15 @@ pub(crate) fn opcode_field(samples: &[(String, Vec<u32>)], mask: u32) -> Option<
 
 /// How many words to sweep per family.
 ///
-/// The field being swept can be up to 16 bits wide, and most of that space is not
-/// instructions. Capped because the point is to reach the *top* of the opcode range, not to
-/// enumerate it, and one batched call of this size costs under a second.
+/// Capped, because the sweep only needs to reach the top of the opcode range, not
+/// enumerate it.
 pub(crate) const SWEEP_LIMIT: u64 = 8192;
 
 /// The candidate words to ask the disassembler about, sweeping below `mask`.
 ///
-/// **Swept from bit zero, not from where the opcode is believed to start.** Starting at the
-/// believed start cannot correct that belief: the first pass put `SOP1`'s opcode at bit 9
-/// because none of four hand-written mnemonics happened to differ in bit 8, and a sweep that
-/// holds bit 8 still confirms the mistake rather than finding it. Sweeping operand bits too
-/// costs nothing - they vary, which is exactly what the solver wants from them.
-///
-/// **Strided, not the first N.** The point is to reach the *top* of the range, and taking
-/// the first few thousand values of a 23-bit field never leaves the bottom of it.
+/// Swept from bit zero, not from the believed opcode start, so a wrong start (from probes
+/// that happened not to differ in a low bit) can be corrected. Strided rather than the
+/// first N values, so it reaches the top of a wide field.
 #[must_use]
 pub(crate) fn sweep_candidates(base: &[u32], mask: u32) -> Vec<Vec<u32>> {
     let Some(&first) = base.first() else {
@@ -167,8 +142,7 @@ mod tests {
 
     /// The prefix stops at the first disagreement, and does not resume after it.
     ///
-    /// A mask with a hole classifies the samples it was fitted to and misfiles the first
-    /// instruction outside them.
+    /// A mask with a hole would misfile instructions outside the samples.
     #[test]
     fn the_prefix_stops_at_the_first_disagreement() {
         // Bit 30 differs; bit 29 agrees again. The run must end at 31.
@@ -184,14 +158,13 @@ mod tests {
 
     /// An empty sample set masks nothing rather than everything.
     ///
-    /// The other answer - `0xFFFFFFFF` - would claim every bit identifies a family nobody
-    /// has any samples of, which is a confident statement about no evidence.
+    /// `0xFFFFFFFF` would claim every bit identifies a family with no samples.
     #[test]
     fn no_words_mask_nothing() {
         assert_eq!(prefix_mask(&[]), 0);
     }
 
-    /// The separating mask is the *shortest* prefix that does the job.
+    /// The separating mask is the shortest prefix that separates.
     #[test]
     fn the_separating_mask_is_the_shortest_that_separates() {
         // Mine all start 0b10; the other family starts 0b11. Two bits is enough.
@@ -202,8 +175,7 @@ mod tests {
 
     /// A family that cannot be separated claims every bit rather than a plausible few.
     ///
-    /// Returning a short mask would silently merge two formats; returning everything makes
-    /// the failure visible downstream instead.
+    /// A short mask would merge two formats; claiming everything makes the failure visible.
     #[test]
     fn an_inseparable_family_claims_everything() {
         let mine = vec![0x1234_5678];
@@ -213,11 +185,10 @@ mod tests {
 
     /// The opcode field is the span between the lowest and highest differing bit.
     ///
-    /// **Not the set of differing bits.** Four mnemonics do not exercise every bit of an
-    /// eight-bit field, and demanding contiguity would reject an ordinary one.
+    /// Not the set of differing bits, which few mnemonics leave non-contiguous.
     #[test]
     fn the_opcode_field_is_a_span_not_a_bit_set() {
-        // Opcodes 0x01, 0x02, 0x03, 0x41 at bit 8: differ in bits 8, 9, 14 - not contiguous.
+        // Opcodes 0x01, 0x02, 0x03, 0x41 at bit 8 differ in bits 8, 9 and 14.
         let samples: Vec<(String, Vec<u32>)> = [0x01, 0x02, 0x03, 0x41]
             .iter()
             .enumerate()
@@ -251,9 +222,7 @@ mod tests {
 
     /// The sweep reaches the top of the range, not just the bottom of it.
     ///
-    /// This is the property the stride exists for: taking the first `SWEEP_LIMIT` values of
-    /// a wide field never leaves its lowest corner, and the whole reason to sweep is to find
-    /// the family members a person's probe file did not think of.
+    /// The stride reaches beyond the first `SWEEP_LIMIT` values of a wide field.
     #[test]
     fn the_sweep_reaches_the_top_of_the_range() {
         let mask = 0xFFFF_0000_u32;
@@ -275,8 +244,7 @@ mod tests {
 
     /// Trailing words are carried through the sweep unchanged.
     ///
-    /// Only the first word carries the opcode. Varying a literal in the second word would
-    /// ask the disassembler about a different instruction than the one intended.
+    /// Only the first word carries the opcode; the rest must stay as given.
     #[test]
     fn trailing_words_are_carried_unchanged() {
         let candidates = sweep_candidates(&[0x8000_0000, 0xDEAD_BEEF], 0xFF00_0000);

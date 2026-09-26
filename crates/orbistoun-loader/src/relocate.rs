@@ -1,21 +1,11 @@
 //! Applying relocations to a placed image.
 //!
-//! This is where D005 stops being a design statement and becomes machine code: writing
-//! a host address into a PLT slot **is** the interception. There is no hooking pass,
-//! and there never will be one - the guest calls whatever the slot contains, and the
-//! slot contains what this module put there.
-//!
-//! # What gets written
-//!
-//! - `RELATIVE`: an internal pointer, adjusted by the placement base.
-//! - `ABS64` / `GLOB_DAT`: a symbol's address.
-//! - `JUMP_SLOT`: a function address - the import case.
-//!
-//! # What deliberately does not
-//!
-//! TLS relocations need thread-local storage to exist. They are **counted and
-//! reported**, never skipped silently: an unrelocated pointer looks valid and is not,
-//! so a guest that limps past one fails somewhere unrelated and much later.
+//! Writing a host address into a PLT slot is the interception (D005): the guest calls
+//! whatever the slot contains, and the slot contains what this module put there.
+//! `RELATIVE` writes an internal pointer adjusted by the placement base, `ABS64` and
+//! `GLOB_DAT` a symbol's address, and `JUMP_SLOT` a function address. A relocation that
+//! cannot be applied is counted and reported, never skipped silently: an unrelocated
+//! pointer looks valid and fails somewhere unrelated.
 
 use orbistoun_elf::reloc::{Elf64Rela, RelocationTally, kind, parse_table};
 use orbistoun_elf::{Container, dynamic::DynamicInfo};
@@ -36,8 +26,8 @@ pub enum Resolution {
 
 /// Resolves a dynamic symbol index to the address the guest should see.
 ///
-/// Returning `None` means the symbol is unresolved - the relocation is then counted
-/// rather than applied, so the tally says exactly how much of the image is not ready.
+/// `None` means the symbol is unresolved; the relocation is then counted rather than
+/// applied, so the tally says how much of the image is not ready.
 pub trait SymbolResolver {
     /// The address for a symbol index, or `None` if it cannot be resolved.
     fn resolve(&self, symbol_index: u32) -> Option<u64>;
@@ -61,9 +51,8 @@ impl<F: Fn(u32) -> Option<u64>> SymbolResolver for F {
 
 /// A table of per-import stubs resolves a symbol to that symbol's own stub.
 ///
-/// This is what makes a call trace say *which* import the guest wanted. A single
-/// shared address answers only "something unimplemented was called", which is worth
-/// very little by comparison.
+/// A call trace then names which import the guest wanted, where a single shared address
+/// says only that something unimplemented was called.
 impl SymbolResolver for orbistoun_thunk::ThunkTable {
     fn resolve(&self, symbol_index: u32) -> Option<u64> {
         self.address_of(symbol_index as usize)
@@ -72,11 +61,9 @@ impl SymbolResolver for orbistoun_thunk::ThunkTable {
 
 /// Data first, then thunks.
 ///
-/// **The composition is the point.** A function is unaffected by this existing: it misses
-/// in the data blocks and falls through to its own stub, exactly as before. An import that
-/// names an object gets storage instead of a stub, which is the difference between a guest
-/// dereferencing a null it can check and a guest dereferencing x86 instruction bytes it
-/// cannot (D307).
+/// A function import misses in the data blocks and falls through to its own stub; an import
+/// that names an object gets storage instead, so the guest dereferences a null it can check
+/// rather than instruction bytes (D307).
 #[derive(Debug, Clone, Copy)]
 pub struct ImportResolver<'a> {
     /// Stubs, for imports that name code.
@@ -85,23 +72,10 @@ pub struct ImportResolver<'a> {
     pub data: &'a orbistoun_thunk::DataBlocks,
     /// Imports to leave unresolved, by index.
     ///
-    /// # Why refusing is sometimes the accurate answer
-    ///
-    /// Every import gets a stub, so that a call to something unimplemented is *reported*
-    /// rather than a jump into a zeroed slot. That is the whole interception model and it is
-    /// right for measuring.
-    ///
-    /// It also means **the platform answers yes to every symbol that has ever been asked
-    /// about**. A guest cannot tell a function this emulator implements from one no console
-    /// ever exported, because both resolve to an address. The conformance probe caught it
-    /// with a control - a symbol that cannot exist, reported present - and said the obvious
-    /// thing: *every count in this section is meaningless*. It also explains two other
-    /// findings at once, because a probe that infers a machine's kind or its generation from
-    /// which symbols are there gets **both** answers from a loader that stubs everything
-    /// (D392).
-    ///
-    /// [`None`] refuses nothing, which is the default and the behaviour every recorded
-    /// measurement was taken under.
+    /// Every import otherwise resolves to a stub, so a guest cannot tell an implemented
+    /// function from one the platform never exported, and a presence probe counts both as
+    /// present. A refused import resolves to nothing, as on the hardware (D392). [`None`]
+    /// refuses nothing and is the default.
     pub refuse: Option<&'a std::collections::BTreeSet<usize>>,
     /// Weak imports that are unanswered and should bind to zero, by index (D676).
     pub weak_zero: Option<&'a std::collections::BTreeSet<usize>>,
@@ -118,8 +92,7 @@ impl SymbolResolver for ImportResolver<'_> {
     fn resolve_symbol(&self, symbol_index: u32) -> Resolution {
         let index = symbol_index as usize;
         if self.refuse.is_some_and(|refuse| refuse.contains(&index)) {
-            // Unresolved, which the relocation tally already counts and reports - refusing
-            // is not a new outcome here, it is one that had no way of being chosen.
+            // Unresolved, which the relocation tally counts and reports.
             return Resolution::Unresolved;
         }
         if self.weak_zero.is_some_and(|wz| wz.contains(&index)) {
@@ -138,21 +111,11 @@ impl SymbolResolver for ImportResolver<'_> {
 
 /// Binds an import to a real address inside a module the title ships, before any stub.
 ///
-/// # Why a stub is the wrong answer here
-///
-/// Every import gets a stub so that a call to something unimplemented is *reported* rather
-/// than jumping into a zeroed slot, and for a platform library that is the honest answer -
-/// orbistoun either implements the function or says it does not.
-///
-/// **A module the title ships is not that case.** The code is in the title's own data, placed
-/// and relocated; answering with a stub says "nothing implements this" about a function that
-/// is right there. PPSA02664 imports `0x6f8b9da539afc9af` from `Il2CppUserAssemblies` and calls
-/// it 222 times with strings like `il2cpp_init`; on a stub it answers a placeholder, and the
-/// guest uses the placeholder as an address (D483, D489).
-///
-/// `bound` holds only the imports that should take this path - the caller decides, because
-/// whether the emulator's own implementation wins is a policy question and not one a resolver
-/// can see (D483).
+/// A stub is right for a platform library, where orbistoun either implements the function
+/// or says it does not. A module the title ships has the code placed and relocated, so a
+/// stub would answer a placeholder for a function that is present (D483). `bound` holds
+/// only the imports that take this path; whether orbistoun's own implementation wins is a
+/// policy the caller decides.
 #[derive(Debug, Clone, Copy)]
 pub struct TitleResolver<'a, R> {
     /// Dynamic symbol index to an address inside a placed, relocated module.
@@ -180,15 +143,10 @@ impl<R: SymbolResolver> SymbolResolver for TitleResolver<'_, R> {
 
 /// Shifts a module's symbol indices into the shared table's index space.
 ///
-/// # Why this exists
-///
-/// One stub table serves every module, and module *M*'s symbol *i* lives at slot
-/// `offset(M) + i` (D484). A relocation inside *M* names *i*, because that is what *M*'s own
-/// dynamic symbol table is indexed by - so something has to add the offset, and doing it here
-/// means the resolvers underneath stay unaware there is more than one module.
-///
-/// The main executable is module 0 with offset 0, so wrapping it is a no-op rather than a
-/// special case anybody has to remember not to apply.
+/// One stub table serves every module, and module M's symbol i lives at slot `offset(M) + i`
+/// (D484). A relocation inside M names i, so this adds the offset and the resolvers
+/// underneath see one table. The main executable is module 0 with offset 0, so wrapping it
+/// is a no-op.
 #[derive(Debug, Clone, Copy)]
 pub struct OffsetResolver<'a, R> {
     /// Where this module's symbol zero sits in the shared table.
@@ -199,10 +157,9 @@ pub struct OffsetResolver<'a, R> {
 
 impl<R: SymbolResolver> SymbolResolver for OffsetResolver<'_, R> {
     fn resolve(&self, symbol_index: u32) -> Option<u64> {
-        // **Refuses rather than wraps.** A shifted index that does not fit is a table and a
-        // module disagreeing about how many symbols exist, and answering a wrapped slot would
-        // bind the relocation to whatever else happened to be there - an implementation
-        // answering for a symbol nobody wrote it for, silently, for the whole run.
+        // Refuses rather than wraps: a shifted index that does not fit means the table and
+        // the module disagree about the symbol count, and a wrapped slot would bind the
+        // relocation to an unrelated implementation.
         let shifted = u32::try_from(self.offset).ok()?.checked_add(symbol_index)?;
         self.inner.resolve(shifted)
     }
@@ -220,10 +177,8 @@ impl<R: SymbolResolver> SymbolResolver for OffsetResolver<'_, R> {
 
 /// A resolver that answers every symbol with one address.
 ///
-/// Used before per-import thunks exist: every import points at a single host function
-/// that reports being called. Crude, but it makes the image *complete* - and a guest
-/// that reaches an unimplemented stub and says so is far more useful than one that
-/// jumps to a zeroed slot and dies with no explanation.
+/// Every import points at one host function that reports being called, so the image is
+/// complete and an unimplemented call says so rather than jumping to a zeroed slot.
 #[derive(Debug, Clone, Copy)]
 pub struct SingleTargetResolver {
     /// Address every symbol resolves to.
@@ -257,12 +212,9 @@ impl RelocValue {
 
 /// Computes the value one relocation should write, or why it cannot.
 ///
-/// Split out from the writing so the arithmetic is testable without mapping anything -
-/// the pattern D016 exists to encourage.
-///
-/// `tls` is the module's own thread-local layout, when it declares one. Passing `None`
-/// makes every thread-local relocation report as deferred rather than guessing at an
-/// offset into a block that does not exist.
+/// Separate from the writing so the arithmetic is testable without mapping anything
+/// (D016). `tls` is the module's own thread-local layout, when it declares one; `None`
+/// reports every thread-local relocation as deferred.
 pub fn value_for(
     entry: &Elf64Rela,
     base: u64,
@@ -289,9 +241,8 @@ pub fn value_for(
 
 /// The thread-local cases, split out to keep the main match readable.
 ///
-/// Only the module's **own** block is handled. A relocation naming another module
-/// needs a descriptor table and a second loaded image, neither of which exists - so it
-/// is reported rather than answered with a plausible number.
+/// Only the module's own block is handled. A relocation naming another module needs a
+/// descriptor table and a second loaded image, so it is reported rather than answered.
 fn tls_value_for(entry: &Elf64Rela, addend: i64, tls: Option<&TlsLayout>) -> Result<u64, Outcome> {
     let Some(layout) = tls else {
         return Err(Outcome::TlsDeferred);
@@ -300,13 +251,11 @@ fn tls_value_for(entry: &Elf64Rela, addend: i64, tls: Option<&TlsLayout>) -> Res
         return Err(Outcome::TlsDeferred);
     }
     match entry.kind() {
-        // Which module the variable belongs to. Ours is the only one loaded.
+        // Which module the variable belongs to: the main module.
         kind::DTPMOD64 => Ok(tls::MAIN_MODULE_ID),
         // An offset within that module's block, so the addend needs no adjustment.
         kind::DTPOFF64 => Ok(addend as u64),
-        // Measured from the thread pointer, and therefore negative - the block sits
-        // below it. Writing the unadjusted offset here is the classic variant II
-        // mistake and reads memory that belongs to the control block.
+        // Measured from the thread pointer, so negative: the block sits below it.
         kind::TPOFF64 => Ok(layout.tp_offset(addend as u64) as u64),
         _ => Err(Outcome::Unsupported),
     }
@@ -315,7 +264,7 @@ fn tls_value_for(entry: &Elf64Rela, addend: i64, tls: Option<&TlsLayout>) -> Res
 /// Why a relocation was not applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Needs thread-local storage, which does not exist yet.
+    /// Needs another module's thread-local storage, or a layout the module does not declare.
     TlsDeferred,
     /// A relocation type this loader does not implement.
     Unsupported,
@@ -325,9 +274,8 @@ pub enum Outcome {
 
 /// Applies every relocation in a container to its placed image.
 ///
-/// Returns a tally rather than a bare success: knowing *how many* entries were left
-/// unapplied, and why, is the difference between "this image is not ready" and "this
-/// image loaded and then behaved strangely".
+/// Returns a tally of how many entries were left unapplied and why, separating "this image
+/// is not ready" from "this image loaded and then behaved strangely".
 pub fn apply(
     image: &Image,
     whole: &[u8],
@@ -336,8 +284,7 @@ pub fn apply(
 ) -> Result<RelocationTally, LoadError> {
     let container = Container::parse(whole)?;
     let Some(dyn_bytes) = container.dynamic_bytes(whole)? else {
-        // No dynamic table means nothing to relocate. That is a legitimate image, not
-        // a failure - a static binary has no relocations.
+        // No dynamic table: a static binary has no relocations.
         return Ok(RelocationTally::default());
     };
     let info = DynamicInfo::parse(dyn_bytes);
@@ -347,9 +294,8 @@ pub fn apply(
         if addr == 0 || size == 0 {
             continue;
         }
-        // Through the container rather than by virtual address: under the vendor's dynamic
-        // tags these are offsets into the data segment, and reading them as addresses
-        // produced two relocations whose types decoded as unsupported (D247).
+        // Through the container rather than by virtual address: under the vendor dynamic
+        // tags these are offsets into the data segment (D247).
         let Some(at) = container.table_offset(whole, &info, addr)? else {
             continue;
         };
@@ -391,9 +337,8 @@ fn apply_table(
         };
 
         let target = base.wrapping_add(entry.offset.get());
-        // Every write must land inside the span this image owns. A relocation pointing
-        // outside it is a corrupt or hostile table, and honouring it would scribble on
-        // unrelated memory.
+        // Every write lands inside the span this image owns; a relocation outside it is
+        // a corrupt table.
         if target < span_base || target.saturating_add(8) > span_base.saturating_add(span_len) {
             return Err(LoadError::RelocationOutOfBounds {
                 target,
@@ -403,9 +348,8 @@ fn apply_table(
         }
 
         let ptr = usize::try_from(target).map_err(|_| LoadError::AddressTooLarge(target))?;
-        // SAFETY: `target` was just checked to lie wholly inside the image's span,
-        // which the image holds a live reservation for and exclusively owns. The write
-        // is unaligned-safe by construction.
+        // SAFETY: `target` lies wholly inside the image's span, which the image holds a
+        // live reservation for and exclusively owns; the write is unaligned.
         unsafe {
             std::ptr::with_exposed_provenance_mut::<u64>(ptr).write_unaligned(value.value());
         }
@@ -440,8 +384,7 @@ mod tests {
         assert_eq!(resolver.resolve(7), Some(0x5000_1234));
     }
 
-    /// **Everything not bound still falls through**, which is what keeps the stub table the
-    /// answer for the platform's own libraries.
+    /// An unbound import falls through to the stub table.
     #[test]
     fn an_unbound_import_falls_through() {
         let bound = std::collections::BTreeMap::from([(7_u32, 0x5000_1234_u64)]);
@@ -452,7 +395,7 @@ mod tests {
         assert_eq!(resolver.resolve(8), Some(8), "the stub table still answers");
     }
 
-    /// An empty binding changes nothing at all - the shape a title with no own modules takes.
+    /// An empty binding changes nothing.
     #[test]
     fn binding_nothing_is_the_identity() {
         let bound = std::collections::BTreeMap::new();
@@ -463,11 +406,7 @@ mod tests {
         assert_eq!(resolver.resolve(3), Some(3));
     }
 
-    /// **The main executable is module 0, and wrapping it changes nothing.**
-    ///
-    /// Every call index and every measurement taken before the table was shared names a slot
-    /// in the executable's range, so an offset of zero has to be exactly the identity - not
-    /// approximately, and not a case anybody has to remember to skip.
+    /// The main executable is module 0, and wrapping it is exactly the identity.
     #[test]
     fn module_zero_is_unshifted() {
         let resolver = OffsetResolver {
@@ -489,11 +428,7 @@ mod tests {
         assert_eq!(resolver.resolve(4), Some(587));
     }
 
-    /// **A shift that does not fit refuses rather than wraps.**
-    ///
-    /// A wrapped index answers some other module's slot, which binds the relocation to an
-    /// implementation written for a different symbol - silently, and for the whole run. An
-    /// unresolved relocation is counted and reported; a wrong one is not.
+    /// A shift that does not fit refuses rather than wraps into another module's slot.
     #[test]
     fn a_shift_that_overflows_answers_nothing() {
         let resolver = OffsetResolver {
@@ -515,25 +450,13 @@ mod tests {
 
     /// Addresses these tests reserve, taken rather than chosen.
     ///
-    /// # Why this is one static for the module and not one per test
-    ///
-    /// [`Range::take`] hands out an address no other caller **of that instance** will get -
-    /// its cursor is atomic, so concurrent takes are safe. Two tests each declaring their own
-    /// function-local `static RANGE` get two instances, two cursors, both starting at zero,
-    /// and therefore the *same* addresses. Whichever ran second failed to reserve its pages.
-    ///
-    /// It failed only when those two happened to overlap, so it passed alone and passed most
-    /// of the time in a suite - which is the shape this project already refuses elsewhere: an
-    /// intermittently-failing gate teaches you to re-run until green, and that is how a real
-    /// failure gets waved through.
+    /// One static for the module: each `Range` instance has its own cursor, so two
+    /// function-local statics would hand out the same addresses to concurrent tests.
     static RANGE: orbistoun_mem::test_bases::Range =
         orbistoun_mem::test_bases::Range::nth(orbistoun_mem::test_bases::crates::LOADER);
 
-    /// **Data wins, and a function is untouched by the composition existing.**
-    ///
-    /// The whole safety of D307's fix is that it changes nothing for code: an import that
-    /// names a function misses in the data blocks and falls through to its own stub,
-    /// exactly as before. If that stopped being true, every guest would break at once.
+    /// A data import resolves to storage and a function import still resolves to its stub
+    /// (D307).
     #[test]
     fn a_data_import_resolves_to_storage_and_a_function_still_resolves_to_its_stub() {
         use super::{ImportResolver, SymbolResolver};
@@ -568,12 +491,7 @@ mod tests {
         );
     }
 
-    /// **A refused import resolves to nothing**, which is what a console does with a symbol
-    /// no library exports.
-    ///
-    /// The failure this protects against is the silent direction: an import that resolves
-    /// anyway tells a guest the symbol is present, and a presence census then counts it
-    /// (D392).
+    /// A refused import resolves to nothing, as for a symbol no library exports (D392).
     #[test]
     fn a_refused_import_resolves_to_nothing() {
         use super::{ImportResolver, SymbolResolver};
@@ -607,7 +525,7 @@ mod tests {
     use crate::tls::{MAIN_MODULE_ID, TlsLayout};
     use orbistoun_elf::reloc::{kind, parse_table};
 
-    /// Builds a relocation entry. **Generated, never extracted** (D051).
+    /// Builds a relocation entry, generated (D051).
     fn rela(offset: u64, sym: u32, k: u32, addend: i64) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(&offset.to_le_bytes());
@@ -628,10 +546,10 @@ mod tests {
         }
     }
 
+    /// `RELATIVE` adds the placement base.
     #[test]
     fn a_relative_relocation_adjusts_for_the_placement_base() {
-        // The commonest kind by far - 172,790 of them in one real executable. Getting
-        // the base arithmetic wrong here corrupts an image comprehensively.
+        // The commonest kind; wrong base arithmetic corrupts the whole image.
         let got = value_for(
             &entry(kind::RELATIVE, 0, 0x2000),
             0x4000_0000,
@@ -642,18 +560,19 @@ mod tests {
         assert_eq!(got, RelocValue::Address(0x4000_2000));
     }
 
+    /// A negative addend subtracts rather than wrapping.
     #[test]
     fn a_negative_addend_subtracts_rather_than_wrapping_enormously() {
-        // Addends are signed. Reading one as unsigned turns a small backwards offset
-        // into an address near the top of the address space.
+        // Addends are signed.
         let got = value_for(&entry(kind::RELATIVE, 0, -8), 0x4000_0000, &Nothing, None)
             .expect("relative");
         assert_eq!(got, RelocValue::Address(0x3FFF_FFF8));
     }
 
+    /// `JUMP_SLOT` writes the symbol address and ignores the addend.
     #[test]
     fn a_jump_slot_takes_the_symbol_address_and_ignores_the_addend() {
-        // This is the import case: the value written here is what the guest calls.
+        // The import case: the value written here is what the guest calls.
         let resolver = SingleTargetResolver {
             target: 0xDEAD_BEEF,
         };
@@ -666,6 +585,7 @@ mod tests {
         );
     }
 
+    /// `ABS64` adds the addend to the symbol address.
     #[test]
     fn an_absolute_relocation_adds_the_addend_to_the_symbol() {
         let resolver = SingleTargetResolver { target: 0x1_0000 };
@@ -677,16 +597,17 @@ mod tests {
         );
     }
 
+    /// An unresolvable symbol is reported, not written as zero.
     #[test]
     fn an_unresolvable_symbol_is_reported_rather_than_written_as_zero() {
-        // Writing zero would leave a slot that looks like a valid null pointer, and the
-        // guest would fault somewhere unrelated and much later.
+        // Zero would look like a valid null pointer.
         assert_eq!(
             value_for(&entry(kind::JUMP_SLOT, 3, 0), 0, &Nothing, None),
             Err(Outcome::Unresolved)
         );
     }
 
+    /// A weak unanswered symbol binds to zero and is reported as such (D676).
     #[test]
     fn a_weak_unanswered_symbol_binds_to_zero_and_is_distinguished() {
         struct WeakUnanswered;
@@ -712,6 +633,7 @@ mod tests {
         assert_eq!(got_abs, RelocValue::WeakZero(0x20));
     }
 
+    /// The import resolver distinguishes weak-zero from refused.
     #[test]
     fn an_import_resolver_distinguishes_weak_zero_from_refused() {
         use super::{ImportResolver, Resolution, SymbolResolver};
@@ -735,10 +657,10 @@ mod tests {
         assert!(resolver.resolve(1).is_some());
     }
 
+    /// Thread-local relocations report as deferred, not unsupported.
     #[test]
     fn tls_is_deferred_distinctly_from_unsupported() {
-        // Two different problems: one waits for a feature, the other for a decision.
-        // Collapsing them would hide which.
+        // Two different problems; collapsing them would hide which.
         for k in [kind::DTPMOD64, kind::DTPOFF64, kind::TPOFF64] {
             assert_eq!(
                 value_for(
@@ -762,9 +684,9 @@ mod tests {
         );
     }
 
+    /// A closure serves as a resolver.
     #[test]
     fn a_closure_can_serve_as_a_resolver() {
-        // Keeps the common case light: a test or a caller with a map needs no type.
         let resolver = |index: u32| if index == 5 { Some(0x999) } else { None };
         assert_eq!(
             value_for(&entry(kind::GLOB_DAT, 5, 0), 0, &resolver, None),
@@ -776,17 +698,18 @@ mod tests {
         );
     }
 
+    /// `TPOFF64` is measured downwards from the thread pointer.
     #[test]
     fn a_thread_local_offset_is_measured_downwards_from_the_thread_pointer() {
-        // Variant II: the block sits below the pointer, so the offset is negative.
-        // Writing the raw module offset instead reads the control block, which holds
-        // plausible pointers - so the guest misbehaves rather than faulting.
+        // Variant II: the block sits below the pointer. The raw module offset would read
+        // the control block's plausible pointers instead of faulting.
         let layout = TlsLayout::new(16, 64, 8);
         let got = value_for(&entry(kind::TPOFF64, 0, 8), 0, &Nothing, Some(&layout))
             .expect("a local thread-local needs no symbol");
         assert_eq!(got.value() as i64, 8 - 64);
     }
 
+    /// `DTPMOD64` answers the main module's id.
     #[test]
     fn the_module_id_is_answered_for_the_only_module_loaded() {
         let layout = TlsLayout::new(0, 32, 8);
@@ -796,10 +719,10 @@ mod tests {
         );
     }
 
+    /// `DTPOFF64` is the addend unchanged.
     #[test]
     fn an_offset_within_the_module_block_is_the_addend_unchanged() {
-        // DTPOFF64 is module-relative, unlike TPOFF64. Adjusting it as well would
-        // double-count the block size.
+        // Module-relative, unlike TPOFF64; adjusting it would double-count the block size.
         let layout = TlsLayout::new(0, 64, 8);
         assert_eq!(
             value_for(&entry(kind::DTPOFF64, 0, 24), 0, &Nothing, Some(&layout)),
@@ -807,10 +730,9 @@ mod tests {
         );
     }
 
+    /// A thread-local relocation naming another module is deferred.
     #[test]
     fn a_thread_local_naming_another_module_is_deferred_rather_than_guessed() {
-        // It needs a descriptor table and a second loaded image, neither of which
-        // exists. A plausible number here would be silently wrong.
         let layout = TlsLayout::new(0, 64, 8);
         assert_eq!(
             value_for(&entry(kind::TPOFF64, 9, 0), 0, &Nothing, Some(&layout)),
@@ -818,10 +740,9 @@ mod tests {
         );
     }
 
+    /// Thread-local relocations without a layout are deferred, not zeroed.
     #[test]
     fn thread_local_relocations_without_a_layout_are_deferred_not_zeroed() {
-        // A module declaring no PT_TLS but carrying TLS relocations is odd enough that
-        // answering it with an offset into a block that does not exist would be a lie.
         assert_eq!(
             value_for(&entry(kind::TPOFF64, 0, 0), 0, &Nothing, None),
             Err(Outcome::TlsDeferred)

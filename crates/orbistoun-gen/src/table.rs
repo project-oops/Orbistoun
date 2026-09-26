@@ -1,17 +1,9 @@
 //! Reading the encoding table the decoder uses, and classifying an instruction with it.
 //!
-//! **Read rather than duplicated.** The family and opcode of an instruction are decided by
-//! exactly one set of rules, and a second copy of them here would drift from the decoder
-//! silently.
-//!
-//! What *is* duplicated is [`classify`], which implements the same rule the decoder
-//! implements in Rust - and the duplication is worth naming rather than hiding. The two
-//! agreeing is what lets a generated table be checked against the code that reads it. The
-//! two *drifting* would be hard to see, because each stays self-consistent: reading only
-//! the contiguous part of a split opcode here while the decoder reads both halves would
-//! classify a half-precision variant as its counterpart, and emit a second name for an
-//! opcode that already has one. The name table refuses a duplicate, so that particular
-//! drift surfaces loudly. Not every drift would.
+//! The table is read rather than duplicated, so the family rules have one source. The
+//! classification rule itself is duplicated in [`classify`], which must agree with the
+//! decoder's; the name table refuses a duplicate name, which catches some drift but not
+//! all.
 
 use std::path::Path;
 
@@ -31,7 +23,7 @@ pub(crate) struct Field {
 /// One encoding family, as the decoder's table declares it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Encoding {
-    /// Family name - `VOP3`, `SOPK`.
+    /// Family name, such as `VOP3` or `SOPK`.
     pub(crate) name: String,
     /// Bits that identify the family.
     pub(crate) mask: u32,
@@ -60,9 +52,8 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Encoding>> {
 
     let mut out = Vec::new();
     for row in rows {
-        // A row missing any of these is skipped rather than fatal, which is what the
-        // generator this replaced did: the table carries rows that describe a boundary and
-        // nothing else, and demanding a full opcode from all of them would reject the file.
+        // A row missing any of these is skipped rather than fatal: some rows describe only
+        // an instruction boundary.
         let (Some(name), Some(mask), Some(value), Some(opcode)) = (
             row.get("name").and_then(toml::Value::as_str),
             row.get("mask").and_then(hex_u32),
@@ -81,8 +72,8 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Encoding>> {
     }
     anyhow::ensure!(!out.is_empty(), "no usable rows in the encoding table");
 
-    // Most specific first, exactly as the loader orders it. Two families can share a
-    // prefix, and the narrower mask must not claim an instruction the wider one identifies.
+    // Most specific first, as the loader orders it, so a mask with fewer bits never claims
+    // an instruction a more specific one identifies.
     out.sort_by_key(|e| std::cmp::Reverse(e.mask.count_ones()));
     Ok(out)
 }
@@ -107,9 +98,9 @@ fn field(value: &toml::Value, default_word: usize) -> Option<Field> {
 
 /// The family and opcode of an instruction, from all of its words.
 ///
-/// **Takes the whole instruction rather than its first word**, because an opcode is not
-/// always kept in one piece: the typed-buffer family puts three bits at 18:16 of the first
-/// word and a fourth at bit 53, which is bit 21 of the second.
+/// Takes the whole instruction, because an opcode can be split: the typed-buffer family
+/// puts three bits at 18:16 of the first word and a fourth at bit 53 (bit 21 of the
+/// second).
 #[must_use]
 pub(crate) fn classify(words: &[u32], encodings: &[Encoding]) -> Option<(String, u32)> {
     let word = words.first().copied().unwrap_or(0);
@@ -160,8 +151,7 @@ value = "0xFF000000"
 
     /// A row with no opcode is skipped, not rejected.
     ///
-    /// The table carries rows that describe an instruction *boundary* and nothing else.
-    /// Demanding a full opcode from every row would refuse the committed file.
+    /// Some rows describe only an instruction boundary.
     #[test]
     fn a_row_describing_only_a_boundary_is_skipped() {
         let table = parse(TABLE).expect("parses");
@@ -171,9 +161,8 @@ value = "0xFF000000"
 
     /// The most specific mask is tried first.
     ///
-    /// Two families can share a prefix. If the narrower mask were tried first it would
-    /// claim instructions the wider one identifies, and every one of them would be filed
-    /// under the wrong family.
+    /// Two families can share a prefix, and the less specific mask must not claim the
+    /// other's instructions.
     #[test]
     fn the_most_specific_mask_is_tried_first() {
         let table = parse(TABLE).expect("parses");
@@ -182,9 +171,8 @@ value = "0xFF000000"
 
     /// A split opcode reads both halves.
     ///
-    /// **This is the case the whole `classify` duplication exists for.** Reading only the
-    /// contiguous part would give a half-precision variant the same opcode as its
-    /// counterpart - the two differ in the extension bit and nothing else.
+    /// Reading only the contiguous part would give a half-precision variant the same
+    /// opcode as its counterpart, since they differ only in the extension bit.
     #[test]
     fn a_split_opcode_reads_both_words() {
         let table = parse(TABLE).expect("parses");

@@ -1,24 +1,9 @@
 //! The provenance accounting, exercised through its public face.
 //!
-//! # Why these are here rather than beside the code
-//!
-//! `knowledge.rs` is the machinery principle 1 rests on: every recorded behaviour carries a
-//! `known_by`, every claim of outside support has to cite something, and CI refuses a tree
-//! that breaks either rule. It was at **15% coverage** - the lowest of any pure module in
-//! the workspace - which meant most of the rules it enforces had never been watched enforce
-//! anything.
-//!
-//! That is the shape `CLAUDE.md` calls out directly: *"a guard is not finished until
-//! somebody has made it fail. A guard nobody has watched reject something is a guard nobody
-//! knows anything about."* Every test below makes one of them reject something.
-//!
-//! # Built from values, never from the shipped files
-//!
-//! Nothing here asserts on `Knowledge::builtin()` being clean. The shipped files change as
-//! functions are implemented, so a test that read them would fail for reasons belonging to
-//! whoever last edited a TOML - and would then be *disabled*, which is worse than not having
-//! it. The rules are tested against constructed entries; the shipped files are checked
-//! separately, by the guard that exists for them.
+//! Every recorded behaviour carries a `known_by`, every claim of outside support cites
+//! something, and CI refuses a tree that breaks either rule (D180). Each test makes one of those
+//! rules reject something. The tests build entries from values and never assert on the shipped
+//! files, which change as functions are implemented; those have their own guard.
 
 use orbistoun_hle::knowledge::{FunctionKnowledge, Knowledge, KnowledgeFile, Oracle};
 
@@ -41,11 +26,8 @@ fn claiming(name: &str, known: Oracle) -> FunctionKnowledge {
     }
 }
 
-/// **A bare entry needs no source, and one that claims behaviour does.**
-///
-/// The distinction the whole accounting rests on: recording that a function exists is not a
-/// claim about what it does, and demanding a citation for it would make the rule noise that
-/// people learn to silence.
+/// A bare entry needs no source, and one that claims behaviour does: recording that a function
+/// exists is not a claim about what it does.
 #[test]
 fn only_an_entry_claiming_behaviour_needs_to_say_how_it_is_known() {
     let seen = bare("sceSomethingSeen");
@@ -68,10 +50,8 @@ fn only_an_entry_claiming_behaviour_needs_to_say_how_it_is_known() {
     );
 }
 
-/// Any of the four ways of being non-bare is enough to require provenance.
-///
-/// Checked one at a time because `is_bare` is a conjunction, and a conjunction with one
-/// clause wrong still reads correctly for every input that trips a different clause.
+/// Any one of the four kinds of content makes an entry non-bare, each checked alone because
+/// `is_bare` is a conjunction.
 #[test]
 fn each_kind_of_content_on_its_own_makes_an_entry_non_bare() {
     let with_arity = FunctionKnowledge {
@@ -96,11 +76,8 @@ fn each_kind_of_content_on_its_own_makes_an_entry_non_bare() {
     }
 }
 
-/// **A claim of outside support with nothing to check is refused.**
-///
-/// `published` and `measured` both assert something a reader could go and verify. Without a
-/// citation there is nothing to verify, and the entry *looks* like evidence while being
-/// worth less than an honest `assumed`.
+/// A claim of outside support with nothing to check is refused: without a citation it looks
+/// like evidence and is worth less than an honest `assumed`.
 #[test]
 fn claiming_an_outside_source_without_citing_one_is_a_fault() {
     for oracle in [Oracle::Published, Oracle::Measured] {
@@ -125,11 +102,10 @@ fn claiming_an_outside_source_without_citing_one_is_a_fault() {
     }
 }
 
-/// **A path is not a citation, in every shape a path arrives in.**
+/// A path is not a citation, in every shape a path arrives in.
 ///
-/// A citation exists so somebody else can check a claim, and a location only one machine has
-/// defeats that entirely. Each form is checked because the test is a disjunction, and one
-/// missing arm passes for every input that trips another (D239).
+/// A location only one machine has cannot be checked by anyone else. Each form is tested
+/// because the check is a disjunction.
 #[test]
 fn a_citation_naming_a_location_rather_than_a_document_is_refused() {
     for path in [
@@ -151,10 +127,8 @@ fn a_citation_naming_a_location_rather_than_a_document_is_refused() {
     }
 }
 
-/// A document reference that merely contains a dot is still a document.
-///
-/// The converse of the test above, and the one that stops the path check being tightened
-/// into something that rejects ordinary citations.
+/// A document reference that merely contains a dot is still a document, so the path check
+/// cannot tighten into rejecting ordinary citations.
 #[test]
 fn an_ordinary_document_reference_is_not_mistaken_for_a_path() {
     for citation in [
@@ -174,10 +148,7 @@ fn an_ordinary_document_reference_is_not_mistaken_for_a_path() {
     }
 }
 
-/// **Citing a source for a guess is refused, because it reads as evidence.**
-///
-/// `assumed` means nobody established it. An entry that says so *and* points at a document
-/// is the precise confusion the field exists to prevent.
+/// Citing a source for a guess is refused, because it reads as evidence.
 #[test]
 fn an_assumption_that_cites_something_is_a_fault() {
     assert!(Oracle::Assumed.is_guess());
@@ -219,11 +190,8 @@ fn saying_nothing_about_where_a_name_came_from_is_not_a_claim() {
     assert!(entry.name_provenance_faults().is_empty());
 }
 
-/// **An entry that itemises its guesses is not charged again for being candid.**
-///
-/// Two definitions of this count once disagreed by ten across the same knowledge base, and
-/// neither report said which it meant. The rule kept was: itemised assumptions count as
-/// themselves, and an entry resting on a guess while listing nothing counts as one (D239).
+/// Itemised assumptions count as themselves, and an entry resting on a guess while listing
+/// nothing counts as one; no penalty is added on top.
 #[test]
 fn open_questions_count_the_items_and_never_add_a_penalty_on_top() {
     let itemised = FunctionKnowledge {
@@ -267,10 +235,8 @@ fn the_question_count_is_derived_from_the_question_list() {
     }
 }
 
-/// **The vocabulary has no value meaning "I already knew it", and each says what it is.**
-///
-/// The property that makes the field enforcement rather than decoration: every option names
-/// something that could contradict it.
+/// Every oracle names something that could contradict it, and has a label; none means "I
+/// already knew it".
 #[test]
 fn every_oracle_is_falsifiable_and_labelled() {
     let all = [
@@ -285,14 +251,14 @@ fn every_oracle_is_falsifiable_and_labelled() {
         assert!(!oracle.label().is_empty());
     }
 
-    // Only the two claiming outside support need a citation; the two resting on our own
-    // observation do not, because the observation is the evidence.
+    // Only the two claiming outside support need a citation; for the other two the observation is
+    // the evidence.
     assert!(Oracle::Published.needs_citation());
     assert!(Oracle::Measured.needs_citation());
     assert!(!Oracle::GuestObserved.needs_citation());
     assert!(!Oracle::Assumed.needs_citation());
 
-    // Only what nobody has settled, or settled with one bit, is worth pointing hardware at.
+    // Only what nobody settled, or settled with one bit, is worth pointing hardware at.
     assert!(Oracle::Assumed.is_probeable());
     assert!(Oracle::GuestObserved.is_probeable());
     assert!(!Oracle::Published.is_probeable());
@@ -324,10 +290,8 @@ fn a_knowledge_file_round_trips_through_its_own_format() {
     );
 }
 
-/// Malformed text is refused rather than read as an empty file.
-///
-/// An empty fall-back would look exactly like a library nobody has learned anything about,
-/// which is the failure `Container::imports` is written to avoid one layer down.
+/// Malformed text is refused rather than read as an empty file, which would look like a
+/// library nobody has learned anything about.
 #[test]
 fn a_malformed_file_is_an_error_rather_than_an_empty_one() {
     assert!(KnowledgeFile::parse("this is not toml {{{").is_err());
@@ -364,11 +328,10 @@ fn an_absorbed_file_is_searchable_by_function_and_by_library() {
     assert!(knowledge.library_of("sceNeverHeardOf").is_none());
 }
 
-/// **The tallies count what they say they count.**
+/// The tallies count what they say they count.
 ///
-/// `understood` counts entries that record something; `resting_on` counts by oracle; and
-/// `open_questions` sums the itemised guesses. Built from a known set so each number has a
-/// hand-checkable answer rather than being whatever the shipped files happen to hold.
+/// `understood` counts entries that record something, `resting_on` counts by oracle, and
+/// `open_questions` sums the itemised guesses, over a known set with hand-checkable answers.
 #[test]
 fn the_tallies_are_each_computed_over_the_right_thing() {
     let mut knowledge = Knowledge::default();
@@ -409,10 +372,7 @@ fn the_tallies_are_each_computed_over_the_right_thing() {
     assert_eq!(knowledge.functions().count(), 4);
 }
 
-/// **A fault in one entry is reported against the whole base, and names the function.**
-///
-/// The property CI depends on: a report that said only "something is wrong" would send
-/// somebody reading ninety-five entries.
+/// A fault in one entry is reported against the whole base, naming the function.
 #[test]
 fn a_faulty_entry_is_reported_by_name_across_the_whole_base() {
     let mut knowledge = Knowledge::default();
@@ -436,12 +396,8 @@ fn a_faulty_entry_is_reported_by_name_across_the_whole_base() {
     );
 }
 
-/// The shipped knowledge parses and holds something.
-///
-/// **Deliberately not an assertion that it is clean.** The shipped files change as functions
-/// are implemented, so a cleanliness assertion here would fail for reasons belonging to
-/// whoever last edited a TOML - and a test that fails for somebody else's reason is one that
-/// gets disabled. That check has its own home; this one only says the embedded files load.
+/// The shipped knowledge parses and holds something; cleanliness is checked elsewhere, since
+/// the files change as functions are implemented.
 #[test]
 fn the_shipped_knowledge_loads_and_is_not_empty() {
     let builtin = Knowledge::builtin();
@@ -458,11 +414,7 @@ fn recording(function: &str) -> orbistoun_hle::knowledge::Record {
     }
 }
 
-/// **A merge adds without restating, and never drops what came before.**
-///
-/// The property the whole accumulate-never-regenerate design rests on: a session recording
-/// one edge case must not have to repeat what was established three sessions ago, and must
-/// not silently lose it either.
+/// A merge adds without restating, and never drops what earlier sessions established (D292).
 #[test]
 fn merging_a_record_keeps_what_earlier_sessions_established() {
     let mut file = KnowledgeFile {
@@ -495,10 +447,7 @@ fn merging_a_record_keeps_what_earlier_sessions_established() {
     assert_eq!(entry.purpose, "does a thing", "and the same for purpose");
 }
 
-/// **Recording the same thing twice does not record it twice.**
-///
-/// A loop that re-derives the same finding every run would otherwise grow a file without
-/// bound, and a list of a hundred identical edge cases says less than one does.
+/// Merging the same finding again does not duplicate it.
 #[test]
 fn merging_the_same_finding_again_does_not_duplicate_it() {
     let mut file = KnowledgeFile {
@@ -551,10 +500,8 @@ fn merging_an_unknown_function_creates_it_with_todays_date() {
     assert_eq!(entry.found_on, "2026-08-27");
 }
 
-/// **A merge reports faults rather than refusing, and an empty list means admissible.**
-///
-/// The distinction the doc comment insists on: only the caller knows whether this is a
-/// command rejecting input or a loop declining to record, so the decision is not made here.
+/// A merge reports faults rather than refusing; an empty list means admissible, and the
+/// caller decides what to do.
 #[test]
 fn a_merge_reports_what_is_wrong_instead_of_deciding_what_to_do_about_it() {
     let mut file = KnowledgeFile {

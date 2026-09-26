@@ -1,20 +1,10 @@
 //! System service HLE - the settings and status a title asks the system about.
 //!
-//! # Why this exists, and what it is not
-//!
-//! A title asks the system what language it is set to, which button confirms, what the
-//! display looks like. None of that is emulation in any interesting sense; it is a
-//! question with an answer, and the answer is a *setting of the console*, not a fact about
-//! the guest.
-//!
-//! Which is the whole problem. **We do not know the values**, and the interface hands them
-//! back through an out-pointer rather than a return value - so an unimplemented stub does
-//! not merely answer wrongly, it answers *nothing*, and the guest reads whatever the stack
-//! happened to hold. That is a different and worse failure than a bad return: a bad return
-//! is at least the same wrong answer every run (D171).
-//!
-//! So the out-pointer is always written, and what is written is a stated placeholder
-//! rather than a guess dressed as knowledge.
+//! A title asks which language is set, which button confirms and what the display looks like.
+//! The answers are settings of the machine, not facts about the guest, and most are unmeasured.
+//! The interface answers through out-pointers, so an unwritten one leaves the guest reading stale
+//! stack, a different wrong answer every run. Every out-pointer is therefore written, with a
+//! stated placeholder where the value is unknown (D171).
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
@@ -34,23 +24,21 @@ pub mod console;
 
 guest_module! {
     "libSceSystemService" {
-        // Confirmed by hash against a real import (D167).
         "sceSystemServiceParamGetInt" => 2,
         "sceSystemServiceHideSplashScreen" => 0,
         "sceSystemServiceGetStatus" => 1,
-        // title id, argv, parameter block - the shape the launcher that first called it passes.
+        // title id, argv, parameter block.
         "sceSystemServiceLaunchApp" => 3,
-        // A system-flag setter, arity the trampoline's six because the real signature is
-        // unmeasured (D504); the handler reads none of it.
+        // A system-flag setter. The real signature is unmeasured, so the arity is the trampoline's
+        // six; the handler reads none of it.
         "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet" => 6,
     }
 }
 
 /// The user service, which is its own library.
 ///
-/// A nested module because `guest_module!` names its declaration `MODULE`, and a crate
-/// serving two libraries needs two of them. Kept here rather than in a crate of its own:
-/// three functions that answer which user is signed in are not a subsystem.
+/// A nested module because `guest_module!` names its declaration `MODULE`, and a crate serving
+/// two libraries needs two of them.
 pub mod user {
     use orbistoun_hle::guest_module;
 
@@ -60,10 +48,9 @@ pub mod user {
             "sceUserServiceTerminate" => 0,
             "sceUserServiceGetInitialUser" => 1,
             "sceUserServiceGetUserName" => 3,
-            // Declared so a trace names them, and deliberately not implemented. Each writes
-            // a number or a structure whose *meaning* is unmeasured - an age band, an
-            // accessibility encoding, a list layout - and a person's answer to "what age
-            // level" is not the integer a title reads (D346).
+            // Declared so a trace names them, and not implemented: each writes a number or
+            // structure whose meaning is unmeasured (an age band, an accessibility encoding, a list
+            // layout) (D346).
             "sceUserServiceGetLoginUserIdList" => 1,
             "sceUserServiceGetAgeLevel" => 2,
             "sceUserServiceGetGamePresets" => 2,
@@ -78,10 +65,8 @@ pub mod user {
 
 /// Loading system modules - `libSceSysmodule`.
 ///
-/// A nested module for the same reason [`user`] is: one crate, more than one library, and each
-/// `guest_module!` names its declaration `MODULE`. This one is the call nearly every title makes
-/// first - "bring library X in so I can use it" - and getting it wrong strands a title before it
-/// reaches anything interesting.
+/// A nested module for the same reason as [`user`]. Nearly every title calls it first to bring a
+/// library in before using it.
 pub mod sysmodule {
     use orbistoun_hle::guest_module;
 
@@ -99,20 +84,11 @@ const OK: u64 = 0;
 
 /// What an unknown system parameter answers.
 ///
-/// **Zero, and it is a placeholder rather than a value.** Nothing here knows what any of
-/// these parameters mean - they are console settings, and no lawful source describes the
-/// identifiers.
-///
-/// Zero is chosen because it is the answer least likely to send a guest somewhere
-/// surprising: a parameter read as an index lands on the first entry, one read as a flag
-/// reads as off, one read as a count reads as none. All of those are ordinary states a
-/// title must already handle. A non-zero guess would be picking a specific behaviour out
-/// of the air and calling it a default.
+/// A placeholder, not a value: the identifiers are machine settings no lawful source describes.
+/// Zero reads as a first index, an unset flag or an empty count, all states a title handles.
 const UNKNOWN_PARAMETER: u64 = 0;
 
-/// Writes a machine word into guest memory.
-///
-/// The mapping is identity, so a guest address is a host address (D014).
+/// Writes a machine word into guest memory. Guest memory is identity-mapped.
 fn write_word(address: u64, value: u64) -> bool {
     let Ok(at) = usize::try_from(address) else {
         return false;
@@ -120,9 +96,9 @@ fn write_word(address: u64, value: u64) -> bool {
     if at == 0 {
         return false;
     }
-    // SAFETY: the guest supplied this destination, which is the same contract the real
-    // call has. Written unaligned because the guest's alignment is its own business, and
-    // an address it has not mapped faults here exactly as it would have in the guest.
+    // SAFETY: the guest supplied this destination, the same contract the real call has. Written
+    // unaligned because alignment is the guest's; an unmapped address faults as it would in the
+    // guest.
     unsafe {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u32>(at),
@@ -134,33 +110,19 @@ fn write_word(address: u64, value: u64) -> bool {
 
 /// `sceSystemServiceParamGetInt(param, out)`.
 ///
-/// # The failure this prevents
-///
-/// Unimplemented, this wrote nothing at all, and the guest read whatever its stack held at
-/// that address. Every other unimplemented call in this project answers *wrongly but
-/// consistently*; this one answered differently on every run, because the value depended
-/// on what had last been in that stack slot.
-///
-/// **An out-pointer that is never written is worse than a wrong return value**, and it is a
-/// failure mode with no signature - there is no placeholder to recognise in a trace,
-/// because nothing was written to recognise.
-///
-/// Answering `OK` rather than an error is deliberate. A guest that checks the return takes
-/// its error path and skips whatever the setting was for; one that does not check reads the
-/// value regardless, which is why the value has to be written either way. Writing it *and*
-/// reporting success is the combination that leaves a guest in a state it can handle.
+/// The out-pointer is always written, because an unwritten one hands the guest stale stack that
+/// differs every run and leaves no placeholder in a trace. It answers `OK`: a guest that checks the
+/// return proceeds, and one that does not reads the written value either way.
 fn param_get_int(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out = args[1];
-    // A measured answer if the console has one, and the documented placeholder otherwise -
-    // counted either way, so a run can say how many questions it did not understand
-    // (`console::summarise`). An identifier too large to be one is simply not one, and takes
-    // the same path as an identifier nobody has measured.
+    // A measured answer if the machine has one, the placeholder otherwise; counted either way
+    // (`console::summarise`). An identifier too large to be one takes the unmeasured path.
     let value = u32::try_from(args[0])
         .ok()
         .and_then(console::parameter)
         .map_or(UNKNOWN_PARAMETER, |answer| {
-            // Through the bytes rather than by `as`: a parameter is an `int` and a negative
-            // measured value must reach the guest as the bit pattern it was measured as.
+            // Through the bytes rather than `as`: a negative measured `int` reaches the guest as
+            // its bits.
             u64::from(u32::from_ne_bytes(answer.to_ne_bytes()))
         });
     if !write_word(out, value) {
@@ -169,19 +131,14 @@ fn param_get_int(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// The user the console is signed in as.
+/// The user the machine is signed in as.
 ///
-/// **A fixed identifier, and that is an assumption rather than a fact.** A real console
-/// numbers its users and a title uses the value to key save data, so the specific number
-/// matters to anything that has stored something under a different one. One is chosen
-/// because it is the first identifier a one-user console would hand out, and because zero
-/// is what a caller reads as "nobody" (D274).
+/// An assumed identifier: titles key save data on it, so the number matters. One is the first
+/// identifier a one-user machine hands out, and zero reads as nobody.
 const INITIAL_USER: u64 = 1;
 
-/// `sceUserServiceInitialize(params)` - starts the user service.
-///
-/// Accepts whatever parameters it is given. Nothing here reads them, and refusing the call
-/// would stop a title before it could ask anything more interesting.
+/// `sceUserServiceInitialize(params)` - starts the user service. Accepts any parameters and reads
+/// none of them.
 fn user_service_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
@@ -191,75 +148,47 @@ fn user_service_terminate(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceErrorDialogInitialize()` - set up the system error-dialog subsystem.
+/// `sceErrorDialogInitialize()` - sets up the system error-dialog subsystem.
 ///
-/// An init that succeeds honestly: it answers `OK` (`0x0`), the way an SDK `*Initialize` does on its
-/// first call, without claiming a dialog was ever shown - the same reasoning that let
-/// `libSceAudioOut`'s init leave `SERVES_NOTHING` (setting a subsystem up is not claiming a sound was
-/// made). Unimplemented, it answered the loud placeholder to guests that call it (PPSA28061, worklog
-/// 756); the honest fill is the `OK` an init returns. Arity is the trampoline's 6, not a claim about
-/// the real signature (D504).
+/// Answers `OK`, as an SDK `*Initialize` does, without claiming a dialog was shown. Arity is the
+/// trampoline's six, not a claim about the real signature.
 fn error_dialog_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceSystemServiceHideSplashScreen()` - dismiss the boot splash once a title is ready to draw.
+/// `sceSystemServiceHideSplashScreen()` - dismisses the boot splash once a title is ready to draw.
 ///
-/// An action that succeeds honestly. On a console this tears down the boot-logo layer the system
-/// showed while the title loaded; nothing displays that layer through this path here, so "hide it"
-/// is a no-op that succeeds - the same shape [`sysmodule_unload_module`] states ("nothing was paged
-/// in, so nothing is paged out ... success"). It answers `OK`, writes nothing, and claims no
-/// framebuffer was touched. Unimplemented, it handed the loud placeholder to a guest that checks the
-/// return (PPSA04263, worklog 757); the honest fill is the `OK` the console answers. Arity zero is
-/// the declared shape (D167).
+/// Nothing displays a splash layer here, so hiding it is a no-op that succeeds, like
+/// [`sysmodule_unload_module`]. Answers `OK` and writes nothing.
 fn hide_splash_screen(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceSystemServiceDisableNoticeScreenSkipFlagAutoSet()` - turn off a system flag's auto-set.
+/// `sceSystemServiceDisableNoticeScreenSkipFlagAutoSet()` - turns off a system flag's auto-set.
 ///
-/// A setter, and a setter's contract is that the request was taken, not that a value was read back
-/// (D523). It disables the automatic setting of the notice-screen skip flag; orbistoun keeps no such
-/// flag, so there is nothing to toggle and nothing to write, and answering `OK` states the request
-/// was accepted without inventing a value. Unimplemented, it handed the loud placeholder to a guest
-/// that checks the return (PPSA04263, worklog 757). Arity is the trampoline's six, not a claim about
-/// the real signature (D504) - the handler reads none of its arguments.
+/// A setter's contract is that the request was taken. orbistoun keeps no such flag, so nothing
+/// is toggled or written and the call answers `OK`. The handler reads none of its arguments.
 fn disable_notice_screen_skip_flag_auto_set(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
 /// Longest name this will write, however large a buffer says it is.
 ///
-/// **A ceiling on our own trust, not on the caller's buffer.** The size argument is only
-/// believed up to here; anything larger is treated as a value that is not a size at all,
-/// which is what a wrong argument position looks like. A name longer than this is truncated
-/// rather than refused, because a shortened name is a cosmetic problem and a stack overwrite
-/// is not.
+/// A ceiling on trust in the size argument: a larger value is treated as not a size at all, which
+/// is what a wrong argument position looks like. A longer name is truncated, not refused.
 const MAX_USER_NAME: usize = 64;
 
 /// `sceUserServiceGetUserName(user, out, size)` - the name a person chose, for a guest.
 ///
-/// # The one call where a console setting reaches a title unencoded
-///
-/// Everything else this crate answers is a number whose meaning is a measurement. A name is
-/// a string: the owner types it in the shell, the guest reads it, and nothing in between has
-/// to be guessed. That is the whole argument for a shell holding settings, with a real
-/// caller attached (D346).
-///
-/// # Why the size is checked rather than trusted
-///
-/// `size` being the third argument is an **assumption**, and a wrong one writes past the end
-/// of a caller's buffer - the failure `sceUserServiceGetInitialUser` already carries a
-/// warning about (D210, D272). So it is believed only within [`MAX_USER_NAME`]; a value
-/// outside that is not a size, and the call is refused rather than acted on. A refusal is
-/// recoverable and a smashed stack is not.
+/// The name is a string the owner types in the shell and the guest reads unencoded (D346).
+/// `size` being the third argument is an assumption, and a wrong one writes past a caller's
+/// buffer, so it is believed only within [`MAX_USER_NAME`]; outside that the call is refused.
 fn user_service_get_user_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(id) = u32::try_from(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     let Some(name) = console::settings().user(id).map(|user| user.name.clone()) else {
-        // A title asking about a user this machine does not have is answered as such, not
-        // handed the signed-in user's name - which would be a different person.
+        // A user this machine does not have is refused, not given the signed-in user's name.
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
 
@@ -267,8 +196,7 @@ fn user_service_get_user_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(size) = usize::try_from(args[2]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    // Room for at least one byte of name and its terminator, and no more than this shim is
-    // willing to believe. Both ends refuse rather than guess.
+    // Room for at least one byte of name and its terminator, and no more than this shim believes.
     if !(2..=MAX_USER_NAME).contains(&size) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
@@ -279,8 +207,7 @@ fn user_service_get_user_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
 
-    // Truncated on a character boundary, not a byte one: cutting a multi-byte character in
-    // half hands the guest a string that is not text.
+    // Truncated on a character boundary so the guest receives valid text.
     let room = size - 1;
     let mut keep = room.min(name.len());
     while keep > 0 && !name.is_char_boundary(keep) {
@@ -288,33 +215,27 @@ fn user_service_get_user_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 
     let destination = std::ptr::with_exposed_provenance_mut::<u8>(at);
-    // SAFETY: the guest supplied this destination and its size, which is the same contract
-    // the real call has. `keep` is at most `size - 1` and `size` was bounded above, so the
-    // write stays inside the buffer the caller described. The mapping is identity, so a guest
-    // address is a host address (D014), and an address the guest has not mapped faults here
-    // exactly as it would have in the guest. The name is owned locally and cannot overlap it.
+    // SAFETY: the guest supplied this identity-mapped destination and its size, the real call's
+    // contract. `keep` is at most `size - 1` and `size` is bounded, so the write stays inside the
+    // buffer. The name is owned locally and cannot overlap it.
     unsafe {
         std::ptr::copy_nonoverlapping(name.as_ptr(), destination, keep);
     }
-    // SAFETY: `keep < size` and the buffer is `size` bytes, so one past the copied text is
-    // still within it - which is precisely where the terminator belongs.
+    // SAFETY: `keep < size` and the buffer is `size` bytes, so the terminator byte is inside it.
     let terminator = unsafe { destination.add(keep) };
-    // SAFETY: the same byte, shown above to be inside the caller's buffer.
+    // SAFETY: the same byte, inside the caller's buffer.
     unsafe {
         terminator.write(0);
     }
     OK
 }
 
-/// The identifier of whoever is signed in, as every call that reports it must answer.
+/// The identifier of whoever is signed in, as every call that reports it answers.
 ///
-/// **One place, because two calls disagreeing about who is signed in is worse than either
-/// being wrong.** `sceUserServiceGetInitialUser` and `sceUserServiceGetLoginUserIdList` are
-/// asked the same question in different shapes, and a title that got different answers would
-/// key its save data on one and its session on the other.
+/// One accessor, so `sceUserServiceGetInitialUser` and `sceUserServiceGetLoginUserIdList` cannot
+/// disagree and have a title key save data and session on different users.
 fn signed_in_user() -> u32 {
-    // A machine with a deleted signed-in user answers the placeholder, which is the honest
-    // answer to "who is signed in" when nobody is (D346).
+    // A machine with a deleted signed-in user answers the placeholder (D346).
     console::settings()
         .current()
         .map_or(INITIAL_USER as u32, |user| user.id)
@@ -322,23 +243,10 @@ fn signed_in_user() -> u32 {
 
 /// `sceUserServiceGetLoginUserIdList(out)` - which users are signed in.
 ///
-/// # One entry, and that is a fact about orbistoun rather than a guess about the structure
-///
-/// **How many identifiers the caller's structure holds is not established.** The symbol has
-/// never resolved on any leg obSCEne has run - `130-layout/user-service-layout` skips with
-/// *libSceUserService symbols not available in this context* - so nothing has measured its
-/// length, and a console is documented nowhere this project may read.
-///
-/// This writes **one** identifier, which needs no such guess: orbistoun signs exactly one user
-/// in ([`orbistoun_shell::settings::Settings::signed_in`] is one identifier, not a set), so the
-/// list of signed-in users has exactly one entry and writing it is a transcription rather than
-/// an assumption.
-///
-/// **What is not written is the honest part.** Anything past the first identifier is left as the
-/// caller had it, because zero-filling a tail would be inventing the length this call does not
-/// know. A caller that does not clear the structure first therefore reads its own stale bytes as
-/// extra users - a wrong answer that is *visible*, where a guessed length is a wrong answer that
-/// is not. If a title is seen doing that, the fix is a measurement, not a longer write.
+/// The length of the caller's structure is unmeasured. orbistoun signs in exactly one user, so
+/// this writes one identifier and leaves the rest as the caller had it: zero-filling a tail would
+/// invent a length. A caller that does not clear the structure reads its own stale bytes, a
+/// visible wrong answer rather than a hidden one.
 fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
@@ -346,10 +254,8 @@ fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64
     let Ok(at) = usize::try_from(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    // Four bytes, for the reason `sceUserServiceGetInitialUser` gives: an identifier is an
-    // `int`, and writing a whole word through an int pointer takes the caller's next variable
-    // with it (D210, D272).
-    // SAFETY: a guest-supplied `int *` under the identity mapping (D014).
+    // SAFETY: a guest-supplied `int *` in identity-mapped guest memory, written at its declared
+    // four-byte width (D272).
     unsafe {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u32>(at),
@@ -367,56 +273,42 @@ fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(at) = usize::try_from(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    // Four bytes: a user identifier is an `int`, and writing a whole word through an int
-    // pointer takes the caller's next variable with it (D210, D272).
-    // SAFETY: a guest-supplied `int *` under the identity mapping (D014).
+    // SAFETY: a guest-supplied `int *` in identity-mapped guest memory, written at its declared
+    // four-byte width (D272).
     unsafe {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u32>(at),
-            // The user somebody is actually signed in as, rather than a fixed one. A machine
-            // with a deleted signed-in user answers the placeholder, which is the honest
-            // answer to "who is signed in" when nobody is (D346).
+            // The configured signed-in user; a deleted one answers the placeholder (D346).
             signed_in_user(),
         );
     }
     OK
 }
 
-/// `sceSysmoduleLoadModule(id)` - bring a system module in so its functions can be called.
+/// `sceSysmoduleLoadModule(id)` - brings a system module in so its functions can be called.
 ///
-/// **Always succeeds, and that is the honest answer here.** On a console this pages a library into
-/// the process; in orbistoun every library a title imports is already resolved by the loader - its
-/// functions are stubs or implementations in this process before the guest runs - so the module a
-/// guest asks to load is one it can already call. Answering `0` states exactly that. Left to the
-/// stub-everything resolver it returned `0x7fff_0001`, a positive placeholder a caller reads as a
-/// loaded-module handle it never asked for, and a title that stored and dereferenced it faulted a
-/// few calls later on something with no relation to the load (D125).
+/// Always succeeds: the loader resolves every library a title imports before the guest runs, so
+/// the requested module is already callable. Answers `0`; a positive placeholder would read as a
+/// module handle the guest might dereference.
 fn sysmodule_load_module(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceSysmoduleUnloadModule(id)` - the counterpart, and a no-op here.
-///
-/// Nothing was paged in, so nothing is paged out; the functions stay resolved either way. Success,
-/// because a title that unloads a module and checks the result should not be told it failed.
+/// `sceSysmoduleUnloadModule(id)` - a no-op that succeeds, since loading paged nothing in.
 fn sysmodule_unload_module(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
 /// `SCE_SYSMODULE_ERROR_UNLOADED` - answered for an identifier that names no loaded module.
 ///
-/// **Measured.** obSCEne's `060-module/sysmodule-query` called `sceSysmoduleIsLoaded(0)` on hardware
-/// and was answered `0x805a1000` - the sysmodule error base `0x805a_0000` with its unloaded code, not
-/// "loaded". A guest checking against `SCE_SYSMODULE_ERROR_*` never matches a kernel-base code or a
-/// placeholder.
+/// Measured: `sceSysmoduleIsLoaded(0)` answers the sysmodule error base `0x805a_0000` with its
+/// unloaded code (obSCEne's `060-module/sysmodule-query`).
 const SYSMODULE_UNLOADED: u64 = 0x805a_1000;
 
 /// `sceSysmoduleIsLoaded(id)` - whether a module is loaded.
 ///
-/// Every real module a title names is resolved by the loader, so a valid identifier answers `0`
-/// (loaded), the same fact [`sysmodule_load_module`] states from the other side. But **identifier 0 is
-/// not a loadable module** - hardware answers the unloaded error for it, not success - so that case is
-/// answered with the measured [`SYSMODULE_UNLOADED`] rather than reporting a non-module as present.
+/// A valid identifier answers `0` (loaded), since the loader resolves every module. Identifier 0
+/// is not a loadable module and answers the measured [`SYSMODULE_UNLOADED`].
 fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return SYSMODULE_UNLOADED;
@@ -424,10 +316,8 @@ fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Implementations this crate provides, by symbol name.
-///
-/// Names rather than hashes: the hash is derived from the name, so a table written in
-/// hashes could not be read by a person or checked against the declarations above.
+/// Implementations this crate provides, by symbol name. Names rather than hashes, so the table can
+/// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceUserServiceInitialize", user_service_initialize),
@@ -468,11 +358,7 @@ mod tests {
         args
     }
 
-    /// **The two calls that report who is signed in must never disagree.**
-    ///
-    /// A title keys its save data on one answer and its session on the other, so the failure this
-    /// guards is silent and expensive: saves written under an identifier the session does not use.
-    /// Both read one accessor, and this is what says so.
+    /// The two calls that report who is signed in never disagree.
     #[test]
     fn the_login_list_names_the_same_user_as_the_initial_user() {
         let mut list = [0xCCu32; 4];
@@ -493,11 +379,7 @@ mod tests {
         assert_ne!(list[0], 0xCC, "and something was actually written");
     }
 
-    /// **Exactly four bytes, and nothing past them.**
-    ///
-    /// Two things at once. An identifier is an `int`, so writing a word would take the caller's
-    /// next variable with it (D210, D272). And the tail is left alone deliberately: how many
-    /// identifiers the structure holds is unmeasured, so zero-filling it would invent a length.
+    /// The login list writes exactly one four-byte identifier (D272) and leaves the tail alone.
     #[test]
     fn only_the_first_identifier_is_written() {
         let mut list = [0xCCu32; 4];
@@ -523,12 +405,7 @@ mod tests {
         );
     }
 
-    /// **A size this shim does not believe is refused, not acted on.**
-    ///
-    /// The whole safety story for this call. That the size is the third argument is an
-    /// assumption, and a wrong argument position would write past a caller's buffer - so a
-    /// claimed size outside what a name could plausibly need is treated as a value that is
-    /// not a size at all. Asserted on the refusal, because the failure is the point (D346).
+    /// A size outside what a name could need is refused, not acted on (D346).
     #[test]
     fn a_size_this_shim_does_not_believe_is_refused() {
         let mut buffer = [0xAA_u8; 8];
@@ -557,14 +434,12 @@ mod tests {
         assert_eq!(buffer[0], 0, "nothing was written");
     }
 
-    /// **The name arrives NUL-terminated and inside the buffer it was given.**
+    /// The name arrives NUL-terminated inside the buffer it was given.
     ///
-    /// Uses a buffer smaller than the default name so the truncating path is the one under
-    /// test - the untruncated case cannot show that the bound is respected.
+    /// The buffer is smaller than the default name, so the truncating path is the one under test.
     #[test]
     fn a_name_is_written_terminated_and_never_past_the_size_it_was_given() {
-        // The shipped default user is "player", six bytes. Four bytes of room means three
-        // characters and a terminator.
+        // The default user is "player": four bytes of room holds three characters and a terminator.
         let mut buffer = [0xAA_u8; 16];
         let answered = super::user_service_get_user_name(&name_call(1, &mut buffer, 4));
 
@@ -579,11 +454,8 @@ mod tests {
 
     #[test]
     fn every_implementation_is_also_declared() {
-        // An implementation nobody declared can never be reached: resolution goes through
-        // the declared symbol list, so the two drifting apart would leave code that looks
-        // written and never runs.
-        // **Both modules.** This crate serves two libraries, and checking only the first
-        // would report the user service as undeclared while it worked.
+        // Every implementation is declared in one of the crate's modules, or resolution never
+        // reaches it.
         let declared: Vec<&str> = super::MODULE
             .imports
             .iter()
@@ -600,21 +472,14 @@ mod tests {
         }
     }
 
-    /// **The error-dialog init succeeds honestly.** It answers `OK`, not the loud placeholder a guest
-    /// would carry on as a status, and dereferences none of its arguments (worklog 756).
+    /// The error-dialog init answers `OK` and reads none of its arguments.
     #[test]
     fn error_dialog_initialize_answers_ok() {
         let args = [0_u64; GUEST_ARG_REGISTERS];
         assert_eq!(super::error_dialog_initialize(&args), super::OK);
     }
 
-    /// **The two system-service actions succeed and write nothing.**
-    ///
-    /// Both are actions, not getters: hiding the splash and disabling a flag's auto-set take a
-    /// request and answer `OK`, the way [`super::sysmodule_unload_module`] does. The test carries
-    /// non-zero leftovers in every argument slot to prove neither reads one - a getter dressed as
-    /// an action would dereference one and fault, and returning `OK` for a value nobody wrote is
-    /// the failure this crate exists to prevent (worklog 757).
+    /// The splash and flag actions answer `OK` without reading any argument slot.
     #[test]
     fn the_system_service_actions_succeed_without_touching_their_arguments() {
         let args = [0xDEAD_BEEF_u64; GUEST_ARG_REGISTERS];
@@ -627,8 +492,7 @@ mod tests {
 
     #[test]
     fn the_destination_is_always_written() {
-        // The whole point. Unwritten, the guest reads whatever its stack held - which is
-        // a different answer every run and has no signature to recognise in a trace.
+        // The destination is overwritten, so the guest never reads stale stack.
         let mut value: u32 = 0xDEAD_BEEF;
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[1] = std::ptr::addr_of_mut!(value) as usize as u64;
@@ -643,16 +507,14 @@ mod tests {
 
     #[test]
     fn a_request_with_nowhere_to_answer_is_refused() {
-        // Writing to address zero is the alternative, and it faults inside the emulator
-        // rather than naming the guest's mistake.
+        // A null destination is refused instead of faulting inside the emulator.
         let args = [0_u64; GUEST_ARG_REGISTERS];
         assert_ne!(param_get_int(&args), 0);
     }
 
     #[test]
     fn only_four_bytes_are_written() {
-        // The interface answers an `int`. Writing eight would corrupt whatever the guest
-        // put next to it - which on a stack is usually another local.
+        // The interface answers an `int`; the neighbouring word is untouched.
         let mut pair: [u32; 2] = [0xAAAA_AAAA, 0xBBBB_BBBB];
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[1] = std::ptr::addr_of_mut!(pair[0]) as usize as u64;

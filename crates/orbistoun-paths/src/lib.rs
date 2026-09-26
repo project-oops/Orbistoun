@@ -1,49 +1,12 @@
-//! Portable-first path resolution.
+//! Portable-first path resolution (D038).
 //!
-//! One rule governs this crate: **orbistoun never writes outside its own resolved
-//! root.** Every writable location - logs, traces, run reports, overrides, config -
-//! comes from [`Paths`], which picks a root by explicit precedence and confines
-//! everything beneath it.
-//!
-//! # Precedence
-//!
-//! 1. **Portable**, if any trigger fires. Root is `./.portable/` beside the binary.
-//!    Nothing is written anywhere else, traces included - an exception is what makes
-//!    "does not touch outside its own directory" false (D038).
-//! 2. **[`ENV_DATA_DIR`]**, if set. An explicit relocation for anyone who wants one.
-//! 3. **The collection's directory**, via `oops_paths` - `%APPDATA%\OOPS\` on Windows, and
-//!    shared with every sibling rather than a directory of this project's own. That is what
-//!    lets a save Prosperous pulls off real hardware be the tree a title's overlay mounts.
-//!
-//! Bulk that can be rebuilt - models, runtimes, compiled shaders, the base filesystem, traces -
-//! goes to `%LOCALAPPDATA%\OOPS\` instead, so a roaming profile does not carry gigabytes it
-//! could fetch again. See `cache_root`.
-//!
-//! Portable deliberately outranks the environment override: if an env var could
-//! escape the portable root, the containment guarantee would be a suggestion.
-//!
-//! # Portable triggers
-//!
-//! Any of these, OR'd:
-//!
-//! - [`ENV_PORTABLE`] set to a truthy value
-//! - the binary's filename stem contains `portable`, case-insensitively - this is what
-//!   makes a single-file download work with no setup at all
-//! - a `.portable` **directory** beside the binary
-//!
-//! # Why the sentinel is a directory and never a file
-//!
-//! The sentinel and the data root are the same path. A sibling project wrote a
-//! `.portable` *file* as the marker, then failed on first run when `create_dir_all`
-//! tried to make a directory over it. The directory's own existence is the sentinel -
-//! `exists()` is true for a directory - so a portable install is sticky with no
-//! sidecar. [`enable_portable_sentinel`] heals a stale file left by that scheme.
-//!
-//! # Testability
-//!
-//! [`Paths::resolve_with`] takes its inputs rather than reading the world, so
-//! resolution is fully testable without touching real environment variables or the
-//! real binary location (D016).
+//! Orbistoun never writes outside its resolved root: every writable location comes from [`Paths`].
+//! The root is, in order: `./.portable/` beside the binary when portable mode is triggered
+//! ([`ENV_PORTABLE`] truthy, a binary stem containing `portable`, or a `.portable` directory beside
+//! the binary); [`ENV_DATA_DIR`] if set; otherwise the collection's shared directory from
+//! `oops_paths`. Portable outranks the override so containment holds. Rebuildable bulk goes to the
+//! cache root instead (see `cache_root`). The sentinel is a directory because it is also the root.
+//! [`Paths::resolve_with`] takes its inputs, so resolution is testable.
 
 use std::env;
 use std::fs;
@@ -52,8 +15,7 @@ use std::path::{Path, PathBuf};
 
 /// Env var that forces portable mode when set to a truthy value.
 ///
-/// Named by `orbistoun-env` rather than here, so the one list of what this project reads
-/// from the environment cannot disagree with what it actually reads (D221).
+/// Named by `orbistoun-env`, the one list of what this project reads from the environment (D221).
 pub const ENV_PORTABLE: &str = orbistoun_env::PORTABLE_MODE.name;
 /// Env var that relocates the data root. Ignored in portable mode.
 pub const ENV_DATA_DIR: &str = orbistoun_env::DATA_DIR.name;
@@ -61,17 +23,13 @@ pub const ENV_DATA_DIR: &str = orbistoun_env::DATA_DIR.name;
 pub const PORTABLE_DIR: &str = ".portable";
 /// Explanatory note written inside the portable root so it is not a mystery folder.
 ///
-/// Re-exported rather than declared: `oops-paths` owns the *name* (the note is written under
-/// it by the shared `enable_portable_sentinel`), and two crates each declaring `"PORTABLE.txt"`
-/// is one fact in two places waiting to disagree. The body stays orbistoun's - see
-/// `PORTABLE_NOTE_BODY` - because it names this tool; only the filename is shared
-/// (oops-libs REQ-20260910T0825Z-d31e, closing the half of REQ-20260909T2244Z-5cac this left).
+/// `oops-paths` owns the filename; the body is orbistoun's (`PORTABLE_NOTE_BODY`) because it names
+/// this tool.
 pub use oops_paths::PORTABLE_NOTE;
 /// Application name used for the OS-standard data directory.
 pub const APP_NAME: &str = "orbistoun";
 
-/// Subdirectory names under the data root. Named once so nothing hardcodes a string
-/// twice (CLAUDE.md principle 12).
+/// Subdirectory names under the data root, named once.
 pub mod dirs {
     /// Developer logs.
     pub const LOGS: &str = "logs";
@@ -83,35 +41,26 @@ pub mod dirs {
     pub const OVERRIDES: &str = "overrides";
     /// Window captures taken from the toolbar.
     pub const SCREENSHOTS: &str = "screenshots";
-    /// The console's own filesystem, materialised from the manifest that describes it.
+    /// The platform's own filesystem, materialised from the manifest that describes it.
     ///
-    /// Derived, never edited by hand: it can be deleted and rebuilt at any time, which is
-    /// the test that it really is derived. Nothing a guest writes lands here (D251).
+    /// Derived and never edited by hand, so it can be deleted and rebuilt. Nothing a guest writes
+    /// lands here (D251).
     pub const FILESYSTEM: &str = "filesystem";
-    /// Everything one title owns, keyed by the title.
+    /// One directory per title, holding its guest filesystem and anything else known about it.
     ///
-    /// Keyed by title first and by category second, so a title is one directory to back
-    /// up, move or delete. A guest's writes land in its overlay under here and are merged
-    /// over the base tree in process rather than on disk (D251).
-    /// One directory per title, holding its guest filesystem and anything else known about
-    /// it. Named as prosperous already named its own, because they are now the same directory.
+    /// A guest's writes land in its overlay under here and are merged over the base tree in process
+    /// (D251). Prosperous uses the same directory.
     pub const TITLES: &str = "titles";
     /// Raw executables run directly, rather than installed titles.
     ///
-    /// **Separate from [`TITLES`] because they are a different kind of thing.** A title is a
-    /// directory with a `param.json`, an `eboot.bin` and its own filesystem; a payload is one ELF
-    /// somebody runs. Putting the payload mirror under `titles/` made twenty-five one-file
-    /// entries look like installed titles, and a shell listing the library showed them as such
-    /// (D661).
+    /// Separate from [`TITLES`]: a title is a directory with a `param.json`, an `eboot.bin` and its
+    /// own filesystem, and a payload is one ELF (D661).
     pub const PAYLOADS: &str = "payloads";
-    /// The console's own writable storage, as a system application sees it: one tree shared by
+    /// The platform's own writable storage as a system application sees it: one tree shared by
     /// everything run with the system filesystem view, rather than one sandbox per title.
     pub const CONSOLE: &str = "console";
-    /// Installable packages, before anything installs them.
-    ///
-    /// The input side of installation: what a package manager would list and offer to install.
-    /// A package that has been installed becomes a directory under [`TITLES`]; this holds the
-    /// ones that have not.
+    /// Installable packages, before anything installs them. An installed package becomes a
+    /// directory under [`TITLES`].
     pub const PACKAGES: &str = "packages";
 }
 
@@ -119,24 +68,17 @@ pub mod dirs {
 pub const CONFIG_FILE: &str = "config.toml";
 /// Policy the loop worked out for itself, kept apart from what a person configured.
 ///
-/// **A separate file for three reasons, each of which is the reason.** Deleting it is a
-/// complete undo; a diff shows the loop's guesses and a person's decisions separately; and an
-/// entry in `config.toml` wins, so nothing written here can quietly override a deliberate
-/// choice (D296).
+/// Deleting it is a complete undo, a diff separates the loop's guesses from a person's decisions,
+/// and an entry in `config.toml` wins (D296).
 pub const LEARNED_FILE: &str = "learned.toml";
 
-/// What the emulated console is set to, as a person set it.
+/// What the emulated machine is set to, as a person set it.
 ///
-/// Apart from `config.toml` because that holds how the *emulator* is configured and this
-/// holds what the machine it presents is set to. Different decisions, made at different
-/// times by different reasoning - a call budget is a debugging choice and a language is
-/// not - so this file can be carried between installations on its own.
+/// Apart from `config.toml`, which configures the emulator, so the machine settings can be carried
+/// between installations on their own.
 pub const SHELL_FILE: &str = "shell.toml";
 
-/// The environment as resolution sees it.
-///
-/// Captured rather than read at each decision point, so a test can supply one
-/// directly.
+/// The environment as resolution sees it, captured so a test can supply one directly.
 #[derive(Debug, Clone, Default)]
 pub struct EnvSnapshot {
     /// Whether [`ENV_PORTABLE`] was set truthy.
@@ -159,9 +101,8 @@ impl EnvSnapshot {
 
 /// Whether an environment value counts as "on".
 ///
-/// Deliberately narrow and case-insensitive. An unrecognised value is *not* truthy,
-/// because silently treating `ORBISTOUN_PORTABLE_MODE=no` as on would be exactly the
-/// kind of surprise portable mode must not have.
+/// Narrow and case-insensitive: an unrecognised value is not truthy, so
+/// `ORBISTOUN_PORTABLE_MODE=no` does not turn portable mode on.
 fn is_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -169,13 +110,12 @@ fn is_truthy(value: &str) -> bool {
     )
 }
 
-/// Where the console stages homebrew, as path components: `/data/homebrew` (D722). Inside the
-/// titles library it is the same components, so a staged title's host path mirrors its guest one.
+/// Where homebrew is staged, as path components: `/data/homebrew` (D722). Inside the titles library
+/// it is the same components, so a staged title's host path mirrors its guest one.
 pub const STAGING: [&str; 2] = ["data", "homebrew"];
 
-/// The staging root under a titles library `titles` - [`STAGING`] joined on. What
-/// [`Paths::staged_titles_dir`] answers, and what a caller holding only a library root (a
-/// `--titles` override, a test) asks.
+/// The staging root under a titles library: [`STAGING`] joined on. What
+/// [`Paths::staged_titles_dir`] answers, for a caller holding only a library root.
 #[must_use]
 pub fn staged_under(titles: &Path) -> PathBuf {
     STAGING
@@ -187,8 +127,7 @@ pub fn staged_under(titles: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     data_root: PathBuf,
-    /// The collection's answer, kept so the shared locations are its to define rather than
-    /// this crate's to reconstruct from a root and a convention.
+    /// The collection's answer, so the shared locations are its to define.
     shared: oops_paths::Paths,
     portable: bool,
 }
@@ -222,23 +161,9 @@ impl Paths {
         binary_dir: Option<&Path>,
         binary_name: Option<&str>,
     ) -> Self {
-        // **The rules are shared; the variable names and the directories are not.**
-        //
-        // What stays here: this project declares every environment variable it reads in
-        // `orbistoun-env`, so the names are `ORBISTOUN_PORTABLE_MODE` and `ORBISTOUN_DATA_DIR`
-        // rather than the `<APP>_PORTABLE` / `<APP>_DATA_DIR` the shared crate derives. That
-        // registry is a feature of this project and is not being given up to save a struct
-        // literal - so the reading happens here and the *answers* are handed over.
-        //
-        // What goes: sentinel detection, the name check, the precedence between them, and the
-        // platform root. Four rules that were written twice in this collection and have to
-        // agree, because a portable build that disagrees with itself about where it is writing
-        // is a bug nobody sees until a stick is unplugged.
-        // Start from what the shared crate reads about this machine - the home directory and
-        // the platform's own data directory - and override only the three things this project
-        // answers for itself. Building the whole value here instead would mean taking a
-        // dependency on `dirs` again just to fill one field, and re-deriving it every time the
-        // shared crate learns about another location.
+        // The shared crate supplies sentinel detection, the name check, precedence and the platform
+        // root. Start from what it reads about this machine and override only what this project
+        // answers itself.
         let mut process = oops_paths::Process::read(APP_NAME);
         // This project declares every environment variable it reads, so the names are
         // `ORBISTOUN_PORTABLE_MODE` and `ORBISTOUN_DATA_DIR` rather than the `<APP>_PORTABLE` /
@@ -252,15 +177,13 @@ impl Paths {
 
         let (shared, _) = oops_paths::Paths::resolve_found(
             APP_NAME,
-            // The same layout as every sibling, because they share a root and cannot disagree
-            // about where it is. That is the platform's own directory - `%APPDATA%\OOPS` here -
-            // which is where a person, a backup tool and a roaming profile all already look.
+            // The same layout as every sibling, because they share a root: the platform's own data
+            // directory.
             oops_paths::Layout::default(),
             &process,
         );
-        // The flag is ignored on purpose: this crate has always answered, falling back to a
-        // visible directory rather than panicking, and a dozen callers below expect a root.
-        // `resolve_found` exists so that ignoring it costs no `expect`.
+        // The flag is ignored: this crate always answers with a root, falling back to a visible
+        // directory rather than panicking.
         Self {
             data_root: shared.data_root().to_path_buf(),
             portable: shared.is_portable(),
@@ -275,18 +198,16 @@ impl Paths {
 
     /// Where material that can be rebuilt goes.
     ///
-    /// `%LOCALAPPDATA%\OOPS` beside the roaming `data_root`, and the *same* directory in a
-    /// portable run. The test for which side something belongs on is **can you get it back
-    /// without the console?** Models and runtimes download, shaders compile, the base
-    /// filesystem is materialised from a manifest, and a trace is one re-run away - all cache.
-    /// A report measured against real hardware is not, and neither is an override somebody
-    /// typed, so those stay with the data.
+    /// The local (non-roaming) collection directory beside `data_root`, and the same directory in a
+    /// portable run. Anything recoverable without the hardware (models, runtimes, compiled shaders,
+    /// the materialised filesystem, traces) is cache; a report measured on hardware or an override
+    /// somebody typed stays with the data.
     #[must_use]
     pub fn cache_root(&self) -> &Path {
         self.shared.cache_root()
     }
 
-    /// Where downloaded model weights go. Four gigabytes of them, hence the cache root.
+    /// Where downloaded model weights go.
     #[must_use]
     pub fn models_dir(&self) -> PathBuf {
         self.cache_root().join("models")
@@ -316,8 +237,7 @@ impl Paths {
 
     /// Binary guest-call traces.
     pub fn traces_dir(&self) -> PathBuf {
-        // A trace is one run's record and the next run rewrites it. Regenerable by re-running,
-        // which is the test.
+        // A trace is one run's record, rewritten by the next run, so it is cache.
         self.cache_root().join(dirs::TRACES)
     }
 
@@ -333,18 +253,14 @@ impl Paths {
 
     /// Window captures taken from the toolbar.
     ///
-    /// Here rather than beside the binary or in a pictures folder, because everything
-    /// orbistoun writes resolves through this type - that is what makes portable mode move
-    /// all of it at once, and what lets `orbistoun-cli paths` answer "where did it go?"
-    /// without anybody guessing.
+    /// Resolved here like everything else orbistoun writes, so portable mode moves it too.
     pub fn screenshots_dir(&self) -> PathBuf {
         self.data_root.join(dirs::SCREENSHOTS)
     }
 
     /// The base filesystem, as materialised from the manifest.
     pub fn filesystem_dir(&self) -> PathBuf {
-        // Materialised from the manifest that describes it, and its own documentation says it
-        // can be deleted and rebuilt at any time. That is the definition of cache.
+        // Materialised from the manifest and rebuildable, so it is cache.
         self.cache_root().join(dirs::FILESYSTEM)
     }
 
@@ -353,9 +269,8 @@ impl Paths {
         self.data_root.join(dirs::TITLES)
     }
 
-    /// Where homebrew is **staged** inside the titles library - the console's
-    /// `/data/homebrew/<id>`, one directory per title, as `pros restore` stages one (D722). A title
-    /// launched from here has a writable `/app0`, as it does on the console.
+    /// Where homebrew is staged inside the titles library: `/data/homebrew/<id>`, one directory per
+    /// title (D722). A title launched from here has a writable `/app0`.
     pub fn staged_titles_dir(&self) -> PathBuf {
         staged_under(&self.titles_dir())
     }
@@ -372,34 +287,28 @@ impl Paths {
 
     /// One title's overlay, merged over the base tree while it runs.
     ///
-    /// Under the data root rather than beside the module: a title's own directory is the
-    /// material being measured, and a guest able to write into it would be editing its own
-    /// evidence (D250, D251).
+    /// Under the data root rather than beside the module, so a guest cannot write into the material
+    /// being measured (D250).
     pub fn title_overlay_dir(&self, title: &str) -> PathBuf {
-        // **This is the point of a shared directory.**
-        //
-        // The overlay is keyed by the *guest's* path - a file the title writes to
-        // `/user/home/<user>/savedata_prospero/<id>/x` lands at that path inside this tree.
-        // Prosperous reads the console at exactly that path, measured. So a save pulled off real
-        // hardware is this directory, with no translation: the guest's path is the format both
-        // sides already speak.
+        // The overlay is keyed by the guest's path, so a file the title writes to
+        // `/user/home/<user>/savedata_prospero/<id>/x` lands at that path here. Prosperous reads
+        // the hardware at that same path, so a save pulled off hardware is this directory
+        // unchanged.
         self.shared.title_dir(title).join("fs")
     }
 
     /// The overlay a title run with the system filesystem view writes into.
     ///
-    /// One for the whole console, because that is what a system application has: a launcher's
-    /// settings under `/data` are the device's, not a sandbox that vanishes with its own title.
+    /// One for the whole machine, as a system application has: a launcher's settings under `/data`
+    /// belong to the device, not to a per-title sandbox.
     pub fn console_overlay_dir(&self) -> PathBuf {
         self.data_root.join(dirs::CONSOLE)
     }
 
     /// Where one title's save states are kept.
     pub fn title_savestates_dir(&self, title: &str) -> PathBuf {
-        // Beside the guest filesystem, under the same title. A savestate is a snapshot of this
-        // emulator's own memory and means nothing to a console - but everything known about one
-        // title belongs in one directory, and "which of these can go back to hardware" is a
-        // question about the file, not about where it was filed.
+        // Beside the guest filesystem, under the same title, so everything known about one title is
+        // one directory.
         self.shared.title_dir(title).join("savestates")
     }
 
@@ -418,23 +327,15 @@ impl Paths {
 
     /// What the machine is set to, as a person set it.
     ///
-    /// Its own file rather than a section of [`Self::config_file`], for the same reason
-    /// [`Self::learned_file`] is: that one holds how the *emulator* is configured, and this
-    /// holds what the emulated console is set to. They are edited by different people at
-    /// different times - a run limit is a debugging decision, a language is not - and
-    /// keeping them apart means a shell settings file can be copied between installations
-    /// without carrying somebody's call budget with it.
+    /// Its own file rather than a section of [`Self::config_file`], which configures the emulator,
+    /// so shell settings can be copied between installations without a call budget.
     pub fn shell_file(&self) -> PathBuf {
         self.data_root.join(SHELL_FILE)
     }
 
     /// Every directory this crate hands out, with the name it goes by.
     ///
-    /// **The only list.** [`Self::all_dirs`] and the `paths` command both read it, and
-    /// that is deliberate: they used to be two hand-written lists, so a new location could
-    /// be containment-tested and still be missing from the report a person actually looks
-    /// at when asking where something went. Two copies of one list is how they come to
-    /// disagree (D215).
+    /// The only list: [`Self::all_dirs`] and the `paths` command both read it.
     pub fn named_dirs(&self) -> Vec<(&'static str, PathBuf)> {
         vec![
             (dirs::LOGS, self.logs_dir()),
@@ -468,23 +369,14 @@ impl Paths {
 
 /// Makes portable mode sticky for the binary in `binary_dir`.
 ///
-/// Delegates to `oops-paths`, which owns the sentinel for the whole collection: it materialises
-/// the `.portable` **directory** and heals a stale `.portable` *file* left by an older scheme -
-/// `create_dir_all` fails over one, which is the exact first-run crash the design exists to
-/// avoid, and a bug this repository had fixed and the shared crate had not.
-///
-/// The note is orbistoun's, passed in rather than held there. Its words name this tool, so a
-/// shared function that hardcoded them would be wrong for every other caller; `None` writes no
-/// note at all rather than an empty file, which reads as a failed write (oops-libs
-/// `REQ-20260909T2244Z-5cac`, D666).
+/// Delegates to `oops-paths`, which materialises the `.portable` directory and replaces a stale
+/// `.portable` file, over which `create_dir_all` would fail. The note body is orbistoun's and is
+/// passed in; `None` writes no note.
 pub fn enable_portable_sentinel(binary_dir: &Path) -> io::Result<()> {
     oops_paths::enable_portable_sentinel(binary_dir, Some(PORTABLE_NOTE_BODY))
 }
 
-/// What the note beside the sentinel says.
-///
-/// Here rather than in the shared crate because it names orbistoun, and because a caller that
-/// wants different words should not have to edit a sibling repository to get them.
+/// What the note beside the sentinel says. Here because it names orbistoun.
 const PORTABLE_NOTE_BODY: &str = concat!(
     "This directory makes orbistoun run in portable mode.\n\n",
     "Everything orbistoun writes - logs, traces, run reports, settings, per-title\n",
@@ -508,18 +400,19 @@ mod tests {
         }
     }
 
+    /// Only the recognised values count as on, in any case.
     #[test]
     fn truthy_values_are_narrow_and_case_insensitive() {
         for v in ["1", "true", "TRUE", "Yes", " on "] {
             assert!(is_truthy(v), "{v:?} should be truthy");
         }
-        // The important half: anything unrecognised is OFF. Treating `no` as on would
-        // be exactly the surprise portable mode must not have.
+        // Anything unrecognised is off.
         for v in ["0", "false", "no", "off", "", "maybe", "portable"] {
             assert!(!is_truthy(v), "{v:?} should not be truthy");
         }
     }
 
+    /// The environment flag triggers portable mode.
     #[test]
     fn env_var_triggers_portable() {
         let p = Paths::resolve_with(
@@ -529,14 +422,14 @@ mod tests {
         );
         assert!(p.is_portable());
         assert_eq!(p.data_root(), Path::new("/opt/app").join(PORTABLE_DIR));
-        // The sentinel directory *is* the root - one directory for every tool on the stick,
-        // exactly as an installed set shares one.
+        // The sentinel directory is the root.
         assert_eq!(p.data_root(), Path::new("/opt/app").join(PORTABLE_DIR));
     }
 
+    /// A binary stem containing `portable` triggers it alone.
     #[test]
     fn filename_containing_portable_triggers_it_with_no_sentinel_or_env() {
-        // This is what makes a single-file download work with zero instructions.
+        // A single-file download needs no setup.
         let p = Paths::resolve_with(
             &EnvSnapshot::default(),
             Some(Path::new("/downloads")),
@@ -545,6 +438,7 @@ mod tests {
         assert!(p.is_portable());
     }
 
+    /// The stem match ignores case.
     #[test]
     fn filename_match_is_case_insensitive() {
         let p = Paths::resolve_with(
@@ -555,6 +449,7 @@ mod tests {
         assert!(p.is_portable());
     }
 
+    /// A plain binary is not portable.
     #[test]
     fn plain_binary_is_not_portable() {
         let p = Paths::resolve_with(
@@ -568,6 +463,7 @@ mod tests {
         );
     }
 
+    /// A sentinel directory beside the binary triggers portable mode.
     #[test]
     fn sentinel_directory_beside_the_binary_triggers_portable() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -584,10 +480,10 @@ mod tests {
         );
     }
 
+    /// Portable mode outranks the data-dir override.
     #[test]
     fn portable_outranks_the_data_dir_override() {
-        // If an env var could escape the portable root, containment would be a
-        // suggestion rather than a guarantee.
+        // An env var must not escape the portable root.
         let env = EnvSnapshot {
             portable_flag: true,
             data_dir: Some(PathBuf::from("/somewhere/else")),
@@ -597,6 +493,7 @@ mod tests {
         assert!(p.data_root().starts_with("/opt/app"));
     }
 
+    /// The data-dir override applies when not portable.
     #[test]
     fn data_dir_override_applies_when_not_portable() {
         let env = EnvSnapshot {
@@ -608,6 +505,7 @@ mod tests {
         assert_eq!(p.data_root(), Path::new("/var/lib/orbistoun"));
     }
 
+    /// The environment flag works with no known binary location.
     #[test]
     fn unknown_binary_location_still_honours_the_env_flag() {
         let p = Paths::resolve_with(&env_portable(), None, None);
@@ -615,10 +513,11 @@ mod tests {
         assert_eq!(p.data_root(), Path::new(".").join(PORTABLE_DIR));
     }
 
+    /// Enabling the sentinel replaces a stale `.portable` file.
     #[test]
     fn enabling_the_sentinel_heals_a_stale_file_from_the_old_scheme() {
-        // The regression this guards: sentinel and data root are the same path, so a
-        // `.portable` FILE makes create_dir_all fail on first run.
+        // Sentinel and data root are the same path, so a `.portable` file makes `create_dir_all`
+        // fail.
         let tmp = tempfile::tempdir().expect("tempdir");
         fs::write(tmp.path().join(PORTABLE_DIR), b"stale marker").expect("write stale file");
 
@@ -631,7 +530,7 @@ mod tests {
             "note explains itself"
         );
 
-        // And the whole point: creating the tree now succeeds.
+        // Creating the tree succeeds.
         let p = Paths::resolve_with(
             &EnvSnapshot::default(),
             Some(tmp.path()),
@@ -641,7 +540,7 @@ mod tests {
             .expect("first run must not fail over the sentinel");
     }
 
-    /// The containment guarantee, asserted rather than assumed (D038).
+    /// Portable mode writes nothing outside its root (D038).
     #[test]
     fn portable_mode_writes_nothing_outside_its_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -677,10 +576,11 @@ mod tests {
         assert!(p.config_file().starts_with(&root));
     }
 
+    /// Every writable location is listed in `all_dirs`.
     #[test]
     fn every_writable_location_is_listed_in_all_dirs() {
-        // all_dirs drives the containment test, so a new location that forgets to
-        // register here would be silently unverified. This is the reminder.
+        // `all_dirs` drives the containment test, so a location missing from it would be
+        // unverified.
         let p = Paths::resolve_with(&env_portable(), Some(Path::new("/opt/app")), Some("x"));
         let all = p.all_dirs();
         for d in [
@@ -702,10 +602,7 @@ mod tests {
             10,
             "a location was added without updating the test"
         );
-        // **The three library roots are siblings, and separate ones.** They hold different kinds
-        // of thing - a title directory, a bare executable, an uninstalled package - and a corpus
-        // routes to them by name. Nested or equal, a payload would land inside the title library
-        // again, which is the bug this split exists to fix (D661).
+        // The three library roots are distinct siblings (D661).
         for (a, b) in [
             (p.titles_dir(), p.payloads_dir()),
             (p.titles_dir(), p.packages_dir()),
@@ -718,14 +615,8 @@ mod tests {
             );
         }
 
-        // **A title's data is deliberately in two places now, and D251 said it should be in
-        // one.** That rule bought "one title is one directory to move or delete", and it has
-        // been given up on purpose: the guest filesystem is the tree Prosperous fills from real
-        // hardware, so it has to be somewhere a sibling can reach.
-        //
-        // **Everything about one title is one directory**, which is what D251 asked for and
-        // what the shared root finally delivers: the guest filesystem prosperous fills from
-        // hardware and the savestates this emulator writes sit under the same identifier.
+        // Everything about one title sits under one directory: the guest filesystem and the
+        // savestates.
         for under in [
             p.title_overlay_dir("PPSA00000"),
             p.title_savestates_dir("PPSA00000"),
@@ -737,9 +628,10 @@ mod tests {
         }
     }
 
+    /// Reading the process environment does not panic.
     #[test]
     fn env_snapshot_reads_the_process_without_panicking() {
-        // Smoke test for the real-world path; value depends on the ambient env.
+        // Smoke test for the real-world path; the value depends on the ambient environment.
         let snap = EnvSnapshot::from_process();
         let _ = snap.portable_flag;
         assert_eq!(ENV_PORTABLE, "ORBISTOUN_PORTABLE_MODE");

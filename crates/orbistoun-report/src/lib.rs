@@ -1,26 +1,11 @@
 //! Run reports: the machine-readable contract (D046).
 //!
-//! Logs are for humans. **This is what an agent reads.** The distinction matters: if
-//! a consumer greps log prose, then rewording a message silently breaks it, and the
-//! log becomes an unversioned API nobody knows they are maintaining.
-//!
-//! # Designed for a reader with no memory of the session that produced the code
-//!
-//! Every choice here follows from that:
-//!
-//! - **[`RunDiff`] against the previous run of the same title** is the most important
-//!   output. One report says what happened; the delta says whether the last change
-//!   helped. Without it, every session begins by re-deriving state it should have been
-//!   handed.
-//! - **First-touch as well as frequency.** The *first* unmet need is usually the
-//!   cause; everything after it is cascade.
-//! - **Inputs are embedded** ([`RunInputs`]) - title hash, policy hash, overrides in
-//!   force, build identity. Otherwise a difference between runs cannot be attributed
-//!   to the change rather than to config drift, and the loop chases ghosts.
-//! - **Bounded to kilobytes.** A finite context cannot read a multi-gigabyte trace, so
-//!   this is an *index*: [`TOP_N`] and [`TAIL_N`], with the trace queried on demand.
-//!   A report of "everything that happened" stalls the loop on the one artifact it
-//!   depends on.
+//! Logs are for people; a consumer reads this versioned document instead of grepping log
+//! prose. A [`RunDiff`] against the previous run of the same title says whether the last
+//! change helped. The first unmet import is recorded as well as frequency, since it is
+//! usually the cause. [`RunInputs`] are embedded so a difference can be attributed to the
+//! change rather than to configuration drift. The report is an index bounded by [`TOP_N`]
+//! and [`TAIL_N`]; the trace is queried on demand.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,14 +56,13 @@ impl RunId {
 
     /// Reconstructs an id from a filename stem.
     ///
-    /// Deliberately not validating: an id read off disk is data, and refusing to list
-    /// an unexpected filename would be less useful than listing it and letting the
-    /// read fail with the path attached.
+    /// Not validating: an unexpected filename is listed, and reading it fails with the
+    /// path attached.
     pub fn from_raw(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
 
-    /// The id as text - also the filename stem for every artifact of this run.
+    /// The id as text, which is also the filename stem for every artifact of this run.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -93,7 +77,7 @@ impl std::fmt::Display for RunId {
 /// What produced this run. Embedded so a difference can be attributed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunInputs {
-    /// Content hash of the guest executable - the title's identity (D048).
+    /// Content hash of the guest executable, the title's identity (D048).
     pub title_hash: String,
     /// Where it was loaded from. Diagnostic only; the hash is the identity.
     pub title_path: String,
@@ -131,7 +115,7 @@ pub struct TailEntry {
     pub nid: u64,
     /// Symbol name, where known.
     pub symbol: Option<String>,
-    /// Guest address the call returns to - the call site, not just the function.
+    /// Guest address the call returns to: the call site, not just the function.
     pub return_address: u64,
     /// Guest thread.
     pub thread_id: u32,
@@ -208,8 +192,8 @@ impl RunReport {
 
     /// Attaches a survey, deriving the ranked and first-touch views from it.
     ///
-    /// Ranking is by count descending, then NID, so equal counts order
-    /// deterministically - a report is diffed, and unstable ordering reads as change.
+    /// Ranking is by count descending, then NID, so equal counts order deterministically
+    /// and a diff shows no spurious change.
     pub fn set_survey(&mut self, survey: SurveySummary) {
         let mut counts: BTreeMap<u64, UnresolvedCount> = BTreeMap::new();
         for import in survey.unresolved_imports() {
@@ -243,8 +227,7 @@ impl RunReport {
         self.failure_tail = tail;
     }
 
-    /// Serialises to pretty JSON - read by machines, but also by people debugging why
-    /// the machine did something.
+    /// Serialises to pretty JSON, readable by people as well as machines.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -261,7 +244,7 @@ impl RunReport {
 pub enum PhaseChange {
     /// Got further than last time.
     Advanced,
-    /// Got less far - the clearest "that change made it worse" signal there is.
+    /// Got less far than last time.
     Regressed,
     /// No change.
     Same,
@@ -269,8 +252,7 @@ pub enum PhaseChange {
 
 /// The delta between two runs of the same title.
 ///
-/// The single most valuable output of this crate: it turns "here is a report" into
-/// "here is whether your last change helped".
+/// It says whether the last change helped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunDiff {
     /// The run this describes.
@@ -279,8 +261,8 @@ pub struct RunDiff {
     pub previous: RunId,
     /// Whether the two runs even describe the same title.
     pub same_title: bool,
-    /// Whether the inputs were otherwise identical - if not, a behaviour difference
-    /// may be config drift rather than the change under test.
+    /// Whether the inputs were otherwise identical; if not, a behaviour difference may be
+    /// configuration drift rather than the change under test.
     pub same_inputs: bool,
     /// Phase movement.
     pub phase_change: PhaseChange,
@@ -365,8 +347,7 @@ mod tests {
 
     #[test]
     fn run_ids_sort_chronologically_as_strings() {
-        // A directory listing is then already in order, so "the previous run" needs
-        // no index and no parsing.
+        // A directory listing is then already in order.
         let a = RunId::new(1_700_000_000_000, 1);
         let b = RunId::new(1_700_000_000_001, 0);
         assert!(a < b, "{a} should sort before {b}");
@@ -403,7 +384,7 @@ mod tests {
             Some("popular")
         );
         assert_eq!(r.unresolved_by_frequency[0].count, 2);
-        // First-touch is a different question and often the more useful one.
+        // First-touch is a separate ranking from frequency.
         assert_eq!(
             r.first_unmet.expect("some").symbol.as_deref(),
             Some("first_unmet")
@@ -414,7 +395,7 @@ mod tests {
 
     #[test]
     fn ranking_is_deterministic_when_counts_tie() {
-        // Reports are diffed; unstable ordering on ties would read as change.
+        // Ties order deterministically, so a diff shows no spurious change.
         let mut r = report("1");
         r.set_survey(SurveySummary {
             entry: 0,
@@ -430,8 +411,7 @@ mod tests {
 
     #[test]
     fn the_report_stays_bounded() {
-        // A finite context cannot read an unbounded document; that is the whole
-        // reason for the caps.
+        // The report stays bounded however large the run.
         let mut r = report("1");
         let imports = (0..TOP_N as u64 * 5)
             .map(|n| import(n, Some("x"), false))
@@ -499,7 +479,7 @@ mod tests {
 
     #[test]
     fn diff_detects_regression() {
-        // The clearest "your change made it worse" signal the report can carry.
+        // Reaching a lower phase than last time is a regression.
         let mut before = report("1");
         before.reached(Phase::Entered);
         let mut after = report("2");
@@ -536,8 +516,7 @@ mod tests {
 
     #[test]
     fn diff_flags_input_drift_so_a_difference_is_not_misattributed() {
-        // Without this, an agent credits its own change for a difference caused by a
-        // policy edit, and chases ghosts.
+        // A policy edit shows as an input change, so a difference is not misattributed.
         let before = report("1");
         let mut after = report("2");
         after.inputs.policy_hash = "changed".to_owned();

@@ -10,8 +10,7 @@ use crate::run;
 
 /// What is known about the selected title without running it.
 ///
-/// Held rather than recomputed each frame: parsing a container is real work and an
-/// immediate-mode redraw happens whenever the pointer moves.
+/// Held rather than recomputed each frame, because parsing a container is real work.
 struct Detail {
     /// Container summary, or why it could not be read.
     inspect: Result<String, String>,
@@ -21,14 +20,12 @@ struct Detail {
 
 /// Per-title settings, while the window for them is open.
 struct TitleConfig {
-    /// Which title these belong to - the window can outlive a selection change.
+    /// Which title these belong to, since the window can outlive a selection change.
     title: String,
     /// The user layer as editable text.
     ///
-    /// **Text rather than a form**, and that is a real choice: the override format carries
-    /// compatibility entries with mandatory reasons, and a form would have to either drop
-    /// the reason or invent a control for it. Editing the layer directly keeps the
-    /// requirement visible until there is a design that respects it (D162).
+    /// Text rather than a form, because override entries carry mandatory reasons that a
+    /// form would drop or have to invent a control for.
     text: String,
     /// What happened to the last save.
     status: Option<Result<String, String>>,
@@ -36,11 +33,9 @@ struct TitleConfig {
 
 /// What was asked for while drawing, to be acted on after it.
 ///
-/// **One value rather than a flag each**, because they are one idea. The list, the toolbar,
-/// a shell menu and a double-click can all ask for something while holding a borrow of the
-/// very state that would have to change, so every one of them is deferred to the end of the
-/// frame. Three separate bools said that three times, and the lint that counted them was
-/// the more useful complaint.
+/// The list, the toolbar, a shell menu and a double-click can ask for something while
+/// borrowing the state that would change, so each request is deferred to the end of the
+/// frame.
 #[derive(Debug, Clone, Copy, Default)]
 struct Deferred {
     /// Start the selected title.
@@ -53,27 +48,21 @@ struct Deferred {
 
 /// The application.
 pub(crate) struct App {
-    /// The documentation reader. Holds which page is open and the parsed form of the ones
-    /// already looked at, so a megabyte of markdown is not re-parsed sixty times a second.
+    /// The documentation reader. Holds which page is open and the parsed pages already
+    /// viewed, so markdown is not re-parsed every frame.
     docs: oops_docs::DocsWindow,
     service: Service,
     paths: orbistoun_paths::Paths,
-    /// Titles found, or why the scan failed. **Not an empty list on failure** - "you own
-    /// no titles" and "that folder does not exist" are different answers.
+    /// Titles found, or why the scan failed; a failure is not an empty list.
     titles: Result<Vec<TitleEntry>, String>,
     /// What the library list draws, built when the library or a run changes.
     ///
-    /// **Not rebuilt per frame, and the first version was.** Each row carries a last-run
-    /// summary read from a trace file on disk, so drawing them directly meant a file read
-    /// and a JSON parse per title per repaint - and immediate mode repaints whenever the
-    /// pointer moves. The icon cache two files away carries a comment warning about
-    /// exactly this, which did not stop me writing it (D164).
+    /// Not rebuilt per frame, because each row carries a last-run summary read from a
+    /// trace file on disk.
     rows: Vec<Row>,
     /// The probe window.
     ///
-    /// Kept on the application rather than opened per use so a session survives the window
-    /// being closed and reopened - a connection is a thing somebody set up, not a dialog's
-    /// local state.
+    /// Kept on the application so a session survives the window being closed and reopened.
     probe: crate::probe::Panel,
     selected: Option<usize>,
     detail: Option<Detail>,
@@ -81,95 +70,78 @@ pub(crate) struct App {
     title_config: Option<TitleConfig>,
     icons: Icons,
     running: Option<run::InFlight>,
-    /// The frame the running title last presented, uploaded (worklog 841). Shown in place of the
-    /// library while the title runs; cleared when the next run starts.
+    /// The frame the running title last presented, uploaded. Shown in place of the library
+    /// while the title runs; cleared when the next run starts.
     live: Option<egui::TextureHandle>,
     /// Whether [`Self::live`] holds a frame from the run in flight, rather than the last run's.
     live_fresh: bool,
-    /// Where the running title's last second went, drawn over its picture (worklog 844).
+    /// Where the running title's last second went, drawn over its picture.
     perf: Option<orbistoun_proto::PerfReport>,
-    /// Whether that overlay is showing - [`crate::perf_overlay::TOGGLE`] flips it.
+    /// Whether that overlay is showing; [`crate::perf_overlay::TOGGLE`] flips it.
     show_perf: bool,
-    /// The launcher a running title was started from, returned to when that title's run ends -
-    /// as a console goes back to its home screen when a title closes (worklog 842).
+    /// The launcher a running title was started from, returned to when that title's run
+    /// ends, as the system returns to its home screen.
     home: Option<std::path::PathBuf>,
     finished: Option<run::Finished>,
     /// What was asked for while drawing. See [`Deferred`].
     ///
-    /// A window's pixels in particular are not available to the code drawing it: asking is
-    /// a viewport command and the answer arrives as an input event on a later frame, so the
-    /// request and the reply are necessarily two halves (see [`crate::capture`]).
+    /// A screenshot request and its reply are on different frames (see [`crate::capture`]).
     deferred: Deferred,
-    /// Which build this is, computed once - it cannot change while the window is open.
+    /// Which build this is, computed once.
     build: String,
     /// Where the last capture went, or why it did not.
     ///
-    /// Shown in the toolbar rather than logged. A file written somewhere the user cannot
-    /// see is the same to them as no file, and a failure that reaches only a log is worse -
-    /// the button looked like it worked.
+    /// Shown in the toolbar rather than logged, so the user sees the outcome.
     last_capture: Option<capture::Outcome>,
-    /// The file pad input is being captured into - or, with nothing running, will be from the
-    /// next launch (D721). Only ever set by the toolbar's "capture input".
+    /// The file pad input is being captured into, or with nothing running, will be from the
+    /// next launch (D721). Set only by the toolbar's "capture input".
     input_capture: Option<std::path::PathBuf>,
     /// The last capture's file, for the toolbar to say where it went.
     input_captured: Option<std::path::PathBuf>,
-    /// The pad script playing - or, with nothing running, to play from the next launch (D721).
+    /// The pad script playing, or with nothing running, to play from the next launch (D721).
     input_playback: Option<std::path::PathBuf>,
     /// Which view is showing.
     ///
-    /// **One library, two presentations.** The shell and the list draw the same scan and
-    /// the same selection; nothing is duplicated between them, so switching cannot show two
-    /// different answers to "what do I own".
+    /// The shell and the list draw the same scan and selection.
     view: View,
     /// Which graphics backend this window actually got, and the adapter behind it.
     ///
     /// Reported rather than assumed: `wgpu` chooses from a set holding both Vulkan and
-    /// DX12 on this platform, and nothing pins it. Any future work that shares an image
-    /// between this process and the guest depends on the answer (D317).
+    /// DX12 on Windows, and nothing pins it.
     renderer: String,
     /// A title named on the command line that has not been found yet.
     ///
-    /// Kept rather than resolved immediately, because the library scan can fail and a
-    /// rescan should get another chance at what somebody asked for on the way in.
+    /// Kept rather than resolved immediately, so a rescan after a failed scan retries it.
     wanted_title: Option<String>,
-    /// The last frame of pad state, so the controllers pane can light a button as it is
-    /// pressed - which is what turns a mapping from a claim into something checkable.
+    /// The last frame of pad state, so the controllers pane can light a pressed button.
     last_pads: Vec<orbistoun_input::PadState>,
     /// Host input, and the shell button's press across frames.
     input: crate::input::Reader,
-    /// Where the title stands, as **this** process sees it.
-    ///
-    /// The worker keeps its own and they can disagree; that is by design and a disagreement
-    /// is counted rather than designed away (D310). This copy decides what is drawn.
+    /// Where the title stands, as this process sees it. The worker keeps its own copy, and a
+    /// disagreement is counted (D310); this copy decides what is drawn.
     session: orbistoun_shell::Lifecycle,
     /// Which menu the shell button opened, if any.
     ///
-    /// The overlay is not stored here - it is [`orbistoun_shell::Lifecycle::Overlaid`], so
-    /// there is one answer to "is the shell over a title" rather than a flag that can
-    /// disagree with the session.
+    /// The overlay itself is [`orbistoun_shell::Lifecycle::Overlaid`], not a flag here.
     power_menu: bool,
     /// When the last frame was drawn, for the press-versus-hold decision.
     last_frame: std::time::Instant,
     /// Where the highlight is in the shell.
     ///
-    /// Held here rather than in the drawing, so a pad and a pointer move **the same**
-    /// highlight - two positions would let a controller and a mouse disagree about what is
-    /// selected, and confirming would act on whichever the code happened to read.
+    /// Held here rather than in the drawing, so a controller and a pointer move the same
+    /// highlight.
     at: orbistoun_shell::Cross,
 }
 
 impl App {
     /// Builds the window state and scans the default library.
     ///
-    /// `start` has already reconciled the command line with the stored setting - see
-    /// `orbistoun_shell::startup`, which is where that decision is tested. What is left
-    /// here is acting on the answer.
+    /// `start` has already reconciled the command line with the stored setting in
+    /// `orbistoun_shell::startup`.
     pub(crate) fn new(start: Start, renderer: String) -> Self {
         let paths = orbistoun_paths::Paths::resolve();
         let _ = paths.ensure_dirs();
-        // Read before anything else: it carries the library folder, so the scan below
-        // looks in the place this window was last pointed at rather than at a relative
-        // path that depends on where the program happened to be started from.
+        // Read first: it carries the library folder the scan below uses.
         let prefs = Preferences::load(&paths.config_file(), &paths.shell_file(), paths.data_root());
         let service = Service::new(ServiceConfig {
             paths: Some(paths.clone()),
@@ -215,7 +187,7 @@ impl App {
             },
             last_pads: Vec::new(),
             input: crate::input::Reader::default(),
-            // Nothing is running yet, which is exactly what `Exited` means.
+            // Nothing is running yet.
             session: orbistoun_shell::Lifecycle::Exited,
             power_menu: false,
 
@@ -226,26 +198,16 @@ impl App {
             },
         };
         app.rescan();
-        // After the scan, because that is the first moment there is anything to match
-        // against. A name nothing matches leaves the window in the fallback view with a
-        // message, rather than silently opening as though no title had been asked for.
+        // After the scan, which it matches against. An unmatched name leaves the window in
+        // the fallback view with a message.
         app.take_wanted_title();
         app
     }
 
     /// Selects and launches a title named on the command line, if one was.
     ///
-    /// # Matched on identifier as well as folder name
-    ///
-    /// A title's folder is whatever somebody called it and its identifier is what the title
-    /// calls itself, and a person passing `--title` will reach for either. Matching only one
-    /// would refuse half the names visible in the window it is meant to skip.
-    ///
-    /// Case-insensitive for the same reason: an identifier is upper case on the tile and
-    /// nobody types it that way twice.
-    ///
-    /// A name nothing matches is **left in place rather than dropped**, so a rescan after
-    /// fixing the library folder still does what was asked for.
+    /// Matched case-insensitively on either the folder name or the title identifier. A
+    /// name nothing matches is kept, so a rescan after fixing the library folder retries it.
     fn take_wanted_title(&mut self) {
         let Some(wanted) = self.wanted_title.clone() else {
             return;
@@ -265,8 +227,8 @@ impl App {
         match action {
             crate::shell::Action::Launch(index) => {
                 self.inspect(index);
-                // Asked for rather than started, exactly as the list does it: the borrow
-                // held while drawing is the one a run needs to read.
+                // Deferred, as the list does it: the borrow held while drawing is one a run
+                // needs.
                 self.deferred.launch = true;
             }
             crate::shell::Action::ToList => self.view = View::List,
@@ -288,16 +250,10 @@ impl App {
 
     /// Reads input and acts on the shell button.
     ///
-    /// # The whole point of the input subsystem, in one function
-    ///
-    /// A tap moves the session between `Lifecycle::Foreground` and
-    /// `Lifecycle::Overlaid`, and a hold opens the power menu. Both go through
-    /// `Lifecycle::on`, so the transitions are the ones already tested rather than a second
-    /// set written against a menu - and a request that does not apply is refused there
-    /// rather than producing a state nobody can reach on purpose.
-    ///
-    /// The same request is carried to the worker, so the guest is told it lost the machine.
-    /// Whether it hears is a separate question with a measured answer of "not yet" (D311).
+    /// A tap moves the session between `Lifecycle::Foreground` and `Lifecycle::Overlaid`,
+    /// and a hold opens the power menu, both through the tested `Lifecycle::on`. The same
+    /// request goes to the worker, which delivers the event only if its code is measured
+    /// (D311).
     fn read_input(&mut self, ctx: &egui::Context) {
         use orbistoun_shell::Request;
 
@@ -306,15 +262,11 @@ impl App {
         let elapsed_ms = u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX);
 
         let frame = self.input.read(ctx, &self.prefs.file.pads, elapsed_ms);
-        // Kept for the controllers pane, which lights a button as it goes down. That is
-        // what makes a mapping checkable where it is edited rather than by launching
-        // something and seeing whether it responds.
+        // Kept for the controllers pane, which lights a button as it goes down.
         self.last_pads = frame.pads;
 
-        // **Where `Focus` stops being a tested function with no effect.** What the title is
-        // allowed to see is decided here and nothing downstream can widen it: the shell's
-        // own button is always removed, and a title without focus is handed a pad nobody is
-        // holding rather than the last one it saw held forever (D345).
+        // What the title may see is decided here: the shell's button is always removed, and
+        // a title without focus is handed a neutral pad (D345).
         if let Some(in_flight) = &self.running {
             let neutral = self.session.focus().neutral_for_title();
             let seen: Vec<orbistoun_input::PadState> = self
@@ -331,9 +283,7 @@ impl App {
             in_flight.input(&seen);
         }
 
-        // A guest running is what makes the session live. Set here rather than at launch
-        // because a run ends on its own - and a session left `Foreground` after the title
-        // stopped would offer a resume for something that is gone.
+        // Set every frame rather than at launch, because a run ends on its own.
         self.session = if self.running.is_some() {
             match self.session {
                 orbistoun_shell::Lifecycle::Exited => orbistoun_shell::Lifecycle::Foreground,
@@ -346,8 +296,7 @@ impl App {
         match frame.shell {
             orbistoun_input::ShellPress::None => {}
             orbistoun_input::ShellPress::Tap => {
-                // A tap closes the power menu if it is open, rather than also toggling the
-                // overlay underneath it. One press, one effect.
+                // A tap closes an open power menu without also toggling the overlay.
                 if self.power_menu {
                     self.power_menu = false;
                 } else if self.session == orbistoun_shell::Lifecycle::Overlaid {
@@ -359,16 +308,14 @@ impl App {
             orbistoun_input::ShellPress::Hold => self.power_menu = true,
         }
 
-        // Navigation, only while the shell is what somebody is looking at. A direction
-        // pressed with a title in front belongs to the title, not to a highlight nobody can
-        // see - which is the same rule `Focus` states, applied to this side of it.
+        // Navigation only while the shell is showing; otherwise a direction belongs to the
+        // title.
         if self.view == View::Shell && self.session != orbistoun_shell::Lifecycle::Foreground {
             let shape = crate::shell::shape(self.rows.len(), self.running.is_some());
             if let Some(direction) = crate::input::steering(frame.just_pressed) {
                 self.at.steer(direction, &shape);
             } else {
-                // Also when nothing moved: a rescan can shorten the library underneath the
-                // highlight, and one left past the end draws as nothing being selected.
+                // Also when nothing moved, because a rescan can shorten the library.
                 self.at.clamp(&shape);
             }
             if frame.just_pressed & orbistoun_input::Button::South.bit() != 0 {
@@ -376,9 +323,7 @@ impl App {
             }
         }
 
-        // Somebody is holding the button, so the next frame has to come without waiting for
-        // them to move the pointer - otherwise the hold never completes in a window that
-        // only redraws on input.
+        // A hold in progress needs frames without input, or it never completes.
         if frame.hold_progress > 0.0 && frame.hold_progress < 1.0 {
             ctx.request_repaint();
         }
@@ -386,9 +331,8 @@ impl App {
 
     /// Acts on whatever the highlight is sitting on.
     ///
-    /// **The same actions the pointer produces**, reached the other way. Written as one
-    /// match over the highlight rather than by asking the drawing what it drew, so a
-    /// controller cannot end up able to reach something a mouse cannot or the reverse.
+    /// The same actions the pointer produces, as one match over the highlight, so a
+    /// controller and a pointer reach the same things.
     fn confirm(&mut self) {
         use crate::shell::Category;
 
@@ -417,14 +361,11 @@ impl App {
 
     /// Puts a shell request to both copies of the session.
     ///
-    /// **This one decides what is drawn and the worker's decides what the guest is told**,
-    /// and they are applied from the same call so they cannot drift apart through somebody
-    /// updating one and forgetting the other.
+    /// This copy decides what is drawn and the worker's decides what the guest is told;
+    /// one call updates both.
     fn shell_request(&mut self, request: orbistoun_shell::Request) {
         let Ok(taken) = self.session.on(request) else {
-            // Refused here means the button did something that does not apply from where
-            // the session stands - a menu offering an action it should not have. Not worth
-            // interrupting anybody over, and not worth acting on either.
+            // A request that does not apply from this state is ignored.
             return;
         };
         self.session = taken.state;
@@ -435,17 +376,9 @@ impl App {
 
     /// Ends the running title, telling it first.
     ///
-    /// # Two acts, in this order, and the order is the whole point
-    ///
-    /// A `Stopper` is `TerminateProcess`. On its own that is pulling the power out - the
-    /// guest gets no notice, runs no shutdown path, and any question of it saving anything
-    /// never arises. So the shell action goes first, over the control channel that exists
-    /// precisely because the run thread is blocked (D310), and the termination follows.
-    ///
-    /// **Whether the title actually hears is a separate question, and today the answer is
-    /// no**: no code has been measured for `Quitting`, so it is withheld and counted rather
-    /// than invented (D311). The order still matters, because the day a code is measured
-    /// this becomes correct without anything here changing.
+    /// A `Stopper` terminates the process without notice, so the shell action goes first
+    /// over the control channel (D310) and the termination follows. The `Quitting` event
+    /// reaches the guest only once its code is measured (D311).
     fn quit_running_title(&mut self) {
         if let Some(in_flight) = &self.running {
             in_flight.shell(orbistoun_shell::Request::Quit);
@@ -455,8 +388,7 @@ impl App {
 
     /// Draws the shell.
     fn shell_panel(&mut self, ui: &mut egui::Ui) {
-        // Scoped, so every borrow of a field is released before anything acts on the
-        // answer - `shell_action` needs the whole of `self` and the tiles hold `rows`.
+        // Scoped, so every field borrow is released before `shell_action` takes `self`.
         let action = {
             let tiles: Vec<crate::shell::Tile<'_>> = self
                 .rows
@@ -467,8 +399,7 @@ impl App {
                     icon: row.icon.as_deref(),
                 })
                 .collect();
-            // The scan result, not the rows: an empty wall and an unreadable folder are
-            // different answers, and the shell has to tell them apart (D228).
+            // The scan result, not the rows, so an unreadable folder is not an empty library.
             let library = match &self.titles {
                 Ok(_) => Ok(tiles.as_slice()),
                 Err(why) => Err(why.as_str()),
@@ -490,10 +421,8 @@ impl App {
 
     /// Takes the reply to a capture request, if one arrived this frame.
     ///
-    /// The image is cloned out of the event before anything is written, because the write
-    /// borrows `self` mutably and the events are borrowed from the context. Cheap in the
-    /// only case that matters - there is at most one of these per button press, and none
-    /// at all on every other frame.
+    /// The image is cloned out of the event before writing, because the write borrows
+    /// `self` mutably while the events are borrowed from the context.
     fn collect_screenshot(&mut self, ctx: &egui::Context) {
         let captured = ctx.input(|i| {
             i.raw.events.iter().find_map(|event| match event {
@@ -504,9 +433,7 @@ impl App {
         let Some(image) = captured else {
             return;
         };
-        // The title it was taken against, so a folder of captures reads without opening
-        // any of them. The directory name rather than the published one: it is what every
-        // other artefact this project writes is keyed by.
+        // The title's directory name, which keys every other artefact this project writes.
         let label = self.selected_title().map(|t| t.name.clone());
         self.last_capture = Some(capture::save(
             &self.paths.screenshots_dir(),
@@ -524,9 +451,7 @@ impl App {
 
     /// Re-reads the settings file, then the library folder.
     ///
-    /// Discards unsaved edits in the preferences window, which is the honest behaviour
-    /// for something labelled *reload*: the alternative merges a file with a form and
-    /// leaves nobody able to say what the settings now are.
+    /// Discards unsaved edits in the preferences window rather than merging them.
     fn reload_settings(&mut self) {
         self.prefs = Preferences::load(
             &self.paths.config_file(),
@@ -538,10 +463,8 @@ impl App {
 
     /// Re-reads the library folder.
     ///
-    /// Through `resolve` rather than straight off the setting, so a relative root means
-    /// the same folder however this window was started. It did not, and the symptom was
-    /// a library that filled up under `cargo run` and was empty when the same binary was
-    /// launched from `target/debug` (D228).
+    /// Through `resolve`, so a relative root means the same folder however the window was
+    /// started (D038).
     fn rescan(&mut self) {
         self.titles = self
             .service
@@ -556,8 +479,8 @@ impl App {
 
     /// Rebuilds the library rows.
     ///
-    /// Called when the library changes and when a run finishes - the only two things that
-    /// can alter what a row says.
+    /// Called when the library changes and when a run finishes, the only things that
+    /// change a row.
     fn rebuild_rows(&mut self) {
         let traces_dir = self.paths.traces_dir();
         self.rows = self
@@ -569,9 +492,8 @@ impl App {
                     .map(|t| Row {
                         key: t.name.clone(),
                         title: t.display_name().to_owned(),
-                        // The identifier under the name, because that is what appears in
-                        // traces and trace file names - somebody reading a report needs
-                        // to get from one to the other.
+                        // The identifier under the name, as it appears in traces and trace
+                        // file names.
                         id: t
                             .metadata
                             .as_ref()
@@ -615,10 +537,8 @@ impl App {
     /// Starts a run of `module`, replacing the picture of whatever ran before.
     fn start_module(&mut self, module: &std::path::Path) {
         self.finished = None;
-        // A new run starts with no picture: the last run's frame is not this title's. **Hidden, not
-        // freed** - dropping the texture here freed it under a frame wgpu was still submitting, and
-        // the window panicked the moment a launcher started a title (worklog 842). The next frame
-        // overwrites it in place.
+        // A new run starts with no picture. The texture is hidden, not freed, because wgpu
+        // may still be submitting a frame that uses it; the next frame overwrites it.
         self.live_fresh = false;
         self.perf = None;
         self.running = Some(run::start(
@@ -633,15 +553,14 @@ impl App {
         ));
     }
 
-    /// Arms `script` for the next launch - what `--playback <file>` on the command line does, the
-    /// same as choosing it from "playback input" before pressing launch (D721).
+    /// Arms `script` for the next launch, as `--playback <file>` does (D721).
     pub(crate) fn arm_playback(mut self, script: Option<std::path::PathBuf>) -> Self {
         self.input_playback = script;
         self
     }
 
-    /// **The toolbar's "capture input"** (D721): starts capturing what the title reads from its
-    /// pad - now, into the running title, or from the next launch - or stops a capture. The file is
+    /// The toolbar's "capture input" (D721): starts capturing what the title reads from its
+    /// pad, now or from the next launch, or stops a capture. The file is
     /// `<logs>/input/<title>-<unix ms>.toml`, a pad script `playback input` can play back.
     fn toggle_input_capture(&mut self) {
         if let Some(path) = self.input_capture.take() {
@@ -673,8 +592,8 @@ impl App {
         self.input_capture = Some(path);
     }
 
-    /// **The toolbar's "playback input"** (D721): plays `script` - from now on the running title,
-    /// or from the next launch - or stops playing with `None`.
+    /// The toolbar's "playback input" (D721): plays `script` on the running title from now,
+    /// or from the next launch, or stops playing with `None`.
     fn choose_input_playback(&mut self, script: Option<std::path::PathBuf>) {
         if let Some(in_flight) = &self.running {
             in_flight.play_input(script.clone());
@@ -682,9 +601,9 @@ impl App {
         self.input_playback = script;
     }
 
-    /// The toolbar's input section (D721): "capture input", which toggles, and "playback input", a
-    /// menu of captured files. Each acts on the running title from now, or - with nothing running -
-    /// arms the next launch from its start, so a capture replays from where it began.
+    /// The toolbar's input section (D721): "capture input", which toggles, and "playback
+    /// input", a menu of captured files. Each acts on the running title from now, or with
+    /// nothing running arms the next launch from its start.
     fn input_controls(&mut self, ui: &mut egui::Ui) {
         let running = self.running.is_some();
         let capture_hover = match (&self.input_capture, running) {
@@ -746,7 +665,7 @@ impl App {
             self.choose_input_playback(choice);
         }
 
-        // Short and fixed in shape, as the screenshot's own note: the file is on hover.
+        // Short and fixed in shape; the file name is on hover.
         if let Some(path) = &self.input_playback {
             ui.small(if running { "playing" } else { "playback armed" })
                 .on_hover_text(path.display().to_string());
@@ -756,8 +675,8 @@ impl App {
         }
     }
 
-    /// A run's capture and playback end with it, as the worker ends them (D721): the capture's file
-    /// is kept to say where it went, and nothing replays into the next launch unasked.
+    /// A run's capture and playback end with it (D721): the capture's file is kept to say
+    /// where it went, and nothing replays into the next launch unasked.
     fn end_run_input(&mut self) {
         if let Some(path) = self.input_capture.take() {
             self.input_captured = Some(path);
@@ -765,7 +684,7 @@ impl App {
         self.input_playback = None;
     }
 
-    /// Captured input files, newest first - what "playback input" offers.
+    /// Captured input files, newest first, as "playback input" offers them.
     fn input_captures(&self) -> Vec<std::path::PathBuf> {
         let Ok(entries) = std::fs::read_dir(self.paths.logs_dir().join("input")) else {
             return Vec::new();
@@ -782,7 +701,7 @@ impl App {
     /// Takes what the running title has presented and asked for, and its result once it ends.
     fn collect_run(&mut self, ctx: &egui::Context) {
         if let Some(in_flight) = &self.running {
-            // The newest presented frame, onto the one texture (worklog 841).
+            // The newest presented frame, onto the one texture.
             if let Some(report) = in_flight.latest_perf() {
                 self.perf = Some(report);
             }
@@ -811,15 +730,11 @@ impl App {
                     if let Some(home) = self.home.take() {
                         self.start_module(&home);
                     }
-                    // The run just wrote a trace, so the last-run column is stale until
-                    // this. The other half of not rebuilding per frame is remembering to
-                    // rebuild when something actually changed (D164).
+                    // The run wrote a trace, so the last-run column is stale.
                     self.rebuild_rows();
                 }
                 Ok(None) => {
-                    // Immediate mode only redraws on input, and a guest running on another
-                    // thread is not input - without this the spinner freezes and the
-                    // result never appears until the pointer moves.
+                    // Immediate mode redraws only on input, so poll the run on a timer.
                     ctx.request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 Err(()) => {
@@ -831,11 +746,9 @@ impl App {
         }
     }
 
-    /// Carries out a running guest's request to start another title (worklog 842): the run that
-    /// asked is ended and the title started from the library, and the asker is remembered as home.
-    ///
-    /// A title id the library does not hold is refused where a person can see it, rather than
-    /// ending a run that asked for nothing that could start.
+    /// Carries out a running guest's request to start another title: the asking run ends,
+    /// the title starts from the library, and the asker is remembered as home. A title id
+    /// the library does not hold is refused visibly and the run continues.
     fn follow_launch_request(&mut self) {
         let Some(title_id) = self
             .running
@@ -874,8 +787,7 @@ impl App {
         };
         let name = title.name.clone();
         let path = self.overrides_path(&name);
-        // A file that does not exist yet opens as a commented template rather than as an
-        // error: the first thing anybody does here is create one.
+        // A missing file opens as a commented template rather than an error.
         let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
             format!(
                 concat!(
@@ -912,10 +824,7 @@ impl App {
                         self.rescan();
                         ui.close_menu();
                     }
-                    // The way back. Without it the shell is reachable only by restarting
-                    // with a flag or changing a setting, which makes one of the two views a
-                    // one-way door - and the setting is about what somebody wants *usually*,
-                    // not a control for right now.
+                    // Switches views without a restart or a settings change.
                     if ui
                         .button("shell")
                         .on_hover_text("the library as a console presents it")
@@ -930,10 +839,8 @@ impl App {
                     }
                 });
                 ui.menu_button("probe", |ui| {
-                    // The one place this application asks a live question rather than
-                    // reading a file somebody already wrote. Named for what is on the other
-                    // end - a probe - because what it is *running on* is not knowable from
-                    // here and naming it would be asserting it.
+                    // Named for what is on the other end, a probe; what it runs on is not
+                    // knowable from here.
                     if ui.button("connect...").clicked() {
                         self.probe.open = true;
                         ui.close_menu();
@@ -954,11 +861,8 @@ impl App {
                         ui.close_menu();
                     }
                     ui.separator();
-                    // Hand-editing config.toml is a supported way to work - it is how
-                    // every setting in this window was reached before the window existed.
-                    // So there has to be a way to pick the edit up, and "rescan library"
-                    // is not it: that re-reads the folder using settings already in
-                    // memory, which looks like it should have worked and did not (D228).
+                    // Picks up a hand edit of config.toml; "rescan library" reuses the
+                    // settings already in memory.
                     if ui
                         .button("reload settings file")
                         .on_hover_text("re-reads config.toml and scans again")
@@ -984,11 +888,10 @@ impl App {
     /// Draws the toolbar.
     ///
     /// Every control is disabled rather than hidden when it does not apply, and says why
-    /// on hover. A control that vanishes reads as a bug; a greyed one reads as a state.
+    /// on hover.
     fn toolbar(&mut self, ctx: &egui::Context) {
-        // Acted on after the strip is drawn: rescanning replaces the very list the
-        // buttons were drawn from, and doing that mid-draw invalidates the selection
-        // under the pointer.
+        // Acted on after the strip is drawn, because rescanning replaces the list being
+        // drawn.
         let mut rescan = false;
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1007,8 +910,8 @@ impl App {
                     self.deferred.launch = true;
                 }
 
-                // Stop is offered only where it can actually be honoured. Elsewhere it is
-                // disabled with the reason, rather than present and silently useless.
+                // Stop is enabled only where it can be honoured, disabled with the reason
+                // elsewhere.
                 let can_stop = busy && orbistoun_worker::Stopper::is_supported();
                 if ui
                     .add_enabled(can_stop, egui::Button::new("■ stop"))
@@ -1036,9 +939,7 @@ impl App {
 
                 ui.separator();
 
-                // Refresh lives here rather than only in the menu: the library is scanned
-                // once at startup, so noticing a title that appeared since is a thing
-                // somebody wants to do without hunting through menus.
+                // Also on the toolbar, because the library is scanned only at startup.
                 if ui
                     .button("⟳ refresh")
                     .on_hover_text("rescan the library folder")
@@ -1049,9 +950,8 @@ impl App {
 
                 ui.separator();
 
-                // **A screenshot of this window** (D215): the running title's picture with the
-                // panels around it - a call tail, a register dump, a ranked finding list - so
-                // "paste the panel that says this" needs no operating-system screen grab.
+                // A screenshot of this window: the running title's picture with the
+                // diagnostic panels around it.
                 if ui
                     .button("📷 screenshot")
                     .on_hover_text("write this window to a PNG in the screenshots folder")
@@ -1060,18 +960,16 @@ impl App {
                     self.deferred.screenshot = true;
                 }
 
-                // Disabled rather than absent, which is this toolbar's rule throughout: a
-                // control that vanishes reads as a bug, a greyed one reads as a state. It
-                // is here because recording is a thing somebody will look for, and finding
-                // it greyed with the reason is a better answer than finding nothing.
+                // Recording is not built: shown disabled with the reason, per this toolbar's
+                // rule.
                 ui.add_enabled(false, egui::Button::new("⏺ record"))
                     .on_disabled_hover_text(concat!(
                         "recording needs a frame source and an encoder, and neither exists ",
                         "yet - no guest has rendered a pixel. See docs/ROADMAP.md phase 6"
                     ));
 
-                // Short and fixed in shape, so a long path does not shove the controls
-                // beside it around every time one is taken. The path itself is on hover.
+                // Short and fixed in shape so the controls beside it do not move; the path
+                // is on hover.
                 match &self.last_capture {
                     Some(Ok(path)) => {
                         ui.small("saved").on_hover_text(path.display().to_string());
@@ -1099,9 +997,8 @@ impl App {
                         ui.label(format!("running {}", in_flight.module));
                         ui.spinner();
                     } else {
-                        // How many titles the last scan found, so an empty library is
-                        // visibly a scan that ran and found nothing rather than a scan
-                        // that never happened.
+                        // How many titles the last scan found, so an empty library visibly
+                        // comes from a scan that ran.
                         match &self.titles {
                             Ok(titles) => ui.weak(format!("{} titles", titles.len())),
                             Err(_) => ui.weak("library unavailable"),
@@ -1117,16 +1014,8 @@ impl App {
 
     /// Says which settings file produced the folder above it.
     ///
-    /// # Why a failed scan has to name this too
-    ///
-    /// A missing `config.toml` is **not an error** - it is the ordinary first launch, and
-    /// the defaults are used silently and correctly. But that makes two very different
-    /// situations render identically: settings that say `titles` and were read, and
-    /// settings that were never found. Both scan the same folder and report the same
-    /// failure, and only one of them is fixed by editing the file.
-    ///
-    /// That cost a round trip to work out from the outside, which is the definition of a
-    /// diagnostic the window could have given and did not (D228).
+    /// A missing `config.toml` is the ordinary first launch and not an error, so without
+    /// this line a file that was read and a file that was never found look identical.
     fn settings_provenance(&self, ui: &mut egui::Ui) {
         let config = self.paths.config_file();
         ui.add_space(4.0);
@@ -1139,10 +1028,8 @@ impl App {
     /// Draws the library list.
     fn library_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        // Above whatever the scan found, because it explains it. A settings file that
-        // failed to parse falls back to defaults, so the library reported below is not
-        // the one this installation was configured with - and without saying so, the
-        // panel describes a folder nobody chose.
+        // Above the scan result, because it explains it: a settings file that failed to
+        // parse falls back to defaults, so the folder below is not the configured one.
         if let Some(error) = &self.prefs.load_error {
             ui.colored_label(egui::Color32::from_rgb(230, 180, 80), "settings not loaded");
             ui.small(error);
@@ -1157,8 +1044,7 @@ impl App {
             Ok(titles) if titles.is_empty() => {
                 ui.label("no titles here");
                 ui.small("a title is a directory containing an entry module");
-                // Which folder was empty. Without this the message is indistinguishable
-                // from the window having looked somewhere the reader did not expect.
+                // Which folder was empty.
                 ui.add_space(2.0);
                 ui.weak(
                     self.prefs
@@ -1172,9 +1058,8 @@ impl App {
                 ui.small("settings - preferences - general to point somewhere else");
             }
             Ok(_) => {
-                // Drawn from `self.rows`, which is rebuilt only when something changes -
-                // see `rebuild_rows`. Taken out so the icon cache can be borrowed
-                // mutably while iterating.
+                // Drawn from `self.rows` (see `rebuild_rows`), taken out so the icon cache
+                // can be borrowed mutably while iterating.
                 let rows = std::mem::take(&mut self.rows);
                 let mut clicked = None;
                 let mut launched = None;
@@ -1189,9 +1074,8 @@ impl App {
                         if response.clicked() {
                             clicked = Some(index);
                         }
-                        // Double-click launches, which is what a library list is expected
-                        // to do. It also selects, so the panel behind it is not showing a
-                        // different title than the one that started.
+                        // Double-click selects and launches, so the detail panel shows the
+                        // title that started.
                         if response.double_clicked() {
                             launched = Some(index);
                         }
@@ -1211,26 +1095,15 @@ impl App {
 
     /// Which build this is, at the bottom of the sidebar.
     ///
-    /// # Why a running application says which build it is
-    ///
-    /// So a screenshot, a bug report or a run result can be tied to a tree somebody else can
-    /// check out. A result that cannot be attributed to a build is a result nobody can
-    /// reproduce, and this project's whole argument is that its results are reproducible.
-    ///
-    /// Where there is no commit - which is every build of this repository so far - it shows
-    /// **when the binary was compiled** instead, which answers the question a developer is
-    /// actually asking: *am I looking at my last change, or at one from an hour ago?*
-    ///
-    /// Pinned to the bottom rather than placed after the list, so it does not scroll away
-    /// with a long library and does not move when the library is empty (D222).
+    /// Ties a screenshot, bug report or run result to a build (D222). Without a commit it
+    /// shows when the binary was compiled. Pinned to the bottom so it does not scroll away.
     fn build_stamp(&self, ui: &mut egui::Ui) {
         egui::TopBottomPanel::bottom("build")
             .show_separator_line(false)
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.small(&self.build);
-                    // The full detail on hover: the short form is what fits, and the long
-                    // form is what somebody pastes into a report.
+                    // The short form fits; the full detail is on hover.
                     ui.label("")
                         .on_hover_text(orbistoun_env::build::commit().map_or_else(
                             || format!("no commit - {}", self.build),
@@ -1272,8 +1145,7 @@ impl App {
                 ui.heading(&heading);
                 match &subtitle {
                     Some(text) => ui.small(text),
-                    // No metadata at all is the ordinary case for homebrew, and saying so
-                    // beats an empty gap that reads as a failure.
+                    // No metadata is ordinary for homebrew; stated rather than left blank.
                     None => ui.small("no published metadata - named by its folder"),
                 };
             });
@@ -1299,8 +1171,7 @@ impl App {
 
         if let Some(progress) = &finished.progress {
             ui.heading("progress");
-            // The same words the CLI prints, from the same place - two shims describing
-            // one measurement differently is what D160 fixed.
+            // The same words the CLI prints, from the same place (D034).
             let colour = if progress.verdict.is_progress() {
                 egui::Color32::LIGHT_GREEN
             } else {
@@ -1325,8 +1196,8 @@ impl App {
         }
 
         if let Some(trace) = &finished.trace {
-            // Stack conformance, shown even when clean: a line that only appears on
-            // failure cannot be told apart from one nobody wired up (D159).
+            // Stack conformance, shown even when clean, so a missing line means a missing
+            // check (D159).
             ui.separator();
             if trace.abi.misaligned_calls == 0 {
                 ui.label(format!(
@@ -1394,13 +1265,9 @@ impl App {
             .default_size([620.0, 460.0])
             .resizable(true)
             .show(ctx, |ui| {
-                // **The actions are placed before the panes and pinned to the bottom.**
-                // Laid out in reading order they disappeared: the `separator` between the
-                // pane list and the pane is a vertical rule in a horizontal layout, so it
-                // grows to fill the available height - and in a window that sizes itself
-                // to its content, "available" is however much screen there is. The row
-                // holding *save* was pushed past the bottom edge of the window, and the
-                // only way to reach it was to tab to it blind (D228).
+                // The actions are laid out before the panes and pinned to the bottom: the
+                // vertical `separator` between pane list and pane grows to the available
+                // height, which would push them off a self-sizing window.
                 egui::TopBottomPanel::bottom("preferences-actions").show_inside(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -1410,9 +1277,7 @@ impl App {
                         if ui.button("rescan library").clicked() {
                             rescan = true;
                         }
-                        // Saying so plainly, because a settings window that appears to
-                        // take effect immediately and does not is the same lie as a dead
-                        // control.
+                        // Stated, because the settings do not take effect immediately.
                         ui.small("settings apply to the next run");
                     });
                     if let Some(status) = &self.prefs.status {
@@ -1514,21 +1379,17 @@ struct Row {
     icon: Option<std::path::PathBuf>,
     /// The system version this title requires, when it says.
     ///
-    /// The one field a title publishes that predicts anything about the emulator problem
-    /// it poses: an interface era, not a marketing number.
+    /// It indicates the interface generation the title was built against.
     requires: Option<String>,
     /// How the last run of this title went.
     ///
-    /// **This is what makes the library a work queue rather than a menu.** The terminal
-    /// sweep already answers "where is each title stuck"; showing it per row means the
-    /// answer is in front of whoever is choosing what to work on next.
+    /// Shown per row, so the library shows where each title stops.
     last_run: Option<String>,
 }
 
 /// One line summarising a title's last run.
 ///
-/// `None` when it has never been run, which is different from a run that reached nothing
-/// and must not look the same.
+/// `None` when it has never been run, which is distinct from a run that reached nothing.
 fn summarise_last_run(traces_dir: &std::path::Path, module: &std::path::Path) -> Option<String> {
     let trace = orbistoun_report::trace::load_previous(traces_dir, module)?;
     let ended = trace.fault.as_ref().map_or_else(
@@ -1543,9 +1404,7 @@ fn summarise_last_run(traces_dir: &std::path::Path, module: &std::path::Path) ->
 
 /// Draws one library row and answers whether it was interacted with.
 ///
-/// The whole row is one clickable region rather than just the text, because a list where
-/// clicking the icon does nothing feels broken in a way that is hard to articulate and
-/// easy to notice.
+/// The whole row is one clickable region, icon included.
 fn draw_row(
     ui: &mut egui::Ui,
     row: &Row,
@@ -1569,14 +1428,12 @@ fn draw_row(
                         Some(id) => {
                             ui.add(egui::Image::from_texture((id, size)).rounding(4.0));
                         }
-                        // A blank of the same size, so rows with and without an icon
-                        // still line up.
+                        // A blank of the same size, so rows line up.
                         None => ui.add_space(icons::LIST_ICON),
                     }
                     ui.vertical(|ui| {
                         ui.label(&row.title);
-                        // Identifier and required version on one line: both are short,
-                        // and a row three lines tall turns a library into a scroll.
+                        // Identifier and required version share one line to keep rows short.
                         let second = match (&row.id, &row.requires) {
                             (id, Some(requires)) if id.is_empty() => format!("fw {requires}"),
                             (id, Some(requires)) => format!("{id}  fw {requires}"),
@@ -1589,15 +1446,13 @@ fn draw_row(
                             Some(summary) => {
                                 ui.small(egui::RichText::new(summary).weak());
                             }
-                            // Said rather than left blank: never run and ran badly are
-                            // different states, and a gap reads as the second.
+                            // Stated rather than left blank: never run is not ran badly.
                             None => {
                                 ui.small(egui::RichText::new("never run").weak());
                             }
                         }
                     });
-                    // Fill the row so the click region is the full width rather than
-                    // only as wide as the longest name.
+                    // Fill the row so the click region is the full width.
                     ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
                 });
             });
@@ -1608,21 +1463,18 @@ fn draw_row(
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Collect a finished run before drawing, so the frame that removes the spinner is
-        // the same frame that shows the result.
+        // Before drawing, so the frame that removes the spinner shows the result.
         self.collect_run(ctx);
 
-        // Before drawing, because the reply to a capture asked for on an earlier frame
-        // arrives as an ordinary input event and the toolbar wants to report it this
-        // frame rather than next.
+        // Before drawing, so a capture reply that arrived this frame is reported this frame.
         self.collect_screenshot(ctx);
 
-        // Before drawing, so a press acts on the frame it happened in rather than the next
-        // one. It also settles where the session stands, which decides what is drawn below.
+        // Before drawing, so a press acts on its own frame and the session state below is
+        // current.
         self.read_input(ctx);
 
-        // **A running title's own picture, over the library** (worklog 841): once it has presented
-        // a frame, that frame is what the window shows, as a console's would.
+        // Once a running title has presented a frame, the window shows that frame in place
+        // of the library.
         let playing = self
             .running
             .as_ref()
@@ -1640,9 +1492,7 @@ impl eframe::App for App {
                     .frame(egui::Frame::none().fill(egui::Color32::BLACK))
                     .show(ctx, |ui| live_frame(ui, frame, overlay));
             }
-            // The shell gets the whole window. A console's library is not a panel beside
-            // something else, and leaving the toolbar visible would make it the list view
-            // with different tiles rather than a second way of meeting the same library.
+            // The shell gets the whole window, with no toolbar.
             (View::Shell, None) => {
                 egui::CentralPanel::default().show(ctx, |ui| self.shell_panel(ui));
             }
@@ -1659,8 +1509,7 @@ impl eframe::App for App {
                             .show(ctx, |ui| live_frame(ui, frame, overlay));
                     }
                     None => match &self.running {
-                        // A run that has not presented yet is said to be starting, on black -
-                        // the selected title's details in its place read as a hang (worklog 842).
+                        // A run that has not presented yet is shown as starting, on black.
                         Some(in_flight) => {
                             let name = std::path::Path::new(&in_flight.module)
                                 .parent()
@@ -1683,9 +1532,7 @@ impl eframe::App for App {
                 }
             }
         }
-        // **Over everything, in both views.** The shell button is the system's, so it works
-        // while the list view is showing too - a person who reaches for it should not have
-        // to know which view they happen to be in.
+        // Over everything, in both views: the shell button works in either.
         let menu = if self.power_menu {
             Some(crate::shell::Menu::Power)
         } else if self.session == orbistoun_shell::Lifecycle::Overlaid {
@@ -1709,27 +1556,19 @@ impl eframe::App for App {
 
         self.preferences_window(ctx);
         self.title_config_window(ctx);
-        // Beside the other windows rather than inside a view, so the menu item works from
-        // whichever of the two happens to be showing.
+        // Outside either view, so the menu item works from both.
         self.docs.show(ctx, DOCS);
-        // No repaint timer here on purpose. The worker asks for a frame when it has
-        // something to show, which is the only time one is needed - a clock redraws the
-        // window whether or not anything happened, and that reads as a cursor that will
-        // not settle.
+        // No repaint timer: the probe worker requests a repaint when it has something.
         self.probe.show(ctx);
 
-        // Acted on after drawing, so a request made while the state was borrowed for the
-        // list or the toolbar is honoured exactly once.
-        // After drawing, like every other deferred action: closing while a menu still holds
-        // a borrow of the frame is a crash rather than an exit.
+        // Deferred actions run after drawing, once each, when no borrow of the frame is held.
         if std::mem::take(&mut self.deferred.close) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if std::mem::take(&mut self.deferred.launch) && self.running.is_none() {
             self.launch();
         }
-        // Asked for after the frame is composed, so what comes back is the window as it
-        // was just drawn rather than the one before it.
+        // Requested after the frame is composed, so the capture shows this frame.
         if std::mem::take(&mut self.deferred.screenshot) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
         }
@@ -1738,10 +1577,8 @@ impl eframe::App for App {
 
 /// The pages this build ships, and their order in the reader.
 ///
-/// `include_str!` puts them in the binary, so they cannot disagree with the build somebody is
-/// running - there is no version to keep in step and nothing to fetch. What is listed is the
-/// *manual*: the decision log and the worklog are development record, they are in the
-/// repository, and one of them is most of a megabyte.
+/// `include_str!` puts them in the binary, so they match the build. Only the manual is
+/// listed; the development records stay in the repository.
 const DOCS: &[oops_docs::Doc] = &[
     oops_docs::Doc::new(
         "user-guide",
@@ -1799,8 +1636,8 @@ const DOCS: &[oops_docs::Doc] = &[
     ),
 ];
 
-/// Draws a running title's presented frame, as large as fits with its aspect kept, centred on black
-/// (worklog 841).
+/// Draws a running title's presented frame, as large as fits with its aspect kept, centred
+/// on black.
 fn live_frame(
     ui: &mut egui::Ui,
     (texture, size): (egui::TextureId, egui::Vec2),
@@ -1811,7 +1648,7 @@ fn live_frame(
     let shown = ui
         .centered_and_justified(|ui| ui.add(egui::Image::new((texture, size * scale))))
         .inner;
-    // Where the time goes, over the picture it went into (worklog 844).
+    // Where the time goes, over the picture it went into.
     if let Some(report) = overlay {
         crate::perf_overlay::draw(ui, shown.rect, report);
     }
@@ -1820,9 +1657,8 @@ fn live_frame(
 /// How many captured files "playback input" lists, newest first.
 const PLAYBACK_CHOICES: usize = 20;
 
-/// What an input capture of `module`'s run is named after (D721): the title ID among its path's
-/// folders - four capitals and five digits, as `NVRB00001` - or the module's own name where there
-/// is none.
+/// What an input capture of `module`'s run is named after (D721): the title ID among its
+/// path's folders (four capitals and five digits, as `NVRB00001`), or else the module's name.
 fn capture_name(module: &std::path::Path) -> String {
     let is_title_id = |name: &str| {
         name.len() == 9
@@ -1840,9 +1676,7 @@ fn capture_name(module: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod docs_tests {
-    /// `include_str!` proves a file *exists*. It cannot notice one truncated to nothing, two
-    /// entries claiming a slug, or a page with no heading - and all three ship silently,
-    /// because a documentation window showing an empty page looks like a page nobody wrote yet.
+    /// Every shipped page is non-empty, has a heading and a unique slug.
     #[test]
     fn the_registry_is_sound() {
         assert_eq!(oops_docs::check(super::DOCS), Vec::<String>::new());

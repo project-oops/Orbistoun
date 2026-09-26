@@ -1,33 +1,13 @@
 //! Answering the same commands a probe answers, so one driver can drive either.
 //!
-//! # Which way this seam points
+//! orbistoun is a responder, never a driver: obSCEne owns the protocol and the record format, and
+//! every token this module writes is one [`super::parse`] already reads (a test holds the round
+//! trip). A harness that also owned the protocol could define away a disagreement.
 //!
-//! orbistoun is a **responder, never a driver**. obSCEne owns the protocol and the record
-//! format; this implements against whatever they define. That direction is not a courtesy -
-//! the emulator has no business knowing what is on the other end of a comparison, and a
-//! test harness that also owned the protocol could quietly define away a disagreement
-//! (`docs/BACKLOG.md`, D043).
-//!
-//! So there is no vocabulary invented here. Every token this module writes is one
-//! [`super::parse`] already reads, and the round-trip is held by a test.
-//!
-//! # What it is worth before `call` exists
-//!
-//! Very little of the emulator can be invoked live yet, and this declares only what it can
-//! actually serve - a capability announced and then refused is principle 3's failure mode
-//! with a handshake in front of it. What it *can* do is answer `report`, and a report
-//! carries symbol presence: **whether a name exists, in which library, and how it is
-//! reached**. Pointing one driver at a probe and at this, and diffing the `sym` records,
-//! asks "does the emulator know the same names the platform has" - live, from one place,
-//! without a capture step in between.
-//!
-//! # The ack is written before the work, and flushed
-//!
-//! The protocol's central discipline, and it survives being on this side of it. A command
-//! that kills the responder must still have been acknowledged, because an acknowledgement
-//! with no `done` after it names the command that did the killing, and silence names
-//! nothing. Buffering the ack until after the work would make every death look like a
-//! connection that dropped for its own reasons.
+//! Only served capabilities are declared. `report` carries symbol presence (whether a name exists,
+//! in which library, and how it is reached), so diffing `sym` records from a probe and from this
+//! compares the names each side knows. The ack is written and flushed before the work, so a command
+//! that ends the responder is still named by an ack with no `done` after it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -40,10 +20,8 @@ use crate::{Capability, Line, Outcome, Provenance, Record, Refusal, Status, VERS
 impl Capability {
     /// The token this is written as.
     ///
-    /// The inverse of [`Self::parse`], including for [`Self::Other`] - a capability this
-    /// version does not understand is carried through unchanged rather than dropped,
-    /// because a responder relaying one it was told about is not the place to decide it
-    /// was meaningless.
+    /// The inverse of [`Self::parse`], including for [`Self::Other`]: a capability this version
+    /// does not understand is carried through unchanged rather than dropped.
     pub fn token(&self) -> &str {
         match self {
             Self::Call => "call",
@@ -105,10 +83,8 @@ impl Provenance {
 impl Outcome {
     /// The outcome word and the value beside it.
     ///
-    /// Two fields rather than one, because that is how the wire carries them - and because
-    /// the empty value on a non-answer is load-bearing. A reader refuses a record whose
-    /// outcome did not answer and yet carries a value, so a writer that put something
-    /// there would be producing lines its own parser rejects.
+    /// Two fields because the wire carries two. A reader refuses a non-answer that carries a value,
+    /// so the value stays empty on a non-answer.
     pub fn fields(&self) -> (&str, String) {
         match self {
             Self::Ok => ("ok", String::new()),
@@ -128,9 +104,7 @@ impl Outcome {
 
 /// Renders one record as a wire line, without its terminator.
 ///
-/// Every field is written verbatim. There is deliberately no escaping: the protocol has
-/// none, so inventing some here would produce lines only this implementation could read,
-/// which is the one thing a responder must not do.
+/// Every field is written verbatim. The protocol has no escaping, so none is added here.
 #[allow(
     clippy::too_many_lines,
     reason = "one arm per record kind; splitting it scatters the wire order"
@@ -300,9 +274,7 @@ fn render_res(
             status.token().to_owned(),
             value.to_owned(),
             detail.to_owned(),
-            // Absent stays absent. Writing a default grade onto a record that claimed
-            // none would manufacture provenance, which is the failure this whole crate
-            // is arranged to prevent.
+            // Absent stays absent: writing a default grade would manufacture provenance.
             provenance.map_or_else(String::new, |p| p.token().to_owned()),
         ],
     )
@@ -314,22 +286,15 @@ fn render_res(
 
 /// What a responder needs from whatever is behind it.
 ///
-/// # Why every verb returns records rather than values
-///
-/// Because the framing rules are the part that must not be reimplemented per backend.
-/// Sequence echo, ack-before-execute, which refusal a missing capability earns, when a
-/// session counts as negotiated - all of that lives in [`Responder`] and none of it is a
-/// backend's business. A backend answers *what happened*; the responder decides how that
-/// is said.
-///
-/// A verb the backend cannot serve returns [`Refusal::Unsupported`]. It should also not
-/// have announced the capability - see [`Self::capabilities`].
+/// Every verb returns records rather than values so the framing rules (sequence echo,
+/// ack-before-execute, refusals for missing capabilities, negotiation) live once in [`Responder`].
+/// A backend answers what happened; the responder decides how it is said. A verb the backend cannot
+/// serve returns [`Refusal::Unsupported`] and is not announced in [`Self::capabilities`].
 pub trait Answers {
     /// What this responder can actually do.
     ///
-    /// **Announce only what is served.** The reply to `hello` is what a driver plans
-    /// against, so a capability listed here and refused later is worse than one never
-    /// offered: the driver has already decided the comparison is possible.
+    /// Announce only what is served: a driver plans against the `hello` reply, so a capability
+    /// listed and later refused misleads it.
     fn capabilities(&self) -> Vec<Capability>;
 
     /// Identifier for this process. A new one means the responder restarted.
@@ -337,19 +302,16 @@ pub trait Answers {
 
     /// The secret a caller must present, when one is required.
     ///
-    /// [`None`] accepts any `hello`. That is the right default for a responder bound to
-    /// the loopback interface by a person who started it deliberately, and the wrong one
-    /// for anything reachable from a network - see [`Responder::serve`].
+    /// [`None`] accepts any `hello`: right for a responder bound to loopback by a person who
+    /// started it, wrong for anything reachable from a network (see [`Responder::serve`]).
     fn secret(&self) -> Option<String> {
         None
     }
 
     /// Key/value metadata written as `part` records after a successful `hello`.
     ///
-    /// **This is where a responder says what it is**, and the honest answer for this one
-    /// is that it is an emulator. A driver that treats an emulator's answer as the
-    /// platform's has been misled by the thing it was comparing against, which is the one
-    /// failure mode a comparison tool cannot survive.
+    /// This is where the responder says it is an emulator, so a driver never mistakes its answers
+    /// for the platform's.
     fn describe(&self) -> Vec<(String, String)> {
         Vec::new()
     }
@@ -388,9 +350,8 @@ pub trait Answers {
 
 /// Serves the command protocol over one stream.
 ///
-/// Generic over the transport for the same reason the client is: the whole exchange is
-/// testable from a pair of in-memory buffers, so the tests never open a socket and the
-/// gate never needs one (D016).
+/// Generic over the transport so the whole exchange is testable from in-memory buffers, without a
+/// socket.
 #[derive(Debug)]
 pub struct Responder<S, A> {
     stream: BufReader<S>,
@@ -417,26 +378,20 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
 
     /// The backend, so a test can see what it was asked to do.
     ///
-    /// Checking the records is not enough on its own: a responder that refused a malformed
-    /// command *and* executed it would produce exactly the right transcript. What has to be
-    /// asserted is that the backend was never reached.
+    /// A responder that refused a malformed command and also executed it would produce the right
+    /// transcript, so tests assert that the backend was never reached.
     pub const fn answers(&self) -> &A {
         &self.answers
     }
 
     /// Reads commands until the peer says `bye` or the stream ends.
     ///
-    /// # Opening a socket is the caller's decision, not this crate's
-    ///
-    /// Nothing here binds anything. A responder is a socket the emulator did not have to
-    /// open, so it is opt-in at run time and stays out of every automated path - a gate
-    /// that listens on a port is a gate that behaves differently depending on what else is
-    /// running on the machine.
+    /// Nothing here binds a socket: a responder is opt-in at run time and stays out of every
+    /// automated path, whose behaviour must not depend on what else listens on the machine.
     ///
     /// # Errors
     ///
-    /// When the stream fails. A malformed command is **not** an error: it is refused, and
-    /// refusing is the behaviour under test.
+    /// When the stream fails. A malformed command is not an error: it is refused.
     pub fn serve(&mut self) -> std::io::Result<()> {
         let mut line = String::new();
         loop {
@@ -454,11 +409,8 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
                         return Ok(());
                     }
                 }
-                // A record arriving on the command channel is the peer talking as though
-                // it were the probe, and a line that parses as nothing at all is noise.
-                // Both are dropped for the same reason as a note: there is no sequence
-                // number to refuse them against, and refusing against zero would put a
-                // fiction in the transcript.
+                // A record on the command channel, or a line that parses as nothing, is dropped
+                // like a note: there is no sequence number to refuse it against.
                 Ok(Line::Record(_) | Line::Note(_)) | Err(_) => {}
             }
         }
@@ -466,9 +418,9 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
 
     /// Handles one command. Returns whether the session should end.
     fn dispatch(&mut self, seq: Option<u64>, verb: &str, args: &[String]) -> std::io::Result<bool> {
-        // A sequence that is not a number, or that did not advance, is refused against the
-        // number the peer sent as far as it can be read. Refusing against zero would make
-        // two different mistakes indistinguishable in a transcript.
+        // A sequence that is not a number, or did not advance, is refused against the number the
+        // peer sent as far as it can be read, so different mistakes stay distinguishable in a
+        // transcript.
         let Some(seq) = seq else {
             return self.refuse(0, &Refusal::BadArgument).map(|()| false);
         };
@@ -480,9 +432,8 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
         if verb == "hello" {
             return self.hello(seq, args).map(|()| false);
         }
-        // Everything else needs a session. One check, whole surface - the same shape
-        // obSCEne uses, and the reason the secret is verified before the capability reply
-        // rather than beside it.
+        // Everything else needs a session. One check covers the whole surface, which is why the
+        // secret is verified before the capability reply.
         if !self.negotiated {
             return self.refuse(seq, &Refusal::NotNegotiated).map(|()| false);
         }
@@ -508,10 +459,8 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
         if let Some(expected) = self.answers.secret() {
             let presented = args.get(1).map(String::as_str).unwrap_or_default();
             if !same_secret(&expected, presented) {
-                // Before the capability reply, not beside it: the reply names everything
-                // this build can do, and an unauthenticated peer should not learn it.
-                // Failing here never sets `negotiated`, so the rule above refuses the rest
-                // of the surface for free.
+                // Checked before the capability reply, which names everything this build can do.
+                // Failing never sets `negotiated`, so the rest of the surface stays refused.
                 return self.refuse(seq, &Refusal::Unauthorised);
             }
         }
@@ -567,8 +516,8 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
             };
             arguments.push(value);
         }
-        // Before the call, and flushed by `ack`. If invoking the address ends this process
-        // the peer still has a record naming what was being invoked.
+        // Acked and flushed before the call, so the peer has a record of what was invoked even if
+        // the call ends this process.
         self.ack(seq, "call")?;
         match self.answers.call(address, &arguments) {
             Ok((outcome, detail)) => self.emit(&Record::Done {
@@ -613,11 +562,10 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
         }
     }
 
-    /// Writes an acknowledgement and **flushes it**.
+    /// Writes an acknowledgement and flushes it.
     ///
-    /// The flush is the whole point. An ack sitting in a buffer while the command runs is
-    /// an ack that never arrives if the command is fatal, and the peer then sees a
-    /// connection that dropped rather than a command that killed something.
+    /// An ack left in a buffer never arrives if the command is fatal, and the peer would see a
+    /// dropped connection instead of a command that ended the process.
     fn ack(&mut self, seq: u64, verb: &str) -> std::io::Result<()> {
         self.emit(&Record::Ack {
             seq,
@@ -645,10 +593,8 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
 
 /// Compares two secrets without returning early on the first difference.
 ///
-/// The obvious comparison hands a timing adversary the secret one byte at a time. This is
-/// not cryptography and the socket is cleartext anyway - it is the cheap half of a
-/// mitigation whose expensive half nobody has asked for, and leaving it out would be a
-/// choice rather than an oversight.
+/// An early-exit comparison leaks the secret to timing one byte at a time. The socket is cleartext,
+/// so this is a cheap partial mitigation, not cryptography.
 fn same_secret(expected: &str, presented: &str) -> bool {
     if expected.len() != presented.len() {
         return false;

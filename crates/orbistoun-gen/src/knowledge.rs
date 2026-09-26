@@ -1,24 +1,12 @@
 //! Derive knowledge entries from the implementations' own documentation.
 //!
-//! # Why this exists rather than a person writing them
+//! `every_implemented_function_is_written_down` requires an entry for every implemented
+//! function. Each implementation's doc comment already states its contract, usually citing
+//! the specification, so the entry is derived from it and re-derived when it changes.
 //!
-//! `every_implemented_function_is_written_down` failed for **112 functions**, and the guard is
-//! right to: implementing something without recording what was learned is how the knowledge
-//! ends up existing only in a conversation. But hand-writing 112 formulaic rows satisfies the
-//! guard and defeats what it is for - a row saying "POSIX function, follows POSIX" records
-//! nothing a reader did not already know.
-//!
-//! **The material is already written.** Each of those functions carries a doc comment stating
-//! its contract, usually with the specification cited in it, because that is the house style.
-//! So this derives the entry from that rather than inventing one, and the derivation is
-//! mechanical enough to re-run when the documentation changes.
-//!
-//! # What it will not do
-//!
-//! It does not invent provenance. A record whose documentation cites no published
-//! specification lands as `assumed`, never `published`, and every record goes through
-//! [`KnowledgeFile::merge`] so the format's own provenance rules decide whether it is
-//! admissible. **A fault stops the write** rather than being reported and ignored (D180).
+//! Provenance is never invented: a record whose documentation cites no published
+//! specification lands as `assumed`, and every record goes through
+//! [`KnowledgeFile::merge`], where a provenance fault stops the write (D180).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,18 +34,12 @@ pub(crate) struct Declaration {
 
 /// The documentation attached to each function in one source file.
 ///
-/// **Attachment, not proximity.** A block is attached only to the item that immediately
-/// follows it, and any other statement in between clears it - which is what stops an orphaned
-/// block (a real and repeated mistake in this codebase) being read as though it documented
-/// whatever came next.
+/// A block attaches only to the item immediately after it; any other statement in between
+/// clears it, so an orphaned block is never read as documenting what follows.
 ///
-/// # Why plain `//` comments count, for macro-declared functions only
-///
-/// A doc comment does not attach to a macro invocation, so the ten float maths functions
-/// written by `unary_f32!` document themselves with `//` instead - the information is there
-/// and the language will not carry it. Reading those as well is the difference between
-/// deriving an entry for them and recording that they have no documentation, which would be
-/// false. A `///` block always wins where both are present.
+/// Plain `//` comments count for macro-declared functions only: a doc comment does not
+/// attach to a macro invocation, so functions written by `unary_f32!` are documented with
+/// `//`. A `///` block wins where both are present.
 #[must_use]
 pub(crate) fn docs_in(source: &str) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
@@ -88,9 +70,8 @@ pub(crate) fn docs_in(source: &str) -> BTreeMap<String, Vec<String>> {
         }
         if trimmed.is_empty() {
             // A blank line ends a plain-comment paragraph but not a doc block: Rust carries
-            // `///` across one, and a `//` block separated from the item by a blank line is
-            // a different remark. Without this the ten maths functions each inherited the
-            // section banner above them instead of their own line.
+            // `///` across one, while a `//` block before a blank line is a separate remark,
+            // such as a section banner.
             plain.clear();
             continue;
         }
@@ -107,9 +88,9 @@ fn declared_name(trimmed: &str) -> Option<String> {
 
 /// The function a macro invocation names, as `unary_f32!(acosf, acos);` names `acosf`.
 ///
-/// The first argument by convention, which is what every generating macro here uses. A macro
-/// that named its function somewhere else would go undocumented rather than misdocumented -
-/// the entry would be missing, and the run says so.
+/// The first argument, by the convention every generating macro here follows. A macro that
+/// named its function elsewhere would go undocumented rather than misdocumented, and the
+/// run reports it.
 fn macro_declared_name(trimmed: &str) -> Option<String> {
     let (macro_name, rest) = trimmed.split_once("!(")?;
     if macro_name.is_empty()
@@ -149,15 +130,9 @@ fn function_name(trimmed: &str) -> Option<String> {
 
 /// Every `("symbol", rust_function)` row in a registration table.
 ///
-/// **Bounded to the tables themselves**, which the element type identifies: a registration
-/// table is a slice of `(&str, GuestFn)`. Scanning whole files for the row shape instead
-/// found sixty-odd tuples that are not registrations at all - fixture data, test vectors, a
-/// pair of column headings - and each would have produced a knowledge entry about a function
-/// that does not exist.
-///
-/// **A row is not a line.** `cargo fmt` breaks a long one across four, and a line-based
-/// reader silently loses exactly the rows with the longest names - which here meant the
-/// attribute accessors, and only the guard downstream noticed. The region is matched as text.
+/// Bounded to the tables themselves, identified by their `(&str, GuestFn)` element type, so
+/// fixture data and test vectors with the same row shape are not read. The region is matched
+/// as text rather than by line, because `cargo fmt` splits a long row across lines.
 #[must_use]
 pub(crate) fn bindings_in(source: &str) -> Vec<Binding> {
     let row = regex::Regex::new(
@@ -206,10 +181,8 @@ fn table_regions(source: &str) -> Vec<String> {
 
 /// Every `("alias", "target")` row in a delegation table.
 ///
-/// A delegated name resolves to the **same function pointer** as the name it points at, so
-/// at run time it is implemented and at compile time there is no Rust function called that -
-/// which is why a reader looking only for `fn` names records it as missing. The behaviour to
-/// write down is the target's.
+/// A delegated name resolves to the same function pointer as its target, so it has no Rust
+/// function of its own; the behaviour to record is the target's.
 #[must_use]
 pub(crate) fn delegations_in(source: &str) -> Vec<(String, String)> {
     let row = regex::Regex::new(r#"\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,?\s*\)"#)
@@ -242,8 +215,7 @@ pub(crate) fn delegations_in(source: &str) -> Vec<(String, String)> {
 /// Every symbol declared in a `guest_module!` block, with the library it belongs to.
 ///
 /// Bounded to the macro's own body, because `"name" => 3,` is also the shape of an ordinary
-/// match arm and an arity table elsewhere in the same file would otherwise be read as a
-/// declaration.
+/// match arm.
 #[must_use]
 pub(crate) fn declarations_in(source: &str) -> Vec<Declaration> {
     let mut out = Vec::new();
@@ -277,7 +249,7 @@ pub(crate) fn declarations_in(source: &str) -> Vec<Declaration> {
     out
 }
 
-/// The `"name" => arity,` pairs on one line - several share a line in the wider tables.
+/// The `"name" => arity,` pairs on one line; several share a line in the wider tables.
 fn declaration_rows(trimmed: &str) -> Vec<(String, u8)> {
     trimmed
         .split(',')
@@ -298,9 +270,8 @@ fn quoted(text: &str) -> Option<String> {
 
 /// Follows a delegation to the function that actually runs.
 ///
-/// **Transitively, with a bound.** A target can itself be an alias - `posix_close` points at
-/// `close`, which points at the vendor spelling - so one hop is not enough, and a table with a
-/// cycle in it must not hang a generator.
+/// Transitively, with a bound: a target can itself be an alias (`posix_close` points at
+/// `close`, which points at the vendor spelling), and a cycle must not hang the generator.
 fn resolve<'a>(
     alias: &str,
     written: &BTreeMap<&'a str, &'a str>,
@@ -359,14 +330,10 @@ pub(crate) fn record_from(symbol: &str, arity: Option<u8>, doc: &[String]) -> Re
 
 /// The first thing the documentation says the function is for.
 ///
-/// House style opens with the signature and a dash - ``` `pthread_once(control, routine)` -
-/// runs an initialiser exactly once.``` - so the description is what follows it.
-///
-/// **The signature has to be recognised before the markup is stripped**, because that is the
-/// only thing distinguishing it from prose: once the backticks are gone,
-/// `scePthreadMutexLock(mutex).` is just a sentence, and a block that opens with a bare
-/// signature would record the signature as its own purpose instead of falling through to the
-/// paragraph that describes it.
+/// House style opens with the signature and a dash (``` `pthread_once(control, routine)` -
+/// runs an initialiser exactly once.```), so the description is what follows it. The
+/// signature is recognised before the markup is stripped, since afterwards
+/// `scePthreadMutexLock(mutex).` reads as a sentence.
 fn purpose(doc: &[String]) -> Option<String> {
     let mut paragraphs = doc
         .split(|line| line.trim().is_empty())
@@ -378,8 +345,7 @@ fn purpose(doc: &[String]) -> Option<String> {
         if !is_citation_only(&described) {
             return Some(described);
         }
-        // The description is the reference itself, so there is no purpose here to record.
-        // The next paragraph may still hold one; if it does not, none is recorded at all.
+        // The description is the reference itself; the next paragraph may hold a purpose.
         return paragraphs.next().map(|next| plain(&next.join(" ")));
     }
     if is_bare_signature(&raw) {
@@ -396,10 +362,8 @@ fn is_bare_signature(raw: &str) -> bool {
 
 /// The claims the documentation emphasised, which are what a reimplementation gets wrong.
 ///
-/// **Bold is the signal, and it is a convention rather than a guess.** This codebase bolds
-/// the load-bearing caveat - the thing that is true and surprising - so the emphasised
-/// paragraphs are exactly the edge cases the knowledge file wants. Capped, because a record
-/// that quotes an entire doc comment has recorded nothing in particular.
+/// Paragraphs marked with `**` bold are taken as the caveats, by the convention of the
+/// implementations' doc comments. Capped, so a record does not quote a whole doc comment.
 fn edge_cases(doc: &[String]) -> Vec<String> {
     /// How many to keep, and how long each may be.
     const KEEP: usize = 3;
@@ -431,11 +395,8 @@ const STANDARDS: &[&str] = &[
 
 /// Whether a fragment is a reference and nothing else.
 ///
-/// **A citation is not a purpose.** Plenty of these functions are documented as
-/// ``` `pthread_mutex_timedlock(mutex, abstime)` - POSIX.1-2008.``` - the whole content is
-/// "it is the standard one" - and recording that as what the function is *for* would put a
-/// clause number in the field a reader goes to for the behaviour. Better to leave the purpose
-/// empty and let the citation carry it, which is what is actually known.
+/// A citation is not a purpose: a function documented only as ``` `pthread_mutex_timedlock(
+/// mutex, abstime)` - POSIX.1-2008.``` gets no purpose, and the citation carries it.
 fn is_citation_only(text: &str) -> bool {
     /// Longer than this is prose that happens to open with a standard's name.
     const SHORT: usize = 60;
@@ -445,19 +406,17 @@ fn is_citation_only(text: &str) -> bool {
 
 /// Where somebody else can check the claim, if the documentation says.
 ///
-/// An explicit `Reference:` line first, because that is what the style asks for; failing
-/// that, a standard named anywhere in the prose. **Never a guess** - no mention means no
-/// citation, which lands the record as `assumed` rather than `published`.
+/// An explicit `Reference:` line first, as the style asks; failing that, a standard named
+/// anywhere in the prose. No mention means no citation, and the record lands as `assumed`.
 fn citation(doc: &[String]) -> Option<String> {
     let joined = plain(&doc.join(" "));
     if let Some(at) = joined.find("Reference: ") {
         let rest = &joined[at + "Reference: ".len()..];
         let end = rest.find(". ").map_or(rest.len(), |i| i + 1);
         let cited = rest[..end].trim();
-        // **Asked of the format itself**, rather than guessed at here. A reference citing two
-        // clauses at once - `7.27.3.4 (localtime) / 7.27.3.3 (gmtime)` - leaves a bare `/` as
-        // a fragment, which is a path by that rule, so this falls back to the standard's name
-        // instead. The guard is right and stays as it is; what changed is that this asks it.
+        // Asked of the format's own rule. A reference citing two clauses at once
+        // (`7.27.3.4 (localtime) / 7.27.3.3 (gmtime)`) reads as a path by that rule, so this
+        // falls back to the standard's name.
         if !cited.is_empty() && !citation_is_a_path(cited) {
             return Some(cited.to_owned());
         }
@@ -493,7 +452,7 @@ pub(crate) struct Derived {
     pub(crate) undeclared: BTreeSet<String>,
     /// Symbols whose implementation carries no documentation to derive from.
     pub(crate) undocumented: BTreeSet<String>,
-    /// Provenance faults. **Any fault means nothing is written.**
+    /// Provenance faults. Any fault means nothing is written.
     pub(crate) faults: Vec<String>,
 }
 
@@ -570,19 +529,14 @@ pub(crate) fn derive(
         };
         let mut record = record_from(&binding.symbol, Some(declaration.arity), doc);
         if let Some(target) = delegated.get(&binding.symbol) {
-            // **Said out loud rather than left to be inferred.** The entry describes the
-            // target's behaviour because that is the code that runs, and a reader has to know
-            // the description came from somewhere else - not least because the two spellings
-            // can differ in arity, which is the fault D385 records.
+            // Stated explicitly: the entry describes the target's behaviour, and the two
+            // spellings can differ in arity.
             record.edge_cases.push(format!(
                 "Resolves to `{target}`, and this describes that function."
             ));
-            // **The target is deliberately not named in the question.** One sentence used to
-            // carry both the fact and the question, and naming the target inside the question
-            // made every entry's copy of it a different sentence - so a hundred and forty-nine
-            // entries resting on one premise were counted as a hundred and forty-nine
-            // premises, and `questions --premises` cannot group what it cannot see is the same
-            // sentence (D539). The name is in the edge case above, where a reader needs it.
+            // The target is not named in the question, so every entry resting on this premise
+            // shares one sentence and `questions --premises` groups them. The name is in the
+            // edge case above.
             record
                 .assumptions
                 .push(orbistoun_hle::knowledge::DELEGATION_ASSUMPTION.to_owned());
@@ -639,9 +593,7 @@ const FIXTURES: &[(&str, u32)] = &[
 
     /// A doc block attaches to the function after it, and to nothing else.
     ///
-    /// The failure this prevents is the orphaned block: a doc comment separated from its
-    /// function by a statement would otherwise be read as documenting whatever came next,
-    /// and the record would describe the wrong function entirely.
+    /// An orphaned block is not read as documenting whatever comes next.
     #[test]
     fn a_doc_block_attaches_only_to_the_function_that_follows_it() {
         let docs = docs_in(SAMPLE);
@@ -658,10 +610,8 @@ const FIXTURES: &[(&str, u32)] = &[
 
     /// Registration rows are found; a delegation row, and a tuple outside a table, are not.
     ///
-    /// `("posix_open", "open")` maps a name to another *name*, so reading it as a function
-    /// would look up a doc comment that does not exist. And `FIXTURES` has the row shape
-    /// exactly while being test data - the bound on the element type is the only thing
-    /// telling them apart, which is why it exists.
+    /// `("posix_open", "open")` maps a name to another name, and `FIXTURES` has the row
+    /// shape while being test data; the element-type bound tells them apart.
     #[test]
     fn a_delegation_row_is_not_a_binding() {
         let found = bindings_in(SAMPLE);
@@ -672,8 +622,7 @@ const FIXTURES: &[(&str, u32)] = &[
                     symbol: "sem_timedwait".to_owned(),
                     rust_name: "sem_timedwait".to_owned(),
                 },
-                // Split across four lines by `cargo fmt`, and lost entirely by the reader
-                // that worked a line at a time.
+                // Split across four lines by `cargo fmt`.
                 Binding {
                     symbol: "pthread_mutexattr_getprioceiling".to_owned(),
                     rust_name: "pthread_mutexattr_getprioceiling".to_owned(),
@@ -748,11 +697,8 @@ const FIXTURES: &[(&str, u32)] = &[
         );
     }
 
-    /// **Documentation citing nothing lands as `assumed`, never `published`.**
-    ///
-    /// The guard that stops this being a machine for manufacturing provenance. A record is
-    /// only as strong as the source it names, and a doc comment naming no standard names no
-    /// source - so the tier has to drop, and the assumption has to say why.
+    /// Documentation citing nothing lands as `assumed`, never `published`, with an
+    /// assumption saying why.
     #[test]
     fn documentation_that_cites_nothing_is_assumed_rather_than_published() {
         let doc = vec!["`whatever(a)` - does a thing nobody has written down.".to_owned()];
@@ -771,9 +717,7 @@ const FIXTURES: &[(&str, u32)] = &[
 
     /// A function documented only by its reference records the reference, not a purpose.
     ///
-    /// **The failure this prevents is a clause number in the purpose field.** A reader goes
-    /// there for what the function does; `POSIX.1-2008.` answers a different question, and
-    /// answering the wrong question in a field is worse than leaving it empty.
+    /// The purpose field never holds a bare clause number.
     #[test]
     fn a_reference_is_recorded_as_a_citation_rather_than_as_a_purpose() {
         let doc = vec!["`pthread_mutex_timedlock(mutex, abstime)` - POSIX.1-2008.".to_owned()];
@@ -808,10 +752,8 @@ const FIXTURES: &[(&str, u32)] = &[
 
     /// A macro-declared function is documented by the `//` comment above it.
     ///
-    /// The case that made this necessary: ten float maths functions are written by
-    /// `unary_f32!`, a doc comment will not attach to a macro invocation, so their
-    /// documentation is a plain comment. Reading only `///` recorded them as undocumented,
-    /// which was false.
+    /// A doc comment does not attach to a macro invocation such as `unary_f32!`, so its
+    /// plain comment is read.
     #[test]
     fn a_macro_declared_function_carries_the_comment_above_it() {
         let source = "// `acosf(x)` - ISO/IEC 9899 7.12.4.1.\nunary_f32!(acosf, acos);\n";
@@ -824,10 +766,8 @@ const FIXTURES: &[(&str, u32)] = &[
 
     /// A reference spanning two clauses is cited by its standard, not refused.
     ///
-    /// `localtime`'s reference names two ISO C clauses separated by a slash, and the format
-    /// refuses a citation containing one - the rule that stops a filesystem path being passed
-    /// off as a source. **The guard stays exactly as it is**; the derivation falls back to the
-    /// standard's name, which is true and admissible.
+    /// `localtime`'s reference names two ISO C clauses separated by a slash, which the
+    /// format's path rule refuses, so the derivation falls back to the standard's name.
     #[test]
     fn a_two_clause_reference_falls_back_to_the_standard_rather_than_faulting() {
         let doc = vec![

@@ -1,46 +1,25 @@
 //! Capturing every shader the guest hands over.
 //!
-//! # A corpus that builds itself
-//!
-//! Every shader a title uploads is a test case. Stored by content hash, the set
-//! accumulates as titles are run and never needs anyone to write it - and once it
-//! exists, changing the translator means re-running the whole corpus and diffing, so
-//! a regression is visible immediately rather than the next time someone happens to
-//! load the affected scene.
-//!
-//! That is the same trick as the run report: the artefact captured for one purpose is
-//! the test data for another.
-//!
-//! # Identity is content, not order
-//!
-//! Shaders are named by the hash of their bytes. Two runs of the same title produce
-//! the same names in the same corpus, so re-running adds nothing and a diff between
-//! two titles shows exactly what they share. Naming by capture order would make every
-//! run look entirely new.
-//!
-//! # The pure part is separate
-//!
-//! [`shader_id`] is a pure function of bytes and is where the identity rule lives;
-//! [`ShaderCorpus`] is the thin layer that touches the filesystem. The D016 pattern -
-//! the rule is testable without a directory existing.
+//! Every shader a title uploads is stored by content hash, so the corpus accumulates as
+//! titles run and a translator change is checked by re-running it and diffing. Naming by
+//! hash rather than capture order means re-running a title adds nothing and two titles'
+//! corpora diff to what they share. [`shader_id`] is the pure identity rule;
+//! [`ShaderCorpus`] is the thin filesystem layer over it (D016).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::ShaderError;
 
-/// File extension for a shader **dumped from a title**.
+/// File extension for a shader dumped from a title.
 ///
-/// Console-derived, so it must never be tracked - the provenance guard bans this
-/// extension outright and that ban is correct.
+/// Guest-derived material is never tracked; the provenance guard bans this extension.
 pub const SHADER_EXTENSION: &str = "bin";
 
-/// File extension for a shader **generated here**, from source in `tools/`.
+/// File extension for a shader generated here, from source in `tools/`.
 ///
-/// The opposite obligation: these are committed on purpose, so the differential test
-/// runs on a machine with no LLVM. They were `.bin` too until the provenance guard
-/// rejected them, which was the guard being right - one extension for material that must
-/// never be tracked and material that must be is a distinction waiting to be lost.
+/// These are committed so the differential test runs on a machine with no LLVM; a
+/// separate extension keeps them distinct from guest dumps, which must never be tracked.
 pub const GENERATED_EXTENSION: &str = "gcn";
 
 /// Whether a path holds a shader this crate will read.
@@ -56,9 +35,8 @@ pub fn is_shader(path: &Path) -> bool {
 
 /// How many hex characters of the hash name a shader.
 ///
-/// Full SHA-1 is 40 and unwieldy in a report; 16 is 64 bits, which will not collide
-/// across any corpus this will ever hold. Truncating is safe here precisely because
-/// identity is used for deduplication and naming rather than for security.
+/// 16 hex characters are 64 bits, enough to avoid collisions in any corpus this holds;
+/// the identity is for deduplication and naming, not security.
 pub const ID_LENGTH: usize = 16;
 
 /// The identity of a shader: a truncated hash of its bytes.
@@ -73,8 +51,7 @@ pub fn shader_id(bytes: &[u8]) -> String {
         if out.len() >= ID_LENGTH {
             break;
         }
-        // Writing into a String cannot fail; the result is discarded rather than
-        // unwrapped so a formatting change can never introduce a panic here.
+        // Writing into a String cannot fail; discarding the result keeps this panic-free.
         let _ = write!(out, "{byte:02x}");
     }
     out.truncate(ID_LENGTH);
@@ -88,8 +65,8 @@ pub enum Capture {
     Added,
     /// Already held, byte for byte. Nothing written.
     ///
-    /// The common case by a wide margin - a title re-uploads the same shaders
-    /// constantly - and the reason capture is cheap enough to leave switched on.
+    /// The common case: titles re-upload the same shaders constantly, so capture is
+    /// cheap enough to leave on.
     AlreadyHeld,
 }
 
@@ -104,8 +81,7 @@ impl ShaderCorpus {
     /// Opens a corpus at `root`, creating it if absent, and indexes what is already
     /// there.
     ///
-    /// Reading the existing set up front is what makes re-running a title nearly free:
-    /// the second run recognises every shader without writing anything.
+    /// Indexing up front lets a re-run recognise every shader without writing anything.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ShaderError> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)
@@ -127,9 +103,7 @@ impl ShaderCorpus {
 
     /// Offers a shader to the corpus.
     ///
-    /// Returns its identity and whether it was new. Never overwrites: a hash
-    /// collision on identical content is not a collision, and on different content
-    /// would be a far bigger problem than a lost write.
+    /// Returns its identity and whether it was new. Never overwrites an existing file.
     pub fn capture(&mut self, bytes: &[u8]) -> Result<(String, Capture), ShaderError> {
         let id = shader_id(bytes);
         if self.held.contains(&id) {
@@ -177,25 +151,23 @@ impl ShaderCorpus {
 mod tests {
     use super::{Capture, ID_LENGTH, ShaderCorpus, shader_id};
 
+    /// The same bytes always get the same name, so a corpus never holds duplicates.
     #[test]
     fn identity_is_a_function_of_content_alone() {
-        // Two captures of the same shader from different runs must land on the same
-        // name, or a corpus grows a duplicate every time a title is launched.
         assert_eq!(shader_id(b"same bytes"), shader_id(b"same bytes"));
         assert_ne!(shader_id(b"one"), shader_id(b"two"));
         assert_eq!(shader_id(b"anything").len(), ID_LENGTH);
     }
 
+    /// A zero-length capture is named and stored, not a crash.
     #[test]
     fn an_empty_shader_still_has_an_identity() {
-        // A zero-length capture is a finding worth storing, not a crash.
         assert_eq!(shader_id(b"").len(), ID_LENGTH);
     }
 
+    /// A second capture of the same bytes writes nothing.
     #[test]
     fn a_repeated_shader_is_recognised_rather_than_rewritten() {
-        // Titles re-upload the same shaders constantly. If every upload wrote a file,
-        // capture would be far too expensive to leave switched on.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut corpus = ShaderCorpus::open(dir.path()).expect("open");
 
@@ -208,9 +180,9 @@ mod tests {
         assert_eq!(corpus.len(), 1);
     }
 
+    /// Reopening a corpus indexes the shaders already on disk.
     #[test]
     fn a_corpus_reopened_recognises_what_it_already_holds() {
-        // The property that makes a second run of a title nearly free.
         let dir = tempfile::tempdir().expect("tempdir");
         {
             let mut corpus = ShaderCorpus::open(dir.path()).expect("open");
@@ -222,10 +194,9 @@ mod tests {
         assert_eq!(capture, Capture::AlreadyHeld);
     }
 
+    /// A stored shader round-trips byte for byte.
     #[test]
     fn stored_bytes_come_back_unchanged() {
-        // The corpus is the regression suite; a shader that does not round-trip would
-        // silently change what every future comparison is comparing against.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut corpus = ShaderCorpus::open(dir.path()).expect("open");
         let body: Vec<u8> = (0..=255u8).collect();
@@ -233,10 +204,9 @@ mod tests {
         assert_eq!(corpus.load(&id).expect("load"), body);
     }
 
+    /// Identities list in sorted order, so reports diff cleanly.
     #[test]
     fn ids_are_listed_in_a_stable_order() {
-        // Reports get diffed. Directory order would make every listing differ from the
-        // last for no reason.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut corpus = ShaderCorpus::open(dir.path()).expect("open");
         for body in [b"a".as_slice(), b"b", b"c", b"d"] {
@@ -250,6 +220,7 @@ mod tests {
         assert_eq!(once, sorted);
     }
 
+    /// Opening a corpus at a missing path creates the directory.
     #[test]
     fn opening_a_missing_directory_creates_it() {
         let dir = tempfile::tempdir().expect("tempdir");

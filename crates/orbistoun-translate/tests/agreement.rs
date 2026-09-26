@@ -1,42 +1,12 @@
 //! The two wavefront models, compared on generated programs.
 //!
-//! # Why this exists separately from `execute.rs`
-//!
-//! That file asserts what individual instructions *do*, against values worked out by
-//! hand. This asserts something weaker and much broader: that the two models agree.
-//!
-//! [`Fidelity::Lane`] and [`Fidelity::Wavefront`] are independent implementations of the
-//! same semantics - different register files, different masking, different everything
-//! below the shared instruction dispatch. D100 kept both specifically so each could check
-//! the other, and until now that oracle has been used anecdotally: a handful of
-//! hand-written shaders with `the_models_agree_about_…` in the name.
-//!
-//! Used properly it is a property. Every program both models accept must leave identical
-//! registers and identical memory, for every input, and a generator can produce far more
-//! programs than anybody will write by hand - including sequences nobody would think to
-//! write, which is where the interesting disagreements live.
-//!
-//! # What it cannot find
-//!
-//! A misunderstanding shared by both models. They dispatch through the same
-//! `model::instruction`, so an instruction translated wrongly *once* is translated wrongly
-//! in both and they agree perfectly. This finds mistakes in the parts that differ - the
-//! register files, the masking, the lane loops - and is blind to the parts that do not.
-//! `execute.rs` covers the other half, which is why both exist.
-//!
-//! # No branches, deliberately
-//!
-//! A generated backward branch is a generated infinite loop, and an infinite loop in a
-//! compute dispatch is a hung GPU rather than a failing test. Forward-only branching
-//! would be safe but needs the target patched in after the body exists, since the
-//! instructions are variable length. Control flow is covered by `execute.rs` against
-//! hand-written programs where the target is known; the risk of getting it wrong here is
-//! out of proportion to what it would add.
-//!
-//! # Determinism
-//!
-//! The generator is seeded and the seed is printed with any failure, so a disagreement is
-//! reproducible rather than a story about something that happened once.
+//! `execute.rs` asserts what instructions do against hand-worked values; this asserts that
+//! [`Fidelity::Lane`] and [`Fidelity::Wavefront`], independent below the shared dispatch,
+//! leave identical registers and memory for every generated program both accept (D100).
+//! A misunderstanding shared through `model::instruction` is invisible here. Programs have
+//! no branches: a generated backward branch is a hung GPU, and forward targets would need
+//! patching into variable-length code. The generator is seeded and each failure prints its
+//! seed.
 
 use orbistoun_gpu_vulkan::{Availability, dispatch, probe};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
@@ -49,8 +19,7 @@ const OBSERVED: usize = PER_FILE * 2;
 
 /// How many programs to generate.
 ///
-/// Each runs on a real device twice, so this is a wall-clock budget rather than a
-/// statement about how many are enough. Raise it when hunting something.
+/// Each runs on a real device twice, so this is a wall-clock budget; raise it when hunting.
 const PROGRAMS: u32 = 48;
 
 /// Instructions per generated program, before the prologue and terminator.
@@ -58,14 +27,12 @@ const BODY: u32 = 12;
 
 /// A tiny seeded generator.
 ///
-/// Written out rather than pulled in, because a dependency to produce forty-eight
-/// pseudo-random numbers in one test is a poor trade - and because a generator whose
-/// sequence is fixed by its seed is the whole point.
+/// Written out rather than a dependency; its sequence is fixed by its seed.
 struct Rng(u64);
 
 impl Rng {
     const fn next(&mut self) -> u64 {
-        // xorshift64*, chosen for being short enough to read.
+        // xorshift64*.
         let mut x = self.0;
         x ^= x >> 12;
         x ^= x << 25;
@@ -82,23 +49,13 @@ impl Rng {
     }
 }
 
-// ---- instruction encoders, restricted to what *both* models accept ---------------
-//
-// Anything needing a lane mask is left out: the per-lane model refuses those, so there
-// would be nothing to compare against. That excludes the comparisons, the conditional
-// move, the carry arithmetic, whole quad mode and the local data share.
-//
-// **Every instruction here is composed by name.** The family's identifying bits and its
-// opcode both come from the loaded table, so the generator emits whatever this target
-// calls the instruction rather than a number that was true on some other one. Written as
-// numbers it silently produced a different program on a retarget - most words matched no
-// family at all, and the test reported the generator as broken.
+// Instruction encoders, restricted to what both models accept (nothing needing a lane
+// mask). Every instruction is composed by name from the loaded table, so the generator
+// emits this target's encoding rather than a number from another generation.
 
 /// The first word of an instruction, from its name: family bits plus opcode in place.
 ///
-/// Panics rather than returning an option. A vocabulary entry this target has no name
-/// for is a fact about the vocabulary that should stop the test, not something to
-/// quietly skip - skipping would shrink the comparison without saying so.
+/// Panics on a name this target lacks: skipping would shrink the comparison silently.
 fn head(table: &EncodingTable, name: &str) -> u32 {
     let (family, opcode) = table
         .find_by_name(name)
@@ -157,8 +114,8 @@ fn s_cmp_i32(t: &EncodingTable, name: &str, first_code: u32, second_code: u32) -
     head(t, name) | (second_code << 8) | first_code
 }
 
-/// The scalar-base field's value for "no base" - `0x7d`, as the reference emits it for `off`
-/// and as the console's own shaders carry it (worklog 552).
+/// The scalar-base field's value for "no base", `0x7d`, as the reference assembler emits it
+/// for `off`.
 const FLAT_NO_BASE_CODE: u32 = 0x7d;
 
 fn flat_store(t: &EncodingTable, name: &str, vaddr: u32, data: u32) -> [u32; 2] {
@@ -182,32 +139,27 @@ const fn vgpr(register: u32) -> u32 {
 
 /// Registers the generator uses.
 ///
-/// Confined to the observation window, because a register outside it is written and never
-/// looked at - so a disagreement there would be invisible and the program that caused it
-/// wasted.
+/// Confined to the observation window, so every write is observed.
 const REGISTERS: u32 = PER_FILE as u32;
 
 /// Guest-memory addresses the generator uses, in bytes.
 ///
-/// Bounded well inside the window a translated module provides. An address past the end
-/// would be a genuine out-of-range access, and what the two models do there is undefined
-/// rather than required to match - so it is kept out rather than asserted about.
+/// Bounded inside the module's window: what the models do out of range need not match.
 const ADDRESS_LIMIT: u32 = (MEMORY_WORDS as u32 - 4) * 4;
 
 /// One random instruction, appended to `program`.
 ///
-/// Every form here is one **both** models accept. Anything needing a lane mask is
-/// absent (the comparisons, the conditional move, the carry arithmetic, whole quad mode
-/// and the local data share), because the per-lane model refuses those and there would
-/// be nothing to compare against.
+/// Every form here is one both models accept. Anything needing a lane mask (the
+/// comparisons, the conditional move, carry arithmetic, whole quad mode, the local data
+/// share) is absent because the per-lane model refuses it.
 fn emit(t: &EncodingTable, rng: &mut Rng, program: &mut Vec<u32>) {
     let dst = rng.below(REGISTERS);
     let a = rng.below(REGISTERS);
     let b = rng.below(REGISTERS);
     // Inline integers stop at sixty-four.
     let small = rng.below(65);
-    // A destination low enough that a four-register write stays inside the window, so a
-    // wide access is observable rather than written somewhere nothing looks.
+    // A destination low enough that a four-register write stays inside the observation
+    // window.
     let wide_dst = rng.below(REGISTERS - 3);
     let wide_src = rng.below(REGISTERS - 3);
 
@@ -216,15 +168,13 @@ fn emit(t: &EncodingTable, rng: &mut Rng, program: &mut Vec<u32>) {
         0 => program.push(v_mov_inline(t, dst, small)),
         1 => program.push(s_mov_inline(t, dst, small)),
         2 => program.push(s_mov_b64(t, dst & !1, a & !1)),
-        // Short-form float arithmetic, on whatever bits the registers hold. Both models
-        // bitcast identically, so a NaN or an infinity is as good a test as any other
-        // value - what matters is that the two agree, not that the answer means anything.
+        // Short-form float arithmetic on whatever bits the registers hold; a NaN is as good
+        // a test as any, since the question is agreement.
         3 => program.push(v_op2(t, "v_add_f32_e32", dst, vgpr(a), b)),
         4 => program.push(v_op2(t, "v_sub_f32_e32", dst, vgpr(a), b)),
         5 => program.push(v_op2(t, "v_subrev_f32_e32", dst, vgpr(a), b)),
         6 => program.push(v_op2(t, "v_mul_f32_e32", dst, vgpr(a), b)),
-        // Short-form integer. The unsigned add is spelled `v_add_nc_u32` on this
-        // generation - the previous one's `v_add_u32` is a different instruction here.
+        // Short-form integer. The unsigned add is spelled `v_add_nc_u32` on this generation.
         7 => program.push(v_op2(t, "v_add_nc_u32_e32", dst, vgpr(a), b)),
         8 => program.push(v_op2(t, "v_lshlrev_b32_e32", dst, vgpr(a), b)),
         // Long-form float, which reaches the modifier path even with no modifiers set.
@@ -246,9 +196,8 @@ fn emit(t: &EncodingTable, rng: &mut Rng, program: &mut Vec<u32>) {
         23 => program.push(sopk(t, "s_mulk_i32", dst, small as i16)),
         // A scalar compare, which writes only the condition code.
         24 => program.push(s_cmp_i32(t, SCALAR_COMPARES[rng.below(6) as usize], a, b)),
-        // Memory. The scalar load's base is masked even, because the field encodes an
-        // aligned pair, and its offset is kept small - a huge one would be masked into
-        // the window and compare a coincidence rather than a computation.
+        // Memory. The scalar load's base is even, since the field encodes an aligned pair,
+        // and its offset small, so it is not masked into the window by coincidence.
         _ => match rng.below(6) {
             0 => program.extend(flat_store(t, "global_store_dword", a, dst)),
             1 => program.extend(flat_store(t, "global_store_dwordx2", a, wide_src)),
@@ -281,15 +230,13 @@ const SCALAR_LOADS: [&str; 3] = ["s_load_dword", "s_load_dwordx2", "s_load_dword
 
 /// A program that keeps every address register inside the memory window.
 ///
-/// Without this a generated store lands past the end of the buffer, where the two models
-/// are not required to agree and a disagreement would say nothing.
+/// Otherwise a generated store could land past the window, where the models need not agree.
 fn program(t: &EncodingTable, seed: u64) -> Vec<u32> {
     let mut rng = Rng(seed | 1);
     let mut program = Vec::new();
 
-    // Every register starts as a small in-range byte address, so any of them is safe to
-    // use as one. Arithmetic may move them afterwards, which is why the store path uses a
-    // register the prologue set rather than an arbitrary value.
+    // Every register starts as a small in-range byte address, so any of them is safe to use
+    // as one.
     for register in 0..REGISTERS {
         let address = (rng.below(ADDRESS_LIMIT / 4)) * 4;
         program.push(v_mov_inline(t, register, address.min(64)));
@@ -337,6 +284,7 @@ fn run(words: &[u32], fidelity: Fidelity) -> Option<(Vec<u32>, Vec<u32>)> {
     Some((out.observed, out.memory))
 }
 
+/// Both models leave identical registers and memory on every generated program.
 #[test]
 fn the_two_models_agree_on_generated_programs() {
     if !device_or_skip("the_two_models_agree_on_generated_programs") {
@@ -348,9 +296,8 @@ fn the_two_models_agree_on_generated_programs() {
     for seed in 1..=u64::from(PROGRAMS) {
         let words = program(&table, seed);
 
-        // A program either model refuses is not a disagreement - it is outside the
-        // overlap, and skipping it silently is fine only because the count below insists
-        // most of them were not skipped.
+        // A program either model refuses is outside the overlap; the count below insists
+        // most were compared.
         let Some(lane) = run(&words, Fidelity::Lane) else {
             continue;
         };
@@ -378,9 +325,7 @@ fn the_two_models_agree_on_generated_programs() {
     }
 
     println!("{compared} of {PROGRAMS} generated programs compared");
-    // Most must actually have run. A generator that produced nothing translatable would
-    // otherwise pass while comparing nothing, which is the failure this project keeps
-    // finding in its own tests.
+    // Most must have run, or the test compares nothing.
     assert!(
         compared * 2 >= PROGRAMS,
         concat!(
@@ -393,10 +338,10 @@ fn the_two_models_agree_on_generated_programs() {
     );
 }
 
+/// Every generated program decodes cleanly and translates.
 #[test]
 fn the_generator_produces_programs_that_translate() {
-    // Separate from the comparison so a generator fault reports as a generator fault.
-    // Folded into the test above it would look like the models disagreeing.
+    // Separate from the comparison, so a generator fault reports as one.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
 

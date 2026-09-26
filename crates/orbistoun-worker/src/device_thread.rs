@@ -1,15 +1,10 @@
-//! The one host thread the graphics device is driven from (worklog 851).
+//! The one host thread the graphics device is driven from.
 //!
-//! Backend calls are made from a host thread because the guest thread that reaches them runs on a
-//! stack the host's exception dispatch cannot walk, and a graphics driver raises and handles
-//! exceptions as ordinary business (worklog 832). They used to get a thread each - spawned, run and
-//! joined per call - and a spawn in this process costs ~400 us against ~90 us of work: a GL frame of
-//! fifty submissions made a hundred and fifty of them.
-//!
-//! So one thread is made on first use and kept for the process. A call hands it the work and waits
-//! for the answer, which is what the spawn and join did, without the thread's birth and death each
-//! time. A call made from the device thread itself runs in place, since waiting on itself could
-//! never end.
+//! Backend calls run on a host thread because the guest thread that reaches them runs on a stack
+//! the host's exception dispatch cannot walk, and a graphics driver raises and handles exceptions
+//! as ordinary business. The thread is made on first use and kept for the process, since a thread
+//! spawn per call costs several times the work it carries. A call hands it the work and waits for
+//! the answer; a call made from the device thread itself runs in place.
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -46,7 +41,7 @@ fn device() -> Option<&'static Mutex<Sender<Job>>> {
 }
 
 /// Runs `work` on the device thread and answers what it returned - `None` when it panicked or the
-/// thread could not be reached, as a joined spawn answered.
+/// thread could not be reached.
 pub fn on_device<'a, R: Send + 'a>(work: impl FnOnce() -> R + Send + 'a) -> Option<R> {
     if ON_DEVICE_THREAD.with(Cell::get) {
         return catch_unwind(AssertUnwindSafe(work)).ok();
@@ -55,10 +50,9 @@ pub fn on_device<'a, R: Send + 'a>(work: impl FnOnce() -> R + Send + 'a) -> Opti
     let job: Box<dyn FnOnce() + Send + 'a> = Box::new(move || {
         let _ = answer.send(catch_unwind(AssertUnwindSafe(work)).ok());
     });
-    // SAFETY: only the lifetime changes - the layout of a boxed trait object does not depend on it.
-    // Every borrow `job` holds outlives its use: this function does not return until the job has run
-    // and answered, or has been dropped unrun (a send that failed hands the job back, and a device
-    // thread that ended drops its queue, closing the answer), and a panic inside it is caught.
+    // SAFETY: only the lifetime changes, which does not affect a boxed trait object's layout. Every
+    // borrow `job` holds outlives its use: this function returns only after the job has run and
+    // answered or been dropped unrun, and a panic inside it is caught.
     let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
     device()?
         .lock()
@@ -72,9 +66,8 @@ pub fn on_device<'a, R: Send + 'a>(work: impl FnOnce() -> R + Send + 'a) -> Opti
 mod tests {
     use super::on_device;
 
-    /// **Work runs on the device thread, borrows and all, and a panic is an absent answer** (worklog
-    /// 851): one thread for every call, so the second call finds the same thread; a nested call runs
-    /// in place rather than waiting on itself.
+    /// Work runs on one reused device thread with its borrows, a panic is an absent answer, and a
+    /// nested call runs in place.
     #[test]
     fn work_runs_on_one_device_thread_and_answers() {
         let borrowed = String::from("123");

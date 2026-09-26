@@ -1,21 +1,10 @@
 //! The C runtime's internal recursive locks.
 //!
-//! # Why a real lock rather than a no-op
-//!
-//! The Dinkumware runtime this platform carries (D468) guards its own shared state with these:
-//! a `FILE`'s buffer while one thread writes it, and a small set of numbered system locks
-//! around things like the locale and `atexit`'s list. They are **recursive** - the same thread
-//! may take one twice and must release it twice.
-//!
-//! A no-op passes every test a single-threaded guest can run and is a silent corruption the
-//! moment two threads share a stream, which is exactly the failure this project has no cheap
-//! way to notice. So these are real: an owner, a depth, and a condition variable to wait on.
-//!
-//! # Keyed by the argument, whatever it is
-//!
-//! `_Lockfilelock` takes a `FILE *` and `_Locksyslock` a small integer. Both are just a key
-//! here, which keeps one implementation rather than two - and the two spaces cannot collide
-//! because they are kept in separate tables.
+//! The platform's C runtime guards its own shared state with these: a `FILE`'s buffer while a
+//! thread writes it, and numbered system locks around things like the locale and `atexit`'s
+//! list. They are recursive (D431) and real (an owner, a depth, a condition variable), since a
+//! no-op corrupts silently once two threads share a stream. `_Lockfilelock` takes a `FILE *`
+//! and `_Locksyslock` a small integer; both are keys into separate tables.
 
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
@@ -46,15 +35,13 @@ impl Locks {
 
     /// Takes the lock, waiting for another thread to finish with it.
     ///
-    /// Re-entry by the owning thread increments the depth rather than deadlocking, which is
-    /// what makes it recursive and is the whole reason the runtime can call a locked function
-    /// from inside another one.
+    /// Re-entry by the owning thread increments the depth rather than deadlocking, so the runtime
+    /// can call a locked function from inside another.
     fn lock(&self, key: u64) {
         let me = std::thread::current().id();
         let Ok(mut held) = self.held.lock() else {
-            // A poisoned table means another thread panicked holding it. Blocking forever
-            // would turn that into a hang with no explanation; proceeding is the lesser
-            // wrong, and the panic itself is already reported.
+            // A poisoned table means another thread panicked holding it, and that panic is already
+            // reported; proceeding avoids turning it into an unexplained hang.
             return;
         };
         loop {
@@ -85,8 +72,8 @@ impl Locks {
 
     /// Releases one level of the lock.
     ///
-    /// A release by a thread that does not hold it is ignored rather than obeyed: honouring
-    /// it would hand the lock to nobody while its real owner still believed it held one.
+    /// A release by a thread that does not hold it is ignored, since honouring it would free a
+    /// lock its real owner still holds.
     fn unlock(&self, key: u64) {
         let me = std::thread::current().id();
         let Ok(mut held) = self.held.lock() else {
@@ -149,9 +136,7 @@ pub(crate) fn implementations() -> &'static [(&'static str, GuestFn)] {
 mod tests {
     use super::Locks;
 
-    /// **Recursive, which is the whole point.** A lock taken twice by one thread must be
-    /// released twice; a non-recursive implementation deadlocks on the second take, and the
-    /// runtime does take them nested.
+    /// A lock taken twice by one thread must be released twice (D431).
     #[test]
     fn one_thread_may_take_a_lock_twice_and_must_release_it_twice() {
         static IT: Locks = Locks::new();
@@ -174,9 +159,7 @@ mod tests {
         );
     }
 
-    /// **The guard made to fail**: a release by a thread that does not hold the lock must be
-    /// ignored. Obeying it would free a lock its real owner still believes it holds, which is
-    /// the corruption a no-op implementation would cause on every call.
+    /// A release by a thread that does not hold the lock is ignored.
     #[test]
     fn a_release_by_a_thread_that_does_not_hold_it_is_ignored() {
         static IT: Locks = Locks::new();

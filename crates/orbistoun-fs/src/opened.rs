@@ -1,31 +1,10 @@
-//! Paths a guest asked for and got.
+//! Paths a guest asked for and got, and the reads and seeks made on them.
 //!
-//! # The other half of the question `wanted` answers
-//!
-//! [`crate::wanted`] records what a guest asked for and did not get, and calls that the
-//! filesystem's most useful output. It is - but it only names the paths that were *missing*,
-//! and a run can fail for the opposite reason: the guest opened everything it asked for and
-//! still read nothing worth having.
-//!
-//! PPSA03416 is exactly that. It performed **one file read of zero bytes** in a whole run,
-//! against a title directory holding four hundred megabytes of assets, and the only visible
-//! evidence was four paths it probed and did not find - all four of which are the archive
-//! layout this title does not use, so all four are red herrings. What it *did* open was not
-//! recorded anywhere (D578).
-//!
-//! # Off unless asked for, which `wanted` does not have to be
-//!
-//! Failures are rare, so recording all of them costs an ordinary run nothing. Successes are the
-//! common case - a title streaming assets opens hundreds - and a lock and a string for each, on
-//! the guest's own stack, is an observation heavy enough to change what it observes
-//! (principle 9). So this is gated on `ORBISTOUN_TRACE_OPENS` and an ordinary run pays one
-//! atomic load per open.
-//!
-//! # Recorded here, printed by the reporting layer
-//!
-//! The same rule as `wanted`, and for the same reason: this is reached from the guest's own
-//! call, on the guest's own stack, so it takes a lock and allocates a string and nothing else.
-//! Formatting and writing to a stream happen after the guest has stopped (D381).
+//! The counterpart of [`crate::wanted`]: a run can open everything it asks for and still
+//! read nothing useful, and this names what it opened. Successes are the common case, so
+//! recording is gated on `ORBISTOUN_TRACE_OPENS` and an ordinary run pays one atomic load
+//! per open. Recording happens on the guest's own stack, so it takes a lock and allocates a
+//! string and nothing else; the reporting layer formats it after the guest stops (D381).
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -39,16 +18,14 @@ fn taken() -> &'static Mutex<BTreeSet<String>> {
 
 /// How many distinct paths to remember.
 ///
-/// The same ceiling `wanted` uses, for a stronger reason: a title that streams assets opens
-/// files for as long as it runs, and a list with no bound is a leak that grows with the length
-/// of the run rather than with what there is to say.
+/// A title that streams assets opens files for as long as it runs, so an unbounded list
+/// grows with the run's length.
 const MOST_REMEMBERED: usize = 256;
 
 /// Whether recording is on: unread, on, off.
 ///
-/// Cached rather than read from the environment each time. `Var::get` allocates a `String`, and
-/// doing that per open - on the guest's stack, to decide whether to record - would cost more
-/// than the recording it is guarding.
+/// Cached, because `Var::get` allocates a `String`, which per open on the guest's stack would
+/// cost more than the recording it guards.
 static ENABLED: AtomicU8 = AtomicU8::new(UNREAD);
 
 /// Not yet looked up.
@@ -73,8 +50,7 @@ fn enabled() -> bool {
 
 /// Records a path a guest opened.
 ///
-/// Called from the calls that open one, and only when they succeed - so what the list holds is
-/// what the guest actually got, which is the question it exists to answer.
+/// Called only when an open succeeds, so the list holds what the guest got.
 pub(crate) fn note(guest_path: &str) {
     if guest_path.is_empty() || !enabled() {
         return;
@@ -90,8 +66,7 @@ pub(crate) fn note(guest_path: &str) {
 
 /// Every path this run opened successfully.
 ///
-/// Read once the guest has stopped. Sorted, because a list that reorders between runs cannot be
-/// diffed - and comparing two runs is most of what this is for.
+/// Read once the guest has stopped. Sorted, so two runs' lists can be diffed.
 #[must_use]
 pub fn answered() -> Vec<String> {
     taken()
@@ -100,8 +75,8 @@ pub fn answered() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether this run was recording. For the reporting layer, which otherwise cannot tell an
-/// empty list from a list nobody asked for - and those are opposite findings.
+/// Whether this run was recording. The reporting layer otherwise cannot tell an empty list
+/// from one nobody asked for.
 #[must_use]
 pub fn recording() -> bool {
     enabled()
@@ -115,12 +90,8 @@ fn reads() -> &'static Mutex<Vec<String>> {
 
 /// Records one read: what was asked for, and what arrived.
 ///
-/// **The other half of `read_stats`.** That counts reads and bytes and whether any was cut
-/// short, which says a run read almost nothing and not *which* read of *which* file returned
-/// what. PPSA03416 performs one read of zero bytes and the whole question is which file it was
-/// against and how much it asked for - a count cannot answer either (D595).
-///
-/// Under the same gate as the opens, because it is the same question one step later.
+/// `read_stats` counts reads and bytes; this records which read of which file asked for how
+/// much and got how much. Under the same gate as the opens.
 pub(crate) fn note_read(guest_path: &str, wanted: usize, got: usize) {
     if !enabled() {
         return;
@@ -148,10 +119,8 @@ fn seeks() -> &'static Mutex<Vec<String>> {
 
 /// Records one seek: where from, how far, and where it landed.
 ///
-/// **A seek is how a guest asks how big a file is.** Seek to the end, read the position: the
-/// oldest idiom there is, and a title that then calls the file corrupt has been told a size by
-/// this call and by nothing else. Neither the opens record nor the read statistics could show
-/// it (D596).
+/// Seeking to the end and reading the position is how a guest learns a file's size, so this
+/// records the size each guest was told.
 pub(crate) fn note_seek(guest_path: &str, from: &str, offset: i64, landed: u64) {
     if !enabled() {
         return;
@@ -172,15 +141,11 @@ pub fn seeks_made() -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
-    /// Off by default, and an ordinary run records nothing.
-    ///
-    /// **The property that keeps this off the hot path.** A version that recorded regardless
-    /// and filtered when reporting would pay the lock and the string on every open, which is
-    /// the cost the gate exists to avoid.
+    /// Off by default: an ordinary run records nothing and stays off the hot path.
     #[test]
     fn nothing_is_recorded_unless_it_was_asked_for() {
-        // The environment is process-wide and tests share it, so this asserts the decision
-        // rather than setting the variable - mutating it here is the flaky shape D569 names.
+        // The environment is process-wide and shared by tests, so this asserts the decision
+        // rather than setting the variable.
         if orbistoun_env::TRACE_OPENS.is_set() {
             return;
         }

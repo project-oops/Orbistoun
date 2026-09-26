@@ -1,40 +1,15 @@
 //! A model reached by running a command, rather than by an HTTP call or a local weight file.
 //!
-//! # Why this exists
-//!
-//! An installed coding assistant is already authenticated. Shelling out to it borrows that
-//! session, so a machine with one needs **no API key, no download and no accelerator** -
-//! which is the whole of the setup cost for every other way of reaching a capable model.
-//!
-//! Ported from a sibling project of this author's, which built the same thing for the same
-//! reason; the binary-discovery order below is theirs, along with the reasoning for it. See
-//! [ACKNOWLEDGEMENTS.md](../../../ACKNOWLEDGEMENTS.md).
-//!
-//! # What it cannot do, stated rather than hidden
-//!
-//! The command takes a prompt and prints a reply. It has **no seed and no temperature**,
-//! and this project's proposal loop is built on both - the seed advances per round so that
-//! successive rounds ask different questions, and the temperature is 0.9 because greedy
-//! sampling repeated fourteen of twenty suggestions inside a single round.
-//!
-//! So this engine ignores two fields of every [`Request`] it is given. [`CliEngine::describe`]
-//! says so, because an engine that quietly drops a field it was handed is the same failure
-//! as a stub that returns success: the caller cannot tell the difference from the outside.
-//!
-//! What is left is the rotating example window, which varies the *prompt* per round. That
-//! was built as a supplement to the seed rather than a replacement for it.
-//!
-//! # And it has no system prompt of its own to give
-//!
-//! The command runs with its own instructions, which cannot be replaced from outside. The
-//! system text is therefore prepended to the prompt rather than isolated from it. Measured
-//! before choosing that: asked plainly for twelve nouns as a JSON array, it returned
-//! exactly that and nothing else, so the more elaborate framing a sibling project needed is
-//! not carried over until something shows it is required.
+//! An installed coding assistant is already authenticated, so shelling out to it needs no API
+//! key, download or accelerator. The binary-discovery order is carried from another project;
+//! see [ACKNOWLEDGEMENTS.md](../../../ACKNOWLEDGEMENTS.md). The command takes no seed and no
+//! temperature, so this engine ignores both fields of a [`Request`] and
+//! [`CliEngine::describe`] says so; the rotating example window still varies the prompt per
+//! round. The command's own instructions cannot be replaced, so system text is prepended to
+//! the prompt.
 
 use std::path::PathBuf;
-// `Path` is only referenced by the Windows launcher-discovery block and `newest_versioned`,
-// both `#[cfg(target_os = "windows")]`; importing it unconditionally is unused off Windows.
+// `Path` is referenced only by the Windows-only launcher discovery and `newest_versioned`.
 #[cfg(target_os = "windows")]
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -91,10 +66,8 @@ impl CliEngine {
         source == CLAUDE_CODE && find_claude().is_some()
     }
 
-    /// The single string the command is given.
-    ///
-    /// System text first, then the prompt. Not isolated, because the command has its own
-    /// instructions and no way to replace them - see the module note.
+    /// The single string the command is given: system text first, then the prompt, since the
+    /// command's own instructions cannot be replaced.
     fn text(request: &Request) -> String {
         match &request.system {
             Some(system) if !system.trim().is_empty() => {
@@ -125,11 +98,9 @@ impl Engine for CliEngine {
 
     fn complete(&self, request: &Request) -> Result<String, Error> {
         let mut command = Command::new(&self.program);
-        // **The prompt goes on standard input, not in the argument list.** A prompt here
-        // carries decomposed examples and a vocabulary sample, and a Windows command line
-        // stops at about thirty-two thousand characters - which would work until one day
-        // it silently did not. Measured: the command reads a prompt from stdin and writes
-        // the reply to stdout, with its own diagnostics on stderr.
+        // The prompt goes on standard input: it carries examples and a vocabulary sample, and a Windows
+        // command line stops at about thirty-two thousand characters. The command writes the reply to
+        // stdout and its diagnostics to stderr.
         command
             .arg("--print")
             .stdin(Stdio::piped())
@@ -167,13 +138,10 @@ impl Engine for CliEngine {
 
 /// Reads what the command produced, or says why it is not an answer.
 ///
-/// Separated from running it so every branch is testable without the command installed -
-/// which matters because the interesting branches are the failures, and they are the ones
-/// nobody can reproduce on demand.
+/// Separate from running it, so every failure branch is testable without the command installed.
 fn read(stdout: &str, stderr: &str, success: bool) -> Result<String, Error> {
-    // **Checked on both streams.** The bundled command writes this one to *stdout* and
-    // still exits non-zero, so looking only at stderr misses it and reports the exit code
-    // instead of the cause.
+    // Checked on both streams: the command writes this one to stdout and exits non-zero, so
+    // stderr alone would report the exit code instead of the cause.
     if is_unauthenticated(stdout) || is_unauthenticated(stderr) {
         return Err(Error::Model(
             concat!(
@@ -199,8 +167,7 @@ fn read(stdout: &str, stderr: &str, success: bool) -> Result<String, Error> {
             first_line(stderr).unwrap_or("no message")
         )));
     }
-    // Same treatment as the in-process engine: the command chooses its own model and
-    // cannot be told how to answer, so a reasoning block is possible here too (D336).
+    // The command chooses its own model, so a reasoning block is possible here too.
     Ok(crate::engine::without_reasoning(stdout).to_owned())
 }
 
@@ -217,11 +184,9 @@ fn first_line(text: &str) -> Option<&str> {
 
 /// Where the Claude Code command lives, newest first.
 ///
-/// **The order is the sibling project's and so is the reasoning.** On Windows the launcher
-/// under `LOCALAPPDATA` routes to a running desktop application when there is one, and the
-/// calling process never sees the reply - so the versioned command bundled under `APPDATA`
-/// is preferred, and the launcher is a last resort. On other platforms the command on the
-/// path is the ordinary install and is fine.
+/// On Windows the launcher under `LOCALAPPDATA` routes to a running desktop application, whose
+/// reply the calling process never sees, so the versioned command under `APPDATA` is preferred
+/// and the launcher is a last resort. Elsewhere the command on the path is the ordinary install.
 fn find_claude() -> Option<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     {
@@ -258,13 +223,9 @@ fn find_claude() -> Option<PathBuf> {
 
 /// The command inside the highest-numbered versioned directory under `base`.
 ///
-/// Sorted as text descending, which is what the sibling project does. It is not version
-/// ordering - `2.1.9` sorts above `2.1.10` - and it is kept because the alternative is a
-/// version parser for a directory listing that has never had a two-digit patch component.
-/// Written down so the next person meets a note rather than a bug.
-///
-/// Windows-only: its one caller is the `#[cfg(target_os = "windows")]` launcher-discovery
-/// block above, and it looks for `claude.exe`, so off Windows it is dead - gated to say so.
+/// Sorted as text descending, which is not version ordering (`2.1.9` sorts above `2.1.10`);
+/// the listing has no two-digit patch components, so no version parser is used. Windows-only,
+/// like its one caller.
 #[cfg(target_os = "windows")]
 fn newest_versioned(base: &Path) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(base)
@@ -284,18 +245,14 @@ mod tests {
     use super::{CLAUDE_CODE, CliEngine, is_unauthenticated, read};
     use crate::engine::Request;
 
-    /// **A reply is what the command printed, and nothing else.**
+    /// A reply is what the command printed, trimmed, and nothing else.
     #[test]
     fn a_successful_run_is_its_trimmed_output() {
         let out = read("  [\"One\", \"Two\"]\n", "", true).expect("a reply");
         assert_eq!(out, "[\"One\", \"Two\"]");
     }
 
-    /// **Not signed in is detected on stdout, not only stderr.**
-    ///
-    /// The bundled command writes it to stdout *and* exits non-zero, so a reader that
-    /// checks stderr alone reports the exit status and buries the one thing a person can
-    /// act on.
+    /// Not signed in is detected on stdout as well as stderr.
     #[test]
     fn not_signed_in_is_read_from_either_stream() {
         for (out, err) in [("Not logged in", ""), ("", "Please run /login")] {
@@ -307,12 +264,8 @@ mod tests {
         }
     }
 
-    /// **Signing in is never done for the caller.**
-    ///
-    /// A sibling project shells an interactive login on first failure. That is right for a
-    /// desktop application and wrong here: this runs unattended, and a tool that seizes the
-    /// terminal to open a browser cannot be left running. Pinned as a test because it is a
-    /// deliberate omission somebody could reasonably read as missing.
+    /// A signed-out command is reported, never signed in for the caller: this runs unattended and
+    /// must not seize the terminal to open a browser.
     #[test]
     fn a_signed_out_command_is_reported_rather_than_signed_in() {
         let error = read("Not logged in", "", false).expect_err("should refuse");
@@ -324,11 +277,8 @@ mod tests {
         );
     }
 
-    /// **Each phrase the command uses for "not signed in" is recognised.**
-    ///
-    /// Three magic strings, matched on a substring, against output this project does not
-    /// control. Pinned individually so that one of them changing shows up as a failing
-    /// test rather than as an unhelpful exit-code message months later.
+    /// Each phrase the command uses for "not signed in" is recognised, so a change to one fails
+    /// here.
     #[test]
     fn every_phrase_for_signed_out_is_recognised() {
         for said in ["Not logged in", "Please run /login", "not authenticated"] {
@@ -374,11 +324,7 @@ mod tests {
         );
     }
 
-    /// **The engine says it ignores seed and temperature.**
-    ///
-    /// It does ignore them - the command has no way to accept either - and the proposal
-    /// loop is built on both. An engine that dropped them silently would be indistinguishable
-    /// from one that honoured them, which is the failure principle 3 exists to prevent.
+    /// The engine declares that it ignores seed and temperature.
     #[test]
     fn it_declares_the_two_fields_it_cannot_honour() {
         let engine = CliEngine {

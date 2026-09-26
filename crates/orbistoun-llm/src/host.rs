@@ -1,34 +1,12 @@
 //! What this machine is.
 //!
-//! # This module is not about models, and that is deliberate
-//!
-//! Nothing here mentions inference. It answers "what is this machine", which the
-//! selector happens to need and which a run report needs for an unrelated reason:
-//! D046 requires a report to embed its own inputs so that a difference between two
-//! runs can be attributed to the change rather than to drift, and *the machine* is an
-//! input nothing currently records. Two runs compared across two machines are not
-//! comparable today, and nothing says so.
-//!
-//! So this file is written to be **lifted whole** into a shared home once there is
-//! one - it has no dependency on the rest of this crate beyond the error type, and no
-//! knowledge of what it is being asked for. See the note in the crate README.
-//!
-//! # Absent is a real answer
-//!
-//! Every field that has to be measured is an [`Option`], and `None` means *nobody
-//! measured it*, never zero and never a guess. A machine that cannot report its VRAM
-//! is a normal machine, not a broken one, and the selector has a defined behaviour for
-//! it. Principle 3: an explicit "not known" beats a plausible number, and the number
-//! here would drive a multi-gigabyte download.
-//!
-//! # What is deliberately missing
-//!
-//! Only NVIDIA accelerators report memory, via `nvidia-smi`. AMD and Intel report
-//! nothing and are therefore recorded as nothing. The better answer is already
-//! sitting in this repository: `orbistoun-gpu-vulkan` loads Vulkan at runtime and can
-//! enumerate device-local heaps on any vendor. Doing that here would couple this
-//! crate to `ash` for a single number, so it is left as the known improvement rather
-//! than a hidden limitation.
+//! Nothing here concerns inference. It answers what the machine is, which the selector needs
+//! and which a run report needs to record as one of its conditions (D181). It depends on
+//! nothing else in this crate but the error type, so it can move to a shared home whole.
+//! Every measured field is an [`Option`]: `None` means nobody measured it, never zero or a
+//! guess, and the selector has defined behaviour for it. Only accelerators reporting through
+//! `nvidia-smi` give memory; enumerating Vulkan device-local heaps would cover every vendor
+//! but would couple this crate to `ash`.
 
 use std::process::Command;
 
@@ -43,8 +21,7 @@ pub struct Accelerator {
 
 /// The machine this process is running on.
 ///
-/// Cheap to construct and cheap to copy around, so callers keep one rather than
-/// re-probing - probing shells out, and doing that on a hot path would be silly.
+/// Probing shells out, so callers keep one value rather than re-probing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Host {
     /// Target operating system, as the compiler saw it.
@@ -62,9 +39,8 @@ pub struct Host {
 impl Host {
     /// Measures this machine.
     ///
-    /// Never fails. Everything unmeasurable comes back `None`, because there is no
-    /// useful distinction between "the tool is absent", "the tool failed" and "there
-    /// is no such device" - all three mean the selector has to decide without it.
+    /// Never fails. Anything unmeasurable is `None`: a missing tool, a failed tool and a missing
+    /// device all leave the selector deciding without the value.
     #[must_use]
     pub fn probe() -> Self {
         Self {
@@ -91,8 +67,8 @@ impl Host {
 
     /// One line, for a report or a log.
     ///
-    /// Says `unknown` where a value is missing rather than omitting the field: a line
-    /// that silently drops what it could not measure reads as a complete description.
+    /// Says `unknown` where a value is missing rather than omitting the field, so the line never
+    /// reads as complete when it is not.
     #[must_use]
     pub fn summary(&self) -> String {
         let cores = self
@@ -101,8 +77,7 @@ impl Host {
         let ram = self
             .ram_mb
             .map_or_else(|| "unknown".to_owned(), |m| format!("{m} MB"));
-        // An accelerator this build cannot address is worth saying twice as loudly as
-        // one that is absent: the second is a machine, the first is a surprise.
+        // An accelerator this build cannot address is called out more loudly than an absent one.
         let gpu = self.accelerator.as_ref().map_or_else(
             || "none reported".to_owned(),
             |a| {
@@ -123,14 +98,12 @@ impl Host {
 
 /// Total system memory, by whatever this platform offers.
 ///
-/// Shelling out rather than taking a dependency or writing `unsafe`: the value is
-/// wanted once per process, an `Option` is a correct answer, and principle 4 says
-/// `unsafe` should be rare and confined to guest memory - a RAM figure is not worth
-/// spending any.
+/// Shells out rather than taking a dependency or using `unsafe`: the value is wanted once per
+/// process and `None` is a correct answer.
 fn probe_ram_mb() -> Option<u32> {
     #[cfg(target_os = "linux")]
     {
-        // MemTotal is in kB and is the first line, but do not rely on the position.
+        // MemTotal is in kB and is the first line, but the position is not relied on.
         let text = std::fs::read_to_string("/proc/meminfo").ok()?;
         let kb: u64 = text
             .lines()
@@ -149,8 +122,8 @@ fn probe_ram_mb() -> Option<u32> {
     }
     #[cfg(target_os = "windows")]
     {
-        // `wmic` is deprecated and absent on recent images, so ask PowerShell's CIM
-        // layer, which is the supported route and present everywhere `wmic` was.
+        // `wmic` is deprecated and absent on recent images; PowerShell's CIM layer is the supported
+        // route.
         let out = run(
             "powershell",
             &[
@@ -169,10 +142,7 @@ fn probe_ram_mb() -> Option<u32> {
     }
 }
 
-/// The first accelerator that will say how much memory it has.
-///
-/// NVIDIA only, and the module documentation says so rather than leaving the reader
-/// to infer it from a missing branch.
+/// The first accelerator that will say how much memory it has, through `nvidia-smi`.
 fn probe_accelerator() -> Option<Accelerator> {
     let out = run(
         "nvidia-smi",
@@ -191,9 +161,8 @@ fn probe_accelerator() -> Option<Accelerator> {
 
 /// Runs a probe and returns its stdout, or `None` for any reason at all.
 ///
-/// A non-zero exit is `None` rather than an error: every caller here treats "the tool
-/// said no" and "there is no tool" identically, and inventing a distinction the
-/// callers do not use would be structure for its own sake.
+/// A non-zero exit is `None`: every caller treats "the tool said no" and "there is no tool"
+/// the same.
 fn run(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program).args(args).output().ok()?;
     if !output.status.success() {
@@ -206,10 +175,7 @@ fn run(program: &str, args: &[&str]) -> Option<String> {
 mod tests {
     use super::Host;
 
-    /// Probing never panics and never fails, on any machine.
-    ///
-    /// This runs in CI, on a laptop, and inside a container with no accelerator and no
-    /// `powershell`. All three are supported and all three must return.
+    /// Probing never panics and always returns, including with no accelerator and no `powershell`.
     #[test]
     fn probing_always_returns() {
         let host = Host::probe();
@@ -218,9 +184,6 @@ mod tests {
     }
 
     /// A summary names every field even when nothing was measurable.
-    ///
-    /// The failure this guards is a line that reads as a full description of the
-    /// machine while silently omitting what it could not find.
     #[test]
     fn a_summary_says_unknown_rather_than_omitting() {
         let summary = Host::unmeasured().summary();
@@ -229,10 +192,7 @@ mod tests {
         assert!(summary.contains("none reported"), "{summary}");
     }
 
-    /// Cores, if reported at all, are at least one.
-    ///
-    /// Zero would pass every `>=` comparison in the selector's CPU tier and quietly
-    /// choose the smallest model on a large machine.
+    /// A reported core count is at least one, so the selector's CPU tier never sees zero.
     #[test]
     fn a_reported_core_count_is_never_zero() {
         if let Some(cores) = Host::probe().cpu_cores {

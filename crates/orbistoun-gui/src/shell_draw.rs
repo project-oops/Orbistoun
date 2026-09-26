@@ -1,23 +1,8 @@
-//! Categories along a row, their children down a column.
+//! Categories along a row, the selected one's items down a column.
 //!
-//! # The arrangement, and why it is ours
-//!
-//! A row of categories with the selected one's children underneath is how console shells
-//! have shown a library for twenty years, and it is a *shape* rather than a design: it
-//! comes from having a pad with a directional control and more things than fit on a screen.
-//! What is somebody's design is the artwork, the motion, the sounds and the exact
-//! proportions, and none of that is copied here (principle 2, D313).
-//!
-//! It earns its place for a reason beyond looking right: **the whole thing is reachable
-//! with four directions and one button**, which is what makes a controller a way to use
-//! this rather than a thing the emulator merely reads.
-//!
-//! # Where the navigation lives
-//!
-//! Not here. `orbistoun_shell::Cross` holds where the highlight is and every rule about
-//! moving it, because those rules are all edges - the ends of a row, a column shorter than
-//! the one beside it, a category with nothing in it - and a draw function is where edges go
-//! to be discovered by somebody holding a direction until something looks wrong.
+//! The arrangement is a generic shape for a controller-driven library; no artwork, motion,
+//! sound or proportions are copied. Everything is reachable with four directions and one
+//! button. The navigation rules live in `orbistoun_shell::Cross`, where they are tested.
 
 use orbistoun_shell::{Cross, Settings};
 
@@ -39,9 +24,7 @@ pub(crate) enum Category {
 impl Category {
     /// The row, in order.
     ///
-    /// Titles is not first, deliberately: the row reads left to right and the user belongs
-    /// at the start of it, but the *highlight* starts on titles because that is what
-    /// somebody opened the shell to look at.
+    /// The user heads the row, but the highlight starts on titles (see [`Self::START`]).
     pub(crate) const ROW: [Self; 4] = [Self::User, Self::Titles, Self::Settings, Self::Power];
 
     /// Where the highlight starts.
@@ -67,8 +50,8 @@ const SETTINGS_ITEMS: [(&str, Action); 3] = [
 
 /// How many items each category holds, in row order.
 ///
-/// Handed to `Cross` so it can clamp. Computed from the same things that get drawn, so the
-/// highlight cannot be somewhere the drawing does not put an item.
+/// Handed to `Cross` so it can clamp. Computed from what is drawn, so the highlight always
+/// lands on a drawn item.
 pub(crate) fn shape(titles: usize, running: bool) -> Vec<usize> {
     vec![
         1,
@@ -92,8 +75,8 @@ pub(crate) fn draw(
     let mut action = None;
     let tiles: &[Tile<'_>] = library.unwrap_or(&[]);
 
-    // The row. Clicking a heading moves the highlight to it, so the same screen works with
-    // a pointer and with four directions - neither is a second implementation of the other.
+    // The row. Clicking a heading moves the highlight to it, so a pointer and a controller
+    // drive the same state.
     ui.horizontal(|ui| {
         for (index, category) in Category::ROW.iter().enumerate() {
             let selected = index == at.category;
@@ -121,8 +104,7 @@ pub(crate) fn draw(
                 ui.small("change this under settings");
             }
             Category::Titles => match library {
-                // Reported where the titles would be. A folder that cannot be read is the
-                // answer to "why is this empty", and it belongs where the reader is looking.
+                // Reported where the titles would be, since it explains the empty column.
                 Err(why) => {
                     ui.add_space(8.0);
                     ui.label("the library could not be read");
@@ -166,8 +148,7 @@ pub(crate) fn draw(
                 if row(ui, index == at.item, "close orbistoun", None, icons).clicked() {
                     action = Some(Action::CloseEmulator);
                 }
-                // Said rather than offered, because a button whose label claims a feature
-                // that does not exist is principle 3 one level up from the emulator.
+                // Stated rather than offered as a button for a feature that does not exist.
                 ui.small("suspending a title to disk is not built");
             }
         }
@@ -182,9 +163,8 @@ pub(crate) fn draw(
 
 /// One item in the column, with artwork when it has any.
 ///
-/// Selection is drawn rather than left to hover, because the highlight is moved by a pad as
-/// often as by a pointer and a hover style would leave a controller user unable to see where
-/// they are.
+/// Selection is drawn rather than left to hover, because a controller moves the highlight
+/// as often as a pointer does.
 fn row(
     ui: &mut egui::Ui,
     selected: bool,
@@ -209,8 +189,7 @@ fn row(
                                 egui::vec2(ROW, ROW),
                             )));
                         }
-                        // A title with no artwork still occupies the same width, so the
-                        // labels stay in one column rather than stepping in and out.
+                        // A title with no artwork occupies the same width, so labels align.
                         None => {
                             ui.add_sized(
                                 egui::vec2(ROW, ROW),
@@ -228,8 +207,7 @@ fn row(
             });
         })
         .response;
-    // The whole row, not just the label - a pointer aiming at a sixteen-point word inside a
-    // fifty-six point row is aiming at the wrong thing.
+    // The whole row is the click target, not just the label.
     let response = response.interact(egui::Sense::click());
     if selected {
         ui.painter()
@@ -259,19 +237,13 @@ mod tests {
         assert_eq!(first_glyph(""), "?");
     }
 
-    /// **The shape has one entry per heading.**
-    ///
-    /// `Cross` clamps against this, so a shape shorter than the row would let the highlight
-    /// sit on a category that is drawn but cannot be navigated to.
+    /// The shape has one entry per heading, so every drawn category is navigable.
     #[test]
     fn the_shape_describes_every_category() {
         assert_eq!(shape(7, false).len(), Category::ROW.len());
     }
 
-    /// **Power gains an item only while something is running.**
-    ///
-    /// The highlight is clamped against this, so an off-by-one here would leave "quit the
-    /// title" selectable with no title - or unreachable with one.
+    /// Power gains its "quit the title" item only while a title is running.
     #[test]
     fn quitting_is_only_offered_when_there_is_something_to_quit() {
         assert_eq!(shape(0, false)[3], 1);

@@ -1,20 +1,8 @@
-//! Title icons, decoded once and kept.
+//! Title icons, decoded and uploaded once and kept.
 //!
-//! # Why a cache rather than an image widget
-//!
-//! Immediate mode redraws whenever the pointer moves, so anything done while drawing is
-//! done sixty times a second. A title icon is a third of a megabyte of PNG; decoding one
-//! per frame per row would make scrolling the library the most expensive thing this
-//! program does, which would be an absurd thing to be true of a list of eight items.
-//!
-//! So each icon is decoded once, uploaded once, and held. The cache is keyed by the
-//! title's directory name, which is unique within a library by construction.
-//!
-//! # Failures are cached too
-//!
-//! A missing or corrupt icon caches its failure, deliberately. Without that, an icon that
-//! cannot be decoded is *retried every frame* - the most expensive possible response to a
-//! file that will never work.
+//! Immediate mode redraws every frame, so decoding an icon while drawing would repeat the
+//! work each frame. The cache is keyed by the title's directory name, unique within a
+//! library. A failed load is cached too, so a bad icon is not retried every frame.
 
 use std::collections::HashMap;
 
@@ -53,8 +41,7 @@ impl Icons {
 
 /// Reads and uploads one icon.
 ///
-/// Downscaled before upload: the source is far larger than anything drawn here, and
-/// holding full-size textures for a whole library is memory spent on pixels nobody sees.
+/// Downscaled before upload, because the source is far larger than anything drawn here.
 fn decode(ctx: &egui::Context, key: &str, path: &std::path::Path) -> Option<egui::TextureHandle> {
     let bytes = std::fs::read(path).ok()?;
     let decoded = image::load_from_memory(&bytes).ok()?;

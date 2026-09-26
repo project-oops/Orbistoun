@@ -1,24 +1,11 @@
-//! A **translated** texture sample, checked against the framebuffer.
+//! A translated texture sample, checked against the framebuffer (D690).
 //!
-//! `translated_interpolation.rs` put a translated interpolated attribute on the screen. This
-//! puts a translated *texel* there: the guest interpolates a texture coordinate, samples a
-//! texture with it, and exports what came back.
-//!
-//! **Both sampling forms.** A guest's `image_sample_lz` names level zero and the plain
-//! `image_sample` lets the implementation choose from the derivatives of the coordinate. Those
-//! are two different SPIR-V instructions with different operands, so each is checked against the
-//! hand-written oracle emitting *its own* form - checking one against the other's oracle would
-//! pass on a texture with one level and prove nothing.
-//!
-//! The host half went up first and on purpose (worklog 566): an image, a view, a sampler and a
-//! hand-assembled module that reads a known texel through them. This is the translation
-//! measured against it, which is the order D549 argues for.
-//!
-//! What a guest's instruction names and what this binds are not the same thing, and D690 is
-//! why. Its resource operand names eight scalar registers holding an image descriptor and its
-//! sampler operand four more; those describe a surface at a guest address that no host image
-//! stands behind. Every sample in a module therefore reads the one texture the pipeline bound,
-//! and a module that names a second is refused rather than drawn wrong.
+//! The guest interpolates a texture coordinate, samples a texture with it and exports the texel.
+//! `image_sample_lz` (level zero) and the plain `image_sample` (level from derivatives) are
+//! different SPIR-V instructions, so each is checked against a hand-written oracle emitting its own
+//! form. A guest's resource and sampler operands describe a surface at a guest address no host
+//! image stands behind, so every sample reads the one texture the pipeline bound, and a module
+//! naming a second is refused.
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::{COARSE_TEXEL, draw_with_texture};
@@ -55,26 +42,17 @@ const EXPECTED: [[u8; 4]; 4] = [
 
 /// A shader that interpolates a coordinate, samples a texture with it, and exports the texel.
 ///
-/// Written as guest instruction words, so what is translated is the encoding rather than a
-/// convenience. Four instructions:
+/// Written as guest instruction words:
 ///
-/// - `v_interp_p1_f32 v0, v0, attr0.x` and the same into `v1` for `.y` - the coordinate, which
-///   a real textured shader gets exactly this way.
-/// - `image_sample<opcode> v[4:7], v[0:1], s[4:11], s[12:15] dmask:0xf` - the sample, in
-///   whichever of the two forms the caller asked for.
-/// - `exp mrt0 v4, v5, v6, v7` - the texel, to the attachment.
+/// - `v_interp_p1_f32 v0, v0, attr0.x` and the same into `v1` for `.y`: the coordinate.
+/// - `image_sample<opcode> v[4:7], v[0:1], s[4:11], s[12:15] dmask:0xf`: the sample, in either
+///   form.
+/// - `exp mrt0 v4, v5, v6, v7`: the texel, to the attachment.
 ///
-/// The destination is `v[4:7]` rather than `v[0:3]` so it does not overlap the coordinate it
-/// reads, which would make the second half of the assertion depend on evaluation order.
-///
-/// # Where the bits come from
-///
-/// `MIMG` is `0xF0000000` with the opcode at shift 18, and the mask at shift 8 of the first
-/// word - the encoding table's own row. The second word holds the coordinate register at shift
-/// 0, the destination at shift 8, and the two descriptors at shifts 16 and 21 **divided by
-/// four**, which is the layout `opcode-operands.toml` solved from assembled probes. The test
-/// below decodes it and asserts every field before anything is translated, so a hand-assembly
-/// that is wrong fails as itself rather than as a wrong picture.
+/// The destination does not overlap the coordinate it reads. `MIMG` is `0xF0000000` with the opcode
+/// at shift 18 and the mask at shift 8 of the first word; the second word holds the coordinate
+/// register at shift 0, the destination at shift 8, and the two descriptors at shifts 16 and 21
+/// divided by four, as `opcode-operands.toml` records. A test below decodes it first.
 fn sampling_shader(opcode: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     // v0 <- attr0.x, v1 <- attr0.y
@@ -92,39 +70,26 @@ fn sampling_shader(opcode: u32) -> Vec<u8> {
     bytes
 }
 
-/// The two sampling opcodes this file builds shaders from, and what each one means.
-///
-/// **They differ only in where the level of detail comes from**, which is the whole reason both
-/// are here: the guest's `_lz` names level zero and the plain form lets the implementation
-/// choose from the derivatives of the coordinate. Those are two different SPIR-V instructions
-/// with different operands, so a translation checked on one says nothing about the other.
+/// The two sampling opcodes this file builds shaders from, and what each means. They differ only in
+/// where the level of detail comes from, and translate to different SPIR-V instructions.
 const SAMPLE_OPCODES: [(u32, Lod); 2] = [(39, Lod::Zero), (32, Lod::Implicit)];
 
-/// First scalar register of the image descriptor the test's shader names.
-///
-/// Four rather than zero on purpose. The encoding holds this field **divided by four**, and a
-/// descriptor at register zero would put a zero in the field either way - so a scale the layout
-/// got wrong would be invisible here, which is the one thing a hand-assembly must not hide.
+/// First scalar register of the image descriptor the test's shader names. Four rather than zero,
+/// because the field holds it divided by four and zero would hide a wrong scale.
 const IMAGE_DESCRIPTOR: u32 = 4;
 
 /// First scalar register of the sampler descriptor, past the eight the image occupies.
 const SAMPLER_DESCRIPTOR: u32 = 12;
 
-/// The second `MIMG` word, from the register numbers as a disassembly writes them.
-///
-/// The two descriptors are stored divided by four, so doing that division here rather than at
-/// the call site is what lets the caller name `s[4:11]` and `s[12:15]` as `4` and `12` - the
-/// numbers in the instruction this file claims to assemble, checkable against it by eye.
-/// Pre-divided literals would read as `1` and `3`, which match nothing written anywhere.
+/// The second `MIMG` word, from the register numbers as a disassembly writes them. Dividing here
+/// lets a caller write `s[4:11]` and `s[12:15]` as `4` and `12`, checkable against the instruction
+/// by eye.
 const fn mimg_operands(vaddr: u32, vdata: u32, resource: u32, sampler: u32) -> u32 {
     vaddr | (vdata << 8) | ((resource / 4) << 16) | ((sampler / 4) << 21)
 }
 
-/// `image_sample<opcode> v[4:7], v[0:1], s[4:11], s[12:15] dmask:0xf`, as its two words.
-///
-/// One function rather than a constant per opcode, so the decode assertion below and the shaders
-/// that run are unambiguously the same instruction - two hand-assemblies that could drift apart
-/// is exactly the thing a test like this must not have.
+/// `image_sample<opcode> v[4:7], v[0:1], s[4:11], s[12:15] dmask:0xf`, as its two words. One
+/// function, so the decode assertion and the shaders that run use the same instruction.
 const fn image_sample_words(opcode: u32) -> [u32; 2] {
     [
         // 0xF0000000, the opcode at shift 18, dmask 0xf at shift 8, and the dimensionality.
@@ -135,10 +100,9 @@ const fn image_sample_words(opcode: u32) -> [u32; 2] {
 
 /// The dimensionality field, saying this instruction's coordinate has two components.
 ///
-/// A three-bit field at shift 3 of the first word, with two dimensions coded as one. **It has to
-/// be set**: leaving it zero says one-dimensional, and the translation refuses that rather than
-/// reading two coordinate registers for a coordinate that has one. Measured by assembling one
-/// instruction at each of the eight dimensionalities and differencing (worklog 576).
+/// A three-bit field at shift 3 of the first word, with two dimensions coded as one. Zero means
+/// one-dimensional, which the translation refuses for a two-register coordinate. Measured by
+/// assembling one instruction at each of the eight dimensionalities and differencing.
 const TWO_DIMENSIONAL: u32 = 1 << 3;
 
 fn translated(opcode: u32) -> Result<Vec<u32>, TranslateError> {
@@ -155,11 +119,8 @@ fn translated(opcode: u32) -> Result<Vec<u32>, TranslateError> {
     .map(|(module, _)| module)
 }
 
-/// **The hand-assembled instruction is the instruction it claims to be.**
-///
-/// Asserted before anything is translated, and it needs no device. A wrong hand-assembly would
-/// otherwise reach the framebuffer and fail there, where a wrong picture has a dozen possible
-/// causes and this has one.
+/// The hand-assembled instruction is the instruction it claims to be, asserted before anything is
+/// translated and with no device.
 #[test]
 fn the_sampling_instructions_decode_to_what_they_were_written_as() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
@@ -173,9 +134,8 @@ fn the_sampling_instructions_decode_to_what_they_were_written_as() {
         let decoded = decode(&bytes, &encodings, &operands);
         let instruction = decoded.instructions.first().expect("one instruction");
 
-        // The family comes back as an index into the encoding table, and the name is looked up
-        // from that pair - the same route the translator's own dispatch takes, so a name that
-        // resolves here is a name that will dispatch there.
+        // The family comes back as an index into the encoding table and the name is looked up from
+        // that pair, the route the translator's dispatch takes.
         let family = instruction
             .encoding
             .and_then(|i| encodings.encodings().get(usize::from(i)))
@@ -209,35 +169,20 @@ fn the_sampling_instructions_decode_to_what_they_were_written_as() {
     }
 }
 
-/// **A translated texture sample reads the texel its coordinate names.**
+/// A translated texture sample reads the texel its coordinate names.
 ///
-/// # What this asserts
-///
-/// The same four-quadrant claim the hand-written oracle makes, over a frame a *guest's*
-/// instruction words produced: the image is bound and read, the coordinate reaches the sample,
-/// the rows are the right way up, and nothing is filtered.
-///
-/// And then the assertion that means the most: the translated frame is compared **byte for
-/// byte** against the hand-written level-zero oracle over the same geometry and the same
-/// texture. The two differ only in what produced the fragment shader, so a difference is the
-/// translation and nothing else.
-///
-/// # What it cannot assert
-///
-/// **That the texture is the one the guest asked for.** It is the one the pipeline bound, and
-/// D690 says why: the eight registers naming a descriptor describe a surface this backend has
-/// never uploaded. What the translation does guarantee is that a module needing more than one
-/// texture is refused rather than drawn - `a_second_texture_is_refused_rather_than_guessed`
-/// below is that half.
+/// The oracle's four-quadrant claim (bound and read, coordinate reaches the sample, rows the right
+/// way up, nothing filtered) over a frame a guest's instruction words produced, compared byte for
+/// byte with the hand-written level-zero oracle over the same geometry and texture. The texture is
+/// the one the pipeline bound (D690).
 #[test]
 fn a_translated_sample_reads_the_texel_its_coordinate_names() {
     if !device_or_skip("a_translated_sample_reads_the_texel_its_coordinate_names") {
         return;
     }
     let size = (8, 8);
-    // Zero, two and two, so the coordinate sweeps the whole texture once across the visible
-    // frame - the triangle's corners are at (-1, -1), (3, -1) and (-1, 3), two of them outside
-    // it. The same corners the oracle uses, for the same reason.
+    // Zero, two and two, so the coordinate sweeps the whole texture once: the triangle's corners
+    // are at (-1, -1), (3, -1) and (-1, 3). The oracle's corners.
     let corners = [
         [0.0, 0.0, 0.0, 1.0],
         [2.0, 0.0, 0.0, 1.0],
@@ -290,27 +235,22 @@ fn a_translated_sample_reads_the_texel_its_coordinate_names() {
 
 /// A shader that fetches one texel by its index and exports it.
 ///
-/// `v_mov_b32 v0, x` and `v_mov_b32 v1, y` put the texel's index in the coordinate registers,
-/// then `image_load v[4:7], v[0:1], s[4:11] dmask:0xf` reads it. **Constant rather than
-/// interpolated on purpose**: a fetch takes a texel's index, and the assertion this test wants
-/// to make is "this texel, exactly" - an interpolated coordinate would make it "some texel,
-/// depending on where the pixel is", which is a weaker claim about a harder thing.
-///
-/// `VOP1` is `0x7E000000` with the opcode at shift 9, the destination at shift 17 and the
-/// source at shift 0; source `128 + k` is the inline constant `k`. `image_load` has **four**
-/// operands rather than five - no sampler - so its mask sits where a sample's sampler does.
+/// `v_mov_b32 v0, x` and `v_mov_b32 v1, y` put the texel's index in the coordinate registers, then
+/// `image_load v[4:7], v[0:1], s[4:11] dmask:0xf` reads it. Constant rather than interpolated, so
+/// the claim is "this texel, exactly". `VOP1` is `0x7E000000` with the opcode at shift 9, the
+/// destination at shift 17 and the source at shift 0; source `128 + k` is the inline constant `k`.
+/// `image_load` has no sampler operand, so its mask sits where a sample's sampler does.
 fn fetching_shader(x: u32, y: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (register, value) in [(0u32, x), (1, y)] {
         let word = 0x7E00_0000u32 | (1 << 9) | (register << 17) | (128 + value);
         bytes.extend(word.to_le_bytes());
     }
-    // 0xF0000000, dmask 0xf at shift 8, the dimensionality, and **no opcode term because
-    // `image_load` is opcode zero** - the shift is written out in the sampling builder above,
-    // where it is not.
+    // 0xF0000000, dmask 0xf at shift 8, the dimensionality, and no opcode term: `image_load` is
+    // opcode zero.
     bytes.extend((0xF000_0000u32 | (0xF << 8) | TWO_DIMENSIONAL).to_le_bytes());
-    // The coordinate at shift 0, the destination at shift 8, and the image descriptor at shift
-    // 16 divided by four. No sampler field, which is the whole difference from a sample.
+    // The coordinate at shift 0, the destination at shift 8, and the image descriptor at shift 16
+    // divided by four. No sampler field.
     bytes.extend(((4 << 8) | ((IMAGE_DESCRIPTOR / 4) << 16)).to_le_bytes());
     // exp mrt0 v4, v5, v6, v7
     bytes.extend(0xF800_000Fu32.to_le_bytes());
@@ -319,22 +259,11 @@ fn fetching_shader(x: u32, y: u32) -> Vec<u8> {
     bytes
 }
 
-/// **A translated fetch reads the texel its index names.**
+/// A translated fetch reads the texel its index names.
 ///
-/// # Why this is not the sampling test again
-///
-/// A guest's `image_load` names an image descriptor and **no sampler**, because it reads a texel
-/// by its integer index and there is nothing to filter, wrap or choose a level for. On the host
-/// that is a fetch, and a fetch takes an image rather than an image and its sampler - so the
-/// bound pair is unwrapped first. It needs no binding of its own, no device feature and no claim
-/// about the texture's format, which is why it was worth doing before the store that does.
-///
-/// # What it asserts
-///
-/// Four draws, one per texel of the two-by-two texture, each asserting **every pixel** of the
-/// frame is that texel. Four different indices give four different answers, so a fetch ignoring
-/// its coordinate fails rather than passing by luck, and the two rows are told apart - which is
-/// the claim about upload order a fetch makes as directly as a sample does.
+/// `image_load` reads a texel by integer index with no sampler, so on the host it is a fetch from
+/// the image unwrapped from the bound pair. Four draws, one per texel, each asserting every pixel
+/// is that texel, so a fetch ignoring its coordinate fails and the two rows are told apart.
 #[test]
 fn a_translated_fetch_reads_the_texel_its_index_names() {
     if !device_or_skip("a_translated_fetch_reads_the_texel_its_index_names") {
@@ -345,7 +274,7 @@ fn a_translated_fetch_reads_the_texel_its_index_names() {
     let size = (8, 8);
     // Magenta, which is none of the four texels.
     let clear = [1.0, 0.0, 1.0, 1.0];
-    // The fetch ignores the varying; the vertex module is here to cover the frame.
+    // The fetch ignores the varying; the vertex module covers the frame.
     let vertex = interpolated_vertex_module([[0.0, 0.0, 0.0, 1.0]; 3]);
 
     for y in 0..2u32 {
@@ -384,31 +313,21 @@ fn a_translated_fetch_reads_the_texel_its_index_names() {
     }
 }
 
-/// **An image with a different number of dimensions is refused, not read as two.**
+/// An image with a different number of dimensions is refused, not read as two.
 ///
-/// # Why this is the guard that was missing
-///
-/// Every image translation here reads **two** coordinate registers. That is right for a
-/// two-dimensional image and wrong for every other kind: a three-dimensional coordinate is three
-/// registers, and reading two of it would sample a place the guest never named - and draw a
-/// frame that looks entirely plausible.
-///
-/// Nothing checked, for a reason worth keeping: the dimensionality is printed as a symbolic name
-/// and the operand solver skips symbolic modifiers by design, so it never reached the operand
-/// table and the translation could not have looked at it. It is in the instruction all the same,
-/// and assembling one instruction at each of the eight dimensionalities put the field at three
-/// bits from bit three, with every other byte identical (worklog 576).
-///
-/// This is that guard, watched failing. The instruction is the one the test above translates
-/// with two dimensions, with three named instead.
+/// Every image translation here reads two coordinate registers, which is wrong for any other
+/// dimensionality: reading two of a three-dimensional coordinate samples a place the guest never
+/// named. The dimensionality is a symbolic modifier the operand solver skips, so the field (three
+/// bits from bit three) is read directly. This is the two-dimensional instruction above with each
+/// other dimensionality named.
 #[test]
 fn an_image_that_is_not_two_dimensional_is_refused() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
 
-    // Every code but two dimensions. They run 1D, 2D, 3D, cube, 1D array, 2D array,
-    // 2D multi-sampled, 2D multi-sampled array - the order a disassembler prints them, and the
-    // order the measured first bytes 0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38 put them in.
+    // Every code but two dimensions: 1D, 2D, 3D, cube, 1D array, 2D array, 2D multi-sampled, 2D
+    // multi-sampled array, in the order a disassembler prints them and the measured first bytes
+    // 0x00 to 0x38 put them.
     for code in (0..8u32).filter(|code| *code != 1) {
         let mut words = image_sample_words(39);
         words[0] = (words[0] & !(0b111 << 3)) | (code << 3);
@@ -443,19 +362,17 @@ fn an_image_that_is_not_two_dimensional_is_refused() {
 
 /// A guest shader that samples at a level it names, and exports what came back.
 ///
-/// Three moves fill the address registers - the coordinate and then **the level, last** - and
-/// `image_sample_l v[4:7], v[0:2], s[4:11], s[12:15]` reads with them.
-///
-/// `VOP1` source `240` is the inline float one half and `242` is one; `128` is the integer zero,
-/// whose bit pattern is also the float zero. So a coordinate at the middle of the texture and a
-/// level of nought or one are four moves and no literal words.
+/// Three moves fill the address registers, the coordinate and then the level last, and
+/// `image_sample_l v[4:7], v[0:2], s[4:11], s[12:15]` reads with them. `VOP1` source `240` is the
+/// inline float one half and `242` is one; `128` is the integer zero, whose bits are the float
+/// zero.
 fn levelled_shader(level: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut mov = |register: u32, source: u32| {
         let word = 0x7E00_0000u32 | (1 << 9) | (register << 17) | source;
         bytes.extend(word.to_le_bytes());
     };
-    // 0.5, 0.5 - the far quadrant of a two-by-two texture, and the middle of a one-by-one.
+    // 0.5, 0.5: the far quadrant of a two-by-two texture, and the middle of a one-by-one.
     mov(0, 240);
     mov(1, 240);
     mov(2, level);
@@ -468,26 +385,12 @@ fn levelled_shader(level: u32) -> Vec<u8> {
     bytes
 }
 
-/// **A translated levelled sample reads the level it names.**
+/// A translated levelled sample reads the level it names.
 ///
-/// # Why this needed the harness to change
-///
-/// A texture with one level answers the same texel whatever level is asked for, so a test on
-/// one would pass for a translation that dropped the level operand entirely - which is exactly
-/// the claim this instruction rests on. The harness now builds two levels: the caller's texels,
-/// and one coarse texel that is deliberately none of them.
-///
-/// # What it asserts
-///
-/// The same coordinate at two levels gives two different answers, each the right one. That is
-/// the level operand reaching the instruction, which nothing else here could show.
-///
-/// # What it cannot assert
-///
-/// That the level is the **last** address element rather than some other one. With a
-/// two-register coordinate and a one-register level there is only one arrangement that puts a
-/// number in the level's place, so this passes for any translation that reads the third
-/// register as the level. Where it sits was measured from a compiler instead (worklog 577).
+/// The harness builds two levels, the caller's texels and one coarse texel that is none of them, so
+/// the same coordinate at two levels gives two different answers. With a two-register coordinate
+/// and a one-register level only one arrangement fits, so this does not show the level is the last
+/// address element; that placement comes from compiler output.
 #[test]
 fn a_translated_levelled_sample_reads_the_level_it_names() {
     if !device_or_skip("a_translated_levelled_sample_reads_the_level_it_names") {
@@ -530,16 +433,10 @@ fn a_translated_levelled_sample_reads_the_level_it_names() {
     }
 }
 
-/// **A module naming a second texture is refused, not guessed at.**
+/// A module naming a second texture is refused, not guessed at.
 ///
-/// # Why this is the other half
-///
-/// One texture is bound. A translation that mapped every sample onto it regardless would draw a
-/// plausible frame for a shader using two, which is the failure D104 refused for export targets
-/// in exactly these words. D690 chose the refusal, and a refusal nobody has watched happen is a
-/// refusal nobody knows anything about.
-///
-/// Two samples naming different image descriptors, and the second must not translate.
+/// One texture is bound, and mapping every sample onto it would draw a plausible frame for a shader
+/// using two (D690). Two samples naming different image descriptors: the second must not translate.
 #[test]
 fn a_second_texture_is_refused_rather_than_guessed() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
@@ -553,8 +450,8 @@ fn a_second_texture_is_refused_rather_than_guessed() {
     let words = image_sample_words(39);
     bytes.extend(words[0].to_le_bytes());
     bytes.extend(words[1].to_le_bytes());
-    // The same sample again, from s[20:27] instead - a second texture, by register number.
-    // The field is replaced rather than merged into, so the register it names is exactly this.
+    // The same sample from s[20:27]: a second texture, by register number. The field is replaced,
+    // not merged into.
     let elsewhere = (words[1] & !(0x1F << 16)) | ((20 / 4) << 16);
     bytes.extend(words[0].to_le_bytes());
     bytes.extend(elsewhere.to_le_bytes());
@@ -573,19 +470,20 @@ fn a_second_texture_is_refused_rather_than_guessed() {
     let TranslateError::Unsupported { detail, .. } = error else {
         panic!("refused for the wrong reason: {error:?}");
     };
-    // Two textures bind (worklog 840), but only where each one's descriptor is found in the
-    // descriptor table; neither is here, so which is which cannot be told.
+    // Two textures bind only where each descriptor is found in the descriptor table; neither is
+    // here, so which is which cannot be told.
     assert!(
         detail.contains("reads two textures"),
         "refused, but not for naming two textures: {detail}"
     );
 }
 
-/// **Two textures whose descriptors come from the descriptor table translate, each at its own
-/// binding and offset** (worklog 840): the open-toolchain GL context's second texture unit loads
-/// its image descriptor from `+0x40` of the table `s[0:1]` points at, where the first loads from
-/// `+0x00` (oops-sdk `tex-prolog2.s`). Sampled second-unit first, as that prolog does, so slot 0
-/// is the `+0x40` texture.
+/// Two textures whose descriptors come from the descriptor table translate, each at its own binding
+/// and offset.
+///
+/// The open-toolchain GL context's second texture unit loads its image descriptor from `+0x40` of
+/// the table `s[0:1]` points at, and the first from `+0x00` (oops-sdk `tex-prolog2.s`). The second
+/// unit is sampled first, as that prolog does, so slot 0 is the `+0x40` texture.
 #[test]
 fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
     use orbistoun_translate::wavefront::{MeshPrimitive, TextureSource, UserData};
@@ -654,18 +552,12 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
     );
 }
 
-/// **A descriptor rewritten between two samples is refused too.**
+/// A descriptor rewritten between two samples is refused too.
 ///
-/// # Why comparing register numbers is not enough on its own
-///
-/// A shader can load a second image descriptor into the *same* eight registers and sample
-/// again. Both samples then name `s[0:7]`, so the check above sees one texture where there are
-/// two - and the second sample would read the first one's texture and draw a plausible frame.
-/// D690's third rule closes that: a write anywhere inside either group means the descriptor is
-/// no longer the one the last sample used, and the next sample is refused.
-///
-/// This is the negative test for it. `s_mov_b32 s6, 0` lands in the middle of `s[4:11]`, which
-/// is the case a check watching only the first register of the group would miss.
+/// A shader can load a second image descriptor into the same eight registers and sample again, so
+/// both samples name `s[0:7]`. A write anywhere inside either group means the descriptor is no
+/// longer the one the last sample used (D690). `s_mov_b32 s6, 0` lands mid-group, which a check on
+/// the group's first register would miss.
 #[test]
 fn a_descriptor_rewritten_between_samples_is_refused() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
@@ -679,10 +571,10 @@ fn a_descriptor_rewritten_between_samples_is_refused() {
     let words = image_sample_words(39);
     bytes.extend(words[0].to_le_bytes());
     bytes.extend(words[1].to_le_bytes());
-    // `s_mov_b32 s6, 0`: SOP1 is 0xBE800000 with the opcode at shift 8, the destination at
-    // shift 16 and the source at shift 0. Source 128 is the inline constant zero.
+    // `s_mov_b32 s6, 0`: SOP1 is 0xBE800000 with the opcode at shift 8, the destination at shift 16
+    // and the source at shift 0. Source 128 is the inline constant zero.
     bytes.extend((0xBE80_0000u32 | (6 << 16) | (3 << 8) | 128).to_le_bytes());
-    // The same texture, by register number, and no longer the same texture in fact.
+    // The same texture by register number, and no longer the same texture in fact.
     bytes.extend(words[0].to_le_bytes());
     bytes.extend(words[1].to_le_bytes());
     bytes.extend(0xBF81_0000u32.to_le_bytes());

@@ -1,29 +1,17 @@
 //! Orbistoun run against a published implementation of the same interface.
 //!
-//! # The oracle available today
-//!
-//! With no console reachable, a reference C library is the only *live* oracle this project
-//! has - and unlike hardware it is unboundedly parallel. `tools/differential/reference.c`
-//! records what it did; this rebuilds each call from the inputs it recorded and compares.
-//!
-//! **Agreement means orbistoun implements the published interface as that library does.** It
-//! does not mean the console does. The target's C library is FreeBSD-derived and the
-//! reference here is glibc, so the two can legitimately differ - which is why results land at
-//! the `differential` tier and why that tier stays probeable (D478, D479).
-//!
-//! # Same shape as the hardware gate, on purpose
-//!
-//! Every case is either asserted to agree or listed in [`DIVERGES`] with the reason, so a new
-//! reference run arrives as a work list. A case that is neither fails the gate. A red test
-//! left red forever is not a queue.
+//! A reference C library is a live oracle that runs in parallel: `tools/differential/reference.c`
+//! records what it did, and this rebuilds each call from the recorded inputs and compares.
+//! Agreement means orbistoun implements the published interface as that library does, not that the
+//! hardware does; the target's C library is FreeBSD-derived and the reference is glibc, so results
+//! land at the `differential` tier (D478). Every case is asserted to agree or listed in
+//! [`DIVERGES`] with the reason, so a new reference run arrives as a work list.
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_hle::differential::{Argument, Case, Reference};
 
-/// Cases where orbistoun does not answer what the reference answered, and why.
-///
-/// **This is the work queue.** Each entry names a real difference; fixing one is deleting a
-/// line here and watching the gate keep passing.
+/// Cases where orbistoun does not answer what the reference answered, and why. Fixing one is
+/// deleting its line here.
 const DIVERGES: &[(&str, &str)] = &[];
 
 /// Reads the committed reference runs.
@@ -51,15 +39,11 @@ struct Answer {
 
 /// Runs one case through orbistoun.
 ///
-/// **The calling shape is per function and named explicitly.** A generic "pass the arguments
-/// through" cannot know which argument is an out-parameter, and guessing would compare the
-/// wrong bytes while looking like it worked. A shape this does not know answers `None`, and
-/// the gate reports it rather than skipping quietly.
+/// The calling shape is per function and named explicitly, because a generic pass-through cannot
+/// know which argument is an out-parameter. A shape this does not know answers `None`, and the gate
+/// reports it.
 fn run(case: &Case) -> Option<Answer> {
-    // **Which shape each function takes, in one place.** This was seven `if` blocks and grew
-    // one every time a shape was added, until the function tripped the length lint twice in a
-    // day. A reader asking "how is `memcpy` replayed" now has one list to read rather than a
-    // chain to walk, and adding a shape is a line rather than a block.
+    // Which shape each function takes, in one place.
     let shape: Option<fn(&Case) -> Option<Answer>> = match case.function.as_str() {
         "strtod" | "strtof" => Some(run_strtod),
         "qsort" | "bsearch" => Some(run_with_callback),
@@ -75,9 +59,9 @@ fn run(case: &Case) -> Option<Answer> {
         "strdup" | "strndup" => Some(run_duplicate),
         "strftime" => Some(run_strftime),
         "sqrt" | "fabs" | "ceil" | "floor" | "trunc" | "round" => Some(run_math),
-        // Single precision takes the same path: the argument is the low half of the
-        // float register and the answer comes back zero-extended, so the bit pattern
-        // crosses identically at both widths (D534).
+        // Single precision takes the same path: the argument is the low half of the float register
+        // and the answer comes back zero-extended, so the bit pattern crosses identically at both
+        // widths.
         "sqrtf" | "fabsf" | "ceilf" | "floorf" | "truncf" | "roundf" | "nearbyintf" => {
             Some(run_math)
         }
@@ -101,8 +85,8 @@ fn run(case: &Case) -> Option<Answer> {
                 std::ptr::from_mut(&mut end) as u64,
                 *base as u64,
             ]));
-            // Reported as an offset, as the reference does: an address is a fact about one
-            // process and an offset is a fact about the function.
+            // Reported as an offset, as the reference does: an address is a fact about one process
+            // and an offset is a fact about the function.
             let offset = end.saturating_sub(text.as_ptr() as u64);
             out.insert("end_offset".to_owned(), format!("{offset:#x}"));
             Some(Answer { returned, out })
@@ -114,9 +98,9 @@ fn run(case: &Case) -> Option<Answer> {
             let returned = call(&args([subject.as_ptr() as u64, set.as_ptr() as u64, 0]));
             Some(Answer { returned, out })
         }
-        // `strlcpy(dst, src, size)` - the return and the buffer are separate halves of the
-        // contract, so both are compared. The window is poisoned the way the reference
-        // poisons it, or "did not write here" and "wrote a NUL" would read the same.
+        // `strlcpy(dst, src, size)`: the return and the buffer are separate halves of the contract,
+        // so both are compared. The window is poisoned as the reference poisons it, so "did not
+        // write here" and "wrote a NUL" differ.
         (
             "strlcpy",
             [
@@ -135,8 +119,8 @@ fn run(case: &Case) -> Option<Answer> {
             out.insert("buffer".to_owned(), window(&buffer[..12]));
             Some(Answer { returned, out })
         }
-        // `snprintf(buffer, room, "%d", value)` - the return and the buffer disagree by
-        // design, so both are compared.
+        // `snprintf(buffer, room, "%d", value)`: the return and the buffer disagree by design, so
+        // both are compared.
         ("snprintf", [Argument::Unsigned(room), Argument::Signed(value)]) => {
             let mut buffer = [b'@'; 64];
             let format = std::ffi::CString::new("%d").ok()?;
@@ -151,10 +135,8 @@ fn run(case: &Case) -> Option<Answer> {
             out.insert("buffer".to_owned(), window(&buffer[..8]));
             Some(Answer { returned, out })
         }
-        // A comparison, whose contract is the **sign** and not the value. ISO C says greater
-        // than, equal to or less than zero and no more; glibc returns the byte difference and
-        // another implementation may return exactly the sign. Asserting the magnitude would
-        // report a conforming difference as a bug, so the sign is what is compared.
+        // A comparison, whose contract is the sign and not the value: ISO C says greater than,
+        // equal to or less than zero, and glibc returns the byte difference.
         ("strcmp" | "strcasecmp", [Argument::Text(a), Argument::Text(b)]) => {
             let (a, b) = (text(a)?, text(b)?);
             let returned = call(&args([a.as_ptr() as u64, b.as_ptr() as u64, 0]));
@@ -174,12 +156,11 @@ fn run(case: &Case) -> Option<Answer> {
     }
 }
 
-/// The two that call back into the caller's own code, which is what makes them interesting.
+/// The two that call back into the caller's own code.
 ///
-/// Orbistoun's comparator is a native `sysv64` function pointer - guest code runs in this
-/// process, so a test supplies a real one and the emulator calls it exactly as it would call
-/// a guest's. That `qsort/jumbled` comes back sorted is the proof it was called at all: a
-/// no-op sort would leave the array as it found it.
+/// Orbistoun's comparator is a native `sysv64` function pointer: guest code runs in this process,
+/// so a test supplies a real one and the emulator calls it as it would a guest's. `qsort/jumbled`
+/// coming back sorted proves it was called.
 fn run_with_callback(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named(&case.function)?;
     let mut out = std::collections::BTreeMap::new();
@@ -239,31 +220,20 @@ fn run_with_callback(case: &Case) -> Option<Answer> {
     }
 }
 
-/// The shapes that answer a pointer into their subject.
-///
-/// Reduced to found-or-not plus an offset, because an address is a fact about one process and
-/// an offset is a fact about the function - the same reasoning the end pointer follows.
-/// The eleven character classes, by name.
-///
-/// One list so the dispatch and the match cannot disagree about which functions are swept -
-/// the shape of drift that lets a case stop being compared while the gate still passes.
+/// The eleven character classes, by name, in one list so the dispatch and the match cannot disagree
+/// about which functions are swept.
 const CLASSES: &[&str] = &[
     "isalnum", "isalpha", "iscntrl", "isdigit", "isgraph", "islower", "isprint", "ispunct",
     "isspace", "isupper", "isxdigit",
 ];
 
 /// The ctype family: a class swept over sixty-four code points, or a case mapping at one.
-///
-/// Split out of [`run`] for the reason the searches and the buffer writers were: the match
-/// outgrew the length lint, and "sweeps a range" is a different calling shape from "takes a
-/// string and a bound", not merely another arm.
 fn run_ctype(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named(&case.function)?;
     let out = std::collections::BTreeMap::new();
     match (case.function.as_str(), case.arguments.as_slice()) {
-        // Compared as *classified or not*, never as the raw return: the standard promises
-        // non-zero, glibc answers a mask out of its table, and comparing those would compare
-        // an implementation detail rather than the contract.
+        // Compared as classified or not, never as the raw return: the standard promises non-zero,
+        // and glibc answers a mask from its table.
         (_, [Argument::Unsigned(half)]) if CLASSES.contains(&case.function.as_str()) => {
             let mut bits: u64 = 0;
             for i in 0..64u64 {
@@ -277,8 +247,7 @@ fn run_ctype(case: &Case) -> Option<Answer> {
                 out,
             })
         }
-        // `tolower`/`toupper` at one code point. The answer is a byte, so it is compared
-        // directly rather than as a bit.
+        // `tolower`/`toupper` at one code point. The answer is a byte, compared directly.
         ("tolower" | "toupper", [Argument::Signed(input)]) => {
             let returned = call(&args([*input as u64, 0, 0]));
             Some(Answer { returned, out })
@@ -287,38 +256,14 @@ fn run_ctype(case: &Case) -> Option<Answer> {
     }
 }
 
-/// The functions whose entire answer is the return value.
-///
-/// Split from [`run`] for the same reason as the searches and the ctype sweep - the match
-/// outgrew the length lint - and because these genuinely share one calling shape, which is
-/// what made three of their arms identical bodies clippy was right to object to.
-///
-/// `strlen` and `memcpy` were uncovered until this was written despite being the two
-/// most-called functions in the whole recorded corpus. `atoi` and friends are `strtol` with
-/// the error reporting removed, which is exactly why they need their own cases rather than
-/// being assumed to follow it.
 /// `vsnprintf`, driven through a `va_list` this test builds.
 ///
-/// # Why the list is constructed rather than borrowed
-///
-/// Orbistoun reads a guest's `va_list` as the System V psABI defines it - a four-field
-/// structure naming a register save area and an overflow area - so a caller has to supply one.
-/// Rust has no way to hand over a C `va_list`, and it does not need to: the layout is
-/// published, and what is compared is what was *rendered*, not how the arguments were arranged
-/// to get there.
-///
-/// **So this builds the simplest valid list**: `gp_offset` at zero, six slots in the save area,
-/// and everything past the sixth in the overflow area. That is exactly the arrangement a caller
-/// with seven or more integer arguments produces, which is the case the cases care about - an
-/// implementation reading only the save area renders six correctly and the seventh from
-/// whatever follows it.
-///
-/// # What this cannot check
-///
-/// The reference's own list has three named parameters before its variadic ones, so its
-/// `gp_offset` starts partway up the save area where this one starts at zero. Both are valid
-/// and both must render the same text, which is the property under test - but a bug that only
-/// appears at a non-zero starting offset would not be caught here.
+/// Orbistoun reads a guest's `va_list` as the System V psABI defines it (a four-field structure
+/// naming a register save area and an overflow area), so the test builds the simplest valid list:
+/// `gp_offset` at zero, six slots in the save area, everything past the sixth in the overflow area.
+/// That is what a caller with seven or more integer arguments produces. The reference's list starts
+/// partway up the save area, so a bug that appears only at a non-zero starting offset is not caught
+/// here.
 fn run_va_format(case: &Case) -> Option<Answer> {
     /// Six integer registers at eight bytes each, per the psABI.
     const SAVE_AREA_BYTES: u32 = 48;
@@ -346,12 +291,11 @@ fn run_va_format(case: &Case) -> Option<Answer> {
         *slot = *value;
     }
     let mut overflow: Vec<u64> = values.iter().skip(6).copied().collect();
-    // Never empty, so the pointer is a real address even when nothing overflows - orbistoun
-    // refuses an area pointer that could not be one, and rightly.
+    // Never empty, so the pointer is a real address even when nothing overflows; orbistoun refuses
+    // an area pointer that could not be one.
     overflow.push(0);
 
-    // gp_offset, fp_offset, overflow_arg_area, reg_save_area - in that order, as the psABI
-    // lays them out.
+    // `gp_offset`, `fp_offset`, `overflow_arg_area`, `reg_save_area`, in psABI order.
     let list: [u64; 3] = [
         u64::from(0_u32) | (u64::from(SAVE_AREA_BYTES) << 32),
         overflow.as_ptr() as u64,
@@ -370,16 +314,13 @@ fn run_va_format(case: &Case) -> Option<Answer> {
     Some(Answer { returned, out })
 }
 
-/// `sprintf`, which is its own shape because it is the only unbounded formatter here.
-///
-/// Split from [`run`] for the reason the searches, the ctype sweep and the scalars were: the
-/// match outgrew the length lint. The two arms differ only in whether the one variadic
-/// argument is a number or a string, which is exactly what the record carries.
+/// `sprintf`, its own shape as the only unbounded formatter here. The two arms differ only in
+/// whether the one variadic argument is a number or a string.
 fn run_format(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named("sprintf")?;
     let mut out = std::collections::BTreeMap::new();
-    // Generous, because nothing bounds `sprintf` - and the poison past what was written is
-    // compared, so an overrun shows as a changed byte rather than as a corrupted neighbour.
+    // Generous, because nothing bounds `sprintf`; the poison past what was written is compared, so
+    // an overrun shows as a changed byte.
     let mut buffer = [b'@'; 64];
     let format = match case.arguments.first()? {
         Argument::Text(format) => text(format)?,
@@ -390,8 +331,7 @@ fn run_format(case: &Case) -> Option<Answer> {
         Argument::Text(subject) => {
             let held = text(subject)?;
             let at = held.as_ptr() as u64;
-            // Kept alive until after the call: a `CString` dropped here would leave the
-            // formatter reading freed memory, which is the bug this shape invites.
+            // Kept alive until after the call, so the formatter never reads freed memory.
             let returned = call(&[
                 buffer.as_mut_ptr() as u64,
                 format.as_ptr() as u64,
@@ -418,6 +358,8 @@ fn run_format(case: &Case) -> Option<Answer> {
     Some(Answer { returned, out })
 }
 
+/// The functions whose entire answer is the return value. `atoi` and friends are `strtol` without
+/// error reporting, so they have their own cases.
 fn run_scalar(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named(&case.function)?;
     let out = std::collections::BTreeMap::new();
@@ -434,9 +376,8 @@ fn run_scalar(case: &Case) -> Option<Answer> {
             let returned = call(&args([subject.as_ptr() as u64, *n, 0]));
             Some(Answer { returned, out })
         }
-        // One number in, one out. The reference records the answer at the width the
-        // function has, so the comparison is of that width rather than of a sign-extended
-        // host value.
+        // One number in, one out. The reference records the answer at the function's width, so that
+        // width is compared rather than a sign-extended host value.
         [Argument::Signed(value)] => {
             let returned = call(&args([*value as u64, 0, 0]));
             Some(Answer { returned, out })
@@ -445,12 +386,13 @@ fn run_scalar(case: &Case) -> Option<Answer> {
     }
 }
 
+/// The shapes that answer a pointer into their subject, reduced to found-or-not plus an offset: an
+/// address is a fact about one process, an offset a fact about the function.
 fn run_search(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named(&case.function)?;
     let out = std::collections::BTreeMap::new();
     match (case.function.as_str(), case.arguments.as_slice()) {
-        // A search answering a pointer, reduced to found-or-not plus an offset - an address
-        // is a fact about one process, an offset is a fact about the function.
+        // A search answering a pointer, reduced to found-or-not plus an offset.
         ("strchr" | "strrchr", [Argument::Text(subject), Argument::Signed(needle)]) => {
             let subject = text(subject)?;
             let found = call(&args([subject.as_ptr() as u64, *needle as u64, 0]));
@@ -468,9 +410,9 @@ fn run_search(case: &Case) -> Option<Answer> {
             let found = call(&args([subject.as_ptr() as u64, *needle as u64, *n]));
             Some(located(found, subject.as_ptr() as u64, out))
         }
-        // `strpbrk` answers a pointer to the first character in the set, so it reduces to the
-        // same found-or-not plus offset as `strstr`. Beside `strcspn`, which asks the same
-        // question and answers a length - they disagree in shape exactly at not-found.
+        // `strpbrk` answers a pointer to the first character in the set, so it reduces like
+        // `strstr`. `strcspn` asks the same question and answers a length; the two differ in shape
+        // at not-found.
         ("strpbrk", [Argument::Text(subject), Argument::Text(set)]) => {
             let subject = text(subject)?;
             let set = text(set)?;
@@ -486,18 +428,15 @@ fn run_search(case: &Case) -> Option<Answer> {
     }
 }
 
-/// The shapes whose whole answer is the bytes they left behind.
-///
-/// Every one of these returns a pointer nobody checks and is judged entirely on the window:
-/// where the terminator landed, what was padded, and what past it was left alone.
+/// The shapes whose whole answer is the bytes they left behind: where the terminator landed, what
+/// was padded, and what past it was left alone.
 fn run_into_buffer(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named(&case.function)?;
     let mut out = std::collections::BTreeMap::new();
     match (case.function.as_str(), case.arguments.as_slice()) {
-        // A move within one buffer. **The case a naive copy gets wrong in exactly one
-        // direction**: front-to-back is correct when the destination is below the source and
-        // corrupts when it is above, because the bytes it is about to read have already been
-        // overwritten. The answer is entirely in the window.
+        // A move within one buffer. A naive front-to-back copy corrupts when the destination is
+        // above the source, because it overwrites bytes before reading them. The answer is entirely
+        // in the window.
         (
             "memmove",
             [
@@ -527,9 +466,8 @@ fn run_into_buffer(case: &Case) -> Option<Answer> {
             out.insert("buffer".to_owned(), window(&buffer[..12]));
             Some(Answer { returned: 0, out })
         }
-        // An unbounded copy or append. What is watched is the terminator and what is left
-        // past it - a shim that copies the right characters and forgets the NUL passes every
-        // test that reads the result back as a string.
+        // An unbounded copy or append. The terminator and what is left past it are watched: a copy
+        // that forgets the NUL passes any test reading the result back as a string.
         ("strcpy" | "strcat", [Argument::Text(initial), Argument::Text(src)]) => {
             let mut buffer = poisoned(initial);
             let source = text(src)?;
@@ -541,9 +479,8 @@ fn run_into_buffer(case: &Case) -> Option<Answer> {
             out.insert("buffer".to_owned(), window(&buffer[..12]));
             Some(Answer { returned: 0, out })
         }
-        // A bounded copy into a poisoned window. The bytes are the whole answer: `strncpy`
-        // pads the remainder with NULs when the source is short and does **not** terminate
-        // when it is not, and neither is visible in a return value.
+        // A bounded copy into a poisoned window. `strncpy` pads with NULs when the source is short
+        // and does not terminate when it is not, and neither shows in the return value.
         (
             "strncpy" | "strncat" | "memcpy",
             [
@@ -564,9 +501,8 @@ fn run_into_buffer(case: &Case) -> Option<Answer> {
 
 /// A sixteen-byte window holding `initial`, with the rest left as a pattern.
 ///
-/// The poison is what makes an overrun visible: bytes past the terminator are `@` until
-/// something writes them, so a copy that goes too far shows up in the record rather than
-/// landing on a zero that was already there.
+/// Bytes past the terminator are `@` until something writes them, so an overrun shows in the record
+/// rather than landing on a zero that was already there.
 fn poisoned(initial: &[u8]) -> [u8; 16] {
     let mut buffer = [b'@'; 16];
     buffer[..initial.len()].copy_from_slice(initial);
@@ -576,16 +512,12 @@ fn poisoned(initial: &[u8]) -> [u8; 16] {
 
 /// The comparison a sorting case names, as an address orbistoun can call.
 ///
-/// **The one place the "there is only one case list" property does not reach.** A comparator
-/// is code, and the reference cannot hand its machine code to the checker - so the case names
-/// a *semantic* and each side implements it. A name this does not know answers `None`, which
-/// the rebuild gate reports rather than passing over: an unrecognised comparator must not
-/// become a silently skipped case.
+/// A comparator is code, so the case names a semantic and each side implements it. A name this does
+/// not know answers `None`, which the rebuild gate reports.
 fn comparator(order: &[u8]) -> Option<u64> {
     match order {
-        // Through a function *pointer* rather than casting the item, which is what the
-        // lint asks for and is also the honest spelling: the address handed over is the one
-        // a call would go through.
+        // Through a function pointer rather than a cast of the item: the address handed over is the
+        // one a call goes through.
         b"int32-asc" => {
             let f: extern "sysv64" fn(u64, u64) -> u64 = int32_ascending;
             Some(f as usize as u64)
@@ -596,8 +528,8 @@ fn comparator(order: &[u8]) -> Option<u64> {
 
 /// Ascending order over four-byte integers, in the guest's own calling convention.
 extern "sysv64" fn int32_ascending(a: u64, b: u64) -> u64 {
-    // SAFETY: orbistoun hands the comparator addresses inside the array this test allocated
-    // and described, which is the contract the interface has and this test satisfies.
+    // SAFETY: orbistoun hands the comparator addresses inside the array this test allocated and
+    // described.
     let x = unsafe { std::ptr::read_unaligned(a as usize as *const i32) };
     // SAFETY: the same, for the second element.
     let y = unsafe { std::ptr::read_unaligned(b as usize as *const i32) };
@@ -613,14 +545,11 @@ fn args_of(given: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
     out
 }
 
-/// The one case that answers in a floating-point register, so it comes from the other table.
-///
-/// Its value is compared as a **bit pattern** rather than as a number, because a decimal
-/// rendering would hide exactly the last-place differences worth catching.
+/// The one case that answers in a floating-point register, so it comes from the other table. Its
+/// value is compared as a bit pattern, which keeps last-place differences.
 fn run_strtod(case: &Case) -> Option<Answer> {
-    // **The function is taken from the case, not hard-coded.** `strtof` is the same shape at
-    // single precision and shares this path; naming `strtod` here would have run every
-    // `strtof` case against the double and passed on the wrong implementation.
+    // The function is taken from the case: `strtof` shares this path, and a hard-coded `strtod`
+    // would run every `strtof` case against the double.
     let call = orbistoun_service::float_implementation_named(&case.function)?;
     let [Argument::Text(subject)] = case.arguments.as_slice() else {
         return None;
@@ -639,10 +568,7 @@ fn run_strtod(case: &Case) -> Option<Answer> {
     Some(Answer { returned, out })
 }
 
-/// One answer per step, however many steps the sequence has.
-///
-/// Everything but `strtok` is a sequence of one, so the two shapes meet here rather than at
-/// every call site.
+/// One answer per step. Everything but `strtok` is a sequence of one.
 fn answers_for(steps: &[&Case]) -> Option<Vec<Answer>> {
     if steps[0].function == "strtok" || steps[0].function == "strtok_r" {
         return run_strtok_sequence(steps);
@@ -655,39 +581,26 @@ fn answers_for(steps: &[&Case]) -> Option<Vec<Answer>> {
 
 /// Replays a whole `strtok` sequence against one buffer.
 ///
-/// # Why this cannot be one case at a time
-///
-/// `strtok` carries its place between calls, so the second call's answer depends on the
-/// first having happened - and it **mutates the subject**, writing a NUL over each delimiter
-/// it consumes. Half the contract is therefore invisible in the return values: a shim that
-/// answers the right tokens without writing the terminators is wrong in a way only the bytes
-/// show, so the buffer is compared too.
-///
-/// # And why it takes a lock
-///
-/// Orbistoun keeps the place in a process-wide value, which is **correct** - ISO C says
-/// `strtok` is not reentrant and the platform's will not be either. But this file's tests run
-/// on several threads, and two sequences interleaved would each see the other's position. The
-/// lock is the test being honest about a property of the function rather than a workaround.
+/// `strtok` carries its place between calls and writes a NUL over each delimiter it consumes, so
+/// the buffer is compared as well as the returns. Orbistoun keeps the place in a process-wide
+/// value, as ISO C permits for a non-reentrant function, so sequences take a lock because this
+/// file's tests run on several threads.
 fn run_strtok_sequence(steps: &[&Case]) -> Option<Vec<Answer>> {
     /// One sequence at a time, because the place `strtok` keeps is shared by all of them.
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// How many interleaved walks one sequence may carry.
     ///
-    /// Two, because two is what distinguishes `strtok_r` from `strtok` and a third proves
-    /// nothing a second does not. A record asking for more is refused rather than folded into
-    /// stream one, which would compare the wrong walk while looking like it worked.
+    /// Two distinguish `strtok_r` from `strtok`. A record asking for more is refused rather than
+    /// folded into stream one.
     const STREAMS: usize = 2;
 
-    // Taken from the case: `strtok_r` shares this path and naming `strtok` here would run
-    // every reentrant case against the non-reentrant function (the D508 wire).
+    // Taken from the case: `strtok_r` shares this path, and a hard-coded `strtok` would run every
+    // reentrant case against the non-reentrant function.
     let name = steps[0].function.as_str();
     let call = orbistoun_service::implementation_named(name)?;
 
-    // **One buffer and one saved place per stream.** A sequence with no stream argument is
-    // stream zero, which is every sequence written before interleaving existed - so the older
-    // cases run through exactly the path they always did.
+    // One buffer and one saved place per stream. A sequence with no stream argument is stream zero.
     let mut buffers = [[b'@'; 24]; STREAMS];
     let mut saves = [0_u64; STREAMS];
     let mut used = 1;
@@ -709,8 +622,7 @@ fn run_strtok_sequence(steps: &[&Case]) -> Option<Vec<Answer>> {
         let delimiters = text(set)?;
 
         // A `Text` first argument starts that stream's walk and installs its buffer; a `Null`
-        // continues it. That is the function's own contract, and it is why the two shapes can
-        // be told apart from the record without a flag saying which is which.
+        // continues it, as the function's contract says.
         let start = match subject {
             Argument::Text(bytes) => {
                 if bytes.len() >= buffers[stream].len() {
@@ -725,9 +637,8 @@ fn run_strtok_sequence(steps: &[&Case]) -> Option<Vec<Answer>> {
             Argument::Null => 0,
             _ => return None,
         };
-        // **The reentrant form keeps its place here, where the caller can see it.** That is the
-        // whole difference between the two, so the storage is this test's, one per stream, and
-        // is threaded through every step - exactly as a caller must.
+        // The reentrant form keeps its place in caller storage, one per stream, threaded through
+        // every step.
         let save_ptr = if name == "strtok_r" {
             std::ptr::from_mut(&mut saves[stream]) as u64
         } else {
@@ -741,8 +652,8 @@ fn run_strtok_sequence(steps: &[&Case]) -> Option<Vec<Answer>> {
         ));
     }
 
-    // The buffers, on the last step: `strtok` mutates its subject, and a shim that answers the
-    // right tokens without writing the terminators is wrong in a way only the bytes show.
+    // The buffers, on the last step: a shim answering the right tokens without writing the
+    // terminators is wrong in a way only the bytes show.
     if let Some(last) = answers.last_mut() {
         if used == 1 {
             last.out
@@ -764,9 +675,8 @@ fn text(bytes: &[u8]) -> Option<std::ffi::CString> {
 
 /// The sign of a comparison, in the reference's own words.
 fn sign_of(returned: u64) -> String {
-    // The shim answers in a 64-bit register and the value is a C `int`, so the sign lives in
-    // bit 31 rather than bit 63 - reading it as `i64` would call every negative answer
-    // positive.
+    // The shim answers in a 64-bit register and the value is a C `int`, so the sign lives in bit
+    // 31.
     match returned as u32 as i32 {
         0 => "zero".to_owned(),
         n if n > 0 => "positive".to_owned(),
@@ -788,24 +698,10 @@ fn located(found: u64, base: u64, mut out: std::collections::BTreeMap<String, St
 
 /// `strdup` and `strndup`, whose answer is an address and whose contract is the bytes behind it.
 ///
-/// # The read is bounded, and that is not caution
-///
-/// A `strndup` that does not terminate is one of the bugs here, and reading the copy "until the
-/// NUL" would run off the end of exactly the allocation that bug produces - the test would
-/// crash instead of reporting, on the input it was written for. So the read stops at a bound.
-///
-/// # What these cases cannot reliably catch, measured rather than assumed
-///
-/// **A missing terminator, only sometimes.** The byte after an unterminated copy is whatever
-/// the allocator last left there, and it is a zero often enough to matter: breaking the
-/// terminator and running three times failed three, three and four cases, and *different* ones
-/// each time (D535).
-///
-/// So what these verify is the **contents** of a copy that is terminated. Termination itself is
-/// caught probabilistically, and calling that verified would be the confident wrong answer this
-/// whole file exists to avoid. Catching it properly needs the allocation poisoned before the
-/// call, which is the reference's technique for buffers it owns and not something a caller of
-/// `strdup` can do.
+/// The read is bounded, because an unterminated `strndup` would otherwise run off its own
+/// allocation. A missing terminator is caught only sometimes: the byte after an unterminated copy
+/// is whatever the allocator left there, often zero. These verify the contents of a terminated
+/// copy.
 fn run_duplicate(case: &Case) -> Option<Answer> {
     /// Far more than any case copies, and short enough that an unterminated answer is reported
     /// rather than walked.
@@ -827,8 +723,8 @@ fn run_duplicate(case: &Case) -> Option<Answer> {
     let mut bytes = Vec::with_capacity(BOUND);
     let mut terminated = false;
     for step in 0..BOUND {
-        // SAFETY: the address `strdup`/`strndup` just answered, read one byte at a time and
-        // stopped at the first NUL - which every conforming answer has inside the bound.
+        // SAFETY: the address `strdup`/`strndup` just answered, read one byte at a time up to the
+        // first NUL, which every conforming answer has inside the bound.
         let byte = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u8>(at + step)) };
         bytes.push(byte);
         if byte == 0 {
@@ -849,27 +745,10 @@ fn run_duplicate(case: &Case) -> Option<Answer> {
 
 /// The exactly-specified math functions, whose answers are bit patterns.
 ///
-/// # Which ones are here, and why the rest are not
-///
-/// `sqrt`, `fabs`, `ceil`, `floor`, `trunc` and `round` are **exactly specified** - IEEE-754
-/// and ISO C give each input one correct answer, so comparing bit-for-bit states the contract.
-///
-/// The transcendentals - `sin`, `cos`, `exp`, `log`, `pow` and around forty others, all
-/// implemented and all uncompared - are **deliberately absent**. They are permitted to differ
-/// in the last place, so a bit comparison would pin orbistoun to *glibc's* libm rather than to
-/// any contract. That is the same reason `rand` and `strerror` are out (D532, D533).
-///
-/// # Why the value is a bit pattern on both sides
-///
-/// A decimal rendering hides the last-place differences that are the whole point, and it hides
-/// the **sign of zero** - which is not a detail: `round(-0.5)` is `-0.0`, and an implementation
-/// answering `+0.0` passes every comparison that goes through a string.
-///
-/// # What this cannot prove
-///
-/// That the console's libm agrees with glibc on these. It cannot: the claim is that both
-/// implement the *specified* answer, and for these six there is one. For anything where the
-/// specification permits a range, no differential could settle it and this does not pretend to.
+/// `sqrt`, `fabs`, `ceil`, `floor`, `trunc` and `round` have one correct answer per input under
+/// IEEE 754 and ISO C, so bit-for-bit comparison states the contract. The transcendentals may
+/// differ in the last place, so comparing them would pin orbistoun to glibc's libm (D533). Bit
+/// patterns also keep the sign of zero: `round(-0.5)` is `-0.0`.
 fn run_math(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::float_implementation_named(&case.function)?;
     let [Argument::Unsigned(bits)] = case.arguments.as_slice() else {
@@ -884,25 +763,12 @@ fn run_math(case: &Case) -> Option<Answer> {
     })
 }
 
-/// `strftime(dest, room, format, tm)` - a specifier parser, which is the shape that hid two
-/// bugs in `sprintf` (D511).
+/// `strftime(dest, room, format, tm)`, a specifier parser.
 ///
-/// # What crosses, and what deliberately does not
-///
-/// Only the **nine `int` fields** of `struct tm`, as a `b:` blob. ISO C fixes their names and
-/// order and both sides agree on them; the fields past the ninth are not recorded, because
-/// orbistoun does not read them and the conversions that would need them (`%Z`, `%z`) are ones
-/// it refuses.
-///
-/// **The buffer is compared only when the call succeeded.** ISO C leaves the contents
-/// unspecified when the result does not fit, so the reference records none there and neither
-/// does this - comparing them would be comparing something neither implementation promises.
-///
-/// # What this cannot prove
-///
-/// That the console's `struct tm` is laid out this way. Both sides assume the ISO C order, and
-/// orbistoun cites FreeBSD's LP64 form where it reads them; if the target differs, every case
-/// here agrees and both are wrong together - which is the same limit every differential has.
+/// Only the nine `int` fields of `struct tm` cross, as a `b:` blob, in ISO C order; orbistoun reads
+/// nothing past them and refuses `%Z` and `%z`. The buffer is compared only when the call
+/// succeeded, since ISO C leaves it unspecified otherwise. Both sides assume the ISO C layout, so a
+/// target that differed would agree here and be wrong on both.
 fn run_strftime(case: &Case) -> Option<Answer> {
     let call = orbistoun_service::implementation_named(&case.function)?;
     let mut out = std::collections::BTreeMap::new();
@@ -916,8 +782,8 @@ fn run_strftime(case: &Case) -> Option<Answer> {
     };
     let format = text(format)?;
     let when = when.clone();
-    // The same window and the same poison the reference used, so a short render and a
-    // half-render are told apart by the bytes rather than by the count alone.
+    // The same window and poison the reference used, so a short render and a half-render differ in
+    // the bytes.
     let mut buffer = [b'@'; 64];
     if *room as usize > buffer.len() {
         return None;
@@ -936,21 +802,9 @@ fn run_strftime(case: &Case) -> Option<Answer> {
 
 /// The wide-character family, whose subjects arrive as `b:` blobs.
 ///
-/// # Why the subject is bytes and the offset is elements
-///
-/// A wide string is element data - `L'A'` is `41 00 00 00` - so it rides in the record as a
-/// byte blob and is handed over as one (D529). But `wcsrchr` answers a pointer *into* that
-/// array, and the reference records `at - s` in **`wchar_t` units**, because that is what
-/// pointer arithmetic on a `wchar_t *` produces. Dividing by four here is not a conversion, it
-/// is the same arithmetic on this side.
-///
-/// # What these cannot prove
-///
-/// That a wide character is four bytes on the console. Both sides assume it: glibc by its own
-/// definition, orbistoun by saying so where it implements them. If the target's `wchar_t` is
-/// not four bytes, every case here agrees with the reference and both are wrong together -
-/// which no differential can catch, because a differential compares two implementations and
-/// not either against hardware.
+/// A wide string is element data (`L'A'` is `41 00 00 00`), handed over as bytes. `wcsrchr` answers
+/// a pointer into that array, and the reference records `at - s` in `wchar_t` units, so the offset
+/// is divided by four here. Both sides assume a four-byte `wchar_t`.
 fn run_wide(case: &Case) -> Option<Answer> {
     /// Bytes per wide character, on both sides of this comparison.
     const WIDE: u64 = 4;
@@ -986,9 +840,8 @@ fn run_wide(case: &Case) -> Option<Answer> {
         }
         ("wcsncpy", [Argument::Bytes(source), Argument::Unsigned(count)]) => {
             let source = source.clone();
-            // Eight wide characters, poisoned - the same window and the same poison the
-            // reference used, so padding and non-termination are both visible rather than
-            // inferred from a length.
+            // Eight wide characters, poisoned as the reference poisons them, so padding and
+            // non-termination are visible.
             let mut destination = [0x40_u8; 8 * WIDE as usize];
             call(&args([
                 destination.as_mut_ptr() as u64,
@@ -1018,10 +871,8 @@ fn args(given: [u64; 3]) -> [u64; GUEST_ARG_REGISTERS] {
     out
 }
 
-/// Every case runs, and the shapes this does not know are named rather than skipped.
-///
-/// The failure a silent skip causes: a differential that compares nothing reports agreement,
-/// which is the most confident wrong answer available.
+/// Every case runs, and the shapes this does not know are named rather than skipped: a differential
+/// that compares nothing reports agreement.
 #[test]
 fn every_recorded_case_can_be_rebuilt() {
     let runs = references();
@@ -1037,7 +888,7 @@ fn every_recorded_case_can_be_rebuilt() {
     );
 }
 
-/// **Orbistoun answers what the reference answered, or the difference is written down.**
+/// Orbistoun answers what the reference answered, or the difference is written down.
 #[test]
 fn orbistoun_agrees_with_the_reference_or_says_where_it_does_not() {
     let diverges: std::collections::BTreeMap<&str, &str> = DIVERGES.iter().copied().collect();
@@ -1088,12 +939,8 @@ fn orbistoun_agrees_with_the_reference_or_says_where_it_does_not() {
         "differences nobody has written down (or stale entries): {surprises:#?}"
     );
 
-    // **Every rebuilt case is accounted for, not merely "some agreed".**
-    //
-    // `agreed > 0` was the first version of this, and it is the shape of assertion that lets
-    // a differential rot into nothing: a checker that silently stopped comparing sixty of
-    // sixty-three cases would still pass it. Counting successes is not checking for failures,
-    // so the count is asserted against the case list instead.
+    // Every rebuilt case is accounted for: the count is asserted against the case list, so a
+    // checker that silently stopped comparing most cases fails.
     let runs = references();
     let rebuilt: usize = runs
         .iter()
@@ -1108,13 +955,8 @@ fn orbistoun_agrees_with_the_reference_or_says_where_it_does_not() {
     );
 }
 
-/// `errno` is not compared, and the reason is recorded rather than left as an omission.
-///
-/// **Orbistoun keeps no guest `errno`.** The `sem_*` family says so in as many words: this
-/// project answers the code directly rather than setting a variable it does not maintain. So
-/// the reference's `errno` column is captured - it is a fact about the library and worth
-/// having when a guest `errno` exists - and comparing it today would report a difference in
-/// every case that sets one, which is a finding already known and recorded, not news.
+/// `errno` is not compared, because orbistoun keeps no guest `errno`: it answers the code directly.
+/// The reference's column is captured for when one exists.
 #[test]
 fn the_reference_records_errno_even_though_nothing_compares_it_yet() {
     let runs = references();

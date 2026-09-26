@@ -1,84 +1,13 @@
 //! From a submitted command buffer to shaders ready to run.
 //!
-//! # Why this is the shape a console emulator has
-//!
-//! Nothing here is ever called by the emulator on the guest's behalf. The guest builds
-//! a command buffer, writes shader addresses into hardware registers, and submits. That
-//! submission is the only input, and everything the frame will do is derivable from it
-//! and from guest memory. There is no high-level graphics call to intercept - on this
-//! generation the guest talks to the hardware, so a translator that waited for one
-//! would wait forever.
-//!
-//! So the direction of control is: walk the packets, read the registers the guest set,
-//! find the shader addresses among them, fetch those shaders *out of guest memory*,
-//! translate them, and emit backend commands. Each step is driven by what the guest
-//! did, not by what this crate expects.
-//!
-//! # What was missing before this module
-//!
-//! Every piece of that already existed and none of them touched. `walk` decoded packets,
-//! `shader_candidates` found addresses, `orbistoun-translate` turned shader bytes into
-//! SPIR-V, and `RenderCommand` described what a backend should do. A shader translator
-//! nothing calls is a library, not a subsystem, and it cannot be wrong in any way a test
-//! would notice - because the only shaders it ever saw were the ones its own tests
-//! handed it.
-//!
-//! # The address in a register is a *GPU* address
-//!
-//! Everything here reads a shader at the address a hardware register named, through
-//! [`GuestMemory`], which reads the guest's address space. Those are two different
-//! address spaces and this treats them as one.
-//!
-//! The loader side has established that a guest virtual address is the host address -
-//! an identity mapping, and load-bearing. Whether a *GPU* virtual address is also that
-//! same number is **not** established. The console has one coherent memory pool shared
-//! by both processors, which is the reason to expect it; expecting is not knowing.
-//!
-//! [`guest_address_of`] is the one place that assumption lives. It is the identity
-//! function today and exists so that when the answer arrives it is a single edit rather
-//! than a search. If the assumption is wrong the failure is loud - the read finds
-//! nothing mapped, or finds bytes that do not decode - which is the right shape for a
-//! guess to fail in.
-//!
-//! # Guest memory is a trait
-//!
-//! A shader lives at a guest virtual address, so this needs to read guest memory - and
-//! must not depend on the address space to do it. [`GuestMemory`] is the whole contract:
-//! one fallible read. That keeps this crate testable with a fake and keeps the address
-//! space free to change.
-//!
-//! # Shaders are cached by content
-//!
-//! A guest rebinds the same shader every draw, often thousands of times a frame.
-//! Translating it each time would dominate the cost of everything else here. The cache
-//! is keyed on the **bytes**, not on the address, because a guest is entitled to move a
-//! shader, to write a different one to the same address, and to have two addresses hold
-//! the same shader. An address-keyed cache is wrong in all three cases and right in the
-//! common one, which is the worst combination available.
-//!
-//! # Two ways a shader address arrives, and which one is believed
-//!
-//! The guest's graphics layer is a command-buffer *builder*: library calls append packets
-//! to a buffer the guest owns, and a separate call submits it. So a shader can be learned
-//! about twice - once because the guest asked the library to register it, and once
-//! because a register write in the submitted packets points at it.
-//!
-//! A [`RegisteredShader`] is believed over the register writes where the two overlap. Not
-//! because registration is more fundamental - the packets are what the hardware executes
-//! and the guest can hand-roll or patch a buffer without the library - but because
-//! registration is *stated* and the register path is *inferred*, and the table that
-//! inference rests on is the least verified thing in this crate.
-//!
-//! Neither replaces the other. A submission with no registrations still finds its shaders
-//! the hard way, and the report says which route found what - because the two disagreeing
-//! is the most useful signal available about whether that table is right.
-//!
-//! # A shader that will not translate is reported, never skipped
-//!
-//! It does not become a no-op and it does not stop the submission. The command referring
-//! to it is omitted, the failure is recorded with its address and its reason, and
-//! [`Submission::report`] carries it out. A frame missing a draw is visible; a frame
-//! where a draw silently drew nothing is a bug somebody chases for a week.
+//! The guest builds a command buffer, writes shader addresses into registers and submits it; that
+//! submission and guest memory are the only input (D112). This walks the packets, finds the shader
+//! addresses, fetches each shader from guest memory through [`GuestMemory`], translates it, and
+//! emits backend commands. A register holds a GPU address, read as a guest address through
+//! [`guest_address_of`]. Shaders are cached by content, since a guest may move, replace or alias
+//! one. A [`RegisteredShader`] is believed over an address inferred from register writes where both
+//! exist, and the report counts agreement and disagreement. A shader that does not translate is
+//! reported with its address and reason, and the command using it is omitted.
 
 use std::collections::BTreeMap;
 
@@ -104,10 +33,8 @@ use crate::registers::{
 
 /// Which queue a command buffer was submitted to.
 ///
-/// The guest has two, and they take different work: one draws and one dispatches compute.
-/// Which one a buffer came from decides which shader stages can legitimately appear in
-/// it, so a vertex shader in a compute submission is a decode that went wrong rather than
-/// an unusual frame.
+/// The guest's two queues take different work, so a vertex shader in a compute submission is a
+/// decode error rather than an unusual frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Queue {
     /// Drawing.
@@ -119,9 +46,8 @@ pub enum Queue {
 impl Queue {
     /// The shader stages a submission to this queue may bind.
     ///
-    /// Used to report a stage that cannot belong, rather than to silently drop it: a
-    /// vertex shader named by a compute submission means the register vocabulary
-    /// mis-identified something, and that is worth surfacing rather than filtering.
+    /// Used to report a stage that cannot belong rather than to drop it: it means the register
+    /// vocabulary misidentified something.
     pub const fn permits(self, stage: ShaderStage) -> bool {
         match self {
             Self::Draw => matches!(stage, ShaderStage::Vertex | ShaderStage::Fragment),
@@ -132,17 +58,9 @@ impl Queue {
 
 /// The host stage a shader named by the register vocabulary is translated for.
 ///
-/// # Vertex is the mesh stage
-///
-/// There is no host vertex stage for what the guest calls one: a shader bound to the vertex
-/// slot on this hardware is an NGG primitive shader, which declares how much it will emit and
-/// emits both the primitive and its vertices - a mesh shader (D688, worklog 558). It was
-/// attempted as a compute dispatch until the mesh stage existed, which reported the first
-/// instruction it could not translate rather than a policy.
-///
-/// The stage itself is the typed one the submission reconciled, not the vocabulary's string:
-/// the table's spelling is data and this is a dispatch, and the two should not be the same
-/// thing.
+/// A shader bound to the vertex slot is a primitive shader that emits primitives and their
+/// vertices, so it translates to a mesh stage (D688). The input is the typed stage the submission
+/// reconciled, not the vocabulary's string.
 const fn host_stage(stage: ShaderStage) -> Stage {
     match stage {
         ShaderStage::Fragment => Stage::Fragment,
@@ -153,9 +71,7 @@ const fn host_stage(stage: ShaderStage) -> Stage {
 
 /// Distinguishes the same shader translated for different stages, in the cache key.
 ///
-/// An arbitrary constant per stage, mixed into the content hash. It has to be *stable* across
-/// runs, because a report is diffed, and it has to differ per stage - nothing else about it
-/// matters.
+/// An arbitrary constant per stage, stable across runs so reports diff cleanly.
 const fn stage_salt(stage: Stage) -> u64 {
     match stage {
         Stage::Compute => 0,
@@ -166,8 +82,8 @@ const fn stage_salt(stage: Stage) -> u64 {
 
 /// Distinguishes the same shader translated for different mesh primitives, in the cache key.
 ///
-/// A mesh module's output shape is in the module (D688), so a point and a triangle built from
-/// the same bytes are different modules and must not share a cache entry (`-0c58`).
+/// A mesh module's output shape is in the module (D688), so a point and a triangle built from the
+/// same bytes are different modules.
 const fn primitive_salt(primitive: MeshPrimitive) -> u64 {
     match primitive {
         MeshPrimitive::Points => 0x504f_494e_0000_0001,
@@ -177,12 +93,10 @@ const fn primitive_salt(primitive: MeshPrimitive) -> u64 {
 }
 
 /// The mesh primitive a decoded topology asks the translator to assemble, or a refusal naming a
-/// topology that has no mesh-primitive shape (`-0c58`).
+/// topology that has no mesh-primitive shape.
 ///
-/// A point, line and triangle map onto the three the mesh extension emits. A rectangle list and
-/// any unknown value are **refused by name** rather than drawn as a triangle: assembling a shape
-/// the stream did not ask for is the plausible-output principle 3 forbids, at the last step
-/// before a picture.
+/// Point, line and triangle map onto the three the mesh extension emits. A rectangle list or an
+/// unknown value is refused by name rather than drawn as a triangle.
 fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, PipelineError> {
     match topology {
         PrimitiveTopology::PointList => Ok(MeshPrimitive::Points),
@@ -192,17 +106,8 @@ fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, Pipel
     }
 }
 
-/// Distinguishes the same shader translated against different memory windows, in the cache key.
-///
-/// **The same reason the stage is in there.** A window's base and length are compiled into the
-/// module - the base is subtracted before an index is masked, and the length is the mask - so
-/// two windows produce two different modules from one shader. A cache that ignored the window
-/// would serve whichever was translated first, and the shader would read the wrong memory while
-/// everything about the run looked fine.
-///
-/// Both halves, because a window that moved and a window that grew are both different windows.
 /// The strategy a stage's shader is translated with, at the wave width the stream declared for that
-/// stage (D141), and the cache-key salt that width contributes.
+/// stage (D145), and the cache-key salt that width contributes.
 ///
 /// A compute dispatch keeps the pipeline's own width: its width is in the dispatch initiator, which
 /// is not decoded.
@@ -231,9 +136,13 @@ fn stage_strategy(strategy: Strategy, stage: Stage, widths: WaveWidths) -> (Stra
     (strategy, salt)
 }
 
+/// Distinguishes the same shader translated against different memory windows, in the cache key.
+///
+/// A window's base and length are compiled into the module (the base is subtracted and the length
+/// is the mask), so two windows produce two modules from one shader.
 const fn window_salt(window: Window) -> u64 {
-    // The full address, rotated so the length lands in bits a low-half base does not reach; two
-    // windows that differ only in their high half (D711) are different windows.
+    // The full address, rotated so the length lands in bits a low-half base does not reach; windows
+    // that differ only in their high half are different windows.
     window.address().rotate_left(20) ^ window.words() as u64
 }
 
@@ -248,24 +157,19 @@ pub struct RegisteredShader {
 
 /// Reads guest memory.
 ///
-/// The only thing this module needs from the address space, kept to one method so a test
-/// can supply a `Vec<u8>` and a real emulator can supply the mapped guest pages.
+/// One method, so a test can supply a `Vec<u8>` and an emulator the mapped guest pages.
 pub trait GuestMemory {
     /// Bytes at a guest virtual address, or `None` if the range is not mapped.
     ///
-    /// Returning `None` rather than a short read or zeros is deliberate: a shader read
-    /// from unmapped memory is not a short shader, it is a wrong address, and zeros
-    /// decode into a plausible instruction stream.
+    /// `None` rather than zeros or a short read, because zeros decode into a plausible instruction
+    /// stream.
     fn read(&self, address: u64, length: usize) -> Option<&[u8]>;
 }
 
 /// The largest shader this will read out of guest memory.
 ///
-/// A shader carries no length. The decoder finds the end by reaching the instruction
-/// that stops the program, so this is the window it is allowed to look in - not a claim
-/// about how big shaders are. Reading past the real end is harmless because decoding
-/// stops at the terminator; reading past the end of a *mapping* is not, which is why the
-/// read narrows until it succeeds rather than demanding the whole window.
+/// A shader carries no length; decoding stops at its terminator, so this bounds the search, not the
+/// shader. The read narrows until it succeeds, because reading past a mapping fails.
 pub const MAX_SHADER_BYTES: usize = 64 * 1024;
 
 /// Why a shader could not be prepared.
@@ -279,10 +183,7 @@ pub struct ShaderFailure {
     pub reason: String,
 }
 
-/// What a submission turned out to contain.
-///
-/// Counts first, because counts are what decide where effort goes - the same argument
-/// the import survey made for the operating system, one layer down.
+/// What a submission contains, as counts first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubmissionReport {
     /// Packets the walk recognised.
@@ -291,16 +192,13 @@ pub struct SubmissionReport {
     pub register_writes: usize,
     /// Draws the stream asked for.
     ///
-    /// Auto-indexed draws only. An indexed one takes its count from separate state and an index
-    /// buffer in guest memory, and neither is read - so a stream full of indexed draws reports
-    /// none here, which is the honest answer rather than a guess at how many.
+    /// Auto-indexed draws only. An indexed draw's count comes from state and an index buffer that
+    /// are not read, so it is not counted.
     pub draws: usize,
-    /// The primitive the draw's geometry produces, from `VGT_GS_OUT_PRIM_TYPE` (`-0c58`).
+    /// The primitive the draw's geometry produces, from `VGT_GS_OUT_PRIM_TYPE`.
     ///
-    /// `None` when the stream set it nowhere. Carried so a reader - and a backend - can tell a point
-    /// draw from a triangle one, which the input-assembly register cannot: it reads `TRILIST` for
-    /// both. The backend's mesh output still emits triangles unconditionally, so this is decoded and
-    /// reported before it is drawn with; making the mesh output follow it is the rest of `-0c58`.
+    /// `None` when the stream set it nowhere. The input-assembly register reads `TRILIST` for both
+    /// point and triangle draws, so this is what tells them apart.
     pub primitive_topology: Option<PrimitiveTopology>,
     /// Which stages the stream declared thirty-two lanes wide, from `VGT_SHADER_STAGES_EN` and
     /// `SPI_PS_IN_CONTROL`. The primitive and pixel shaders are translated at these widths.
@@ -315,88 +213,51 @@ pub struct SubmissionReport {
     pub registered: usize,
     /// Shader addresses the register writes implied.
     pub inferred: usize,
-    /// Stages where both routes produced an address and the two matched.
-    ///
-    /// Evidence *for* the register vocabulary, and the only kind available.
+    /// Stages where both routes produced an address and the two matched: evidence for the register
+    /// vocabulary.
     pub agreed: usize,
     /// Stages where both produced an address and they differed.
     ///
-    /// Evidence against it, and the most useful line in this report: the registered
-    /// address is what the guest said, so a mismatch means the register table found the
-    /// wrong bits. Nothing else in this crate can tell you that.
+    /// The registered address is what the guest stated, so a mismatch means the register table
+    /// found the wrong bits.
     pub disagreed: Vec<Disagreement>,
-    /// Stages named by a route that the queue does not permit.
-    ///
-    /// A vertex shader in a compute submission is a decode that went wrong. Reported
-    /// rather than filtered, for the same reason.
+    /// Stages named by a route that the queue does not permit, reported rather than filtered.
     pub impossible_stages: Vec<String>,
     /// Every shader that did not, and why.
     pub failures: Vec<ShaderFailure>,
     /// Addresses a register named that guest memory recognised.
     ///
-    /// # What this is evidence *for*
-    ///
-    /// An address in a command stream is a **GPU** virtual address. Guest memory is
-    /// indexed by a guest one. Everything here reads the first as the second on the
-    /// assumption they are the same number, and nobody has confirmed that - it is the
-    /// open half of D101.
-    ///
-    /// Every address that resolves is a data point saying they coincided at least there,
-    /// and every one that does not is a data point against. Counted apart from the shader
-    /// outcome on purpose: an address can resolve perfectly and its shader still fail to
-    /// translate, and folding the two together would lose exactly the signal this exists
-    /// to collect.
-    ///
-    /// It is weak evidence per address and strong in aggregate. A run where every address
-    /// resolves is a run where the assumption held every time it was tested.
+    /// Each resolved address is evidence that the GPU and guest address of a shader coincide there.
+    /// Counted apart from the shader outcome, because an address can resolve and its shader still
+    /// fail to translate.
     pub addresses_resolved: usize,
     /// Addresses a register named that guest memory did not recognise.
     ///
-    /// Two causes, and they want different responses: the register decode found the wrong
-    /// bits, or a GPU address is not a guest address. The failure message says which to
-    /// suspect first, and this count says how often it happens.
+    /// Either the register decode found the wrong bits or a GPU address is not a guest address.
     pub addresses_unresolved: usize,
-    /// Shaders that translated, and something about them worth knowing.
-    ///
-    /// Separate from `failures` because these *worked*. The one that exists today is a
-    /// shader that had to be translated at the slowest fidelity, which is correct and
-    /// costs a factor of sixty four - a thing a caller should be told rather than left
-    /// to find in a field.
+    /// Shaders that translated, with something about them worth knowing, such as needing the
+    /// slowest fidelity.
     pub warnings: Vec<String>,
-    /// Every distinct texture the draws' pixel shaders name, in first-use order (worklog 827).
+    /// Every distinct texture the draws' pixel shaders name, in first-use order.
     ///
-    /// Read the way the shader reads it: the fragment stage's user data words 0 and 1 are its
-    /// descriptor table, and the image descriptor is the table's first eight words (the GL context's
-    /// textured shader loads them with `s_load_dwordx8 s[4:11], s[0:1], 0x00`). What a backend needs
-    /// to bind a draw's real texture - size, format, tiling, where the texels are - measured before
-    /// anything is bound, because which of these the detiler can already serve decides what comes
-    /// next.
+    /// Read the way the shader reads it: the fragment stage's user data words 0 and 1 address its
+    /// descriptor table, whose first eight words are the image descriptor (the GL context's
+    /// textured shader loads them with `s_load_dwordx8 s[4:11], s[0:1], 0x00`).
     pub textures: Vec<ImageDescriptor>,
 }
 
 impl SubmissionReport {
-    /// This submission in the shader work's progress vocabulary.
+    /// This submission in the shader corpus's progress vocabulary (D129).
     ///
-    /// # Why not a second set of counters
-    ///
-    /// The shader corpus already reports `FURTHER` / `same` / `BACK` against the previous
-    /// run (D148), and a submission is the same question asked of shaders that arrived
-    /// from a guest rather than from a directory. Given its own progress format it would
-    /// drift from that one immediately, and a reader would have to learn which numbers
-    /// meant what depending on where the shaders came from.
-    ///
-    /// So it converts. A submission's "complete" is a shader that translated, because
-    /// that is the same claim the corpus makes: every instruction in it is understood.
-    ///
-    /// Blockers are the failures' reasons rather than instruction names - a submission
-    /// fails for reasons a corpus never sees, like an address that does not resolve, and
-    /// flattening those into instruction names would hide the ones worth acting on.
+    /// A submission asks the corpus's question of shaders that arrived from a guest, so it reports
+    /// in the same form. "Complete" is a shader that translated. Blockers are failure reasons
+    /// rather than instruction names, because a submission fails for reasons a corpus never sees,
+    /// such as an unresolved address.
     pub fn summary(&self) -> orbistoun_shader::coverage::Summary {
         orbistoun_shader::coverage::Summary {
             complete: self.shaders_translated,
-            // A submission has always counted shaders a translator actually ran over -
-            // that is what `shaders_translated` is - so it is comparable with a corpus run
-            // that does the same and not with one that counted supported opcodes.
+            // Counts shaders a translator ran over, comparable with a corpus run that does the
+            // same.
             attempted: true,
             shaders: self.shaders_found,
             translatable: self.shaders_translated,
@@ -436,52 +297,46 @@ pub struct Submission {
     /// Modules the commands refer to, for a backend that has not seen them before.
     pub modules: BTreeMap<ResourceId, Vec<u32>>,
     /// Colour render targets the commands select, by the id a [`RenderCommand::SetRenderTargets`]
-    /// names, to their dimensions. A target carries no bytes - only the size a backend allocates its
-    /// attachment to - so it rides here rather than in [`Self::modules`], and the driver makes it
-    /// resident the same way (D701).
+    /// names, to their dimensions. A target carries no bytes, only the size a backend allocates, so
+    /// it rides here rather than in [`Self::modules`] and is made resident the same way (D701).
     pub targets: BTreeMap<ResourceId, ColourTargetExtent>,
-    /// Colour target zero's full record - base address and extent - decoded from the stream
-    /// (`CB_COLOR0_BASE` + `ATTRIB2`, worklog 655). A backend needs the base to find the attachment in
-    /// guest memory; the extent it also holds mirrors the entry in [`Self::targets`]. `None` when the
-    /// stream set neither register.
+    /// Colour target zero's base address and extent, decoded from `CB_COLOR0_BASE` and `ATTRIB2`.
+    /// The base locates the attachment in guest memory; the extent mirrors the entry in
+    /// [`Self::targets`]. `None` when the stream set neither register.
     pub colour_target: Option<ColourTarget>,
-    /// Colour target zero's tiling mode (`CB_COLOR0_ATTRIB3`'s `COLOR_SW_MODE`, worklog 657). A backend
-    /// detiles a `Tiled64KbRX` attachment and reads a `Linear` one straight. `None` when the stream set
-    /// no mode.
+    /// Colour target zero's tiling mode (`CB_COLOR0_ATTRIB3`'s `COLOR_SW_MODE`). A backend detiles
+    /// a `Tiled64KbRX` attachment and reads a `Linear` one directly. `None` when the stream set no
+    /// mode.
     pub colour_target_tiling: Option<SwizzleMode>,
-    /// Colour target zero's element layout (`CB_COLOR0_INFO`, worklog 832) - the byte order a frame
-    /// written back into it must use. `None` when the stream set none.
+    /// Colour target zero's element layout (`CB_COLOR0_INFO`), the byte order a frame written back
+    /// into it must use. `None` when the stream set none.
     pub colour_target_format: Option<ColourTargetFormat>,
-    /// How many distinct colour target zero bases the stream wrote (worklog 832): one frame written
-    /// back for a submission is honest only when its draws all went to one target.
+    /// How many distinct colour target zero bases the stream wrote: one frame is written back only
+    /// when all draws went to one target.
     pub colour_target_bases: usize,
-    /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`, worklog 669). `None`
-    /// when the stream set none - a draw with no depth control has no depth test, not an assumed one.
+    /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`). `None` when the
+    /// stream set none: a draw with no depth control has no depth test.
     pub depth_control: Option<DepthControl>,
-    /// The stencil operations a draw applies on each test outcome (`DB_STENCIL_CONTROL`, worklog 670).
-    /// `None` when the stream set none.
+    /// The stencil operations a draw applies on each test outcome (`DB_STENCIL_CONTROL`). `None`
+    /// when the stream set none.
     pub stencil_control: Option<StencilControl>,
-    /// Colour target zero's blend state (`CB_BLEND0_CONTROL`, worklog 671). `None` when the stream set
-    /// none.
+    /// Colour target zero's blend state (`CB_BLEND0_CONTROL`). `None` when the stream set none.
     pub blend_control: Option<BlendControl>,
-    /// The guest-memory window this submission's shaders read, as words, read out of guest memory at
-    /// the pipeline's window (D703). Frame-level rather than per-draw, because every module is
-    /// compiled against one window (worklog 635). Empty when the window is not mapped - a stream
-    /// against the default window at address zero reads nothing, and a real one reads its region.
+    /// The guest-memory window this submission's shaders read, as words, read at the pipeline's
+    /// window (D703). Frame-level, because every module is compiled against one window. Empty when
+    /// the window is not mapped.
     pub guest_memory: Vec<u32>,
-    /// The guest address [`Self::guest_memory`]'s first word was read from (worklog 836) - what a
-    /// diagnostic needs to find an address the shaders form inside the window.
+    /// The guest address of [`Self::guest_memory`]'s first word, for locating an address the
+    /// shaders form inside the window.
     pub guest_memory_base: u64,
     /// What was seen and what failed.
     pub report: SubmissionReport,
 }
 
-/// Why a shader could not be prepared, and whether its *address* was the problem.
+/// Why a shader could not be prepared, and whether its address was the problem.
 ///
-/// The split is the whole point. An address that guest memory does not recognise is
-/// evidence about the address space; anything after that is evidence about the shader.
-/// Reporting them as one string loses the first, which is the only measurement available
-/// for the open half of D101.
+/// An unresolved address is evidence about the address space; anything after it is evidence about
+/// the shader, so the two are kept apart.
 #[derive(Debug)]
 enum PrepareFailure {
     /// Guest memory has nothing at the address the register named.
@@ -499,24 +354,11 @@ impl PrepareFailure {
     }
 }
 
-/// A translated shader, and enough to notice if the key ever lied.
+/// A translated shader, with enough of its bytes to notice if the key stops identifying it.
 ///
-/// # Why anything beyond the resource is kept
-///
-/// The cache key is a sixty-four-bit hash of the shader's bytes. A *collision* is not the
-/// worry - at this width, with a few thousand shaders, that probability is around one in
-/// a million million. The worry is that the key stops meaning what it did.
-///
-/// It is computed over `decoded.consumed`, which is the *decoder's* idea of where the
-/// shader ends, not a property of the guest's bytes alone. That number has already
-/// changed once: the decoder used to stop at the first end-of-program instruction and now
-/// stops at the padding past the end, so the same shader keys differently before and
-/// after. A hit is served without ever looking at the bytes again, so a key that has
-/// quietly changed meaning serves a stale module and the report says nothing at all.
-///
-/// Keeping the length and the first and last words turns that from silent into loud, for
-/// a few comparisons per bind. It is not a full re-compare and is not meant to be: it is
-/// there to catch the key meaning something different, not to catch an adversary.
+/// The key hashes `decoded.consumed`, the decoder's idea of where the shader ends, so a decoder
+/// change can change what a key means. A hit is served without re-reading the bytes; keeping the
+/// length and the first and last words makes such a change loud for a few comparisons per bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Cached {
     resource: ResourceId,
@@ -543,11 +385,8 @@ impl Cached {
 
     /// The word at `at`, zero-padded when fewer than four bytes remain.
     ///
-    /// Padded rather than answered as zero. Reading past the end returned zero for *any*
-    /// short shader, so two different ones of the same short length compared equal - the
-    /// exact "two shaders satisfy one entry" fault this type exists to prevent, hiding at
-    /// the one end nobody thinks about. A shader shorter than a word is not a real shader,
-    /// but `read_window` narrows rather than refusing, so one can reach here.
+    /// Padding rather than returning zero keeps two different short shaders of the same length
+    /// distinct; `read_window` narrows rather than refusing, so a short one can reach here.
     fn word(bytes: &[u8], at: usize) -> u32 {
         let mut packed = [0u8; 4];
         let available = bytes.get(at..).unwrap_or_default();
@@ -557,10 +396,9 @@ impl Cached {
     }
 }
 
-/// Translates submissions, remembering shaders between them.
+/// Translates submissions, caching shaders between them.
 ///
-/// Long-lived on purpose: the cache is the point, and a frame's worth of submissions
-/// binds the same handful of shaders over and over.
+/// Long-lived, because a frame's submissions bind the same few shaders repeatedly.
 #[derive(Debug)]
 pub struct Pipeline {
     encodings: EncodingTable,
@@ -569,25 +407,16 @@ pub struct Pipeline {
     strategy: Strategy,
     /// The span of guest memory a translated shader may reach, and where it starts.
     ///
-    /// **Named by the caller, not derived from the submission, and that is the open half.**
-    /// Every memory access a translated shader makes is checked against this; anchored in the
-    /// wrong place, every one is refused and the shader draws nothing (worklog 561). A window
-    /// placed where a record says the buffers were is what got the console's own shaders
-    /// fetching vertices and landing a store (worklog 570).
-    ///
-    /// Deriving one from the command stream needs a register vocabulary that says which
-    /// register carries a buffer address, and nothing has measured that - so the default is
-    /// the default, and a caller that knows can say. Inventing the mapping instead would
-    /// produce a plausible frame drawn from the wrong memory, which is what the vocabulary
-    /// exists to prevent (`REQ-20260914T2348Z-4e71`).
+    /// Named by the caller rather than derived from the submission: no measured register vocabulary
+    /// says which register carries a buffer address. Every shader memory access is checked against
+    /// it, so a misplaced window refuses every access.
     window: Window,
-    /// Whether each submission places the window itself, from the constant base its geometry
-    /// shader forms (D711) - set by [`Self::placing_window_from_shaders`] for a live guest, whose
-    /// shaders name their own buffers; off for a caller that places the window by hand.
+    /// Whether each submission places the window itself, from the constant base its geometry shader
+    /// forms (D711). Set by [`Self::placing_window_from_shaders`] for a live guest; off for a
+    /// caller that places the window by hand.
     places_window: bool,
-    /// Whether translated shaders read their stage's user data at entry (worklog 826) - set by
-    /// [`Self::feeding_user_data`] for a backend that supplies it per draw; off for callers whose
-    /// modules must stay as they were.
+    /// Whether translated shaders read their stage's user data at entry. Set by
+    /// [`Self::feeding_user_data`] for a backend that supplies it per draw.
     feeds_user_data: bool,
     /// Each stage's user-data layout for the submission being prepared, vertex then fragment.
     user_data: [UserData; 2],
@@ -595,13 +424,12 @@ pub struct Pipeline {
     cache: BTreeMap<u64, Cached>,
     /// The bytes each shader address decoded to, end-of-program included.
     decoded: BTreeMap<u64, Vec<u8>>,
-    /// The constant base each vertex program address formed (D711), with the program bytes it was
-    /// found in.
+    /// The constant base each vertex program address formed, with the program bytes it was found
+    /// in.
     bases: BTreeMap<u64, (Vec<u8>, Option<u64>)>,
-    /// Each translated module's texture sources, by its resource (worklog 840).
+    /// Each translated module's texture sources, by its resource.
     texture_sources: BTreeMap<ResourceId, Vec<TextureSource>>,
-    /// Texels read from guest memory, shared across submissions while their bytes are unchanged
-    /// (worklog 851).
+    /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
     next_resource: u64,
 }
@@ -611,8 +439,8 @@ impl Pipeline {
     ///
     /// # Errors
     ///
-    /// If a built-in table does not load, which is a build fault rather than anything
-    /// about a guest.
+    /// If a built-in table does not load, which is a build fault rather than anything about a
+    /// guest.
     pub fn new(strategy: Strategy) -> Result<Self, PipelineError> {
         Ok(Self {
             encodings: EncodingTable::builtin().map_err(|e| PipelineError::Table(e.to_string()))?,
@@ -632,12 +460,11 @@ impl Pipeline {
         })
     }
 
-    /// Has every submission place the window at the constant 64-bit base its geometry shader forms
-    /// for its memory accesses, and leaves the window where it was when the shader forms none (D711).
+    /// Has every submission place the window at the constant 64-bit base its geometry shader forms,
+    /// and leaves the window where it was when the shader forms none (D711).
     ///
-    /// For a live guest, whose shaders name their own buffers in their own words. A caller that
-    /// places the window by hand - every capture test, which relocates a vertex buffer - leaves this
-    /// off and keeps the window it chose.
+    /// For a live guest, whose shaders name their own buffers. A caller that places the window by
+    /// hand, such as a capture test that relocates a vertex buffer, leaves this off.
     #[must_use]
     pub const fn placing_window_from_shaders(mut self) -> Self {
         self.places_window = true;
@@ -645,10 +472,9 @@ impl Pipeline {
     }
 
     /// Has every shader read its stage's user data at entry, from the push-constant block the
-    /// backend fills per draw from each [`RenderCommand::SetUserData`] (worklog 826).
+    /// backend fills per draw from each [`RenderCommand::SetUserData`].
     ///
-    /// For the live path, whose backend supplies the block. A caller whose backend does not leaves
-    /// this off, and its modules read no block and are word for word what they were.
+    /// For a backend that supplies the block. Otherwise modules read no block and are unchanged.
     #[must_use]
     pub const fn feeding_user_data(mut self) -> Self {
         self.feeds_user_data = true;
@@ -657,13 +483,9 @@ impl Pipeline {
 
     /// Places the guest-memory window every shader this pipeline translates is built against.
     ///
-    /// The default is at address zero, which refuses every access a real guest shader makes -
-    /// a guest's buffers are not there. A caller that knows where they are says so here.
-    ///
-    /// **It clears the cache**, because the cached modules were built against the old window
-    /// and are not the modules this one would produce. The key carries the window too, so the
-    /// clear is belt and braces rather than the mechanism - but a cache holding entries no key
-    /// will ever match again is just memory nobody can reach.
+    /// The default is at address zero, which refuses every access a real guest shader makes. Clears
+    /// the cache: the key carries the window too, but entries for the old window could never be hit
+    /// again.
     #[must_use]
     pub fn with_window(mut self, window: Window) -> Self {
         self.window = window;
@@ -682,26 +504,11 @@ impl Pipeline {
         self.cache.len()
     }
 
-    /// Submits a command buffer that lives in **guest memory**.
+    /// Submits a command buffer that lives in guest memory.
     ///
-    /// # Why this exists as well as [`Pipeline::submit`]
-    ///
-    /// `submit` takes bytes, which is what a test has. A guest has an *address and a
-    /// length*: it builds a command buffer somewhere in its own memory and then calls the
-    /// vendor's submit function with a pointer to it. This is the shape that call site
-    /// needs, and it is deliberately the whole of what the shim above has to know - read
-    /// the arguments, hand them here.
-    ///
-    /// **Nothing calls this yet**, and that is a statement about the loader rather than
-    /// about this crate: no guest has reached a submission. The entry point exists so that
-    /// when one does, the work is wiring a shim to a function rather than designing an
-    /// interface under time pressure - and so the address the guest passes is measured on
-    /// its way in, the same way every shader address already is.
-    ///
-    /// Answers `None` when the command buffer itself is not readable. That is the same
-    /// evidence a shader address gives about D101, one level earlier: the pointer came
-    /// from the guest's own CPU-side code, so if *that* does not resolve, the fault is in
-    /// the shim's arguments rather than in any assumption about GPU addresses.
+    /// [`Pipeline::submit`] takes bytes; a guest's submit call passes an address and a length, and
+    /// this is the shape that call site needs. Returns `None` when the command buffer is not
+    /// readable, which points at the call's arguments rather than at GPU address translation.
     pub fn submit_at(
         &mut self,
         address: u64,
@@ -716,13 +523,9 @@ impl Pipeline {
 
     /// Prepares one submitted command buffer.
     ///
-    /// Never fails on the guest's account. A command buffer full of packets nobody
-    /// understands produces an empty command list and a report saying so, which is the
-    /// honest answer and the one a worklist can act on.
-    ///
-    /// `registered` is what the guest told the graphics library about, if anything. It is
-    /// believed where it overlaps with what the register writes imply, and the report
-    /// records where the two disagreed.
+    /// Never fails on the guest's account: packets nobody understands produce an empty command list
+    /// and a report saying so. `registered` is what the guest told the graphics library about; it
+    /// is believed where it overlaps the register writes, and the report records disagreements.
     pub fn submit(
         &mut self,
         stream: &[u8],
@@ -746,12 +549,9 @@ impl Pipeline {
             ..Submission::default()
         };
 
-        // **The colour target, before anything that draws into it.** A stream sizes its target with
-        // a register write; decoding that (worklog 637) lets a backend allocate a real attachment
-        // rather than a guessed square. Emitted first, because it is state a draw reads. The `targets`
-        // map is still keyed by extent - the size register is corroborated by both sources where the
-        // base once was not (D702) - but the base *is* decoded now (`CB_COLOR0_BASE`, worklog 655) and
-        // rides on `colour_target` below, so a backend can find the attachment in guest memory.
+        // The colour target first, because a draw reads it. Decoding its size register lets a
+        // backend allocate a real attachment. The `targets` map is keyed by extent (D702); the
+        // decoded base rides on `colour_target` below.
         if let Some(extent) = colour_target_extent_at(&writes) {
             let target = colour_target_id(extent);
             submission.targets.insert(target, extent);
@@ -761,11 +561,9 @@ impl Pipeline {
             });
         }
 
-        // The pipeline state a draw runs under, decoded from the same stream and carried for a backend
-        // to build its pipeline from: colour target zero's base and tiling (worklogs 655/657), and the
-        // depth, stencil and blend state (worklogs 669/670/671). Each is `None` when the stream set its
-        // register nowhere - the state is read, never assumed, so a draw with no depth control has no
-        // depth test rather than a default one.
+        // Colour target zero's base and tiling, and the depth, stencil and blend state, for a
+        // backend to build its pipeline from. Each is `None` when the stream set its register
+        // nowhere: state is read, never assumed.
         submission.colour_target = colour_target_at(&writes);
         submission.colour_target_tiling = colour_swizzle_mode_at(&writes);
         submission.colour_target_format = colour_target_format_at(&writes);
@@ -773,18 +571,15 @@ impl Pipeline {
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&writes);
-        // The primitive the draw produces, read from `VGT_GS_OUT_PRIM_TYPE` - a point draw and a
-        // triangle draw are told apart here, and `prepare` threads this into the mesh module's
-        // output shape (points, lines or triangles), so the two no longer render alike (`-0c58`).
+        // The primitive the draw produces, from `VGT_GS_OUT_PRIM_TYPE`; `prepare` makes it the mesh
+        // module's output shape.
         submission.report.primitive_topology = primitive_topology_at(&writes);
-        // And how wide each stage's wave is: the encodings are identical at either width, so the
-        // stream's registers are the only place it is said (D141).
+        // Each stage's wave width: the encodings are identical at either width, so the stream's
+        // registers are the only source (D145).
         submission.report.wave_widths = crate::registers::wave_widths_at(&writes);
 
-        // The scissor a stream set, as a viewport the backend restricts a draw to (worklog 646). The
-        // generic scissor's corners are decoded (register offsets and layout mined from a hardware
-        // draw capture) into the command's rectangle; a stream that set no scissor emits none, so a
-        // draw covers the whole target.
+        // The scissor as a viewport the backend restricts a draw to; a stream that set none emits
+        // none, so a draw covers the whole target.
         if let Some(scissor) = scissor_at(&writes) {
             submission.commands.push(RenderCommand::SetViewport(Rect {
                 x: i32::try_from(scissor.x).unwrap_or(0),
@@ -794,11 +589,8 @@ impl Pipeline {
             }));
         }
 
-        // The guest-memory window this frame's shaders read, out of guest memory at the pipeline's
-        // window (D703). Read here, once, because every module shares the one window; a shader
-        // fetches its vertices from it. The default window at address zero is unmapped and reads
-        // nothing, so a stream that never placed its window carries an empty region rather than a
-        // guessed one - the honest answer, and what a shader reading it would find.
+        // The guest-memory window this frame's shaders read, read once because every module shares
+        // it (D703). The default window at address zero is unmapped and reads empty.
         let candidates = Self::reconcile(queue, registered, &inferred, &mut submission.report);
         span(Span::PrepareEnvironment, || {
             self.set_environment(&candidates, &writes, memory);
@@ -821,9 +613,7 @@ impl Pipeline {
             )
         });
 
-        // **The draws and dispatches, after the binds.** A stream sets its state and then asks for
-        // geometry, so emitting them in that order is what a backend can act on - and the order is
-        // the stream's own, from the packet walk rather than from anything this function decides.
+        // Draws and dispatches after the binds, in the stream's own packet order.
         span(Span::PrepareGeometry, || {
             push_geometry_commands(
                 &mut submission.commands,
@@ -871,11 +661,10 @@ enum Prepared {
 }
 
 impl Pipeline {
-    /// Prepares the reconciled candidates and binds them, then works out **the shader each draw ran**
-    /// (worklog 835): the program addresses in force at its packet, translated where the first pass
-    /// did not already, so a stream that swaps a stage's program between draws binds each draw's
-    /// own. A stage the guest registered keeps its registration. Returns each draw's shaders, in draw
-    /// order.
+    /// Prepares the reconciled candidates and binds them, then finds the shader each draw ran: the
+    /// program addresses in force at its packet, translated where the first pass did not, so a
+    /// stream that swaps a stage's program between draws binds each draw's own. A registered stage
+    /// keeps its registration. Returns each draw's shaders, in draw order.
     fn bind_shaders(
         &mut self,
         candidates: &[Candidate],
@@ -884,8 +673,8 @@ impl Pipeline {
         memory: &impl GuestMemory,
         submission: &mut Submission,
     ) -> Vec<Vec<(ShaderStage, ResourceId)>> {
-        // Every (stage, address) prepared so far, and what it became - `None` for one that failed, so
-        // it is tried and reported once however many draws name it.
+        // Every (stage, address) prepared so far and what it became; `None` for a failure, so it is
+        // tried and reported once however many draws name it.
         let mut prepared: BTreeMap<(u32, u64), Option<ResourceId>> = BTreeMap::new();
         let registered_stages: Vec<ShaderStage> = candidates
             .iter()
@@ -908,12 +697,11 @@ impl Pipeline {
         }
 
         let mut per_draw = Vec::new();
-        // One pass over the stream's writes for all its draws, not one per draw (worklog 844).
+        // One pass over the stream's writes for all its draws.
         let mut sweep = crate::registers::RegisterSweep::new(writes);
         let shader_registers: Vec<u32> = self.vocabulary.shader_register_ids().collect();
-        // A draw whose shader registers hold the same values as the previous draw's runs the same
-        // shaders - which stage runs what is those values and nothing else - and a GL frame
-        // rewrites one pair's addresses unchanged before each of thousands of draws.
+        // A draw whose shader registers hold the previous draw's values runs the same shaders; a GL
+        // frame rewrites the same addresses before each of many draws.
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
         for draw in draws {
@@ -981,9 +769,7 @@ impl Pipeline {
                 submission.report.addresses_resolved += 1;
                 submission.report.shaders_translated += 1;
                 Some(match prepared {
-                    // Only a module the backend has not seen travels with the
-                    // submission. A cached one is already there, and re-sending it
-                    // every draw would undo the point of caching it.
+                    // Only a module the backend has not seen travels with the submission.
                     Prepared::Fresh {
                         resource,
                         module,
@@ -1000,9 +786,8 @@ impl Pipeline {
                 })
             }
             Err(failure) => {
-                // Counted before the reason is consumed, and counted apart from the
-                // shader outcome: whether the address resolved is evidence about the
-                // address space, and the two questions have different answers.
+                // Counted before the reason is consumed, and apart from the shader outcome: address
+                // resolution is evidence about the address space.
                 match failure {
                     PrepareFailure::Unresolved(_) => {
                         submission.report.addresses_unresolved += 1;
@@ -1021,11 +806,9 @@ impl Pipeline {
 
     /// Decides which shader addresses to prepare, from both routes.
     ///
-    /// Registration wins where the two overlap, and every overlap is counted either way -
-    /// agreement is the only evidence available that the register vocabulary is right,
-    /// and disagreement is the only evidence that it is wrong. Neither is obtainable
-    /// without both routes running, which is why the inferred path keeps running even
-    /// when registration has already answered.
+    /// Registration wins where the two overlap, and every overlap is counted. Agreement and
+    /// disagreement are the only evidence about the register vocabulary, so the inferred route runs
+    /// even when registration has answered.
     fn reconcile(
         queue: Queue,
         registered: &[RegisteredShader],
@@ -1088,16 +871,9 @@ impl Pipeline {
 
     /// Reads, decodes, translates and caches the shader at a guest address.
     ///
-    /// # The order of operations is the point
-    ///
-    /// Decode, then hash, then check the cache, then translate. Decoding first is what
-    /// makes the key the shader's *actual bytes* rather than the arbitrary window it was
-    /// read from - two identical shaders followed by different data would otherwise miss
-    /// the cache every time, and a shader whose trailing data changed would translate
-    /// again on every frame.
-    ///
-    /// Decoding is a linear walk and translation expands every instruction across
-    /// sixty-four lanes, so the expensive half is the one behind the cache.
+    /// Decode, then hash, then check the cache, then translate. Decoding first keys the cache on
+    /// the shader's own bytes rather than the window it was read from, and keeps the expensive
+    /// step, translation, behind the cache.
     fn prepare(
         &mut self,
         address: u64,
@@ -1105,17 +881,16 @@ impl Pipeline {
         (topology, widths): (Option<PrimitiveTopology>, WaveWidths),
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
-        // A shader already decoded at this address, and still byte for byte the same, is not decoded
-        // again: a decode is a function of the bytes, and a GL frame names the same few shaders in
-        // every submission.
+        // A shader already decoded at this address with the same bytes is not decoded again: a
+        // decode is a function of the bytes.
         if let Some(known) = self.decoded.get(&address)
             && let Some(bytes) = memory.read(guest_address_of(address), known.len())
             && bytes == known.as_slice()
         {
             return self.prepare_decoded(address, stage, (topology, widths), (bytes, None));
         }
-        // The register named a GPU address; guest memory is indexed by a guest one.
-        // They are assumed to be the same number - see `guest_address_of`.
+        // The register named a GPU address; guest memory is indexed by a guest one. See
+        // `guest_address_of`.
         let window = read_window(memory, guest_address_of(address)).ok_or_else(|| {
             PrepareFailure::Unresolved(format!(
                 concat!(
@@ -1154,12 +929,11 @@ impl Pipeline {
         self.prepare_decoded(address, stage, (topology, widths), (shader, Some(&decoded)))
     }
 
-    /// Translates and caches a shader whose bytes, end-of-program included, are known - or finds
-    /// its translation in the cache.
+    /// Translates and caches a shader whose bytes, end-of-program included, are known, or finds its
+    /// translation in the cache.
     ///
-    /// `decoded` is the decode of exactly `shader` when the caller has one. When it does not (the
-    /// bytes were matched against an earlier decode at the same address), the decode is done again,
-    /// only if a translation is needed: it is a function of the bytes, so it is the same decode.
+    /// `decoded` is the decode of exactly `shader` when the caller has one. Otherwise the decode is
+    /// repeated only if a translation is needed; it is a function of the bytes, so it is the same.
     fn prepare_decoded(
         &mut self,
         address: u64,
@@ -1168,9 +942,8 @@ impl Pipeline {
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
     ) -> Result<Prepared, PrepareFailure> {
         let host_stage = host_stage(stage);
-        // The primitive the mesh output assembles, from the stream's decoded topology. Only the
-        // mesh stage emits primitives, so only there does the topology matter or a bad one refuse;
-        // a stream that set no topology draws the measured triangle (`-0c58`).
+        // The primitive the mesh output assembles, from the stream's topology. Only the mesh stage
+        // emits primitives; a stream that set no topology draws triangles.
         let primitive = if host_stage == Stage::Mesh {
             match topology {
                 Some(t) => {
@@ -1181,21 +954,15 @@ impl Pipeline {
         } else {
             MeshPrimitive::default()
         };
-        // **Keyed by content, stage and primitive, not content alone.** The same instructions
-        // translated for a fragment stage and for a compute dispatch are different modules - one
-        // declares inputs and a colour output and the other publishes its registers - and a mesh
-        // module's output shape is in the module too, so a point and a triangle from the same
-        // bytes are different modules. A cache that ignored any of these would serve whichever was
-        // translated first.
+        // Keyed by content, stage and primitive: one instruction stream translated for different
+        // stages or output shapes gives different modules.
         let user_data = match stage {
             ShaderStage::Vertex => self.user_data[0],
             ShaderStage::Fragment => self.user_data[1],
             ShaderStage::Compute => UserData::default(),
         };
         let (strategy, width_salt) = stage_strategy(self.strategy, host_stage, widths);
-        // The user-data layout is in the module too: the same bytes reading two words at entry and
-        // reading none are different modules (worklog 826). So is the width: a mask is one register
-        // or two.
+        // The user-data layout and the wave width are in the module too.
         let key = content_hash(shader)
             ^ stage_salt(host_stage)
             ^ primitive_salt(primitive)
@@ -1208,11 +975,8 @@ impl Pipeline {
                     resource: cached.resource,
                 });
             }
-            // The key matched and the shader did not. Refused rather than re-translated,
-            // because the two possible causes - a hash collision, or a key that has
-            // stopped meaning what it did - are both faults in this crate, and quietly
-            // recovering from either would leave the cache in a state nobody can reason
-            // about.
+            // The key matched and the shader did not. Refused rather than re-translated: a hash
+            // collision and a key that changed meaning are both faults in this crate.
             return Err(PrepareFailure::Resolved(format!(
                 concat!(
                     "the shader at {:#x} hashes to a cached entry it does not match ",
@@ -1258,7 +1022,7 @@ impl Pipeline {
         let resource = ResourceId(self.next_resource);
         self.next_resource += 1;
         self.cache.insert(key, Cached::of(resource, shader));
-        // Where each texture the module samples comes from, for binding them per draw (worklog 840).
+        // Where each texture the module samples comes from, for binding them per draw.
         self.texture_sources
             .insert(resource, translated.textures.clone());
         Ok(Prepared::Fresh {
@@ -1275,15 +1039,10 @@ impl Pipeline {
 
 /// Appends a submission's draws and dispatches to its command list, in the stream's order.
 ///
-/// Split from `submit` for length, but it is a coherent step: the geometry a stream asks for, after
-/// its state. An auto draw becomes a [`RenderCommand::Draw`] and an indexed one a
-/// [`RenderCommand::DrawIndexed`] - the index buffer's address is decoded (`DrawKind::Indexed`) but
-/// bound separately (worklog 628), so the count is emitted and the address waits. Each
-/// `DISPATCH_DIRECT` becomes a [`RenderCommand::Dispatch`]; the guest memory it reads and writes is a
-/// windowed buffer the backend binds on its own, so only the workgroup counts are carried.
-///
-/// A guest's frame is many small draws: the captured GL cube asks for three vertices at a time,
-/// twelve times over, one triangle per draw (worklog 585).
+/// An auto draw becomes a [`RenderCommand::Draw`] and an indexed one a
+/// [`RenderCommand::DrawIndexed`]; the index buffer's address is decoded (`DrawKind::Indexed`) but
+/// bound separately. Each `DISPATCH_DIRECT` becomes a [`RenderCommand::Dispatch`] carrying only
+/// workgroup counts, since its guest memory is a windowed buffer the backend binds itself.
 fn push_geometry_commands(
     commands: &mut Vec<RenderCommand>,
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
@@ -1293,7 +1052,7 @@ fn push_geometry_commands(
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
     let mut blend_sent = None;
     let mut transform_sent = None;
-    // What each stage has bound so far - the up-front binds, then each draw's own (worklog 835).
+    // What each stage has bound so far: the up-front binds, then each draw's own.
     let mut bound: Vec<(ShaderStage, ResourceId)> = commands
         .iter()
         .filter_map(|command| match command {
@@ -1301,8 +1060,8 @@ fn push_geometry_commands(
             _ => None,
         })
         .collect();
-    // Each draw's state from the latest writes before it, found in one pass, and read a register at
-    // a time rather than gathered into a list per draw.
+    // Each draw's state from the latest writes before it, found in one pass and read a register at
+    // a time.
     let mut sweep = crate::registers::RegisterSweep::new(writes);
     for (index, draw) in draws.iter().enumerate() {
         let at = draw.packet_offset;
@@ -1314,24 +1073,23 @@ fn push_geometry_commands(
                 commands.push(RenderCommand::BindShader { stage, shader });
             }
         }
-        // The blend state in force at this draw, when the stream set one and it changed
-        // (`REQ-...2ea9`, worklog 829).
+        // The blend state in force at this draw, when the stream set one and it changed.
         if let Some(value) = sweep.latest(at, crate::registers::CB_BLEND0_CONTROL)
             && blend_sent != Some(value)
         {
             commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
             blend_sent = Some(value);
         }
-        // The clip-to-pixel transform in force at this draw, when the stream set one and it changed
-        // (worklog 837) - a GL guest's flips y.
+        // The clip-to-pixel transform in force at this draw, when the stream set one and it
+        // changed.
         if let Some(transform) = viewport_transform_from(|register| sweep.latest(at, register))
             && transform_sent != Some(transform)
         {
             commands.push(RenderCommand::SetViewportTransform(transform));
             transform_sent = Some(transform);
         }
-        // Each stage's user data as it stands at this draw, emitted when it changed (worklog 825).
-        // A word the stream never wrote reads zero.
+        // Each stage's user data as it stands at this draw, emitted when it changed. A word the
+        // stream never wrote reads zero.
         for (slot, (stage, first)) in USER_DATA_REGISTERS.into_iter().enumerate() {
             let mut words = [0u32; USER_DATA_WORDS];
             for (register, word) in (first..).zip(words.iter_mut()) {
@@ -1365,24 +1123,23 @@ fn push_geometry_commands(
     }
 }
 
-/// Each stage's first user-data register, as an absolute register index (worklog 825).
+/// Each stage's first user-data register, as an absolute register index.
 ///
-/// `SPI_SHADER_USER_DATA_PS_0` is `0x2C0C` - measured, the GL cube capture showed the pixel shader's
-/// descriptor-table pointer there (`data/packets.toml`) - and `SPI_SHADER_USER_DATA_GS_0` is
-/// `0x2C8C`: `gfx103.json` maps it at byte `45616` (`0xB230`, register `0x2C8C`), and the
-/// open-toolchain GL context writes its per-draw vertex offset there (oops-sdk `gl_draw.c`). The
-/// vertex stage reads the `GS` set because on this generation the vertex program runs as the NGG
-/// geometry stage, the shape every translation of it takes (D688).
+/// `SPI_SHADER_USER_DATA_PS_0` is `0x2C0C`: a hardware draw capture shows the pixel shader's
+/// descriptor-table pointer there (`data/packets.toml`). `SPI_SHADER_USER_DATA_GS_0` is `0x2C8C`:
+/// `gfx103.json` maps it at byte `45616` (`0xB230`), and the open-toolchain GL context writes its
+/// per-draw vertex offset there (oops-sdk `gl_draw.c`). The vertex stage reads the `GS` set because
+/// the vertex program runs as the primitive-shader geometry stage (D688).
 const USER_DATA_REGISTERS: [(ShaderStage, u32); 2] = [
     (ShaderStage::Vertex, 0x2C8C),
     (ShaderStage::Fragment, 0x2C0C),
 ];
 
-/// The distinct image descriptors the draws' pixel shaders name, in first-use order (worklog 827).
+/// The distinct image descriptors the draws' pixel shaders name, in first-use order.
 ///
-/// Each fragment [`RenderCommand::SetUserData`]'s words 0 and 1 are a descriptor table's address; its
-/// first eight words are the image descriptor. A table that is not readable guest memory names
-/// nothing - a draw with no texture passes zeros, and zero is not mapped.
+/// Each fragment [`RenderCommand::SetUserData`]'s words 0 and 1 are a descriptor table's address;
+/// its first eight words are the image descriptor. A table that is not readable names nothing; a
+/// draw with no texture passes zeros, and zero is not mapped.
 fn texture_census(commands: &[RenderCommand], memory: &impl GuestMemory) -> Vec<ImageDescriptor> {
     let mut textures: Vec<ImageDescriptor> = Vec::new();
     for command in commands {
@@ -1410,24 +1167,23 @@ fn texture_census(commands: &[RenderCommand], memory: &impl GuestMemory) -> Vec<
 }
 
 /// `SQ_IMG_RSRC_WORD3.TYPE` for a 2D image: 9 (Mesa `ac_descriptors.c:372`, as the SDK's
-/// `gl_pack_descriptors` cites it, and obSCEne `-6c80` measured `0x90000fac` for its 2D control).
+/// `gl_pack_descriptors` cites it).
 const IMAGE_TYPE_2D: u32 = 9;
 
 /// `GFX10_FORMAT_8_8_8_8_UNORM` (`gfx10-rsrc.json:61`).
 const FORMAT_8_8_8_8_UNORM: u32 = 56;
 
-/// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor table
-/// names a texture read exactly, so the draws that follow sample the guest's own texels rather than
-/// the backend's default (worklog 828).
+/// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
+/// table names a texture read exactly, so the draws that follow sample the guest's own texels.
 fn bind_textures(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
 ) {
-    // **Each draw's textures, where its pixel shader says they are** (worklog 840): for every slot
-    // the bound fragment module samples, the descriptor at that slot's table offset - zero for a
-    // module whose one texture's descriptor did not come from the table, the one place a texture
-    // was ever read from. Re-emitted before a draw whenever the table or the module changed.
+    // Each draw's textures, where its pixel shader says they are: for every slot the bound fragment
+    // module samples, the descriptor at that slot's table offset (zero for a module whose texture
+    // did not come from the table). Re-emitted before a draw whenever the table or the module
+    // changed.
     let mut out = Vec::with_capacity(commands.len());
     let (mut table, mut fragment, mut stale) = (None, None, false);
     let mut read: BTreeMap<(u64, u32), Option<RenderCommand>> = BTreeMap::new();
@@ -1452,8 +1208,7 @@ fn bind_textures(
                 let slots = fragment
                     .and_then(|module| sources.get(&module))
                     .map_or(&[][..], Vec::as_slice);
-                // A module this pipeline did not translate (none in practice) still gets the one
-                // texture it always did.
+                // A module this pipeline did not translate gets the one default texture source.
                 let default = [TextureSource {
                     slot: 0,
                     table_offset: None,
@@ -1465,9 +1220,8 @@ fn bind_textures(
                 };
                 for source in slots {
                     let at = table.map(|t| t + u64::from(source.table_offset.unwrap_or(0)));
-                    // **Read once per descriptor per submission** (worklog 844): guest memory does
-                    // not change while its submission is prepared, and a GL frame binds the same few
-                    // textures hundreds of times - each read, copied and hashed again.
+                    // Read once per descriptor per submission: guest memory does not change while a
+                    // submission is prepared, and a frame binds the same few textures many times.
                     out.extend(at.and_then(|at| {
                         read.entry((at, source.slot))
                             .or_insert_with(|| read_texture(at, source.slot, memory, texels))
@@ -1482,19 +1236,14 @@ fn bind_textures(
     *commands = out;
 }
 
-/// The texture a descriptor table's first eight words name, as a [`RenderCommand::BindTexture`] - or
-/// `None` for a table that is not readable, or a texture whose layout is not one read exactly: 2D,
-/// linear, `8_8_8_8_UNORM`.
+/// The texture a descriptor table's first eight words name, as a [`RenderCommand::BindTexture`], or
+/// `None` for a table that is not readable or a texture that is not 2D, linear, `8_8_8_8_UNORM`.
 ///
-/// **The row pitch is the descriptor's, not the width.** `ADDR_SW_LINEAR` aligns a row to 256 bytes
-/// (Mesa `gfx9addrlib.cpp:5117-5127`, as the SDK cites it), so a 16-texel-wide texture's rows are 64
-/// texels apart; for a 2D image `SQ_IMG_RSRC_WORD4` carries `pitch - 1` in bits 0-13 when the pitch
-/// exceeds the width and zero when it does not (`gfx10-rsrc.json:401-406`). Read at the width
-/// instead, every row after the first would be read from the wrong place.
-///
-/// **Hashed where it lies, copied only when new** (worklog 851): the rows are hashed in guest memory,
-/// and texels whose hash `texels` already holds at the same place and shape are shared rather than
-/// gathered again - a GL frame binds the same few textures in every one of its fifty submissions.
+/// The row pitch is the descriptor's, not the width: `ADDR_SW_LINEAR` aligns a row to 256 bytes
+/// (Mesa `gfx9addrlib.cpp:5117-5127`), and for a 2D image `SQ_IMG_RSRC_WORD4` carries `pitch - 1`
+/// in bits 0-13 when the pitch exceeds the width, zero otherwise (`gfx10-rsrc.json:401-406`). Rows
+/// are hashed in guest memory and texels already held in `texels` at the same place and shape are
+/// shared rather than copied again.
 fn read_texture(
     table: u64,
     slot: u32,
@@ -1523,8 +1272,8 @@ fn read_texture(
     let row_bytes = pitch as usize * 4;
     let span = row_bytes * (height - 1) + width * 4;
     let key = (descriptor.base, descriptor.width, descriptor.height, pitch);
-    // **Nothing written since it was read: nothing to read** (worklog 851) - asked of the host, and
-    // only where it says so.
+    // Nothing written since it was read, as far as the host's write tracking reports: the cached
+    // texels stand.
     if let Some(cached) = texels.get(&key)
         && cached.since.and_then(|since| {
             orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
@@ -1588,30 +1337,29 @@ struct CachedTexels {
     texels: std::sync::Arc<[u32]>,
 }
 
-/// Texels read from guest memory, by where they lie and their shape (worklog 851).
+/// Texels read from guest memory, by where they lie and their shape.
 type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
 
-/// How many textures the cache holds before it starts again - enough for a frame's set, and a bound
-/// on what a guest streaming new textures every frame can make it keep.
+/// How many textures the cache holds before it restarts: enough for a frame's set, and a bound for
+/// a guest streaming new textures every frame.
 const TEXEL_CACHE_ENTRIES: usize = 64;
 
-/// Each stage's `SPI_SHADER_PGM_RSRC2`, vertex (the NGG geometry set) then fragment: `gfx103.json`
-/// maps `RSRC2_GS` at byte `45612` (register `0x2C8B`) and `RSRC2_PS` at `45100` (`0x2C0B`), and
-/// both carry `USER_SGPR` in bits 1-5.
+/// Each stage's `SPI_SHADER_PGM_RSRC2`, vertex (the geometry set) then fragment: `gfx103.json` maps
+/// `RSRC2_GS` at byte `45612` (register `0x2C8B`) and `RSRC2_PS` at `45100` (`0x2C0B`), and both
+/// carry `USER_SGPR` in bits 1-5.
 const RSRC2_REGISTERS: [u32; 2] = [0x2C8B, 0x2C0B];
 
 /// Each stage's `SPI_SHADER_PGM_RSRC1`, in the same order: `gfx103.json` maps `RSRC1_GS` at byte
-/// `45608` (`0x2C8A`) and `RSRC1_PS` at `45096` (`0x2C0A`), with `DX10_CLAMP` in bit 21 (worklog 834).
+/// `45608` (`0x2C8A`) and `RSRC1_PS` at `45096` (`0x2C0A`), with `DX10_CLAMP` in bit 21.
 const RSRC1_REGISTERS: [u32; 2] = [0x2C8A, 0x2C0A];
 
 /// `SPI_SHADER_PGM_RSRC1.DX10_CLAMP`, bit 21 (`gfx103.json`).
 const DX10_CLAMP_BIT: u32 = 1 << 21;
 
-/// Where each stage's user data lands, how much of it there is, and where it sits in the block
-/// (worklog 826): the count from the stage's last `RSRC2` write, the first register `s8` for the
-/// geometry program - the eight before it are the wave's own, and the cube's vertex program reads
-/// its per-draw word from `s8` (`v_add_nc_u32 v14, s8, v14`) - and `s0` for the pixel shader, the
-/// vertex stage's words first in the block and the fragment stage's after them.
+/// Where each stage's user data lands, how much there is, and where it sits in the block: the count
+/// from the stage's last `RSRC2` write; the first register `s8` for the geometry program (the eight
+/// before it are the wave's own, and a vertex program reads its per-draw word from `s8`) and `s0`
+/// for the pixel shader; the vertex stage's words first in the block, the fragment stage's after.
 fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
     let last = |register: u32| {
         writes
@@ -1621,8 +1369,8 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             .map(|write| write.value)
     };
     let count = |register: u32| last(register).map_or(0, |value| (value >> 1) & 0x1f);
-    // `DX10_CLAMP`, bit 21 of the stage's `RSRC1` (Mesa `S_00B848_DX10_CLAMP`; worklog 834): what an
-    // output clamp does with a NaN. `None` when the stream set no `RSRC1`.
+    // `DX10_CLAMP`, bit 21 of the stage's `RSRC1` (Mesa `S_00B848_DX10_CLAMP`): what an output
+    // clamp does with a NaN. `None` when the stream set no `RSRC1`.
     let dx10_clamp = |register: u32| last(register).map(|value| value & DX10_CLAMP_BIT != 0);
     [
         UserData {
@@ -1653,13 +1401,13 @@ impl Pipeline {
         writes: &[RegisterWrite],
         memory: &impl GuestMemory,
     ) {
-        // **Where the geometry shader says its memory is** (D711): a live guest's vertex buffer is a
-        // constant the shader forms in its own words, not something a register write carries.
+        // Where the geometry shader says its memory is (D711): a live guest's vertex buffer is a
+        // constant the shader forms, not something a register write carries.
         if self.places_window {
             self.place_window(candidates, memory);
         }
-        // How many user-data words each stage's shader takes, from its `RSRC2` - what the hardware
-        // loads, and so what the module reads at entry (worklog 826).
+        // How many user-data words each stage's shader takes, from its `RSRC2`: what the hardware
+        // loads, and so what the module reads at entry.
         self.user_data = if self.feeds_user_data {
             user_data_layouts(writes)
         } else {
@@ -1670,9 +1418,8 @@ impl Pipeline {
     /// Places the window at the constant base the vertex-stage candidate's shader forms (D711).
     ///
     /// The largest power-of-two span from that base, at most [`PLACED_WINDOW_MAX_WORDS`], that is
-    /// wholly readable guest memory and does not cross four gigabytes - bounded by what the guest
-    /// mapped, never by a guessed buffer size. No base, or no readable span, leaves the window as
-    /// it was: the honest answer is the old one, not a window somewhere else.
+    /// wholly readable guest memory and does not cross four gigabytes. No base, or no readable
+    /// span, leaves the window as it was.
     fn place_window(&mut self, candidates: &[Candidate], memory: &impl GuestMemory) {
         let Some(base) = candidates
             .iter()
@@ -1719,21 +1466,19 @@ impl Pipeline {
 /// The 64-bit address a shader forms from two constant scalar registers as the base of its memory
 /// accesses, or `None` (D711).
 ///
-/// **What counts as constant, and why so narrowly.** A scalar register is a constant here only if the
-/// whole program writes it exactly once, with `s_mov_b32` of a literal or an inline integer, and no
-/// other instruction's destination - a scalar load's whole range included - touches it. The base is
-/// then the pair a `v_add_co_u32` takes as its scalar source for the low half and a
-/// `v_add_co_ci_u32` takes, one register up, for the high half: the carry-chained 64-bit add every
-/// global access in the open-toolchain GL context's geometry shaders forms its address with
-/// (oops-sdk `tools/shader/vs-param3.s`, `vs-param4.s`; orbistoun `tools/shader-fixtures/primitive.s`).
-/// A register the program also computes, loads or moves from elsewhere is not a constant and names
-/// no base - so a shader whose addresses are computed yields nothing rather than a guess.
+/// A scalar register is constant only if the whole program writes it exactly once, with `s_mov_b32`
+/// of a literal or inline integer, and no other destination (a scalar load's whole range included)
+/// touches it. The base is the pair a `v_add_co_u32` takes as its scalar source for the low half
+/// and a `v_add_co_ci_u32` takes, one register up, for the high half: the carry-chained add the
+/// open-toolchain GL context's geometry shaders form addresses with (oops-sdk
+/// `tools/shader/vs-param3.s`, `vs-param4.s`; `tools/shader-fixtures/primitive.s`). A computed
+/// address yields nothing rather than a guess.
 fn constant_address_base(
     decoded: &orbistoun_shader::Decode,
     encodings: &EncodingTable,
 ) -> Option<u64> {
     // Named the way the translator names them (`EncodingTable::mnemonic_for`), which covers the
-    // long-form families - the carry-out add the base feeds is a VOP3.
+    // long-form families; the carry-out add is a VOP3.
     let name = |instruction: &orbistoun_shader::Instruction| {
         let family = &encodings
             .encodings()
@@ -1819,9 +1564,8 @@ fn scalar_destination_span(mnemonic: &str) -> u16 {
 
 /// Reads as much as can be read at an address, up to [`MAX_SHADER_BYTES`].
 ///
-/// Narrowing rather than demanding the whole window, because a shader near the end of a
-/// mapping is an ordinary thing and refusing to read it would make its placement in
-/// memory decide whether it works.
+/// Narrows rather than demanding the whole window, so a shader near the end of a mapping still
+/// reads.
 fn read_window(memory: &impl GuestMemory, address: u64) -> Option<&[u8]> {
     let mut length = MAX_SHADER_BYTES;
     while length >= MIN_SHADER_BYTES {
@@ -1835,12 +1579,9 @@ fn read_window(memory: &impl GuestMemory, address: u64) -> Option<&[u8]> {
 
 /// Reads the guest-memory window a pipeline is built against, as words.
 ///
-/// Exactly the window's span - `words()` words from `base` - because that length is the mask the
-/// module applies (`Window::spanning` refuses a non-power-of-two for that reason), so a backend that
-/// binds a region of a different length would fold an index to a different word than the shader
-/// meant. An empty vector when the region is not fully mapped: a partial window is not one to bind,
-/// and the default window at address zero is unmapped, so a stream that never placed its window
-/// reads nothing rather than a page of whatever happens to be at zero.
+/// Exactly the window's span, because that length is the mask the module applies and a region of
+/// another length would fold an index to a different word. Empty when the region is not fully
+/// mapped, so an unplaced window at address zero reads nothing.
 fn read_guest_window(memory: &impl GuestMemory, window: Window) -> Vec<u32> {
     let byte_len = window.words() as usize * 4;
     memory
@@ -1856,41 +1597,19 @@ fn read_guest_window(memory: &impl GuestMemory, window: Window) -> Vec<u32> {
 
 /// Converts a GPU virtual address to the guest virtual address holding the same bytes.
 ///
-/// The identity function, and deliberately a function rather than nothing at all.
-///
-/// The console shares one coherent memory pool between both processors, so the two
-/// address spaces are expected to coincide - but that has not been confirmed against a
-/// real submission, and it is the sort of assumption that is either exactly right or
-/// wrong by a constant offset with nothing in between. Naming it here means checking it
-/// later is a one-line change, and means a reader of a failed shader read knows which
-/// assumption to suspect first.
-///
-/// Not a trait. There is no second implementation and inventing a seam for a
-/// hypothetical one would be speculation; this is a known-uncertain constant with one
-/// call site.
+/// The identity: the hardware shares one coherent memory pool between both processors, so the two
+/// address spaces are expected to coincide. A function rather than nothing, so the assumption has
+/// one place to change and a failed shader read names which assumption to suspect.
 pub const fn guest_address_of(gpu_address: u64) -> u64 {
     gpu_address
 }
 
 /// A content-addressed id for a colour target of a given extent.
 ///
-/// # Why the extent and not the address
-///
-/// A resource's id is meant to be its guest identity, and a render target's is really its guest
-/// address. But the register carrying that address is the disputed one - the hardware capture and
-/// obSCEne's constructed stream name different offsets for `CB_COLOR0_BASE`, while they agree on the
-/// size register - so keying on the address would rest the id on the less certain of the two. The
-/// extent is what is corroborated, and it is enough: the backend draws into an attachment it
-/// allocates and reads back, storing nothing per-target, so two same-sized targets sharing an id is
-/// harmless today. When a per-target host object exists, the address becomes the identity and this
-/// changes (D702).
-///
-/// # Why the top bit
-///
-/// Shader ids are minted sequentially from one and stay small. Tagging a target id into the top of
-/// the id space keeps the two disjoint without a shared counter, so a target and a shader can never
-/// collide. Width and height are each at most fourteen bits (the register's fields), so the packed
-/// extent uses thirty bits and the tag is free.
+/// Keyed by extent rather than base address, because sources agree on the size register and not on
+/// the base register's offset (D702). The backend stores nothing per target, so two same-sized
+/// targets sharing an id is harmless. The top bit keeps target ids disjoint from shader ids, which
+/// count up from one; width and height are at most fourteen bits each, so the extent fits below it.
 fn colour_target_id(extent: ColourTargetExtent) -> ResourceId {
     const TARGET_NAMESPACE: u64 = 1 << 63;
     ResourceId(TARGET_NAMESPACE | (u64::from(extent.width) << 16) | u64::from(extent.height))
@@ -1901,11 +1620,8 @@ const MIN_SHADER_BYTES: usize = 4;
 
 /// A cache key over a shader's bytes.
 ///
-/// Keyed on content rather than address deliberately. A guest may move a shader, write a
-/// different one to the same address, or have two addresses hold the same shader, and an
-/// address-keyed cache is wrong in all three - silently reusing a translation of code
-/// that is no longer there, which produces a frame drawn with the wrong shader and
-/// nothing to indicate it.
+/// Keyed on content rather than address: a guest may move a shader, write a different one to
+/// the same address, or have two addresses hold the same shader.
 fn content_hash(bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1918,19 +1634,17 @@ fn content_hash(bytes: &[u8]) -> u64 {
 pub struct CapturedShader {
     /// The content id it was stored under - a truncated hash of its bytes.
     pub id: String,
-    /// The pipeline stage the shader address was attributed to. Reported, never
-    /// dispatched on - the register mapping it rests on is a hypothesis.
+    /// The pipeline stage the shader address was attributed to. Reported, never dispatched on,
+    /// because the register mapping it rests on is a hypothesis.
     pub stage: String,
-    /// Whether the corpus had not seen it before. A title rebinds the same shaders
-    /// constantly, so most captures in a real frame are already held.
+    /// Whether the corpus had not seen it before.
     pub fresh: bool,
     /// Its length in bytes, up to and including the terminator that ended it.
     pub length: usize,
 }
 
-/// A shader address that yielded no shader, and why. Reported rather than dropped: an
-/// address the register mapping produced but memory could not honour is the strongest
-/// signal available about whether that mapping is right.
+/// A shader address that yielded no shader, and why. Reported because an address the register
+/// mapping produced but memory could not honour is evidence about that mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureMiss {
     /// The stage the missed address was attributed to.
@@ -1952,20 +1666,11 @@ pub struct CaptureReport {
 
 /// Recovers every shader a command stream points at and offers it to the corpus.
 ///
-/// This is the census's input, gathered the way a frame gathers it: walk the packets,
-/// read the shader-address registers, fetch each shader out of guest memory, and store it
-/// by content. It is the connective step [`registers`](crate::registers) describes as the
-/// one that lets the packet walker and the shader decoder finally meet.
-///
-/// Unlike [`Pipeline::submit`], it does **not** require a shader to *translate*. A shader
-/// carrying an instruction the translator cannot handle yet is exactly what the census
-/// exists to rank, so it is captured, not refused. The one thing required is a
-/// terminator: without an end-of-program instruction the extent is unknown (D114), and
-/// bytes of unknown length are not a shader but a guess about where one stops.
-///
-/// Storage is by content hash, so a guest that rebinds the same shader every draw
-/// contributes it once. The report says what was stored and what each unresolved address
-/// was, because an address that names nothing is evidence about the register mapping.
+/// Walks the packets, reads the shader-address registers, fetches each shader from guest memory and
+/// stores it by content. Unlike [`Pipeline::submit`] it does not require a shader to translate: an
+/// untranslatable shader is what the census ranks. It requires a terminator, because without an
+/// end-of-program instruction the extent is unknown. The report lists what was stored and each
+/// address that named nothing.
 pub fn capture_shaders(
     stream: &[u8],
     memory: &impl GuestMemory,
@@ -1989,9 +1694,8 @@ pub fn capture_shaders(
             continue;
         };
 
-        // The extent, not trustworthiness, is what gates a capture. A desynchronised
-        // decode still bounds the shader if it reached the terminator, and its blockers
-        // are the whole point of capturing it.
+        // The extent, not trustworthiness, gates a capture: a desynchronised decode still bounds
+        // the shader if it reached the terminator.
         let decoded = decode_program(window, encodings, operands);
         if !decoded.terminated {
             report.missed.push(CaptureMiss {
@@ -2033,8 +1737,7 @@ pub enum PipelineError {
 
 /// The stage a register name refers to.
 ///
-/// Unknown names produce `None` rather than a guess. A shader bound to the wrong stage
-/// runs, and produces a frame that is wrong in a way nothing points at.
+/// Unknown names produce `None` rather than a guess.
 fn stage_of(name: &str) -> Option<ShaderStage> {
     match name {
         "vertex" => Some(ShaderStage::Vertex),
@@ -2048,7 +1751,7 @@ fn stage_of(name: &str) -> Option<ShaderStage> {
 mod tests {
     use super::{Cached, ResourceId};
 
-    /// The GL cube's vertex program, as the console ran it: the first 64 words of oracle record B's
+    /// The GL cube's vertex program as the hardware ran it: the first 64 words of oracle record B's
     /// payload (`tests/captures/agc-gl-cube-fw1240-b.payload.hex`).
     fn console_vertex_program() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2067,12 +1770,8 @@ mod tests {
             .collect()
     }
 
-    /// **A linear texture is read at its descriptor's pitch, not its width** (worklog 828).
-    ///
-    /// A 16x2 `8_8_8_8_UNORM` 2D texture whose rows are 64 texels apart - `ADDR_SW_LINEAR`'s 256-byte
-    /// row alignment - with `WORD4` carrying `pitch - 1 = 63`. Row 1 must come from 64 texels in; read
-    /// at the width it would come from texel 16, which holds a different value here. And a descriptor
-    /// that is not 2D linear RGBA8 binds nothing.
+    /// A linear texture is read at its descriptor's pitch, not its width, and a descriptor that is
+    /// not 2D linear RGBA8 binds nothing.
     #[test]
     fn a_linear_texture_is_read_at_its_descriptors_pitch() {
         use super::{RenderCommand, read_texture};
@@ -2132,9 +1831,8 @@ mod tests {
             "hashed in place as gathered"
         );
 
-        // **A cached texture is re-read when its bytes change** (worklog 851): texel (1, 1) edited
-        // in guest memory binds the edited value, not the cached one - and the padding past the
-        // width, which no texel reads, changes nothing.
+        // A cached texture is re-read when its bytes change, and padding past the width changes
+        // nothing.
         let mut edited = bytes.clone();
         edited[at(u64::from(pitch) + 1)..at(u64::from(pitch) + 1) + 4]
             .copy_from_slice(&7u32.to_le_bytes());
@@ -2159,8 +1857,8 @@ mod tests {
         assert!(read_texture(table, 0, &Memory(three_d), &mut cache).is_none());
     }
 
-    /// **The backend's user-data block and the translator's are one layout** (worklog 826): the size
-    /// and each stage's start, stated in two crates that must not import each other, pinned equal.
+    /// The backend's user-data block and the translator's share one layout: size and each stage's
+    /// start are pinned equal across two crates that cannot import each other.
     #[test]
     fn the_backends_user_data_block_is_the_translators() {
         use orbistoun_translate::wavefront::{USER_DATA_BLOCK_WORDS, USER_DATA_STAGE_WORDS};
@@ -2176,12 +1874,9 @@ mod tests {
         );
     }
 
-    /// **Each draw carries its own user data** (worklog 825).
-    ///
-    /// The console-run cube stream (oracle record B) writes a vertex offset into
-    /// `SPI_SHADER_USER_DATA_GS_0` before each of its twelve draws. The submission must hand the
-    /// vertex stage that word before each draw, and the twelve must differ - one offset for all of
-    /// them is exactly why the cube's first live frame showed one face drawn twelve times.
+    /// Each draw carries its own user data: the captured cube stream writes a different vertex
+    /// offset into `SPI_SHADER_USER_DATA_GS_0` before each of its twelve draws, and each must reach
+    /// its draw.
     #[test]
     fn each_of_the_cubes_twelve_draws_carries_its_own_vertex_offset() {
         use super::{Pipeline, RenderCommand, ShaderStage};
@@ -2235,13 +1930,8 @@ mod tests {
         assert_eq!(distinct.len(), 12, "each draw its own offset: {offsets:?}");
     }
 
-    /// **The base a live vertex program forms is read out of its own words** (D711).
-    ///
-    /// The console-run cube program moves `0x0090_0000` into `s2` and `0x2` into `s3` and adds the
-    /// pair, carry-chained, to every vertex's offset - so its buffer is at `0x2_0090_0000`, the
-    /// address worklog 561 recorded. The capture tests anchor their window at the low half by hand;
-    /// this is the same number, found. And the negative: the same program with `s2` also written by
-    /// a second move is no longer a constant, so it names no base rather than the first value.
+    /// The base a live vertex program forms is read from its own words (D711), and a register
+    /// written twice names no base.
     #[test]
     fn the_constant_base_a_vertex_program_forms_is_found_and_a_reassigned_one_is_not() {
         use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
@@ -2257,10 +1947,9 @@ mod tests {
             "the pair its vertex loads add to - not the canary's pair behind it"
         );
 
-        // `s_mov_b32 s2, 0x1234` put first (a decode stops at `s_endpgm`, so it has to be inside the
-        // program): s2 is written twice now, so it is not a constant, and the vertex loads' pair
-        // names nothing. The scan moves on to the next add whose pair *is* constant - the canary
-        // store's `s6:s7`, `0x2_0092_0000` - and never to either value of the reassigned register.
+        // `s_mov_b32 s2, 0x1234` inserted first (a decode stops at `s_endpgm`): s2 is no longer
+        // constant, so the vertex loads' pair names nothing and the scan moves to the canary
+        // store's constant `s6:s7`, `0x2_0092_0000`.
         let mut reassigned = 0xbe82_03ffu32.to_le_bytes().to_vec();
         reassigned.extend(0x1234u32.to_le_bytes());
         reassigned.extend(program);
@@ -2387,13 +2076,8 @@ mod tests {
         );
     }
 
-    /// **A topology maps to the mesh primitive its shape is, or is refused by the name of the
-    /// shape it is not.** The mesh module carries the output topology (D688), so this is the seam
-    /// where a stream's `VGT_GS_OUT_PRIM_TYPE` becomes the primitive the translator emits. The
-    /// negative is the point: a rectangle list and an unmeasured value have no mesh-primitive
-    /// shape, and drawing one as a triangle is the plausible output principle 3 forbids at the
-    /// last step before a picture - so they are refused, and the refusal names the topology
-    /// (`-0c58` acceptance 3, watched failing here).
+    /// A topology maps to the mesh primitive of its shape (D688), or is refused by name when it has
+    /// none, such as a rectangle list or an unknown value.
     #[test]
     fn a_topology_maps_to_its_primitive_or_is_refused_by_name() {
         use super::{MeshPrimitive, PrimitiveTopology, mesh_primitive_of};
@@ -2427,8 +2111,8 @@ mod tests {
         );
     }
 
-    /// The index count is the whole difference between the three shapes, and the mesh output is
-    /// built from it - one index for a point, two for a line, three for a triangle.
+    /// The index count distinguishes the three shapes: one for a point, two for a line, three for a
+    /// triangle.
     #[test]
     fn a_primitive_carries_its_index_count_and_a_distinct_cache_salt() {
         use super::{MeshPrimitive, primitive_salt};
@@ -2437,8 +2121,7 @@ mod tests {
         assert_eq!(MeshPrimitive::Lines.indices(), 2);
         assert_eq!(MeshPrimitive::Triangles.indices(), 3);
 
-        // The salts must differ, or the same bytes at two topologies would share a cache entry
-        // and the second draw would be served the first's module.
+        // Distinct salts keep the same bytes at two topologies in separate cache entries.
         let salts = [
             primitive_salt(MeshPrimitive::Points),
             primitive_salt(MeshPrimitive::Lines),
@@ -2450,23 +2133,19 @@ mod tests {
         );
     }
 
+    /// A cache entry matches its own bytes, so a `matches` that always answers false fails here.
     #[test]
     fn a_cache_entry_recognises_the_shader_it_was_built_from() {
-        // The entry exists to notice when a key stops identifying a shader, so what it
-        // has to get right is the *negative*: two different shaders must not both satisfy
-        // one entry. The positive is the easy half and is here to keep the negative
-        // honest - a `matches` that always answered false would pass the interesting test
-        // and fail this one.
         let bytes: Vec<u8> = (0..32u8).collect();
         let entry = Cached::of(ResourceId(1), &bytes);
         assert!(entry.matches(&bytes));
     }
 
+    /// Two different shaders never satisfy one cache entry.
     #[test]
     fn a_cache_entry_rejects_a_shader_that_only_looks_like_it() {
-        // Each field on its own, because an entry that compared only the length would
-        // accept an edit in the middle, and one that compared only the ends would accept
-        // a shader of a different size that happened to start and finish the same way.
+        // Each field alone: comparing only the length accepts an edit in the middle, and comparing
+        // only the ends accepts a different-sized shader with the same ends.
         let bytes: Vec<u8> = (0..32u8).collect();
         let entry = Cached::of(ResourceId(1), &bytes);
 
@@ -2487,12 +2166,10 @@ mod tests {
         assert!(!entry.matches(&last_changed), "the last word is compared");
     }
 
+    /// A shader shorter than a word is compared without an out-of-bounds index: `read_window`
+    /// narrows, so one near the end of a mapping can be that short.
     #[test]
     fn a_shader_too_short_to_hold_a_word_does_not_panic() {
-        // Reached through `read_window`, which narrows rather than demanding a full
-        // window - so a shader near the end of a mapping can be very short. Indexing
-        // without checking would turn that into a crash in the emulator rather than a
-        // refusal from the decoder.
         let entry = Cached::of(ResourceId(1), &[1, 2]);
         assert!(entry.matches(&[1, 2]));
         assert!(!entry.matches(&[3, 4]));

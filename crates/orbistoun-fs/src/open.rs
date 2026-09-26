@@ -1,19 +1,10 @@
 //! Open files, and the handles a guest holds them by.
 //!
-//! # A handle is an address, for the third time
-//!
-//! `fopen` returns a `FILE *`, and the guest **dereferences it without checking**. That is
-//! measured, not assumed: with the call unimplemented and answering an error code, the
-//! guest carried that code through four more calls; answering null instead, it read offset
-//! four of the null and faulted immediately.
-//!
-//! So the same rule as thread handles and lock handles (D151): the value handed back is the
-//! address of a real, zeroed, never-freed block. A guest reading a field out of it gets a
-//! zero rather than a fault, and a handle kept past a close reads as zeroes rather than as
-//! a use-after-free.
-//!
-//! Nothing is written into the block, because the layout of the structure the guest thinks
-//! it has is not known from any lawful source. Zero is the honest content.
+//! `fopen` returns a `FILE *` that the guest dereferences without checking, so the handle is
+//! the address of a real, zeroed, never-freed block, as for thread and lock handles (D151).
+//! A guest reading a field gets zero rather than a fault, and a handle kept past a close reads
+//! as zeroes rather than freed memory. Nothing is written into the block: the layout of the
+//! structure the guest expects has no lawful source.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
@@ -26,8 +17,8 @@ pub const NO_FILE: FileHandle = 0;
 
 /// How much zeroed memory sits behind a handle.
 ///
-/// Matched to the other subsystems' control blocks, and generous next to any field a
-/// caller reads at a small offset.
+/// Matched to the other subsystems' control blocks, and generous next to any field a caller
+/// reads at a small offset.
 const CONTROL_BLOCK_WORDS: usize = 32;
 
 /// One open file.
@@ -35,27 +26,20 @@ const CONTROL_BLOCK_WORDS: usize = 32;
 struct Open {
     /// The host file.
     file: std::fs::File,
-    /// The guest path, kept for traces - "which file" is the first thing anybody asks.
+    /// The guest path, kept for traces.
     path: String,
     /// Whether a read has hit the end.
     ///
-    /// Tracked rather than derived, because `feof` is asked *after* the read that ended
-    /// the file and the answer has to survive until then.
+    /// Tracked rather than derived, because `feof` is asked after the read that ended the file.
     at_end: bool,
 }
 
 /// Streams that are a descriptor rather than a file of their own.
 ///
-/// # Why an FTP server needs this and nothing else did
-///
-/// A `FILE` is a buffered descriptor. Nothing here needed that until a server wanted to
-/// `fdopen` an accepted connection and then `fprintf` its replies into it - which is how
-/// every one of these servers writes a protocol.
-///
-/// Kept as a separate table rather than a field on [`Open`], because the two are genuinely
-/// different things: an `Open` owns a host file, and this owns nothing - the descriptor table
-/// does. A stream that closed a descriptor it did not own would close it out from under the
-/// guest.
+/// A `FILE` is a buffered descriptor; a server `fdopen`s an accepted connection and
+/// `fprintf`s its replies into it. A separate table from [`Open`] because an `Open` owns a
+/// host file and this owns nothing: the descriptor table does, and a stream closing a
+/// descriptor it did not own would close it out from under the guest.
 fn wrapped() -> &'static Mutex<BTreeMap<FileHandle, u64>> {
     static WRAPPED: OnceLock<Mutex<BTreeMap<FileHandle, u64>>> = OnceLock::new();
     WRAPPED.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -64,8 +48,8 @@ fn wrapped() -> &'static Mutex<BTreeMap<FileHandle, u64>> {
 /// Answers a stream handle that stands for an already-open descriptor.
 ///
 /// The descriptor stays the descriptor table's: closing the stream forgets the wrapper and
-/// leaves the descriptor open, which is not what `fclose` does on the platform and **is** what
-/// this can promise. Stated in the knowledge file rather than papered over.
+/// leaves the descriptor open. That differs from the platform's `fclose`, and the knowledge
+/// file states it.
 pub fn wrap_descriptor(fd: u64) -> Option<FileHandle> {
     let handle = next_handle();
     wrapped().lock().ok()?.insert(handle, fd);
@@ -87,21 +71,17 @@ pub fn unwrap_descriptor(handle: FileHandle) -> bool {
 
 /// How reads have gone, across the whole run.
 ///
-/// **Completeness rather than content.** Verifying that delivered bytes match the file
-/// would double every read; verifying that the guest got *as many bytes as it asked for*
-/// costs a counter and catches the failure that matters. A title that silently receives a
-/// truncated asset then faults somewhere in its own parser, which is exactly the shape of
-/// wall that is hard to attribute (D175).
+/// Completeness rather than content: counting whether the guest got as many bytes as it
+/// asked for costs a counter, where verifying the bytes would double every read. A title
+/// that receives a truncated asset faults later in its own parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReadStats {
     /// Reads attempted.
     pub reads: u64,
     /// Reads that delivered fewer bytes than asked for.
     ///
-    /// Not automatically a fault: reading to the end of a file is a short read by
-    /// definition, and it is how the end announces itself. A short read *before* the end
-    /// is the defect, and the two are told apart by whether the file was already at its
-    /// end.
+    /// Reading to the end of a file is a short read by definition. A short read before the
+    /// end is the defect; the two are told apart by whether the file was already at its end.
     pub short: u64,
     /// Total bytes delivered.
     pub bytes: u64,
@@ -126,30 +106,23 @@ fn table() -> &'static Mutex<BTreeMap<FileHandle, Open>> {
 
 /// Hands out a handle nothing else will hand out, for another subsystem's own table.
 ///
-/// **The same source, so two tables cannot collide.** A directory handle and a stream handle
-/// are both addresses a guest holds and dereferences, and two independent sources of them
-/// would eventually issue one twice - at which point closing one would close the other.
+/// The same source, so two tables cannot collide: a directory handle and a stream handle are
+/// both addresses a guest dereferences, and closing one must never close the other.
 pub fn fresh_handle() -> FileHandle {
     next_handle()
 }
 
 /// Hands out handles: the address of a fresh zeroed block, never freed.
 ///
-/// **From the one region every guest-visible handle comes from**, so a `FILE *` is the same
-/// address in every run. This was the ninth `Box::leak` handing the guest a host heap address,
-/// and it survived the eight D584 fixed because that search was scoped to `orbistoun-kernel` -
-/// which is also the crate the shared allocator was in, and out of reach from here. Moving it
-/// down to `orbistoun-mem`, where guest-visible memory belongs, put it in reach of both
-/// subsystems without either reaching sideways (D601).
+/// From the one region every guest-visible handle comes from, so a `FILE *` is the same
+/// address in every run (D584).
 fn next_handle() -> FileHandle {
     orbistoun_mem::blocks::block(CONTROL_BLOCK_WORDS)
 }
 
 /// Opens a guest path for reading.
 ///
-/// Read-only, and deliberately: nothing observed writes, and a guest that could write
-/// through this would be writing into the user's own title directory. Adding write access
-/// is a decision with consequences, not an oversight to be corrected silently.
+/// Read-only: a guest writing through this would write into the title directory being run.
 ///
 /// `None` when the path is under no mount, tries to climb out of one, or does not exist.
 pub fn open(guest_path: &str) -> Option<FileHandle> {
@@ -170,16 +143,8 @@ pub fn open(guest_path: &str) -> Option<FileHandle> {
 
 /// Opens a guest path for writing, creating it if it is not there.
 ///
-/// # Why this exists now and did not before
-///
-/// [`open`] is read-only, and its comment said adding write access was *"a decision with
-/// consequences, not an oversight"*. The consequence it named was a guest writing into the
-/// user's own title directory - which is the material being measured, so a guest able to
-/// change it would be editing its own evidence.
-///
-/// That objection is answered by *where*, not by *whether*: `/data` is storage the
-/// installation owns and the guest is meant to have. `/app0` stays read-only, and
-/// [`crate::mount::is_writable`] is what separates them (D250).
+/// `/data` is storage the installation owns and the guest is meant to have; `/app0` stays
+/// read-only, and [`crate::mount::is_writable`] separates them (D250).
 ///
 /// `None` when the path is under no mount, climbs out of one, or is not writable.
 pub fn create(guest_path: &str) -> Option<FileHandle> {
@@ -217,8 +182,8 @@ fn with<R>(handle: FileHandle, f: impl FnOnce(&mut Open) -> R) -> Option<R> {
 pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
     use std::io::Read as _;
     let outcome = with(handle, |open| {
-        // Whether the end had *already* been reached, which is what separates "this file
-        // is finished" from "this read was cut short".
+        // Whether the end had already been reached, which separates "this file is finished"
+        // from "this read was cut short".
         let was_at_end = open.at_end;
         let read = open.file.read(into).unwrap_or(0);
         // A short read is how the end announces itself, and `feof` is asked afterwards.
@@ -228,18 +193,15 @@ pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
         (read, was_at_end)
     })?;
     let (read, was_at_end) = outcome;
-    // **Which file, and how much it asked for.** `read_stats` counts reads and bytes, which says
-    // a run read almost nothing and cannot say which read of which file returned what - and for
-    // a title that performs one read of zero bytes, those are the only two things worth knowing
-    // (D595).
+    // Which file, and how much it asked for, for the opens record.
     if let Some(path) = path_of(handle) {
         crate::opened::note_read(&path, into.len(), read);
     }
     if let Ok(mut stats) = stats().lock() {
         stats.reads += 1;
         stats.bytes += read as u64;
-        // Counted only when the file was not already finished - reading to the end is a
-        // short read by definition and is not a defect.
+        // Counted only when the file was not already finished: reading to the end is not a
+        // defect.
         if read < into.len() && !was_at_end {
             stats.short += 1;
         }
@@ -271,7 +233,7 @@ impl From {
 
     /// The POSIX `SEEK_*` value, which is what a guest passes.
     ///
-    /// Published values, and the same on every System V platform: set 0, current 1, end 2.
+    /// Published values, the same on every System V platform: set 0, current 1, end 2.
     pub const fn from_whence(whence: u64) -> Option<Self> {
         match whence {
             0 => Some(Self::Start),
@@ -292,12 +254,9 @@ pub fn seek(handle: FileHandle, from: From, offset: i64) -> Option<u64> {
             From::End => std::io::SeekFrom::End(offset),
         };
         let at = open.file.seek(to).unwrap_or(0);
-        // **A seek is how a guest asks how big a file is.** Seeking to the end and reading the
-        // position is the oldest way to do it, and a title that then reports the file as
-        // corrupt has been told a size by this call and nothing else records what (D596).
+        // Recorded, because seeking to the end is how a guest learns a file's size.
         crate::opened::note_seek(open.path.as_str(), from.label(), offset, at);
-        // Seeking clears the end marker, which is what makes the read-to-end then
-        // rewind then read-again pattern work.
+        // Seeking clears the end marker, so read-to-end, rewind, read-again works.
         open.at_end = false;
         at
     })
@@ -321,13 +280,11 @@ pub fn path_of(handle: FileHandle) -> Option<String> {
 
 /// Closes a file. Answers whether there was one.
 ///
-/// The control block is deliberately **not** freed - a guest holding a stale handle then
-/// reads zeroes rather than freed memory, and the count is bounded by how many files a
-/// title opens.
+/// The control block is not freed: a guest holding a stale handle reads zeroes, and the count
+/// is bounded by how many files a title opens.
 pub fn close(handle: FileHandle) -> bool {
     // A stream that wraps a descriptor owns nothing: forgetting the wrapper is the whole of
-    // closing it, and closing the descriptor as well would take it out from under a guest
-    // that still holds the number.
+    // closing it, and the guest still holds the descriptor.
     if unwrap_descriptor(handle) {
         return true;
     }
@@ -348,9 +305,7 @@ mod tests {
     use super::{From, at_end, close, open, path_of, read, seek, tell};
 
     /// Serialises the tests that touch the mount table.
-    ///
-    /// Mounts are process-global - they describe one guest - and the harness runs tests in
-    /// parallel, so without this a test can have the mount cleared out from under it.
+    /// Mounts are process-global and the harness runs tests in parallel.
     use crate::exclusively;
 
     /// A title directory with one known file in it.
@@ -364,28 +319,26 @@ mod tests {
         root
     }
 
+    /// A handle is a zeroed block the guest can read through.
     #[test]
     fn a_handle_is_memory_the_guest_can_read_through() {
         let _guard = exclusively();
-        // Measured, not assumed: the guest dereferences what `fopen` returns without
-        // checking it. Answering an error code made it carry that code through four more
-        // calls; answering null made it read offset four of the null and fault (D165).
+        // The guest dereferences what `fopen` returns without checking it.
         a_title_with("deref", b"hello");
         let h = open("/app0/game.bin").expect("opens");
         assert_ne!(h, super::NO_FILE);
         assert_eq!(h % 8, 0, "aligned, so a word read is a word read");
 
-        // SAFETY: the address of a leaked, zeroed, aligned block this module owns and
-        // never frees, so a word read from it is always valid.
+        // SAFETY: the address of a leaked, zeroed, aligned block this module owns and never
+        // frees, so a word read from it is valid.
         let first = unsafe { std::ptr::read(h as usize as *const u64) };
         assert_eq!(first, 0, "unknown fields read as zero, not as garbage");
     }
 
+    /// A short read at the end of a file is not counted as a defect.
     #[test]
     fn a_short_read_at_the_end_of_a_file_is_not_counted_as_a_defect() {
-        // Reading to the end is a short read by definition. Counting it would bury the
-        // case that matters - a read cut short *before* the end, which is a truncated
-        // asset the guest will then try to parse (D175).
+        // Counting it would bury a read cut short before the end: a truncated asset.
         let _guard = exclusively();
         a_title_with("shortcount", b"ab");
         let before = super::read_stats().short;
@@ -401,6 +354,7 @@ mod tests {
         close(h);
     }
 
+    /// Reading gives back what is in the file.
     #[test]
     fn reading_gives_back_what_is_in_the_file() {
         let _guard = exclusively();
@@ -413,12 +367,11 @@ mod tests {
         assert!(close(h));
     }
 
+    /// Seeking to the end reports the file's size.
     #[test]
     fn seeking_to_the_end_is_how_a_guest_learns_the_size() {
         let _guard = exclusively();
-        // The pattern this whole subsystem exists to serve: seek to the end, ask where
-        // that is, allocate that much, rewind, read. A wrong answer here is how a title
-        // ended up asking for a two gigabyte buffer.
+        // Seek to the end, ask where that is, allocate that much, rewind, read.
         a_title_with("size", &[7_u8; 1234]);
         let h = open("/app0/game.bin").expect("opens");
         assert_eq!(seek(h, From::End, 0), Some(1234));
@@ -430,38 +383,41 @@ mod tests {
         assert!(buf.iter().all(|b| *b == 7));
     }
 
+    /// The end is reported after the read that reached it, and a seek clears it.
     #[test]
     fn the_end_is_reported_after_the_read_that_reached_it() {
         let _guard = exclusively();
-        // `feof` is asked *after* the short read, so the answer has to survive until
-        // then rather than being derived at the moment it is asked.
+        // `feof` is asked after the short read, so the answer has to persist.
         a_title_with("eof", b"ab");
         let h = open("/app0/game.bin").expect("opens");
         let mut buf = [0_u8; 8];
         assert_eq!(read(h, &mut buf), Some(2));
         assert_eq!(at_end(h), Some(true));
-        // And seeking back clears it, which is what makes rewind-and-read-again work.
+        // Seeking back clears it, so rewind-and-read-again works.
         seek(h, From::Start, 0);
         assert_eq!(at_end(h), Some(false));
     }
 
+    /// A missing file is refused rather than given a handle.
     #[test]
     fn a_file_that_is_not_there_is_refused_rather_than_handled() {
         let _guard = exclusively();
-        // The guest must be able to tell "no such file" from "here is an empty one".
+        // "No such file" must differ from an empty file.
         a_title_with("missing", b"x");
         assert_eq!(open("/app0/not-here.bin"), None);
     }
 
+    /// A path climbing out of its mount never opens.
     #[test]
     fn a_path_climbing_out_of_the_mount_never_opens() {
         let _guard = exclusively();
-        // The containment rule is tested pure elsewhere; this is the check that it is
-        // actually consulted on the path that touches the disk.
+        // The containment rule is tested pure elsewhere; this checks it is consulted on the
+        // path that touches the disk.
         a_title_with("escape", b"x");
         assert_eq!(open("/app0/../../../etc/passwd"), None);
     }
 
+    /// A closed handle stops answering.
     #[test]
     fn a_closed_handle_stops_answering() {
         let _guard = exclusively();
@@ -472,10 +428,10 @@ mod tests {
         assert!(!close(h), "and closing twice reports the truth");
     }
 
+    /// A handle remembers the guest path it was opened with.
     #[test]
     fn a_handle_remembers_which_file_it_is() {
         let _guard = exclusively();
-        // "which file" is the first thing anybody asks of a trace.
         a_title_with("named", b"x");
         let h = open("/app0/game.bin").expect("opens");
         assert_eq!(path_of(h).as_deref(), Some("/app0/game.bin"));

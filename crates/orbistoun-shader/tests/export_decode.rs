@@ -1,23 +1,16 @@
 //! The export's operand layout, pinned.
 //!
-//! # Why this test exists
-//!
-//! The roadmap listed *"solve the export's operand layout by probe"* as work still to do, and
-//! it had been done - `opcode-operands.toml` carries the EXP entry, solved from ten samples,
-//! and the decoder reads it. Nothing said so, so the item sat in a table of next steps and in
-//! every summary generated from it (D551).
-//!
-//! A solved layout that nothing asserts can also be *lost* - a regenerated table that dropped
-//! the entry would take `exp` back to decoding nothing, and the only symptom would be a
-//! worklist quietly reranking. This is the assertion that was missing.
+//! `opcode-operands.toml` carries the EXP entry, solved from ten samples. A regenerated
+//! table that dropped it would return `exp` to decoding nothing, with a reranked worklist
+//! as the only symptom.
 
 use orbistoun_shader::{EncodingTable, Operand, OperandTable, decode};
 
 /// An EXP instruction with the given target and four consecutive source registers.
 ///
-/// The encoding is the one `encodings.toml` declares: mask `0xFC000000`, value `0xF8000000`,
-/// eight bytes. The target is six bits at shift four; the four sources are one byte each in
-/// the second word.
+/// The encoding is the one `encodings.toml` declares: mask `0xFC000000`, value
+/// `0xF8000000`, eight bytes. The target is six bits at shift four; the four sources are one
+/// byte each in the second word.
 fn export_words(target: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend((0xF800_0000u32 | (target << 4)).to_le_bytes());
@@ -25,26 +18,13 @@ fn export_words(target: u32) -> Vec<u8> {
     bytes
 }
 
-/// **`exp` decodes to a target and four vector registers.**
+/// `exp` decodes to a target and four vector registers.
 ///
-/// # What this asserts
-///
-/// That the export's operands come back decoded rather than empty, and that the target is read
-/// as a value rather than fixed - three targets, three answers. `operands_decoded` is checked
-/// separately from the operand list because an empty list with the flag set means "this family
-/// genuinely takes none", which is a different claim from "nobody has taught the decoder this
-/// family" and the decoder is careful to distinguish them.
-///
-/// # What it cannot assert
-///
-/// **What the target numbers mean.** `Immediate(0)` is the first render target by the
-/// mnemonic's own name, but which attachment that becomes, and what targets 8 and above select,
-/// is not decided here and is not decided by decoding. That is the mapping the roadmap's step
-/// (d) says needs a capture, and D104 refuses to invent.
-///
-/// It also says nothing about *translation*. `exp` is still in `BLOCKED`, for a reason that is
-/// now precisely one thing: every module the translator emits is a compute dispatch, so an
-/// export has nowhere to go inside it.
+/// The target is read as a value, not fixed: three targets, three answers.
+/// `operands_decoded` is checked separately, since an empty list with the flag set means the
+/// family takes no operands. What the target numbers select (which attachment, and targets 8
+/// and above) is not decided by decoding (D104). `exp` is in `BLOCKED` because a translated
+/// module is a compute dispatch, which has nowhere to export to.
 #[test]
 fn an_export_decodes_to_a_target_and_four_registers() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");

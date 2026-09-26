@@ -1,31 +1,11 @@
 //! The guest address space.
 //!
-//! A guest module is linked to load at specific addresses and its allocator hands
-//! out addresses the guest's own code then dereferences directly. So orbistoun does
-//! not get to choose the layout: it has to reserve exactly what the guest expects
-//! inside the host process, or nothing above this layer works.
-//!
-//! # Why this is the second thing built, not the last
-//!
-//! Every subsystem shim above depends on it. An audio stub is never reached until
-//! the guest has loaded, allocated, and spawned threads, so getting this wrong
-//! makes every higher-level trace meaningless.
-//!
-//! # The two primitives
-//!
-//! Fixed-address reservation has no portable API, and only two calls are needed:
-//!
-//! - Unix: `mmap` with `MAP_FIXED_NOREPLACE`, which fails rather than silently
-//!   evicting an existing mapping. Plain `MAP_FIXED` is never correct here - it
-//!   would unmap host memory and the failure would look like guest corruption.
-//! - Windows: `VirtualAlloc2` with a placeholder reservation, which is the only
-//!   way to get a specific address range with an explicit conflict error.
-//!
-//! # Status
-//!
-//! Implemented and verified on both platforms (D055). [`platform`] holds the
-//! primitives; [`AddressSpace::validate`] holds the rules, which stay testable
-//! without touching the host address space at all.
+//! A guest module is linked to load at specific addresses and its code dereferences what its
+//! allocator hands out, so orbistoun reserves exactly the layout the guest expects inside the
+//! host process. Fixed-address reservation uses `mmap` with `MAP_FIXED_NOREPLACE` on Unix
+//! (plain `MAP_FIXED` would silently evict host mappings) and `VirtualAlloc2` placeholder
+//! reservations on Windows. [`platform`] holds the primitives; [`AddressSpace::validate`]
+//! holds the rules, testable without touching the host address space.
 
 pub mod blocks;
 pub mod guest;
@@ -35,7 +15,7 @@ pub mod test_bases;
 pub mod watch;
 
 /// A base no other test in this crate gets: one range for the crate, one cursor for every test
-/// module that takes from it (D399).
+/// module that takes from it (D324).
 #[cfg(test)]
 pub(crate) fn unique_test_base() -> u64 {
     use test_bases::{Range, crates};
@@ -52,13 +32,9 @@ use orbistoun_core::{DIRECT_MEMORY_ALIGN, GUEST_PAGE_SIZE};
 /// The base of the last reservation this process failed to make, with [`FAIL_KIND`] the
 /// reason and [`FAIL_LEN`] the size.
 ///
-/// # Why a run needs this
-///
-/// A reservation failure is otherwise invisible. `map_named_direct_memory` collapses every
-/// [`MemError`] into `NoMemory`, the guest reads that as out-of-memory and faults through the
-/// null it kept - far from the reservation, with the base and the reason both unrecoverable
-/// (worklog 284). Recorded allocation-free, because `reserve` runs on the guest's own stack
-/// when a guest maps memory, and a lock or an allocation there is the D381 fault.
+/// A failed reservation otherwise reaches the guest only as `NoMemory`, and the guest faults
+/// far away on the null it kept. Recorded allocation-free, because `reserve` runs on the
+/// guest's stack when a guest maps memory (D381).
 static FAIL_BASE: AtomicU64 = AtomicU64::new(0);
 /// The size of the last failed reservation; see [`FAIL_BASE`].
 static FAIL_LEN: AtomicU64 = AtomicU64::new(0);
@@ -66,28 +42,18 @@ static FAIL_LEN: AtomicU64 = AtomicU64::new(0);
 /// refused. Written last, with `Release`, so a reader that sees it also sees the base and len.
 static FAIL_KIND: AtomicU8 = AtomicU8::new(0);
 
-/// How many reservations have failed, not just the last one.
-///
-/// # Why a count and not only the last failure
-///
-/// The last failure alone cannot answer "did this run fail more reservations than that one",
-/// which is exactly the question when two runs of the same binary take different paths. Two
-/// runs reporting the identical last failure looked like agreement and were not compared on
-/// anything else (D487).
+/// How many reservations have failed, so two runs can be compared on more than their last
+/// failure.
 static FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// The base of the *first* failure, which the last one cannot stand in for.
-///
-/// Thirteen failures all at one address is a caller retrying; thirteen at different addresses
-/// is a walk running out of room. The two want different fixes and the last failure alone
-/// cannot tell them apart.
+/// The base of the first failure. Many failures at one address are a caller retrying; at
+/// different addresses, a walk running out of room.
 static FIRST_FAIL_BASE: AtomicU64 = AtomicU64::new(0);
 
 /// The last reservation this process could not make, for the run report to surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReserveFailure {
-    /// The base address the reservation was attempted at - the value the empty-arena
-    /// reasoning could not otherwise confirm.
+    /// The base address the reservation was attempted at.
     pub base: u64,
     /// The length in bytes.
     pub len: u64,
@@ -113,9 +79,8 @@ fn note_reserve_failure(base: u64, len: u64, error: &MemError) {
 
 /// How many reservations this process failed to make.
 ///
-/// **Zero is a real answer** and differs from "no failure recorded": a run that reserved
-/// everything it asked for reports zero here and [`None`] from [`last_reserve_failure`], and
-/// the two agree. A run that failed several reports the count here and only the newest there.
+/// Zero agrees with [`None`] from [`last_reserve_failure`]; after several failures that
+/// reports only the newest.
 #[must_use]
 pub fn reserve_failures() -> u64 {
     FAIL_COUNT.load(Ordering::Relaxed)
@@ -129,8 +94,7 @@ pub fn first_reserve_failure_base() -> Option<u64> {
 
 /// The last reservation this process failed to make, or [`None`] if every one has succeeded.
 ///
-/// Read at the end of a run, from the host side, so it may allocate - unlike the recording
-/// side, which is on the guest's stack.
+/// Read from the host side at the end of a run, so it may allocate.
 #[must_use]
 pub fn last_reserve_failure() -> Option<ReserveFailure> {
     let reason = match FAIL_KIND.load(Ordering::Acquire) {
@@ -205,10 +169,8 @@ impl Protection {
 
     /// Interprets an ELF program header's `p_flags`.
     ///
-    /// The bit values are fixed by the format: execute is 1, write is 2, read is 4.
-    /// Note the ordering is *not* the intuitive read-write-execute - transcribing them
-    /// in the wrong order maps text as writable data, which then faults on the first
-    /// instruction fetch with nothing to point at the cause.
+    /// The format fixes execute as 1, write as 2 and read as 4; reversing them maps text as
+    /// writable data, which faults on the first instruction fetch.
     pub const fn from_elf_flags(flags: u32) -> Self {
         Self {
             read: flags & 0x4 != 0,
@@ -219,18 +181,15 @@ impl Protection {
 
     /// Whether this permits writing and executing at once.
     ///
-    /// Worth asking about explicitly. A segment mapped both ways is a legitimate thing
-    /// for a guest to request and a real hazard, so it is reported rather than either
-    /// silently honoured or silently downgraded (D060).
+    /// A guest may legitimately request it, and it is a hazard, so it is reported rather than
+    /// honoured or downgraded silently.
     pub const fn is_writable_and_executable(&self) -> bool {
         self.write && self.execute
     }
 
     /// Every permission this and `other` grant between them.
     ///
-    /// Needed because segments may share a page: the page must satisfy both, and a
-    /// loader that simply applies the last one strips permissions the first still
-    /// needs.
+    /// Segments may share a page, and the page must satisfy both.
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self {
@@ -244,8 +203,8 @@ impl Protection {
 /// One reserved guest region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Region {
-    /// Guest base address, which equals the host address - the mapping is
-    /// identity, because guest code dereferences these values directly.
+    /// Guest base address, which equals the host address: guest code dereferences these values
+    /// directly.
     pub base: u64,
     /// Length in bytes, always a multiple of [`GUEST_PAGE_SIZE`].
     pub len: u64,
@@ -279,9 +238,8 @@ impl AddressSpace {
 
     /// Checks a request against the ABI rules and existing reservations.
     ///
-    /// Separated from the mapping itself so the rules are testable without
-    /// touching the host address space at all - which is what lets this crate
-    /// have meaningful tests before the platform code exists.
+    /// Separate from the mapping so the rules are testable without touching the host address
+    /// space.
     pub fn validate(&self, base: u64, len: u64, direct: bool) -> Result<(), MemError> {
         if len == 0 || len % GUEST_PAGE_SIZE != 0 {
             return Err(MemError::Misaligned {
@@ -314,18 +272,16 @@ impl AddressSpace {
 
     /// Reserves `len` bytes at exactly `base`.
     ///
-    /// Fails rather than relocating. A guest that asked for an address and got a
-    /// different one will corrupt itself in ways that look like anything except a
-    /// mapping bug.
+    /// Fails rather than relocating: a guest given a different address than it asked for corrupts
+    /// itself in ways that do not look like a mapping fault.
     pub fn reserve(
         &mut self,
         base: u64,
         len: u64,
         protection: Protection,
     ) -> Result<Region, MemError> {
-        // The failure is captured here, at the one place both the validate conflict and the
-        // host refusal pass through, so the report can name the base and the reason a caller
-        // that only sees `NoMemory` cannot (worklog 284).
+        // Both the validate conflict and the host refusal pass through here, so the failure is
+        // recorded with its base and reason.
         if let Err(e) = self.validate(base, len, false) {
             note_reserve_failure(base, len, &e);
             return Err(e);
@@ -349,12 +305,9 @@ impl AddressSpace {
 
     /// Whether `[base, base + len)` lies entirely within a single region this space reserved.
     ///
-    /// Exposed so a caller that means to **commit into an existing reservation** - a guest
-    /// that reserved a range with one call and then mapped physical memory inside it with
-    /// another - can tell that case from a fresh mapping without reaching into the region
-    /// list itself. Reserving the same range a second time conflicts (that is the point of
-    /// [`reserve`](Self::reserve) refusing to relocate), so the two operations have to be
-    /// told apart before the mapping, not after it fails.
+    /// Lets a caller that commits into an existing reservation (reserve with one call, map
+    /// inside it with another) tell that case from a fresh mapping before mapping, since
+    /// reserving the same range twice conflicts (D460).
     #[must_use]
     pub fn owns(&self, base: u64, len: u64) -> bool {
         let end = base.saturating_add(len);
@@ -365,9 +318,8 @@ impl AddressSpace {
 
     /// Changes the protection of a range already covered by a reservation.
     ///
-    /// Refuses a range this address space does not own. Calling the platform directly
-    /// would let a typo re-protect arbitrary host memory - including this process's own
-    /// code - and the failure would appear as an unrelated crash.
+    /// Refuses a range this address space does not own, so a bad address cannot re-protect host
+    /// memory, including this process's own code.
     pub fn protect(&mut self, base: u64, len: u64, protection: Protection) -> Result<(), MemError> {
         if !self.owns(base, len) {
             let end = base.saturating_add(len);
@@ -377,9 +329,7 @@ impl AddressSpace {
             note_reserve_failure(base, len, &error);
             return Err(error);
         }
-        // Recorded on failure for the same reason `reserve` is: a guest that maps into a
-        // pre-reserved range and is refused faults far from here, and the report otherwise
-        // sees only `NoMemory` (worklog 284).
+        // Recorded for the same reason as in `reserve`: the guest otherwise sees only `NoMemory`.
         if let Err(e) = platform::protect(base, len, protection) {
             note_reserve_failure(base, len, &e);
             return Err(e);
@@ -487,9 +437,7 @@ mod tests {
     }
     #[test]
     fn elf_flag_bits_map_to_the_right_permissions() {
-        // Execute is 1 and read is 4, which is the reverse of how they are usually
-        // spoken. Getting it backwards maps text as writable data and faults on the
-        // first instruction fetch with nothing pointing at the cause.
+        // Execute is 1 and read is 4, the reverse of the usual spoken order.
         assert_eq!(Protection::from_elf_flags(0x4), Protection::READ_ONLY);
         assert_eq!(
             Protection::from_elf_flags(0x4 | 0x2),
@@ -519,16 +467,14 @@ mod tests {
 
     #[test]
     fn union_keeps_every_permission_either_side_needs() {
-        // Two segments sharing a page must both still work. Applying the last one
-        // strips permissions the first still needs.
+        // Two segments sharing a page must both still work.
         let both = Protection::READ_EXECUTE.union(Protection::READ_WRITE);
         assert!(both.read && both.write && both.execute);
     }
 
     #[test]
     fn protecting_a_range_outside_every_region_is_refused() {
-        // Passing this through to the platform would let a typo re-protect arbitrary
-        // host memory, including this process's own code.
+        // Passing this to the platform could re-protect arbitrary host memory.
         let mut s = space_with(0x1_0000, GUEST_PAGE_SIZE * 4);
         assert!(
             s.protect(0x9_0000, GUEST_PAGE_SIZE, Protection::READ_ONLY)

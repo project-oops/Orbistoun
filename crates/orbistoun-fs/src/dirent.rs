@@ -1,15 +1,15 @@
-//! Reading a directory through its descriptor: the `getdirentries` family (worklog 842).
+//! Reading a directory through its descriptor: the `getdirentries` family.
 //!
 //! A guest that lists a directory without the C library - a launcher scanning `/user/app` for
 //! installed titles does - opens the directory, then issues the system call on the descriptor and
 //! walks the records it gets back itself. So the records are the kernel's own layout, exactly:
 //!
-//! - `getdirentries` (554) writes the current `struct dirent` - `d_fileno` 64-bit at 0, `d_off` at
-//!   8, `d_reclen` at 16, `d_type` at 18, `d_namlen` 16-bit at 20, the name at 24 - each record
-//!   rounded to 8 bytes (FreeBSD `sys/sys/dirent.h`, `_GENERIC_DIRSIZ`);
-//! - `freebsd11_getdirentries` (196) and `freebsd11_getdents` (272) write the older one - `d_fileno`
-//!   32-bit at 0, `d_reclen` at 4, `d_type` at 6, `d_namlen` 8-bit at 7, the name at 8 - rounded
-//!   to 4 (FreeBSD 11 `sys/sys/dirent.h`).
+//! - `getdirentries` (554) writes the current `struct dirent`: `d_fileno` 64-bit at 0, `d_off`
+//!   at 8, `d_reclen` at 16, `d_type` at 18, `d_namlen` 16-bit at 20, the name at 24, each
+//!   record rounded to 8 bytes (FreeBSD `sys/sys/dirent.h`, `_GENERIC_DIRSIZ`);
+//! - `freebsd11_getdirentries` (196) and `freebsd11_getdents` (272) write the older one:
+//!   `d_fileno` 32-bit at 0, `d_reclen` at 4, `d_type` at 6, `d_namlen` 8-bit at 7, the name
+//!   at 8, rounded to 4 (FreeBSD 11 `sys/sys/dirent.h`).
 //!
 //! The entries are the listing `metadata::listing` builds for `opendir`, taken when the
 //! directory is opened and walked from there, so the two ways of reading a directory agree.
@@ -99,8 +99,7 @@ fn encode(
             break;
         };
         slot.fill(0);
-        // A non-zero inode: a reader that skips zero-inode records, as the C library does,
-        // must not skip these.
+        // A non-zero inode, since a reader such as the C library skips zero-inode records.
         let inode = index as u64 + 1;
         let kind = if *is_directory { DT_DIR } else { DT_REG };
         let reclen = u16::try_from(record).unwrap_or(u16::MAX);
@@ -144,7 +143,7 @@ fn read_entries(fd: u64, (buffer, length): (u64, u64), basep: u64, generation: G
     let start = listing.next;
     let (written, next) = encode(&listing.entries, start, bytes, generation);
     if written == 0 && next < listing.entries.len() {
-        // The next record does not fit at all: `EINVAL` on the console, a failure here.
+        // The next record does not fit at all: `EINVAL` on the hardware.
         return FAILED;
     }
     listing.next = next;
@@ -161,27 +160,27 @@ fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     }
     let at = usize::try_from(address).ok()?;
     let len = usize::try_from(length).ok()?;
-    // SAFETY: a guest-supplied buffer under the identity mapping (D014), with the length the guest
-    // itself passed - the same contract the real call has.
+    // SAFETY: a guest-supplied buffer under the identity mapping, with the length the guest
+    // passed, the same contract the real call has.
     Some(unsafe {
         std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(at), len)
     })
 }
 
-/// `getdirentries(fd, buf, nbytes, basep)` - the current record layout.
+/// `getdirentries(fd, buf, nbytes, basep)`: the current record layout.
 ///
 /// Reference: FreeBSD `getdirentries(2)`.
 fn getdirentries(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     read_entries(args[0], (args[1], args[2]), args[3], Generation::Current)
 }
 
-/// `sceKernelGetdirentries(fd, buf, nbytes, basep)` - the FreeBSD 11 record layout, and what the
+/// `sceKernelGetdirentries(fd, buf, nbytes, basep)`: the FreeBSD 11 record layout, and what the
 /// old system call 196 (`freebsd11_getdirentries`) is served by.
 fn get_dir_entries(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     read_entries(args[0], (args[1], args[2]), args[3], Generation::FreeBsd11)
 }
 
-/// `sceKernelGetdents(fd, buf, nbytes)` - the FreeBSD 11 layout with no position out, and what the
+/// `sceKernelGetdents(fd, buf, nbytes)`: the FreeBSD 11 layout with no position out, and what the
 /// old system call 272 (`freebsd11_getdents`) is served by.
 fn get_dents(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     read_entries(args[0], (args[1], args[2]), 0, Generation::FreeBsd11)
@@ -209,8 +208,8 @@ mod tests {
         ]
     }
 
-    /// **The current layout: 64-bit inode, 8-byte records, the name at 24** (FreeBSD 12
-    /// `sys/sys/dirent.h`) - what a scanner reading `reclen` at 16 and `namlen` at 20 walks.
+    /// The current layout: 64-bit inode, 8-byte records, the name at 24 (FreeBSD 12
+    /// `sys/sys/dirent.h`).
     #[test]
     fn the_current_layout_puts_each_field_where_the_header_does() {
         let mut buffer = [0u8; 256];
@@ -236,7 +235,7 @@ mod tests {
         assert_eq!(written, 32 + 40 + 40);
     }
 
-    /// **The FreeBSD 11 layout: 32-bit inode, 4-byte records, the name at 8.**
+    /// The FreeBSD 11 layout: 32-bit inode, 4-byte records, the name at 8.
     #[test]
     fn the_freebsd11_layout_puts_each_field_where_its_header_does() {
         let mut buffer = [0u8; 256];
@@ -250,7 +249,7 @@ mod tests {
         assert_eq!(buffer[20 + 6], 8, "a regular file");
     }
 
-    /// **A buffer stops at the last whole record**, and the next call resumes after it.
+    /// A short buffer stops at the last whole record, and the next call resumes after it.
     #[test]
     fn a_short_buffer_stops_at_a_whole_record() {
         let mut buffer = [0u8; 40];

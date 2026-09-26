@@ -1,16 +1,7 @@
 //! Address translation in a container with no wrapper.
 //!
-//! # Why these exist
-//!
-//! Because every one of them passed vacuously before, by returning "cannot locate that"
-//! for every address of every unwrapped module. The container parsed, the loader mapped
-//! its segments, and then nothing downstream could find a single byte - reported as *no
-//! `PT_DYNAMIC` segment, or its address could not be located* about a module that had one
-//! sitting inside a mapped `PT_LOAD` (D237).
-//!
-//! The modules this matters for are the ones nobody can sign: a conformance probe emits a
-//! bare ELF because it has no other option, and that is the guest most worth being able to
-//! run repeatedly.
+//! In an unwrapped container the program headers' own file offsets are authoritative.
+//! A conformance probe emits a bare ELF, so these paths serve the guest run most often.
 
 use orbistoun_elf::Container;
 
@@ -27,7 +18,7 @@ fn bare_elf(headers: &[(u32, u64, u64, u64)], body: usize) -> Vec<u8> {
     elf[5] = 1; // little endian
     elf[6] = 1; // version
     elf[7] = 9; // FreeBSD, as a target module carries
-    elf[8] = 2; // ABI version - a generation-5 module
+    elf[8] = 2; // ABI version
     elf[16..18].copy_from_slice(&0xfe18u16.to_le_bytes());
     elf[18..20].copy_from_slice(&62u16.to_le_bytes()); // x86-64
     elf[20..24].copy_from_slice(&1u32.to_le_bytes());
@@ -46,8 +37,8 @@ fn bare_elf(headers: &[(u32, u64, u64, u64)], body: usize) -> Vec<u8> {
     elf
 }
 
-/// One `PT_LOAD` at 0x1000, backed by file offset 0x200, with a `PT_DYNAMIC` inside it -
-/// the shape a conformance probe's module actually has.
+/// One `PT_LOAD` at 0x1000, backed by file offset 0x200, with a `PT_DYNAMIC` inside it:
+/// the shape of a conformance probe's module.
 fn probe_shaped() -> Vec<u8> {
     bare_elf(
         &[(1, 0x200, 0x1000, 0x200), (2, 0x300, 0x1100, 0x100)],
@@ -55,6 +46,7 @@ fn probe_shaped() -> Vec<u8> {
     )
 }
 
+/// An address inside a `PT_LOAD` resolves through its file offset.
 #[test]
 fn an_address_inside_a_load_resolves_through_its_file_offset() {
     let bytes = probe_shaped();
@@ -72,7 +64,7 @@ fn an_address_inside_a_load_resolves_through_its_file_offset() {
     );
 }
 
-/// The failure that started this: a dynamic table that is present and was unreachable.
+/// A dynamic table inside a `PT_LOAD` is found.
 #[test]
 fn a_dynamic_table_inside_a_load_can_be_found() {
     let bytes = probe_shaped();
@@ -84,7 +76,7 @@ fn a_dynamic_table_inside_a_load_can_be_found() {
     assert_eq!(dynamic.len(), 0x100, "the whole declared table came back");
 }
 
-/// An address outside every segment is still unlocatable, which is the honest answer.
+/// An address outside every segment resolves to nothing.
 #[test]
 fn an_address_in_no_segment_resolves_to_nothing() {
     let bytes = probe_shaped();
@@ -97,8 +89,7 @@ fn an_address_in_no_segment_resolves_to_nothing() {
 
 /// A header describing more than the file holds does not resolve past the end of it.
 ///
-/// Truncated containers exist, and the difference between "cannot locate that" and an
-/// index past the end of a slice is the difference between a report and a panic.
+/// A truncated container reads as "cannot locate", never as an index past the slice.
 #[test]
 fn a_header_pointing_past_the_end_of_the_file_locates_nothing() {
     let bytes = bare_elf(&[(1, 0x9000, 0x1000, 0x200)], 0x400);
@@ -112,9 +103,9 @@ fn a_header_pointing_past_the_end_of_the_file_locates_nothing() {
 
 /// When a vendor segment and a `PT_LOAD` both claim an address, the `PT_LOAD` wins.
 ///
-/// Both genuinely cover it: a vendor segment carrying dynamic data is commonly declared at
-/// virtual address zero, and a module whose first `PT_LOAD` also starts at zero then has
-/// two headers over the same low range. An address in the image means the image.
+/// A vendor segment carrying dynamic data is commonly declared at virtual address zero, and
+/// a module whose first `PT_LOAD` also starts at zero has two headers over the same range. An
+/// address in the image means the image.
 #[test]
 fn a_load_is_preferred_over_a_vendor_segment_claiming_the_same_address() {
     use orbistoun_elf::segment::SCE_DYNLIBDATA;
@@ -148,11 +139,10 @@ fn a_vendor_segment_resolves_when_no_load_covers_the_address() {
     );
 }
 
-/// An unwrapped container reports no wrapper-located segments, and that stays true.
+/// An unwrapped container reports no wrapper-located segments.
 ///
-/// It is not the defect it looked like from outside: program headers address the file
-/// directly when there is no wrapper, so there is nothing for a descriptor table to locate.
-/// The bug was never here.
+/// Program headers address the file directly when there is no wrapper, so there is nothing
+/// for a descriptor table to locate.
 #[test]
 fn a_bare_container_still_reports_no_wrapper_mapped_segments() {
     let bytes = probe_shaped();
@@ -166,13 +156,10 @@ fn a_bare_container_still_reports_no_wrapper_mapped_segments() {
     );
 }
 
-/// **A vendor hash table at offset zero is a table, not a missing tag.**
+/// A vendor hash table at offset zero is a table, not a missing tag.
 ///
-/// D247 is the entry about this: a vendor `DT_` value is an offset into
-/// `PT_SCE_DYNLIBDATA`, and offset zero is the first byte of it - where a real module puts
-/// a table. D305 added a `DT_GNU_HASH` fallback and guarded it with `info.hash != 0`,
-/// which reintroduced exactly that bug for any module whose hash sits at the front. It was
-/// caught by writing this, which is the point of writing it.
+/// A vendor `DT_` value is an offset into `PT_SCE_DYNLIBDATA`, and offset zero is its first
+/// byte (D247). The `DT_GNU_HASH` fallback must not treat it as absent.
 #[test]
 fn a_vendor_hash_table_at_offset_zero_is_still_found() {
     use orbistoun_elf::segment::SCE_DYNLIBDATA as VENDOR_DATA;
@@ -190,7 +177,7 @@ fn a_vendor_hash_table_at_offset_zero_is_still_found() {
         0x500,
     );
 
-    // The dynamic table: every vendor tag named, and the hash **at offset zero**.
+    // The dynamic table: every vendor tag named, and the hash at offset zero.
     let mut at = 0x300;
     for (tag, value) in [(SCE_HASH, 0_u64), (SCE_STRTAB, 0x40), (SCE_SYMTAB, 0x80)] {
         bytes[at..at + 8].copy_from_slice(&tag.to_le_bytes());
@@ -210,17 +197,15 @@ fn a_vendor_hash_table_at_offset_zero_is_still_found() {
     );
 }
 
-/// The shape a **real title** has, where two segments claim address zero.
+/// The shape a real title has, where two segments claim address zero.
 ///
 /// ```text
 /// PT_SCE_DYNLIBDATA  off 0x8c130  filesz 0x3760  vaddr 0   -> ends 0x8f890
 /// PT_DYNAMIC         off 0x8f450  filesz 0x0440  vaddr 0   -> ends 0x8f890
 /// ```
 ///
-/// Scaled down, and with the vendor segment first in the table so that a reader resolving
-/// `PT_DYNAMIC` *by address* picks the wrong one - which is what the file layout does on real
-/// hardware, and what nothing in this repository could load until it was measured there
-/// (D391).
+/// Scaled down, with the vendor segment first in the table so a reader resolving
+/// `PT_DYNAMIC` by address picks the wrong one.
 fn title_shaped() -> Vec<u8> {
     const PT_LOAD: u32 = 1;
     const PT_DYNAMIC: u32 = 2;
@@ -236,10 +221,10 @@ fn title_shaped() -> Vec<u8> {
     )
 }
 
-/// **The dynamic table is found by its own file offset, not by address.**
+/// The dynamic table is found by its own file offset, not by address.
 ///
-/// The failure this protects against is silent: resolving by address returns the *vendor*
-/// segment's bytes, which parse as a dynamic table of nonsense rather than as an error.
+/// Resolving by address returns the vendor segment's bytes, which parse as a nonsense
+/// dynamic table rather than an error.
 #[test]
 fn a_dynamic_table_with_no_address_is_still_found() {
     let bytes = title_shaped();
@@ -257,10 +242,7 @@ fn a_dynamic_table_with_no_address_is_still_found() {
     );
 }
 
-/// Resolving *by address* is exactly the ambiguity, kept as a statement about the file.
-///
-/// Two segments cover address zero, so the question has no single answer - which is why the
-/// dynamic table is not found that way any more.
+/// Two segments cover address zero in a title, so resolving by address has no single answer.
 #[test]
 fn address_zero_is_claimed_by_two_segments_in_a_title() {
     let bytes = title_shaped();

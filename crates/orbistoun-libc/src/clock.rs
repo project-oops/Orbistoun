@@ -1,33 +1,16 @@
 //! Time, and waiting.
 //!
-//! # Why these are worth having early
-//!
-//! Between them, `sleep`, `gettimeofday`, `time`, `usleep` and `clock_gettime` are wanted by
-//! more of the open-toolchain payloads than the whole socket set: a server's main loop is
-//! *wait, poll, timestamp, log*, and it does the first of those before it does anything
-//! interesting. A guest whose `sleep` answers an error code does not pause - it spins.
-//!
-//! # There is no oracle problem here at all
-//!
-//! POSIX says exactly what each of these does, the structures are two machine words each,
-//! and both are in the FreeBSD checkout the ABI constants are harvested from:
+//! A guest whose `sleep` answers an error does not pause, it spins, so these are real waits.
+//! The structures follow FreeBSD, and on this data model each is two little-endian 64-bit
+//! words:
 //!
 //! ```text
 //! struct timeval  { time_t tv_sec; suseconds_t tv_usec; }   sys/sys/_timeval.h
 //! struct timespec { time_t tv_sec; long        tv_nsec; }   sys/sys/timespec.h
 //! ```
 //!
-//! On this data model every one of those types is 64 bits, so each structure is sixteen
-//! bytes of two little-endian words. That is the only assumption here, it follows from the
-//! architecture rather than from anything about this target, and it is stated in the
-//! knowledge file.
-//!
-//! # The wall clock is the host's, and that is a real answer
-//!
-//! Nothing here invents a time. A guest asking what time it is gets what time it is, for the
-//! same reason `getpid` answers the host's process id: it is true in every sense that can be
-//! checked from inside the guest, and a made-up constant would be indistinguishable until
-//! something compared it against something else.
+//! The wall clock is the host's, for the same reason `getpid` answers the host's process id:
+//! it is true in every sense a guest can check.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -36,12 +19,11 @@ const OK: u64 = 0;
 
 /// Answered by a call that could not do what was asked.
 ///
-/// Negative one, which is what every one of these interfaces documents as its failure - and
-/// deliberately not an invented errno, which is a different question this cannot answer.
+/// Negative one, the documented failure of every one of these interfaces; no errno is
+/// invented.
 const FAILED: u64 = -1_i64 as u64;
 
-/// Nanoseconds in a second, named because it appears in two conversions and a typo in
-/// either would be a clock that is wrong by a factor of a thousand.
+/// Nanoseconds in a second.
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 /// Microseconds in a second.
@@ -49,8 +31,7 @@ const MICROS_PER_SECOND: u64 = 1_000_000;
 
 /// Writes two machine words where a guest expects a two-field time structure.
 ///
-/// Answers whether it could. A null destination is refused rather than written to, which is
-/// the one error case these calls really have.
+/// Answers whether it could; a null destination is refused rather than written to.
 fn write_pair(address: u64, first: u64, second: u64) -> bool {
     if address == 0 {
         return false;
@@ -58,11 +39,11 @@ fn write_pair(address: u64, first: u64, second: u64) -> bool {
     let Ok(at) = usize::try_from(address) else {
         return false;
     };
-    // Built from the address rather than cast down from a byte pointer, so nothing here
-    // claims an alignment the guest never promised. Every access below is unaligned.
+    // Built from the address rather than cast from a byte pointer, so no alignment is claimed
+    // that the guest never promised. Every access below is unaligned.
     let at = std::ptr::with_exposed_provenance_mut::<u64>(at);
-    // SAFETY: a guest-supplied address under the identity mapping (D014), where the guest
-    // itself asked for sixteen bytes of answer - the same contract the real call has.
+    // SAFETY: a guest-supplied address under the identity mapping, where the guest asked for
+    // sixteen bytes of answer, as the real call's contract states.
     unsafe { std::ptr::write_unaligned(at, first) };
     // SAFETY: the second field of the same structure the guest provided.
     let next = unsafe { at.add(1) };
@@ -83,8 +64,8 @@ fn time(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         && at != 0
     {
         let at = std::ptr::with_exposed_provenance_mut::<u64>(at);
-        // SAFETY: a guest-supplied address under the identity mapping (D014), where the
-        // guest asked for a `time_t` to be written.
+        // SAFETY: a guest-supplied address under the identity mapping, where the guest asked for a
+        // `time_t` to be written.
         unsafe { std::ptr::write_unaligned(at, seconds) };
     }
     seconds
@@ -92,16 +73,13 @@ fn time(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `gettimeofday(tp, tzp)` - the wall clock, to the microsecond.
 ///
-/// **The timezone argument is ignored, as it must be.** POSIX marks it obsolete and says
-/// that if it is not null the behaviour is unspecified; FreeBSD fills in a structure whose
-/// contents have been meaningless for decades. Writing something plausible there would be
-/// inventing data; leaving it is what every modern caller expects.
+/// The timezone argument is ignored: POSIX marks it obsolete with unspecified behaviour when
+/// not null.
 ///
 /// Reference: POSIX.1-2008 `gettimeofday(3)`; `struct timeval` from `sys/sys/_timeval.h`.
 fn gettimeofday(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (seconds, nanos) = orbistoun_hle::clocks::wall_clock();
-    // A null destination is success with nothing written: the call is then a no-op, which
-    // is what a caller passing two nulls asked for.
+    // A null destination is success with nothing written.
     if args[0] == 0 {
         return OK;
     }
@@ -118,24 +96,15 @@ fn gettimeofday(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `clock_gettime(clock_id, tp)` - a named clock, to the nanosecond.
 ///
-/// # Which clocks, and why the rest are refused
-///
-/// Two families are answerable here and are answered: the real-time clocks, which are the
-/// host's wall clock, and the monotonic ones, which are time since this process started. The
-/// identifiers come from the harvested table rather than from recall, because the numbers
-/// differ between platforms and a wrong one is a guest silently reading the wrong clock.
-///
-/// Anything else - the per-process and per-thread CPU clocks, `CLOCK_UPTIME`, the second
-/// variants - is **refused rather than answered with the nearest thing**. A guest measuring
-/// its own CPU time and receiving wall time gets a number that looks right and is not, which
-/// is the failure this project refuses on principle (principle 3).
+/// The real-time clocks answer the host's wall clock and the monotonic ones the time since
+/// this process started; identifiers come from the harvested table, since they differ between
+/// platforms. The CPU-time clocks, `CLOCK_UPTIME` and the second variants are refused rather
+/// than answered with the nearest thing (D010).
 ///
 /// Reference: POSIX.1-2008 `clock_gettime(3)`; identifiers from `sys/sys/_clock_id.h`.
 fn clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    // **The families, the identifiers and the monotonic origin live one crate down**, because
-    // `sceKernelClockGettime` is the same call under the platform's own name and belongs to a
-    // library this crate does not own. Copying them would have worked and would have drifted
-    // (D536).
+    // The families, identifiers and monotonic origin live in `orbistoun-hle`, shared with
+    // `sceKernelClockGettime`, the same call under the platform's name (D536).
     let Some((seconds, nanos)) = orbistoun_hle::clocks::reading(args[0] as i64) else {
         return FAILED;
     };
@@ -146,21 +115,13 @@ fn clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sleep(seconds)` - waits, and really waits.
+/// `sleep(seconds)` - waits for the full time.
 ///
-/// # Why this is a real sleep
+/// Returning at once would turn a paced guest loop into a spin. A wait longer than the run
+/// has left reaches the run's own limit. Answers the seconds remaining, always zero, because
+/// nothing here delivers a signal to cut a sleep short.
 ///
-/// A `sleep` that returns immediately does not save a guest any time - it turns a paced loop
-/// into a spin, and the run then measures how fast this emulator can answer the same call a
-/// million times. Every payload's main loop is *wait, poll, act*.
-///
-/// A guest that asks to wait longer than the run has left simply reaches the run's own limit,
-/// which exists for exactly this and reports itself honestly. Capping the wait here would be
-/// a lie the guest could measure with the clock above.
-///
-/// Reference: POSIX.1-2008 `sleep(3)`. Answers the seconds *remaining*, which is zero
-/// whenever the sleep was not cut short - and nothing here can cut one short, because nothing
-/// here delivers a signal.
+/// Reference: POSIX.1-2008 `sleep(3)`.
 fn sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     slept(std::time::Duration::from_secs(args[0]));
     0
@@ -168,11 +129,9 @@ fn sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// Waits, and tells the clock that time passed.
 ///
-/// **One function because the second half is easy to forget.** Three calls here sleep, and a
-/// guest that sleeps ten milliseconds and then reads a clock which moved a microsecond
-/// concludes the sleep did not happen - the failure D275 records for a counter that did not
-/// advance, arriving by a different route. Under the host clock the second call does nothing,
-/// because the sleep moved it already (D582).
+/// Under the logical clock a guest that sleeps and then reads the time must see the time move
+/// (D275); under the host clock the second call does nothing, because the sleep moved it
+/// (D582).
 fn slept(how_long: std::time::Duration) {
     std::thread::sleep(how_long);
     orbistoun_hle::clocks::advance(how_long.as_nanos());
@@ -203,8 +162,8 @@ fn nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return FAILED;
     };
     let at = std::ptr::with_exposed_provenance::<u64>(at);
-    // SAFETY: a guest-supplied `struct timespec` under the identity mapping (D014) - the
-    // same contract the real call has.
+    // SAFETY: a guest-supplied `struct timespec` under the identity mapping, as the real
+    // call's contract states.
     let seconds = unsafe { std::ptr::read_unaligned(at) };
     // SAFETY: the second field of the same structure the guest provided.
     let next = unsafe { at.add(1) };
@@ -212,8 +171,7 @@ fn nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let nanos = unsafe { std::ptr::read_unaligned(next) };
 
     if nanos >= NANOS_PER_SECOND {
-        // What the standard says is invalid, refused rather than normalised: a caller that
-        // built the structure wrongly should be told, not quietly corrected.
+        // Invalid per the standard, refused rather than normalised.
         return FAILED;
     }
     slept(std::time::Duration::new(seconds, nanos as u32));
@@ -225,10 +183,8 @@ fn nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// FreeBSD `struct tm`, LP64: nine `int` fields, then `long tm_gmtoff` and `char *tm_zone`.
 ///
-/// The nine ints sit at offsets 0, 4, ... 32; `long` then aligns to 40 and the pointer to 48,
-/// for fifty-six bytes in all. `asctime` and a guest reading the struct both take the ints from
-/// those offsets, so the layout is the ABI here - taken from FreeBSD `<time.h>`, the same
-/// checkout the other constants are harvested from, rather than guessed.
+/// The ints sit at offsets 0 through 32, the `long` at 40 and the pointer at 48, fifty-six
+/// bytes in all, from FreeBSD `<time.h>`.
 const TM_BYTES: usize = 56;
 
 /// The three-letter day and month names `asctime` prints, in `tm_wday` (Sunday = 0) and
@@ -241,16 +197,15 @@ const MONTH_NAME: [&str; 12] = [
 /// The nine `int` fields of `struct tm`, in order, from a count of seconds since the epoch.
 ///
 /// `[tm_sec, tm_min, tm_hour, tm_mday, tm_mon(0-11), tm_year(-1900), tm_wday(0=Sun), tm_yday,
-/// tm_isdst]`. Computed as UTC: no timezone is modelled here, so "local" time is UTC, which is
-/// the one honest answer available and is noted as such in the knowledge file.
+/// tm_isdst]`. Computed as UTC, since guest local time is UTC (D454).
 fn broken_down(secs: i64) -> [i32; 9] {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let hour = (rem / 3_600) as i32;
     let minute = ((rem % 3_600) / 60) as i32;
     let second = (rem % 60) as i32;
-    // 1970-01-01 was a Thursday, which is 4 with Sunday at 0. `rem_euclid` keeps it in range
-    // for dates before the epoch as well as after.
+    // 1970-01-01 was a Thursday, 4 with Sunday at 0. `rem_euclid` keeps it in range before the
+    // epoch too.
     let wday = (days + 4).rem_euclid(7) as i32;
     let (year, month, day) = civil_from_days(days);
     [
@@ -268,8 +223,8 @@ fn broken_down(secs: i64) -> [i32; 9] {
 
 /// Gregorian year, month (1-12) and day (1-31) from a count of days since 1970-01-01.
 ///
-/// Howard Hinnant's `civil_from_days` (public domain, and widely used precisely because it is
-/// exact across the whole range of a signed day count rather than only for recent dates).
+/// Howard Hinnant's public-domain `civil_from_days`, exact across the whole range of a signed
+/// day count.
 fn civil_from_days(days: i64) -> (i64, i32, i32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -297,9 +252,8 @@ fn yday(year: i64, month: i32, day: i32) -> i32 {
 
 /// Fills this thread's `struct tm` and answers its address.
 ///
-/// Per-thread, like `errno`: the C `localtime` returns a pointer to a static object a later
-/// call may overwrite, and a shared one would let two guest threads corrupt each other's. A
-/// guest thread is a host thread here, so `thread_local!` gives exactly the per-thread static
+/// Per-thread, like `errno`: `localtime` returns a pointer to a static object a later call may
+/// overwrite, and a guest thread is a host thread, so `thread_local!` is the per-thread static
 /// the standard allows.
 fn fill_tm(fields: [i32; 9]) -> u64 {
     thread_local! {
@@ -308,10 +262,8 @@ fn fill_tm(fields: [i32; 9]) -> u64 {
     }
     TM.with(|cell| {
         let slot = cell.get();
-        // SAFETY: this thread's own buffer under the identity mapping. Nothing else holds a
-        // reference to it - it is thread-local and this is the only writer on this thread -
-        // and the address stays valid for the life of the thread, which is what the caller
-        // keeps.
+        // SAFETY: this thread's own buffer; it is thread-local and this is the only writer on this
+        // thread, and it stays valid for the life of the thread.
         let buffer = unsafe { &mut *slot };
         *buffer = [0; TM_BYTES];
         for (index, value) in fields.iter().enumerate() {
@@ -323,8 +275,7 @@ fn fill_tm(fields: [i32; 9]) -> u64 {
 
 /// `localtime(timer)` and `gmtime(timer)` - a `time_t` broken down into a `struct tm`.
 ///
-/// The two coincide here: no timezone is modelled, so both answer UTC. The result points at
-/// this thread's static `struct tm`, exactly as the C library's does.
+/// Both answer UTC (D454). The result points at this thread's static `struct tm`.
 ///
 /// Reference: ISO C 7.27.3.4 (`localtime`) / 7.27.3.3 (`gmtime`); `struct tm` from FreeBSD
 /// `<time.h>`.
@@ -338,21 +289,17 @@ fn localtime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     };
     let at = std::ptr::with_exposed_provenance::<i64>(at);
-    // SAFETY: a guest-supplied `time_t*` under the identity mapping (D014) - the same contract
-    // the real call has. `time_t` is a signed 64-bit count of seconds on this data model.
+    // SAFETY: a guest-supplied `time_t*` under the identity mapping, as the real call's
+    // contract states. `time_t` is a signed 64-bit count of seconds on this data model.
     let seconds = unsafe { std::ptr::read_unaligned(at) };
     fill_tm(broken_down(seconds))
 }
 
 /// `asctime(tm)` - the fixed 26-character rendering of a `struct tm`.
 ///
-/// The format is ISO C's exactly: `"Www Mmm%3d %02d:%02d:%02d %d\n"`, with the day and month
-/// names above and the year as `1900 + tm_year`. The result points at this thread's static
-/// buffer.
-///
-/// Out-of-range `tm_wday`/`tm_mon` are wrapped rather than allowed to index out of bounds - the
-/// C library's behaviour there is undefined, and a fault inside a formatting helper would read
-/// as anything but the malformed `struct tm` that caused it.
+/// ISO C's format, `"Www Mmm%3d %02d:%02d:%02d %d\n"`, with the year as `1900 + tm_year`, into
+/// this thread's static buffer. Out-of-range `tm_wday` and `tm_mon` wrap rather than index out
+/// of bounds, where the C library is undefined.
 ///
 /// Reference: ISO C 7.27.3.1 (`asctime`).
 fn asctime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -365,8 +312,8 @@ fn asctime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     let base = std::ptr::with_exposed_provenance::<u8>(base);
     let field = |index: usize| {
-        // SAFETY: the field's address, `index` ints in from the base at its FreeBSD offset,
-        // inside the `struct tm` the guest supplied under the identity mapping (D014).
+        // SAFETY: the field's address, `index` ints in from the base at its FreeBSD offset, inside
+        // the `struct tm` the guest supplied under the identity mapping.
         let at = unsafe { base.add(index * 4) };
         // SAFETY: one `int` read unaligned from that in-bounds field address.
         unsafe { std::ptr::read_unaligned(at.cast::<i32>()) }
@@ -414,7 +361,7 @@ pub(crate) fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("usleep", usleep),
         ("nanosleep", nanosleep),
         ("localtime", localtime),
-        // No timezone is modelled, so `gmtime` and `localtime` are the same UTC breakdown.
+        // Guest local time is UTC, so `gmtime` and `localtime` are the same breakdown.
         ("gmtime", localtime),
         ("asctime", asctime),
     ]
@@ -437,8 +384,7 @@ mod tests {
             [std::ptr::addr_of_mut!(tv) as usize as u64, 0, 0, 0, 0, 0],
         );
         assert_eq!(answered, 0);
-        // Later than the release of the console this emulates, and not a fabricated
-        // constant: the point is that it is a real time rather than a plausible one.
+        // A real current time, later than any plausible constant.
         assert!(tv[0] > 1_600_000_000, "seconds since the epoch");
         assert!(
             tv[1] < super::MICROS_PER_SECOND,
@@ -463,7 +409,7 @@ mod tests {
         assert!(call(super::time, [0; GUEST_ARG_REGISTERS]) > 1_600_000_000);
     }
 
-    /// **The identifiers come from the harvested table**, and the two families differ.
+    /// The identifiers come from the harvested table, and the two families differ.
     #[test]
     fn the_two_clock_families_answer_different_things() {
         let realtime =
@@ -542,7 +488,7 @@ mod tests {
         );
     }
 
-    /// A sleep really sleeps, which is the whole point of it.
+    /// A sleep waits for the requested time.
     #[test]
     fn a_short_sleep_actually_waits() {
         let before = std::time::Instant::now();
@@ -594,8 +540,7 @@ mod tests {
         read_c_string(rendered)
     }
 
-    /// **The epoch renders exactly as the C library documents it.** This is the whole chain -
-    /// `time_t` in, broken down, formatted - checked against a value with one right answer.
+    /// The epoch renders exactly as the C library documents it, through the whole chain.
     #[test]
     fn the_epoch_renders_as_the_standard_says() {
         assert_eq!(ctime_of(0), "Thu Jan  1 00:00:00 1970\n");

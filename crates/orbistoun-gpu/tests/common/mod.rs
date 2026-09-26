@@ -1,17 +1,14 @@
-//! Shared by the tests that read captures. Not a test target: cargo treats a directory with
-//! a `mod.rs` under `tests/` as a module for the tests that declare it, which is the
-//! documented shape for this.
+//! Shared by the tests that read captures. Not a test target: cargo treats a directory with a
+//! `mod.rs` under `tests/` as a module for the tests that declare it.
 
 use std::path::Path;
 
 /// Reads a capture's words: little-endian dwords written as eight hex digits, separated by
 /// whitespace, with `#` to the end of a line a comment.
 ///
-/// Text rather than bytes on purpose. The provenance guard refuses a `.bin` on sight, because
-/// that is the shape a console dump takes, and a capture is the one thing in this crate that
-/// is neither generated nor derived - it should read in a diff. A word that is not eight hex
-/// digits stops the test naming the line, never skips: half a capture checked quietly is the
-/// failure the vocabulary test exists to prevent.
+/// Text rather than bytes: the provenance guard refuses a `.bin`, and a capture should read in a
+/// diff. A word that is not eight hex digits stops the test naming the line rather than being
+/// skipped.
 ///
 /// # Panics
 ///

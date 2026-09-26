@@ -1,47 +1,12 @@
-//! A skeleton of the console's firmware address space.
+//! A skeleton of the platform firmware's address space.
 //!
-//! # Why this crate exists, and what it deliberately is not
-//!
-//! Most guests use the platform through its **named interface**: they import `sceKernelDlsym`
-//! or call `malloc`, and [`orbistoun_kernel`](../orbistoun_kernel/index.html) and its
-//! neighbours answer. That is high-level emulation, and for an ordinary title it is the whole
-//! job.
-//!
-//! A small class of guests does not. The open-toolchain payloads - `elfldr`, `pldmgr` and the
-//! rest - are post-exploitation agents: they resolve one function, take its address, add a
-//! **firmware-version-specific offset measured in tens of megabytes**, and read or write
-//! through the result. They are reaching past the interface into the raw memory image the
-//! interface is implemented on top of. An emulator that answers every named call perfectly
-//! still hands them nothing at those addresses (the sibling decision log's D403, D404).
-//!
-//! **This is not, and can never be, a real firmware.** No dump, no keys, no vendor bytes - the
-//! whole project stays distributable precisely because it holds none of those (CLAUDE.md
-//! principle 1). What this provides is a *skeleton*: a region of real, mapped, observable
-//! memory where those computed addresses land, so a guest that reaches into the firmware image
-//! finds **something honest** - zeroed placeholder memory this project owns - rather than an
-//! unmapped sentinel it faults on or, worse, silently misreads.
-//!
-//! # What it buys, in order of how much it is worth
-//!
-//! 1. **Debuggability.** Every access a guest makes into the firmware region is an access into
-//!    memory this crate owns and can watch. "The payload read firmware+0x2885e00" becomes a
-//!    thing that can be observed and reported, where before it was a fault at an address that
-//!    named nothing.
-//! 2. **Accuracy, honestly bounded.** A guest reaching into the image reads zeroes, which is a
-//!    *stated placeholder* and not a guess dressed as data - exactly the discipline the rest of
-//!    the project already holds itself to (principle 3). It does not pretend to be the console's
-//!    memory; it refuses to pretend, out loud, by being obviously blank.
-//! 3. **A base to hand over.** The address arithmetic needs a base, and a base pointing into
-//!    this region is one where the arithmetic at least lands in mapped memory rather than in a
-//!    marker range.
-//!
-//! # What it does not do yet, and must not pretend to
-//!
-//! It does not know the console's real layout - where any particular module sits, what any
-//! particular offset points at. Those are measurements this project does not have, and inventing
-//! them is the failure it exists to avoid. So the region answers zeroes and says so; filling any
-//! part of it with a specific value is a later, evidence-driven step, one measured offset at a
-//! time, and each such value will carry its provenance exactly as every other measured fact does.
+//! Most guests use the platform through its named interface, which HLE answers. The
+//! open-toolchain payloads also resolve one function, add a firmware-version-specific offset
+//! and read, write or call through the result, reaching the memory image beneath the interface.
+//! This crate maps a region of zeroed memory this project owns where those computed addresses
+//! land, so such an access is observable and reportable instead of a fault at an address that
+//! names nothing (D404). It holds no firmware bytes: libkernel exports are placed at measured
+//! vaddrs as stubs, and everything else reads as a stated zero placeholder.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -49,66 +14,43 @@ use orbistoun_mem::{AddressSpace, MemError, Protection};
 
 /// Where the firmware skeleton is mapped.
 ///
-/// # Why here
-///
-/// Clear of the guest image (which loads around `0x4000_0000_0000`), of the runtime thunks
-/// (`0x7000_0000_0000`), and of every marker range this project uses to name unmapped things
-/// (`0x0000_5E27..` and up). A guest that reaches the firmware image lands at an address that
-/// is recognisably *firmware* on sight, the same way a sentinel is recognisably a sentinel.
-///
-/// Not a real console address. The console's own layout is a measurement this project does not
-/// have; this is a home of the project's choosing for a region of the project's own making, and
-/// choosing a memorable one costs nothing.
+/// Clear of the guest image (around `0x4000_0000_0000`), the runtime thunks
+/// (`0x7000_0000_0000`) and the marker ranges (`0x0000_5E27..` and up), so a firmware address
+/// is recognisable on sight. A base of this project's choosing, not a hardware address.
 pub const FIRMWARE_BASE: u64 = 0x0000_00F0_0000_0000;
 
-/// How much of it is mapped.
-///
-/// Two gibibytes - comfortably past the tens-of-megabytes offsets the payloads compute, with
-/// room for arithmetic that reaches further, and small enough that reserving it is cheap and a
-/// stray access still lands inside rather than off the end.
+/// How much of it is mapped: two gibibytes, well past the tens-of-megabytes offsets payloads
+/// compute, and cheap to reserve.
 pub const FIRMWARE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// The base a guest's firmware arithmetic should be handed.
 ///
-/// The middle of the region rather than its start, so an offset *below* the base - the payloads
-/// compute `base - 0xd50000` among others - still lands inside mapped memory instead of just
-/// underneath it.
+/// The middle of the region, so an offset below the base (payloads compute `base - 0xd50000`)
+/// still lands in mapped memory.
 #[must_use]
 pub const fn handed_base() -> u64 {
     FIRMWARE_BASE + FIRMWARE_SIZE / 2
 }
 
-/// The console's own libkernel base, where a freestanding first-party payload calls its syscall
-/// gadget when it cannot resolve libkernel by name.
+/// The platform's own libkernel base, where a freestanding first-party payload calls its
+/// syscall gadget when it cannot resolve libkernel by name.
 ///
-/// # Why this address is not this project's to choose
-///
-/// [`FIRMWARE_BASE`] is a home of the project's own picking. This one is the **console's**. The
-/// first-party SDK routes every syscall through a gadget inside libkernel - the raw `syscall`
-/// instruction ten bytes into `getpid` - to satisfy the platform's direct-syscall mitigation. When
-/// the runtime cannot look that gadget up (no handoff block, no resolvable `getpid`), it falls back
-/// to a hardcoded address: libkernel loads at `0x8_0000_0000`, `getpid` sits at vaddr `0x4e0`, and
-/// the syscall instruction is `getpid + 0xa`, so the runtime issues `callq *0x8000004ea` for every
-/// system call. That address is baked into the guest; nothing this project hands it changes it.
-///
-/// So this project maps a page here and puts a trampoline into this run's syscall gadget at
-/// [`CONSOLE_SYSCALL_GADGET_VADDR`], the same way [`FIRMWARE_BASE`] answers a payload's firmware
-/// arithmetic with mapped memory: the guest's `callq *0x8000004ea` dispatches and returns rather
-/// than faulting on an unmapped instruction fetch. The base is quoted, not invented, so the guest's
-/// own arithmetic lands on something honest.
+/// The first-party SDK routes every syscall through the raw `syscall` instruction ten bytes
+/// into libkernel's `getpid`. Without a handoff block or a resolvable `getpid`, the runtime
+/// falls back to a hardcoded address: libkernel at `0x8_0000_0000`, `getpid` at `0x4e0`, so it
+/// issues `callq *0x8000004ea` for every system call. The address is baked into the guest, so
+/// this project maps a page here and puts a trampoline into this run's syscall gadget at
+/// [`CONSOLE_SYSCALL_GADGET_VADDR`].
 pub const CONSOLE_SYSCALL_GADGET_BASE: u64 = 0x0000_0008_0000_0000;
 
-/// Where the syscall gadget sits within the console's libkernel page: `getpid` (`0x4e0`) plus ten,
-/// where the raw `syscall` instruction is, which is the address a first-party payload calls.
+/// Where the syscall gadget sits within the libkernel page: `getpid` (`0x4e0`) plus ten, where
+/// the raw `syscall` instruction is.
 ///
-/// The current-generation offset. An earlier generation places `getpid` at `0x5b0`, so its gadget
-/// is `+0x5ba`; a payload built for it would fall back there instead, and would be served by
-/// placing the same trampoline at that offset. Only the offset a run's guest actually reaches is
-/// mapped, so this is the one exercised value rather than both.
+/// The current-generation offset. The previous generation places `getpid` at `0x5b0`, so its
+/// gadget is `+0x5ba`; only the offset a guest reaches is mapped.
 pub const CONSOLE_SYSCALL_GADGET_VADDR: u64 = 0x4ea;
 
-/// How much is mapped for it: one 16 KiB page, the console's page size, far more than a trampoline
-/// at [`CONSOLE_SYSCALL_GADGET_VADDR`] needs and small enough that reserving it costs nothing.
+/// How much is mapped for it: one 16 KiB page, the platform's page size.
 pub const CONSOLE_SYSCALL_GADGET_SIZE: u64 = 0x4000;
 
 /// The skeleton firmware image: a mapped region, and a record of what has been reached in it.
@@ -125,27 +67,21 @@ impl Firmware {
     ///
     /// # Errors
     ///
-    /// If the host will not give this exact range - almost always because something already
-    /// holds it, which is a bug in whoever laid the address space out, not a runtime condition.
+    /// If the host will not give this exact range, which means something already holds it: a
+    /// fault in whoever laid the address space out.
     pub fn reserve() -> Result<Self, MemError> {
         Self::reserve_at(FIRMWARE_BASE, FIRMWARE_SIZE)
     }
 
-    /// Reserves a region of a given size at a given base. Split out so a test can use a small
-    /// one without standing up two gibibytes.
+    /// Reserves a region of a given size at a given base, so a test can use a small one.
     pub fn reserve_at(base: u64, len: u64) -> Result<Self, MemError> {
         let mut space = AddressSpace::new();
-        // Readable, writable, and executable. A guest reaching the image reads and writes
-        // through computed pointers - it thinks it is editing the kernel - and it also *calls*
-        // functions it computes there: a payload's CRT reaches `getpid` at `base + 0x5b0` and
-        // jumps to it. So the region carries both the blank skeleton and the export stubs, and
-        // must permit both a write and an instruction fetch.
-        //
-        // This is the one place this project maps writable-executable memory, and it is a
-        // considered exception: the region models a firmware image, where code and mutable data
-        // share an address space, and separating them would mean modelling libkernel's own
-        // segment layout - a measurement not yet had. A jump into the blank part still faults
-        // usefully, because zeroes decode to instructions that fault rather than to a `ret`.
+        // Readable, writable and executable: a guest reads and writes through computed pointers
+        // and also calls functions it computes there (a payload's CRT jumps to `getpid` at
+        // `base + 0x5b0`), so the region holds both the blank skeleton and the export stubs. The
+        // only writable-executable mapping in this project; separating code from data would need
+        // libkernel's own segment layout. A jump into the blank part faults, since zeroes do not
+        // decode to a `ret`.
         space.reserve(
             base,
             len,
@@ -170,17 +106,16 @@ impl Firmware {
         self.base + self.len
     }
 
-    /// Whether an address falls inside the skeleton - which is how a fault reporter tells
-    /// "the guest reached into the firmware image" from any other unmapped access.
+    /// Whether an address falls inside the skeleton, which is how a fault reporter tells a
+    /// firmware access from any other unmapped access.
     #[must_use]
     pub const fn contains(&self, address: u64) -> bool {
         address >= self.base && address < self.end()
     }
 
-    /// The offset of an address within the image, for saying *where* a guest reached.
+    /// The offset of an address within the image, for saying where a guest reached.
     ///
-    /// Returns `None` for an address outside the region, so a caller cannot accidentally report
-    /// a negative or wrapped offset as if it were inside.
+    /// `None` for an address outside the region, so a wrapped offset is never reported as inside.
     #[must_use]
     pub const fn offset_of(&self, address: u64) -> Option<u64> {
         if self.contains(address) {
@@ -193,33 +128,22 @@ impl Firmware {
 
 /// Where libkernel sits within the firmware region.
 ///
-/// The module base a payload's `payload_args[0]` is measured against. It is the start of the
-/// firmware region, so `firmware+<vaddr>` and `libkernel+<vaddr>` are the same address and a
-/// fault reporter's phrasing stays true.
+/// The start of the region, so `firmware+<vaddr>` and `libkernel+<vaddr>` are the same
+/// address.
 pub const LIBKERNEL_BASE: u64 = FIRMWARE_BASE;
 
-/// `getpid`'s vaddr in the 12.40 `libkernel_sys.sprx`, and the anchor the whole scheme turns on.
+/// `getpid`'s vaddr in the 12.40 `libkernel_sys.sprx`, the anchor of the layout.
 ///
-/// # How this is known
-///
-/// **Measured, not guessed.** obSCEne pulled the real `/system/common/lib/libkernel_sys.sprx`
-/// off a 12.40 console over FTP, and selfish read it as the plain decrypted ELF it arrives as -
-/// 1,867 exports with their vaddrs, the platform's own file drawing every number (obSCEne D209).
-/// `getpid` sits at `0x5b0`.
-///
-/// # Why it anchors everything
-///
-/// A payload loaded by elfldr is handed `getpid`'s runtime address as `payload_args[0]` and
-/// nothing else - elfldr resolves no imports. Its CRT computes `libkernel_base = args[0] - 0x5b0`
-/// and reaches every other export at `base + vaddr`. So placing `getpid` at `LIBKERNEL_BASE +
-/// 0x5b0` and handing that address as word 0 makes the payload's own arithmetic land on this
-/// project's functions (D407).
+/// A payload loaded by elfldr receives `getpid`'s runtime address as `payload_args[0]` and
+/// nothing else; its CRT computes `libkernel_base = args[0] - 0x5b0` and reaches every other
+/// export at `base + vaddr`. Placing `getpid` at `LIBKERNEL_BASE + 0x5b0` and handing that
+/// address makes the payload's own arithmetic land on this project's functions (D407). The
+/// vaddrs are in `data/libkernel-vaddrs.txt`.
 pub const GETPID_VADDR: u64 = 0x5b0;
 
 /// The libkernel exports laid out in the firmware region, at their measured vaddrs.
 ///
-/// Loaded from `data/libkernel-vaddrs.txt`, read off the real 12.40 `libkernel_sys.sprx` (D407).
-/// Every entry is a vaddr read from the real file, never a guess.
+/// Loaded from `data/libkernel-vaddrs.txt` (D407).
 #[must_use]
 pub fn libkernel_exports() -> &'static [(&'static str, u64)] {
     static EXPORTS: OnceLock<Box<[(&'static str, u64)]>> = OnceLock::new();
@@ -262,25 +186,20 @@ pub const fn getpid_address() -> u64 {
 
 /// How an export's vaddr came to be trusted.
 ///
-/// The vaddr table began as numbers scanned out of a firmware file, which is a borderline source
-/// and not reproducible the way a hardware record is. The provenance-clean answer is
-/// behavioural: obSCEne calls `base + vaddr` on a console and checks the function behaved
-/// (its `139-exports`). A vaddr's *source* carries no weight; only that confirmation does. This
-/// tracks which vaddrs have earned it.
+/// A vaddr is trusted only when obSCEne calls `base + vaddr` on hardware and the function
+/// behaves as itself (its `139-exports` checks); where the number was read from carries no
+/// weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
-    /// A console was watched calling `base + vaddr` and the function behaved as itself.
+    /// Hardware was observed calling `base + vaddr` and the function behaved as itself.
     Confirmed,
-    /// A hypothesis, not yet behaviourally confirmed - useful to point the layout at, but not a
-    /// measurement. The default, because most of the table is still awaiting confirmation.
+    /// A hypothesis, not yet behaviourally confirmed. The default.
     Candidate,
 }
 
 /// The provenance of an export's vaddr, defaulting to [`Provenance::Candidate`].
 ///
-/// Read from the third column of `data/libkernel-vaddrs.txt` (`name vaddr confirmed`); a line
-/// without it is a candidate, which is the honest default for a value read off a firmware file
-/// and not yet reproduced by behaviour.
+/// Read from the third column of `data/libkernel-vaddrs.txt` (`name vaddr confirmed`).
 #[must_use]
 pub fn libkernel_provenance(name: &str) -> Provenance {
     static CONFIRMED: OnceLock<std::collections::BTreeSet<&'static str>> = OnceLock::new();
@@ -308,9 +227,9 @@ pub fn libkernel_provenance(name: &str) -> Provenance {
 
 /// Bytes the anchor slot occupies: `getpid`, which must also expose the syscall gadget at +10.
 ///
-/// The real export table packs functions `0x20` bytes apart, so this must stay under that or it
-/// runs over its neighbour - which is exactly the collision that corrupted `getpid` before it was
-/// made compact (D407). Twenty-three: `mov eax, N` (5) padded to offset 10, then a 13-byte jump.
+/// The export table packs functions `0x20` bytes apart, so the slot stays under that or it
+/// overruns its neighbour (D407). Twenty-three: `mov eax, N` (5) padded to offset 10, then a
+/// 13-byte jump.
 pub const ANCHOR_SLOT_LEN: usize = 23;
 
 /// Bytes an ordinary implemented export's slot occupies: a `mov r11, imm64; jmp r11` trampoline.
@@ -324,7 +243,7 @@ pub const UNIMPLEMENTED_SLOT_LEN: usize = 18;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotKind {
     /// `getpid`, the anchor. A compact slot that both calls getpid and exposes the syscall
-    /// gadget at +10, so a payload's `getpid + 10` convention works (D400, D407).
+    /// gadget at +10, so a payload's `getpid + 10` convention works (D407).
     Anchor,
     /// An export this project implements: a trampoline to its real thunk.
     Trampoline,
@@ -355,31 +274,17 @@ pub struct Placement {
     pub vaddr: u64,
     /// What kind of stub it gets.
     pub kind: SlotKind,
-    /// The next export its stub overruns, if any - a *real* overlap, not an alias.
+    /// The next export its stub overruns, if any: a real overlap, not an alias.
     pub collides_with: Option<(String, u64)>,
 }
 
 /// Plans the libkernel layout without touching any memory.
 ///
-/// # Why this is pure and separate from placing the bytes
-///
-/// The layout is where a whole class of bug lives - a stub that runs over its neighbour and
-/// corrupts it, silently, as `getpid`'s 64-byte thunk did to `mount` at `+0x20` (D407). Deciding
-/// the layout in a pure function makes that decision **testable and diff-able**: a unit test can
-/// assert the anchor fits the packing and that a real overlap is reported, and
-/// `orbistoun-cli firmware layout` can print the plan, where before the only way to find a
-/// collision was to run a guest into it.
-///
-/// `is_implemented` answers whether this project has a real thunk for a name; the caller supplies
-/// it because this crate cannot see the thunk table.
-///
-/// # Aliases are not collisions
-///
-/// Two names at the *same* vaddr are aliases for one function - `listen` and `_listen` both at
-/// `0xcd0` - and share a stub rather than fighting over the address. Only a next export that
-/// starts **after** this one but **before** its stub ends is a real overlap; a same-vaddr
-/// neighbour is not, and reporting it as one is the false positive that first made the collision
-/// output hard to read.
+/// Pure, so a test can assert the anchor fits the packing and a real overlap is reported, and
+/// `orbistoun-cli firmware layout` can print the plan (D407). `is_implemented` answers whether
+/// this project has a thunk for a name; the caller supplies it because this crate cannot see
+/// the thunk table. Two names at the same vaddr (`listen` and `_listen`) are aliases sharing
+/// one stub; only a next export starting after this one and before its stub ends is an overlap.
 #[must_use]
 pub fn plan_layout(
     exports: &[(String, u64)],
@@ -418,14 +323,13 @@ pub fn plan_layout(
 /// Places a function's stub at a libkernel export vaddr, so a payload reaching it by
 /// `base + vaddr` lands on this project's dispatch.
 ///
-/// The bytes are a thunk emitted elsewhere - this crate holds no code generator, only the
-/// memory. They are copied verbatim because this project's thunks are position-independent
-/// (absolute call targets, self-relative internal jump), so a thunk works wherever it is put.
+/// The bytes are a thunk emitted elsewhere, copied verbatim: this project's thunks are
+/// position-independent (absolute call targets, self-relative internal jump).
 ///
 /// # Errors
 ///
-/// If no region is reserved, or the vaddr plus the stub would run past its end - either is a
-/// caller laying the region out wrong, not a runtime condition.
+/// If no region is reserved, or the vaddr plus the stub would run past its end: the caller
+/// laying the region out wrong.
 pub fn place_export(vaddr: u64, thunk: &[u8]) -> Result<(), MemError> {
     let held = cell()
         .lock()
@@ -447,8 +351,8 @@ pub fn place_export(vaddr: u64, thunk: &[u8]) -> Result<(), MemError> {
             "export address does not fit".to_owned(),
         ));
     };
-    // SAFETY: `at`..`end` was just checked to lie inside the region this process reserved
-    // read-write, and `thunk` is a valid slice for its own length. The region outlives the run.
+    // SAFETY: `at`..`end` was just checked to lie inside the region this process reserved,
+    // and `thunk` is a valid slice for its own length. The region outlives the run.
     unsafe {
         std::ptr::copy_nonoverlapping(
             thunk.as_ptr(),
@@ -467,8 +371,7 @@ fn cell() -> &'static Mutex<Option<Firmware>> {
 
 /// Reserves the skeleton for this process, if it is not already present.
 ///
-/// Idempotent: a second call with the region already mapped is a success that changes nothing,
-/// so a caller need not track whether it was the one to set it up.
+/// Idempotent: a second call with the region already mapped succeeds and changes nothing.
 ///
 /// # Errors
 ///
@@ -491,9 +394,8 @@ pub fn is_present() -> bool {
 
 /// Whether an address is inside the firmware skeleton this process reserved.
 ///
-/// Answers `false` when no skeleton is present, so a run that never stood one up reads every
-/// address as "not firmware" rather than erroring - the region is an opt-in, and its absence is
-/// an ordinary state.
+/// `false` when no skeleton is present: the region is opt-in and its absence is an ordinary
+/// state.
 #[must_use]
 pub fn is_firmware_address(address: u64) -> bool {
     cell()
@@ -501,30 +403,26 @@ pub fn is_firmware_address(address: u64) -> bool {
         .is_ok_and(|held| held.as_ref().is_some_and(|f| f.contains(address)))
 }
 
-/// The console syscall-gadget page this process holds, once reserved.
+/// The syscall-gadget page this process holds, once reserved.
 ///
-/// Separate from [`cell`] because it is a different region at a different base, reserved on its own
-/// terms - a run serves the gadget whether or not it presents the firmware skeleton, because a
-/// freestanding payload reaches the gadget without reaching the rest of the image.
+/// Separate from [`cell`]: a freestanding payload reaches the gadget without reaching the
+/// rest of the image, so a run serves it whether or not the skeleton is present.
 fn console_gadget_cell() -> &'static Mutex<Option<Firmware>> {
     static CELL: OnceLock<Mutex<Option<Firmware>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
 }
 
-/// Reserves the console syscall-gadget page and writes `trampoline` at
+/// Reserves the syscall-gadget page and writes `trampoline` at
 /// [`CONSOLE_SYSCALL_GADGET_VADDR`].
 ///
-/// `trampoline` is the run's own bytes - a jump into this process's syscall gadget - built by the
-/// caller and passed in, so this crate stays free of any dependency on the gadget's owner, exactly
-/// as [`place_export`] takes finished thunk bytes rather than knowing how to make them.
-///
-/// Idempotent: a second call rewrites the trampoline in the page already mapped, so a caller need
-/// not track whether it was the one to reserve it.
+/// `trampoline` is the run's own jump into this process's syscall gadget, built by the caller
+/// so this crate does not depend on the gadget's owner. Idempotent: a second call rewrites the
+/// trampoline in the page already mapped.
 ///
 /// # Errors
 ///
 /// Propagates a reservation failure from [`Firmware::reserve_at`], or refuses a trampoline that
-/// would run past the page - either is the caller passing the wrong bytes, not a runtime condition.
+/// would run past the page.
 pub fn present_console_gadget(trampoline: &[u8]) -> Result<(), MemError> {
     let mut held = console_gadget_cell()
         .lock()
@@ -554,7 +452,7 @@ pub fn present_console_gadget(trampoline: &[u8]) -> Result<(), MemError> {
     };
     // SAFETY: `at`..`end` was just checked to lie inside the page this process reserved
     // read-write-execute, and `trampoline` is a valid slice for its own length. The page outlives
-    // the run, so the guest may fetch from it for as long as it executes.
+    // the run.
     unsafe {
         std::ptr::copy_nonoverlapping(
             trampoline.as_ptr(),
@@ -571,7 +469,7 @@ pub const fn console_gadget_address() -> u64 {
     CONSOLE_SYSCALL_GADGET_BASE + CONSOLE_SYSCALL_GADGET_VADDR
 }
 
-/// Whether the console syscall-gadget page has been reserved in this process.
+/// Whether the syscall-gadget page has been reserved in this process.
 #[must_use]
 pub fn is_console_gadget_present() -> bool {
     console_gadget_cell()
@@ -581,8 +479,7 @@ pub fn is_console_gadget_present() -> bool {
 
 /// The offset of an address within the reserved skeleton, or `None`.
 ///
-/// What a fault reporter calls to turn a raw address into "firmware+0x2885e00" - the phrase that
-/// makes a payload's arithmetic legible.
+/// Turns a raw fault address into "firmware+0x2885e00".
 #[must_use]
 pub fn firmware_offset(address: u64) -> Option<u64> {
     cell()
@@ -593,15 +490,8 @@ pub fn firmware_offset(address: u64) -> Option<u64> {
 
 /// The offset of an address within the firmware region, decoded from the constants alone.
 ///
-/// # Why a second, stateless decoder
-///
-/// [`firmware_offset`] answers only when a skeleton has actually been reserved in this process,
-/// which is right for a caller acting on live memory. A fault *reporter* is different: it names
-/// an address after the guest has stopped, often in a process that never reserved the region,
-/// and it should still be able to say "that was a firmware address" from the number alone -
-/// exactly as the sentinel decoder reads a sentinel without the block being present. This
-/// decodes from [`FIRMWARE_BASE`] and [`FIRMWARE_SIZE`], so it names the range whether or not
-/// one was mapped.
+/// Unlike [`firmware_offset`], this answers whether or not a skeleton was reserved, so a fault
+/// reporter can name a firmware address after the guest has stopped, in any process.
 #[must_use]
 pub const fn firmware_slot(address: u64) -> Option<u64> {
     if address >= FIRMWARE_BASE && address < FIRMWARE_BASE + FIRMWARE_SIZE {
@@ -615,8 +505,8 @@ pub const fn firmware_slot(address: u64) -> Option<u64> {
 mod tests {
     use super::{FIRMWARE_BASE, FIRMWARE_SIZE, Firmware, handed_base};
 
-    /// The handed base is inside the region, and far enough from either edge that the payloads'
-    /// offsets - which reach both below and tens of megabytes above it - stay inside.
+    /// The handed base is inside the region, far enough from either edge that payload offsets
+    /// below and above it stay inside.
     #[test]
     fn the_handed_base_leaves_room_both_ways() {
         let base = handed_base();
@@ -625,7 +515,7 @@ mod tests {
             base + 64 * 1024 * 1024 < FIRMWARE_BASE + FIRMWARE_SIZE,
             "room above for the largest offsets observed"
         );
-        // The largest below-offset a payload was seen to use is 0xd50000; it must stay inside.
+        // The largest below-offset a payload uses is 0xd50000.
         assert!(
             base - 0x00d5_0000 > FIRMWARE_BASE,
             "a below-offset stays mapped"
@@ -633,9 +523,6 @@ mod tests {
     }
 
     /// `contains` and `offset_of` agree, and both refuse an address outside the region.
-    ///
-    /// A small region, so the test does not reserve two gibibytes - the boundary logic is what
-    /// is under test, not the size.
     #[test]
     fn membership_and_offset_agree_at_the_edges() {
         let base = 0x0000_00F0_0000_0000;
@@ -650,20 +537,15 @@ mod tests {
         assert!(!fw.contains(base - 1), "one before the start is outside");
     }
 
-    /// The console gadget page reserves, holds the trampoline it was handed, and reads it back.
-    ///
-    /// The whole point of the region: a first-party payload's `callq *console_gadget_address()`
-    /// must reach real bytes this run wrote, not an unmapped fault. So place a real 13-byte
-    /// trampoline shape and read it back from the gadget address, and confirm the page and its
-    /// address agree with the constants.
+    /// The syscall-gadget page reserves, holds the trampoline it was handed, and reads it back at
+    /// the gadget address.
     #[test]
     fn the_console_gadget_page_holds_the_trampoline_it_was_given() {
         use super::{
             CONSOLE_SYSCALL_GADGET_BASE, CONSOLE_SYSCALL_GADGET_VADDR, console_gadget_address,
             is_console_gadget_present, present_console_gadget,
         };
-        // `mov r11, imm64; jmp r11` - the exact shape a run writes, so this exercises the real
-        // trampoline bytes rather than a placeholder.
+        // `mov r11, imm64; jmp r11`, the shape a run writes.
         let trampoline: [u8; 13] = [
             0x49, 0xBB, 0xEF, 0xBE, 0xAD, 0xDE, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE3,
         ];
@@ -711,10 +593,7 @@ mod tests {
         );
     }
 
-    /// **The getpid collision, as a test.** With the real 0x20-byte packing, a 64-byte anchor
-    /// would run over its neighbour; the anchor is compact for exactly this reason, so it must
-    /// fit and not collide (D407). This is the check that would have caught the bug before a
-    /// guest ran into it.
+    /// With the real 0x20-byte packing the compact anchor fits and does not collide (D407).
     #[test]
     fn the_getpid_anchor_fits_the_real_packing() {
         use super::{GETPID_VADDR, SlotKind};
@@ -741,8 +620,8 @@ mod tests {
     /// A real overlap is reported; a same-vaddr alias is not.
     #[test]
     fn a_real_overlap_reports_and_an_alias_does_not() {
-        // Two names at one vaddr are aliases and share a stub - not a collision.
-        // A close-but-distinct neighbour inside the stub's length is a real overlap.
+        // Two names at one vaddr are aliases sharing a stub, not a collision; a distinct neighbour
+        // inside the stub's length is a real overlap.
         let exports = vec![
             ("listen".to_owned(), 0xcd0),
             ("_listen".to_owned(), 0xcd0),
@@ -750,15 +629,15 @@ mod tests {
         ];
         let plan = super::plan_layout(&exports, |_| true);
         let listen = plan.iter().find(|p| p.name == "listen").expect("listen");
-        // listen at 0xcd0, next distinct export tight at 0xcd4 (4 < 13) - a real overlap.
+        // listen at 0xcd0, next distinct export tight at 0xcd4 (4 < 13): a real overlap.
         assert_eq!(
             listen.collides_with,
             Some(("tight".to_owned(), 0xcd4)),
             "a distinct neighbour inside the stub length overlaps"
         );
         let alias = plan.iter().find(|p| p.name == "_listen").expect("_listen");
-        // The alias sits at the same vaddr as listen; its own next is tight, also an overlap,
-        // but the point is the *alias pair* is not reported against each other.
+        // The alias's own next is also an overlap; the alias pair is not reported against each
+        // other.
         assert_ne!(
             alias.collides_with.as_ref().map(|(n, _)| n.as_str()),
             Some("listen"),

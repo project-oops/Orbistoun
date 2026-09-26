@@ -1,21 +1,10 @@
 //! Instruction names, for reports.
 //!
-//! # Generated, and only from what was observed
-//!
-//! `data/mnemonics.toml` is emitted by `orbistoun-gen fixtures`. Every entry in
-//! it was seen: a compiler emitted the instruction and a reference disassembler named
-//! it, so the table is verified by construction rather than transcribed and hoped for.
-//!
-//! That means it is **incomplete by design**, covering only what the fixture set
-//! exercises. Widening it is a matter of adding fixtures, which also widens what the
-//! differential test proves - the two grow together, which is the right coupling.
-//!
-//! # Nothing dispatches on a name
-//!
-//! Names exist so a worklist reads as `v_mad_f32` instead of `VOP3:0x1c1`. An
-//! instruction with no entry reports as its family and opcode, which is legible enough
-//! to look up. A missing name costs a reader ten seconds; an invented one sends them
-//! to the wrong instruction, so absence is reported rather than filled in.
+//! `data/mnemonics.toml` is emitted by `orbistoun-gen fixtures`: every entry is an
+//! instruction a compiler emitted and a reference disassembler named, so the table covers
+//! exactly what the fixture set exercises. Names make a worklist read as `v_mad_f32`
+//! instead of `VOP3:0x1c1`; an instruction with no entry reports as family and opcode
+//! rather than an invented name.
 
 use std::collections::BTreeMap;
 
@@ -54,9 +43,7 @@ impl MnemonicTable {
         let mut names = BTreeMap::new();
         for entry in file.mnemonic {
             if let Some(previous) = names.insert((entry.family.clone(), entry.opcode), entry.name) {
-                // Two names for one opcode means the generator's classification is
-                // wrong, and whichever won would be arbitrary. Refusing surfaces it at
-                // load rather than as a puzzling report weeks later.
+                // Two names for one opcode is a generator fault; refuse it at load.
                 return Err(ShaderError::Table(format!(
                     "{}:{:#x} is named twice, first as {previous}",
                     entry.family, entry.opcode
@@ -76,9 +63,8 @@ impl MnemonicTable {
 
     /// The name for an instruction, if one has been observed.
     pub fn name(&self, family: &str, opcode: u32) -> Option<&str> {
-        // Allocating a key to look one up is wasteful, but this runs once per distinct
-        // blocker in a report rather than once per instruction, so it stays off any
-        // hot path.
+        // Runs once per distinct blocker, not per instruction, so the key allocation is
+        // off any hot path.
         self.names
             .get(&(family.to_owned(), opcode))
             .map(String::as_str)
@@ -86,8 +72,7 @@ impl MnemonicTable {
 
     /// Every entry, as (family, opcode, name).
     ///
-    /// For merging into the encoding table, which dispatches on names and needs every
-    /// source of them in one place.
+    /// For merging into the encoding table, which dispatches on names.
     pub fn entries(&self) -> impl Iterator<Item = (&str, u32, &str)> {
         self.names
             .iter()
@@ -114,6 +99,7 @@ impl MnemonicTable {
 mod tests {
     use super::MnemonicTable;
 
+    /// A name is keyed by family and opcode together.
     #[test]
     fn a_name_is_found_by_family_and_opcode() {
         let table = MnemonicTable::load(
@@ -126,14 +112,13 @@ mod tests {
         )
         .expect("table");
         assert_eq!(table.name("VOP1", 1), Some("v_mov_b32"));
-        // The same opcode in a different family is a different instruction entirely.
+        // The same opcode in a different family is a different instruction.
         assert_eq!(table.name("VOP2", 1), None);
     }
 
+    /// A table naming one opcode twice fails to load.
     #[test]
     fn an_opcode_named_twice_is_refused() {
-        // It means the generator classified something wrongly, and whichever entry won
-        // would be arbitrary. Better to fail at load than to report a wrong name.
         let result = MnemonicTable::load(
             r#"
             [[mnemonic]]
@@ -150,16 +135,15 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// An empty mnemonic table loads; reports then show opcode numbers.
     #[test]
     fn an_empty_table_is_allowed() {
-        // Unlike the encoding table, an empty mnemonic table is harmless - reports
-        // simply show opcode numbers. Refusing it would make the names a hard
-        // dependency of a tool that works without them.
         let table = MnemonicTable::load("").expect("empty is fine");
         assert!(table.is_empty());
         assert_eq!(table.name("VOP1", 0), None);
     }
 
+    /// The built-in table loads and holds a known fixture instruction.
     #[test]
     fn the_builtin_table_loads_and_holds_what_the_fixtures_observed() {
         let table = MnemonicTable::builtin().expect("builtin");
@@ -167,8 +151,7 @@ mod tests {
             !table.is_empty(),
             "regenerate with tools/shader-fixtures/generate.sh"
         );
-        // A real instruction from the fixture set, to catch the table being emitted
-        // with the wrong shape rather than merely being non-empty.
+        // A real fixture instruction catches a table emitted with the wrong shape.
         assert!(
             table
                 .name("VOP1", 1)

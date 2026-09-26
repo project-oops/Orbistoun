@@ -1,42 +1,12 @@
 //! A GPU inference runtime, downloaded and supervised like any other input.
 //!
-//! # Why this exists at all
-//!
-//! The requirement is narrow and it rules out everything else: inference must run on the
-//! **GPU**, with **no action from the user**, in a **portable** install.
-//!
-//! - Compiling an accelerator backend into this binary fails the second requirement.
-//!   It is a build-time dependency on a vendor toolkit, so a machine without one cannot
-//!   produce a build that uses its own hardware - and a machine *with* one produces a
-//!   binary that will not load anywhere else.
-//! - Asking the user to install a model server fails it outright.
-//! - Running on the processor fails the first. Measured, on sixteen cores: about one
-//!   token per second, four minutes for a reply nobody would wait for.
-//!
-//! What is left is to **fetch a runtime the same way a model is fetched**, which is
-//! exactly what "download whatever it needs" allows. So this module downloads a
-//! prebuilt `llama-server`, starts it, and talks to it over the OpenAI-shaped wire that
-//! [`crate::online`] already speaks.
-//!
-//! # Vulkan, not CUDA
-//!
-//! | backend | download | vendors |
-//! |---|---|---|
-//! | Vulkan | **34 MB** | NVIDIA, AMD, Intel |
-//! | CUDA | 250 MB, plus a 391 MB redistributable | NVIDIA only, matched per toolkit version |
-//!
-//! Size is the smaller argument. **orbistoun translates guest command streams to
-//! Vulkan**, so a machine that can run this project at all has a working Vulkan driver
-//! by definition. It is the one accelerator interface this project may assume, and
-//! assuming it costs nothing that is not already assumed.
-//!
-//! The archive also carries processor backends selected at load time, so a machine with
-//! no usable Vulkan device still runs - slower, and without a second download.
-//!
-//! # What this does not solve
-//!
-//! A supervised child process can be orphaned if this one dies without unwinding.
-//! [`Runtime`] kills it on drop, which covers every ordinary exit and no hard crash.
+//! Inference must run on the GPU, need no action from the user, and work in a portable install.
+//! A compiled-in accelerator backend needs a vendor toolkit at build time, a user-installed
+//! server needs action, and the CPU is too slow, so this downloads a pinned prebuilt
+//! `llama-server`, starts it, and speaks the OpenAI-shaped wire of [`crate::online`] (D219). The
+//! Vulkan build is used: it is small, covers every GPU vendor, and any machine running orbistoun
+//! already has a Vulkan driver; its bundled CPU backends cover a machine with no usable device.
+//! [`Runtime`] kills the child on drop, which covers every ordinary exit but not a hard crash.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
@@ -49,26 +19,20 @@ use std::time::{Duration, Instant};
 use crate::Error;
 use crate::catalog::Offline;
 
-/// The release this project pins.
-///
-/// A tag, not "latest". The same argument as the wire version in [`crate::online`]: a
-/// client that follows whatever is newest has behaviour that changes without a commit,
-/// and here it would also change without a download anybody asked for. Bumping this is
-/// a deliberate act with a diff attached.
+/// The release this project pins: a tag, so behaviour and downloads change only with a commit.
 pub const LLAMA_TAG: &str = "b10612";
 
 /// Where releases come from.
 const RELEASES: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
 
-/// How long to wait for the server to answer after it is started.
-///
-/// Generous, because the first start loads several gigabytes of weights onto a device.
+/// How long to wait for the server to answer after it is started; the first start loads
+/// gigabytes of weights onto a device.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The archive for this platform, and the server binary inside it.
 ///
-/// `None` where no prebuilt Vulkan build is published, which is not a failure - it means
-/// this machine falls back to the in-process engine, and the caller says so.
+/// `None` where no prebuilt Vulkan build is published; the machine then falls back to the
+/// in-process engine, and the caller says so.
 #[must_use]
 pub fn asset() -> Option<(String, &'static str)> {
     let (suffix, binary) = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -86,11 +50,10 @@ pub fn available() -> bool {
     asset().is_some()
 }
 
-/// An accelerator the runtime can actually address.
+/// An accelerator the runtime can address.
 ///
-/// Reported by the runtime rather than probed for, which is the point: it answers "can
-/// *this* inference backend use *that* device", where a vendor tool answers only "is a
-/// device present". Those differ, and only the first one decides anything.
+/// Reported by the runtime, so it answers whether this backend can use the device, not only
+/// whether a device is present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accelerator {
     /// The runtime's own identifier, and what `--device` takes - `Vulkan0`.
@@ -103,10 +66,8 @@ pub struct Accelerator {
     pub free_mb: Option<u32>,
 }
 
-/// How many lines of the runtime's own output to keep.
-///
-/// Startup diagnostics only. Enough to hold the device enumeration and the layer
-/// placement, which are the two things worth being able to prove afterwards.
+/// How many lines of the runtime's own output to keep: enough for the device enumeration and
+/// the layer placement.
 const LOG_LINES: usize = 400;
 
 /// A supervised `llama-server`, and the port it answers on.
@@ -165,9 +126,7 @@ impl Runtime {
         if std::fs::metadata(&server).is_ok_and(|m| m.len() > 0) {
             Ok(server)
         } else {
-            // A published archive whose layout changed is a wrong assumption about
-            // somebody else's release, which is exactly the class of thing that cannot
-            // be checked by reading. Say what was expected and where.
+            // The published archive's layout is someone else's; say what was expected and where.
             Err(Error::Download(format!(
                 "{archive} unpacked without a {binary} in {}",
                 dir.display()
@@ -177,9 +136,8 @@ impl Runtime {
 
     /// Every accelerator this runtime can address, by asking it.
     ///
-    /// Cheap - no model is loaded - and vendor-neutral, so an AMD or Intel device
-    /// reports itself as readily as an NVIDIA one. A real gain over the `nvidia-smi`
-    /// probe in [`crate::host`], which can only ever see one vendor.
+    /// Cheap (no model is loaded) and vendor-neutral, unlike the `nvidia-smi` probe in
+    /// [`crate::host`].
     ///
     /// # Errors
     ///
@@ -190,8 +148,8 @@ impl Runtime {
             .arg("--list-devices")
             .output()
             .map_err(|e| Error::Model(format!("listing devices with {}: {e}", server.display())))?;
-        // The listing goes to stdout and the runtime's logging to stderr. Reading the
-        // wrong one returns nothing, which looks exactly like a machine with no device.
+        // The listing goes to stdout and the runtime's logging to stderr; reading the wrong one looks
+        // like a machine with no device.
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(accelerator_from)
@@ -222,39 +180,25 @@ impl Runtime {
             .arg(&weights)
             .args(["--host", "127.0.0.1"])
             .args(["--port", &port.to_string()])
-            // Everything on the device. llama.cpp places what it can and leaves the
-            // rest on the processor, so this is a ceiling rather than a demand - a
-            // machine with no usable device still runs, without a second download.
+            // Everything on the device: llama.cpp places what it can and leaves the rest on the processor,
+            // so this is a ceiling rather than a demand.
             .args(["--n-gpu-layers", "999"])
             // One request at a time, matching how this crate asks.
             .args(["--parallel", "1"])
-            // **No thinking.** A reasoning model puts its working somewhere other than
-            // `message.content`, so a short reply comes back *empty* rather than short -
-            // which is what the first live start of this runtime actually did. This is
-            // the same decision the in-process engine makes by appending `/no_think`,
-            // taken here in the one place that covers every reasoning model rather than
-            // one family's chat template.
+            // No thinking: a reasoning model puts its working outside `message.content`, so a short reply
+            // would come back empty. This covers every reasoning model, not one family's template.
             .args(["--reasoning", "off"]);
 
-        // **Named, not inferred.** Asking for a device by name makes an unusable one a
-        // refusal to start rather than a silent fall back to the processor - which is
-        // what turns "it started" into evidence that it is accelerated. Reading the same
-        // fact out of the log needs a verbosity that prints a line per layer, and that
-        // output is a debug log rather than an interface.
+        // The device is named, so an unusable one refuses to start rather than silently falling back to
+        // the processor; a started runtime is then evidence of acceleration.
         if let Some(device) = &accelerator {
             command.args(["--device", &device.id]);
         }
 
         let child = command
-            // **Both streams, piped and drained.** They are not interchangeable: the
-            // runtime's ordinary logging goes to stderr, but the *device enumeration*
-            // goes to stdout. Discarding stdout - which the first version did - throws
-            // away the only evidence that an accelerator was used at all, and since
-            // falling back to the processor is silent and successful, the result is a
-            // run that cannot be told from a GPU one.
-            //
-            // A piped stream nobody reads fills its buffer and stops the child, so the
-            // drains below are load-bearing rather than a convenience.
+            // Both streams piped and drained: logging goes to stderr but the device enumeration to stdout,
+            // the only evidence an accelerator was used. A piped stream nobody reads fills and stops the
+            // child, so the drains are required.
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -292,13 +236,9 @@ impl Runtime {
 
     /// The accelerator this runtime was started on, if any.
     ///
-    /// **`None` is the answer that matters.** Falling back to the processor is silent
-    /// and successful, so "it answered" is not evidence of anything - a test asserting
-    /// only that a reply arrived passes identically either way.
-    ///
-    /// Trustworthy because the device was *named* on the command line: an unusable one
-    /// stops the runtime starting, so a live [`Runtime`] holding `Some` is one whose
-    /// device the runtime itself accepted.
+    /// Falling back to the processor is silent and successful, so a reply proves nothing; this does.
+    /// The device was named on the command line, so a live [`Runtime`] holding `Some` runs on a
+    /// device the runtime accepted.
     #[must_use]
     pub fn accelerator(&self) -> Option<&Accelerator> {
         self.accelerator.as_ref()
@@ -337,8 +277,7 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        // Covers every ordinary exit. A hard crash of this process orphans the child,
-        // which the module documentation says rather than leaving it to be discovered.
+        // Covers every ordinary exit; a hard crash of this process orphans the child.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -346,8 +285,7 @@ impl Drop for Runtime {
 
 /// Reads one of the child's streams into the shared log until it closes.
 ///
-/// Both streams share one buffer. Interleaving is not a problem here because nothing
-/// reconstructs an ordering from it - it is searched for two specific facts.
+/// Both streams share one buffer; nothing reconstructs an ordering from it.
 fn drain(stream: impl Read + Send + 'static, sink: Arc<Mutex<VecDeque<String>>>) {
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
@@ -362,18 +300,14 @@ fn drain(stream: impl Read + Send + 'static, sink: Arc<Mutex<VecDeque<String>>>)
 
 /// Reads one device out of a `--list-devices` listing.
 ///
-/// That listing is a user-facing interface rather than a debug log, which is why it is
-/// the thing parsed. The device selection *is* reported in the log too, but only at a
-/// verbosity that also prints a line per layer of the model.
-///
-/// The memory figures are optional: a device reporting none is still a device, and
-/// refusing it over a missing number would turn a formatting change into "no GPU here".
+/// The listing is a user-facing interface, where the log reports the device only at a verbosity
+/// that prints every layer. Memory figures are optional, so a format change does not read as
+/// "no GPU".
 fn accelerator_from(line: &str) -> Option<Accelerator> {
     // Trimmed because the listing is written with carriage returns.
     let line = line.trim();
     let (id, rest) = line.split_once(": ")?;
-    // Indented entries only. `Available devices:` is a heading that also contains a
-    // colon, and reading it as a device reports one on a machine that listed none.
+    // Indented entries only: the `Available devices:` heading also contains a colon.
     if id.is_empty() || id.contains(char::is_whitespace) {
         return None;
     }
@@ -396,9 +330,8 @@ fn accelerator_from(line: &str) -> Option<Accelerator> {
 
 /// A port nothing is listening on.
 ///
-/// Asked for and released, so there is a window in which something else could take it.
-/// The alternative is a fixed port, which collides with *any* other copy of this rather
-/// than with an unlucky one.
+/// Asked for and released, so something else could take it in between; a fixed port would
+/// collide with every other copy of this.
 fn free_port() -> Result<u16, Error> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| Error::Transport(format!("finding a free port: {e}")))?;
@@ -421,13 +354,9 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), Error> {
 
 /// Unpacks a zip, flattening it.
 ///
-/// **Flattened deliberately, and it is currently a no-op.** The pinned release ships a
-/// flat archive - checked, not assumed - but releases have carried a `build/bin` prefix
-/// before. Flattening means the layout of somebody else's archive is not part of this
-/// crate's contract, and everything landing in one directory is what the backend loader
-/// wants anyway: it finds `ggml-*` beside the executable.
-///
-/// Entries whose names try to escape the directory are refused rather than sanitised.
+/// Flattened so another project's archive layout is not this crate's contract, and because the
+/// backend loader finds `ggml-*` beside the executable. Entries whose names escape the directory
+/// are refused rather than sanitised.
 fn unzip(archive: &Path, into: &Path) -> Result<(), Error> {
     let file = std::fs::File::open(archive)
         .map_err(|e| Error::Download(format!("opening {}: {e}", archive.display())))?;
@@ -442,9 +371,8 @@ fn unzip(archive: &Path, into: &Path) -> Result<(), Error> {
             continue;
         }
         let Some(name) = entry.enclosed_name() else {
-            // `enclosed_name` is `None` for anything that would escape - an absolute
-            // path or one climbing out with `..`. Refused rather than repaired: an
-            // archive doing that is not one to be clever about.
+            // `enclosed_name` is `None` for an absolute path or one climbing out with `..`; such an archive
+            // is refused.
             return Err(Error::Download(format!(
                 "{} contains an entry that would write outside its directory",
                 archive.display()
@@ -474,8 +402,7 @@ fn unzip(archive: &Path, into: &Path) -> Result<(), Error> {
 
 /// A [`Runtime`] and the client that talks to it, as one engine.
 ///
-/// Owns the server rather than borrowing it, because a supervised process outliving
-/// nothing in particular is a process nobody stops. Dropping this stops it.
+/// Owns the server, so dropping the engine stops it.
 #[derive(Debug)]
 pub struct ManagedEngine {
     runtime: Runtime,
@@ -542,20 +469,15 @@ impl crate::Engine for ManagedEngine {
 mod tests {
     use super::{LLAMA_TAG, Runtime, asset, free_port};
 
-    /// The pinned tag is a tag, not a moving target.
-    ///
-    /// A client that follows whatever is newest changes behaviour with no commit, and
-    /// here it would also change with no download anybody asked for.
+    /// The runtime release is pinned to a tag.
     #[test]
     fn the_runtime_release_is_pinned() {
         assert!(LLAMA_TAG.starts_with('b'), "{LLAMA_TAG}");
         assert!(!LLAMA_TAG.contains("latest"), "{LLAMA_TAG}");
     }
 
-    /// The asset name carries the pinned tag and asks for the Vulkan build.
-    ///
-    /// Getting this wrong is a 404 minutes into a first run, which is exactly how the
-    /// model catalogue's coordinates turned out to be wrong.
+    /// The asset name carries the pinned tag and asks for the Vulkan build; a wrong name is a 404
+    /// minutes into a first run.
     #[test]
     fn the_asset_is_the_vulkan_build_for_this_platform() {
         if let Some((archive, binary)) = asset() {
@@ -579,12 +501,7 @@ mod tests {
         );
     }
 
-    /// A device is read out of the listing, verbatim from a real one.
-    ///
-    /// Pinned against output that was captured rather than recalled. The first version
-    /// of this parser was written against a log format from memory - `ggml_vulkan: 0 =
-    /// ...` - which this build does not emit at all, so it reported no accelerator on a
-    /// machine that was demonstrably using one.
+    /// A device is read out of a listing captured from a real run.
     #[test]
     fn a_device_is_read_out_of_the_listing() {
         let device = super::accelerator_from(
@@ -597,11 +514,7 @@ mod tests {
         assert_eq!(device.free_mb, Some(15418));
     }
 
-    /// Carriage returns do not become part of the identifier.
-    ///
-    /// The listing is written with CRLF endings, and an id of `Vulkan0\r` is one the
-    /// runtime does not recognise - so the device would be named on the command line
-    /// and then refused, turning a working machine into a failure to start.
+    /// Carriage returns do not become part of the identifier, which the runtime would refuse.
     #[test]
     fn a_carriage_return_does_not_become_part_of_the_device() {
         let device =
@@ -610,11 +523,7 @@ mod tests {
         assert!(!device.name.contains('\r'), "{:?}", device.name);
     }
 
-    /// The heading is not mistaken for a device.
-    ///
-    /// `Available devices:` contains a colon like every entry does. Reading it as one
-    /// reports an accelerator on a machine that listed none, which is the precise false
-    /// positive that would send `--device` a name nothing can use.
+    /// The listing heading is not mistaken for a device.
     #[test]
     fn the_listing_heading_is_not_a_device() {
         assert_eq!(super::accelerator_from("Available devices:"), None);
@@ -622,10 +531,7 @@ mod tests {
         assert_eq!(super::accelerator_from("no devices found"), None);
     }
 
-    /// A device that reports no memory is still a device.
-    ///
-    /// Refusing it over a missing figure would turn a change in someone else's output
-    /// format into "this machine has no GPU", which is the worst way to be wrong here.
+    /// A device that reports no memory figures is still a device.
     #[test]
     fn a_device_without_memory_figures_still_counts() {
         let device = super::accelerator_from("  Vulkan0: Some Device").expect("a device");
@@ -633,8 +539,7 @@ mod tests {
         assert_eq!(device.total_mb, None);
     }
 
-    /// An archive is flattened, because the publisher's directory layout is not this
-    /// crate's contract.
+    /// An archive is flattened, since the publisher's layout is not this crate's contract.
     #[test]
     fn unpacking_flattens_the_archive() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -657,10 +562,6 @@ mod tests {
     }
 
     /// An entry that would write outside the directory is refused, not repaired.
-    ///
-    /// The archive is somebody else's, fetched over the network. An entry climbing out
-    /// of the directory is not a layout quirk to be tidied up - it is an archive to stop
-    /// unpacking.
     #[test]
     fn an_escaping_entry_is_refused() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -697,17 +598,13 @@ mod tests {
         zip.finish().expect("finish");
     }
 
-    /// A port comes back, and it is not zero.
-    ///
-    /// Zero is what the operating system was *asked* for, and returning it would mean
-    /// reading the request back rather than the answer - the server would then bind an
-    /// arbitrary port and nothing would know which.
+    /// A free port is a real one, not the zero that was asked for.
     #[test]
     fn a_free_port_is_a_real_one() {
         assert_ne!(free_port().expect("a port"), 0);
     }
 
-    /// The whole thing, against real hardware. Opt-in: it downloads a runtime.
+    /// The runtime end to end, against real hardware. Opt-in: it downloads a runtime.
     ///
     /// ```text
     /// cargo test -p orbistoun-llm --release -- --ignored gpu_runtime
@@ -741,9 +638,8 @@ mod tests {
             .expect("the runtime answers");
         assert!(!reply.trim().is_empty(), "empty reply");
 
-        // **The assertion the requirement actually needs.** Falling back to the
-        // processor is silent and successful, so "it answered" passes identically
-        // either way and proves nothing about acceleration.
+        // Falling back to the processor is silent and successful, so the accelerator is asserted, not
+        // just the reply.
         let device = runtime
             .accelerator()
             .expect("no accelerator was listed - this ran on the processor");

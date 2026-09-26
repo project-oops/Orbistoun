@@ -1,23 +1,10 @@
 //! Section headers, and the globals a runtime fills in.
 //!
-//! # Why this exists when nothing else here needs sections
-//!
-//! Loading a program needs **program** headers; sections are a link-time view and a loader
-//! is entitled to ignore them. This project ignored them for a year.
-//!
-//! One question needs them. The open-toolchain payloads resolve most of their C library at
-//! startup and store the answers in named globals in `.bss` - `vsnprintf`, `snprintf`,
-//! `strerror`, forty-odd of them - and a run entered past that startup code finds them all
-//! null. Those names are in `.symtab`, which is a section, and which no program header
-//! points at (D376).
-//!
-//! So this reads exactly enough to answer *which named globals does this program have, and
-//! where*. It is not a general section parser and does not want to be.
-//!
-//! # What it deliberately does not do
-//!
-//! Nothing here decides to *write* anything. It answers a list; the loader decides what to do
-//! with it, and does so only in a mode that already declares itself not an ordinary run.
+//! Loading needs only program headers. Open-toolchain payloads resolve most of their C
+//! library at startup into named `.bss` globals (`vsnprintf`, `strerror` and others), so a
+//! run entered past that startup code finds them null (D376). Their names are in `.symtab`,
+//! a section no program header points at. This reads just enough to list those globals and
+//! where they are; the loader decides what to write, and only in a diagnostic mode.
 
 use zerocopy::{FromBytes, Immutable, KnownLayout, little_endian};
 
@@ -39,7 +26,7 @@ pub struct Elf64SectionHeader {
     pub offset: little_endian::U64,
     /// Size in bytes.
     pub size: little_endian::U64,
-    /// A section this one refers to - for a symbol table, its string table.
+    /// A section this one refers to: for a symbol table, its string table.
     pub link: little_endian::U32,
     /// Extra information, per type.
     pub info: little_endian::U32,
@@ -52,7 +39,7 @@ pub struct Elf64SectionHeader {
 /// A full symbol table, which is a section rather than a segment.
 pub const SHT_SYMTAB: u32 = 2;
 
-/// A section that occupies no file space - `.bss`.
+/// A section that occupies no file space, such as `.bss`.
 pub const SHT_NOBITS: u32 = 8;
 
 /// A section that is writable once loaded.
@@ -90,8 +77,7 @@ pub struct NamedGlobal {
 impl Container<'_> {
     /// The section headers, or an empty list when the file has none.
     ///
-    /// A stripped image legitimately has none, and that is not an error: it is a program
-    /// this cannot answer the question about.
+    /// A stripped image has none, and that is not an error.
     ///
     /// # Errors
     ///
@@ -128,12 +114,9 @@ impl Container<'_> {
 
     /// Named globals this program keeps in writable, zero-filled storage.
     ///
-    /// **`.bss` objects with names**, which is precisely the set a startup routine fills in.
-    /// A program with no symbol table answers an empty list, which is a true answer about a
-    /// stripped image rather than a failure.
-    ///
-    /// Duplicate names are kept, because they are real: `klogsrv` has four separate slots
-    /// called `strcpy`, and filling one and not the others would leave three nulls behind.
+    /// `.bss` objects with names: the set a startup routine fills in. A program with no
+    /// symbol table answers an empty list. Duplicate names are kept because they are real
+    /// slots, and each needs filling.
     ///
     /// # Errors
     ///
@@ -142,7 +125,7 @@ impl Container<'_> {
         let inner = self.inner_bytes(whole);
         let sections = self.section_headers(whole)?;
 
-        // Which sections are writable and occupy no file space - `.bss` and anything shaped
+        // Sections that are writable and occupy no file space: `.bss` and anything shaped
         // like it. A runtime fills these; a `.data` global already has its value.
         let zero_filled: Vec<usize> = sections
             .iter()
@@ -225,8 +208,7 @@ fn read_name(strings: &[u8], at: usize) -> Option<String> {
 mod tests {
     /// A file with no section table answers an empty list rather than failing.
     ///
-    /// A stripped image is a real thing to be handed, and "this program has no named
-    /// globals" is a true answer about one.
+    /// A stripped image has no named globals, and that is a true answer.
     #[test]
     fn a_file_without_sections_answers_nothing_rather_than_failing() {
         let mut bytes = vec![0_u8; 64];

@@ -1,35 +1,13 @@
 //! ABI constants, harvested from FreeBSD headers.
 //!
-//! # Why these are read rather than remembered
+//! Implementing needs numbers: `socket(AF_INET, SOCK_STREAM, 0)` cannot be mapped onto a
+//! host socket without them, and a wrong value creates the wrong kind of socket (D352).
 //!
-//! The naming loop needs *names*, and the harvest was scoped to them - `Symbol.map` files,
-//! no constants, deliberately (`docs/REFERENCES.md`). That was right while the work was
-//! naming. Implementing needs numbers, and the gap cost three answers in one session before
-//! anyone noticed: `SIGPIPE` was recovered from a guest's own call argument, a `sysctl` MIB
-//! was recorded with its meaning left open, and `errno` was left unset because `ENOENT`'s
-//! value was not derivable from anything lawful here (D350, D352).
-//!
-//! Sockets make it acute. `socket(AF_INET, SOCK_STREAM, 0)` cannot be mapped onto a host
-//! socket without knowing what those are, and a wrong value creates the wrong kind of
-//! socket: a silent, late failure of exactly the shape principle 3 exists to stop.
-//!
-//! # What is taken, and what is not
-//!
-//! `#define NAME <number>` and the trailing comment, from named headers. **No function
-//! bodies, no structure layouts, no expressions.** A `#define` of a bare number is an
-//! interface fact - it *is* the ABI - which is the same category as a symbol name and the
-//! reason this is within the provenance boundary rather than an exception to it.
-//!
-//! A definition whose value is itself an expression - `#define X (Y | Z)` - is deliberately
-//! skipped rather than evaluated. Evaluating one means reproducing a decision somebody made
-//! about how to compose it, which is the line this does not cross.
-//!
-//! # They are FreeBSD's numbers, not the target's
-//!
-//! The target platform is FreeBSD-derived, which is why these are worth having and also why
-//! they are not facts about it. The rendered file says so at the top. Each is `published`
-//! about FreeBSD and `assumed` about a guest, and a guest passing a value that disagrees is
-//! what would show it.
+//! Only `#define NAME <number>` and its trailing comment are taken, from named headers: a
+//! bare number is an interface fact, like a symbol name. No function bodies, structure
+//! layouts or expressions; `#define X (Y | Z)` is skipped rather than evaluated. The target
+//! is FreeBSD-derived, so each value is `published` about FreeBSD and `assumed` about a
+//! guest, as the rendered file says.
 
 use std::path::Path;
 
@@ -40,8 +18,8 @@ use anyhow::{Context as _, Result};
 pub(crate) struct Constant {
     /// The name, exactly as the header spells it.
     pub(crate) name: String,
-    /// The value, as written - hexadecimal stays hexadecimal, because a reader comparing
-    /// this against the header should not have to convert anything.
+    /// The value as written; hexadecimal stays hexadecimal, so it compares directly with
+    /// the header.
     pub(crate) value: String,
     /// The header's own trailing comment, where it had one.
     pub(crate) comment: String,
@@ -60,9 +38,7 @@ pub(crate) struct Header {
 
 /// The headers this harvests, and why each is here.
 ///
-/// **A list rather than a directory walk.** Every entry is one somebody needed, and a walk
-/// would pull in hundreds of headers nobody has looked at - making the file large, the
-/// provenance question vaguer, and the answer to "why is this constant here" worse.
+/// A list rather than a directory walk, so every section is one somebody needed.
 pub(crate) const HEADERS: &[Header] = &[
     Header {
         section: "errno",
@@ -138,13 +114,9 @@ pub(crate) const HEADERS: &[Header] = &[
 
 /// Extracts every `#define NAME <number>` from one header's text.
 ///
-/// Pure, so the parsing is testable without a checkout - which matters here, because the
-/// checkout is sparse and the thing most likely to go wrong is a header being absent rather
-/// than malformed.
-///
-/// **First definition wins.** Headers guard alternatives behind `#if`, and this does not
-/// evaluate preprocessor conditions; taking the first keeps the choice deterministic and
-/// makes a disagreement visible as a wrong value rather than as an unstable file.
+/// Pure, so the parsing is testable without a checkout. First definition wins: headers
+/// guard alternatives behind `#if`, which this does not evaluate, and taking the first
+/// keeps the output deterministic.
 #[must_use]
 pub(crate) fn extract(text: &str) -> Vec<Constant> {
     let mut out: Vec<Constant> = Vec::new();
@@ -180,13 +152,9 @@ pub(crate) fn extract(text: &str) -> Vec<Constant> {
 
 /// Whether a token is a name this harvests.
 ///
-/// Starts upper case, so a lower-case internal macro is left alone, and no parentheses - a
-/// function-like macro is code, not a constant.
-///
-/// **The body may be lower case, and that was not always so.** The rule was upper case
-/// throughout, which is right for every header harvested until `sys/sys/syscall.h` - where
-/// every name is `SYS_read`, `SYS_write`, `SYS_getpid`. It harvested exactly one constant
-/// from a header of six hundred, and the count was the only thing that said so (D378).
+/// Starts upper case, so a lower-case internal macro is left alone, and has no parentheses,
+/// since a function-like macro is code. The rest may be lower case, as in `SYS_read` from
+/// `sys/sys/syscall.h` (D378).
 fn is_constant_name(token: &str) -> bool {
     !token.is_empty()
         && token.starts_with(|c: char| c.is_ascii_uppercase())
@@ -195,22 +163,9 @@ fn is_constant_name(token: &str) -> bool {
 
 /// Whether a value is a bare number rather than an expression.
 ///
-/// Anything composed - `(A | B)`, a cast, a reference to another name - is skipped. Working
-/// out what it evaluates to means reproducing a decision, which is the line (see the module
-/// documentation).
-///
-/// # Brackets and a sign are still a bare number
-///
-/// `sys/sys/event.h` writes every filter as `#define EVFILT_READ (-1)`, which is what a
-/// header does with a negative constant so that `EVFILT_READ - 1` cannot mean something
-/// else. Requiring bare digits skipped **all fifteen filters** and kept `EVFILT_SYSCOUNT`,
-/// which is the one number of the set that is not a filter - so the section looked harvested
-/// and named nothing a guest can ask for.
-///
-/// That is the third time a rule about spelling silently dropped what mattered: the
-/// upper-case rule took one constant of six hundred from `syscall.h` (D378), C octal made a
-/// whole table unparseable (D374), and this. **The count is the only thing that ever says
-/// so**, which is why the harvest prints one (D385).
+/// Anything composed (`(A | B)`, a cast, a reference to another name) is skipped. A sign
+/// and one pair of brackets still count as a bare number, because `sys/sys/event.h` writes
+/// every filter as `#define EVFILT_READ (-1)`.
 fn is_plain_number(token: &str) -> bool {
     let token = strip_brackets(token);
     let token = token.strip_prefix('-').unwrap_or(token);
@@ -225,8 +180,7 @@ fn is_plain_number(token: &str) -> bool {
 
 /// One pair of wrapping brackets removed, if that is all they are.
 ///
-/// **One pair, not any number.** Nested brackets are how an expression is written, and this
-/// only exists for the single pair a header puts around a negative number.
+/// One pair only: nested brackets mean an expression.
 fn strip_brackets(token: &str) -> &str {
     token
         .strip_prefix('(')
@@ -236,22 +190,11 @@ fn strip_brackets(token: &str) -> &str {
 
 /// A header's number, spelled the way TOML spells it.
 ///
-/// # C octal is not TOML octal
-///
-/// `S_IFDIR` is `0040000` in `sys/sys/stat.h`, and a **leading zero is how C says octal**.
-/// TOML rejects a leading zero outright, so the first file mode harvested made the whole
-/// table unparseable - and the failure surfaced as every constant in every section being
-/// missing at once, which reads like a build problem rather than like one number (D374).
-///
-/// So a C octal becomes TOML's `0o` form. The value is the same number in the same base, and
-/// a reader comparing it against the header still sees octal - which is why it is not simply
-/// converted to decimal.
-///
-/// Hexadecimal and decimal pass through untouched: both spellings already mean the same in
-/// each language.
+/// A leading zero is C octal (`S_IFDIR` is `0040000`), which TOML rejects, so it becomes
+/// TOML's `0o` form: still octal, so it compares with the header (D374). Hexadecimal and
+/// decimal pass through.
 fn as_toml_number(token: &str) -> String {
-    // The brackets a header puts around a negative number are C's, not TOML's, and TOML has
-    // no use for them - `-1` is `-1` in both.
+    // The brackets around a negative number are C's; `-1` is `-1` in both.
     let token = strip_brackets(token);
     let (sign, digits) = match token.strip_prefix('-') {
         Some(rest) => ("-", rest),
@@ -269,14 +212,8 @@ fn as_toml_number(token: &str) -> String {
 
 /// The header's trailing comment, flattened to one line.
 ///
-/// Kept because it is the header's own description and worth far more than anything that
-/// could be written here about a number.
-///
-/// **A comment that runs onto the next line is marked, not silently cut.** Eight
-/// definitions in these headers have one, and a truncated sentence reads as a complete one.
-/// `AT_EACCESS` would be described as *"Check access using effective user"*, which stops
-/// exactly where it stops meaning something. The marker costs one character and makes the
-/// difference visible.
+/// Kept as the header's own description. A comment that runs onto the next line is marked,
+/// not silently cut, because a truncated sentence reads as a complete one.
 fn comment_of(tail: &str) -> String {
     let Some(start) = tail.find("/*") else {
         return String::new();
@@ -293,30 +230,15 @@ fn comment_of(tail: &str) -> String {
     }
 }
 
-/// Reads every header and renders the data file.
+/// The revision the checkout is at.
+///
+/// Asked of `git` rather than taken as an argument, so the header states what the harvest
+/// ran against and a hand-edited header differs from a regeneration.
 ///
 /// # Errors
 ///
-/// When the checkout is not a directory, or a header named above is missing. **Named rather
-/// than skipped**, because a sparse checkout lacking one silently yields a smaller table,
-/// and a constant absent for that reason looks exactly like one that was never defined.
-/// The revision a checkout is actually at.
-///
-/// # Why this is asked rather than accepted
-///
-/// The first version took the revision as an argument and stamped it into the header. That
-/// makes the header a **claim**, and the gate that re-derives the file could not tell a true
-/// claim from a false one: regenerating with whatever the file says produces a file saying
-/// the same thing, so editing the header to name a different revision passed (D354).
-///
-/// Deriving it closes that. The header then says what the harvest actually ran against, and
-/// a hand-edited one differs from a regeneration - which is what the gate is looking at.
-///
-/// # Errors
-///
-/// When the checkout is not a git repository or `git` cannot be run. **Refused rather than
-/// falling back to "unknown"**, because a table that cannot say where it came from is
-/// exactly the thing this whole file exists to prevent.
+/// When the checkout is not a git repository or `git` cannot be run, rather than falling
+/// back to "unknown".
 fn revision_of(source: &Path) -> Result<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -337,6 +259,13 @@ fn revision_of(source: &Path) -> Result<String> {
     Ok(format!("commit {commit}"))
 }
 
+/// Reads every header and renders the data file.
+///
+/// # Errors
+///
+/// When the checkout is not a directory, or a header named above is missing. A missing
+/// header is named rather than skipped, so a sparse checkout cannot yield a silently
+/// smaller table.
 pub(crate) fn run(source: &Path) -> Result<String> {
     use std::fmt::Write as _;
 
@@ -383,23 +312,13 @@ pub(crate) fn run(source: &Path) -> Result<String> {
 
 /// How many skipped names to print before saying only how many are left.
 ///
-/// Enough to see what kind of thing was skipped without burying the counts under a header
-/// full of function-like macros.
+/// Enough to show what kind of thing was skipped without burying the counts.
 const SKIPPED_SHOWN: usize = 8;
 
 /// Says what a section did not take, and names some of it.
 ///
-/// # Why this exists
-///
-/// Three separate times a rule about *spelling* has silently taken the wrong set: the
-/// upper-case rule left one constant of six hundred in `syscall.h` (D378), C octal made the
-/// whole table unparseable (D374), and requiring bare digits took none of the fifteen event
-/// filters while keeping the one number of the set that is not a filter (D385).
-///
-/// Every time, **the count was the only thing that said so**, and twice it was noticed weeks
-/// later by somebody looking for a constant that should have been there. A `#define` whose
-/// name qualifies and whose value does not is a decision this makes on its own, and a
-/// decision nobody can see is one nobody can check.
+/// A `#define` whose name qualifies and whose value does not is skipped by a spelling rule,
+/// so it is reported rather than dropped silently (D385).
 fn report_skipped(section: &str, names: &[String]) {
     if names.is_empty() {
         return;
@@ -424,9 +343,8 @@ fn report_skipped(section: &str, names: &[String]) {
 
 /// Every name this could have taken and did not, in the order the header states them.
 ///
-/// A name that qualifies with a value that does not. Names that do not qualify are not
-/// listed: a lower-case internal macro is not a constant anybody was looking for, and
-/// listing them would bury the ones that are.
+/// Names that qualify with values that do not. Names that do not qualify, such as
+/// lower-case internal macros, are not listed.
 #[must_use]
 pub(crate) fn skipped(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -484,21 +402,15 @@ mod tests {
         assert_eq!(found[0].comment, "No such file or directory");
     }
 
-    /// **Hexadecimal stays hexadecimal.**
-    ///
-    /// A reader checking this against the header should not have to convert anything, and
-    /// `SOL_SOCKET` being `0xffff` is exactly the value somebody would misremember.
+    /// Hexadecimal stays hexadecimal, so it compares directly with the header.
     #[test]
     fn a_hexadecimal_value_is_not_normalised() {
         let found = extract("#define\tSOL_SOCKET\t0xffff\t\t/* options for socket level */\n");
         assert_eq!(found[0].value, "0xffff");
     }
 
-    /// **A negative constant in brackets is still a bare number.**
-    ///
-    /// Every filter in `sys/sys/event.h` is written this way, and requiring bare digits
-    /// harvested none of them while keeping `EVFILT_SYSCOUNT` - so the section existed and
-    /// named nothing a guest can ask for (D385).
+    /// A negative constant in brackets is still a bare number, as every filter in
+    /// `sys/sys/event.h` is written.
     #[test]
     fn a_bracketed_negative_is_harvested() {
         let found = extract(
@@ -525,10 +437,7 @@ mod tests {
         assert_eq!(found[0].value, "-3");
     }
 
-    /// **An expression is skipped, never evaluated.**
-    ///
-    /// Working out what `(A | B)` comes to means reproducing a decision somebody made about
-    /// how to compose it. The number is not the point; where it came from is.
+    /// An expression is skipped, never evaluated.
     #[test]
     fn a_composed_value_is_left_alone() {
         let text = concat!(
@@ -541,11 +450,7 @@ mod tests {
         assert_eq!(found[0].name, "O_RDONLY");
     }
 
-    /// **An unterminated comment is marked rather than silently truncated.**
-    ///
-    /// A cut sentence reads as a whole one, which is the plausible-output problem at the
-    /// scale of a comment. Found by comparing two implementations of this harvest against
-    /// each other (D353).
+    /// An unterminated comment is marked rather than silently truncated.
     #[test]
     fn a_comment_running_onto_the_next_line_says_that_it_does() {
         let found = extract(
@@ -571,11 +476,7 @@ mod tests {
         assert!(extract("#define IN_CLASSA(i) (((u_int32_t)(i) & 0x80) == 0)\n").is_empty());
     }
 
-    /// **First definition wins, and the choice is deterministic.**
-    ///
-    /// Headers guard alternatives behind `#if`, and this does not evaluate preprocessor
-    /// conditions. Taking the first makes a disagreement show up as a wrong value somebody
-    /// can find, rather than as a file that changes between runs.
+    /// First definition wins, so the output is deterministic without evaluating `#if`.
     #[test]
     fn the_first_definition_of_a_name_is_the_one_kept() {
         let found = extract("#define SIGPIPE 13\n#define SIGPIPE 99\n");
@@ -583,12 +484,7 @@ mod tests {
         assert_eq!(found[0].value, "13");
     }
 
-    /// A name must *start* upper case, and may go on however it likes.
-    ///
-    /// **The body used to have to be upper case too**, and that silently dropped an entire
-    /// header: every syscall is `SYS_read`, `SYS_write`, `SYS_getpid`, so the rule harvested
-    /// one constant out of six hundred and the only thing that said so was the total going up
-    /// by one (D378).
+    /// A name must start upper case and may continue in any case, as `SYS_read` does (D378).
     #[test]
     fn a_name_must_start_upper_case_and_may_go_on_however_it_likes() {
         // A leading underscore is an internal macro, still left alone.
@@ -603,10 +499,7 @@ mod tests {
         assert_eq!(found[0].value, "3");
     }
 
-    /// **What is skipped is named**, which is the whole of D385's tooling half.
-    ///
-    /// The failure this protects against is a section that looks harvested and is not: a
-    /// header of fifteen filters that yields one number, with nothing anywhere saying so.
+    /// What is skipped is named (D385).
     #[test]
     fn what_was_skipped_is_named_rather_than_dropped() {
         let text = concat!(
@@ -639,9 +532,7 @@ mod tests {
 
     /// The number test itself, at its edges.
     ///
-    /// **`-1` and `(1)` are numbers now and were not.** They were asserted *not* to be, which
-    /// is what made every event filter invisible - the assertion was written from the rule
-    /// rather than from what a header contains, so it protected the bug (D385).
+    /// `-1` and `(1)` are numbers; an expression is not.
     #[test]
     fn a_number_is_told_from_everything_else() {
         assert!(is_plain_number("0"));

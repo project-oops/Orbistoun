@@ -4,30 +4,13 @@
 //! cargo test -p orbistoun-propose --release --test shapes -- --nocapture
 //! ```
 //!
-//! # Why this is not answered by the audit
-//!
-//! `orbistoun-cli audit` asks whether the grammar can re-derive every name in the
-//! database, and today it can. That sounds like full coverage and is not, because of a
-//! selection effect: most of those names were *found* by the grammar, so of course the
-//! grammar can spell them. Measuring shape coverage against them measures the search that
-//! produced them.
-//!
-//! The names found **without** the grammar are the ones worth measuring. A name read out
-//! of a module's own strings, or seen going past in a trace, is a sample of what vendor
-//! identifiers actually look like that owes nothing to the pattern list. If those need
-//! shapes the grammar does not have, the pattern list is the binding constraint and buying
-//! more vocabulary is spending on the wrong lever.
-//!
-//! # What it reports
-//!
-//! Every such name is split into known words, each word is mapped to the vocabulary lists
-//! holding it, and the pattern list is asked whether any of its shapes can spell that
-//! sequence. What comes out is a count of reachable and unreachable, and for the
-//! unreachable a ranked list of the shapes that would fix them.
-//!
-//! A word can sit in several lists, so a name has several possible shapes and only one has
-//! to match. An empty entry - how a shape says "no suffix" - lets a longer pattern spell a
-//! shorter name, so the matcher may consume a part without consuming a word.
+//! Most database names were found by the grammar, so measuring shape coverage against them
+//! measures the search that produced them. This uses only names found without the grammar
+//! (module strings, traces, published standards): each is split into known words, each word
+//! mapped to the lists holding it, and the pattern list asked whether any shape spells the
+//! sequence. A word in several lists gives several candidate shapes, and an empty entry (no
+//! suffix) lets a longer pattern spell a shorter name. The output counts reachable and
+//! unreachable names and ranks the shapes that would fix the rest.
 
 use orbistoun_names::Grammar;
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,6 +21,7 @@ const INDEPENDENT: [&str; 3] = ["static", "runtime", "published-standard"];
 /// What every vendor pattern starts with, and so what this can say anything about.
 const VENDOR_PREFIX: &str = "sce";
 
+/// Reports whether independently found vendor names are short of vocabulary or of shapes.
 #[test]
 fn is_the_next_name_short_of_a_word_or_short_of_a_shape() {
     let grammar = Grammar::builtin().expect("the shipped grammar parses");
@@ -54,19 +38,15 @@ fn is_the_next_name_short_of_a_word_or_short_of_a_shape() {
         if !INDEPENDENT.contains(&found.as_str()) {
             continue;
         }
-        // **Vendor-shaped only, and the first cut of this was wrong without it.** Of the
-        // independently-found names, 276 of 464 are POSIX or libc - `fopen_s`, `gmtime_s`,
-        // C++ mangled symbols. The vendor patterns all begin with the `sce` prefix and
-        // cannot spell those, and are not meant to; counting them turned a 68% vocabulary
-        // gap out of a sample two thirds of which the grammar was never aiming at.
+        // Vendor-shaped only: most independently found names are POSIX, libc or C++ mangled
+        // symbols, which the `sce`-prefixed vendor patterns are not meant to spell.
         if !name.starts_with(VENDOR_PREFIX) {
             continue;
         }
         sampled += 1;
         let Some(parts) = orbistoun_propose::vocabulary::decompose(name, &words) else {
-            // Not a shape question: the grammar does not hold the words to split it at
-            // all, so this name is short of vocabulary rather than short of a pattern.
-            // Which word it is short of is the useful part, so record where it stalled.
+            // Not a shape question: the grammar lacks the words to split this name, so it is short of
+            // vocabulary. Where it stalled says which word.
             undecomposable.push(name.clone());
             *missing.entry(stalled_on(name, &words)).or_default() += 1;
             continue;
@@ -97,9 +77,8 @@ fn is_the_next_name_short_of_a_word_or_short_of_a_shape() {
         &missing,
     );
 
-    // **The failure this guards is measuring nothing.** A decomposition that never
-    // succeeds, or a sample that is empty, produces "no missing shapes" - which reads as
-    // the strongest possible result and would be drawn from an experiment that did not run.
+    // An empty sample or a decomposition that never succeeds would report "no missing shapes",
+    // the strongest-looking result from an experiment that did not run.
     assert!(
         sampled > 0,
         "no independently-found names to measure against"
@@ -110,11 +89,8 @@ fn is_the_next_name_short_of_a_word_or_short_of_a_shape() {
     );
 }
 
-/// Everything the measurement found, in the order a person would want it.
-///
-/// Split out because the measurement should read as a measurement: the loop above decides
-/// what is true and this decides how to say it, and mixing them made one function that did
-/// both and was longer than the lint allows.
+/// Everything the measurement found, in the order a person would want it; the loop decides
+/// what is true and this decides how to say it.
 fn report(
     grammar: &Grammar,
     database: &[(String, String)],
@@ -196,10 +172,8 @@ fn report(
 
 /// The part of a name a greedy split could not get past.
 ///
-/// Not the missing word - a greedy longest-first split will happily consume a short word
-/// that happens to fit and then stall one character later, so `sceKernelApr...` eats the
-/// `A` and stops at `pr...`. What it gives is the position, which is enough to see that
-/// twelve names all stall in the same place and one word would free them all.
+/// Not the missing word: a longest-first split can consume a short word that fits and stall
+/// just after it. The position is enough to see many names stalling in the same place.
 fn stalled_on(name: &str, words: &[String]) -> String {
     let mut at = 0;
     while at < name.len() {
@@ -211,7 +185,7 @@ fn stalled_on(name: &str, words: &[String]) -> String {
     String::new()
 }
 
-/// How many candidates the whole pattern list produces today.
+/// How many candidates the whole pattern list produces.
 fn whole_space(grammar: &Grammar) -> u128 {
     grammar
         .pattern
@@ -227,10 +201,8 @@ fn whole_space(grammar: &Grammar) -> u128 {
 
 /// What the cheapest pattern spelling a shape would cost.
 ///
-/// A position a word could have come from more than one list is costed at the **smallest**
-/// of them, because the question is what the cheapest pattern that would work costs. That
-/// makes every figure here a floor, which is the honest direction for a number used to
-/// decide whether to add a shape at all.
+/// A position whose word could come from several lists is costed at the smallest, so every
+/// figure is a floor.
 fn cost_of(grammar: &Grammar, shape: &str) -> u128 {
     shape
         .split(" + ")
@@ -246,8 +218,8 @@ fn cost_of(grammar: &Grammar, shape: &str) -> u128 {
 
 /// Whether a pattern's parts can spell a sequence of words.
 ///
-/// Recursive because a part may be consumed without consuming a word: an empty entry is
-/// how a shape says "no suffix", and it lets a five-part pattern spell a four-word name.
+/// Recursive because an empty entry consumes a part without a word, letting a five-part
+/// pattern spell a four-word name.
 fn spells(
     grammar: &Grammar,
     parts: &[String],
@@ -280,11 +252,8 @@ fn slots_holding(grammar: &Grammar, word: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// One line naming the shape a decomposition takes.
-///
-/// The lists each word could have come from, in order. Ambiguity is kept rather than
-/// resolved - a word in two lists genuinely gives the name two shapes, and picking one
-/// would invent a precision the evidence does not have.
+/// One line naming the shape a decomposition takes: the lists each word could have come
+/// from, in order. A word in two lists gives the name two shapes, and both are kept.
 fn signature(slots: &[BTreeSet<String>]) -> String {
     slots
         .iter()

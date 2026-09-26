@@ -1,31 +1,18 @@
-//! Proving the dispatch runner against a shader whose answer is known.
+//! The dispatch runner, proved against a shader whose answer is known.
 //!
-//! This runs before the runner is trusted with anything translated. If a shader that
-//! writes a constant does not produce that constant, the fault is in the harness, and
-//! establishing that cheaply is what stops a harness bug being read as a translator
-//! bug later.
-//!
-//! # A missing device skips loudly
-//!
-//! Rust has no first-class skip, so the honest default is easy to get wrong: a test
-//! that finds no device, returns early and reports `ok` makes the suite green on a
-//! machine where the most important test never ran.
-//!
-//! These print an unmissable line instead, and `bin/orbistoun check` surfaces it. That
-//! is the same rule obSCEne's harness follows - an absence that looks identical to a
-//! success is worse than no test at all.
+//! If a shader that writes a constant does not produce it, the fault is in the harness, not the
+//! translator. A missing device skips with a line `bin/orbistoun check` surfaces, because a test
+//! that returns early and reports `ok` makes the suite green where it never ran.
 
 use orbistoun_gpu_vulkan::{Availability, dispatch, probe};
 
-/// Prints a skip in a form that survives being scrolled past.
-///
-/// Returns whether the caller should continue.
+/// Prints a skip in a form that survives being scrolled past. Returns whether the caller should
+/// continue.
 fn device_or_skip(test: &str) -> bool {
     match probe() {
         Availability::Available { properties } => {
-            // The properties are printed, not just the name. A device that flushes
-            // subnormals runs a different program from one that does not, and a suite
-            // that reports only "it ran" cannot tell those two runs apart afterwards.
+            // The properties are printed, not just the name: a device that flushes subnormals runs
+            // a different program.
             println!(
                 "[{test}] device: {} (subgroup {}, subnormals {})",
                 properties.device,
@@ -50,11 +37,11 @@ fn device_or_skip(test: &str) -> bool {
     }
 }
 
+/// A shader that writes a constant produces that constant.
 #[test]
 fn a_shader_that_writes_a_constant_produces_that_constant() {
-    // The whole chain: build a module, create a device, bind a buffer, dispatch, read
-    // back. Every part of it has to work for this value to appear, which is what makes
-    // it worth running first.
+    // Every part of the chain (module, device, buffer, dispatch, readback) has to work for this
+    // value to appear.
     const VALUE: u32 = 0xABCD_1234;
     const WORDS: usize = 4;
 
@@ -73,12 +60,11 @@ fn a_shader_that_writes_a_constant_produces_that_constant() {
     );
 }
 
+/// The buffer is zeroed before the shader runs.
 #[test]
 fn the_buffer_is_zeroed_before_the_shader_runs() {
-    // Elements the shader never touches must read as zero, not as whatever previously
-    // occupied that memory. Without this, a shader that writes nothing at all could
-    // appear to have written something - and a translator emitting a shader that does
-    // nothing is exactly the failure worth catching.
+    // Elements the shader never touches read as zero, so a shader that writes nothing cannot appear
+    // to have written something.
     const WORDS: usize = 4;
 
     if !device_or_skip("the_buffer_is_zeroed_before_the_shader_runs") {
@@ -97,10 +83,10 @@ fn the_buffer_is_zeroed_before_the_shader_runs() {
     );
 }
 
+/// A malformed module is rejected rather than run.
 #[test]
 fn a_malformed_module_is_rejected_rather_than_run() {
-    // The driver validates what it is given, and a runner that accepted nonsense would
-    // let a broken translator look like a working one with strange output.
+    // A runner that accepted nonsense would make a broken translator look like a working one.
     if !device_or_skip("a_malformed_module_is_rejected_rather_than_run") {
         return;
     }
@@ -129,15 +115,11 @@ impl orbistoun_gpu::pipeline::GuestMemory for Mapping {
 /// Where the fixture puts its shader. Arbitrary, and deliberately not zero.
 const ADDRESS: u64 = 0x1_0000;
 
+/// A module found through a command stream runs on a device.
 #[test]
 fn a_module_that_came_from_a_command_stream_runs() {
-    // The last gap in the path. Everything before this asserts that a submission
-    // *produces* a module; nothing asserted that the module produced this way is one a
-    // device will accept. Those are different claims, and the difference is exactly
-    // where the two driver faults earlier in this subsystem lived.
-    //
-    // Nothing here calls the translator. The shader is found because a command stream
-    // named its address, which is the only way one is ever found in a real frame.
+    // A submission produces a module; this asserts a device accepts it. The shader is found because
+    // a command stream named its address, as in a real frame.
     use orbistoun_gpu::pipeline::Pipeline;
     use orbistoun_translate::{Fidelity, Strategy, Width};
 
@@ -168,8 +150,8 @@ fn a_module_that_came_from_a_command_stream_runs() {
         .opcode_for_register(low)
         .expect("an opcode reaching the shader registers");
 
-    // The registers hold the address in 256-byte units, low word then high, as the GL
-    // cube capture measured on the console (orbistoun-gpu `tests/captures/`, worklog 545).
+    // The registers hold the address in 256-byte units, low word then high, as the GL cube capture
+    // shows (orbistoun-gpu `tests/captures/`).
     let mut stream: Vec<u32> = Vec::new();
     for (register, value) in [
         (
@@ -189,8 +171,7 @@ fn a_module_that_came_from_a_command_stream_runs() {
         width: Width::default(),
     })
     .expect("pipeline");
-    // No registrations here on purpose: this is the path that finds a shader from the
-    // packets alone, which is what has to work when the guest hand-rolls a buffer.
+    // No registrations: this is the path that finds a shader from the packets alone.
     let submission = pipeline.submit(
         &stream,
         orbistoun_gpu::pipeline::Queue::Compute,
@@ -210,8 +191,8 @@ fn a_module_that_came_from_a_command_stream_runs() {
         .next()
         .expect("a module for the backend");
 
-    // The observation window the translator writes registers into: the vector file then
-    // the scalar file.
+    // The observation window the translator writes registers into: the vector file, then the scalar
+    // file.
     let observed = (orbistoun_translate::OBSERVED_REGISTERS * 2) as usize;
     let output = dispatch(module, observed, 64, [1, 1, 1]).expect("dispatch");
     assert_eq!(

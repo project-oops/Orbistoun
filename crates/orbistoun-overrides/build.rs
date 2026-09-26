@@ -1,10 +1,9 @@
 //! Carries each compatibility record's `[settings]` table into the binary as the repository layer.
 //!
-//! The records in `compat/` are the shipped layer of the override merge, but a run happens wherever
-//! the binary is, not in the repository - so the part a run acts on is taken at build time. Only
-//! `[settings]`: the rest of a record is a measurement written back by the tools, and embedding it
-//! would rebuild everything that depends on this crate each time a run is recorded, for nothing a
-//! run reads.
+//! A run happens wherever the binary is, not in the repository, so the shipped layer of the
+//! override merge is taken at build time. Only `[settings]` is embedded: the rest of a record is
+//! written back by the tools, and embedding it would rebuild this crate's dependents on every
+//! recorded run for nothing a run reads.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -26,8 +25,8 @@ fn main() {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            // A record that does not parse is the gate's to refuse, with a better message than a
-            // build script can give; it contributes no settings here.
+            // A record that does not parse is the gate's to refuse, with a better message than a build
+            // script can give; it contributes no settings here.
             let Ok(record) = text.parse::<toml::Table>() else {
                 continue;
             };

@@ -1,29 +1,13 @@
 //! The kernel's guest-facing calls, driven through the table a resolved import reaches.
 //!
-//! # The shape almost every one of these has
+//! Most take a pointer to a handle slot: the guest passes the address of a null local and the
+//! kernel writes the address of the real object into it. The tests run whole cycles (init,
+//! use, destroy), because a wrapper that writes its handle to the wrong place still answers
+//! `OK` call by call.
 //!
-//! **The argument is a pointer to a pointer.** The guest declares an opaque handle as a
-//! null local and passes its address; this crate allocates the real object and writes its
-//! address into that slot. Treating the slot as the object itself is the mistake that made
-//! `Settype` overwrite the guest's own pointer variable (D272), and it is invisible in any
-//! test that only ever calls one function.
-//!
-//! So the tests here go through the whole cycle - init, use, destroy - rather than checking
-//! return codes one call at a time. A wrapper that wrote its handle to the wrong place
-//! still answers `OK`.
-//!
-//! # Out-parameter widths are load-bearing
-//!
-//! Some out-parameters are `int` and some are pointer-width, and the difference has bitten
-//! this crate twice: an eight-byte write through an `int *` put the top half in whatever
-//! the guest kept next door - once a semaphore handle's neighbour (D210), once a caller's
-//! loop counter, which reset every iteration and ran until the call budget stopped it
-//! (D272). Every out-parameter test below writes a sentinel into the neighbouring bytes and
-//! asserts it survived.
-//!
-//! # Guest memory is host memory
-//!
-//! The mapping is identity (D014), so a `Vec<u64>` this test owns is a guest object.
+//! Out-parameters are `int` or pointer-width, and each test writes a sentinel beside the
+//! out-parameter and asserts it survived (D272). Guest memory is host memory, so a `Vec<u64>`
+//! this test owns is a guest object.
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_core::GuestFn;
@@ -32,26 +16,19 @@ use orbistoun_core::GuestFn;
 const OK: u64 = 0;
 /// The caller passed something this could not use.
 ///
-/// **Derived, not written out.** These were literals, and when the placeholders gained the
-/// high bit six tests failed on a number rather than on a behaviour - two copies of one
-/// constant, which is the thing this project keeps finding disagreeing with itself (D670).
+/// Derived from the error type rather than written out, so the tests and the implementation
+/// share one constant (D670).
 const INVALID_ARGUMENT: u64 = orbistoun_core::GuestError::InvalidArgument.as_raw() as u64;
 /// The handle names nothing.
 const INVALID_HANDLE: u64 = orbistoun_core::GuestError::InvalidHandle.as_raw() as u64;
 /// Releasing something this thread does not hold.
 ///
-/// Measured on a target console, which distinguishes it from a bad argument (D398).
+/// Measured on the hardware; distinct from a bad argument (D398).
 const NOT_OWNER: u64 = 0x8002_0001;
-/// The ordinary outcome of asking for something somebody else holds.
-///
-/// **Measured, not chosen.** This was a placeholder until a conformance run on a target
-/// console took a lock it already held and the console answered with this (D398).
+/// The ordinary outcome of asking for something somebody else holds, as measured on the
+/// hardware (D398).
 const BUSY: u64 = 0x8002_0010;
-/// No such object - the vendor `ESRCH` a bad handle earns.
-///
-/// **Measured.** obSCEne's `015-sync/event-flag-rejects-bad-handle` answered this on hardware, so
-/// the event-flag family returns it for a bad handle rather than the `INVALID_HANDLE` placeholder
-/// (D438).
+/// No such object: the vendor `ESRCH` a bad event-flag handle answers on the hardware.
 const NO_SUCH: u64 = 0x8002_0003;
 
 /// A guest object: a run of words at a real address.
@@ -119,12 +96,9 @@ fn call(name: &str, args: &[u64]) -> u64 {
     implementation(name)(&regs)
 }
 
-// --- the table ---------------------------------------------------------------------------
-
 /// Every name appears once, and the table is not empty.
 ///
-/// A duplicate would mean the registry silently picks one of two implementations for the
-/// same import, and the pair could disagree for a long time before anything noticed.
+/// A duplicate would let the registry pick one of two implementations for the same import.
 #[test]
 fn the_table_names_each_call_once() {
     let mut seen = std::collections::BTreeSet::new();
@@ -137,14 +111,10 @@ fn the_table_names_each_call_once() {
     );
 }
 
-// --- signal sets -------------------------------------------------------------------------
-
 /// An emptied set contains nothing, and a filled one contains everything.
 ///
-/// **`sigismember` had to exist for `sigemptyset` to be believed.** Unimplemented it
-/// answered the placeholder error code - which is non-zero, which a caller reads as *yes* -
-/// so a set that had just been emptied reported every signal still in it, and the failure
-/// was attributed to the function that did the emptying (D271).
+/// `sigismember` needs a real implementation: the placeholder error code is non-zero and a
+/// caller reads it as yes.
 #[test]
 fn an_emptied_signal_set_contains_nothing_and_a_filled_one_everything() {
     let set = Slot::new(2);
@@ -170,9 +140,7 @@ fn an_emptied_signal_set_contains_nothing_and_a_filled_one_everything() {
 
 /// Adding and removing one signal leaves its neighbours alone.
 ///
-/// Signals are numbered from one, so signal *n* is bit *n-1* - an off-by-one here moves
-/// every membership question one place along, which is correct for none of them and
-/// plausible for all.
+/// Signals are numbered from one, so signal n is bit n-1.
 #[test]
 fn adding_a_signal_leaves_its_neighbours_alone() {
     let set = Slot::new(2);
@@ -210,8 +178,8 @@ fn a_signal_past_the_first_word_still_lands() {
 
 /// A signal number outside the set is an error, not a write past the end of the object.
 ///
-/// The guest's `sigset_t` is a fixed size, so an out-of-range number has nowhere to go -
-/// and computing an offset for it anyway would corrupt whatever the guest keeps after it.
+/// The guest's `sigset_t` is a fixed size, so an offset for an out-of-range number would
+/// corrupt whatever the guest keeps after it.
 #[test]
 fn a_signal_number_outside_the_set_is_refused() {
     let set = Slot::new(2);
@@ -247,8 +215,6 @@ fn a_null_signal_set_is_refused() {
     }
 }
 
-// --- mutexes through a guest pointer --------------------------------------------------------
-
 /// The whole mutex cycle, driven the way a guest drives it.
 #[test]
 fn a_guest_mutex_is_initialised_used_and_destroyed_through_its_own_pointer() {
@@ -283,10 +249,9 @@ fn a_guest_mutex_is_initialised_used_and_destroyed_through_its_own_pointer() {
 
 /// A statically initialised lock names nothing, and says so.
 ///
-/// The guest filled the location with a constant at compile time and never called init, so
-/// the handle there is not one this crate handed out. **Reporting that honestly is the
-/// whole point** - a stub returning success would let every thread through the critical
-/// section at once, and the corruption would be blamed on whatever the lock was protecting.
+/// The guest filled the location at compile time and never called init, so the handle there
+/// is not one this crate issued. Answering success would let every thread into the critical
+/// section at once.
 #[test]
 fn a_lock_that_was_never_initialised_names_nothing() {
     let mutex = Slot::one(); // still zero: never initialised
@@ -307,13 +272,10 @@ fn a_lock_that_was_never_initialised_names_nothing() {
     assert_eq!(call("scePthreadMutexLock", &[0]), INVALID_HANDLE);
 }
 
-/// `Trylock` reports a lock it could not take, and does not answer `OK`.
+/// `Trylock` reports a lock it could not take as `Busy`, not `OK`.
 ///
-/// **The one that must not answer success when it fails.** `Lock` blocks until it has the
-/// mutex, so success is its only interesting answer; `trylock` exists precisely to report
-/// that it could *not* take it, and a guest branches on that. Reported as `Busy` rather
-/// than an argument error, because this is the ordinary outcome of the call rather than a
-/// misuse of it.
+/// A guest branches on that answer, and it is the ordinary outcome of the call rather than a
+/// misuse, so it is not an argument error.
 #[test]
 fn trylock_reports_a_lock_held_by_somebody_else() {
     let mutex = Slot::one();
@@ -338,11 +300,10 @@ fn trylock_reports_a_lock_held_by_somebody_else() {
     );
 }
 
-/// The default recursion mode is the strict one, so a double lock is refused not hung.
+/// The default recursion mode is the strict one, so a double lock is refused, not hung.
 ///
-/// The attribute block is not parsed, so this is the default rather than whatever the guest
-/// asked for - stated in the trace, and the first thing to suspect if a title deadlocks on
-/// a lock it takes twice.
+/// The attribute block is not parsed, so this is the default rather than what the guest asked
+/// for, and the trace says so.
 #[test]
 fn a_guest_mutex_defaults_to_refusing_a_second_lock_by_its_owner() {
     let mutex = Slot::one();
@@ -359,13 +320,8 @@ fn a_guest_mutex_defaults_to_refusing_a_second_lock_by_its_owner() {
     call("scePthreadMutexDestroy", &[mutex.at()]);
 }
 
-// --- attribute objects --------------------------------------------------------------------
-
-/// A mutex attribute stores what it was told and reads it back.
-///
-/// It used to accept the call and write nothing, so the `Gettype` counterpart read whatever
-/// the guest's stack held - an out-parameter left untouched, which the conformance probe
-/// named exactly: *the attribute object is inert* (D272).
+/// A mutex attribute stores what it was told and reads it back, so `Gettype` writes its
+/// out-parameter (D272).
 #[test]
 fn a_mutex_attribute_stores_what_it_was_told() {
     let attr = Slot::one();
@@ -402,10 +358,8 @@ fn a_mutex_attribute_stores_what_it_was_told() {
 
 /// An `int` out-parameter is written four bytes wide, not eight.
 ///
-/// **This has bitten the crate twice.** An eight-byte write through an `int *` takes the
-/// caller's neighbouring variable with it - once the top half of a semaphore handle's
-/// neighbour (D210), once a loop counter that was reset every iteration, so the check ran
-/// until the call budget stopped it (D272). The sentinel in the upper half is the assertion.
+/// An eight-byte write through an `int *` overwrites the caller's neighbouring variable; the
+/// sentinel in the upper half is the assertion (D272).
 #[test]
 fn an_int_out_parameter_does_not_take_its_neighbour_with_it() {
     let attr = Slot::one();
@@ -438,11 +392,10 @@ fn an_int_out_parameter_does_not_take_its_neighbour_with_it() {
     );
 }
 
-/// A size out-parameter is pointer-width, which is the deliberate exception.
+/// A size out-parameter is pointer-width, the deliberate exception to the `int` case above.
 ///
-/// Asserted against the `int` case above rather than alone: the two widths sit beside each
-/// other in the same family, and a refactor that made them uniform would be wrong in one
-/// direction or the other whichever way it went.
+/// The two widths sit side by side in one family, so a refactor that made them uniform would
+/// be wrong one way or the other.
 #[test]
 fn a_size_out_parameter_is_written_the_full_width() {
     let attr = Slot::one();
@@ -524,8 +477,6 @@ fn an_uninitialised_attribute_object_is_refused() {
     );
 }
 
-// --- condition variables ---------------------------------------------------------------------
-
 /// The condition-variable cycle, including a signal that arrives before the wait.
 #[test]
 fn a_guest_condition_variable_remembers_a_signal_that_arrived_early() {
@@ -560,8 +511,6 @@ fn an_uninitialised_condition_variable_names_nothing() {
     assert_eq!(call("scePthreadCondDestroy", &[cond.at()]), INVALID_HANDLE);
     assert_eq!(call("scePthreadCondInit", &[0, 0, 0]), INVALID_ARGUMENT);
 }
-
-// --- read/write locks ---------------------------------------------------------------------------
 
 /// The read/write lock cycle, and readers sharing where writers do not.
 #[test]
@@ -601,11 +550,8 @@ fn a_guest_rwlock_shares_between_readers_and_excludes_writers() {
     assert_eq!(call("scePthreadRwlockDestroy", &[lock.at()]), OK);
 }
 
-/// The POSIX-named entries are the same calls under another name.
-///
-/// They resolve to the same functions, so what has to be true is that the *pair* behaves
-/// identically - a guest importing one spelling and a library importing the other must be
-/// talking about the same lock.
+/// The POSIX-named entries are the same calls under another name, so a lock taken through
+/// one spelling is the lock the other spelling sees.
 #[test]
 fn the_posix_named_rwlock_entries_reach_the_same_lock() {
     let lock = Slot::one();
@@ -641,8 +587,6 @@ fn an_uninitialised_rwlock_names_nothing() {
     );
 }
 
-// --- barriers ----------------------------------------------------------------------------------
-
 /// A barrier of one releases on arrival and can be reused.
 #[test]
 fn a_guest_barrier_of_one_releases_on_arrival() {
@@ -668,22 +612,17 @@ fn a_guest_barrier_of_one_releases_on_arrival() {
     );
 }
 
-// --- event flags -------------------------------------------------------------------------------
-
 /// The event-flag cycle, and the mode bit that separates "all" from "any".
 ///
-/// **A miss is not an error.** Polling asks whether the pattern is set right now, and
-/// answering an argument error when it is not would make a guest read an ordinary poll as a
-/// broken handle - so a miss is `Busy` and only a bad handle is a handle error.
+/// A poll that misses answers `Busy`, not an error, so a guest does not read an ordinary poll
+/// as a broken handle; only a bad handle is a handle error.
 #[test]
 fn a_guest_event_flag_distinguishes_a_miss_from_a_bad_handle() {
     /// The mode bit meaning every bit of the pattern must be present.
     const WAIT_AND: u64 = 0x01;
     /// The mode bit meaning any bit of the pattern will do.
     ///
-    /// **Passed explicitly, because zero is not a mode.** These calls used `0`, which read as
-    /// `or` only because the old implementation tested one bit and found it clear. A console
-    /// answers `0x80020016` to a mode naming neither (D610).
+    /// Passed explicitly: a mode naming neither `and` nor `or` is an argument error on the hardware.
     const WAIT_OR: u64 = 0x02;
 
     let flag = Slot::one();
@@ -769,8 +708,7 @@ fn an_event_flag_poll_with_no_result_pointer_still_answers() {
     call("sceKernelCreateEventFlag", &[flag.at(), name.at(), 0, 1, 0]);
     let handle = flag.read(0);
 
-    // `0x02` is `or`, spelled out: a mode of zero names neither `and` nor `or` and is an
-    // argument error on the console, so it cannot stand in for "the default" (D610).
+    // `0x02` is `or`: a mode of zero names neither and is an argument error on the hardware.
     assert_eq!(call("sceKernelPollEventFlag", &[handle, 1, 0x02, 0, 0]), OK);
     assert_eq!(
         call("sceKernelPollEventFlag", &[handle, 2, 0x02, 0, 0]),
@@ -788,8 +726,6 @@ fn creating_an_event_flag_with_nowhere_to_put_it_is_refused() {
         INVALID_ARGUMENT
     );
 }
-
-// --- semaphores --------------------------------------------------------------------------------
 
 /// The semaphore cycle through the kernel entry points.
 #[test]
@@ -824,9 +760,8 @@ fn a_guest_semaphore_is_taken_signalled_and_deleted() {
     );
 
     assert_eq!(call("sceKernelDeleteSema", &[handle]), OK);
-    // One, spelled out. `sceKernelPollSema` takes the count as its second argument, and an
-    // omitted argument is a request for zero - which a console refuses rather than granting
-    // trivially (D610).
+    // The count is the second argument, and zero is refused on the hardware rather than granted
+    // trivially.
     assert_eq!(call("sceKernelPollSema", &[handle, 1]), INVALID_HANDLE);
     assert_eq!(call("sceKernelDeleteSema", &[handle]), INVALID_HANDLE);
 }
@@ -839,8 +774,6 @@ fn a_semaphore_handle_of_zero_names_nothing() {
     assert_eq!(call("sceKernelDeleteSema", &[0]), INVALID_HANDLE);
 }
 
-// --- what the guest asks about the machine --------------------------------------------------------
-
 /// The page size is a real power of two, because guests round against it.
 #[test]
 fn the_page_size_is_a_usable_power_of_two() {
@@ -849,15 +782,11 @@ fn the_page_size_is_a_usable_power_of_two() {
     assert!(size.is_power_of_two(), "{size} is not a power of two");
 }
 
-/// The console reports as a retail unit and not as a development one.
+/// The machine reports as a retail unit and not as a development one.
 ///
-/// Exactly one of the three can be true, and a guest branches hard on the answer - a title
-/// that believes it is on a development kit takes paths nothing here implements.
-///
-/// **The spelling is part of the assertion.** This passed for five days while the platform
-/// reported being both, because it called `sceKernelIsDevKit` and every guest imports
-/// `sceKernelIsDevkit` - a different hash, a different symbol, and a test that asserted the
-/// right answer about the wrong one (D393).
+/// Exactly one of the three can be true, and a guest branches on the answer. The spelling is
+/// part of the assertion: guests import `sceKernelIsDevkit`, a different symbol from
+/// `sceKernelIsDevKit` (D393).
 #[test]
 fn the_console_reports_itself_as_retail() {
     let retail = call("sceKernelIsCex", &[]);
@@ -873,12 +802,10 @@ fn the_console_reports_itself_as_retail() {
     assert_eq!(development, 0);
 }
 
-/// **Every one of these is a boolean, so none of them may answer a placeholder.**
+/// Each of these is a boolean, so none may answer the placeholder.
 ///
-/// The failure mode has now happened twice: a boolean left unimplemented answers this
-/// project's placeholder, which is non-zero, which a caller reads as *yes*. Asserting the
-/// value is not enough - what matters is that it is small enough to be a boolean at all, so
-/// a function quietly dropped from the table fails here rather than in a guest (D271, D393).
+/// The placeholder is non-zero and reads as yes; asserting the answer is small enough to be a
+/// boolean catches a function dropped from the table (D393).
 #[test]
 fn no_console_kind_answers_a_placeholder() {
     for name in [
@@ -901,10 +828,9 @@ fn no_console_kind_answers_a_placeholder() {
     }
 }
 
-/// The counter runs forward, and the frequency it is said to run at is usable.
+/// The counter runs forward, and its reported frequency is usable.
 ///
-/// A guest divides by the frequency, so zero is not an answer; and a counter that went
-/// backwards would make an elapsed time negative in a title that never checks.
+/// A guest divides by the frequency, so zero is not an answer.
 #[test]
 fn the_timestamp_counter_runs_forward_at_a_stated_frequency() {
     let frequency = call("sceKernelGetTscFrequency", &[]);
@@ -917,15 +843,12 @@ fn the_timestamp_counter_runs_forward_at_a_stated_frequency() {
 
 /// Process time is monotonic and measured from this process, not from an epoch.
 ///
-/// Wall-clock would let a title see time run backwards when the host's clock is corrected,
-/// and an epoch-based value would make two runs incomparable. Neither is what the name
-/// says.
+/// A wall clock would run backwards when the host's clock is corrected, and an epoch would
+/// make two runs incomparable.
 #[test]
 fn process_time_is_monotonic_and_starts_near_zero() {
-    // A century of microseconds, which an epoch-based value would exceed and a
-    // process-relative one cannot reach. Declared first: items exist from the start of the
-    // scope whatever line they are written on, and pretending otherwise reads as a
-    // statement.
+    // A century of microseconds, which an epoch-based value would exceed and a process-relative
+    // one cannot reach.
     const A_CENTURY: u64 = 100 * 365 * 24 * 60 * 60 * 1_000_000;
 
     let first = call("sceKernelGetProcessTime", &[]);
@@ -952,13 +875,9 @@ fn a_sleep_of_nothing_returns_at_once() {
 
 /// `sceKernelIsStack` reports the span through its out-parameters and answers zero.
 ///
-/// **This used to assert a predicate**, on the reading its name invites: non-zero for an
-/// address inside the stack and zero for one outside. The console answers `0` to a local and
-/// to a static alike, in twenty-three runs, and puts the bounds in the two words after the
-/// address - so the old assertions were pinning an inversion of what it does (D612).
-///
-/// **One test, because the span is process-wide.** Recorded before it is asked about, which
-/// is the whole contract: with no span noted there is nothing to report.
+/// On the hardware it answers `0` for a local and a static alike and writes the stack bounds
+/// to the two words after the address. The span is process-wide, so this is one test; with
+/// no span recorded there is nothing to report.
 #[test]
 fn is_stack_reports_the_span_that_was_noted_and_answers_zero() {
     let base = 0x7000_0000_u64;
@@ -980,8 +899,7 @@ fn is_stack_reports_the_span_that_was_noted_and_answers_zero() {
     assert_eq!(low, base, "the low bound is the base of the span");
     assert_eq!(high, base + len, "and the high bound is one past its end");
 
-    // **And the same for an address outside it.** The console does not distinguish, so
-    // neither does this - a caller asking about a static still learns where its stack is.
+    // The same for an address outside the stack: the hardware does not distinguish.
     low = 0;
     high = 0;
     assert_eq!(call("sceKernelIsStack", &[base - 1, low_at, high_at]), 0);

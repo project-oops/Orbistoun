@@ -1,30 +1,10 @@
 //! Splitting a decoded shader into basic blocks.
 //!
-//! # Why this is needed at all
-//!
-//! SPIR-V demands structured control flow: merge blocks, a reducible graph, no jumping
-//! into the middle of a construct. The guest has none of that. It has a flat instruction
-//! stream and a signed offset, and it will happily branch backwards into the middle of
-//! anything.
-//!
-//! Rather than reconstruct structure that may not exist, every guest block becomes an
-//! arm of one switch inside one loop, selected by a program counter (D110). That shape
-//! is always valid however tangled the guest's flow is - but it needs the blocks, which
-//! is what this module finds.
-//!
-//! # What starts a block
-//!
-//! Three things: the entry point, any instruction a branch targets, and the instruction
-//! after a branch. The last is what makes a conditional's not-taken path a block of its
-//! own.
-//!
-//! # A branch target that is not an instruction boundary
-//!
-//! An offset can land inside an instruction - from a miscomputed target, a decode that
-//! went wrong earlier, or data being executed. It is reported rather than rounded to a
-//! nearby boundary: a shader whose branch lands mid-instruction is not a shader this
-//! translator understands, and quietly moving the target would produce a plausible
-//! program that is not the one the guest wrote.
+//! Guest code is a flat stream with signed branch offsets and no structure; every guest
+//! block becomes an arm of one switch inside one loop (D098), and this module finds the
+//! blocks. A block starts at the entry point, at any branch target, and after a branch (the
+//! not-taken path). A branch target inside an instruction is refused rather than rounded to
+//! a nearby boundary, which would run a program the guest did not write.
 
 use orbistoun_shader::{Decode, Instruction, Operand};
 
@@ -69,9 +49,8 @@ pub struct Block {
 
 /// The branch opcodes, and what makes each take.
 ///
-/// SOPP, all of them, all four bytes, all carrying a signed word offset in the low half.
-/// Listed rather than matched on a range because the family also holds `s_endpgm`,
-/// `s_waitcnt` and a dozen instructions that are not branches at all.
+/// All SOPP, four bytes, with a signed word offset in the low half. Listed rather than a
+/// range because the family also holds `s_endpgm`, `s_waitcnt` and other non-branches.
 pub const BRANCHES: &[(u32, Condition)] = &[
     (2, Condition::Always),
     (4, Condition::ScalarConditionClear),
@@ -117,14 +96,10 @@ pub fn branch_condition(instruction: &Instruction, family: &str) -> Option<Condi
 
 /// Where a branch goes.
 ///
-/// The offset is a **signed** count of dwords from the instruction *after* the branch.
-/// The decoder reports the field as encoded, which keeps it agreeing with the reference
-/// operand for operand - a disassembler prints `-6` as `65530` - so the sign extension
-/// happens here, where the instruction's meaning is known.
-///
-/// Sixteen bits, from the instruction's definition rather than from the operand layout.
-/// The layout records the field it observed; how to read it is not something the bits
-/// can say.
+/// The offset is a signed count of dwords from the instruction after the branch. The
+/// decoder reports the field as encoded, agreeing with the reference (a disassembler
+/// prints `-6` as `65530`), so the sixteen-bit sign extension happens here, from the
+/// instruction's definition.
 pub fn branch_target(instruction: &Instruction) -> Result<u32, TranslateError> {
     let Some(Operand::Immediate(raw)) = instruction.operands.first() else {
         return Err(TranslateError::Unsupported {
@@ -151,9 +126,8 @@ pub fn branch_target(instruction: &Instruction) -> Result<u32, TranslateError> {
 ///
 /// # Errors
 ///
-/// A branch whose target is not the start of an instruction, or falls outside the
-/// shader. Both mean the stream is not what it appears to be, and rounding to a nearby
-/// boundary would produce a program that runs and is not the guest's.
+/// A branch whose target is not the start of an instruction, or falls outside the shader:
+/// the stream is not what it appears to be.
 pub fn split(
     decode: &Decode,
     family_of: impl Fn(&Instruction) -> Option<String>,
@@ -163,8 +137,8 @@ pub fn split(
         return Ok(Vec::new());
     }
 
-    // Byte offset to instruction index, so a branch target can be checked against real
-    // boundaries rather than assumed to land on one.
+    // Byte offset to instruction index, so a branch target is checked against real
+    // boundaries.
     let index_of: std::collections::BTreeMap<u32, usize> = instructions
         .iter()
         .enumerate()
@@ -191,9 +165,8 @@ pub fn split(
             ),
         })?;
         starts.insert(at);
-        // The instruction after a branch begins a block too: it is the not-taken path,
-        // and for an unconditional branch it is unreachable-but-present, which the guest
-        // is entitled to do.
+        // The instruction after a branch begins a block: the not-taken path, or
+        // unreachable-but-present code after an unconditional branch.
         if i + 1 < instructions.len() {
             starts.insert(i + 1);
         }
@@ -214,9 +187,8 @@ pub fn split(
                 fallthrough: last.offset + last.length,
             },
             None if family.as_deref() == Some("SOPP") && last.opcode == ENDPGM => Terminator::End,
-            // Runs off the end of the shader with no terminator. Treated as ending
-            // rather than as an error: a decode that stops early is already reported by
-            // `is_trustworthy`, and this is not the place to report it twice.
+            // Runs off the end with no terminator: treated as ending, since an early stop
+            // is already reported by `is_trustworthy`.
             None if end == instructions.len() => Terminator::End,
             None => Terminator::Fallthrough {
                 next: last.offset + last.length,
@@ -264,10 +236,9 @@ mod tests {
     /// `v_mov_b32_e32 v0, 0`, as filler with no control-flow meaning.
     const NOP: u32 = 0x7E00_0280;
 
+    /// A shader with no branches is one block ending in `End`.
     #[test]
     fn a_shader_with_no_branches_is_one_block() {
-        // The case every existing test exercises, and the one the dispatch loop must
-        // not make worse: one arm, entered once, left once.
         let blocks = split_words(&[NOP, NOP, ENDPGM_WORD]).expect("split");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].terminator, Terminator::End);
@@ -275,11 +246,9 @@ mod tests {
         assert_eq!(blocks[0].end, 3);
     }
 
+    /// A conditional branch splits the stream into three blocks.
     #[test]
     fn a_forward_branch_splits_into_three() {
-        // The branch ends a block; its target starts one; the instruction after it
-        // starts one too, because that is the not-taken path.
-        //
         //   0x0 nop
         //   0x4 s_cbranch_execz +1   -> 0xc
         //   0x8 nop                   (not taken)
@@ -298,11 +267,10 @@ mod tests {
         assert_eq!(blocks[2].terminator, Terminator::End);
     }
 
+    /// A block running into a branch target falls through explicitly, so the program
+    /// counter advances.
     #[test]
     fn a_block_running_into_a_branch_target_falls_through() {
-        // Block 1 has no terminating branch - it simply reaches an instruction that
-        // something else jumps to. Without an explicit fallthrough the dispatch loop
-        // would leave the program counter unchanged and spin forever on that arm.
         let blocks = split_words(&[NOP, branch(8, 1), NOP, ENDPGM_WORD]).expect("split");
         assert_eq!(
             blocks[1].terminator,
@@ -311,10 +279,9 @@ mod tests {
         );
     }
 
+    /// A backward branch targets a block start, forming a loop.
     #[test]
     fn a_backward_branch_makes_a_loop() {
-        // The case predication cannot express at all, and the reason this module exists.
-        //
         //   0x0 nop            <- target
         //   0x4 nop
         //   0x8 s_cbranch_execnz -3  -> 0x0
@@ -335,27 +302,19 @@ mod tests {
         );
     }
 
+    /// An unconditional branch counts from the instruction after it, with no fallthrough.
     #[test]
     fn an_unconditional_branch_is_a_jump_with_no_fallthrough() {
-        // The offset counts dwords from the instruction *after* the branch, so +1 from
-        // a branch at 0x0 is 0x4 + 4 = 0x8 - not 0xc. Getting that base wrong is a
-        // one-instruction error in every branch in every shader, and it lands on a real
-        // instruction boundary most of the time, so nothing downstream would complain.
+        // +1 from a branch at 0x0 is 0x4 + 4 = 0x8, not 0xc.
         let blocks = split_words(&[branch(2, 1), NOP, ENDPGM_WORD]).expect("split");
         assert_eq!(blocks[0].terminator, Terminator::Jump { target: 0x8 });
         assert_eq!(blocks.last().expect("a block").start, 0x8);
     }
 
+    /// A branch target inside an instruction is refused.
     #[test]
     fn a_target_that_is_not_an_instruction_boundary_is_refused() {
-        // An offset can land inside an instruction. Rounding to a nearby boundary would
-        // produce a program that runs and is not the one the guest wrote, which is the
-        // worst outcome available - so it is an error.
-        //
-        // Any eight-byte instruction will do, so the table is asked for one rather than
-        // a word being written down here - a written-down encoding belongs to one
-        // architecture generation, and on the next it matches no family, decodes as four
-        // unrecognised bytes, and this test fails claiming the fixture is malformed.
+        // The eight-byte instruction comes from the table so the test survives a retarget.
         //
         //   0x0 s_cbranch_execz +1  -> 0x8, which is inside the instruction below
         //   0x4 an eight-byte instruction, so it spans 0x4..0xc

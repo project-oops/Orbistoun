@@ -1,16 +1,7 @@
-//! `sceKernelLoadStartModule` does the `Load` half and not the `Start` half, and says so.
+//! `sceKernelLoadStartModule` reports which modules it started and which it only loaded.
 //!
-//! # Why this is a test and not a gate on the eventual fix
-//!
-//! Nothing in the tree runs a module's `DT_INIT_ARRAY`. That is the wall PPSA02664 stands at:
-//! `Il2CppUserAssemblies.prx` is placed, its exported code runs, and a global its constructors
-//! would have filled is read as null three calls later - a fault at a site with no visible
-//! connection to the load (D514).
-//!
-//! What is testable *now* is that the gap is **reported** rather than silent. A handle and a
-//! silence are indistinguishable from a module that started, which is the failure principle 3
-//! forbids. When something does run the initialisers, this test should be replaced by one
-//! asserting they ran - not deleted quietly, which is how a gap outlives its fix (D510).
+//! A module whose initialisers did not run looks identical to the guest to one that started,
+//! so the gap is reported in the module-start summary rather than left silent (D515).
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -26,8 +17,7 @@ fn implementation(name: &str) -> GuestFn {
 
 /// A guest string at a real address, so `read_name` reads what this test wrote.
 struct Path {
-    /// Never read, and required: it owns the bytes `at` points into. Dropping it while the
-    /// call is in flight would hand `read_name` a freed buffer.
+    /// Never read, and required: it owns the bytes `at` points into for the duration of the call.
     _storage: Vec<u8>,
     at: u64,
 }
@@ -46,16 +36,8 @@ impl Path {
 
 /// A module handed a handle is named in the summary, with the fact that it did not start.
 ///
-/// # What this asserts and what it cannot
-///
-/// It asserts the **report**, not the behaviour: that a `/app0` load is recorded and surfaces
-/// with its leaf name and handle. It cannot assert that the module's initialisers did not run,
-/// because nothing here loads a module - `place_title_modules` does that, before a guest
-/// starts, and this crate never sees it.
-///
-/// The summary is process-wide, so this asserts *containment* rather than the whole string;
-/// another test in this binary calling `sceKernelLoadStartModule` would otherwise decide
-/// whether this one passed.
+/// This asserts the report, not the behaviour: nothing here places a module. The summary is
+/// process-wide, so the assertions check containment rather than the whole string.
 #[test]
 fn a_module_given_a_handle_is_reported_as_not_started() {
     assert_eq!(
@@ -100,13 +82,9 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
     );
     drop(path);
 
-    // --- and a module the loader *did* record ------------------------------------------
-    //
-    // Recorded with nothing to run, which is the one shape this can assert without mapping
-    // real guest code: starting a module enters an address, and a test cannot manufacture
-    // executable relocated guest text. So this pins the **bookkeeping** - that a recorded
-    // module is reported as started rather than as missing - and the separate call-out for a
-    // start that ran nothing.
+    // A module the loader recorded, with nothing to run: a test cannot manufacture executable
+    // relocated guest text, so this pins the bookkeeping. A recorded module is reported as
+    // started, and a start that ran nothing is called out.
     orbistoun_kernel::note_module_initialisers(
         "ARecordedModule",
         orbistoun_kernel::ModuleInitialisers {
@@ -142,12 +120,8 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
     );
     drop(recorded);
 
-    // --- and the bulk start, which is a diagnostic rather than behaviour ----------------
-    //
-    // `ARecordedModule` has nothing to run, so this asserts the **bookkeeping and the
-    // wording**: that every recorded module is visited, and that a start nobody asked for is
-    // not reported as though a guest had supplied a handle. It cannot assert that a real
-    // module's constructors run - that needs placed, relocated, executable guest text.
+    // The bulk start: every recorded module is visited, and a start nobody asked for is not
+    // reported as though a guest supplied a handle.
     let (modules, ran) = orbistoun_kernel::start_every_placed_module();
     assert_eq!(
         modules, 1,
@@ -171,21 +145,14 @@ fn a_module_given_a_handle_is_reported_as_not_started() {
 
 /// The running-thread affinity setter answers success, not a placeholder.
 ///
-/// # What this asserts, and the thing it deliberately does not
-///
-/// It asserts the **answer**, because that is what a caller acts on: a scheduling call tested
-/// against zero reads a placeholder as "the affinity was refused", which is a lie in the
-/// direction that stops a guest (D125, D523).
-///
-/// It does **not** assert that any affinity was *applied* - nothing here pins a thread and the
-/// implementation says so. The set-then-get below shows why a mask coming back would not check that
-/// anyway: `scePthreadGetaffinity` reads the thread's creation-time `requested_affinity`, and the
-/// running-thread setter drops (D523), so what the getter answers is not what the setter was handed.
+/// A caller testing against zero reads a placeholder as a refusal (D523). No affinity is
+/// applied, and `scePthreadGetaffinity` reads the creation-time `requested_affinity`, so the
+/// mask set here does not read back.
 #[test]
 fn setting_a_threads_affinity_is_accepted_rather_than_refused() {
     let mut regs = [0_u64; GUEST_ARG_REGISTERS];
     regs[0] = 0x01d1_d900_0960; // a thread handle shaped like the ones a run produces
-    regs[1] = 0x1ffb; // the mask PPSA02664 passes
+    regs[1] = 0x1ffb; // the mask a title passes
 
     let answer = implementation("scePthreadSetaffinity")(&regs);
     assert_eq!(
@@ -200,11 +167,9 @@ fn setting_a_threads_affinity_is_accepted_rather_than_refused() {
         "and it must not answer a vendor-shaped error either: {answer:#x}"
     );
 
-    // And reading it straight back does not return what was just set. `scePthreadGetaffinity`
-    // answers the thread's creation-time `requested_affinity`, not what a running-thread
-    // `scePthreadSetaffinity` was handed - that setter drops (D523). For a handle no thread was
-    // registered under, the getter reads zero ("anywhere"), so the `0x1ffb` set above is not
-    // observable here - which is the honest limit the doc states rather than a mask promise.
+    // `scePthreadGetaffinity` answers the creation-time `requested_affinity`, not what the
+    // running-thread setter was handed; for a handle no thread was registered under it reads zero
+    // ("anywhere").
     let mut mask = 0_u64;
     regs[1] = std::ptr::addr_of_mut!(mask) as u64;
     assert_eq!(
@@ -220,16 +185,9 @@ fn setting_a_threads_affinity_is_accepted_rather_than_refused() {
 
 /// The vendor clock call fills both fields and refuses a clock it has no source for.
 ///
-/// # What this asserts, and the half it deliberately does not
-///
-/// It asserts the **shape and the refusal**: two fields written, a vendor-family code for a
-/// clock orbistoun cannot answer, and never the POSIX `-1` - registering the POSIX function
-/// under the vendor name is the mistake this shape invites and the `stat` pair made once
-/// (D525, D536).
-///
-/// It does **not** assert the values. A wall clock is not reproducible, so what is checked is
-/// that the seconds field is past a date already in the past - which distinguishes "the clock
-/// answered" from "the field was left alone" without pinning a number no run can repeat.
+/// The refusal is a vendor-family code, never the POSIX `-1` (D525). A wall clock is not
+/// reproducible, so the seconds field is checked against a date already in the past rather
+/// than a value.
 #[test]
 fn the_vendor_clock_writes_both_fields_and_refuses_what_it_cannot_answer() {
     let id = |name: &str| {

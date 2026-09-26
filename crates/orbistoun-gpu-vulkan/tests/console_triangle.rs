@@ -1,25 +1,10 @@
-//! The console's triangle, drawn from its captured command stream and compared with its own frame.
+//! The hardware's triangle, drawn from its captured command stream and compared with its own frame.
 //!
-//! # The first render checked against a frame the console drew
-//!
-//! Every framebuffer check before this compares orbistoun against material orbistoun generated
-//! (D701). `submitted_frame.rs` walks a captured stream and draws its translated shaders, but over
-//! *this file's* geometry - the gl-cube stream carries no vertex buffer. The triangle record does not
-//! need one: per obSCEne `-b9d2`'s disassembly the vertex shader carries its three positions as
-//! constants, so walking the stream, translating both shaders, and driving the submission produces
-//! the console's own triangle - the same 512 texels, at the same places, in the same colour.
-//!
-//! # The outcome, and the one gap it names (`-f50b`)
-//!
-//! Both shaders translate and the draw runs. Every one of the console's 512 drawn texels is
-//! reproduced **pixel-exact**. The frame is *not* equal to the console's target everywhere, and the
-//! single reason is the clear: the backend clears the attachment to opaque black, while the console's
-//! target read back `0x55555555` on the field the triangle did not cover. That clear is not in the
-//! draw the stream describes - it is the surface's prior contents - so a full-frame match waits on the
-//! target carrying its clear colour into the render, which is the next backend gap this records.
-//!
-//! So this asserts what does hold, exactly: the drawn triangle, pixel for pixel against the detiled
-//! console target; and the clear difference, named rather than papered over.
+//! The triangle record's vertex shader carries its three positions as constants, so walking the
+//! stream, translating both shaders and driving the submission produces the hardware's own triangle
+//! with no vertex buffer (D701). Every texel the hardware drew is reproduced pixel-exact. The field
+//! the triangle does not cover differs: the backend clears to opaque black, while the hardware's
+//! target held `0x55555555`, the surface's prior contents rather than anything in the draw.
 
 use orbistoun_gpu::pipeline::{GuestMemory, Pipeline, Queue};
 use orbistoun_gpu::{RenderCommand, ShaderStage, detile_64kb_rx_bpp4, drive};
@@ -33,11 +18,11 @@ const PIXEL_ADDR: u64 = 0x2_000c_0200;
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
 
-/// The colour the triangle drew, and the colour the console's target was cleared to, as the bytes a
-/// pixel comes back as. `0xff0000ff` and `0x55555555`, MSB-first.
+/// The colour the triangle drew, and the colour the hardware's target was cleared to, as the bytes
+/// a pixel comes back as: `0xff0000ff` and `0x55555555`, MSB-first.
 const DRAWN: [u8; 4] = [0xff, 0x00, 0x00, 0xff];
 const CONSOLE_CLEAR: [u8; 4] = [0x55, 0x55, 0x55, 0x55];
-/// What the backend clears an attachment to today: opaque black.
+/// What the backend clears an attachment to: opaque black.
 const BACKEND_CLEAR: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
 
 fn device_or_skip(what: &str) -> bool {
@@ -53,12 +38,10 @@ fn device_or_skip(what: &str) -> bool {
     }
 }
 
-/// The two shader payloads, laid out at their console addresses in one region.
+/// The two shader payloads, laid out at their guest addresses in one region.
 ///
-/// A generous span so the decoder's read is not starved: it narrows a 64 KiB window in powers of two,
-/// and a buffer exactly a shader's length lands it on 64 bytes, short of the 104-byte pixel shader's
-/// terminator. The bytes past each shader are zero, which the decoder never reaches - it stops at the
-/// shader's own end-of-program first.
+/// A generous span, so the decoder's read, which narrows a 64 KiB window in powers of two, reaches
+/// the 104-byte pixel shader's terminator. The bytes past each shader are zero and never read.
 struct Shaders {
     bytes: Vec<u8>,
 }
@@ -70,8 +53,7 @@ impl GuestMemory for Shaders {
     }
 }
 
-/// Reads one of the other crate's capture files as bytes - from there, not copied, so a capture stays
-/// one thing to keep true.
+/// Reads one of the other crate's capture files as bytes, from there, so a capture has one copy.
 fn capture(name: &str) -> Vec<u8> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -96,7 +78,7 @@ fn capture(name: &str) -> Vec<u8> {
     bytes
 }
 
-/// A named console target, detiled to a linear frame of `[u8; 4]` pixels, MSB-first.
+/// A named hardware target, detiled to a linear frame of `[u8; 4]` pixels, MSB-first.
 fn console_frame(target_capture: &str) -> Vec<[u8; 4]> {
     let target: Vec<u32> = capture(target_capture)
         .chunks_exact(4)
@@ -109,18 +91,14 @@ fn console_frame(target_capture: &str) -> Vec<[u8; 4]> {
         .collect()
 }
 
-/// **The console's triangle is reproduced pixel-exact; only the clear colour differs.**
+/// The hardware's triangle is reproduced pixel-exact; only the clear colour differs.
 ///
-/// Walks the triangle DCB through `Pipeline::submit` with the two shaders served at their console
-/// addresses, drives the resulting submission through a `VulkanBackend`, and compares `last_frame()`
-/// against the detiled console target. Both shaders translate, the draw runs, and every one of the
-/// 512 texels the console drew comes back exactly - the triangle's shape and colour reproduced from
-/// the console's own shaders. The field the triangle did not cover is the backend's black rather than
-/// the console's `0x55555555`, which is the target's prior clear and not in the draw; that difference
-/// is asserted, not hidden, and is the next backend gap for a full-frame match. Skips with no device.
-///
-/// Discriminating, not vacuous: the drawn pixels are checked at the console's own texels, so a shader
-/// that coloured them differently, or geometry that placed them elsewhere, fails the comparison.
+/// Walks the triangle DCB through `Pipeline::submit` with the two shaders served at their guest
+/// addresses, drives the submission through a `VulkanBackend`, and compares `last_frame()` with the
+/// detiled hardware target. The drawn pixels are checked at the hardware's own texels, so a shader
+/// that coloured them differently or geometry that placed them elsewhere fails. The uncovered field
+/// is the backend's black, not the target's prior clear, and that difference is asserted. Skips
+/// with no device.
 #[test]
 fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
     if !device_or_skip("the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear") {
@@ -163,7 +141,7 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
     );
     assert_eq!(report.draws, 1, "the stream describes one draw");
 
-    // Both stages are bound with a module, and the draw is present - what `drive` needs.
+    // Both stages are bound with a module, and the draw is present, as `drive` needs.
     let bound: Vec<&ShaderStage> = submission
         .commands
         .iter()
@@ -204,15 +182,15 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
             let want = console[(y * WIDTH + x) as usize];
             let got = frame.at(x, y).expect("inside the frame");
             if want == DRAWN {
-                // A texel the console drew: orbistoun reproduces it exactly.
+                // A texel the hardware drew: reproduced exactly.
                 assert_eq!(
                     got, DRAWN,
                     "drawn texel ({x},{y}) is not the console's colour"
                 );
                 drawn += 1;
             } else {
-                // A texel the console left at its clear: the console's `0x55555555`, the backend's
-                // black. This is the named gap - the target's prior clear the draw does not carry.
+                // A texel the hardware left at its clear: `0x55555555` there, the backend's black
+                // here.
                 assert_eq!(
                     want, CONSOLE_CLEAR,
                     "an undrawn console texel is not the clear colour"
@@ -227,26 +205,13 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
     assert_eq!(drawn, 512, "the console drew 512 texels and all reproduced");
 }
 
-/// **A point draw renders as a point, not the triangle the same bytes made.**
+/// A point draw renders as the hardware's point, not the triangle the same bytes made.
 ///
-/// The point record (`agc-primitive-draw-fw1240`) is the triangle record's near-twin: its stream
-/// differs only in `VGT_GS_OUT_PRIM_TYPE` (0 = POINTLIST against the triangle's 2 = TRISTRIP) and
-/// two counts, and it names the *same* shader addresses. So the triangle's captured shaders drive
-/// it, and the one thing that changes the picture is the topology this crate now threads into the
-/// mesh output (`-0c58`).
-///
-/// # What it asserts, and what it cannot
-///
-/// The topology decodes to a point list through the whole submit path - device-free and certain.
-/// With a device, the point module translates and the draw runs (the point-shaped mesh SPIR-V is
-/// one a driver accepts), and it covers far fewer texels than the triangle's 512 - it is not a
-/// triangle list (`-0c58` acceptance 2/4).
-///
-/// **What it cannot yet assert:** that the lit texel is the console's exact pixel. The point
-/// record did not capture its own shaders, so this drives it with the triangle's on the premise -
-/// supported by the near-identical streams - that the two draws share a primitive program; and
-/// where the point lands also depends on the assumed `exp prim` point packing (worklog 712). That
-/// exact match waits on the point record's own shaders.
+/// The point record (`agc-primitive-draw-fw1240`) differs from the triangle record only in
+/// `VGT_GS_OUT_PRIM_TYPE` (0 = POINTLIST against 2 = TRISTRIP) and two counts, and names the same
+/// shader addresses, so the triangle's captured shaders drive it. The topology decodes to a point
+/// list through the whole submit path without a device. With a device, the draw covers far fewer
+/// texels than the triangle and lights the same texel as the hardware.
 #[test]
 fn a_point_draw_renders_as_a_point_not_a_triangle() {
     let stream = capture("agc-primitive-draw-fw1240.hex");
@@ -266,8 +231,7 @@ fn a_point_draw_renders_as_a_point_not_a_triangle() {
     let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory);
     let report = &submission.report;
 
-    // Device-free and certain: the point record's topology is a point list, carried through the
-    // whole submit path - not the triangle record's strip.
+    // Device-free: the point record's topology is a point list through the whole submit path.
     assert_eq!(
         report.primitive_topology,
         Some(orbistoun_gpu::registers::PrimitiveTopology::PointList),
@@ -302,10 +266,10 @@ fn a_point_draw_renders_as_a_point_not_a_triangle() {
         "the target sized the frame"
     );
 
-    // The console's point target, detiled the same way the triangle's is.
+    // The hardware's point target, detiled like the triangle's.
     let console = console_frame("agc-primitive-draw-fw1240.target.hex");
 
-    // Where the console lit a texel, and where orbistoun did.
+    // Where the hardware lit a texel, and where orbistoun did.
     let console_drawn: Vec<(u32, u32)> = (0..HEIGHT)
         .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
         .filter(|&(x, y)| console[(y * WIDTH + x) as usize] == DRAWN)
@@ -322,8 +286,7 @@ fn a_point_draw_renders_as_a_point_not_a_triangle() {
         "a point draw is not a triangle list: it drew {} texels, the triangle's whole count",
         orbistoun_drawn.len()
     );
-    // And it is the console's point: the same texel, pixel-exact. This confirms both that the two
-    // records share a primitive program and that the assumed `exp prim` point packing is right.
+    // The same texel as the hardware's point, pixel-exact.
     assert_eq!(
         orbistoun_drawn, console_drawn,
         "the point orbistoun drew is not the console's point"

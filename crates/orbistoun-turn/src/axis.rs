@@ -1,33 +1,13 @@
 //! Every way a run can be changed to find something out.
 //!
-//! `orbistoun-cli env` lists ten diagnostics, each one a question phrased as an
-//! intervention. Only one of them - planting a value at an argument - had ever been
-//! swept automatically, and sweeping it exhaustively across a whole title took fifty
-//! seconds. The other axes are the same size and the same price.
+//! Each axis is a different question and their answers are not comparable: [`Axis::Write`] asks
+//! whether an argument is an out-parameter nobody filled, [`Axis::Map`] whether the faulting
+//! address is a region the guest wanted, [`Axis::Poke`] whether the fault follows a planted value,
+//! and [`Axis::Fill`] whether the run depends on memory nobody wrote.
 //!
-//! # Each axis is a different question
-//!
-//! | axis | the question it asks |
-//! |---|---|
-//! | [`Axis::Write`] | is that argument an out-parameter nobody filled? |
-//! | [`Axis::Map`] | does the faulting address become a region the guest wanted? |
-//! | [`Axis::Poke`] | does the fault follow a value planted at a known address? |
-//! | [`Axis::Fill`] | does the run depend on memory nobody wrote? |
-//!
-//! They are not interchangeable, and the answers are not comparable: `Fill` changing
-//! nothing says the guest does not read uninitialised memory *in that region*, while
-//! `Map` changing nothing says something much narrower.
-//!
-//! # An intervention that moves a wall is not a diagnosis
-//!
-//! Principle 3, in as many words, and it is the reason [`Change`] distinguishes what it
-//! does. Every axis here *alters the program*, so any of them can buy progress with a
-//! wrong answer - a poisoned region that shifts a fault has not explained anything, and
-//! a mapped region that lets a guest continue may only have postponed the same mistake.
-//!
-//! So a change is reported as what was observed - the fault moved, the fault went away,
-//! the guest reached further - and never as a conclusion. Reading one requires a second
-//! observation of a different kind, which is a person's job and is meant to be.
+//! An intervention that moves a wall is not a diagnosis: every intervening axis alters the program
+//! and can buy progress with a wrong answer. So a [`Change`] reports what was observed, never a
+//! conclusion; reading one needs a second observation of a different kind.
 
 use crate::Error;
 
@@ -40,8 +20,7 @@ pub enum Region {
     Heap,
     /// Zero-initialised static data.
     ///
-    /// *"The last region a poison could not reach"*, as the variable's own description
-    /// puts it - which makes it the one most likely to still hold an answer.
+    /// The region a stack or heap poison cannot reach.
     Bss,
 }
 
@@ -65,17 +44,14 @@ impl Region {
 
 /// One way of changing a run.
 ///
-/// Each variant carries exactly what its variable takes, so a wrong shape is a
-/// compile error rather than a run that silently changes nothing. That is not
-/// theoretical: passing a `library::symbol` label to [`Axis::Write`], whose value is
-/// split on `:`, produced two hundred and seventy-six runs that planted nothing and
-/// reported twenty-three clean negatives.
+/// Each variant carries exactly what its variable takes, so a wrong shape is a compile error rather
+/// than a run that silently changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Axis {
     /// Plant a value at the address held in an argument.
     Write {
-        /// The import, by bare symbol or bare hash - **never `library::symbol`**, which
-        /// the value's own `:` delimiter cannot express.
+        /// The import, by bare symbol or bare hash, never `library::symbol`, which the value's own
+        /// `:` delimiter cannot express.
         target: String,
         /// Which argument.
         slot: u8,
@@ -98,15 +74,12 @@ pub enum Axis {
     },
     /// Force an import to answer a value, and see whether the fault follows it.
     ///
-    /// **The last channel into a wall that arguments cannot reach.** A function can hand
-    /// back a region base rather than filling one in, and no amount of planting in its
-    /// arguments will show that. Unlike every other axis this one changes what a function
-    /// *does* rather than what it is given, so a run under it is a different program -
-    /// which is why the answer is an offset that agrees across two sentinels, not a fault
-    /// that moved.
+    /// A function can hand back a region base rather than filling one in, which planting in its
+    /// arguments never shows. This axis changes what a function does rather than what it is given,
+    /// so the answer is an offset that agrees across two sentinels, not a fault that moved.
     Return {
-        /// The import, by bare symbol or bare hash - **never `library::symbol`**, which
-        /// this value's own `:` delimiter cannot express.
+        /// The import, by bare symbol or bare hash, never `library::symbol`, which this value's own
+        /// `:` delimiter cannot express.
         target: String,
         /// What to answer.
         value: u64,
@@ -120,24 +93,17 @@ pub enum Axis {
     },
     /// Show the guest a different shape of physical memory map.
     ///
-    /// **The experiment D218 built the apparatus for and never ran.** `MapShape` has had three
-    /// variants since then with nothing selecting between them, so the question it exists to
-    /// answer - what map will the guest accept - stayed open while the function it blocks took
-    /// 67.5% of every guest call recorded (D356).
+    /// Answers which map the guest accepts (D357).
     MapShape {
         /// The shape, by the name the diagnostic takes.
         shape: &'static str,
     },
     /// Trap on every access to a run of words, and report which instruction made it.
     ///
-    /// **The only axis that observes rather than intervenes.** Every other one changes the
-    /// program to see what the difference is, and a verdict under those needs the caveat the
-    /// run report prints. This one arms a debug register: the guest runs the program it
-    /// would have run, and what comes back is where an access came from (D276).
-    ///
-    /// Four words is the hardware's limit rather than a choice, and the address must be
-    /// eight-byte aligned - `orbistoun_worker::watchpoint` refuses anything else with the
-    /// reason, rather than rounding it into watching different bytes.
+    /// It observes rather than intervenes: a debug register is armed, the guest runs the program it
+    /// would have run, and what comes back is where an access came from (D276). Four words is the
+    /// hardware's limit, and the address must be eight-byte aligned; `orbistoun_worker::watchpoint`
+    /// refuses anything else with the reason.
     Watch {
         /// First word. Eight-byte aligned.
         base: u64,
@@ -146,14 +112,9 @@ pub enum Axis {
     },
     /// Read a span of guest memory back once the guest has stopped.
     ///
-    /// **Observes, like [`Self::Watch`], and unlike everything else here.** It snapshots and
-    /// prints; the guest runs the program it would have run, so a verdict beside it needs no
-    /// caveat.
-    ///
-    /// The question it answers is the one the argument dump runs out of room for. A dump shows
-    /// thirty-two bytes at a pointer; a structure a call was handed is longer than that, and it
-    /// is allocated while the guest runs - so until the snapshot survived an address that did
-    /// not exist at entry, this could not be asked at all (D580, D586).
+    /// It observes, like [`Self::Watch`]: it snapshots and prints, so a verdict beside it needs no
+    /// caveat. It reads structures longer than the argument dump shows, including ones allocated
+    /// while the guest runs.
     Read {
         /// Where the structure starts.
         address: u64,
@@ -202,20 +163,10 @@ impl Axis {
 
     /// Every diagnostic a run must not inherit.
     ///
-    /// Cleared before each run, so one experiment cannot inherit another's - or the
-    /// environment the sweep was launched from. A baseline taken with a stale variable
-    /// set is not a baseline.
-    ///
-    /// **Read from the registry, not listed here.** This was seven hand-written strings, and
-    /// `ORBISTOUN_WATCHPOINT` was added to `orbistoun-env` without reaching them - so a sweep
-    /// launched from a shell with a watchpoint set would have carried it into every run and
-    /// reported a controlled experiment. A second copy of the one list is the exact failure
-    /// that crate exists to prevent (D288).
-    ///
-    /// **Diagnostics only.** A *setting* is how the caller configures the run - the sweep
-    /// points each trial at its own temporary trace directory with `ORBISTOUN_DATA_DIR` - and
-    /// clearing those would send every run at the machine's real one. That is what `Kind`
-    /// distinguishes, and it is load-bearing here rather than descriptive.
+    /// Cleared before each run, so one experiment cannot inherit another's, or the environment the
+    /// sweep was launched from. Read from the registry, so a new diagnostic is covered once
+    /// declared (D288). Diagnostics only: a setting, such as the `ORBISTOUN_DATA_DIR` each trial is
+    /// pointed at, is how the caller configures the run, and `Kind` tells the two apart.
     #[must_use]
     pub fn every_variable() -> Vec<&'static str> {
         orbistoun_env::REGISTRY
@@ -258,13 +209,10 @@ impl Axis {
 
     /// Whether this changes the program, rather than only observing it.
     ///
-    /// **A verdict taken under an intervention is not a diagnosis** - a poke, a poison or a
-    /// reservation can buy progress with a wrong answer, and needs a second observation of a
-    /// different kind saying what the guest did with it (D224, D226, D227). A watchpoint is
-    /// the one axis here that leaves the program alone.
-    ///
-    /// Derived from `orbistoun-env`, which records the effect of every diagnostic, rather
-    /// than restated here - the same reason the cleared list is (D288).
+    /// A poke, a poison or a reservation can buy progress with a wrong answer, and needs a second
+    /// observation of a different kind saying what the guest did with it (D227). A watchpoint
+    /// leaves the program alone. Derived from the `orbistoun-env` registry, which records every
+    /// diagnostic's effect.
     #[must_use]
     pub fn intervenes(&self) -> bool {
         let name = self.env().0;
@@ -280,27 +228,21 @@ impl Axis {
 pub enum Change {
     /// The run was indistinguishable from the baseline.
     ///
-    /// The most common and least exciting answer, and a real one: whatever this axis
-    /// changed, the guest did not depend on it.
+    /// Whatever this axis changed, the guest did not depend on it.
     Nothing,
     /// It faulted somewhere else, having got at least as far.
     ///
-    /// **Not progress and not a diagnosis.** A fault that moves has been changed, not
-    /// explained. This is the version worth a person's time, because the guest was not
-    /// simply broken earlier.
+    /// Not progress and not a diagnosis: a fault that moves has been changed, not explained. It is
+    /// worth a person's time because the guest was not simply broken earlier.
     MovedTo {
         /// Where it faulted instead.
         address: u64,
     },
-    /// It faulted somewhere else, having got **less far**.
+    /// It faulted somewhere else, having got less far.
     ///
-    /// The intervention broke something before the guest reached what was being asked
-    /// about, so the new fault says nothing about the old one. Measured: poisoning
-    /// zero-initialised statics on this wall moved the fault to a different address
-    /// entirely, and the guest reached eight distinct imports instead of twenty-three.
-    ///
-    /// Held apart because the address alone reads as a lead. D129 records the same
-    /// lesson about the progress verdict - one signal hid a run that had gone backwards.
+    /// The intervention broke something before the guest reached what was asked about, so the new
+    /// fault says nothing about the old one. Held apart because the address alone reads as a lead
+    /// (D129).
     BrokeEarlier {
         /// Where it faulted instead.
         address: u64,
@@ -311,25 +253,21 @@ pub enum Change {
     },
     /// It stopped faulting.
     ///
-    /// The loudest outcome and the one most worth distrusting: an intervention that
-    /// removes a fault can equally have postponed it, and only what the guest does next
-    /// says which.
+    /// The outcome most worth distrusting: an intervention that removes a fault can equally have
+    /// postponed it, and only what the guest does next says which.
     NoLongerFaulted,
     /// The intervention never took effect, so nothing was measured.
     ///
-    /// Held apart from [`Self::Nothing`] for the reason the whole sweep exists: a run
-    /// that changed nothing because it *did* nothing is not evidence, and reading it as
-    /// evidence is how a wrong variable format turned into twenty-three clean negatives.
+    /// Held apart from [`Self::Nothing`], since a run that changed nothing because it did nothing
+    /// is not evidence.
     NotApplied,
 }
 
 impl Change {
     /// Whether this is worth a person's attention.
-    /// Whether this is worth a person's attention.
     ///
-    /// A regression is not. It has changed the program without saying anything about the
-    /// question that was asked, and putting it beside a real lead is how an afternoon
-    /// gets spent on one.
+    /// A regression is not: it changed the program without saying anything about the question
+    /// asked.
     #[must_use]
     pub const fn is_notable(&self) -> bool {
         matches!(self, Self::MovedTo { .. } | Self::NoLongerFaulted)
@@ -338,9 +276,8 @@ impl Change {
 
 /// Reads one outcome against a baseline.
 ///
-/// `applied` comes from the run itself rather than from whether the fault moved -
-/// inferring it from the result would make "nothing happened" and "nothing was done"
-/// the same observation, which is the confusion this exists to prevent.
+/// `applied` comes from the run itself, not from whether the fault moved, so "nothing happened" and
+/// "nothing was done" stay different observations.
 #[must_use]
 pub fn compare(
     baseline: &crate::experiment::Outcome,
@@ -351,17 +288,11 @@ pub fn compare(
         return Change::NotApplied;
     }
     match (baseline.fault, outcome.fault) {
-        // **A run that never faulted did not stop faulting.** The wildcard here reported
-        // `NoLongerFaulted` for a guest that spins to the time limit under every intervention,
-        // so three map shapes each came back as though they had fixed something. Nothing
-        // started, so nothing stopped (D356).
-        //
-        // Fourth time today that a field only meaningful when a fault happened was read on a
-        // run where none did - the progress verdict, the sweep's oracle, `Derailed`, and this.
+        // A run that never faulted did not stop faulting: with no baseline fault, nothing started,
+        // so nothing stopped (D356).
         (Some(_), None) => Change::NoLongerFaulted,
         (Some(before), Some(after)) if before != after => {
-            // Two signals, because the address alone cannot tell a lead from a
-            // regression - and a regression reported as a lead is a person's afternoon.
+            // Two signals, because the address alone cannot tell a lead from a regression.
             if outcome.reached < baseline.reached {
                 Change::BrokeEarlier {
                     address: after,
@@ -378,8 +309,7 @@ pub fn compare(
 
 /// The fill experiments: one byte per region.
 ///
-/// A distinctive pattern rather than zero, because zero is what the region already holds
-/// and a fault that follows it would be indistinguishable from one that always happened.
+/// A distinctive pattern rather than zero, because zero is what the region already holds.
 #[must_use]
 pub fn fills(byte: u8) -> Vec<Axis> {
     Region::all()
@@ -390,9 +320,8 @@ pub fn fills(byte: u8) -> Vec<Axis> {
 
 /// Reserving the page a fault landed in, and the region around it.
 ///
-/// Sized outward from the fault rather than at it: a guest that wanted a megabyte and
-/// indexed near its end faults at the far edge, so reserving only the faulting page
-/// answers a narrower question than the one worth asking.
+/// Sized outward from the fault: a guest that wanted a megabyte and indexed near its end faults at
+/// the far edge, so reserving only the faulting page answers a narrower question.
 #[must_use]
 pub fn around(fault: u64) -> Vec<Axis> {
     const PAGE: u64 = 0x1000;
@@ -400,10 +329,8 @@ pub fn around(fault: u64) -> Vec<Axis> {
     [PAGE, 0x10_000, 0x100_000]
         .into_iter()
         .map(|length| Axis::Map {
-            // Centred on the fault's *page*, not on the fault, and by half of what is
-            // left after that page. Centring by half the whole length puts the start
-            // below the fault for a single page - the reservation then misses the thing
-            // it was made for, and the run reports a clean negative.
+            // Centred on the fault's page, by half of what is left after that page, so a single
+            // page still starts at the fault.
             address: page.saturating_sub((length - PAGE) / 2) & !(PAGE - 1),
             length,
         })
@@ -412,13 +339,12 @@ pub fn around(fault: u64) -> Vec<Axis> {
 
 /// Everything worth trying against a wall, before anything has to be guessed.
 ///
-/// Ordered cheapest question first. Every one of these is a run of about a tenth of a
-/// second, so the whole list costs less than describing it.
+/// Ordered cheapest question first; each is a short run.
 ///
 /// # Errors
 ///
-/// Never. The signature is fallible so a caller can chain it with axes that need to read
-/// something first.
+/// Never. The signature is fallible so a caller can chain it with axes that need to read something
+/// first.
 pub fn against_a_wall(fault: Option<u64>) -> Result<Vec<Axis>, Error> {
     let mut out = fills(0xA5);
     if let Some(fault) = fault {
@@ -433,15 +359,9 @@ mod tests {
 
     /// Every axis this crate can set is one the next run clears.
     ///
-    /// **The invariant behind the whole sweep being controlled.** An axis whose variable is
-    /// not cleared leaks into every subsequent run, and the sweep goes on describing itself
-    /// as one experiment at a time. That is not a wrong answer, it is a wrong *method*, and
-    /// it produces confident results.
-    ///
-    /// The list is derived from `orbistoun-env` now, so this cannot fail for the reason it
-    /// once could - a diagnostic added there and forgotten here (D288). It stays because the
-    /// derivation could be narrowed again by somebody filtering it differently, and because a
-    /// guard nobody has watched reject something is a guard nobody knows anything about.
+    /// The invariant behind the sweep being controlled: an axis whose variable is not cleared leaks
+    /// into every later run. The list is derived from the registry (D288); this guards against the
+    /// derivation being narrowed.
     #[test]
     fn no_axis_survives_into_the_next_run() {
         let cleared = Axis::every_variable();
@@ -487,9 +407,8 @@ mod tests {
 
     /// Every axis renders the shape its variable documents.
     ///
-    /// Checked against `orbistoun-cli env`'s own examples, because a wrong shape is a
-    /// run that changes nothing and reports a clean negative - which is exactly what a
-    /// mis-rendered `Write` value did across two hundred and seventy-six runs.
+    /// Checked against `orbistoun-cli env`'s own examples, because a wrong shape is a run that
+    /// changes nothing and reports a clean negative.
     #[test]
     fn each_axis_renders_the_shape_its_variable_documents() {
         let cases = [
@@ -536,11 +455,7 @@ mod tests {
         }
     }
 
-    /// **Nothing happened and nothing was done are different observations.**
-    ///
-    /// The distinction the whole sweep rests on. Inferring "applied" from whether the
-    /// fault moved would collapse them, and that collapse is how a wrong variable format
-    /// became twenty-three clean negatives from runs that changed nothing at all.
+    /// Nothing happened and nothing was done are different observations.
     #[test]
     fn an_intervention_that_never_applied_is_not_a_negative_result() {
         assert_eq!(
@@ -564,12 +479,7 @@ mod tests {
         );
     }
 
-    /// **A fault that moves after the guest got less far is a regression.**
-    ///
-    /// The one that had to be run to be found. Poisoning zero-initialised statics on the
-    /// live wall moved the fault to a completely different address, which read as a lead,
-    /// and the guest had reached eight distinct imports instead of twenty-three. The
-    /// poison broke it long before it got anywhere near the question being asked.
+    /// A fault that moves after the guest got less far is a regression, not a lead.
     #[test]
     fn a_fault_that_moves_after_getting_less_far_is_a_regression() {
         let change = compare(&ran(Some(0xfffe0), 23), &ran(Some(0xffff_ffff), 8), true);
@@ -581,14 +491,12 @@ mod tests {
                 was: 23,
             }
         );
-        // And it must not be offered beside a real lead.
+        // It must not be offered beside a real lead.
         assert!(!change.is_notable());
     }
 
-    /// Reaching *further* than the baseline is still only an observation.
-    ///
-    /// The intervention changed the program, so more subsystems reached is not evidence
-    /// the change was right - only that it was not simply destructive.
+    /// Reaching further than the baseline is still only an observation, not evidence the change was
+    /// right.
     #[test]
     fn getting_further_is_reported_as_a_move_not_a_regression() {
         assert_eq!(
@@ -600,9 +508,6 @@ mod tests {
     }
 
     /// A fault that goes away is its own outcome.
-    ///
-    /// Loud, and the one most worth distrusting: an intervention that removes a fault
-    /// may only have postponed it.
     #[test]
     fn a_fault_that_goes_away_is_its_own_outcome() {
         let gone = compare(&ran(Some(0xfffe0), 23), &ran(None, 23), true);
@@ -635,10 +540,6 @@ mod tests {
     }
 
     /// A reservation is sized outward from the fault, and stays page-aligned.
-    ///
-    /// A guest that wanted a megabyte and indexed near its end faults at the far edge, so
-    /// a reservation starting *at* the fault answers a narrower question than the one
-    /// worth asking.
     #[test]
     fn a_reservation_is_sized_outward_and_aligned() {
         let axes = around(0xfffe0);
@@ -655,10 +556,7 @@ mod tests {
         }
     }
 
-    /// A reservation near zero does not wrap.
-    ///
-    /// The live wall faults at `0xfffe0`, and a megabyte centred on it starts below zero
-    /// if the arithmetic is allowed to borrow.
+    /// A reservation near zero does not wrap below zero.
     #[test]
     fn a_reservation_near_zero_does_not_wrap() {
         for axis in around(0x100) {
@@ -670,12 +568,7 @@ mod tests {
         }
     }
 
-    /// **A run that never faulted did not stop faulting.**
-    ///
-    /// The wildcard reported `NoLongerFaulted` whenever the outcome had no fault, without
-    /// asking whether the baseline had one - so a guest that spins to the time limit came back
-    /// as though every intervention had fixed it. Three map shapes, three false positives, on
-    /// the title where it matters most (D356).
+    /// A run that never faulted did not stop faulting, whatever the intervention (D356).
     #[test]
     fn a_guest_that_never_faulted_has_not_stopped_faulting() {
         let quiet = crate::experiment::Outcome {

@@ -1,26 +1,13 @@
 //! The dynamic table, and the import list it leads to.
 //!
-//! Imports turn out to use **standard ELF machinery**: `PT_DYNAMIC`, `DT_STRTAB`,
-//! `DT_SYMTAB`, `DT_HASH`, and an ordinary symbol table. What makes them
-//! vendor-specific is only the *encoding of the names* - a dynamic symbol is called
-//! something like `H2e8t5ScQGc#B#C`, which is a base64 NID plus a library id plus a
-//! module id (`orbistoun-nid::decode_symbol_name`).
-//!
-//! So there is far less bespoke parsing here than the vendor `DT_` tags suggest.
-//!
-//! # Addresses are virtual, and reached through the wrapper
-//!
-//! Every address in the dynamic table is a guest virtual address. Translating one to a
-//! file position means finding the program header whose virtual range covers it, then
-//! locating that header's bytes through the wrapper's descriptor table (D052) - the
-//! headers' own `p_offset` values point past end-of-file and are not usable.
-//!
-//! # Symbol count
-//!
-//! There is no `DT_SYMSZ`. The count comes from `DT_HASH`, whose second word is
-//! `nchain` and equals the number of symbols. Deriving it from the gap between tables
-//! would be wrong here: the string table sits *before* the symbol table in real
-//! material, so that heuristic produces nonsense.
+//! Imports use standard ELF machinery: `PT_DYNAMIC`, `DT_STRTAB`, `DT_SYMTAB`, `DT_HASH`
+//! and an ordinary symbol table. Only the encoding of the names is vendor-specific: a
+//! dynamic symbol is named like `H2e8t5ScQGc#B#C`, a base64 NID plus a library id plus a
+//! module id (`orbistoun-nid::decode_symbol_name`). Table addresses are resolved through the
+//! container, since the headers' own `p_offset` values point past end-of-file in a wrapped
+//! container. There is no `DT_SYMSZ`: the symbol count is `DT_HASH`'s `nchain`, because the
+//! string table sits before the symbol table in real material and the gap between them is
+//! not a size.
 
 use orbistoun_nid::{EncodedImport, NidHasher, decode_symbol_name};
 
@@ -32,8 +19,8 @@ pub const SYMBOL_SIZE: usize = 24;
 /// Size of one dynamic table entry.
 pub const DYNAMIC_ENTRY_SIZE: usize = 16;
 
-/// Sanity ceiling on the symbol count, so a corrupt `DT_HASH` cannot drive an
-/// enormous loop before the bounds checks catch it.
+/// Sanity ceiling on the symbol count, so a corrupt `DT_HASH` cannot drive an enormous loop
+/// before the bounds checks catch it.
 pub const MAX_SYMBOLS: u64 = 1_000_000;
 
 /// Standard dynamic tags this parser uses.
@@ -44,14 +31,10 @@ pub mod tag {
     pub const HASH: u64 = 4;
     /// GNU's replacement for [`HASH`], and often the only one present.
     ///
-    /// A public extension to ELF rather than anything vendor-specific, but it matters
-    /// here for a reason that is: it carries **no symbol count**. `DT_HASH` states
-    /// `nchain` in its second word; this states nothing, and the count has to be walked
-    /// out of the bucket and chain arrays (see `symbol_count_from_gnu_hash`).
-    ///
-    /// Every module built by the platform's own toolchain carries `DT_HASH`. Every one
-    /// built by an open toolchain carries only this, which is why a loader that reads
-    /// only the vendor's tables cannot see a homebrew module's imports at all (D305).
+    /// A public ELF extension that carries no symbol count; the count is walked out of the
+    /// bucket and chain arrays (see `symbol_count_from_gnu_hash`). Modules from the
+    /// platform's toolchain carry `DT_HASH`; modules from an open toolchain carry only this
+    /// (D305).
     pub const GNU_HASH: u64 = 0x6fff_fef5;
     /// String table.
     pub const STRTAB: u64 = 5;
@@ -73,11 +56,8 @@ pub mod tag {
     pub const INIT: u64 = 12;
     /// Address of the array of initialisation functions, run in order.
     ///
-    /// **This is where a C++ global constructor lives.** A namespace-scope object with a
-    /// constructor gets an entry here; a function-local static does not, because that one
-    /// initialises on first use behind a guard variable. Ignoring this tag therefore
-    /// produces a guest whose statics look like they initialised - the guard traffic is
-    /// there in the trace - while every global object is still zero (D235).
+    /// A namespace-scope C++ object with a constructor gets an entry here; a function-local
+    /// static initialises on first use behind a guard variable instead.
     pub const INIT_ARRAY: u64 = 25;
     /// Size in bytes of the initialisation array.
     pub const INIT_ARRAYSZ: u64 = 27;
@@ -85,19 +65,12 @@ pub mod tag {
     pub const PREINIT_ARRAY: u64 = 32;
     /// Size in bytes of the pre-initialisation array.
     pub const PREINIT_ARRAYSZ: u64 = 33;
-    /// The vendor's own names for the tables a console loader actually reads.
+    /// The vendor's own names for the tables a hardware loader reads.
     ///
-    /// # Why these exist alongside the standard ones
-    ///
-    /// A console loader **ignores** `DT_STRTAB`, `DT_SYMTAB`, `DT_HASH` and the rest, and
-    /// reads these instead. Their values are not virtual addresses: they are offsets into
-    /// the `PT_SCE_DYNLIBDATA` segment, which is a different resolution entirely.
-    ///
-    /// Every title in the local corpus happens to carry the standard tags too, which is
-    /// why reading only those has worked. A module built the way the platform expects
-    /// carries **only** these - the conformance probe's minimal module does, and orbistoun
-    /// refused it with "dynamic table lacks a string table, symbol table, or hash table"
-    /// while the module had all three (D247).
+    /// A hardware loader ignores `DT_STRTAB`, `DT_SYMTAB`, `DT_HASH` and the rest and reads
+    /// these, whose values are offsets into the `PT_SCE_DYNLIBDATA` segment rather than
+    /// virtual addresses (D247). Many titles also carry the standard tags; a module built the
+    /// platform's way carries only these.
     pub mod sce {
         /// Symbol hash table, as an offset into the vendor data segment.
         pub const HASH: u64 = 0x6100_0025;
@@ -121,10 +94,8 @@ pub mod tag {
 
     /// Vendor tag listing the libraries an import's library id indexes.
     ///
-    /// In the OS-specific range, so it is the platform's to define. Identified by
-    /// counting: it holds exactly as many entries as there are distinct library ids,
-    /// where `DT_NEEDED` does not, and it puts socket functions in a POSIX library
-    /// rather than in a graphics driver (D117).
+    /// In the OS-specific range, so it is the platform's to define. It holds exactly as many
+    /// entries as there are distinct library ids, where `DT_NEEDED` does not.
     pub const SCE_IMPORT_LIB: u64 = 0x0000_6100_0049;
     /// Vendor tag listing modules, indexed by an import's module id.
     pub const SCE_IMPORT_MODULE: u64 = 0x0000_6100_0045;
@@ -151,11 +122,8 @@ pub struct DynamicInfo {
     pub syment: u64,
     /// The vendor's own import-library table, as `(id, name-offset)` pairs.
     ///
-    /// **Not `DT_NEEDED`, and the difference is not cosmetic.** An encoded symbol name
-    /// carries a library id, and those ids index *this* table. Indexing `DT_NEEDED`
-    /// instead produced attributions that fit and meant nothing - a graphics driver
-    /// exporting `setsockopt` - because the two lists are different lengths and
-    /// different contents (D117).
+    /// Not `DT_NEEDED`: the library id in an encoded symbol name indexes this table, and the
+    /// two lists differ in length and content.
     pub libraries: Vec<u64>,
     /// The vendor's module table, indexed by an import's module id.
     pub modules: Vec<u64>,
@@ -163,8 +131,8 @@ pub struct DynamicInfo {
     pub hash: u64,
     /// Virtual address of a GNU hash table, or zero.
     ///
-    /// Held separately rather than folded into [`Self::hash`] because the two are read
-    /// differently: one states the symbol count and the other has to be walked for it.
+    /// Held apart from [`Self::hash`] because one states the symbol count and the other is
+    /// walked for it.
     pub gnu_hash: u64,
     /// String-table offsets of the libraries this module needs.
     pub needed: Vec<u64>,
@@ -188,29 +156,22 @@ pub struct DynamicInfo {
     pub preinit_arraysz: u64,
     /// Whether the table addresses above came from the vendor's tags.
     ///
-    /// **Changes how they are resolved, not merely where they came from.** A standard tag
-    /// holds a virtual address; a vendor tag holds an offset into `PT_SCE_DYNLIBDATA`.
-    /// Reading one as the other lands somewhere plausible and wrong (D247).
+    /// Changes how they are resolved: a standard tag holds a virtual address; a vendor tag
+    /// holds an offset into `PT_SCE_DYNLIBDATA` (D247).
     pub vendor_tables: bool,
 }
 
 impl DynamicInfo {
     /// Parses the dynamic table out of its raw bytes.
     ///
-    /// Stops at `DT_NULL`. Unknown tags - including every vendor tag - are skipped
-    /// rather than rejected: they carry information this parser does not need, and
-    /// failing on them would reject every real module.
+    /// Stops at `DT_NULL`. Unknown tags are skipped rather than rejected: they carry
+    /// information this parser does not need.
     pub fn parse(bytes: &[u8]) -> Self {
         let mut info = Self::default();
-        // Collected separately and applied afterwards, because a module may carry both
-        // sets and the file does not promise an order. The vendor's win: they are what
-        // the platform reads (D247).
-        //
-        // **`Option`, not zero-means-absent.** A standard tag holds a virtual address and
-        // zero is never one; a vendor tag holds an *offset into the data segment*, and
-        // offset zero is the first byte of it. The probe's minimal module puts its string
-        // table exactly there, so treating zero as missing rejected a module whose tables
-        // were all present and correctly described (D247).
+        // Collected separately and applied afterwards, because a module may carry both sets
+        // in any order; the vendor tags win, since they are what the platform reads (D247).
+        // `Option`, not zero-means-absent: a vendor tag holds an offset into the data
+        // segment, and offset zero is its first byte.
         let mut vendor = Self::default();
         let (mut v_strtab, mut v_symtab, mut v_hash) = (None, None, None);
         for chunk in bytes.chunks_exact(DYNAMIC_ENTRY_SIZE) {
@@ -250,8 +211,8 @@ impl DynamicInfo {
                 _ => {}
             }
         }
-        // Only when all three are named. A module carrying one stray vendor tag must not
-        // have its working standard tables replaced by an incomplete vendor set.
+        // Only when all three are named, so one stray vendor tag cannot replace working
+        // standard tables with an incomplete vendor set.
         if let (Some(strtab), Some(symtab), Some(hash)) = (v_strtab, v_symtab, v_hash) {
             info.strtab = strtab;
             info.strsz = vendor.strsz;
@@ -269,10 +230,9 @@ impl DynamicInfo {
 
     /// Whether everything needed to walk the symbol table is present.
     ///
-    /// Zero means "no such tag" for a standard entry, because a virtual address of zero is
-    /// never a table. It means **offset zero into the data segment** for a vendor entry,
-    /// which is where a real module puts its string table - so under vendor tags presence
-    /// is what the parser established when it read them, not a test on the value (D247).
+    /// Zero means "no such tag" for a standard entry, since a virtual address of zero is
+    /// never a table. For a vendor entry it is offset zero into the data segment, so presence
+    /// is what the parser recorded, not a test on the value (D247).
     pub const fn is_usable(&self) -> bool {
         if self.vendor_tables {
             return true;
@@ -283,21 +243,14 @@ impl DynamicInfo {
 
 /// What kind of thing an import names.
 ///
-/// # Why the loader has to care
-///
-/// Interception writes an address into a relocation slot, and for code that address is a
-/// thunk - the whole of principle 7. **For data it is a wrong answer that looks right.**
-/// A guest importing `__stderrp` loads the slot and then dereferences what it found; handed
-/// a thunk it reads the first bytes of x86 instructions as a pointer and carries on. That
-/// is indistinguishable from working until something unrelated breaks much later, which is
-/// the failure principle 3 exists to stop.
-///
-/// Read from `st_info`, which the symbol table states outright - no inference (D307).
+/// For code the relocation slot holds a thunk. For data a thunk is a wrong answer that
+/// looks right: a guest importing `__stderrp` dereferences the slot and reads instruction
+/// bytes as a pointer. Read from `st_info`, which states it outright (D307).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Code. A thunk address is the right answer.
     Function,
-    /// Data. A thunk address is **not** an answer at all.
+    /// Data. A thunk address is not an answer.
     Object,
     /// The table did not say, which is its own fact and not a default.
     Unspecified,
@@ -306,9 +259,8 @@ pub enum Kind {
 impl Kind {
     /// Decodes the low nibble of `st_info`.
     ///
-    /// Anything this does not recognise is [`Self::Unspecified`] rather than guessed at:
-    /// files, sections and TLS entries all appear here and none of them is an import
-    /// the thunk table should be answering for.
+    /// Anything unrecognised is [`Self::Unspecified`]: files, sections and TLS entries appear
+    /// here, and none of them is an import the thunk table answers.
     const fn from_info(info: u8) -> Self {
         match info & 0xf {
             1 => Self::Object,
@@ -320,12 +272,8 @@ impl Kind {
 
 /// The binding attribute of an import, read from the high nibble of `st_info`.
 ///
-/// # Why the loader has to care
-///
-/// Under the ELF gABI, a weak undefined symbol that cannot be resolved binds to zero
-/// and linking succeeds. A global undefined symbol that cannot be resolved is an error.
-/// Reading the binding distinguishes a symbol the guest declared optional from one it
-/// requires (D676).
+/// Under the ELF gABI a weak undefined symbol that cannot be resolved binds to zero, while an
+/// unresolved global undefined symbol is an error (D676).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binding {
     /// Local symbol.
@@ -352,27 +300,19 @@ impl Binding {
 
 /// How a module spelled an import's name, and what that spelling carried with it.
 ///
-/// # Why this is an enum rather than two optional ids
-///
-/// The two spellings differ in **what the format records**, not merely in syntax. A
-/// vendor-encoded name carries its own attribution - the library and module it came
-/// from are part of the string. A standard SysV name carries none: the format leaves
-/// which library exports a symbol to a search across `DT_NEEDED`, and there is no
-/// answer to read out.
-///
-/// Two `Option<u16>` fields that are always both present or both absent would say the
-/// same thing less clearly, and would invite a `0` where "the format does not record
-/// this" belongs (D305).
+/// A vendor-encoded name carries the library and module it came from; a standard SysV name
+/// carries none, leaving the exporter to a search across `DT_NEEDED` (D305). An enum keeps
+/// "the format does not record this" from being written as id `0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameForm {
-    /// `H2e8t5ScQGc#B#C` - a NID with its attribution attached.
+    /// `H2e8t5ScQGc#B#C`: a NID with its attribution attached.
     Encoded {
         /// Library index within the module's import list.
         library_id: u16,
         /// Module index.
         module_id: u16,
     },
-    /// A plain name, as an open toolchain emits it. **Carries no attribution.**
+    /// A plain name, as an open toolchain emits it. Carries no attribution.
     Plain,
 }
 
@@ -381,17 +321,13 @@ pub enum NameForm {
 pub struct RawImport {
     /// Index into the dynamic symbol table.
     ///
-    /// The link between a name and everything that refers to it numerically -
-    /// relocations index this table, and so does the per-import stub table. Without it
-    /// a call trace can only say "import 260", which is a fact about the loader rather
-    /// than about the guest.
+    /// Relocations and the per-import stub table index this table, so it links a name to
+    /// everything that refers to it numerically.
     pub symbol_index: u32,
     /// The hash, decoded from the name or computed from it.
     ///
-    /// **Always present, whichever way the name was spelled.** A plain name is not a
-    /// second kind of import needing a second resolver - it is a NID nobody hashed yet,
-    /// because the exporting library's NID *is* the hash of that same name. Computing it
-    /// here means everything downstream resolves one way (D305).
+    /// Always present. For a plain name it is computed here, because the exporting library's
+    /// NID is the hash of that same name, so everything downstream resolves one way (D305).
     pub nid: u64,
     /// How the name was spelled, and what it carried.
     pub form: NameForm,
@@ -445,9 +381,8 @@ impl RawImport {
 
     /// The library id the name carried, where it carried one.
     ///
-    /// [`None`] is **"the format does not record this"**, not "library zero". A caller
-    /// attributing an import has to fall back to something else, and blending the two
-    /// would attribute every homebrew import to whichever library happens to be first.
+    /// [`None`] means the format does not record it, not library zero; a caller attributing
+    /// the import falls back to something else.
     #[must_use]
     pub const fn library_id(&self) -> Option<u16> {
         match self.form {
@@ -475,13 +410,8 @@ pub fn read_cstr(table: &[u8], offset: usize) -> Option<&str> {
 
 /// One export, as read out of the symbol table.
 ///
-/// # Why this is a separate type from [`RawImport`]
-///
-/// They carry different things, and the difference is the whole point of reading exports at
-/// all. An import is a *question* - a NID this module needs somebody to answer. An export is
-/// an **answer**: the same NID, plus where in this module the thing actually lives. That
-/// address is the field an import has no room for and the only reason a second module is
-/// worth loading.
+/// An import is a NID this module needs answered. An export is the same NID plus where in
+/// this module it lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawExport {
     /// Index into the dynamic symbol table, so a diagnostic can name the row.
@@ -492,15 +422,13 @@ pub struct RawExport {
     pub form: NameForm,
     /// Whether this is code or data.
     ///
-    /// **Load-bearing, exactly as it is for an import.** Binding a data export as though it
-    /// were a function hands the guest a thunk where it expects a value (D125).
+    /// Binding a data export as a function hands the guest a thunk where it expects a value.
     pub kind: Kind,
     /// The symbol name exactly as it appears, encoding included where there is one.
     pub name: String,
-    /// Where it lives, **as an offset from the module's own base**.
+    /// Where it lives, as an offset from the module's own base.
     ///
-    /// Not an address: nothing has been placed yet when this is read, and a module is placed
-    /// wherever there is room. The loader adds its base.
+    /// Nothing is placed when this is read; the loader adds the base.
     pub offset: u64,
 }
 
@@ -541,24 +469,17 @@ impl RawExport {
 
 /// Extracts exports from the symbol table.
 ///
-/// The mirror of [`imports_from_symbols`]: same table, same walk, and the **opposite** test
-/// on `st_shndx`. A symbol bound to a section is one this module provides; one bound to
-/// `SHN_UNDEF` is one it needs.
+/// The mirror of [`imports_from_symbols`]: same table, same walk, and the opposite test on
+/// `st_shndx`. A symbol bound to a section is one this module provides.
 ///
-/// # What is deliberately not filtered here
-///
-/// Binding and visibility are not consulted. A local or hidden symbol is not reachable by
-/// another module in a real linker, and filtering on that would be the right thing for a
-/// general ELF reader - but this format is not being read generally. The guest's own imports
-/// name NIDs, and the only question that matters is whether this module answers one. A symbol
-/// that no importer asks for costs a row in a table nobody reads; a symbol wrongly filtered
-/// out is an import that never binds and a guest that stops. Of the two, the second is the
-/// one that cannot be diagnosed from the outside, so this errs the other way and says so.
+/// Binding and visibility are not consulted. Importers name NIDs, and the only question is
+/// whether this module answers one: an unasked symbol costs a table row, while a symbol
+/// wrongly filtered out is an import that never binds.
 ///
 /// # Errors
 ///
 /// [`ElfError::AbsurdSymbolCount`] when the table claims more symbols than could be real,
-/// which is the same bound the import walk applies and for the same reason.
+/// the same bound the import walk applies.
 pub fn exports_from_symbols(
     symbols: &[u8],
     strings: &[u8],
@@ -583,7 +504,7 @@ pub fn exports_from_symbols(
         let name_off = u32::from_le_bytes(entry[..4].try_into().unwrap_or_default()) as usize;
         let kind = Kind::from_info(entry[4]);
         let shndx = u16::from_le_bytes(entry[6..8].try_into().unwrap_or_default());
-        // Defined, and named. `shndx == 0` is SHN_UNDEF - that is the import case.
+        // Defined and named. `shndx == 0` is SHN_UNDEF, the import case.
         if shndx == 0 || name_off == 0 {
             continue;
         }
@@ -592,10 +513,7 @@ pub fn exports_from_symbols(
             continue;
         };
         let at_index = u32::try_from(index).unwrap_or(u32::MAX);
-        // **Both spellings, exactly as the import walk keeps both.** A module publishing
-        // vendor-encoded names and one publishing plain names are answering the same
-        // questions, and dropping either would make a module that exports eighty things
-        // report exporting none - which reads as "provides nothing" (D305).
+        // Both spellings are kept, as in the import walk (D305).
         out.push(match decode_symbol_name(name) {
             Some(decoded) => RawExport::encoded(at_index, name.to_owned(), decoded, kind, offset),
             None => RawExport::plain(at_index, name.to_owned(), hasher, kind, offset),
@@ -607,7 +525,7 @@ pub fn exports_from_symbols(
 /// Extracts imports from the symbol table.
 ///
 /// `symbols` and `strings` are the raw tables; `count` comes from `DT_HASH`. Only
-/// undefined symbols are imports - a defined one is something this module provides.
+/// undefined symbols are imports; a defined one is something this module provides.
 pub fn imports_from_symbols(
     symbols: &[u8],
     strings: &[u8],
@@ -641,10 +559,7 @@ pub fn imports_from_symbols(
             continue;
         };
         let at_index = u32::try_from(index).unwrap_or(u32::MAX);
-        // **Both spellings are imports, and neither is dropped.** Skipping the ones that
-        // did not decode was silent, and it made a module that needs eighty-five things
-        // report needing none - which reads as "needs nothing", the exact claim principle
-        // 3 forbids an import list from making (D305).
+        // Both spellings are imports; a plain name is hashed to its NID (D305).
         out.push(match decode_symbol_name(name) {
             Some(decoded) => RawImport::encoded(at_index, name.to_owned(), decoded, kind, binding),
             None => RawImport::plain(at_index, name.to_owned(), hasher, kind, binding),
@@ -655,22 +570,13 @@ pub fn imports_from_symbols(
 
 /// Walks a GNU hash table for the number of symbols it covers.
 ///
-/// # Why this is walked rather than read
-///
-/// `DT_HASH` states the count outright in its second word. `DT_GNU_HASH` states no count
-/// anywhere: it holds a bloom filter, a bucket array of symbol indices, and a chain array
-/// whose entries carry a stop bit in their low bit. The highest symbol index is found by
-/// taking the largest bucket and following its chain to the entry whose stop bit is set.
-///
-/// Layout, from the public ELF GNU hash extension: four `u32` headers - bucket count,
-/// the symbol index the hashed range starts at, bloom word count, bloom shift - then the
-/// bloom words as `u64`, then the buckets, then the chain.
-///
-/// # A table covering nothing is not a failure
-///
-/// When every bucket is zero the module hashes no symbols at all, and the answer is the
-/// bias: every symbol below it is unhashed and real. Returning zero there would drop a
-/// module's whole symbol table on a legitimate layout.
+/// `DT_GNU_HASH` states no count. It holds a bloom filter, a bucket array of symbol indices,
+/// and a chain array whose entries carry a stop bit in their low bit; the highest symbol
+/// index is found by following the largest bucket's chain to its stop bit. Layout, from the
+/// public ELF GNU hash extension: four `u32` headers (bucket count, the symbol index the
+/// hashed range starts at, bloom word count, bloom shift), then the bloom words as `u64`,
+/// then the buckets, then the chain. When every bucket is zero no symbol is hashed and the
+/// count is the bias.
 pub fn symbol_count_from_gnu_hash(table: &[u8]) -> Result<u64, ElfError> {
     /// Bytes of header before the bloom filter.
     const HEADER: usize = 16;
@@ -749,7 +655,7 @@ mod tests {
         symbols_at(&placed)
     }
 
-    /// The same, with each symbol's value - which is where an export lives.
+    /// The same, with each symbol's value, which is where an export lives.
     fn symbols_at(entries: &[(u32, bool, u64)]) -> Vec<u8> {
         let mut v = Vec::new();
         for (name_off, defined, value) in entries {
@@ -774,11 +680,7 @@ mod tests {
         (table, offsets)
     }
 
-    /// **Imports and exports are the two sides of one table**, split on `SHN_UNDEF`.
-    ///
-    /// The property that matters is that they are complementary: every named symbol lands in
-    /// exactly one of the two lists. A walk that got the test backwards would return a
-    /// plausible-looking list of the wrong half, and nothing downstream could tell.
+    /// Every named symbol is exactly one of an import or an export, split on `SHN_UNDEF`.
     #[test]
     fn every_named_symbol_is_an_import_or_an_export_and_never_both() {
         let (strings, at) = strings(&["needed_one", "provided_one", "needed_two"]);
@@ -796,7 +698,7 @@ mod tests {
         assert_eq!(exported, ["provided_one"]);
     }
 
-    /// An export carries **where it lives**, which is the field an import has no room for.
+    /// An export carries its offset within the module.
     #[test]
     fn an_export_carries_its_offset_within_the_module() {
         let (strings, at) = strings(&["provided"]);
@@ -818,10 +720,6 @@ mod tests {
     }
 
     /// A vendor-encoded export decodes to the NID it publishes, not to a hash of the encoding.
-    ///
-    /// The case the title's own modules are entirely made of: 247 of 247 exports in
-    /// `Il2CppUserAssemblies.prx` are spelled this way, so hashing the string instead would
-    /// produce 247 NIDs no importer asks for.
     #[test]
     fn an_encoded_export_publishes_the_nid_in_its_name() {
         let (strings, at) = strings(&["CRJcH8CnPSI#I#A"]);
@@ -838,10 +736,9 @@ mod tests {
         assert!(matches!(exports[0].form, NameForm::Encoded { .. }));
     }
 
+    /// The tags the parser needs are collected and unknown tags skipped.
     #[test]
     fn the_tags_the_parser_needs_are_collected_and_the_rest_skipped() {
-        // Vendor tags carry information this parser does not need. Rejecting them
-        // would reject every real module.
         let d = dynamic(&[
             (tag::NEEDED, 0x100),
             (0x6100_0045, 0xdead),
@@ -867,9 +764,9 @@ mod tests {
         assert!(info.is_usable());
     }
 
+    /// Both relocation tables are collected.
     #[test]
     fn relocation_tables_are_collected() {
-        // Two tables, and the split matters: JMPREL is where imports become calls.
         let d = dynamic(&[
             (tag::RELA, 0x5000),
             (tag::RELASZ, 0x120),
@@ -883,10 +780,11 @@ mod tests {
         assert_eq!(info.pltrelsz, 0x60);
     }
 
+    /// Parsing stops at `DT_NULL`.
     #[test]
     fn parsing_stops_at_the_null_terminator() {
         let mut d = dynamic(&[(tag::STRTAB, 0x2000)]);
-        // Anything after DT_NULL must be ignored, not parsed.
+        // Anything after DT_NULL is ignored.
         d.extend_from_slice(&tag::SYMTAB.to_le_bytes());
         d.extend_from_slice(&0x9999_u64.to_le_bytes());
         let info = DynamicInfo::parse(&d);
@@ -894,6 +792,7 @@ mod tests {
         assert_eq!(info.symtab, 0, "entries past DT_NULL are not read");
     }
 
+    /// A table missing what the symbol walk needs reports itself unusable.
     #[test]
     fn a_table_missing_what_the_walk_needs_reports_itself_unusable() {
         let info = DynamicInfo::parse(&dynamic(&[(tag::STRTAB, 0x2000)]));
@@ -908,9 +807,9 @@ mod tests {
         orbistoun_nid::NidHasher::new(orbistoun_nid::default_suffix())
     }
 
+    /// Only undefined symbols are imports.
     #[test]
     fn only_undefined_symbols_are_imports() {
-        // A defined symbol is something this module provides, not something it needs.
         let (strtab, offs) = strings(&["H2e8t5ScQGc#B#C", "ZT4ODD2Ts9o#B#C"]);
         let symtab = symbols(&[(offs[0], false), (offs[1], true)]);
 
@@ -923,13 +822,7 @@ mod tests {
         assert_eq!(imports[0].module_id(), Some(2));
     }
 
-    /// **A plainly named import is an import, and it hashes to its exporter's NID.**
-    ///
-    /// This replaces a test that pinned the opposite - plain names were skipped, which
-    /// made a module needing eighty-five things report needing none. The reversal is the
-    /// whole of D305: the exporting library publishes `SHA-1(name + suffix)`, so a plain
-    /// name is not a second kind of import needing a second resolver. It is a NID nobody
-    /// hashed yet.
+    /// A plainly named import is an import, and hashes to its exporter's NID (D305).
     #[test]
     fn a_plain_name_becomes_the_nid_its_exporter_publishes() {
         let (strtab, offs) = strings(&["memcpy", "H2e8t5ScQGc#B#C"]);
@@ -958,12 +851,7 @@ mod tests {
         );
     }
 
-    /// **A data import is known to be data, so nobody hands it a function address.**
-    ///
-    /// `__stderrp` and `optarg` are `STT_OBJECT`, and a guest that imports one loads the
-    /// slot and then dereferences what it found. Given a thunk it reads instruction bytes
-    /// as a pointer and carries on looking fine, which is the whole reason `st_info` is
-    /// read rather than assumed (D307).
+    /// A data import is reported as data, so it is not handed a function address (D307).
     #[test]
     fn an_import_naming_data_is_not_reported_as_a_function() {
         /// One symbol entry with an explicit `st_info` type.
@@ -988,10 +876,7 @@ mod tests {
         assert_eq!(imports[1].kind, super::Kind::Function, "puts is code");
     }
 
-    /// **An import's binding is read from the high nibble of `st_info`.**
-    ///
-    /// Weak symbols bind to zero when unanswered under the ELF gABI, whereas global
-    /// symbols are required (D676).
+    /// An import's binding is read from the high nibble of `st_info` (D676).
     #[test]
     fn an_import_binding_is_read_from_st_info() {
         /// One symbol entry with an explicit `st_info` byte.
@@ -1020,9 +905,8 @@ mod tests {
 
     /// The count `DT_GNU_HASH` does not state, walked out of its chain.
     ///
-    /// Built by hand rather than read from a file so the layout is visible: four header
-    /// words, one bloom word, one bucket naming symbol 4, then a chain whose second entry
-    /// sets the stop bit - so the highest symbol is 5 and the count is 6.
+    /// Four header words, one bloom word, one bucket naming symbol 4, then a chain whose
+    /// second entry sets the stop bit: the highest symbol is 5 and the count is 6.
     #[test]
     fn a_gnu_hash_table_yields_the_symbol_count_it_never_states() {
         let mut table = Vec::new();
@@ -1038,11 +922,7 @@ mod tests {
         assert_eq!(super::symbol_count_from_gnu_hash(&table).expect("walks"), 6);
     }
 
-    /// **A table covering nothing is a count, not a failure.**
-    ///
-    /// Every bucket zero means the module hashes no symbols, and the answer is the bias.
-    /// Returning zero would silently drop a whole symbol table on a legitimate layout -
-    /// the failure mode principle 3 names, arriving as an empty import list.
+    /// A GNU hash table covering nothing answers its bias, not zero.
     #[test]
     fn a_gnu_hash_table_with_no_hashed_symbols_answers_its_bias() {
         let mut table = Vec::new();
@@ -1065,7 +945,7 @@ mod tests {
         super::symbol_count_from_gnu_hash(&[0, 0, 0]).expect_err("must refuse");
     }
 
-    /// A chain with no stop bit must not be followed forever.
+    /// A chain with no stop bit is refused rather than followed forever.
     #[test]
     fn a_gnu_hash_chain_that_never_stops_is_refused() {
         let mut table = Vec::new();
@@ -1079,6 +959,7 @@ mod tests {
         super::symbol_count_from_gnu_hash(&table).expect_err("must refuse");
     }
 
+    /// An absurd symbol count is rejected before the walk.
     #[test]
     fn an_absurd_symbol_count_is_rejected_before_the_loop() {
         let err = imports_from_symbols(&[], &[], MAX_SYMBOLS + 1, SYMBOL_SIZE, &hasher())
@@ -1086,6 +967,7 @@ mod tests {
         assert!(matches!(err, ElfError::AbsurdSymbolCount { .. }));
     }
 
+    /// A count larger than the table stops at the data.
     #[test]
     fn a_count_larger_than_the_table_stops_at_the_data_rather_than_reading_past_it() {
         let (strtab, offs) = strings(&["H2e8t5ScQGc#B#C"]);
@@ -1096,6 +978,7 @@ mod tests {
         assert_eq!(imports.len(), 1, "stops at the end of real data");
     }
 
+    /// A name offset past the string table is skipped.
     #[test]
     fn a_name_offset_past_the_string_table_is_skipped() {
         let symtab = symbols(&[(9999, false)]);
@@ -1104,6 +987,7 @@ mod tests {
         assert!(imports.is_empty(), "no panic, no bogus entry");
     }
 
+    /// Strings read up to the NUL terminator.
     #[test]
     fn strings_read_up_to_the_terminator() {
         let table = b"\0first\0second\0";
@@ -1113,11 +997,6 @@ mod tests {
     }
 
     /// The initialiser tags are read rather than skipped.
-    ///
-    /// They were in the `_ => {}` arm, so a module's global constructors were invisible -
-    /// not skipped deliberately, simply never looked at. Reading them turns "we do not run
-    /// initialisers" from something nobody had checked into something measured: none of the
-    /// three titles at a wall has a `DT_INIT_ARRAY` at all (D235).
     #[test]
     fn the_initialiser_tags_are_parsed() {
         let bytes = dynamic(&[
@@ -1135,7 +1014,7 @@ mod tests {
         assert_eq!(info.preinit_arraysz, 16);
     }
 
-    /// A module with no initialiser tags reads as having none, not as having some at zero.
+    /// A module with no initialiser tags reads as having none.
     #[test]
     fn absent_initialiser_tags_read_as_absent() {
         let info = DynamicInfo::parse(&dynamic(&[(tag::STRTAB, 0x100)]));

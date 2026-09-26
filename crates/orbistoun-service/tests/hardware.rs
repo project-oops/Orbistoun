@@ -1,30 +1,17 @@
-//! Orbistoun checked against what a console was measured to do.
+//! Orbistoun checked against what the hardware was measured to do.
 //!
-//! # What this file is for
-//!
-//! `crates/orbistoun-hle/data/hardware.toml` is generated from conformance captures and holds
-//! every measurement the runs took. This is where those become claims about *this* emulator:
-//! a test names a measurement by id and asserts orbistoun answers the same thing.
-//!
-//! **The gate is coverage, not the assertions.** Every constant measurement must be either
-//! claimed by a test here or listed in [`OUTSTANDING`] with the reason - so
-//! [`OUTSTANDING`] is a work queue with a completion condition per item, which is the thing a
-//! function-shaped task list cannot give. A measurement that is neither fails the gate, and a
-//! new capture therefore arrives as work rather than as silence.
-//!
-//! # Why divergences are listed rather than left failing
-//!
-//! A test that is red on purpose forever is not a queue, it is a broken build that people
-//! learn to ignore. Where orbistoun is known to disagree with the console, the measured value
-//! and the disagreement are written into [`OUTSTANDING`]. Fixing one moves it up into a test,
-//! and the gate notices immediately if somebody deletes the test instead.
+//! `crates/orbistoun-hle/data/hardware.toml` is generated from conformance captures and holds every
+//! measurement. A test here names a measurement by id and asserts orbistoun answers the same. The
+//! gate is coverage: every constant measurement is claimed by a test or listed in [`OUTSTANDING`]
+//! with the reason, so a new capture arrives as work. A known divergence is written into
+//! [`OUTSTANDING`] rather than left as a permanently red test; fixing it moves the id into a test.
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_hle::hardware::{Measurement, Measurements};
 
 /// Measurements this file asserts orbistoun against.
 const CLAIMED: &[&str] = &[
-    // Return codes a console gave and orbistoun now answers, asserted below (D611).
+    // Return codes the hardware gave and orbistoun answers, asserted below.
     "031-stackattr/address-is-the-base:sceKernelIsStack:is-stack",
     "031-stackattr/fresh-attr-names-no-stack:scePthreadAttrGetstackaddr:stack-address",
     "031-stackattr/fresh-attr-names-no-stack:scePthreadAttrGetstacksize:stack-size",
@@ -33,8 +20,8 @@ const CLAIMED: &[&str] = &[
     "032-syncaddr/wake-with-no-waiter:sceKernelSyncOnAddressWake:returned",
     "130-layout/net-interfaces:getifaddrs:return_code",
     "130-layout/user-service:sceUserServiceGetInitialUser:return_code",
-    // The sync bounds a console measured and orbistoun answered wrongly until D610 -
-    // the semaphore count and the event-flag wait mode, both asserted below.
+    // The sync bounds the hardware measured: the semaphore count and the event-flag wait mode,
+    // asserted below.
     "016-syncbounds/sema-count:sceKernelPollSema:need-0-of-empty",
     "016-syncbounds/sema-count:sceKernelPollSema:need-1-of-1-left",
     "016-syncbounds/sema-count:sceKernelPollSema:need-2-of-1-left",
@@ -43,7 +30,7 @@ const CLAIMED: &[&str] = &[
     "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x01-both-of-one",
     "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x02-both-of-one",
     "016-syncbounds/event-flag-waitmode:sceKernelPollEventFlag:mode-0x11-both-of-one",
-    // Every firmware path the encoder probe tried, refused with the same code (D497).
+    // Every platform module path the encoder probe tried, refused with the same code.
     "106-encoder/path-probe:/system/common/lib/libSceVencCore.sprx:handle",
     "106-encoder/path-probe:/system/priv/lib/libSceVencCore.sprx:handle",
     "106-encoder/path-probe:/system/sys/lib/libSceVencCore.sprx:handle",
@@ -68,33 +55,27 @@ const CLAIMED: &[&str] = &[
     "106-encoder/path-probe:/system/priv/lib/libSceHevcEnc.sprx:handle",
     "106-encoder/path-probe:/system/common/lib/libSceVideodec.sprx:handle",
     "106-encoder/path-probe:/system/priv/lib/libSceVideodec.sprx:handle",
-    // The float environment a title is entered under, asserted against what orbistoun
-    // installs rather than against a constant written down twice (D486).
+    // The float environment a title is entered under, asserted against what orbistoun installs
+    // (D486).
     "035-libc/fpu-environment:mxcsr:daz_denormals_are_zero",
     "035-libc/fpu-environment:mxcsr:ftz_flush_to_zero",
     "035-libc/fpu-environment:mxcsr:rounding_mode",
     "035-libc/fpu-environment:mxcsr:exception_masks",
-    // **The raw value is not here, and that is the finding rather than a gap.** It was, on
-    // the reasoning that it is the four fields above plus one sticky precision flag. Reading
-    // every capture rather than five of them shows it is `0x9fe0` in twelve runs and `0x9fc0`
-    // in three, so the precision flag is not a property of the platform at all - it is
-    // whether the console's own startup happened to do inexact arithmetic before the probe
-    // looked. A varying measurement may not be claimed by anything, so it is claimed by
-    // nothing; the assertion that survives it is in
-    // `the_consoles_float_configuration_is_the_raw_value_without_its_status_flags`, which
-    // now claims every value any run saw rather than one of them (D609).
-    // One attribute object, set then get, for each of 0..4 - the run the queue asked for.
+    // The raw `MXCSR` value is not claimed here: runs saw `0x9fe0` and `0x9fc0`, differing in the
+    // sticky precision flag the hardware's startup may set, so it varies. The surviving assertion
+    // is `the_consoles_float_configuration_is_the_raw_value_without_its_status_flags`.
+    //
+    // One attribute object, set then get, for each of 0..4.
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:default-type",
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:type-0-read-back",
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:type-1-read-back",
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:type-2-read-back",
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:type-3-read-back",
     "015-sync/mutexattr-round-trip:scePthreadMutexattrGettype:type-4-read-back",
-    // The console writes eight bytes where it was given four; D210 said four, from
-    // documentation, and a guard word measured otherwise.
+    // The hardware writes eight bytes where it was given four, measured by a guard word.
     "018-relational/handle-fits-its-out-parameter:sceKernelCreateSema:guard-after-handle",
-    // The character-classification tables, confirmed by a second capture from a different
-    // build form. Every entry read the way a guest reads it: through the function (D468).
+    // The character-classification tables, confirmed by a second capture from a different build
+    // form, each entry read through the function as a guest reads it.
     "035-libc/getpctype:_Getpctype:mask_eof_neg1",
     "035-libc/getpctype:_Getpctype:mask_nul_0",
     "035-libc/getpctype:_Getpctype:mask_tab_9",
@@ -131,37 +112,27 @@ const CLAIMED: &[&str] = &[
     "135-sysctl/names:hw.pagesize:length",
     "135-sysctl/names:machdep.tsc_freq:length",
     "135-sysctl/names:kern.hostname:length",
-    // The third query field is the memory type - the question D398 left open, settled by a
-    // capture that allocated one page of each type and read the field back.
+    // The third query field is the memory type, measured by allocating one page of each type and
+    // reading the field back.
     "130-layout/memory-type:wb-onion:third-field",
     "130-layout/memory-type:wc-garlic:third-field",
     "130-layout/memory-type:wb-garlic:third-field",
-    // The two encoder system modules the console loads; the seven it refuses stay in the
-    // queue, because that refusal may belong to the capture's application category.
+    // The two encoder system modules the hardware loads; the seven it refuses stay in the queue,
+    // because that refusal may belong to the capture's application category.
     "106-encoder/sysmodule-load:VIDEOREC:rc",
-    // The other four paths obSCEne loaded, recovered from its own quantity table.
+    // The other four paths obSCEne loaded, from its own quantity table.
     "110-modules/load:sceKernelLoadStartModule:system-libc-internal",
     "110-modules/load:sceKernelLoadStartModule:system-sysmodule",
     "110-modules/load:sceKernelLoadStartModule:libkernel-prx",
     "110-modules/load:sceKernelLoadStartModule:libkernel-sprx",
 ];
 
-/// Measurements whose value is **not a property of the interface**, so nothing can assert it.
+/// Measurements whose value is not a property of the interface, so nothing can assert it.
 ///
-/// # Why this is a separate list from the work queue
-///
-/// [`OUTSTANDING`] means "not done yet", and every entry in it should one day move up into a
-/// test. These never will, and keeping them there would leave the queue with permanent
-/// residents - at which point it stops being read as a queue.
-///
-/// A module handle is the case that forced it. The console answered `0x15` and `0x14` for two
-/// `/app0` modules, and both runs agree, but the number reflects how many modules *that*
-/// loader had already placed. It is a fact about that machine at that moment, not about
-/// `sceKernelLoadStartModule`. Asserting it would pin orbistoun to somebody else's bookkeeping.
-///
-/// **The record is still worth having** - it says the call answers a small non-negative handle
-/// for a title's own module, which is the shape a guest keys on, and that much *is* asserted
-/// where the shape can be checked.
+/// Separate from [`OUTSTANDING`], which means "not done yet", so that queue has no permanent
+/// residents. A module handle is the typical case: the hardware answered `0x15` and `0x14` for two
+/// `/app0` modules, a count of what that loader had already placed. The record still says the call
+/// answers a small non-negative handle for a title's own module, and that shape is asserted.
 const OPAQUE: &[(&str, &str)] = &[
     (
         "106-encoder/sysmodule-load:VENC:id",
@@ -227,13 +198,8 @@ const OPAQUE: &[(&str, &str)] = &[
         "120-measure/cpuid:rdtscp:numa_node_id",
         "guest instructions run natively on the host CPU, so `cpuid` answers the host's - presenting the console's would need the instruction trapped, and interception here is linking rather than hooking (principle 7)",
     ),
-    // --- the console's own address space -----------------------------------------------
-    //
-    // Reading every capture rather than five of them brought 110 new constants at once, and
-    // this is the half of them nothing here can ever answer. Each carries the same reason
-    // because it *is* the same reason, said once per entry rather than once for a class: a
-    // shared note would let a later entry join the class without anybody deciding it had
-    // (D609).
+    // The hardware's own address space: values that belong to that machine and that run, each entry
+    // carrying its own reason.
     (
         "100-input/dualsense-symbols:scePadDeviceClassGetExtendedInformation:vaddr",
         "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
@@ -430,10 +396,8 @@ const OPAQUE: &[(&str, &str)] = &[
         "138-layout/addresses:strlen:address",
         "an address on the console, and orbistoun places its own - every base it uses is in docs/ADDRESS_MAP.md and none of them is this. A census of where a symbol landed says the symbol exists, which is recorded beside it; where it landed is a property of that machine's loader",
     ),
-    // --- the second batch of reports, on the same terms (D617) ---------------------------
-    //
-    // Sockets, keyboard and mouse resolving on the console. Where each landed is that
-    // machine's, and how long the probe waited for an operator is that afternoon's.
+    // Sockets, keyboard and mouse resolving on the hardware: where each landed is that machine's,
+    // and how long the probe waited for an operator is that run's.
     (
         "101-input-ext/keyboard-held:sceKeyboardReadState:hold-shift-and-a-letter-now",
         "how long the probe waited for an operator, or for a socket that was never going to answer. A duration measured on that machine and on that day, not a property of the platform",
@@ -664,10 +628,10 @@ const OPAQUE: &[(&str, &str)] = &[
     ),
 ];
 
-/// Constant measurements nothing asserts yet, and why. **This is the work queue.**
+/// Constant measurements nothing asserts yet, and why: the work queue.
 ///
-/// Each entry is one unit of work with an unambiguous completion condition: make orbistoun
-/// answer what the console answered, then move the id into [`CLAIMED`] with a test.
+/// Each entry is complete when orbistoun answers what the hardware answered and the id moves into
+/// [`CLAIMED`] with a test.
 const OUTSTANDING: &[(&str, &str)] = &[
     (
         "000-hw/sw-version:sceKernelGetSystemSwVersion:rc",
@@ -893,35 +857,18 @@ const OUTSTANDING: &[(&str, &str)] = &[
         "136-kernel/handoff:payload_args:null",
         "whether the payload-argument pointer is null on a native title entry; orbistoun does not present a payload-argument block",
     ),
-    // --- the widened codes, and a claim that was withdrawn (D480) ------------------------
-    //
-    // These were listed as divergences on the reading that the console answers
-    // `0xffffffff8002_xxxx` sign-extended while orbistoun zero-extends. **That reading was
-    // wrong**, and the probe source says so: the check writes
-    // `int second = scePthreadMutexTrylock(...)` and reports `(uint64_t)(int64_t)second`, so
-    // the leading `ffffffff` is obSCEne widening a C `int`, not the console setting the top
-    // half of `rax`. A prototype returning `int` reads `eax` and nothing else, so these
-    // records cannot say what the other thirty-two bits held.
-    //
-    // Read at the width they were actually taken, **every one is a value orbistoun already
-    // produces**: `0x80020001` is `errno::NOT_OWNER`, `0x80020010` is `BUSY`, `0x80020016` is
-    // `INVALID`, `0x80020002` is `NO_ENTRY`, `0x80020003` is `NO_SUCH`. What keeps them here
-    // is the *condition*, not the value - each needs its check's setup reproduced.
-    // --- the module loader, which loads nothing ---------------------------------------------
-    // --- knobs orbistoun cannot source ------------------------------------------------------
+    // Codes recorded as `0xffffffff8002_xxxx`. The probe reports `(uint64_t)(int64_t)` of a C
+    // `int`, so the leading `ffffffff` is obSCEne widening the value, and the upper half of `rax`
+    // was never observed. At 32 bits each is a value orbistoun already produces (`0x80020001` is
+    // `errno::NOT_OWNER`, `0x80020010` `BUSY`, `0x80020016` `INVALID`, `0x80020002` `NO_ENTRY`,
+    // `0x80020003` `NO_SUCH`); what keeps them here is reproducing each check's condition.
     (
         "135-sysctl/names:kern.version:length",
         "the console answers a 0x2c-byte build banner; orbistoun refuses the knob rather than inventing one (D397)",
     ),
-    // --- needs a harness rather than a call --------------------------------------------------
-    // --- behaviour not modelled --------------------------------------------------------------
-    // --- brought in by reading every capture (D609) --------------------------------------
-    //
-    // Two kinds, and the split is the point. The first is a condition of a function
-    // orbistoun implements that nothing asserts yet - ordinary work. The second is a symbol
-    // the console resolves and this project **does not declare at all**, which is a gap that
-    // was previously unknown rather than merely undone: thirty-one of them, across the
-    // controller, keyboard, mouse, audio decoder and AJM libraries.
+    // Conditions of functions orbistoun implements that nothing asserts yet, and symbols the
+    // hardware resolves that this project does not declare, across the controller, keyboard, mouse,
+    // audio decoder and AJM libraries.
     (
         "000-hw/tsc-frequency:sceKernelGetTscFrequency:hz",
         "`sceKernelGetTscFrequency` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
@@ -1078,11 +1025,8 @@ const OUTSTANDING: &[(&str, &str)] = &[
         "130-layout/user-service:sceUserServiceGetUserName:return_code",
         "`sceUserServiceGetUserName` is implemented and this condition is not asserted yet - reproducing the probe's setup is the work, not the call",
     ),
-    // --- what the network calls answered, before anything implements them (D617) ---------
-    //
-    // Nine values from a subsystem orbistoun has not started. They are recorded now precisely
-    // because nothing implements them: `sceNetRecv` answering `0x80410123` when it would block
-    // is a code somebody would otherwise invent, and the measurement is here first.
+    // What the network calls answered, recorded before anything implements them so no code is
+    // invented: `sceNetRecv` answers `0x80410123` when it would block.
     (
         "101-input-ext/mouse-moving:sceMouseRead:extent-four",
         "orbistoun does not declare `sceMouseRead` at all, so there is no implementation for a claim to check. **The value is the point of recording it**: `0x0` is what the console answered, and whoever writes this function will otherwise invent a code (D617)",
@@ -1743,9 +1687,8 @@ const OUTSTANDING: &[(&str, &str)] = &[
 
 /// Calls an implementation by the name a guest would import it under.
 ///
-/// Guest arguments are plain words and guest memory is the host's under an identity mapping,
-/// so a test hands over the address of its own local and the implementation writes through it -
-/// which is the same thing a guest does.
+/// Guest arguments are plain words and guest memory is the host's, so a test hands over the address
+/// of its own local and the implementation writes through it, as it would for a guest.
 fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
     let found = orbistoun_service::implementation_named(name)
         .unwrap_or_else(|| panic!("{name} is not implemented, so the claim cannot be checked"));
@@ -1760,10 +1703,7 @@ fn measurement(id: &str) -> Measurement {
         .clone()
 }
 
-/// **Every constant measurement is claimed by a test or declared outstanding.**
-///
-/// The gate the rest of this file exists to satisfy. A new capture bringing new measurements
-/// fails it, which is how a hardware run becomes work rather than a file nobody reads.
+/// Every constant measurement is claimed by a test or declared outstanding.
 #[test]
 fn every_constant_measurement_is_claimed_or_declared_outstanding() {
     let table = Measurements::builtin();
@@ -1782,10 +1722,7 @@ fn every_constant_measurement_is_claimed_or_declared_outstanding() {
         "measured on hardware and neither asserted nor declared outstanding: {unaccounted:#?}"
     );
 
-    // **The arithmetic, asserted rather than reported.** The first version of the gate that
-    // runs this counted the outstanding list by grepping the Rust source and got 26 for a list
-    // of 21, because five of the reasons happen to begin with a digit. A number a gate prints
-    // is a claim like any other, and this is the one place that can check it.
+    // The gate's printed counts are asserted, since a count is a claim like any other.
     assert_eq!(
         CLAIMED.len() + OUTSTANDING.len() + OPAQUE.len(),
         table.constants().count(),
@@ -1793,31 +1730,16 @@ fn every_constant_measurement_is_claimed_or_declared_outstanding() {
     );
 }
 
-/// What the console reported, without the check that took the reading: subject, condition,
+/// What the hardware reported, without the check that took the reading: subject, condition,
 /// observation. Two checks producing one of these produced one fact.
 type Reading = (String, String, String);
 
-/// **One measured fact is not both a thing to do and a thing that cannot be done.**
+/// One measured fact is not filed in two different lists.
 ///
-/// # What this asserts
-///
-/// That where two checks measured the same subject, condition and value, both land in the same
-/// list. The three lists are not opinions - [`CLAIMED`] is asserted, [`OUTSTANDING`] is a queue
-/// with a completion condition, and [`OPAQUE`] is what can never move up - so splitting one
-/// fact across two of them means one of the two is wrong.
-///
-/// It caught `kern.osrelease`. Two checks measured its length as `0xe`; one sat in [`OPAQUE`]
-/// with the right reason - a per-machine setting, and matching it would match one console's
-/// configuration - and the other sat in the work queue, where it could never be completed. That
-/// is the permanent resident [`OPAQUE`] exists to keep out, and the queue stops being read as a
-/// queue once it has one (D546).
-///
-/// # What it cannot assert
-///
-/// That any single classification is right - only that duplicates agree. And it can only see
-/// duplicates: **one group qualifies today**, which is honest about its reach rather than
-/// impressive. Its value is on the next capture, where a re-measured id arrives beside one
-/// already filed and the two are decided by different people at different times.
+/// Where two checks measured the same subject, condition and value, both land in the same list:
+/// [`CLAIMED`] is asserted, [`OUTSTANDING`] is a queue, and [`OPAQUE`] never moves up, so splitting
+/// one fact across two means one is wrong. It checks only that duplicates agree, not that a single
+/// classification is right.
 #[test]
 fn two_checks_of_one_fact_do_not_disagree_about_which_list_it_is_in() {
     let claimed: std::collections::BTreeSet<&str> = CLAIMED.iter().copied().collect();
@@ -1836,8 +1758,8 @@ fn two_checks_of_one_fact_do_not_disagree_about_which_list_it_is_in() {
         }
     };
 
-    // Keyed on what the console reported, not on the id - the id carries the check that took
-    // the reading, and two checks taking one reading is exactly the case being looked for.
+    // Keyed on what the hardware reported, not the id, which carries the check that took the
+    // reading.
     let mut seen: std::collections::BTreeMap<Reading, Vec<(&str, &str)>> =
         std::collections::BTreeMap::new();
     for measurement in Measurements::builtin().constants() {
@@ -1872,11 +1794,8 @@ fn two_checks_of_one_fact_do_not_disagree_about_which_list_it_is_in() {
     );
 }
 
-/// Nothing claims or defers a measurement that is not there, or is not constant.
-///
-/// The other half of the gate, and the half that catches a stale list: an id that no longer
-/// exists reads as coverage while asserting nothing, and a varying measurement must never be
-/// asserted at all.
+/// Nothing claims or defers a measurement that is not there, or is not constant: a stale id reads
+/// as coverage while asserting nothing, and a varying measurement is never asserted.
 #[test]
 fn nothing_claims_a_measurement_that_cannot_be_claimed() {
     let table = Measurements::builtin();
@@ -1903,23 +1822,12 @@ fn nothing_claims_a_measurement_that_cannot_be_claimed() {
     }
 }
 
-/// The counter frequency is one a console actually reported, and the two names agree.
+/// The counter frequency is one the hardware reported, and the two names agree.
 ///
-/// # Why this is not an equality against one number
-///
-/// It was, and a third capture falsified it. Two runs measured `0x5f259b8e` and a third
-/// measured `0x5f259bb6` - **1,596,300,174 against 1,596,300,214**, forty hertz apart in one
-/// and a half gigahertz. The two earlier runs agreed with each other *exactly*, so this is not
-/// jitter in the reading: the counter is calibrated per boot, and is stable within a session.
-///
-/// So there is no single value to assert, and the measurement is now `constant = false`. What
-/// is still checkable, and worth checking:
-///
-/// - **orbistoun answers a frequency some console actually reported**, not an invented one.
-///   That is the defect this catches, and the per-boot variation does not excuse it.
-/// - **the two names agree**, in every run and in orbistoun. The timestamp counter and the
-///   process-time counter were measured separately and answered identically each time, which
-///   is why orbistoun answers one constant for both.
+/// The frequency is calibrated per boot (runs measured `0x5f259b8e` and `0x5f259bb6`, stable within
+/// a session), so the measurement is not constant. Checked instead: orbistoun answers a frequency
+/// some run reported, and the timestamp counter and the process-time counter agree, as they did in
+/// every run.
 #[test]
 fn the_counter_frequency_matches_the_console() {
     let measured = measurement("120-measure/frequencies:sceKernelGetTscFrequency:frequency");
@@ -1943,15 +1851,11 @@ fn the_counter_frequency_matches_the_console() {
     );
 }
 
-/// The character-classification tables carry what the console's C library carries.
+/// The character-classification tables carry what the hardware's C library carries.
 ///
-/// **Read the way a guest reads them.** `_Getpctype()` answers the address of the entry for
-/// index zero and a caller indexes from there, so this calls the function and indexes the
-/// result rather than reading the data file - which checks installation and the margin below
-/// zero as well as the values (D468).
-///
-/// Confirmed independently: the committed tables came from one capture, and a second run from
-/// a different build form reproduced all twenty-two of these.
+/// Read as a guest reads them: `_Getpctype()` answers the address of the entry for index zero and
+/// the caller indexes from there, so this checks installation and the margin below zero as well as
+/// the values.
 #[test]
 fn the_ctype_tables_are_the_ones_the_console_carries() {
     for (symbol, prefix) in [
@@ -1970,8 +1874,8 @@ fn the_ctype_tables_are_the_ones_the_console_carries() {
             if m.subject != symbol {
                 continue;
             }
-            // `mask_tab_9` and `entry_eof_neg1` - the character is the last field, and a
-            // `neg` prefix on it is the minus sign the id cannot carry.
+            // `mask_tab_9` and `entry_eof_neg1`: the character is the last field, and a `neg`
+            // prefix is the minus sign the id cannot carry.
             let last = condition
                 .rsplit('_')
                 .next()
@@ -1982,17 +1886,17 @@ fn the_ctype_tables_are_the_ones_the_console_carries() {
             };
             let expected = u16::try_from(m.value().expect("a table entry is a number"))
                 .expect("a table entry fits in an entry");
-            // SAFETY: `base` is the address the implementation just answered for the entry
-            // at index zero, and the measured tables span -8 to 263, so every index checked
-            // here lands inside the allocation the implementation made for them.
+            // SAFETY: `base` is the address the implementation answered for the entry at index
+            // zero, and the measured tables span -8 to 263, so every index checked lands inside the
+            // implementation's allocation.
             let at = unsafe {
                 std::ptr::with_exposed_provenance::<u16>(
                     usize::try_from(base).expect("a guest address fits the host"),
                 )
                 .offset(isize::try_from(index).expect("a table index is small"))
             };
-            // SAFETY: `at` was just computed inside the same allocation, and the table was
-            // written as `u16` entries, so it is aligned and initialised.
+            // SAFETY: `at` is inside the same allocation, and the table holds `u16` entries, so it
+            // is aligned and initialised.
             let found = unsafe { *at };
             assert_eq!(
                 found, expected,
@@ -2007,13 +1911,10 @@ fn the_ctype_tables_are_the_ones_the_console_carries() {
     }
 }
 
-/// Releasing a lock nobody holds answers the code the console answered.
+/// Releasing a lock nobody holds answers the code the hardware answered.
 ///
-/// **Compared at thirty-two bits, which is the width the measurement was taken at.** The
-/// record reads `0xffffffff80020001` because the probe widened a C `int` through `int64_t`;
-/// a prototype returning `int` never saw the other half of the register, so comparing all
-/// sixty-four would be comparing against obSCEne's cast rather than against the console
-/// (D480).
+/// Compared at 32 bits, the width the measurement was taken at: the record's `0xffffffff80020001`
+/// is the probe widening a C `int`.
 #[test]
 fn releasing_an_unheld_lock_answers_the_measured_code() {
     let measured = measurement("015-sync/mutex-unlock-unheld:scePthreadMutexUnlock:unheld-unlock");
@@ -2047,18 +1948,11 @@ fn releasing_an_unheld_lock_answers_the_measured_code() {
     );
 }
 
-/// Taking a mutex twice answers what the console answered, for every type it was asked about.
+/// Taking a mutex twice answers what the hardware answered, for every type it was asked about.
 ///
-/// # What this actually pins
-///
-/// The console was swept across five attribute type values and asked what a *second*
-/// `Trylock` says. That produced the mapping orbistoun already uses - `2` is recursive, `4` is
-/// error-checking, anything else is a plain lock - which until now lived in a comment citing
-/// the check by name. This makes it a test: change the mapping and four measurements start
-/// disagreeing with the machine they came from.
-///
-/// **Compared at thirty-two bits** (D480): the record reads `0xffffffff80020010` because the
-/// probe widened a C `int`, and the other half of the register was never observed.
+/// The hardware was swept across five attribute type values for what a second `Trylock` says,
+/// giving the mapping orbistoun uses: `2` is recursive, `4` is error-checking, anything else is a
+/// plain lock. Compared at 32 bits, since the probe widened a C `int`.
 #[test]
 fn a_second_acquisition_answers_the_measured_code_for_each_mutex_type() {
     for kind in [1_u64, 2, 3, 4] {
@@ -2105,32 +1999,17 @@ fn a_second_acquisition_answers_the_measured_code_for_each_mutex_type() {
     }
 }
 
-/// The memory query accepts exactly the flag values the console accepted.
+/// The memory query accepts exactly the flag values the hardware accepted.
 ///
-/// # It needed no allocation, which is worth writing down
-///
-/// This was carried as "needs a direct-memory allocation to query, which is a harness rather
-/// than one call" - twice, on two entries. Reading the probe's own check settled it in a line:
-/// it calls `sceKernelDirectMemoryQuery(0, flag, buffer, 256)` and allocates nothing. **The
-/// difficulty was in my note, not in the call.**
-///
-/// The boundary itself - 0 and 1 accepted, 2 and 4 refused - is already in orbistoun, in a
-/// comment citing this measurement (D398). A comment citing a measurement is checked by
-/// nothing; this is the same claim as a test.
-///
-/// Compared at thirty-two bits (D480).
+/// The probe calls `sceKernelDirectMemoryQuery(0, flag, buffer, 256)` and allocates nothing; 0 and
+/// 1 are accepted, 2 and 4 refused (D398). Compared at 32 bits.
 #[test]
 fn the_memory_query_accepts_the_flags_the_console_accepted() {
     for flag in [0_u64, 1, 2, 4] {
         let id =
             format!("130-layout/direct-memory-query-flags:sceKernelDirectMemoryQuery:flags-{flag}");
-        // **Every code any run answered, not the first one listed.** Three of the four
-        // conditions stopped being constant once every capture was read rather than five of
-        // them: `flags-0` answered `0x0` sixteen times and `0x8002000d` three times, and
-        // `flags-2` and `flags-4` answered the invalid-argument code eighteen times and `0x0`
-        // once. Whether a query with no allocation finds something is a property of the state
-        // the machine was in, not of the flag - so the claim is membership of what was seen,
-        // which is what `values` exists for (D609).
+        // Every code any run answered: whether a query with no allocation finds something depends
+        // on the machine's state, not the flag, so the claim is membership of what was seen.
         let seen: Vec<u32> = measurement(&id)
             .values()
             .into_iter()
@@ -2138,8 +2017,7 @@ fn the_memory_query_accepts_the_flags_the_console_accepted() {
             .collect();
         assert!(!seen.is_empty(), "flag {flag}: no code was ever measured");
 
-        // The same buffer size the probe declared, so the conditions match rather than
-        // resemble each other.
+        // The buffer size the probe declared, so the conditions match.
         let mut info = [0_u8; 256];
         let answered = call(
             "sceKernelDirectMemoryQuery",
@@ -2153,26 +2031,19 @@ fn the_memory_query_accepts_the_flags_the_console_accepted() {
     }
 }
 
-/// Loading a module answers what the console answered, for the paths whose answer is fixed.
+/// Loading a module answers what the hardware answered, for the paths whose answer is fixed.
 ///
-/// The exact paths the probe asked for, in the same call form - `(path, 0, 0, 0, 0, &started)`.
-/// libkernel is resident and answers its well-known handle; a `/system` module is the
-/// firmware's own copy and is refused with the not-found errno. Both are properties of the
-/// call rather than of one machine's bookkeeping, which is what separates them from the
-/// `/app0` handles in [`OPAQUE`].
-///
-/// Compared at thirty-two bits (D480).
+/// The probe's exact paths and call form, `(path, 0, 0, 0, 0, &started)`. libkernel is resident and
+/// answers its well-known handle; a `/system` module is the platform's own copy and is refused with
+/// the not-found errno. Both are properties of the call, unlike the `/app0` handles in [`OPAQUE`].
+/// Compared at 32 bits.
 #[test]
 fn loading_a_module_answers_the_measured_code() {
-    // The paths are obSCEne's own, in the order its `obs_module_quantity` table names them,
-    // recovered from that table rather than guessed.
+    // The paths are obSCEne's own, in the order its `obs_module_quantity` table names them.
     //
-    // **Two of these cannot detect a wrong path, and that was checked rather than assumed.**
-    // Misspelling `libSceSysmodule.sprx` leaves this test passing: an unrecognised path falls
-    // through to the same `0x8002_0002` the firmware directories answer, so for the `/system/`
-    // entries this pins the answer and not the route to it - the same caveat the firmware
-    // directory test below records. The `libkernel` entries do not share it: they answer
-    // `0x2001`, so a wrong path there fails, and that is the break this was watched failing on.
+    // For the `/system/` entries this pins the answer and not the route: a misspelled path falls
+    // through to the same `0x8002_0002`. The `libkernel` entries answer `0x2001`, so a wrong path
+    // there fails.
     for (quantity, path) in [
         ("libkernel", "libkernel.prx"),
         ("libkernel-prx", "libkernel.prx"),
@@ -2211,30 +2082,11 @@ fn loading_a_module_answers_the_measured_code() {
     }
 }
 
-/// **The third field of the direct-memory query structure is the memory type.**
+/// The third field of the direct-memory query structure is the memory type.
 ///
-/// # The run that settled a question this project asked
-///
-/// `orbistoun-kernel` has carried this comment beside the field: *"What `3` denotes - a type,
-/// or some state - is still open, and one run distinguishes them: allocate with several types
-/// and query each back."* D398 could only say the field was not a boolean, because the console
-/// answered `3` for the region at the bottom of the map and no boolean is three.
-///
-/// That run has now been taken. obSCEne allocated one 16 KiB page with each of `WB_ONION` (0),
-/// `WC_GARLIC` (3) and `WB_GARLIC` (10) and read the field back for each:
-///
-/// ```text
-/// wb-onion  -> 0x0        wc-garlic -> 0x3        wb-garlic -> 0xa
-/// ```
-///
-/// Every one is the type it asked for. Three distinct answers rule out the other reading the
-/// probe named - *"if it is the same value for every type, it is state"* - so the field is the
-/// type, and orbistoun's model of it was right before it could be checked.
-///
-/// # Why this asserts through allocate rather than reading a constant
-///
-/// A test that queried a region orbistoun had already built would pass on the model alone. This
-/// takes the same path the probe took: ask for a type, then ask what is there.
+/// obSCEne allocated one 16 KiB page each of `WB_ONION` (0), `WC_GARLIC` (3) and `WB_GARLIC` (10)
+/// and read back `0x0`, `0x3` and `0xa`: the type asked for, not a state (D398). This takes the
+/// same path, allocate then query, so it does not pass on the model alone.
 #[test]
 fn the_third_query_field_is_the_memory_type_the_allocation_asked_for() {
     let mut compared = 0_usize;
@@ -2279,26 +2131,13 @@ fn the_third_query_field_is_the_memory_type_the_allocation_asked_for() {
     assert_eq!(compared, 3, "all three measured types are compared");
 }
 
-/// **A mutex attribute round-trips the types the console round-trips, and refuses the one it
-/// refuses.**
+/// A mutex attribute round-trips the types the hardware round-trips, and refuses the one it
+/// refuses.
 ///
-/// One attribute object, `Settype` then `Gettype`, for each of 0..4 - which is the run the
-/// queue said this needed and a capture has now taken. The console's answers:
-///
-/// ```text
-/// default 1     0 -> refused     1 -> 1     2 -> 2     3 -> 3     4 -> 4
-/// ```
-///
-/// # The refusal is asserted as behaviour, not as its recorded value
-///
-/// `type-0-read-back` reads `0xffff_ffff_ffff_ffff`, and that is **the probe's marker** - its
-/// own comment says each entry records what `Gettype` read back *"or -1 where `Settype` refused
-/// the type or `Gettype` failed"*. Asserting orbistoun answers `-1` would be asserting against
-/// the instrument, which is D497's mistake. So this asserts what the marker encodes: after
-/// `Settype(0)` the round trip must not succeed.
-///
-/// **What the console answers for that refusal is not measured**, so orbistoun answers its own
-/// placeholder and this test does not look at the code - only that zero does not come back.
+/// `Settype` then `Gettype` on one attribute object for each of 0..4: the hardware refused 0 and
+/// round-tripped 1 to 4, with a default of 1. `type-0-read-back` reads all ones, which is the
+/// probe's marker for a refusal, so this asserts that the round trip after `Settype(0)` does not
+/// succeed rather than asserting the marker. The refusal code itself is not measured.
 #[test]
 fn a_mutex_attribute_round_trips_the_types_the_console_does() {
     let want = |id: &str| {
@@ -2310,8 +2149,7 @@ fn a_mutex_attribute_round_trips_the_types_the_console_does() {
     };
 
     let mut attr = 0_u64;
-    // The address is taken once, because a closure below would otherwise hold a borrow of
-    // `attr` across every later use of it. A guest passes an address; so does this.
+    // The address is taken once, so a closure below does not hold a borrow of `attr`.
     let attr_ptr = std::ptr::from_mut(&mut attr) as u64;
     assert_eq!(
         call("scePthreadMutexattrInit", [attr_ptr, 0, 0, 0, 0, 0]),
@@ -2340,7 +2178,7 @@ fn a_mutex_attribute_round_trips_the_types_the_console_does() {
         "the type a freshly initialised attribute carries"
     );
 
-    // Zero: the console refuses it, so the round trip must not come back with zero.
+    // Zero: refused, so the round trip must not come back with zero.
     set(0);
     assert_eq!(get(&mut read), 0, "the attribute is still readable");
     assert_ne!(
@@ -2349,7 +2187,7 @@ fn a_mutex_attribute_round_trips_the_types_the_console_does() {
         "type 0 must not round-trip - the console refuses it"
     );
 
-    // One through four: a clean round trip, each read back as itself.
+    // One through four: each reads back as itself.
     let mut compared = 0_usize;
     for requested in 1..=4_u64 {
         let expected = want(&format!("type-{requested}-read-back"));
@@ -2365,23 +2203,12 @@ fn a_mutex_attribute_round_trips_the_types_the_console_does() {
     assert_eq!(compared, 4, "all four round-tripping types are compared");
 }
 
-/// **The console writes eight bytes where it was given four, and so does orbistoun.**
+/// The hardware writes eight bytes where it was given four, and so does orbistoun (D272).
 ///
-/// obSCEne plants `0xA5A5A5A5` in the word after an `int handle`, calls `sceKernelCreateSema`
-/// on the `int`, and reads the guard back. It read **`0x0`**: the call wrote past the end of
-/// what it was given, which obSCEne reports as a failure of the platform rather than of the
-/// check.
-///
-/// # This reverses a decision, on purpose
-///
-/// D210 narrowed orbistoun's write to four bytes, reasoning from public interface documentation
-/// that the destination is an `int *`. The measurement says otherwise, and `Measured` outranks
-/// `Published` here for exactly this reason - a documented layout and a real one have diverged
-/// once before (D468). A guest is built against the console, so writing four bytes leaves a
-/// neighbour holding a value the console would have cleared.
-///
-/// The guard is asserted, not the handle: the handle is orbistoun's own number and says
-/// nothing about the platform, where the word beyond it is the whole finding.
+/// obSCEne plants `0xA5A5A5A5` in the word after an `int handle`, calls `sceKernelCreateSema` on
+/// the `int`, and reads the guard back as `0x0`. A measured layout outranks a published one, and a
+/// guest is built against the hardware. The guard is asserted, not the handle, which is orbistoun's
+/// own number.
 #[test]
 fn creating_a_semaphore_writes_past_the_int_it_was_given() {
     /// The same shape the probe used: an `int` for the handle, a guard immediately after it.
@@ -2421,19 +2248,12 @@ fn creating_a_semaphore_writes_past_the_int_it_was_given() {
     );
 }
 
-/// The two encoder system modules the console loads, orbistoun answers the same way.
+/// The two encoder system modules the hardware loads, orbistoun answers the same way.
 ///
-/// # Why only two of the nine
-///
-/// obSCEne asked for nine and was answered `0` for `VENC` and `VIDEOREC` and `0x805a1000` for
-/// the other seven. **Only the two successes are claimed**, because orbistoun answers `0` to
-/// every identifier by design (D125) and the seven refusals may be a property of the capture's
-/// application category rather than of the modules - obSCEne's own D301 records that category
-/// deciding an unrelated call. Claiming the refusals would pin orbistoun to one process's
-/// privileges, which is the mistake `OPAQUE` exists to prevent.
-///
-/// So this is a real agreement on two, and the other seven stay in the queue with the question
-/// that would settle them written down.
+/// obSCEne asked for nine and was answered `0` for `VENC` and `VIDEOREC` and `0x805a1000` for the
+/// other seven. Only the two successes are claimed: orbistoun answers `0` to every identifier
+/// (D428), and the refusals may depend on the capture's application category rather than the
+/// modules.
 #[test]
 fn the_encoder_system_modules_the_console_loads_are_answered_the_same() {
     let mut compared = 0_usize;
@@ -2448,30 +2268,17 @@ fn the_encoder_system_modules_the_console_loads_are_answered_the_same() {
         );
         compared += 1;
     }
-    // Asserted rather than counted on: a loop that quietly compared fewer would pass.
+    // Asserted rather than counted on: a loop that compared fewer would pass.
     assert_eq!(compared, 2, "both measured successes are compared");
 }
 
-/// Every firmware directory is refused, including the one that is not under `/system`.
+/// Every platform module directory is refused, including the one not under `/system`.
 ///
-/// # What this test can and cannot tell you
-///
-/// **It cannot detect the bug that prompted it, and that was checked rather than assumed.**
 /// The platform keeps its modules in three directories, and `/system_ex/common_ex/lib/` is not
-/// under `/system/` - so a rule written as one prefix covered 274 modules and missed 234. But
-/// an unmatched path falls through to the unrecognised-path refusal, and the console answers
-/// `0x8002_0002` for a missing path too (`060-module/load-rejects-missing`). Both routes give
-/// the same code. Reverting to the single prefix leaves this test passing.
-///
-/// So this pins **the answer**, not the reasoning. The reasoning is worth keeping anyway, and
-/// the table it lives in earns its place the moment the loader stops refusing: `/app0` will
-/// load and a firmware path must not, and at that point the two branches stop agreeing. A
-/// distinction that is invisible today is the one that breaks silently tomorrow.
-///
-/// The two `/system` paths are measured (`110-modules/load`); `/system_ex` is the same rule
-/// applied to a directory the same reasoning covers, and **no probe has asked for one**.
-///
-/// Reference: the platform library survey in the sibling conformance-probe repository.
+/// under `/system/`. An unmatched path falls through to the unrecognised-path refusal, which
+/// answers the same `0x8002_0002` as a missing path, so this pins the answer and not the rule; the
+/// two diverge once `/app0` loads and a platform path must not. The two `/system` paths are
+/// measured (`110-modules/load`); `/system_ex` applies the same rule unmeasured.
 #[test]
 fn a_module_in_any_firmware_directory_is_refused() {
     let refused = measurement("110-modules/load:sceKernelLoadStartModule:system-libc")
@@ -2503,11 +2310,8 @@ fn a_module_in_any_firmware_directory_is_refused() {
     }
 }
 
-/// A title's own module gets a distinct, non-negative handle - the part a guest actually uses.
-///
-/// The console's numbers cannot be asserted (see [`OPAQUE`]), but the *shape* can, and it is
-/// the half a guest keys on: two loads must not answer the same handle, and neither may look
-/// like a failure.
+/// A title's own module gets a distinct, non-negative handle: two loads never share one, and
+/// neither looks like a failure.
 #[test]
 fn a_title_module_gets_its_own_non_negative_handle() {
     let mut seen = Vec::new();
@@ -2540,11 +2344,10 @@ fn a_title_module_gets_its_own_non_negative_handle() {
     }
 }
 
-/// The sysctl knobs orbistoun can source answer the widths the console answered.
+/// The sysctl knobs orbistoun can source answer the widths the hardware answered.
 ///
-/// **The width is the claim, not the value.** A caller reading four bytes of an eight-byte
-/// answer reads a different number than was written, which is the failure D210 and D272 both
-/// record; the console's byte count is the thing that pins it.
+/// The width is the claim, not the value: a caller reading four bytes of an eight-byte answer reads
+/// a different number (D272).
 #[test]
 fn the_sourceable_sysctl_knobs_answer_the_measured_widths() {
     for id in [
@@ -2584,19 +2387,12 @@ fn the_sourceable_sysctl_knobs_answer_the_measured_widths() {
     }
 }
 
-/// A guest starts in the float environment the console starts a title in.
+/// A guest starts in the float environment the hardware starts a title in (D486).
 ///
-/// # Why the four fields and not the raw value
-///
-/// The run measured `MXCSR` as `0x9fe0`. Four of its fields are **configuration** - flush to
-/// zero, denormals are zero, round to nearest, all six exceptions masked - and those are
-/// asserted here. The low six bits are sticky **status**, and `0x9fe0` carries the precision
-/// flag set by float work the console had already done. Reproducing that would tell a guest an
-/// inexact result had occurred before it executed an instruction, so orbistoun installs the
-/// configuration and leaves status clear (D486).
-///
-/// Read back from the register rather than compared against the constant, so this fails if the
-/// install silently does not happen - which comparing two constants could never catch.
+/// Of the measured `MXCSR`, four fields are configuration (flush to zero, denormals are zero, round
+/// to nearest, all six exceptions masked) and are asserted here. The low six bits are sticky
+/// status, which orbistoun leaves clear so a guest does not see an inexact result it never
+/// produced. Read back from the register, so a skipped install fails.
 #[test]
 fn the_guest_starts_in_the_float_environment_the_console_uses() {
     orbistoun_abi::enter::adopt_guest_float_environment();
@@ -2628,9 +2424,8 @@ fn the_guest_starts_in_the_float_environment_the_console_uses() {
         "exception masks"
     );
 
-    // **And the status bits are clear**, which is the half the raw measurement must not be
-    // copied for. Asserted rather than assumed: installing `0x9fe0` verbatim would pass every
-    // check above and still be wrong here.
+    // The status bits are clear: installing the raw measurement verbatim would pass everything
+    // above and fail here.
     assert_eq!(
         live & 0x3f,
         0,
@@ -2638,32 +2433,16 @@ fn the_guest_starts_in_the_float_environment_the_console_uses() {
     );
 }
 
-/// **The console's raw `MXCSR` is orbistoun's, once the sticky flags are taken off.**
+/// The hardware's raw `MXCSR` is orbistoun's, once the sticky flags are taken off.
 ///
-/// The raw value was outstanding because it mixes two things: `0x9fe0` is the four
-/// configuration fields *plus* bit 5, the precision flag, which the console's own startup
-/// arithmetic had already set before the title got control. Orbistoun installs `0x9fc0` and
-/// deliberately does not reproduce that bit - writing it would tell a guest an inexact result
-/// had occurred before it executed an instruction (D486).
-///
-/// That made it look unclaimable, and it is not. **The split is published, not guessed**: bits
-/// 0-5 of `MXCSR` are the exception *flags* - sticky status a program accumulates - and every
-/// other bit is configuration. So the whole raw value is claimable against the one thing it
-/// says about the platform:
-///
-/// ```text
-/// 0x9fe0 & !0x3f == 0x9fc0 == GUEST_MXCSR
-/// ```
-///
-/// This asserts the equality rather than the constant, so it stays true if the console's
-/// configuration is ever measured differently: the mask is the claim, not the number.
+/// Bits 0-5 of `MXCSR` are the exception flags, sticky status, and every other bit is
+/// configuration, so `0x9fe0 & !0x3f == 0x9fc0 == GUEST_MXCSR`. The equality is asserted rather
+/// than the constant (D486).
 #[test]
 fn the_consoles_float_configuration_is_the_raw_value_without_its_status_flags() {
-    /// Bits 0-5: the six exception flags, which are status and not configuration.
-    ///
-    /// Intel SDM Vol. 1, the `MXCSR` register: IE, DE, ZE, OE, UE, PE. Sticky - set by
-    /// arithmetic and cleared only by writing the register - so they describe what a program
-    /// has done, never how it was set up.
+    /// Bits 0-5: the six exception flags IE, DE, ZE, OE, UE and PE (Intel SDM Vol. 1, `MXCSR`).
+    /// Sticky: set by arithmetic and cleared only by writing the register, so they are status, not
+    /// configuration.
     const STATUS_FLAGS: u64 = 0x3f;
 
     let raw = measurement("035-libc/fpu-environment:mxcsr:raw");
@@ -2676,10 +2455,7 @@ fn the_consoles_float_configuration_is_the_raw_value_without_its_status_flags() 
     orbistoun_abi::enter::adopt_guest_float_environment();
     let live = u64::from(orbistoun_abi::enter::float_environment());
 
-    // **Every value any run reported, not one of them.** The measurement is not constant, so
-    // asserting `observation` would be asserting whichever run the generator happened to list
-    // first - and `values()` exists for exactly this: the variation is permitted, the claim is
-    // membership.
+    // Every value any run reported: the measurement is not constant, so the claim is membership.
     for value in &seen {
         assert_eq!(
             value & !STATUS_FLAGS,
@@ -2694,10 +2470,8 @@ fn the_consoles_float_configuration_is_the_raw_value_without_its_status_flags() 
         );
     }
 
-    // **And every bit they differ in is status.** Without this the assertions above would also
-    // pass if orbistoun had set a configuration bit the console clears, because masking hides
-    // it. The runs differ in the precision flag alone - twelve saw `0x9fe0`, three saw
-    // `0x9fc0` - which is what makes it status rather than platform (D609).
+    // Every bit the runs differ in is status; masking alone would hide a configuration bit
+    // orbistoun set and the hardware clears.
     let differing = seen.iter().fold(0, |acc, value| acc | (value ^ seen[0]));
     assert_eq!(
         differing & !STATUS_FLAGS,
@@ -2706,28 +2480,13 @@ fn the_consoles_float_configuration_is_the_raw_value_without_its_status_flags() 
     );
 }
 
-/// Every firmware path the encoder probe tried is refused, with the code the console gave.
+/// Every platform module path the encoder probe tried is refused, with the code the hardware gave.
 ///
-/// # What is being claimed
-///
-/// Twenty-four paths across four directories - `/system/common/lib`, `/system/priv/lib`,
-/// `/system/sys/lib` and `/system/lib` - each asked for by `sceKernelLoadStartModule`. The
-/// console answered `0x80020002` to every one, which is the vendor encoding of `ENOENT`.
-///
-/// **Compared at thirty-two bits**, which is the width the probe took it at: it reports
-/// `(uint64_t)(uint32_t)h` from a prototype returning `int`, so the upper half is obSCEne's
-/// cast rather than the console's answer (D480).
-///
-/// # Two of the four directories are right for the wrong reason
-///
-/// `/system/common/lib/` and `/system/priv/lib/` are in `FIRMWARE_MODULE_DIRECTORIES` and are
-/// refused because this project knows they hold the platform's own modules. `/system/sys/lib/`
-/// and `/system/lib/` are in no table and reach the same code by falling through to the
-/// unrecognised-path refusal at the end.
-///
-/// Same value, different reason - and the constant's own comment already records that hazard
-/// biting once, when `/system_ex` was refused by luck for two hundred and thirty-four modules.
-/// Asserted anyway, because the guest cannot tell the two apart and the answer is what it sees.
+/// Twenty-four paths across `/system/common/lib`, `/system/priv/lib`, `/system/sys/lib` and
+/// `/system/lib`, each answered `0x80020002`, the vendor encoding of `ENOENT`, compared at 32 bits.
+/// The first two directories are refused as known platform module directories; the other two reach
+/// the same code by falling through to the unrecognised-path refusal. The guest sees the same
+/// answer either way.
 #[test]
 fn a_firmware_encoder_path_is_refused() {
     let mut checked = 0_usize;
@@ -2756,17 +2515,11 @@ fn a_firmware_encoder_path_is_refused() {
     );
 }
 
-/// **Polling a semaphore honours the count asked for, at every boundary the console measured.**
+/// Polling a semaphore honours the count asked for, at every boundary the hardware measured.
 ///
-/// # What this caught
-///
-/// `sceKernelPollSema` ignored its second argument entirely and took one whatever was asked
-/// for. Two of the four conditions were wrong, and the damaging one is `need-2-of-1-left`: the
-/// console answers busy, orbistoun answered ok **having taken the one that was there**, so a
-/// caller believing it held two goes on to release two and the count runs away upward (D610).
-///
-/// The setup is the probe's own: a semaphore created with the initial count the condition
-/// names, then one poll.
+/// With `need-2-of-1-left` the hardware answers busy; taking the one that is there instead would
+/// let a caller release two it never held. Setup is the probe's: a semaphore created with the named
+/// initial count, then one poll.
 #[test]
 fn polling_a_semaphore_answers_the_measured_code_for_each_count() {
     for (condition, initial, need) in [
@@ -2781,9 +2534,7 @@ fn polling_a_semaphore_answers_the_measured_code_for_each_count() {
         .value()
         .expect("a code is a number") as u32;
 
-        // **A word, not an `int`.** `sceKernelCreateEventFlag` writes eight bytes through this
-        // pointer and `sceKernelCreateSema` four, so a narrow local is written past by one of
-        // them - which is a stack smash rather than a wrong answer, and is how this was found.
+        // A word, not an `int`: `sceKernelCreateEventFlag` writes eight bytes through this pointer.
         let mut handle = 0_u64;
         let name = std::ffi::CString::new(format!("orbistoun-{condition}")).expect("text");
         assert_eq!(
@@ -2794,8 +2545,8 @@ fn polling_a_semaphore_answers_the_measured_code_for_each_count() {
                     name.as_ptr() as u64,
                     0,
                     initial,
-                    // A ceiling above every initial count these conditions use, so the create
-                    // never fails for a reason this test is not about.
+                    // A ceiling above every initial count used, so the create never fails for an
+                    // unrelated reason.
                     8,
                     0,
                 ],
@@ -2813,18 +2564,10 @@ fn polling_a_semaphore_answers_the_measured_code_for_each_count() {
     }
 }
 
-/// **A wait mode naming neither `and` nor `or` is an argument error.**
+/// A wait mode naming neither `and` nor `or` is an argument error.
 ///
-/// # The branch that was two branches wearing one condition
-///
-/// The implementation read `mode & 0x01` and treated everything else as `or`. That is right for
-/// `0x02` and wrong for `0x00`, and the two were indistinguishable because a pattern that fails
-/// an `and` usually satisfies an `or` - so the wrong branch produced the right answer in every
-/// case anybody had tried. The console separates them: `0x00` answers `0x80020016` where `0x02`
-/// answers ok (D610).
-///
-/// The probe's setup, in its own words: a two-bit pattern with one bit set, polled under four
-/// modes.
+/// `0x02` is `or`, but `0x00` is invalid: the hardware answers `0x80020016` for it. Setup is the
+/// probe's: a two-bit pattern with one bit set, polled under four modes.
 #[test]
 fn an_event_flag_answers_the_measured_code_for_each_wait_mode() {
     /// The two bits the pattern names.
@@ -2866,12 +2609,10 @@ fn an_event_flag_answers_the_measured_code_for_each_wait_mode() {
     }
 }
 
-/// **Waking an address nobody is waiting on succeeds.**
+/// Waking an address nobody is waiting on succeeds.
 ///
-/// The condition is the one worth pinning, because the tempting implementation refuses it: a
-/// wake that found no waiter did nothing, and a call that did nothing looks like a call that
-/// failed. The console answers `0` - the count of waiters released is not the return value, and
-/// a caller must not read "none were waiting" as an error (D611).
+/// The hardware answers `0`: the count of waiters released is not the return value, and "none were
+/// waiting" is not an error.
 #[test]
 fn waking_an_address_with_no_waiter_succeeds() {
     let expected =
@@ -2879,8 +2620,7 @@ fn waking_an_address_with_no_waiter_succeeds() {
             .value()
             .expect("a code is a number") as u32;
 
-    // An address in this test's own frame that nothing has ever waited on. The call takes a
-    // guest address and guest memory is the host's under an identity mapping.
+    // An address in this test's own frame that nothing has waited on; guest memory is the host's.
     let mut nobody_waits_here = 0_u32;
     let answered = call(
         "sceKernelSyncOnAddressWake",
@@ -2898,13 +2638,8 @@ fn waking_an_address_with_no_waiter_succeeds() {
         "the console answered {expected:#x} to a wake with nothing waiting"
     );
 
-    // **And the same code where a waiter *was* released.** Three conditions across two checks
-    // record one fact - that this call answers `0` - and `two_checks_of_one_fact_do_not_disagree`
-    // refuses to let them be filed differently, correctly: a claim covering one covers all three.
-    //
-    // What is asserted is the return code and not the release. Whether a waiter was woken is a
-    // second fact, it is not what these measurements carry, and reproducing it needs a thread
-    // that blocks - so it is not smuggled in here under a code that would pass without it.
+    // The same code where a waiter was released: three conditions record one fact, that this call
+    // answers `0`. Whether a waiter woke is a second fact these measurements do not carry.
     for also in [
         "032-syncaddr/wake-releases-a-waiter:sceKernelSyncOnAddressWake:returned",
         "032-syncaddr/wake-releases-a-waiter:sceKernelSyncOnAddressWake:retry-all",
@@ -2917,16 +2652,14 @@ fn waking_an_address_with_no_waiter_succeeds() {
     }
 }
 
-/// **The system software version query answers, and the enumeration of users does too.**
+/// The system software version query answers, and the enumeration of users does too.
 ///
-/// Four return codes from three calls, each `0` on the console. Grouped because the claim is the
-/// same in each case and the setup is one out-parameter: what is being pinned is that orbistoun
-/// answers rather than refusing, which is what a guest branches on before it reads anything
-/// (D611).
+/// Four return codes from three calls, each `0` on the hardware: orbistoun answers rather than
+/// refusing, which is what a guest branches on first.
 #[test]
 fn the_queries_that_answer_zero_on_the_console_answer_zero_here() {
-    // Room for whatever each call writes, well past what any of them is known to use, so a
-    // write past the field this test knows about lands in the buffer rather than the stack.
+    // Room well past what any of these calls writes, so an overrun lands in the buffer rather than
+    // the stack.
     let mut out = [0_u8; 512];
 
     for (id, symbol) in [
@@ -2949,11 +2682,9 @@ fn the_queries_that_answer_zero_on_the_console_answer_zero_here() {
     }
 }
 
-/// **A freshly initialised thread attribute names no stack and a default size.**
-///
-/// Two measurements of one object, and they are worth having together: an attribute that
-/// answered an address before anybody set one would be handing out somebody else's stack, and a
-/// size of zero would make every `scePthreadCreate` from a default attribute fail (D611).
+/// A freshly initialised thread attribute names no stack and a default size: an address before one
+/// was set would hand out someone else's stack, and a zero size would fail every `scePthreadCreate`
+/// from a default attribute.
 #[test]
 fn a_fresh_thread_attribute_names_no_stack_and_the_measured_default_size() {
     let expected_address = measurement(
@@ -2967,11 +2698,8 @@ fn a_fresh_thread_attribute_names_no_stack_and_the_measured_default_size() {
     .value()
     .expect("a size is a number");
 
-    // **The storage, not the handle.** Every call in this family takes a `ScePthreadAttr *` -
-    // the address of the caller's variable - and reads the handle out of it, so passing the
-    // handle itself has the implementation read a word from wherever that handle happens to
-    // point. That is a stack read at an arbitrary address, which is how this test first
-    // announced itself: an access violation rather than a wrong answer.
+    // The storage, not the handle: every call in this family takes a `ScePthreadAttr *` and reads
+    // the handle out of it.
     let mut attr = 0_u64;
     let attr_at = std::ptr::from_mut(&mut attr) as u64;
     assert_eq!(
@@ -3009,16 +2737,11 @@ fn a_fresh_thread_attribute_names_no_stack_and_the_measured_default_size() {
     call("scePthreadAttrDestroy", [attr_at, 0, 0, 0, 0, 0]);
 }
 
-/// **`sceKernelIsStack` answers zero and reports the span through its out-parameters.**
+/// `sceKernelIsStack` answers zero and reports the span through its out-parameters.
 ///
-/// The measurement that says so is the one D611 refused to claim, because the console answered
-/// `0` where orbistoun answered `1`. Reading the probe's own check settled it: the call takes
-/// three arguments, the return is a status, and the bounds are the output. Orbistoun answered an
-/// inverted flag and wrote nothing (D612).
-///
-/// What is asserted is the return code. The bounds a console reported are that machine's
-/// addresses and are listed as opaque; that orbistoun writes *its* span is asserted in
-/// `orbistoun-kernel`'s own tests, where the span can be set.
+/// The call takes three arguments, returns a status, and outputs the bounds. The return code is
+/// asserted; the hardware's bounds are that machine's addresses and are opaque, and orbistoun's
+/// span is asserted in `orbistoun-kernel`'s own tests.
 #[test]
 fn asking_where_the_stack_is_answers_the_measured_status() {
     let expected = measurement("031-stackattr/address-is-the-base:sceKernelIsStack:is-stack")

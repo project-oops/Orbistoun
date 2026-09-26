@@ -3,8 +3,7 @@
 use crate::run::cmd_run;
 use anyhow::Result;
 
-/// `compat list` - every recorded title, furthest first.
-/// Show the corpus manifest: every source and whether each asset is pinned yet.
+/// Show the corpus manifest: every source and whether each asset is pinned.
 pub(crate) fn cmd_corpus_list(manifest: &std::path::Path) -> Result<()> {
     let m = orbistoun_corpus::load(manifest)?;
     if m.source.is_empty() {
@@ -34,8 +33,8 @@ pub(crate) fn cmd_corpus_sync(
     titles: &std::path::Path,
     only: Option<&str>,
 ) -> Result<()> {
-    // A source's relative `path` (and thus a local source) resolves from the repo root, which is
-    // where the CLI runs. Kept explicit so the corpus crate does not guess a working directory.
+    // A source's relative `path` resolves from the repository root, where the CLI runs; the corpus
+    // crate does not guess a working directory.
     let root = std::path::Path::new(".");
     let mut m = orbistoun_corpus::load(manifest)?;
     let client = orbistoun_corpus::client()?;
@@ -46,15 +45,12 @@ pub(crate) fn cmd_corpus_sync(
         if only.is_some_and(|s| s != src.name) {
             continue;
         }
-        // **The root the manifest asked for, not always `titles`.** A payload mirror under
-        // `titles/` made twenty-five one-file ELFs look like installed titles (D661). The
-        // `--titles` argument still names the titles root; the siblings are resolved beside it
-        // so a caller overriding one overrides all three consistently.
+        // The root the source's target names, not always `titles` (D661). The other roots derive
+        // from the `--titles` argument, so overriding it moves all three together.
         let into = beside_target(titles, src.target);
         println!("{}: -> {}", src.name, src.target.label());
-        // **One source that cannot be fetched does not stop the rest** - an app nobody has built
-        // or released yet is listed so it arrives the moment either exists. It is said, counted and
-        // fails the sync at the end, after every source that could come has come.
+        // A source that cannot be fetched does not stop the rest. It is reported, counted, and
+        // fails the sync after every other source has arrived.
         let outcomes = match src.sync(root, &into, &client) {
             Ok(outcomes) => outcomes,
             Err(e) => {
@@ -114,9 +110,8 @@ pub(crate) fn cmd_corpus_sync(
 
 /// A sibling of the titles root, by name.
 ///
-/// **Derived from the titles root rather than resolved separately**, so `--titles` keeps meaning
-/// what it says: point it at a scratch directory and payloads and packages follow it there,
-/// instead of one of the three quietly staying in the real data directory (D661).
+/// Derived from the titles root, so a `--titles` pointing at a scratch directory takes payloads and
+/// packages with it (D661).
 fn beside(titles: &std::path::Path, name: &str) -> std::path::PathBuf {
     titles
         .parent()
@@ -125,8 +120,7 @@ fn beside(titles: &std::path::Path, name: &str) -> std::path::PathBuf {
 
 /// The root a source's target names, given the titles root.
 ///
-/// The same mapping `cmd_corpus_sync` uses, in one place so `run` cannot look for a guest
-/// somewhere `sync` did not put it.
+/// Shared with `cmd_corpus_sync` so `run` looks for a guest where `sync` put it.
 fn beside_target(titles: &std::path::Path, target: orbistoun_corpus::Target) -> std::path::PathBuf {
     match target {
         orbistoun_corpus::Target::Titles => titles.to_path_buf(),
@@ -155,11 +149,8 @@ pub(crate) fn cmd_corpus_run(
             let path = src.path_for(&beside_target(titles, src.target), &a.file);
             println!();
             println!("=== {} / {} ===", src.name, a.file);
-            // The ordinary run path, which records to compat/ on its own. Deliberately no
-            // handoff diagnostic: an intervened run is not recorded (D227), so this measures
-            // the honest default-entry baseline. When the elfldr handoff becomes the default
-            // entry for payload-shaped guests, these records reflect the progress a diagnostic
-            // handoff run shows today (see D411).
+            // The ordinary run path, which records to `compat/` itself. No diagnostic handoff: an
+            // intervened run is not recorded (D227), so this measures the default-entry baseline.
             cmd_run(&path, limit, calls, profile, (None, None), false)?;
         }
     }

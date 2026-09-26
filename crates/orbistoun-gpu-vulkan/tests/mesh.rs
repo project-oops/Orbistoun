@@ -1,15 +1,10 @@
-//! A mesh stage on a device, which is where a guest's primitive shader has to end up.
+//! A mesh stage on a device, where a guest's primitive shader is translated to (D688).
 //!
-//! D688 decided that an NGG primitive shader translates to a mesh shader: it declares how many
-//! vertices and primitives it will emit, writes the primitive's indices, and writes per-vertex
-//! outputs, which is `MSG_GS_ALLOC_REQ`, `exp prim` and `exp pos`/`exp param` in that order.
-//! Nothing had run. This is the host half - hand-assembled, like every other oracle here -
-//! standing up before anything is translated into it, which is the order D549 argues for and
-//! the order the fragment work followed.
-//!
-//! The comparison is the point. The same triangle drawn by the vertex path and by the mesh
-//! path must produce the same frame, because the two differ only in which stage produced the
-//! geometry.
+//! A mesh shader declares how many vertices and primitives it emits, writes the primitive's
+//! indices, and writes per-vertex outputs: `MSG_GS_ALLOC_REQ`, `exp prim` and `exp pos`/`exp param`
+//! in that order. This is the hand-assembled host half. The same triangle drawn by the vertex path
+//! and the mesh path must produce the same frame, since they differ only in which stage produced
+//! the geometry.
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::{draw_mesh_with, draw_with};
@@ -36,21 +31,11 @@ fn mesh_or_skip(what: &str) -> bool {
     }
 }
 
-/// **A mesh shader draws, and draws what the vertex path draws.**
+/// A mesh shader draws, and draws what the vertex path draws.
 ///
-/// # What it asserts
-///
-/// Every pixel is the colour the mesh shader gave its vertices, over a clear it never writes -
-/// so a draw that produced nothing reads as a different answer rather than an absent one. And
-/// the frame is compared byte for byte against the same triangle drawn through the vertex
-/// stage, which is the assertion that means something: the two paths share a fragment shader
-/// and an attachment and differ only in what produced the geometry.
-///
-/// # What it cannot assert
-///
-/// That a *translated* primitive shader would do this. Nothing is translated here - the mesh
-/// module is hand-assembled, exactly like the vertex module it is compared against, and the
-/// point is to have an oracle before there is anything to check against it.
+/// Every pixel is the mesh vertices' colour, over a clear it never writes, and the frame matches
+/// the same triangle drawn through the vertex stage byte for byte: the two share a fragment shader
+/// and an attachment. Nothing is translated.
 #[test]
 fn a_mesh_shader_draws_the_triangle_the_vertex_path_draws() {
     if !mesh_or_skip("a_mesh_shader_draws_the_triangle_the_vertex_path_draws") {

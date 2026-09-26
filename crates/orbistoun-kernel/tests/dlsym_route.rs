@@ -1,23 +1,9 @@
-//! `sceKernelDlsym` resolves a platform name on the payload route.
+//! `sceKernelDlsym` resolves a platform name on the payload route (D669).
 //!
-//! # Why the two routes are two test binaries
-//!
-//! Both the route a run presents and the table of stubs a lookup may answer with are
-//! `OnceLock`s - set once by the loader, first setter wins. A test that sets either decides
-//! for every test sharing its process, so each route gets a binary of its own and installs
-//! its own table. [`dlsym_route_title`](../dlsym_route_title.rs) is the other half.
-//!
-//! # What sent them here
-//!
-//! orbistoun resolved every platform name by name, on both routes. obSCEne's
-//! `060-module/dlsym-resolves-known-symbol` **fails** `0x8002_0003` on the package leg of
-//! sweep 20260909-234847 - a known symbol, a valid handle - and every `dlsym` measurement in
-//! that leg reads `0x0`.
-//!
-//! It was not only a wrong answer. obSCEne's title bootstrap resolves `getpid` to derive
-//! libkernel's base, and reads a non-zero base as *"this process is a payload"* - so orbistoun
-//! running a native title reported itself as `payload/unknown-gpu`, and every conformance
-//! comparison went against the wrong leg of the sweep (D669).
+//! The route and the stub table a lookup answers with are both `OnceLock`s, set once per
+//! process, so each route has its own test binary; [`dlsym_route_title`](../dlsym_route_title.rs)
+//! is the other half. On the hardware a title's `dlsym` for a platform name fails, and a guest
+//! that sees one resolve takes itself for a payload.
 
 use orbistoun_core::route::{Route, present};
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
@@ -25,8 +11,8 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 /// A name that is implemented, so a refusal cannot be mistaken for "nothing implements it".
 const IMPLEMENTED: &str = "sceKernelUsleep";
 
-/// Where the pretend stub lives. Nothing is called, so any address will do - but not zero, and
-/// not one that could be confused with a real answer.
+/// Where the pretend stub lives. Nothing is called, so any non-zero address that cannot be
+/// mistaken for a real answer will do.
 const THUNK_AT: u64 = 0x0000_7000_0000_1234;
 
 fn dlsym() -> GuestFn {
@@ -44,12 +30,10 @@ fn guest_string(text: &str) -> (Vec<u8>, u64) {
     (storage, at)
 }
 
-/// **A payload resolves platform names, and has to.**
+/// A payload resolves platform names.
 ///
-/// The open-toolchain runtime asks the platform for its C library a name at a time and reaches
-/// `main` with a table of nulls otherwise - the wall three sessions of diagnostics arrived at
-/// from different directions (D365). Refusing on both routes would fix a title and break every
-/// payload, so this is the half that says the narrowing stopped where the measurement did.
+/// The open-toolchain runtime asks the platform for its C library one name at a time and
+/// reaches `main` with a table of nulls otherwise (D365).
 #[test]
 fn a_payload_resolves_a_platform_name() {
     present(Route::Payload);

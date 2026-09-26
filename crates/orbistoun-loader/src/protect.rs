@@ -1,20 +1,10 @@
-//! Applying each segment's declared access, once its bytes are in place.
+//! Applying each segment's declared access once its bytes are in place.
 //!
-//! Population needs write access; execution needs the opposite. An image is therefore
-//! placed as one read-write span and re-protected here, after relocation - so guest
-//! text is writable for exactly as long as it takes to build, and no longer.
-//!
-//! # Segments share pages, and the naive loop gets it wrong
-//!
-//! Segment boundaries are not page boundaries. Where a read-only segment ends partway
-//! through a page that the next, writable segment begins in, that page must satisfy
-//! **both**. A loop that protects each segment in turn applies whichever came last and
-//! silently strips permissions the other still needs - producing a fault at an address
-//! that belongs to neither segment obviously.
-//!
-//! So protection is computed per page as the union of every segment touching it, then
-//! merged back into runs. That is what [`page_protections`] does, and it is pure, so
-//! the rule is testable without mapping anything.
+//! An image is placed as one read-write span and re-protected here after relocation, so
+//! guest text is writable only while it is built. Segment boundaries are not page
+//! boundaries: a page shared by two segments gets the union of their access, since
+//! protecting segments in turn would strip what the earlier one needs. [`page_protections`]
+//! computes that per page and merges the result into runs.
 
 use std::collections::BTreeMap;
 
@@ -44,18 +34,16 @@ pub struct ProtectionTally {
     pub writable: u64,
     /// Bytes that ended up both writable and executable.
     ///
-    /// Not an error - a guest may legitimately ask for it, and refusing would make a
-    /// loadable image unloadable. Counted because it is a real hazard and because a
-    /// silent downgrade would fault somewhere unrelated (D060).
+    /// Not an error: a guest may ask for it, and a silent downgrade would fault somewhere
+    /// unrelated. Counted because it is a hazard.
     pub writable_and_executable: u64,
 }
 
 /// Computes the protection every page should end up with.
 ///
-/// Pure, so the sharing rule above is testable with nothing mapped - the D016 pattern.
-/// Runs come back in ascending address order with adjacent equal ones merged, because
-/// one call per page across a 96 MB image is twenty-five thousand syscalls to describe
-/// five regions.
+/// Pure, so the sharing rule is testable with nothing mapped (D016). Runs come back in
+/// ascending address order with adjacent equal ones merged, so a large image takes one call
+/// per region rather than one per page.
 pub fn page_protections(segments: &[PlacedSegment], page: u64) -> Vec<ProtectionRun> {
     if page == 0 {
         return Vec::new();
@@ -97,8 +85,7 @@ pub fn page_protections(segments: &[PlacedSegment], page: u64) -> Vec<Protection
 
 /// Applies every segment's declared access to a placed, relocated image.
 ///
-/// Call **after** relocation. Doing it earlier makes text read-only while relocations
-/// still need to write into it.
+/// Call after relocation: earlier, text is read-only while relocations still write to it.
 pub fn apply(image: &mut Image, page: u64) -> Result<ProtectionTally, LoadError> {
     let runs = page_protections(image.segments(), page);
     let mut tally = ProtectionTally::default();
@@ -143,10 +130,9 @@ mod tests {
         }
     }
 
+    /// A text segment ends read-execute and not writable.
     #[test]
     fn a_text_segment_becomes_read_execute_and_stops_being_writable() {
-        // The whole point of the pass: the image is populated read-write, and text
-        // must not stay that way.
         let runs = page_protections(&[seg(0x1000, 0x2000, RX)], 0x1000);
         assert_eq!(
             runs,
@@ -158,60 +144,57 @@ mod tests {
         );
     }
 
+    /// A page shared by two segments gets the union of their access.
     #[test]
     fn two_segments_sharing_a_page_get_the_union_not_the_last_one() {
-        // The failure this function exists to prevent. Text ends partway through a
-        // page that data begins in; applying whichever came last strips permissions
-        // the other still needs, and the fault lands at an address belonging to
-        // neither segment obviously.
+        // Text ends partway through a page that data begins in.
         let runs = page_protections(&[seg(0x1000, 0x800, RX), seg(0x1800, 0x800, RW)], 0x1000);
         assert_eq!(runs.len(), 1, "one shared page");
         let p = runs[0].protection;
         assert!(p.read && p.write && p.execute, "the page must satisfy both");
     }
 
+    /// Adjacent pages with equal protection merge into one run.
     #[test]
     fn adjacent_pages_with_equal_protection_merge_into_one_run() {
-        // One syscall per page across a 96 MB image is twenty-five thousand calls to
-        // describe five regions.
         let runs = page_protections(&[seg(0, 0x10_000, R)], 0x1000);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].len, 0x10_000);
     }
 
+    /// A gap between segments breaks a run.
     #[test]
     fn a_gap_between_segments_breaks_the_run() {
-        // Merging across a hole would re-protect pages no segment claimed, which may
-        // not even be reserved.
+        // Merging across a hole would re-protect pages no segment claims.
         let runs = page_protections(&[seg(0x1000, 0x1000, R), seg(0x9000, 0x1000, R)], 0x1000);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].base, 0x1000);
         assert_eq!(runs[1].base, 0x9000);
     }
 
+    /// Runs are in ascending address order whatever the program header order.
     #[test]
     fn runs_come_back_in_ascending_address_order() {
-        // Regardless of the order the program headers happened to be in.
         let runs = page_protections(&[seg(0x8000, 0x1000, R), seg(0x1000, 0x1000, RX)], 0x1000);
         assert!(runs.windows(2).all(|w| w[0].base < w[1].base));
     }
 
+    /// A segment ending mid-page protects that whole page.
     #[test]
     fn a_segment_ending_mid_page_still_protects_that_whole_page() {
-        // Protection is page-granular whatever the segment says, so the tail page must
-        // be covered - otherwise it keeps the read-write it was populated with.
+        // Otherwise the tail page keeps the read-write it was populated with.
         let runs = page_protections(&[seg(0x1000, 0x1001, RX)], 0x1000);
         assert_eq!(runs[0].len, 0x2000, "the partial second page counts");
     }
 
+    /// A write-execute segment is honoured and counted, not downgraded.
     #[test]
     fn a_write_execute_segment_is_honoured_rather_than_downgraded() {
-        // Refusing would make a loadable image unloadable; downgrading would fault
-        // somewhere unrelated. It is honoured and counted (D060).
         let runs = page_protections(&[seg(0x1000, 0x1000, RW | 0x1)], 0x1000);
         assert!(runs[0].protection.is_writable_and_executable());
     }
 
+    /// No segments yield no runs.
     #[test]
     fn an_empty_segment_list_yields_no_runs() {
         assert!(page_protections(&[], 0x1000).is_empty());

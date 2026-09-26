@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 
 /// `learn` - record something established about a guest function.
 ///
-/// Merges rather than replaces. A session that learns one edge case should not have to
-/// restate everything already known, and it must not silently drop it either.
+/// Merges rather than replaces, so a new edge case neither restates nor drops what is already
+/// known.
 pub(crate) fn cmd_learn(learned: &Learned) -> Result<()> {
     use orbistoun_hle::knowledge::{KnowledgeFile, Record};
 
@@ -22,9 +22,8 @@ pub(crate) fn cmd_learn(learned: &Learned) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
 
-    // **The merge rule is not here.** It belongs to the crate that owns the format, so the
-    // loop can record what it measured through the same rule rather than a second copy of it
-    // (D291, D292). What a shim keeps is where the file is, and what to say afterwards.
+    // The merge rule lives in the crate that owns the format, so the loop records through the same
+    // rule (D292). The shim only locates the file and reports.
     let record = Record {
         function: learned.function.clone(),
         arity: learned.arity,
@@ -38,10 +37,8 @@ pub(crate) fn cmd_learn(learned: &Learned) -> Result<()> {
     };
     let faults = file.merge(&record, &orbistoun_nid::today());
 
-    // **Refused rather than defaulted.** A default would pick a provenance on the writer's
-    // behalf, and every available default is a lie: `assumed` understates work that was
-    // really done, and anything stronger overstates it. Refusing costs one retry and is
-    // the only option that cannot record something untrue (D180).
+    // Refused rather than defaulted: `assumed` would understate real work and anything stronger
+    // would overstate it (D180).
     if !faults.is_empty() {
         anyhow::bail!(
             concat!(
@@ -79,7 +76,7 @@ Record how it is known: ",
 
 /// `knows` - print what is known about guest functions.
 pub(crate) fn cmd_knows(pattern: Option<&str>) {
-    /// Written explicitly so the replacement below is not a bare escape in a call.
+    /// Written as a constant so the replacement below is not a bare escape in a call.
     const NEWLINE: &str = "
 ";
     /// What a wrapped purpose line is prefixed with, to line up under the first.
@@ -117,8 +114,8 @@ pub(crate) fn cmd_knows(pattern: Option<&str>) {
             println!("  arity {arity}");
         }
         if !f.purpose.is_empty() {
-            // Indented so a multi-line purpose reads as one block rather than
-            // colliding with the labels beneath it.
+            // Indented so a multi-line purpose reads as one block, apart from the labels beneath
+            // it.
             let indented = f.purpose.trim().replace(NEWLINE, PURPOSE_CONTINUATION);
             println!("  purpose {indented}");
         }
@@ -156,16 +153,11 @@ pub(crate) fn cmd_knows(pattern: Option<&str>) {
     }
 }
 
-/// How the knowledge base knows what it claims, and how much of it is guessing.
+/// How the knowledge base knows what it claims, and how much of it is assumed.
 ///
-/// **Printed unprompted, because a provenance field nobody looks at is a provenance field
-/// nobody maintains.** Two hundred entries all resting on an assumption and two hundred
-/// measured against hardware are the same count and completely different projects; only
-/// this breakdown tells them apart.
-///
-/// The open-question total is expected to *rise* as more is written down - an assumption
-/// only appears once somebody notices it - and to fall as hardware answers them. A number
-/// that only ever falls is measuring candour rather than knowledge.
+/// Printed unprompted so the provenance field stays maintained: equal counts of assumed and
+/// measured entries describe very different knowledge. The open-question total rises as assumptions
+/// are written down and falls as hardware answers them.
 fn print_provenance_summary(knowledge: &orbistoun_hle::knowledge::Knowledge) {
     use orbistoun_hle::knowledge::Oracle;
 
@@ -192,8 +184,7 @@ fn print_provenance_summary(knowledge: &orbistoun_hle::knowledge::Knowledge) {
         println!("  {open} open questions a probe on real hardware could settle");
     }
 
-    // Never silent on a fault. A knowledge base that quietly contains unaccounted claims
-    // is worse than one with none, because it reads as though it had been checked.
+    // Never silent on a fault: unaccounted claims would read as checked.
     let faults = knowledge.provenance_faults();
     if !faults.is_empty() {
         println!(

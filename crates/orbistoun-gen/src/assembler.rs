@@ -1,21 +1,10 @@
-//! Getting encodings out of the reference assembler - live, or from a recording.
+//! Getting encodings out of the reference assembler, live or from a recording (D209).
 //!
-//! # Why a recording is a first-class mode
-//!
-//! Every table under `crates/orbistoun-shader/data/` is *solved* from bytes the reference
-//! assembler produced, rather than transcribed from a document (D085). That is the right
-//! design and it has one consequence nobody had confronted: **nothing checks that the
-//! committed tables still match what the generator would produce**, because regenerating
-//! needs `llvm-mc` with the AMDGPU target and CI has no such thing.
-//!
-//! So the assembler call is a seam. [`Source::Llvm`] shells out, exactly as before.
-//! [`Source::Transcript`] replays a recording of that call, and needs nothing installed -
-//! which makes every solver in this crate testable in CI, and makes the drift question
-//! answerable at all.
-//!
-//! Recording is deliberately a separate act (`--record`) rather than a cache. A cache
-//! decides for itself when it is stale; a committed recording is a decision somebody made,
-//! with the target it was taken for written next to it.
+//! The tables under `crates/orbistoun-shader/data/` are solved from assembled bytes
+//! (D085), and a live run needs `llvm-mc` with the `AMDGPU` target. [`Source::Llvm`] shells
+//! out; [`Source::Transcript`] replays a committed recording and needs nothing installed,
+//! so the solvers and the committed tables are checked in CI. Recording is an explicit act
+//! (`--record`), not a cache that decides for itself when it is stale.
 
 use std::path::{Path, PathBuf};
 
@@ -25,22 +14,21 @@ use crate::target::{MATTR, MCPU};
 
 /// What an assembler invocation produced.
 ///
-/// Both streams, because the diagnostics are load-bearing rather than noise: a probe file
-/// is written for one architecture generation and assembled against another, so rejections
-/// are *expected* and the list of them is part of the answer (see `probes` in the operand
-/// solver).
+/// Both streams, because rejections are expected when a probe file is assembled against
+/// another generation, and the list of them is part of the answer (see `probes` in the
+/// operand solver).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Output {
-    /// Standard output - the assembled listing, with `; encoding: [..]` per line.
+    /// Standard output: the assembled listing, with `; encoding: [..]` per line.
     pub(crate) stdout: String,
-    /// Standard error - one diagnostic per refused line.
+    /// Standard error: one diagnostic per refused line.
     pub(crate) stderr: String,
 }
 
 /// Where encodings come from.
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
-    /// Invoke `llvm-mc`. Needs it on `PATH`, built with the AMDGPU target.
+    /// Invoke `llvm-mc`, which must be on `PATH` and built with the `AMDGPU` target.
     Llvm {
         /// Triple to assemble for. Compute and graphics need different ones.
         triple: String,
@@ -62,9 +50,8 @@ impl Source {
 /// Assembles `input`, or replays what a recording says it produced.
 ///
 /// `key` names the invocation. Under [`Source::Transcript`] it selects the recording; under
-/// [`Source::Llvm`] with `record` set it names the file written. It is the caller's job to
-/// keep keys stable, for the same reason a fixture filename is: a renamed key silently
-/// stops matching its recording.
+/// [`Source::Llvm`] with `record` set it names the file written. The caller keeps keys
+/// stable, because a renamed key stops matching its recording.
 pub(crate) fn assemble(
     source: &Source,
     key: &str,
@@ -83,11 +70,9 @@ pub(crate) fn assemble(
 
 /// Shells out to the reference assembler.
 ///
-/// A non-zero exit is **not** an error. `llvm-mc` reports every rejected line and still
-/// emits encodings for the ones that assembled, and both halves are wanted - so the status
-/// is ignored and the streams are returned. What *is* an error is not being able to run it
-/// at all, which is a missing toolchain rather than a rejected probe and deserves to say so
-/// in those words.
+/// A non-zero exit is not an error: `llvm-mc` reports rejected lines and still emits
+/// encodings for the rest, and both are wanted. Failing to run it at all is an error, named
+/// as a missing toolchain.
 fn run_llvm(triple: &str, input: &str) -> Result<Output> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
@@ -124,9 +109,8 @@ fn run_llvm(triple: &str, input: &str) -> Result<Output> {
 
 /// Asks the reference what a sequence of words decodes to, or replays a recording.
 ///
-/// The other direction, and a separate mode of the same tool. The sweep in the encoding
-/// solver builds candidate words and needs to know which of them are instructions at all -
-/// a question only the disassembler can answer.
+/// The encoding solver's sweep needs to know which candidate words are instructions, which
+/// only the disassembler answers.
 pub(crate) fn disassemble(
     source: &Source,
     key: &str,
@@ -161,10 +145,8 @@ fn hex_lines(words: &[Vec<u32>]) -> String {
 
 /// Pairs disassembled names back to the words that produced them.
 ///
-/// **A rejected line produces no output line at all**, so stdout alone cannot say which
-/// input each name belongs to - and attaching a real name to the wrong word would put a
-/// real instruction in the wrong family, quietly. The refused line numbers come from the
-/// diagnostics, and the names fill the gaps between them in order.
+/// A rejected line produces no output line, so the refused line numbers come from the
+/// diagnostics and the names fill the gaps between them in order.
 fn names_of(count: usize, output: &Output) -> Vec<Option<String>> {
     let refused: std::collections::BTreeSet<usize> = output
         .stderr
@@ -188,8 +170,8 @@ fn names_of(count: usize, output: &Output) -> Vec<Option<String>> {
         }
     }
     if !emitted.is_empty() {
-        // More names than places to put them: the accounting above is wrong somewhere, and
-        // a misaligned sweep is worse than no sweep.
+        // More names than places means the accounting is wrong; no names beats misaligned
+        // ones.
         return vec![None; count];
     }
     named
@@ -238,21 +220,14 @@ fn paths(dir: &Path, key: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 /// Replays a recording.
 ///
-/// **This reads the answers and does not look at the question.** The recorded input is
-/// deliberately untouched here, because a replay that checked its own input would have to
-/// be handed that input, and the callers that have it are the solvers - so the comparison
-/// lives in [`check_recording`], which each of them calls before replaying.
-///
-/// Saying so plainly because the comment that used to be here claimed this function did the
-/// checking, which was not true and made the hazard it describes look handled: a solver
-/// whose probe list has changed since the recording was taken gets the old answers to new
-/// questions, and that surfaces as a wrong table rather than as a stale recording.
+/// Reads the answers without checking the recorded input: the solvers hold the input, so
+/// each calls [`check_recording`] before replaying. Without that check, a changed probe
+/// list would get old answers and produce a wrong table.
 fn read_recording(dir: &Path, key: &str) -> Result<Output> {
     let (input_path, out_path, err_path) = paths(dir, key);
     let stdout = std::fs::read_to_string(&out_path)
         .with_context(|| format!("reading the recording at {}", out_path.display()))?;
-    // A recording with no diagnostics is an empty file, not a missing one - but tolerate
-    // absence, because a run that rejected nothing has nothing to say.
+    // A missing diagnostics file is tolerated: a run that rejected nothing has none.
     let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
     let _ = input_path;
     Ok(Output { stdout, stderr })
@@ -320,11 +295,9 @@ pub(crate) struct Assembled {
     pub(crate) rejected: Vec<Rejection>,
     /// For each sample, the zero-based input line it came from.
     ///
-    /// Carried because some callers cannot recover it from the output: a field sitting at
-    /// its default is printed with no modifier at all, so the listing does not say what was
-    /// asked for. Pairing outputs to inputs positionally *without* accounting for refusals
-    /// shifts every result after the first rejection by one - silently, and into an answer
-    /// that still looks plausible.
+    /// Carried because a field at its default prints no modifier, so the listing does not
+    /// say what was asked for. Pairing by position must account for refusals, or every
+    /// later result shifts by one.
     pub(crate) from_line: Vec<usize>,
 }
 
@@ -370,13 +343,9 @@ pub(crate) fn parse(input: &str, output: &Output) -> Assembled {
 
 /// A short, stable key for an arbitrary probe.
 ///
-/// Content-derived, so a recording matches by *what was asked* rather than by the order it
-/// was asked in - which makes a recording survive a reordering of the candidate list, and
-/// makes two probes that differ get two files rather than one.
-///
-/// SHA-1 because it is already in the tree and is deterministic across platforms and
-/// releases; `DefaultHasher` is neither, and a recording keyed by it would replay correctly
-/// only on the machine that took it.
+/// Content-derived, so a recording matches what was asked rather than the order it was
+/// asked in. SHA-1 because it is already a dependency and is deterministic across
+/// platforms and releases, which `DefaultHasher` is not.
 pub(crate) fn key_for(input: &str) -> String {
     use sha1::Digest as _;
     use std::fmt::Write as _;
@@ -396,10 +365,8 @@ mod tests {
 
     /// A refusal shifts nothing.
     ///
-    /// **The bug this protects against is silent.** Outputs are paired to inputs by
-    /// position, so a rejected line that is not accounted for makes every later sample
-    /// claim it came from the line before its own - and the result is a table that is
-    /// wrong rather than a run that fails.
+    /// Outputs pair to inputs by position, so an unaccounted rejection would shift every
+    /// later sample onto the wrong line.
     #[test]
     fn a_rejected_probe_does_not_shift_the_ones_after_it() {
         let input = "first_one v0, v1\nrefused_one v0\nthird_one v2, v3\n";
@@ -415,7 +382,7 @@ mod tests {
         assert_eq!(assembled.samples.len(), 2);
         assert_eq!(assembled.rejected.len(), 1);
         assert_eq!(assembled.rejected[0].probe, "refused_one v0");
-        // Zero-based: the first survivor is line 0, the second is line 2 - *not* line 1.
+        // Zero-based: the first survivor is line 0, the second is line 2, not line 1.
         assert_eq!(assembled.from_line, vec![0, 2]);
     }
 
@@ -433,8 +400,8 @@ mod tests {
 
     /// A listing line with no encoding is not a sample.
     ///
-    /// Directives, labels and blank lines all appear in the listing. Counting one as a
-    /// sample would shift the input pairing, which is the failure above by another route.
+    /// Directives, labels and blank lines appear in the listing; counting one would shift
+    /// the input pairing.
     #[test]
     fn a_line_without_an_encoding_is_not_a_sample() {
         let output = Output {
@@ -446,11 +413,8 @@ mod tests {
 
     /// The words `bin/orbistoun` looks for to tell a stale recording from a broken replay.
     ///
-    /// Duplicated across a language boundary on purpose - the shell cannot call into this
-    /// crate - and pinned below from both ends, because the coupling is otherwise the kind
-    /// that rots in silence: reword the Rust message and the shell's `grep` simply stops
-    /// matching, with no failure anywhere, and the gate quietly goes back to blaming a
-    /// hand-edited table for an edited probe.
+    /// Duplicated across a language boundary, since the shell cannot call this crate, and
+    /// pinned from both ends below so a reworded message cannot break the shell's `grep`.
     const STALE_MARKER: &str = "was taken for different probes";
 
     /// Writes a recording for `key` whose input is `input`.
@@ -479,12 +443,8 @@ mod tests {
         .expect("the recording describes exactly these probes");
     }
 
-    /// **The hazard this guard exists for, watched rejecting.**
-    ///
-    /// A probe added after the recording was taken. The replay would still work, still
-    /// solve, and still produce the committed table - so every other check in the gate
-    /// stays green while the recording has stopped describing the probes. Only this
-    /// comparison can see it.
+    /// A probe added after the recording was taken is rejected, although the replay would
+    /// still produce the committed table.
     #[test]
     fn a_probe_added_since_the_recording_is_refused_by_name() {
         let dir = tempfile::tempdir().expect("a temporary directory");
@@ -529,12 +489,7 @@ mod tests {
         .expect_err("dropping a probe changes what was solved just as much as adding one");
     }
 
-    /// **Line endings alone are not a probe edit, and saying they are would be worse than
-    /// not checking at all.**
-    ///
-    /// These files are checked out on Windows as often as not. A guard that failed on a
-    /// checkout's line endings would fail on a tree nobody had touched, and the thing
-    /// people learn from a gate that cries wolf is to stop reading it.
+    /// Line endings alone are not a probe edit, so a Windows checkout passes.
     #[test]
     fn line_endings_alone_are_not_a_different_probe_set() {
         let dir = tempfile::tempdir().expect("a temporary directory");
@@ -565,9 +520,7 @@ mod tests {
 
     /// The other end of the marker: the gate really does look for these words.
     ///
-    /// Without this, [`STALE_MARKER`] pins only that the Rust message has not changed -
-    /// which is half a coupling. Reading the script is the only way to pin the other half
-    /// from here.
+    /// Reads the script, pinning the shell half of the [`STALE_MARKER`] coupling.
     #[test]
     fn the_gate_looks_for_the_words_this_message_carries() {
         let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/orbistoun");

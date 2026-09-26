@@ -1,13 +1,8 @@
 //! Which addresses a guest can be reached on, and how it prints one.
 //!
-//! # Why a server asks
+//! Servers call `getifaddrs` before serving and print what comes back, via `__inet_ntop`.
 //!
-//! `klogsrv` and `ftpsrv` both call `getifaddrs` before they serve anything, and both print
-//! what comes back: a log server that nobody can find the address of is a log server nobody
-//! connects to. Eleven of the twenty-five payloads measured ask for it, and twelve for
-//! `__inet_ntop`, which is how the answer becomes text.
-//!
-//! # The structure is citable, and so are the flags
+//! The structure, from `include/ifaddrs.h`:
 //!
 //! ```text
 //! include/ifaddrs.h
@@ -22,22 +17,13 @@
 //!     };
 //! ```
 //!
-//! `ifa_flags` is a four-byte field followed by four bytes of padding, because the pointer
-//! after it is eight-aligned. The flags themselves are harvested from `sys/net/if.h` -
-//! `IFF_LOOPBACK` in particular, because **a server filters on it**: it walks the list
-//! looking for an address that is not the loopback, and gets one or prints nothing.
-//!
-//! # Where the addresses come from, and the one thing that is ours
-//!
-//! The loopback is `127.0.0.1`, which is not a choice. The other entry is the host's own
-//! address for reaching the outside world, asked of the operating system by opening a UDP
-//! socket towards a documentation address and reading back which local address it would use.
-//! **Nothing is sent** - a UDP `connect` picks a route and a source address and transmits
-//! nothing - so this is a question put to the host's routing table rather than a guess.
-//!
-//! The **name** of that interface is the one invention here, and it is admitted rather than
-//! hidden: nothing available to this process knows what the platform calls its interfaces, so
-//! it is `net0`. `lo0` is not invented - it is what every BSD calls its loopback.
+//! `ifa_flags` is four bytes followed by four of padding, since the next pointer is
+//! eight-aligned. The flags are harvested from `sys/net/if.h`; a server filters on
+//! `IFF_LOOPBACK`, looking for an address that is not the loopback. The loopback is
+//! `127.0.0.1`. The other entry is the host's outward address, found by opening a UDP socket
+//! towards a documentation address and reading which local address it would use; a UDP
+//! `connect` sends nothing. The interface name `net0` is the one invention, since nothing
+//! here knows what the platform calls its interfaces; `lo0` is every BSD's loopback name.
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -53,8 +39,8 @@ pub const IFF_UP: u32 = 0x1;
 
 /// `IFF_LOOPBACK`, from `sys/net/if.h`.
 ///
-/// **The flag a server filters on**, which is why it is named rather than written inline.
-/// Checked against the harvested table by a test in `orbistoun-libc` (D370).
+/// The flag a server filters on, so it is named, and checked against the harvested table by
+/// a test in `orbistoun-libc` (D370).
 pub const IFF_LOOPBACK: u32 = 0x8;
 
 /// `IFF_RUNNING`, from `sys/net/if.h` by way of `IFF_DRV_RUNNING`.
@@ -87,11 +73,9 @@ struct Interface {
 
 /// The host's address for reaching anything outside itself.
 ///
-/// Asked of the operating system rather than guessed: a UDP socket pointed at a
-/// documentation address (RFC 5737 `TEST-NET-1`, which is reserved and routed nowhere) picks
-/// a route and a source address without sending anything, and the source address is the
-/// answer. Answers [`None`] on a host with no route out, which is a real state and not an
-/// error.
+/// A UDP socket pointed at RFC 5737 `TEST-NET-1`, reserved and routed nowhere, picks a route
+/// and a source address without sending anything; the source address is the answer. [`None`]
+/// on a host with no route out, which is a real state.
 fn outward_address() -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
@@ -104,7 +88,7 @@ fn outward_address() -> Option<Ipv4Addr> {
 /// What this reports, in the order a guest walks it.
 ///
 /// The loopback last, so a server taking the first non-loopback entry finds the useful one
-/// immediately - and one that walks the whole list still sees both.
+/// at once.
 fn interfaces() -> Vec<Interface> {
     let mut out = Vec::new();
     if let Some(address) = outward_address() {
@@ -126,9 +110,8 @@ fn interfaces() -> Vec<Interface> {
 
 /// Lists this process has handed out, so `freeifaddrs` can give them back.
 ///
-/// **Kept rather than leaked.** A server calls `getifaddrs` every time it reports its
-/// address, and a list leaked per call is a slow leak in a program that runs for days -
-/// which is exactly the kind of defect an emulator should not be the cause of.
+/// Kept rather than leaked: a server calls `getifaddrs` every time it reports its address,
+/// and runs for days.
 fn handed_out() -> &'static Mutex<BTreeMap<u64, Vec<u8>>> {
     static LISTS: OnceLock<Mutex<BTreeMap<u64, Vec<u8>>>> = OnceLock::new();
     LISTS.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -138,8 +121,8 @@ fn handed_out() -> &'static Mutex<BTreeMap<u64, Vec<u8>>> {
 fn put_sockaddr(block: &mut [u8], at: usize, address: Ipv4Addr) {
     block[at] = SOCKADDR_IN_LEN as u8;
     block[at + 1] = af_inet() as u8;
-    // Port zero: an interface address has no port, and the field is present because the
-    // structure is shared with the ones that do.
+    // Port zero: an interface address has no port; the field exists because the structure is
+    // shared.
     block[at + 2] = 0;
     block[at + 3] = 0;
     block[at + 4..at + 8].copy_from_slice(&address.octets());
@@ -150,10 +133,10 @@ fn put_pointer(block: &mut [u8], at: usize, value: u64) {
     block[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-/// `getifaddrs(&list)` - builds the linked list a guest walks.
+/// `getifaddrs(&list)`: builds the linked list a guest walks.
 ///
-/// One allocation holding every structure, every name and every address, so the whole list
-/// is freed by dropping one thing - and so a guest walking `ifa_next` never leaves it.
+/// One allocation holds every structure, name and address, so the list is freed by dropping
+/// one thing and a guest walking `ifa_next` never leaves it.
 ///
 /// Reference: FreeBSD `getifaddrs(3)`; `struct ifaddrs` from `include/ifaddrs.h`.
 fn getifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -163,8 +146,8 @@ fn getifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     let entries = interfaces();
 
-    // Laid out as: every `ifaddrs`, then every name, then every address and netmask. One
-    // block, so the addresses inside it can be computed before it is written.
+    // Laid out as every `ifaddrs`, then every name, then every address and netmask, in one
+    // block, so the addresses inside it are computed before it is written.
     let first_name = entries.len() * IFADDRS_LEN;
     let names_len: usize = entries.iter().map(|i| i.name.len() + 1).sum();
     let addresses_at = first_name + names_len;
@@ -187,8 +170,7 @@ fn getifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         block[record + 16..record + 20].copy_from_slice(&entry.flags.to_le_bytes());
         put_pointer(&mut block, record + 24, base + address_at as u64);
         put_pointer(&mut block, record + 32, base + netmask_at as u64);
-        // No destination address and no driver data: a broadcast interface has neither, and
-        // a guest reading through either would want something this has not got.
+        // No destination address and no driver data: a broadcast interface has neither.
         put_pointer(&mut block, record + 40, 0);
         put_pointer(&mut block, record + 48, 0);
 
@@ -203,8 +185,8 @@ fn getifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(at) = usize::try_from(out) else {
         return -1_i64 as u64;
     };
-    // SAFETY: a guest-supplied `struct ifaddrs **` under the identity mapping (D014) - the
-    // same contract the real call has.
+    // SAFETY: a guest-supplied `struct ifaddrs **` under the identity mapping, the same
+    // contract the real call has.
     unsafe {
         std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(at), base);
     }
@@ -214,10 +196,10 @@ fn getifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// `freeifaddrs(list)` - gives back what [`getifaddrs`] handed out.
+/// `freeifaddrs(list)`: gives back what [`getifaddrs`] handed out.
 ///
-/// A list this did not hand out is ignored rather than freed, which is the only safe answer:
-/// the alternative is treating an arbitrary guest pointer as an allocation.
+/// A list this did not hand out is ignored, since freeing it would treat an arbitrary guest
+/// pointer as an allocation.
 ///
 /// Reference: FreeBSD `getifaddrs(3)`.
 fn freeifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -227,19 +209,12 @@ fn freeifaddrs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// `__inet_ntop(family, source, destination, size)` - an address as text.
+/// `__inet_ntop(family, source, destination, size)`: an address as text.
 ///
-/// The leading underscores are FreeBSD's own: the payloads import `__inet_ntop`, which is
-/// what `inet_ntop` resolves to there. Both names are served, because a guest may ask for
-/// either and they are one function.
-///
-/// `AF_INET` and `AF_INET6`. An address family this cannot render is refused rather than
-/// printed as something plausible, because the caller prints what it gets.
-///
-/// The sixteen-byte form is rendered by [`std::net::Ipv6Addr`], whose `Display` is RFC 5952
-/// canonical - lower case, and the longest run of zeroes replaced by `::`. That is what
-/// `inet_ntop` produces, so this is a use of the standard library rather than a
-/// reimplementation of a format with subtle rules (D385).
+/// The leading underscores are FreeBSD's: `inet_ntop` resolves to `__inet_ntop` there, and
+/// both names are served. `AF_INET` and `AF_INET6`; any other family is refused rather than
+/// printed plausibly. The sixteen-byte form is rendered by [`std::net::Ipv6Addr`], whose
+/// `Display` is RFC 5952 canonical, as `inet_ntop` produces.
 ///
 /// Reference: POSIX.1-2008 `inet_ntop(3)`. `INET_ADDRSTRLEN` is 16 and `INET6_ADDRSTRLEN` is
 /// 46, from `sys/netinet/in.h`.
@@ -259,8 +234,8 @@ fn inet_ntop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     };
     // SAFETY: a guest-supplied `struct in_addr` or `struct in6_addr` under the identity
-    // mapping (D014) - four or sixteen bytes for the family the guest itself named, which is
-    // the same contract the real call has.
+    // mapping: four or sixteen bytes for the family the guest named, the same contract the
+    // real call has.
     let octets =
         unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(from), width) };
     let text = if width == 4 {
@@ -274,8 +249,8 @@ fn inet_ntop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Refused rather than truncated: half an address is a different address.
         return 0;
     }
-    // SAFETY: the destination has at least `text.len()` bytes, which was just checked
-    // against the size the guest itself passed.
+    // SAFETY: the destination has at least `text.len()` bytes, just checked against the size
+    // the guest passed.
     unsafe {
         std::ptr::copy_nonoverlapping(
             text.as_ptr(),
@@ -286,33 +261,14 @@ fn inet_ntop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     destination
 }
 
-/// `__inet_pton(family, source, destination)` - text as an address.
+/// `__inet_pton(family, source, destination)`: text as an address.
 ///
-/// The other direction, and **the one a server needs before it can serve**. `zftpd` opens a
-/// socket, sets an option on it, and then turns the address it means to bind into four bytes;
-/// with nothing answering that, it closed the socket and reported `Init failed` - which reads
-/// as a networking problem and was a missing parser (D385).
-///
-/// # What "not an address" means here
-///
-/// The three answers are the whole contract: **1** parsed, **0** the text is not a valid
-/// address in this family, **-1** the family itself is not one this knows, with `EAFNOSUPPORT`.
-/// A caller distinguishes them, so a parse failure must not be reported as a family failure.
-///
-/// `AF_INET` and `AF_INET6`, the same two [`inet_ntop`] renders. For the four-byte form:
-/// dotted quad only - the classful short forms (`inet_aton`'s `a.b.c`, `a.b`, a bare number)
-/// are `inet_aton`'s and **not** `inet_pton`'s, which is the difference between the two
-/// functions.
-///
-/// The sixteen-byte form is parsed by [`std::net::Ipv6Addr`], which follows RFC 4291 and
-/// rejects a zone identifier - both of which `inet_pton` also does. **`zftpd` needed this
-/// one**: it binds its web-upload port on an IPv6 address, was told the family was
-/// unsupported, and turned the feature off (D385).
-///
-/// Reference: POSIX.1-2008 `inet_pton(3)`. The leading underscores are FreeBSD's own, as with
-/// `__inet_ntop`. **Only that spelling is served**, because only that spelling has been
-/// measured: `inet_ntop` without them is declared in `libScePosix` because a title was seen
-/// importing it there, and nothing has yet imported the bare `inet_pton` anywhere (D367).
+/// Answers 1 when parsed, 0 when the text is not a valid address in this family, and -1 with
+/// `EAFNOSUPPORT` for a family this does not know; a caller tells them apart. `AF_INET` takes
+/// a dotted quad only, since the classful short forms are `inet_aton`'s. `AF_INET6` is parsed
+/// by [`std::net::Ipv6Addr`], which follows RFC 4291 and rejects a zone identifier, as
+/// `inet_pton` does. Only the underscored spelling is served, since only that one is
+/// imported (D367).
 fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     /// What the call answers for a family it does not serve.
     const UNSUPPORTED_FAMILY: u64 = -1_i64 as u64;
@@ -325,10 +281,8 @@ fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     } else if family == af_inet6() {
         true
     } else {
-        // A family this cannot parse is a different failure from text it cannot parse, and
-        // the caller is entitled to tell them apart. `errno` is left alone, as everywhere
-        // else in this crate: the return value is the answer, and which code accompanies it
-        // is a question for a probe on hardware.
+        // A family this cannot parse is a different failure from text it cannot parse. `errno`
+        // is left alone: the return value is the answer.
         return UNSUPPORTED_FAMILY;
     };
     if source == 0 || destination == 0 {
@@ -353,8 +307,7 @@ fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return NOT_AN_ADDRESS;
     };
     // SAFETY: a guest-supplied `struct in_addr` or `struct in6_addr` under the identity
-    // mapping (D014) - four or sixteen bytes for the family the guest itself named, which is
-    // the same contract the real call has, and it passed the pointer to be written.
+    // mapping: four or sixteen bytes for the family the guest named and passed to be written.
     unsafe {
         std::ptr::copy_nonoverlapping(
             parsed.as_ptr(),
@@ -367,9 +320,8 @@ fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// Four decimal octets separated by three dots, and nothing else.
 ///
-/// **Stricter than `inet_aton` on purpose.** `inet_pton` accepts exactly this form: no leading
-/// zeros (which some libraries read as octal and others as decimal, so the same text means two
-/// addresses), no whitespace, no trailing characters, no short forms.
+/// Stricter than `inet_aton`: no leading zeros (octal to some readers, decimal to others), no
+/// whitespace, no trailing characters, no short forms.
 fn dotted_quad(text: &str) -> Option<[u8; 4]> {
     let mut octets = [0_u8; 4];
     let mut parts = text.split('.');
@@ -379,8 +331,7 @@ fn dotted_quad(text: &str) -> Option<[u8; 4]> {
             return None;
         }
         if part.len() > 1 && part.starts_with('0') {
-            // A leading zero is octal to some readers and decimal to others, so text that
-            // names two different addresses names neither.
+            // A leading zero is octal to some readers and decimal to others.
             return None;
         }
         *slot = part.parse().ok()?;
@@ -442,7 +393,7 @@ mod tests {
         unsafe { *slot }
     }
 
-    /// **The list a server walks**, at the offsets the header states.
+    /// The list is laid out at the header's offsets and ends in a null.
     #[test]
     fn the_list_is_laid_out_where_the_header_says_and_ends_in_a_null() {
         let mut head = 0_u64;
@@ -502,6 +453,7 @@ mod tests {
         );
     }
 
+    /// An address becomes the text a person reads.
     #[test]
     fn an_address_becomes_the_text_a_person_reads() {
         let address = [192_u8, 168, 1, 55];
@@ -550,9 +502,7 @@ mod tests {
 
     /// A family this cannot render is refused rather than printed as something plausible.
     ///
-    /// `AF_UNIX`, because `AF_INET6` **is** rendered now (D385) - a test naming a family that
-    /// has since been implemented asserts nothing, and would keep passing while saying the
-    /// opposite of what it means.
+    /// `AF_UNIX`, a family that is not rendered.
     #[test]
     fn an_address_family_this_cannot_render_is_refused() {
         let unix = orbistoun_hle::constants::abi_constant("socket", "AF_UNIX")
@@ -580,11 +530,10 @@ mod tests {
         assert_eq!(text, [0xAA; 64], "and nothing is written");
     }
 
-    /// **The sixteen-byte family, both ways**, which is what `zftpd`'s web port needed.
+    /// A sixteen-byte address parses and renders back.
     ///
-    /// Round-tripped rather than compared against a literal: the text form has compression
-    /// rules, and asserting one spelling of one address would pass while getting the rules
-    /// wrong.
+    /// Round-tripped rather than compared against a literal, since the text form has
+    /// compression rules.
     #[test]
     fn a_sixteen_byte_address_parses_and_renders_back() {
         for spelling in ["::", "::1", "2001:db8::1", "fe80::1"] {
@@ -631,8 +580,7 @@ mod tests {
 
     /// Text that is not an address is a different failure from a family that is not served.
     ///
-    /// **Zero and `-1` mean different things** and a caller acts on the difference, so a
-    /// parse failure must never be reported as a family failure.
+    /// Zero and `-1` mean different things to a caller.
     #[test]
     fn unparseable_text_is_not_the_same_answer_as_an_unserved_family() {
         let mut source = b"not an address ".to_vec();

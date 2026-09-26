@@ -1,12 +1,9 @@
-//! Checking whether import library attribution is real or merely plausible.
+//! Checks whether import library attribution is real or merely plausible.
 //!
-//! An encoded symbol name carries two small indices alongside its hash. orbistoun has
-//! been treating the first as an index into the module's `DT_NEEDED` list, and the
-//! result *looks* fine - every index is in range and every import gets a library name.
-//!
-//! It is also visibly wrong: a graphics driver library does not export `setsockopt`.
-//! This dumps the raw indices so the question can be settled by counting rather than by
-//! reading attributions and being unconvinced by them.
+//! An encoded symbol name carries two small indices beside its hash. Reading the first as an
+//! index into the module's `DT_NEEDED` list yields in-range, plausible-looking attributions
+//! that can still be wrong (a graphics driver library does not export `setsockopt`). This
+//! dumps the raw indices so the question is settled by counting.
 
 use std::collections::BTreeMap;
 
@@ -14,16 +11,15 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: libs <container>");
     let bytes = std::fs::read(&path).expect("read the container");
     let container = orbistoun_elf::Container::parse(&bytes).expect("parse");
-    // The shipped suffix: this example asks about attribution, not about hashing, and a
-    // name that hashes to nothing still carries the ids being counted here.
+    // The shipped suffix: attribution, not hashing, is the question, and a name that hashes to
+    // nothing still carries the ids counted here.
     let hasher = orbistoun_nid::NidHasher::new(orbistoun_nid::default_suffix());
     let imports = container.raw_imports(&bytes, &hasher).expect("imports");
     let needed = container.needed_libraries(&bytes).expect("needed");
 
     let mut by_library: BTreeMap<u16, usize> = BTreeMap::new();
     let mut by_module: BTreeMap<u16, usize> = BTreeMap::new();
-    // Plain names carry no ids at all, and counting them as zero would invent the very
-    // attribution this example exists to check.
+    // Plain names carry no ids; counting them as zero would invent the attribution under test.
     for import in &imports {
         if let Some(id) = import.library_id() {
             *by_library.entry(id).or_default() += 1;
@@ -48,8 +44,8 @@ fn main() {
         by_module.keys().next_back()
     );
 
-    // If the ids really indexed this list, the busiest ids would land on libraries a
-    // program plausibly leans on. Printing the mapping makes a wrong one obvious.
+    // If the ids index this list, the busiest ids land on libraries a program plausibly uses;
+    // printing the mapping makes a wrong one obvious.
     println!("\nbusiest library ids, and what DT_NEEDED says they are:");
     let mut ranked: Vec<(&u16, &usize)> = by_library.iter().collect();
     ranked.sort_by_key(|(_, count)| std::cmp::Reverse(**count));

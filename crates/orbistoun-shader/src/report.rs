@@ -1,19 +1,9 @@
 //! Rendering a corpus analysis as text.
 //!
-//! # Why this is in the library rather than in the shim
-//!
-//! Principle 13: the shims hold no logic. What a coverage report *says* is a property
-//! of the analysis, not of whichever surface asked for it, so a CLI command and a run
-//! report should not be able to disagree about it. Both call this.
-//!
-//! # It is written to be diffed
-//!
-//! Ordering is total everywhere, numbers are rendered identically every time, and
-//! nothing carries a timestamp or a path. Two runs over an unchanged corpus produce
-//! byte-identical output, so a diff shows only what actually moved.
-//!
-//! That constraint is why the ranked list is not truncated by default. A top-ten that
-//! silently drops the eleventh entry makes a diff lie when the ordering shifts.
+//! The report lives in the library because shims hold no logic: a CLI command and a run
+//! report render the same text. Output is written to be diffed - ordering is total,
+//! numbers render identically, and nothing carries a timestamp or path - and the ranked
+//! list is untruncated by default so a shifted ordering never hides an entry.
 
 use core::fmt::Write as _;
 
@@ -23,15 +13,13 @@ use crate::mnemonics::MnemonicTable;
 
 /// How many blockers to list. `None` lists all of them.
 ///
-/// A cap is presentation, so it is a parameter rather than a constant - a terminal
-/// wants twenty, an agent reading the whole worklist wants all of them.
+/// A terminal wants twenty; an agent reading the whole worklist wants all of them.
 pub type Limit = Option<usize>;
 
 /// Renders the headline coverage numbers.
 ///
-/// Deliberately short. The number that matters is complete shaders: partial support
-/// for a shader renders nothing, so an instruction-level percentage flatters progress
-/// in a way that would mislead anyone tracking it.
+/// Leads with complete shaders: partial support for a shader renders nothing, so an
+/// instruction-level percentage alone overstates coverage.
 pub fn summary(coverage: &CorpusCoverage) -> String {
     let shaders = coverage.shaders();
     let complete = coverage.complete_shaders();
@@ -39,11 +27,9 @@ pub fn summary(coverage: &CorpusCoverage) -> String {
     let instructions: usize = shaders.iter().map(|s| s.instructions).sum();
     let translatable: usize = shaders.iter().map(|s| s.translatable).sum();
 
-    // Which question the count answers, said on the line rather than left to be assumed.
-    // A shader every opcode of which is supported is not a shader that translates - the
-    // refusals that are about operands, registers and stages are invisible to an opcode
-    // census - and the two numbers were reported identically until they disagreed by two
-    // shaders out of six (worklog 550).
+    // The line says which question the count answers: a shader with every opcode
+    // supported can still fail translation on operands, registers or stages, which an
+    // opcode census cannot see.
     let attempted = shaders.iter().filter(|s| s.translated.is_some()).count();
     let basis = if attempted == shaders.len() && !shaders.is_empty() {
         "translate"
@@ -58,9 +44,8 @@ pub fn summary(coverage: &CorpusCoverage) -> String {
         "instructions {translatable} of {instructions} translatable"
     );
     if untrustworthy > 0 {
-        // Called out rather than folded into the totals: an untrustworthy decode
-        // usually means the encoding table is wrong, which is different work from an
-        // unimplemented instruction and goes to a different file.
+        // Separate from the totals: an untrustworthy decode usually means an encoding
+        // table fault, which is different work from an unimplemented instruction.
         let _ = writeln!(
             out,
             concat!(
@@ -75,10 +60,8 @@ pub fn summary(coverage: &CorpusCoverage) -> String {
 
 /// Renders the ranked worklist.
 ///
-/// The top line is the instruction whose support would unblock the most shaders **of
-/// those that can be worked on now**. That qualifier is the whole point: without it the
-/// list is led by whatever is most valuable and least reachable, and offers no way to
-/// tell the difference.
+/// The top line is the instruction whose support unblocks the most shaders of those
+/// workable now, so the list is not led by valuable but unreachable work.
 ///
 /// `effort_of` says which tier an instruction is in. See [`Effort`].
 pub fn worklist(
@@ -105,9 +88,8 @@ pub fn worklist(
 
     let mut announced = false;
     for blocker in &blockers[..shown] {
-        // The tiers are separated in the output as well as in the order, because a
-        // reader scanning for "what do I do next" should not have to know that the list
-        // silently changes meaning partway down.
+        // The tiers are separated in the output as well as the order, so a reader sees
+        // where the list changes meaning.
         if blocker.effort == Effort::Subsystem && !announced {
             announced = true;
             let _ = writeln!(
@@ -129,8 +111,7 @@ pub fn worklist(
     }
 
     if shown < blockers.len() {
-        // Never silently truncated. A list that stops without saying so reads as the
-        // whole list, and the reader concludes the work is smaller than it is.
+        // Truncation is stated, so a shortened list never reads as the whole list.
         let _ = writeln!(
             out,
             "... {} further blocker(s) not shown",
@@ -151,8 +132,7 @@ fn describe(blocker: &Blocker, table: &EncodingTable, mnemonics: &MnemonicTable)
     match family {
         Some(family) => match mnemonics.name(family, blocker.key.opcode) {
             Some(name) => format!("{name}  ({family}:{:#x})", blocker.key.opcode),
-            // No name is not a gap worth hiding - the family and opcode are enough to
-            // find it in the reference, and inventing a label would suggest otherwise.
+            // The family and opcode are enough to find it in the reference.
             None => format!("{family}:{:#x}", blocker.key.opcode),
         },
         None => format!(
@@ -179,7 +159,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use crate::coverage::all_ordinary;
-    /// The built-in operand table. Every decode needs one now that operands are read.
+    /// The built-in operand table, which every decode needs.
     fn operands() -> crate::operand::OperandTable {
         crate::operand::OperandTable::builtin().expect("built-in operand table")
     }
@@ -206,10 +186,9 @@ mod tests {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
+    /// The summary leads with the complete-shader count and says no translation ran.
     #[test]
     fn the_summary_leads_with_complete_shaders() {
-        // Partial support for a shader renders nothing, so an instruction percentage
-        // alone would flatter progress to anyone tracking it.
         let (table, _) = parts();
         let mut coverage = CorpusCoverage::new();
         coverage.observe(
@@ -229,9 +208,7 @@ mod tests {
             "got:
 {text}"
         );
-        // And it says which question that count answered. Nobody ran a translator here,
-        // so the number is the opcode-level bound and the line has to admit it - the two
-        // were printed identically until they disagreed by two shaders in six.
+        // No translator ran, so the line says the count is the opcode-level bound.
         assert!(
             text.contains("no translation was attempted"),
             "got:
@@ -239,11 +216,8 @@ mod tests {
         );
     }
 
-    /// **The same corpus, judged by a translator that refused, reads differently.**
-    ///
-    /// The one line that distinguishes a bound from a verdict, asserted rather than
-    /// trusted: a shader whose every opcode is supported still counts incomplete when the
-    /// translation of it failed.
+    /// A translation verdict overrides the opcode estimate: a shader whose every opcode
+    /// is supported still counts incomplete when its translation failed.
     #[test]
     fn a_translation_verdict_overrides_the_opcode_estimate() {
         let (table, _) = parts();
@@ -263,10 +237,9 @@ mod tests {
         );
     }
 
+    /// An untrustworthy decode is reported as a probable table fault.
     #[test]
     fn an_untrustworthy_decode_is_called_out_separately() {
-        // It means a probable table fault, which is different work from a missing
-        // feature and belongs in a different file.
         let (table, _) = parts();
         let mut coverage = CorpusCoverage::new();
         coverage.observe(
@@ -277,6 +250,7 @@ mod tests {
         assert!(summary(&coverage).contains("suspect"));
     }
 
+    /// The instruction blocking the most shaders ranks first, not the most frequent.
     #[test]
     fn the_worklist_puts_the_most_blocking_instruction_first() {
         let (table, mnemonics) = parts();
@@ -298,10 +272,9 @@ mod tests {
         assert!(first.contains("VOP1:0x3"), "got:\n{text}");
     }
 
+    /// An instruction in the mnemonic table is shown by name.
     #[test]
     fn a_known_instruction_is_named() {
-        // v_mov_b32 is in the generated mnemonic table, so the report should say so
-        // rather than making the reader look up an opcode number.
         let (table, mnemonics) = parts();
         let mut coverage = CorpusCoverage::new();
         // 0x7E000280 is v_mov_b32_e32 as emitted by a real compiler.
@@ -314,10 +287,9 @@ mod tests {
         assert!(text.contains("v_mov_b32"), "got:\n{text}");
     }
 
+    /// A truncated worklist states how many entries it left out.
     #[test]
     fn truncation_says_what_it_left_out() {
-        // A list that stops without saying so reads as the whole list, and the reader
-        // concludes there is less work than there is.
         let (table, mnemonics) = parts();
         let mut coverage = CorpusCoverage::new();
         let words: Vec<u32> = (1..=10).map(vop1).collect();
@@ -332,6 +304,7 @@ mod tests {
         );
     }
 
+    /// An empty worklist says so rather than printing a bare header.
     #[test]
     fn an_empty_worklist_says_so_rather_than_printing_a_bare_header() {
         let (table, mnemonics) = parts();
@@ -346,10 +319,9 @@ mod tests {
         );
     }
 
+    /// Two renders of the same corpus are byte-identical.
     #[test]
     fn two_renders_of_the_same_corpus_are_byte_identical() {
-        // The property that makes a diff between runs meaningful. Any hash ordering
-        // or timestamp leaking in would break it.
         let (table, mnemonics) = parts();
         let mut coverage = CorpusCoverage::new();
         for name in ["a", "b", "c"] {

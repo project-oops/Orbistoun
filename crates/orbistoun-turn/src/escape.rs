@@ -1,32 +1,23 @@
-//! The Escape Hatch: when an autonomous trial loop should stop and ask a person.
+//! The escape hatch: when an autonomous trial loop should stop and ask a person.
 //!
-//! `docs/THE_LOOP.md` runs a try-measure-verdict cycle - propose a change, run the guest, read
-//! whether it got **further** - and most of that is progress a loop can make on its own. Four
-//! situations are not, and a loop that keeps grinding on them wastes boots and risks the "Kyty trap":
-//! a hallucinated stub that compiles and reads like progress. This is the policy that recognises the
-//! four and halts (`-4a1b`):
+//! Most of the try-measure-verdict cycle in `docs/THE_LOOP.md` is progress a loop can make on its
+//! own. Four situations are not, and grinding on them wastes boots and risks a stub that compiles
+//! and reads like progress:
 //!
-//! - an **architectural wall** the loop cannot pass without new capability - a GPU packet opcode the
-//!   walker does not know, an instruction the recompiler cannot translate, or an ABI boundary the
-//!   guest crossed in a way the convention forbids;
-//! - a **spin deadlock** - the guest stuck in its own synchronisation, calling the host nothing and
-//!   reaching nowhere (the `quiet` signal, D645);
-//! - a **regression** - a change that made the guest reach *less* than doing nothing did (verdict
-//!   BACK), which the reached count carries (D129);
-//! - **retry exhaustion** - [`RETRY_LIMIT`] attempts on one finding with no further between them.
+//! - an architectural wall the loop cannot pass without new capability: an unknown command-buffer
+//!   opcode, an untranslatable shader instruction, or an ABI violation;
+//! - a spin deadlock: the guest stuck in its own synchronisation, calling the host nothing (the
+//!   `quiet` signal);
+//! - a regression: a change that made the guest reach less than doing nothing did (D129);
+//! - retry exhaustion: [`RETRY_LIMIT`] attempts on one finding with no further between them.
 //!
-//! # What it does, and what it deliberately does not
-//!
-//! Deciding *which* trigger tripped is a pure function of the attempts observed, tested here against
-//! simulated walls, spins and regressions with no guest. On a trip the hatch **returns** an
-//! [`Escalation`] - the record a person reads - and says the inert trial patches are to be rolled
-//! back; it does not write a file, because [this crate writes to none](crate) (D291), and it does not
-//! dispatch the autonomous hardware probe the request also sketched (querying obSCEne over `pros` on
-//! the live console). That touches the PS5, and a loop does not touch the console - a person does.
+//! Deciding which trigger tripped is a pure function of the attempts observed. On a trip the hatch
+//! returns an [`Escalation`] for a person and the inert trial patches are discarded; it writes no
+//! file and never touches the hardware.
 
 use crate::patch::Patch;
 
-/// How many attempts on one finding without further before the loop gives up on it (`-4a1b`).
+/// How many attempts on one finding without further before the loop gives up on it.
 pub const RETRY_LIMIT: u32 = 3;
 
 /// The kind of architectural wall, so an escalation names the capability that is missing.
@@ -34,7 +25,7 @@ pub const RETRY_LIMIT: u32 = 3;
 pub enum Wall {
     /// A GPU command-buffer opcode the packet walker does not recognise.
     UnknownGpuOpcode,
-    /// An RDNA2 instruction the shader recompiler cannot translate.
+    /// A shader instruction the shader recompiler cannot translate.
     UntranslatableInstruction,
     /// The guest crossed the ABI boundary in a way the calling convention forbids.
     AbiViolation,
@@ -57,7 +48,8 @@ impl Wall {
 pub enum Trigger {
     /// A wall the loop cannot pass without new capability, and which kind.
     ArchitecturalWall(Wall),
-    /// The guest is stuck in its own synchronisation - calling the host nothing, reaching nowhere.
+    /// The guest is stuck in its own synchronisation, calling the host nothing and reaching
+    /// nowhere.
     SpinDeadlock,
     /// A change made the guest reach less than the baseline: verdict BACK.
     Regression,
@@ -80,22 +72,22 @@ impl Trigger {
 
 /// One attempt's signals, as far as the hatch reads them.
 ///
-/// Constructed from a run's trace by the loop that drives the hatch - `reached` from the distinct
-/// imports the run reached, `spinning` from the trace's `quiet` signal, `wall` from an ABI report, an
-/// unwalkable submission, or an untranslatable shader - or constructed directly in a test. Reduced to
-/// exactly what the four triggers need, and nothing else.
+/// Built from a run's trace by the loop that drives the hatch (`reached` from the distinct imports,
+/// `spinning` from the trace's `quiet` signal, `wall` from an ABI report, an unwalkable submission
+/// or an untranslatable shader), or directly in a test. It holds exactly what the four triggers
+/// need.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Attempt {
-    /// Distinct imports the guest reached - the progress signal (D129).
+    /// Distinct imports the guest reached: the progress signal (D129).
     pub reached: usize,
     /// A wall this run hit, if the trace classified one.
     pub wall: Option<Wall>,
-    /// Whether the guest went quiet in its own code without calling the host - a spin (D645).
+    /// Whether the guest went quiet in its own code without calling the host: a spin.
     pub spinning: bool,
 }
 
 impl Attempt {
-    /// An attempt that only reached somewhere, with no wall and no spin - the ordinary case.
+    /// An attempt that only reached somewhere, with no wall and no spin: the ordinary case.
     #[must_use]
     pub fn reaching(reached: usize) -> Self {
         Self {
@@ -122,8 +114,7 @@ pub struct Escalation {
 }
 
 impl Escalation {
-    /// The `[ESCALATION-NEEDED]` block to append to the worklog - which the caller writes, not this
-    /// crate.
+    /// The `[ESCALATION-NEEDED]` block for the caller to append to the worklog.
     #[must_use]
     pub fn worklog_entry(&self) -> String {
         format!(
@@ -174,10 +165,9 @@ impl EscapeHatch {
     /// the hatch is closed: every later `observe` returns `None` without advancing anything, so a
     /// caller that keeps calling it cannot un-halt the loop or double-count.
     ///
-    /// The order is deliberate. A wall or a spin is a hard stop the moment it is seen - no amount of
-    /// retrying passes a missing opcode or frees a deadlock. A regression is next: a change that
-    /// reached *less* than the baseline is worse than doing nothing and must not be retried into.
-    /// Retry exhaustion is last, the case where nothing broke but nothing moved either.
+    /// A wall or a spin stops at once, since no retry passes a missing opcode or frees a deadlock.
+    /// A regression is next: reaching less than the baseline is worse than doing nothing and is not
+    /// retried into. Retry exhaustion is last.
     pub fn observe(&mut self, attempt: &Attempt) -> Option<Escalation> {
         if self.tripped.is_some() {
             return None;
@@ -211,7 +201,7 @@ impl EscapeHatch {
         })
     }
 
-    /// Whether the hatch has tripped, and on what - the signal a loop reads to stop.
+    /// Whether the hatch has tripped, and on what: the signal a loop reads to stop.
     #[must_use]
     pub fn tripped(&self) -> Option<&Trigger> {
         self.tripped.as_ref()
@@ -219,11 +209,9 @@ impl EscapeHatch {
 
     /// Rolls back the inert trial patches.
     ///
-    /// A patch is a diff proposed, never applied here, so rolling one back is discarding it
-    /// unproposed. On a trip every patch under trial was inert - none made the guest reach further,
-    /// or the run hit a wall no patch can fix - so this returns nothing to propose; the escalation
-    /// replaces them. With no trip there is nothing to roll back and the patches are handed straight
-    /// back.
+    /// A patch is a proposed diff, never applied here, so rolling one back is discarding it. On a
+    /// trip every patch under trial was inert, so nothing is returned and the escalation replaces
+    /// them; with no trip the patches are handed straight back.
     #[must_use]
     pub fn roll_back(&self, trial_patches: Vec<Patch>) -> Vec<Patch> {
         if self.tripped.is_some() {
@@ -249,8 +237,7 @@ mod tests {
         }
     }
 
-    /// **An architectural wall trips at once and halts the loop.** A missing opcode is not retried
-    /// past; the hatch names the wall, closes, and rolls the trial patch back.
+    /// An architectural wall trips at once, closes the hatch and rolls the trial patch back.
     #[test]
     fn an_architectural_wall_trips_and_rolls_back() {
         let mut hatch = EscapeHatch::new("libSceGnm::submit", 20);
@@ -276,7 +263,7 @@ mod tests {
         assert!(escalation.worklog_entry().contains("architectural wall"));
     }
 
-    /// **A spinning guest trips as a deadlock.** No wall, but the guest went quiet in its own code.
+    /// A spinning guest trips as a deadlock.
     #[test]
     fn a_spin_trips_as_a_deadlock() {
         let mut hatch = EscapeHatch::new("libkernel::wait", 15);
@@ -291,8 +278,7 @@ mod tests {
         assert!(escalation.worklog_entry().contains("spin deadlock"));
     }
 
-    /// **A change that reaches less than the baseline trips as a regression.** Verdict BACK is worse
-    /// than doing nothing, so it is not retried into.
+    /// A change that reaches less than the baseline trips as a regression.
     #[test]
     fn reaching_less_than_the_baseline_trips_as_a_regression() {
         let mut hatch = EscapeHatch::new("libSceNet::socket", 30);
@@ -304,8 +290,7 @@ mod tests {
         assert_eq!(escalation.trigger, Trigger::Regression);
     }
 
-    /// **Three attempts with no further exhaust the retries.** Nothing broke - the guest reached the
-    /// same each time - but nothing moved, and the loop stops rather than grinding on.
+    /// Three attempts with no further exhaust the retries, though nothing broke.
     #[test]
     fn three_attempts_without_further_exhaust_the_retries() {
         let mut hatch = EscapeHatch::new("libSceAudioOut::output", 12);
@@ -319,8 +304,7 @@ mod tests {
         assert_eq!(escalation.attempts, RETRY_LIMIT);
     }
 
-    /// **Further resets the retry count.** A run of no-further attempts that is broken by progress
-    /// does not trip - the loop is still moving, however slowly.
+    /// Further resets the retry count, so a loop that is still moving does not trip.
     #[test]
     fn further_resets_the_retry_count_and_does_not_trip() {
         let mut hatch = EscapeHatch::new("libSceVideoOut::flip", 40);
@@ -344,15 +328,14 @@ mod tests {
             hatch.observe(&Attempt::reaching(41)).is_none(),
             "no further"
         );
-        // Only the third *consecutive* no-further trips, so this one does.
+        // Only the third consecutive no-further trips, so this one does.
         assert!(
             hatch.observe(&Attempt::reaching(41)).is_some(),
             "the third consecutive no-further after the reset trips"
         );
     }
 
-    /// **With no trip, patches are handed straight back.** The hatch only rolls back on an
-    /// escalation, so an ordinary further-making run keeps its patch to propose.
+    /// With no trip, patches are handed straight back to propose.
     #[test]
     fn without_a_trip_patches_are_kept() {
         let mut hatch = EscapeHatch::new("libc::malloc", 5);

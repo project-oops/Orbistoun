@@ -1,25 +1,10 @@
 //! The synchronisation primitives, exercised as a guest drives them.
 //!
-//! # Why these are worth the effort
-//!
-//! Every one of them is an object the guest creates in one call and uses in another, so the
-//! failure mode is never a wrong return value in isolation - it is two guest threads inside
-//! the same critical section, and the corruption that follows gets attributed to whatever
-//! the lock was protecting rather than to here. A synchronisation bug is the furthest thing
-//! in this codebase from where it shows up.
-//!
-//! # Handles are per-object, so these tests do not collide
-//!
-//! The tables are process-wide, but every `create_*` mints a fresh handle, so a test that
-//! makes its own objects cannot be disturbed by one running beside it. Nothing here
-//! enumerates a table or destroys a handle it did not create, which is what keeps that
-//! true.
-//!
-//! # Thread handles are just numbers
-//!
-//! `ThreadHandle` is a `u64` the caller supplies, so ownership rules can be tested without
-//! spawning anything. Where a test genuinely needs two threads - blocking, waking, barrier
-//! rounds - it spawns them and says why.
+//! A synchronisation bug shows up as two guest threads in one critical section, far from its
+//! cause, so these test behaviour across calls rather than single return values. The tables are
+//! process-wide, but every `create_*` mints a fresh handle, so a test that only touches its own
+//! objects is not disturbed by one running beside it. `ThreadHandle` is a caller-supplied `u64`,
+//! so ownership is tested without spawning; tests that need blocking or waking spawn threads.
 
 use orbistoun_kernel::sync;
 use std::time::Duration;
@@ -32,12 +17,10 @@ const BOB: u64 = 0x2002;
 /// broken test fails rather than hangs.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-// --- mutexes -----------------------------------------------------------------------------
-
 /// A fresh mutex is a real handle with the name it was given.
 ///
-/// The handle is a block this crate owns rather than a small integer, so that a guest
-/// reading a field through it finds memory instead of faulting.
+/// The handle is a block this crate owns rather than a small integer, so a guest reading a
+/// field through it finds memory instead of faulting.
 #[test]
 fn a_created_mutex_has_a_handle_and_remembers_its_name() {
     let m = sync::create(sync::Recursion::Forbidden, "render-queue");
@@ -55,7 +38,7 @@ fn a_mutex_is_taken_and_released_by_its_owner() {
         Some(sync::Acquisition::Locked)
     );
     assert_eq!(sync::unlock(m, ALICE), Some(true));
-    // And is free again afterwards, which is the half a leak would pass without.
+    // And it is free again afterwards, which a leak would fail.
     assert_eq!(
         sync::acquire(m, BOB, sync::Blocking::Never),
         Some(sync::Acquisition::Locked)
@@ -64,12 +47,9 @@ fn a_mutex_is_taken_and_released_by_its_owner() {
     sync::destroy(m);
 }
 
-/// Re-locking a non-recursive mutex is refused **without blocking**.
+/// Re-locking a non-recursive mutex is refused without blocking.
 ///
-/// Waiting there would deadlock against ourselves and look like a hang in the guest - so
-/// the test that matters is not just that it answers `false`, but that it *answers at all*.
-/// A test asserting the return value alone would hang instead of failing if this regressed,
-/// which is why the call happens on a thread with a deadline on it.
+/// The call runs on a thread with a deadline, so a regression fails instead of hanging.
 #[test]
 fn re_locking_a_non_recursive_mutex_is_refused_rather_than_deadlocked() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
@@ -94,9 +74,7 @@ fn re_locking_a_non_recursive_mutex_is_refused_rather_than_deadlocked() {
 
 /// A recursive mutex counts its acquisitions and must be released as many times.
 ///
-/// The depth is the whole difference between the two kinds, and it is invisible until the
-/// last release: a recursive lock that forgot to count would look correct right up to the
-/// point another thread was let in one release early.
+/// A recursive lock that did not count would let another thread in one release early.
 #[test]
 fn a_recursive_mutex_must_be_released_as_many_times_as_it_was_taken() {
     let m = sync::create(sync::Recursion::Allowed, "m");
@@ -135,9 +113,7 @@ fn a_recursive_mutex_must_be_released_as_many_times_as_it_was_taken() {
 
 /// Unlocking a lock you do not hold is refused, whoever you are.
 ///
-/// **Refusing rather than releasing is the point.** Releasing somebody else's lock would
-/// let two guest threads into the same critical section, and nothing downstream would ever
-/// point back here.
+/// Releasing somebody else's lock would let two guest threads into one critical section.
 #[test]
 fn unlocking_a_mutex_you_do_not_hold_is_refused() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
@@ -153,7 +129,7 @@ fn unlocking_a_mutex_you_do_not_hold_is_refused() {
         Some(sync::Acquisition::Locked)
     );
     assert_eq!(sync::unlock(m, BOB), Some(false), "somebody else holds it");
-    // And the real owner still does, which a wrongly-permissive unlock would have broken.
+    // And the real owner still holds it.
     assert_eq!(
         sync::acquire(m, BOB, sync::Blocking::Never),
         Some(sync::Acquisition::Busy)
@@ -207,9 +183,8 @@ fn an_impatient_take_answers_immediately_and_respects_recursion() {
 
 /// An error-checking mutex tells its owner a self-relock is a deadlock, distinct from busy.
 ///
-/// The whole reason an acquisition reports three states rather than two: a normal lock the owner
-/// re-takes is *busy*, an error-checking one is a *deadlock*, and the platform gives those two
-/// different codes (015-sync/mutex-recursion, D416). To another thread it is still just busy.
+/// A normal lock the owner re-takes is busy, an error-checking one is a deadlock, and the
+/// platform gives the two different codes. To another thread it is busy.
 #[test]
 fn an_errorcheck_mutex_reports_a_self_relock_as_a_deadlock() {
     let m = sync::create(sync::Recursion::Errorcheck, "errorcheck");
@@ -231,10 +206,7 @@ fn an_errorcheck_mutex_reports_a_self_relock_as_a_deadlock() {
     sync::destroy(m);
 }
 
-/// A blocked acquirer is woken when the lock is released.
-///
-/// The one behaviour that cannot be tested without two threads: `lock` waiting, and the
-/// release actually notifying rather than leaving the waiter to a timeout it does not have.
+/// A blocked acquirer is woken when the lock is released, rather than left to a timeout.
 #[test]
 fn a_waiting_thread_is_woken_when_the_mutex_is_released() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
@@ -269,9 +241,8 @@ fn a_waiting_thread_is_woken_when_the_mutex_is_released() {
 
 /// Every mutex call on a handle naming nothing answers "no such object".
 ///
-/// Distinct from `Some(false)`, which is a real object refusing. A guest branches
-/// differently on each, and collapsing them would make a destroyed handle look like a busy
-/// lock - which a caller retries forever.
+/// Distinct from `Some(false)`, a real object refusing: collapsing them would make a destroyed
+/// handle look like a busy lock, which a caller retries forever.
 #[test]
 fn a_mutex_handle_naming_nothing_is_not_the_same_as_a_refusal() {
     let m = sync::create(sync::Recursion::Forbidden, "m");
@@ -287,8 +258,6 @@ fn a_mutex_handle_naming_nothing_is_not_the_same_as_a_refusal() {
         None
     );
 }
-
-// --- semaphores ---------------------------------------------------------------------------
 
 /// A semaphore hands out its initial count and then refuses.
 #[test]
@@ -322,9 +291,8 @@ fn a_semaphore_hands_out_its_count_and_then_refuses() {
 
 /// A handle is a counter, not a truncated pointer.
 ///
-/// The handle is an `int`, and a host address truncated to four bytes collides with every
-/// other semaphore sharing its low half - **silently**. Two created in a row differing by
-/// exactly one is what a counter looks like and what a truncated address does not.
+/// The handle is an `int`, and a host address truncated to four bytes can collide with another
+/// semaphore's. Two created in a row differ by exactly one.
 #[test]
 fn semaphore_handles_are_counted_rather_than_derived_from_addresses() {
     let a = sync::create_semaphore(0, 1, "a");
@@ -335,10 +303,7 @@ fn semaphore_handles_are_counted_rather_than_derived_from_addresses() {
     sync::semaphore_destroy(b);
 }
 
-/// A signal past the ceiling is refused, not clamped.
-///
-/// **Silently capping would let a guest that has lost count carry on as though it had
-/// not**, and the imbalance would surface as a hang somewhere with no connection to here.
+/// A signal past the ceiling is refused, not clamped, so a guest that lost count is told.
 #[test]
 fn a_signal_past_the_ceiling_is_refused_rather_than_clamped() {
     let s = sync::create_semaphore(1, 3, "capped");
@@ -362,8 +327,8 @@ fn a_signal_past_the_ceiling_is_refused_rather_than_clamped() {
         Some(false)
     );
 
-    // An addition that would not even fit in the counter is refused before the ceiling
-    // comparison, rather than wrapping to a small number that passes it.
+    // An addition that would overflow the counter is refused before the ceiling comparison
+    // rather than wrapping to a small number that passes it.
     assert_eq!(sync::semaphore_signal(s, u32::MAX), Some(false));
     assert_eq!(
         sync::semaphore_wait(s, 1, sync::Blocking::Never),
@@ -411,13 +376,10 @@ fn a_semaphore_handle_naming_nothing_answers_nothing() {
     );
 }
 
-// --- condition variables ----------------------------------------------------------------------
-
 /// A signal arriving before anybody waits is remembered.
 ///
-/// **Counted rather than relying on the host notify alone.** A guest may signal first, and
-/// a wake that existed only as a host notification would be lost - leaving the next waiter
-/// blocked on something that already happened.
+/// Signals are counted rather than relying on the host notify alone, which a waiter arriving
+/// later would miss.
 #[test]
 fn a_signal_before_anybody_waits_is_not_lost() {
     let c = sync::create_cond("ready");
@@ -429,7 +391,7 @@ fn a_signal_before_anybody_waits_is_not_lost() {
         Some(true),
         "the owed wake is taken immediately"
     );
-    // And it was consumed rather than left standing.
+    // And it was consumed.
     assert_eq!(
         sync::cond_wait(c, Some(Duration::from_millis(50))),
         Some(false),
@@ -439,16 +401,11 @@ fn a_signal_before_anybody_waits_is_not_lost() {
     assert!(sync::cond_destroy(c));
 }
 
-/// **One signal wakes one waiter, however many the notify reaches.**
+/// One signal wakes one waiter, however many the notify reaches.
 ///
-/// The deterministic form of the bug a loaded test run found by accident. `cond_broadcast`
-/// owes one wake and calls the host's `notify_all`, so both waiters are woken; the count is
-/// what says only one of them was signalled. A wait that returned "signalled" for any wake -
-/// which is what this did - let both through, and a guest would have two threads leaving a
-/// condition only one of them was told about.
-///
-/// Nothing here forces a *spurious* wake, which cannot be provoked on demand. It provokes the
-/// same thing by the route that can be: a real wake with nothing behind it.
+/// `cond_broadcast` calls the host's `notify_all`, so both waiters wake; the signal count
+/// decides that only one leaves the wait. This stands in for a spurious wake, which cannot be
+/// provoked on demand.
 #[test]
 fn one_signal_releases_one_waiter_even_though_the_notify_reaches_both() {
     let c = sync::create_cond("one-of-two");
@@ -527,13 +484,9 @@ fn a_cond_handle_naming_nothing_answers_nothing() {
     assert_eq!(sync::cond_name_of(c), None);
 }
 
-// --- read/write locks -------------------------------------------------------------------------
-
 /// Readers do not wait for other readers.
 ///
-/// **The whole point of the type**: a shared lock that queued readers behind each other
-/// would be a mutex wearing another name, and would pass every test that only ever takes it
-/// once.
+/// A shared lock that queued readers behind each other would be a mutex under another name.
 #[test]
 fn readers_do_not_wait_for_each_other() {
     let l = sync::create_rwlock("shared");
@@ -587,9 +540,7 @@ fn a_writer_excludes_readers_as_well_as_other_writers() {
 
 /// Releasing a lock nobody holds is reported rather than ignored.
 ///
-/// It is a real bug in the guest, and silence would let it corrupt whatever the lock was
-/// protecting - the release is one call for both kinds, so an unbalanced one is exactly the
-/// mistake this shape invites.
+/// The release is one call for both kinds, so an unbalanced release is an easy guest bug.
 #[test]
 fn releasing_an_rwlock_nobody_holds_is_reported() {
     let l = sync::create_rwlock("l");
@@ -642,8 +593,6 @@ fn an_rwlock_handle_naming_nothing_answers_nothing() {
     assert_eq!(sync::rwlock_name_of(l), None);
 }
 
-// --- barriers ---------------------------------------------------------------------------------
-
 /// A barrier of one releases on arrival, and says who released it.
 #[test]
 fn a_barrier_of_one_releases_immediately() {
@@ -660,8 +609,7 @@ fn a_barrier_of_one_releases_immediately() {
 
 /// A barrier asked for nobody still needs somebody.
 ///
-/// `needed` is floored at one, because a barrier that releases before anyone arrives is not
-/// a barrier - and a zero would make the arrival count never reach it.
+/// `needed` is floored at one: a barrier that releases before anyone arrives is not a barrier.
 #[test]
 fn a_barrier_of_zero_is_treated_as_a_barrier_of_one() {
     let b = sync::create_barrier(0, "zero");
@@ -671,9 +619,8 @@ fn a_barrier_of_zero_is_treated_as_a_barrier_of_one() {
 
 /// Two threads meet at a barrier, and exactly one is told it did the releasing.
 ///
-/// Run twice over the same barrier, which is what the round number exists for: without it a
-/// fast thread re-entering would be counted into a round a slow one had not yet left, and
-/// the second meeting would release early.
+/// Run twice over the same barrier: the round number keeps a fast thread re-entering from being
+/// counted into a round a slow one has not left.
 #[test]
 fn two_threads_meet_at_a_barrier_and_can_meet_again() {
     let b = sync::create_barrier(2, "pair");
@@ -711,14 +658,10 @@ fn a_barrier_handle_naming_nothing_answers_nothing() {
     assert_eq!(sync::barrier_name_of(b), None);
 }
 
-// --- event flags -------------------------------------------------------------------------------
-
 /// A poll distinguishes "no such flag" from "the pattern is not set".
 ///
-/// **The reason the answer nests.** The first is a bad handle and the second is an ordinary
-/// miss, and a guest branches differently on each - collapsing them would make a destroyed
-/// flag look like a condition that has simply not happened yet, which a caller waits on
-/// forever.
+/// The first is a bad handle and the second an ordinary miss; collapsing them would make a
+/// destroyed flag look like a condition a caller waits on forever.
 #[test]
 fn a_missing_flag_and_an_unset_pattern_are_different_answers() {
     let e = sync::create_event_flag(0b0100, "state");
@@ -755,8 +698,7 @@ fn polling_for_all_bits_differs_from_polling_for_any() {
     );
     assert_eq!(sync::event_flag_poll(e, 0b0101, true), Some(Some(0b0101)));
 
-    // Asking for no bits at all cannot be satisfied by "all of them", which would otherwise
-    // be vacuously true and wake every waiter on an empty pattern.
+    // No bits at all cannot satisfy "all of them", which would otherwise be vacuously true.
     assert_eq!(sync::event_flag_poll(e, 0, true), Some(None));
     assert_eq!(sync::event_flag_poll(e, 0, false), Some(None));
 
@@ -765,8 +707,7 @@ fn polling_for_all_bits_differs_from_polling_for_any() {
 
 /// Setting adds bits; clearing keeps only the bits named.
 ///
-/// **`clear` is a mask, not a subtraction** - it clears every bit *outside* the pattern,
-/// which is the opposite of what the name suggests to a reader who has not checked.
+/// `clear` is a mask: it clears every bit outside the pattern.
 #[test]
 fn setting_adds_bits_and_clearing_keeps_only_those_named() {
     let e = sync::create_event_flag(0b0001, "e");
@@ -794,9 +735,6 @@ fn setting_adds_bits_and_clearing_keeps_only_those_named() {
 }
 
 /// The full width of the word is usable, including the top bit.
-///
-/// A pattern held as anything narrower would lose these silently, and a guest waiting on a
-/// high bit would wait forever.
 #[test]
 fn the_whole_word_is_usable_including_the_top_bit() {
     let top = 1_u64 << 63;
@@ -822,13 +760,10 @@ fn an_event_flag_handle_naming_nothing_answers_nothing() {
     assert_eq!(sync::event_flag_name_of(e), None);
 }
 
-// --- across the kinds --------------------------------------------------------------------------
-
 /// Handles from different kinds of object are not interchangeable.
 ///
-/// Every kind but the semaphore hands out an address-shaped `u64`, so a guest - or a bug
-/// here - passing one to the wrong call must be told there is no such object rather than
-/// finding a plausible one. They come from separate tables, and this is what proves it.
+/// Most kinds hand out an address-shaped `u64`; they come from separate tables, so a handle
+/// passed to the wrong call finds no such object.
 #[test]
 fn a_handle_from_one_kind_of_object_means_nothing_to_another() {
     let mutex = sync::create(sync::Recursion::Forbidden, "m");
@@ -851,23 +786,17 @@ fn a_handle_from_one_kind_of_object_means_nothing_to_another() {
     sync::event_flag_destroy(flag);
 }
 
-// --- deadlines ---------------------------------------------------------------------------------
-//
-// The three primitives that gained a deadline this batch, tested for the property the
-// deadline exists to give: a bounded total wait. Every one of these would pass against an
-// implementation that waited forever, if it only asserted the return value - so each one
-// measures the elapsed time as well.
+// Deadlines: each test measures elapsed time as well as the answer, because an
+// implementation that waited forever would pass on the return value alone.
 
 /// A span short enough that a test waiting it out is not slow, long enough that the wait is
 /// real rather than a scheduling accident.
 const BRIEF: Duration = Duration::from_millis(80);
 
-/// A deadline that has already passed is a wait of no time, **not a refusal**.
+/// A deadline that has already passed is a wait of no time, not a refusal.
 ///
-/// POSIX says the timeout of a `pthread_mutex_timedlock` is not consulted when the mutex can
-/// be locked at once, so a caller that arrives late at a free lock still gets it. An
-/// implementation that checked the clock first would fail this and would look correct
-/// everywhere else.
+/// POSIX does not consult the timeout of `pthread_mutex_timedlock` when the mutex can be
+/// locked at once, so a late caller at a free lock still gets it.
 #[test]
 fn a_deadline_already_past_still_takes_something_that_is_free() {
     let m = sync::create(sync::Recursion::Forbidden, "late");
@@ -884,7 +813,7 @@ fn a_deadline_already_past_still_takes_something_that_is_free() {
     sync::destroy(m);
 }
 
-/// A timed acquisition of a held lock gives up, and gives up **when it said it would**.
+/// A timed acquisition of a held lock gives up when its deadline passes.
 #[test]
 fn a_timed_acquisition_gives_up_at_its_deadline() {
     let m = sync::create(sync::Recursion::Forbidden, "held");
@@ -931,25 +860,12 @@ fn a_timed_acquisition_takes_a_lock_that_comes_free_in_time() {
     sync::destroy(m);
 }
 
-/// **Repeated wakes must not extend the wait**, which is the bug the deadline arithmetic
-/// exists to prevent.
+/// Repeated wakes do not extend the wait.
 ///
-/// Handing the whole remaining span to each `wait_timeout` restarts the clock every time the
-/// condition variable wakes a waiter, and this module's release notifies *all* of them - so
-/// a writer waiting behind readers that keep arriving and leaving would be woken, find the
-/// lock still taken, and start its timeout again from the top. It would never return.
-///
-/// The churn is deliberate: readers enter and leave continuously for longer than the
-/// writer's deadline, so every one of those releases wakes the writer with nothing for it.
-///
-/// # Why the wait happens on its own thread
-///
-/// **The regression this guards against is an infinite wait**, so a test that simply called
-/// `rwlock_write` and asserted afterwards would hang rather than fail - and a hanging test
-/// takes the whole suite with it, reporting nothing about what broke. This was confirmed
-/// the hard way: the arithmetic was reverted deliberately and the first version of this test
-/// stopped responding instead of failing. So the wait runs on a thread with a channel, and
-/// the deadline that matters is the one on the `recv`.
+/// Every release notifies all waiters, so a writer behind churning readers is woken many times
+/// with nothing for it; handing each `wait_timeout` the whole span again would restart the
+/// clock and never return. The wait runs on its own thread with a deadline on the `recv`, so
+/// the regression fails instead of hanging.
 #[test]
 fn wakes_that_bring_nothing_do_not_extend_a_deadline() {
     let l = sync::create_rwlock("churn");
@@ -964,8 +880,7 @@ fn wakes_that_bring_nothing_do_not_extend_a_deadline() {
         let stop = std::sync::Arc::clone(&stop);
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                // Each release notifies every waiter, so each turn is one pointless wake
-                // for the writer below.
+                // Each release notifies every waiter, so each turn is one empty wake for the writer.
                 sync::rwlock_read(l, sync::Blocking::Forever);
                 sync::rwlock_unlock(l);
                 std::thread::yield_now();
@@ -993,20 +908,10 @@ fn wakes_that_bring_nothing_do_not_extend_a_deadline() {
     sync::rwlock_destroy(l);
 }
 
-/// A timed semaphore take gives up, and one signalled in time does not.
-/// **A timed wait must not report a timeout before its deadline.**
+/// A timed wait never reports a timeout before its deadline.
 ///
-/// The invariant `a_timed_semaphore_take_gives_up_and_can_be_rescued` asserts once, and it
-/// failed once - under the load of a whole-workspace run, never on its own. Once is a
-/// coincidence to that test and a property to this one: fifty short waits, each of which must
-/// have lasted at least as long as it was told to.
-///
-/// **The cause is not established.** The leading guess was rounding - `Condvar::wait_timeout`
-/// is handed the span remaining until a fixed instant, and a host that rounds it *down* to its
-/// timer granularity would report `timed_out` a fraction early. Fifty-eight attempts across
-/// 5ms and 80ms deadlines did not reproduce it, so that guess is unsupported and this test is
-/// an instrument rather than a regression test: it exercises the property fifty times a run
-/// instead of once, so the next occurrence lands here with a turn number attached.
+/// Fifty short waits, each of which must last at least as long as it was told to; a host that
+/// rounds the remaining span down to its timer granularity would fail it.
 #[test]
 fn a_timed_wait_never_gives_up_before_its_deadline() {
     const SHORT: Duration = Duration::from_millis(5);
@@ -1023,6 +928,7 @@ fn a_timed_wait_never_gives_up_before_its_deadline() {
     }
 }
 
+/// A timed semaphore take gives up, and one signalled in time does not.
 #[test]
 fn a_timed_semaphore_take_gives_up_and_can_be_rescued() {
     let s = sync::create_semaphore(0, 4, "empty");

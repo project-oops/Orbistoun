@@ -1,32 +1,10 @@
 //! The decoder against bytes that are not a shader.
 //!
-//! # Why this matters before any real data arrives
-//!
-//! Every other test in this crate feeds the decoder something that *is* an instruction
-//! stream - a compiled fixture, or a word this project built on purpose. Real material
-//! will not be so obliging. A shader address decoded from the wrong register bits points
-//! at a texture, a stack frame, or nothing; a branch target computed wrongly lands
-//! mid-instruction; a shader read from guest memory runs past its end into whatever the
-//! guest put there.
-//!
-//! In all of those the decoder is handed bytes that are not instructions, and its job is
-//! to **say so** rather than to hang, panic, or quietly report a plausible program. The
-//! last is the dangerous one: a decode that runs off into garbage and produces a hundred
-//! confident instructions would send the worklist chasing opcodes nobody's guest ever
-//! executed.
-//!
-//! # The properties
-//!
-//! For *any* input, however hostile:
-//!
-//! - it terminates
-//! - it does not panic
-//! - offsets are strictly increasing and inside the buffer
-//! - garbage is reported as untrustworthy rather than presented as a program
-//!
-//! Termination is the one that would be catastrophic to get wrong and the easiest to get
-//! wrong: an instruction whose decoded length is zero advances nothing, and the loop
-//! never ends. There is a guard for exactly that, and this is what proves it.
+//! A wrong shader address, a mis-computed branch target, or a shader read past its end all
+//! hand the decoder bytes that are not instructions. For any input it must terminate, not
+//! panic, keep offsets strictly increasing and inside the buffer, and flag garbage as
+//! untrustworthy rather than present it as a program. Termination rests on no instruction
+//! having zero length.
 
 use orbistoun_shader::{EncodingTable, OperandTable, decode, decode_program};
 
@@ -86,11 +64,9 @@ fn well_formed(bytes: &[u8], decoded: &orbistoun_shader::Decode, what: &str) {
     }
 }
 
+/// Random bytes decode without panicking or hanging, in both decode modes.
 #[test]
 fn random_bytes_decode_without_panicking_or_hanging() {
-    // The blunt property. If this ever hangs rather than fails, the guard against a
-    // zero-length instruction has gone - and a hung test is the symptom a hung emulator
-    // would have.
     let (table, operands) = tables();
     let mut rng = Rng(0x5EED);
 
@@ -113,11 +89,11 @@ fn random_bytes_decode_without_panicking_or_hanging() {
     }
 }
 
+/// A buffer of zeros is either flagged untrustworthy or wholly recognised.
 #[test]
 fn a_buffer_of_zeros_is_not_reported_as_a_hundred_instructions() {
-    // The shape a wrong shader address most often takes: mapped memory that is not code.
-    // Zeros happen to decode as *something* in most encodings, so the honest answer is
-    // not "no instructions" - it is a decode flagged as untrustworthy.
+    // Zeros decode as something in most encodings; mapped memory that is not code is the
+    // common shape of a wrong shader address.
     let (table, operands) = tables();
     let bytes = vec![0u8; 512];
     let decoded = decode(&bytes, &table, &operands);
@@ -136,34 +112,23 @@ fn a_buffer_of_zeros_is_not_reported_as_a_hundred_instructions() {
     );
 }
 
+/// A buffer of `0xFF` bytes decodes well-formed.
 #[test]
 fn a_buffer_of_ones_is_handled() {
-    // The other degenerate case, and the one most likely to produce absurd lengths.
     let (table, operands) = tables();
     let bytes = vec![0xFFu8; 512];
     let decoded = decode(&bytes, &table, &operands);
     well_formed(&bytes, &decoded, "ones");
 }
 
+/// The typed-buffer half-precision variants decode as distinct opcodes.
 #[test]
 fn the_typed_buffer_half_precision_variants_decode_distinctly() {
-    // This test used to assert the opposite, and that was the point of it.
-    //
-    // The typed-buffer opcode is split - bits 18:16 of the first word and a fourth at
-    // bit 53, which is bit 21 of the second - and the table read only the contiguous
-    // part, so every half-precision variant decoded as the operation it is a variant of.
-    // The gap was pinned as a *passing* test asserting the conflation existed, so that
-    // closing it would fail here and say so rather than leaving a comment describing a
-    // problem somebody had already fixed.
-    //
-    // It did exactly that. Kept, inverted, as the guard that the fourth bit is still read.
-    //
-    // These two encodings came from the reference assembler for this target:
+    // The typed-buffer opcode is split: bits 18:16 of the first word and a fourth at bit
+    // 53, bit 21 of the second. From the reference assembler for this target:
     //
     //   tbuffer_load_format_x      -> e8a02000 80020001
     //   tbuffer_load_format_d16_x  -> e8a02000 80220001
-    //
-    // Identical first word. The whole difference is bit 21 of the second.
     let (table, operands) = tables();
 
     let plain = [0xe8a0_2000u32, 0x8002_0001];
@@ -194,9 +159,8 @@ fn the_typed_buffer_half_precision_variants_decode_distinctly() {
             "operation it is a variant of"
         )
     );
-    // The continuation is the *high* bit, so the variant is its counterpart plus eight.
-    // Asserting the arithmetic rather than just inequality catches a continuation
-    // shifted to the wrong place, which would still produce two different numbers.
+    // The continuation is the high bit, so the variant is its counterpart plus eight; the
+    // arithmetic catches a continuation shifted to the wrong place.
     assert_eq!(
         half_opcode,
         plain_opcode + 8,
@@ -204,18 +168,13 @@ fn the_typed_buffer_half_precision_variants_decode_distinctly() {
     );
 }
 
+/// Half of an eight-byte instruction sets `overran`.
 #[test]
 fn a_truncated_instruction_is_reported_as_overrunning() {
-    // A shader read from guest memory can end at a page boundary part way through an
-    // eight-byte instruction. Continuing would read whatever follows in memory as
-    // operands.
+    // A shader read from guest memory can end part way through an eight-byte instruction.
     let (table, operands) = tables();
-    // Half of an eight-byte instruction, whichever family the table says is one.
-    //
-    // Asked rather than written down. This test used to hold a scalar-load word from a
-    // different architecture generation; after a retarget that word matched no family at
-    // all, so it decoded as four unrecognised bytes, did not overrun, and the test failed
-    // while reporting the decoder as broken.
+    // Half of an eight-byte instruction, from whichever family the table says is one, so
+    // the test survives a retarget.
     let wide = table
         .encodings()
         .iter()
@@ -235,11 +194,9 @@ fn a_truncated_instruction_is_reported_as_overrunning() {
     assert!(!decoded.is_trustworthy());
 }
 
+/// `decode_program` distinguishes a program that ended from a window that ran out.
 #[test]
 fn a_shader_with_no_terminator_is_not_silently_complete() {
-    // `decode_program` reads a window rather than a shader, so it has to distinguish
-    // "the program ended here" from "the window ran out". Confusing the two means a
-    // shader read from a wrong address looks like a short, valid one.
     let (table, operands) = tables();
     // Two moves and nothing that ends the program.
     let words: [u32; 2] = [0x7E00_0280, 0x7E02_0280];
@@ -259,10 +216,9 @@ fn a_shader_with_no_terminator_is_not_silently_complete() {
     assert_eq!(program.consumed, bytes.len());
 }
 
+/// A buffer that is not whole words is reported untrustworthy.
 #[test]
 fn trailing_bytes_that_are_not_a_whole_word_are_reported() {
-    // A buffer whose length is not a multiple of four is not a shader, and saying so is
-    // cheaper than guessing what the remainder was meant to be.
     let (table, operands) = tables();
     let bytes = vec![0u8; 6];
     let decoded = decode(&bytes, &table, &operands);
@@ -271,10 +227,9 @@ fn trailing_bytes_that_are_not_a_whole_word_are_reported() {
     assert!(!decoded.is_trustworthy());
 }
 
+/// An empty buffer decodes to an empty program, not an error.
 #[test]
 fn an_empty_buffer_decodes_to_nothing_rather_than_failing() {
-    // Reachable from a zero-length mapping, and the honest answer is an empty program
-    // rather than an error - there is nothing wrong with the bytes, there are none.
     let (table, operands) = tables();
     let decoded = decode(&[], &table, &operands);
     assert!(decoded.instructions.is_empty());
@@ -286,11 +241,11 @@ fn an_empty_buffer_decodes_to_nothing_rather_than_failing() {
     assert_eq!(program.consumed, 0);
 }
 
+/// Every high byte, with sampled low bits, decodes well-formed.
 #[test]
 fn every_single_word_decodes_without_panicking() {
-    // Exhaustive over the high byte, which is what every encoding family is selected by,
-    // and sampled below that. A family whose mask or length rule is malformed shows up
-    // here as a panic rather than as a strange fixture months later.
+    // The high byte selects every encoding family, so a malformed mask or length rule
+    // shows up here as a panic.
     let (table, operands) = tables();
 
     for high in 0u32..256 {
@@ -304,13 +259,9 @@ fn every_single_word_decodes_without_panicking() {
     }
 }
 
+/// The table loader refuses a zero-width encoding, which would never advance.
 #[test]
 fn the_table_cannot_describe_an_instruction_that_advances_nothing() {
-    // Termination is guaranteed by construction rather than by the tests above: every
-    // recognised instruction advances by its declared width, every unrecognised one by
-    // the four-byte minimum, and the loader refuses a width of zero. This pins that
-    // refusal, so the guarantee stays a guarantee rather than becoming an accident of
-    // what the table happens to contain.
     let malformed = r#"
         [[encoding]]
         name = "BROKEN"

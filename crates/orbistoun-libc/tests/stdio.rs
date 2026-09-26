@@ -1,26 +1,11 @@
 //! Diagnostics, process queries, the C++ allocation operators, and the file layer.
 //!
-//! # The section of the library a guest uses to explain itself
-//!
-//! `puts`, `printf` and `fprintf` are how a program that is about to give up says why, and
-//! for a long time the emulator discarded that and then reported the guest as having
-//! stopped for reasons unknown (D186, D344). `strerror` and `sysctl` are the same shape one
-//! level down: a guest asks a question, takes its own error path, and reports the file and
-//! line itself - but only if the answer it gets is a *documented* failure rather than an
-//! invented success.
-//!
-//! # Two functions here are deliberately never called
-//!
-//! `abort` and `exit` end the process: they go to `orbistoun_core::stop`, which is
-//! diverging and calls `std::process::exit`. Calling either from a test would take the test
-//! binary with it and every other test in this file would be reported as never having run.
-//! They are named here so their absence reads as a decision rather than an oversight -
-//! their behaviour belongs to a test that owns a whole process.
-//!
-//! # Process-wide state
-//!
-//! The mount table and the unknown-`sysctl` report are process-wide, so the tests touching
-//! them use their own prefixes and assert "at least" rather than exact totals.
+//! `puts`, `printf` and `fprintf` are how a program about to give up says why (D170).
+//! `strerror` and `sysctl` answer documented failures, so a guest takes its own error path and
+//! reports it. `abort` and `exit` end the process through `orbistoun_core::stop` and are not
+//! called here, since they would end the test binary. The mount table and the
+//! unknown-`sysctl` report are process-wide, so those tests use their own prefixes and assert
+//! "at least".
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -93,8 +78,8 @@ fn call(name: &str, args: &[u64]) -> u64 {
 fn read_string(at: u64) -> String {
     let mut out = Vec::new();
     for offset in 0..1024_u64 {
-        // SAFETY: an address this library returned, pointing at storage it owns for the
-        // life of this thread, under the identity mapping (D014).
+        // SAFETY: an address this library returned, pointing at storage it owns for the life of
+        // this thread, under the identity mapping.
         let byte = unsafe {
             std::ptr::read(std::ptr::with_exposed_provenance::<u8>(
                 (at + offset) as usize,
@@ -108,14 +93,10 @@ fn read_string(at: u64) -> String {
     String::from_utf8(out).expect("these messages are ASCII")
 }
 
-// --- saying why ---------------------------------------------------------------------------
+// Saying why.
 
-/// `strerror` answers a pointer to storage this library owns, per thread.
-///
-/// **A pointer, which the caller immediately reads.** Answering a value rather than an
-/// address gives the guest a wild pointer it dereferences at once - the same failure shape
-/// as `__error` (D344). Per thread because two threads reporting different failures must
-/// not overwrite each other's message mid-print.
+/// `strerror` answers a pointer to per-thread storage this library owns, so two threads'
+/// messages do not overwrite each other.
 #[test]
 fn strerror_answers_thread_local_storage_rather_than_a_value() {
     let message = call("strerror", &[2]);
@@ -128,7 +109,7 @@ fn strerror_answers_thread_local_storage_rather_than_a_value() {
         "the message should name the number it was asked about: {text:?}"
     );
 
-    // Honest about what it does not have, rather than inventing a message table.
+    // There is no message table, and the text says so.
     assert!(text.contains("no message table"), "{text:?}");
 
     // A different code gives a different message through the same address.
@@ -145,11 +126,7 @@ fn strerror_answers_thread_local_storage_rather_than_a_value() {
     );
 }
 
-/// `puts` writes its argument verbatim and reports what it wrote.
-///
-/// **Not `printf` with the same argument**, which is the whole implementation: `puts` does
-/// not treat its argument as a format, so a guest's own text containing a percent sign
-/// must survive rather than vanish or be reported as a bad conversion.
+/// `puts` writes its argument verbatim, not as a format, and reports what it wrote.
 #[test]
 fn puts_does_not_treat_its_argument_as_a_format() {
     let plain = Buf::text("starting up");
@@ -159,8 +136,7 @@ fn puts_does_not_treat_its_argument_as_a_format() {
         "eleven bytes and a newline"
     );
 
-    // The case that separates it from `printf`. Routed through the renderer this would be
-    // an unsupported conversion and answer zero.
+    // Through the renderer this would be an unsupported conversion and answer zero.
     let percent = Buf::text("100% done");
     assert_eq!(call("puts", &[percent.at()]), 10);
 
@@ -168,9 +144,6 @@ fn puts_does_not_treat_its_argument_as_a_format() {
 }
 
 /// `printf` reports how much it rendered, and refuses what it cannot render.
-///
-/// A half-rendered diagnostic is worse than none: it is the text somebody would then reason
-/// from.
 #[test]
 fn printf_reports_what_it_rendered_and_refuses_what_it_cannot() {
     let format = Buf::text("value %d\n");
@@ -185,13 +158,7 @@ fn printf_reports_what_it_rendered_and_refuses_what_it_cannot() {
     assert_eq!(call("printf", &[0]), 0, "a null format renders nothing");
 }
 
-/// `fprintf` drops the stream and renders the rest.
-///
-/// **The stream is read and ignored, deliberately** - a guest's `stderr` is imported as
-/// data and this layer gives it zeroed storage, so there is nothing behind the handle to
-/// tell apart. What must work is the *shift*: the format is the second argument, and an
-/// implementation that forgot to move the window along would treat the stream handle as its
-/// format string.
+/// `fprintf` drops the stream and renders the rest: the format is the second argument.
 #[test]
 fn fprintf_drops_the_stream_and_renders_the_rest() {
     let format = Buf::text("%s=%d\n");
@@ -200,12 +167,11 @@ fn fprintf_drops_the_stream_and_renders_the_rest() {
 
     assert_eq!(call("fprintf", &[stream, format.at(), name.at(), 60]), 7);
 
-    // Whatever the stream is, the answer is the same - which is the documented limitation
-    // rather than an accident.
+    // Whatever the stream is, the answer is the same.
     assert_eq!(call("fprintf", &[0, format.at(), name.at(), 60]), 7);
 }
 
-// --- asking the system --------------------------------------------------------------------
+// Asking the system.
 
 /// `getpid` answers the process the guest is actually running in.
 #[test]
@@ -215,11 +181,8 @@ fn getpid_answers_the_real_process() {
     assert_ne!(reported, 0, "no real process is zero");
 }
 
-/// `sysctl` refuses what it does not know, with the documented failure.
-///
-/// **Answering success would be far worse.** `oldp` is often null on the first of a pair of
-/// calls asking only how large the answer is, so a success without a length written hands
-/// the caller an uninitialised size it then allocates against.
+/// `sysctl` refuses what it does not know, with the documented failure, since a success
+/// without a length leaves the caller an uninitialised size.
 #[test]
 fn sysctl_refuses_a_name_it_does_not_know() {
     let mib = Buf::words(&[1, 14]);
@@ -231,9 +194,6 @@ fn sysctl_refuses_a_name_it_does_not_know() {
 }
 
 /// A name array that could not have come from a real process is refused before it is read.
-///
-/// Walking an array sized by a stray value would fault inside this call and be reported as
-/// the guest's fault, which is the failure a library function must not have.
 #[test]
 fn sysctl_refuses_a_name_array_it_should_not_walk() {
     let mib = Buf::words(&[1, 14]);
@@ -251,12 +211,8 @@ fn sysctl_refuses_a_name_array_it_should_not_walk() {
     assert_eq!(call("sysctl", &[mib.at(), u64::MAX, 0, 0, 0, 0]), FAILED);
 }
 
-/// The harvested ABI constants are read from the table rather than written into the code.
-///
-/// Retyping one into Rust would make it untraceable - a reader could no longer tell a
-/// harvested value from a remembered one, which is the distinction `known_by` exists to
-/// keep (D351). The test is that the lookup works and that a name nothing harvested is
-/// absent rather than defaulted.
+/// The harvested ABI constants are read from the table, and a name nothing harvested is
+/// absent rather than defaulted (D352).
 #[test]
 fn an_abi_constant_is_looked_up_and_a_missing_one_is_absent() {
     assert!(
@@ -273,24 +229,21 @@ fn an_abi_constant_is_looked_up_and_a_missing_one_is_absent() {
     );
 }
 
-// --- the C++ operators --------------------------------------------------------------------
+// The C++ operators.
 
-/// `operator new` and `operator delete` are the heap under another name.
-///
-/// They have to be, rather than a second allocator: a block allocated by one and released
-/// by the other is the normal case, and two heaps that each half-understand a header is a
-/// corruption with no connection to either call.
+/// `operator new` and `operator delete` are the same heap as `malloc` and `free`, so blocks
+/// may cross between them.
 #[test]
 fn the_cxx_operators_share_the_heap_with_malloc() {
     let block = call("_Znwm", &[128]);
     assert_ne!(block, 0);
     call("memset", &[block, 0x7E, 128]);
 
-    // Freed through the C name, which is only correct because they are the same heap.
+    // Freed through the C name.
     call("free", &[block]);
 
-    // And the other way round: allocated by `malloc`, released by the sized delete, whose
-    // size argument is ignored in favour of the header.
+    // And the other way round: allocated by `malloc`, released by the sized delete, whose size
+    // argument is ignored in favour of the header.
     let other = call("malloc", &[64]);
     assert_ne!(other, 0);
     assert_eq!(
@@ -300,13 +253,10 @@ fn the_cxx_operators_share_the_heap_with_malloc() {
     );
 }
 
-// --- files ------------------------------------------------------------------------------------
+// Files.
 
-/// A handle naming nothing is refused by every call that takes one.
-///
-/// **`EOF`, not an error code that looks like a size.** A guest sized a two gigabyte
-/// allocation from a nonsense `ftell`, so a wrong value here does not stay contained - it
-/// becomes a memory request the next subsystem has to refuse (D165).
+/// A handle naming nothing is refused by every call that takes one, with `EOF` rather than a
+/// value that looks like a size.
 #[test]
 fn a_handle_naming_nothing_is_refused_by_everything() {
     let bogus = 0x7FFF_0001;
@@ -322,10 +272,8 @@ fn a_handle_naming_nothing_is_refused_by_everything() {
     assert_eq!(call("fseek", &[bogus, 0, 99]), EOF);
 }
 
-/// A read of nothing reads nothing, and a size that cannot be expressed is refused.
-///
-/// Refused rather than truncated to something plausible: a request this cannot express is
-/// not a smaller request.
+/// A read of nothing reads nothing, and a size that cannot be expressed is refused rather
+/// than truncated.
 #[test]
 fn a_read_that_cannot_be_expressed_is_refused() {
     let dest = Buf::zeroed(16);
@@ -344,10 +292,6 @@ fn a_read_that_cannot_be_expressed_is_refused() {
 }
 
 /// A path under no mount opens nothing, and answers null rather than a code.
-///
-/// Null is still the wrong answer for a guest that does not check - but it is the wrong
-/// answer that faults nearest the cause, instead of being carried through four more calls
-/// as if it were a stream (D165).
 #[test]
 fn a_path_under_no_mount_opens_nothing() {
     let path = Buf::text("/nowhere0/definitely-not-here.bin");
@@ -357,10 +301,8 @@ fn a_path_under_no_mount_opens_nothing() {
 
 /// The whole file cycle over a real file, in one test.
 ///
-/// **One test on purpose.** The mount table is process-wide, so two tests mounting at once
-/// would each see the other's prefix. A prefix nothing else uses keeps this from disturbing
-/// anything, and it is never cleared - clearing the table would remove mounts a parallel
-/// test is relying on.
+/// The mount table is process-wide, so this uses a prefix nothing else uses and never clears
+/// the table.
 #[test]
 fn a_mounted_file_can_be_opened_read_and_positioned() {
     let dir = std::env::temp_dir().join("orbistoun-libc-stdio-test");
@@ -372,8 +314,7 @@ fn a_mounted_file_can_be_opened_read_and_positioned() {
     let stream = call("fopen", &[path.at(), 0]);
     assert_ne!(stream, 0, "a mounted, existing file opens");
 
-    // Reading answers whole **elements**, not bytes - a distinction that costs nothing to
-    // get right and produces a silently truncated load if got wrong.
+    // Reading answers whole elements, not bytes.
     let dest = Buf::zeroed(16);
     assert_eq!(call("fread", &[dest.at(), 2, 3, stream]), 3);
     assert_eq!(&dest.bytes()[..6], b"012345");

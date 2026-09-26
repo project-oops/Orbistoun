@@ -1,31 +1,10 @@
 //! The packet vocabulary, against captures of a guest that used it.
 //!
-//! # The circle this breaks
-//!
-//! Every layer above `data/packets.toml` is verified against something external:
-//! instruction decoding against a reference disassembler, translation against a real GPU.
-//! The table itself is transcribed and checked against nothing, and its own comment calls
-//! the shader-address rows the least certain thing in the file.
-//!
-//! It is also the layer where a mistake is silent. A wrong register base attributes every
-//! write in its class to the wrong register - consistently, so nothing looks odd. A wrong
-//! shader-address row means shaders are looked for in the wrong place. Neither produces
-//! an error; both produce a submission that yields nothing and looks like an
-//! unremarkable frame.
-//!
-//! # Why a capture is a pair
-//!
-//! A recorded command buffer on its own would have to be read *through* the table under
-//! test, so agreement would prove nothing. Each capture records what a library call
-//! asked for **and** the bytes it appended: the call states the answer, the bytes are the
-//! question.
-//!
-//! # A small corpus, and an empty one reported rather than passed
-//!
-//! The captures here each record what a library call asked for and the bytes it appended, and the
-//! suite checks the table against them. An empty corpus would report that it checked nothing,
-//! because "nothing to check" and "everything checks out" must never look the same - the same rule
-//! the device-dependent tests follow.
+//! `data/packets.toml` is transcribed, and a mistake in it is silent: a wrong register base
+//! misattributes every write in its class, and a wrong shader-address row looks for shaders in the
+//! wrong place. Each capture is a pair - what a library call asked for, and the bytes it appended -
+//! so the call states the answer independently of the table. An empty corpus reports that it
+//! checked nothing rather than passing.
 
 mod common;
 
@@ -75,11 +54,8 @@ fn captures_dir() -> PathBuf {
         .join("captures")
 }
 
-/// Every capture on disk, as (name, claims, bytes).
-///
-/// A `.toml` with no `.hex` beside it is an error rather than a skip: it means a capture
-/// was added half way, and silently ignoring it would leave somebody believing it was
-/// being checked.
+/// Every capture on disk, as (name, claims, bytes). A `.toml` with no `.hex` beside it is an error,
+/// not a skip.
 fn captures() -> Vec<(String, Capture, Vec<u8>)> {
     let directory = captures_dir();
     let Ok(entries) = std::fs::read_dir(&directory) else {
@@ -119,11 +95,8 @@ fn captures() -> Vec<(String, Capture, Vec<u8>)> {
     found
 }
 
-/// Checks one capture, returning how many expectations held or what disagreed.
-///
-/// Errors rather than panics, so the comparison itself can be tested. A comparator that
-/// panics can only be exercised by data that makes it pass - which would leave the one
-/// thing this file exists to do never having been run.
+/// Checks one capture, returning how many expectations held or what disagreed. Errors rather than
+/// panics, so the comparison itself can be tested with data that makes it fail.
 fn check(
     name: &str,
     capture: &Capture,
@@ -203,8 +176,7 @@ fn every_capture_agrees_with_the_register_vocabulary() {
     let captures = captures();
 
     if captures.is_empty() {
-        // Loud, and deliberately not an ignored test: a harness reports an ignored test
-        // as a kind of pass, and this needs to read as "checked nothing".
+        // Printed rather than an ignored test: a harness reports an ignored test as a kind of pass.
         println!();
         println!("!! NO CAPTURES: the packet vocabulary was checked against nothing.");
         println!("!! data/packets.toml remains transcribed and unverified.");
@@ -240,9 +212,8 @@ fn every_capture_agrees_with_the_register_vocabulary() {
 
 /// A command stream that writes one register, built the way a guest would.
 ///
-/// Synthetic, and **not evidence about the vocabulary** - it is generated from the same
-/// table it would be checking, so of course they agree. It exists to exercise the
-/// comparison, which otherwise could not run at all until a real capture arrived.
+/// Synthetic and not evidence about the vocabulary: it is generated from the table it checks. It
+/// exercises the comparison.
 fn synthetic_stream(register: u32, value: u32, vocabulary: &Vocabulary) -> Vec<u8> {
     let (opcode, base) = vocabulary
         .opcode_for_register(register)
@@ -267,9 +238,8 @@ fn synthetic_capture(register: u32, value: u32) -> Capture {
 
 #[test]
 fn the_comparison_accepts_a_capture_that_agrees() {
-    // Proves the harness can load, decode and compare. Says nothing about whether the
-    // table is right, and is only here because the corpus is empty - a comparator that
-    // has never run is not a check.
+    // Proves the harness can load, decode and compare; says nothing about whether the table is
+    // right.
     let vocabulary = Vocabulary::builtin().expect("vocabulary");
     let register = 0x2E0C;
     let bytes = synthetic_stream(register, 0x1234, &vocabulary);
@@ -285,9 +255,8 @@ fn the_comparison_accepts_a_capture_that_agrees() {
 
 #[test]
 fn the_comparison_rejects_a_capture_that_disagrees() {
-    // The half that matters. A comparator that only ever sees agreement cannot be
-    // distinguished from one that returns success unconditionally, and this file's whole
-    // purpose is to fail when the table is wrong.
+    // A comparator that only ever sees agreement cannot be told from one that always succeeds, so
+    // this checks that it fails when the table is wrong.
     let vocabulary = Vocabulary::builtin().expect("vocabulary");
     let register = 0x2E0C;
     let bytes = synthetic_stream(register, 0x1234, &vocabulary);
@@ -318,9 +287,7 @@ fn the_comparison_rejects_a_capture_that_disagrees() {
 
 #[test]
 fn the_capture_directory_explains_itself() {
-    // The format is what the other side of this has to produce, so the description of it
-    // is part of the deliverable rather than a nicety. A missing README means somebody
-    // captures the wrong thing and finds out a round trip later.
+    // The capture format is documented beside the captures, for whoever produces them.
     let readme = captures_dir().join("README.md");
     assert!(
         Path::new(&readme).exists(),

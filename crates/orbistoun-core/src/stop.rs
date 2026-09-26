@@ -1,24 +1,10 @@
 //! Stopping, when the guest asks to.
 //!
-//! # Why this needs a hook rather than a call
-//!
-//! A guest that calls `abort` or `exit` has decided to stop. The subsystem crate that
-//! receives the call is the wrong place to decide *how* - it does not know whether a trace
-//! is being written, where it goes, or what a shim expects to see. The worker knows all of
-//! that and sits above the subsystem crates, so it cannot be called downwards.
-//!
-//! So the worker installs a handler here and the subsystems call it, which is the ordinary
-//! way to invert a dependency and the only one that keeps the spine intact (principle 6).
-//!
-//! # What this fixes, and it was reporting the opposite of the truth
-//!
-//! `abort` is declared `noreturn`, so a compiler emits a trap immediately after the call -
-//! that code is unreachable by contract. An unimplemented `abort` **returns**, execution
-//! falls into the trap, and the run reports `illegal instruction`.
-//!
-//! Two titles were reporting exactly that. The guest had not executed anything invalid; it
-//! had deliberately given up, and the emulator turned a clear statement of intent into a
-//! confusing machine fault at an address that meant nothing (D177).
+//! A guest that calls `abort` or `exit` has decided to stop. The worker knows how to end a
+//! run (trace, destination, what a shim expects) and sits above the subsystem crates, so it
+//! installs a handler here and the subsystems call it. `abort` is `noreturn`, so a compiler
+//! places a trap after the call; an `abort` that returned would run into it and be reported
+//! as an illegal instruction instead of a deliberate stop (D177).
 
 use std::sync::OnceLock;
 
@@ -31,13 +17,9 @@ pub enum StopReason {
     Exited,
     /// A signal was raised on a thread and nothing was installed to handle it.
     ///
-    /// **A third way to stop, and the two above could only misreport it.** Measured: a
-    /// `sceKernelRaiseException` for a signal with no handler does not return - the process takes
-    /// the signal and dies (obSCEne `030-thread/exception-handler`, sweep 20260909-151910).
-    /// Reporting that as `Aborted` would name a call the guest never made, and answering a
-    /// placeholder instead would let it run on past the point where hardware ended it (D650).
-    ///
-    /// The `code` is the signal number.
+    /// A `sceKernelRaiseException` for a signal with no handler does not return: the process takes
+    /// the signal and dies (obSCEne's `030-thread/exception-handler` check). The `code` is the
+    /// signal number.
     Signalled,
 }
 
@@ -60,54 +42,47 @@ static HANDLER: OnceLock<Handler> = OnceLock::new();
 
 /// Installs the handler. The first caller wins; later ones are ignored.
 ///
-/// Called once, during setup, by the process that owns the trace - so that a guest
-/// stopping is recorded rather than merely happening.
+/// Called once during setup by the process that owns the trace, so a guest stop is recorded.
 pub fn on_guest_stop(handler: Handler) {
     let _ = HANDLER.set(handler);
 }
 
 /// Stops, because the guest asked to. Never returns.
 ///
-/// `code` is whatever the guest passed, which is an exit status for `exit` and meaningless
-/// for `abort` - carried through rather than interpreted.
-///
-/// **Without a handler this still does not return.** A subsystem calling this has already
-/// established that the guest will not continue, and returning would put execution into
-/// the unreachable trap the compiler placed after the call - which is precisely the
-/// failure this exists to remove.
+/// `code` is whatever the guest passed: an exit status for `exit`, meaningless for `abort`.
+/// Without a handler this still does not return, since returning would run into the trap the
+/// compiler placed after the call.
 pub fn stop(reason: StopReason, code: u64) -> ! {
     if let Some(handler) = HANDLER.get() {
         handler(reason, code);
     }
-    // No handler: nothing is recording, so there is nothing to flush. Logged plainly first,
-    // because a process that vanishes silently is indistinguishable from one that crashed.
+    // No handler: nothing is recording, so there is nothing to flush. Logged first, because a
+    // process that vanishes silently is indistinguishable from one that crashed.
     tracing::error!("{} ({code:#x})", reason.label());
     std::process::exit(EXIT_GUEST_STOPPED);
 }
 
 /// Exit status for a run the guest ended itself.
 ///
-/// Distinct from a crash and from the time limit, so a shim can tell "it gave up" from "it
-/// died" without parsing anything.
+/// Distinct from a crash and from the time limit, so a shim can tell "it gave up" from "it died".
 pub const EXIT_GUEST_STOPPED: i32 = 0x0B0F;
 
 #[cfg(test)]
 mod tests {
     use super::StopReason;
 
+    /// Every stop reason's label names what the guest did in words.
     #[test]
     fn every_reason_says_what_happened_in_words() {
-        // These go straight into a report a person reads. "Aborted" is a state; "the guest
-        // called abort" is a sentence, and the difference matters when the alternative
-        // report was `illegal instruction` at a meaningless address.
+        // Labels go straight into a report a person reads, so they name the call the guest made.
         assert!(StopReason::Aborted.label().contains("abort"));
         assert!(StopReason::Exited.label().contains("exit"));
     }
 
+    /// The guest-stopped exit status differs from ordinary success.
     #[test]
     fn the_stopped_status_is_not_the_ordinary_success() {
-        // A shim distinguishes "gave up" from "ran to completion" and from "was killed",
-        // and a status that collided with one of those would erase the distinction.
+        // A status that collided with success or with a kill would erase the distinction.
         assert_ne!(super::EXIT_GUEST_STOPPED, 0);
     }
 }

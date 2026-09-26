@@ -1,27 +1,13 @@
 //! Turning a run into a ranked list of things to do about it.
 //!
-//! # Why findings rather than output
+//! Everything here is visible somewhere in a run's output (the ranked import list, the fault, the
+//! call tail, the stack conformance line); findings state it as data - what is wrong, where, what
+//! evidence says so and what would address it - so a consumer, person or tool, re-derives nothing
+//! from prose.
 //!
-//! Everything below is already visible somewhere in a run's output - the ranked import
-//! list, the fault, the call tail, the stack conformance line. Reading it takes a person
-//! who knows what each shape means, and *that person is the bottleneck*.
-//!
-//! The eventual consumer of this is not a person. It is something that reads a run and
-//! proposes a change - today that is a human with a language model, and later it may be
-//! the emulator repairing its own gaps. Either way it needs the same thing: **what is
-//! wrong, where, what evidence says so, and what would address it** - as data, ranked, so
-//! nothing has to be re-derived from prose.
-//!
-//! # Confidence is the load-bearing field
-//!
-//! A confidently wrong suggestion is **worse than no suggestion**, because it gets acted
-//! on. That is not a general worry - it is this project's own history: an entry convention
-//! that looked right, a stub policy that looked wired, a name sweep whose vocabulary could
-//! not contain the answer. Each of those would have produced a confident, wrong finding.
-//!
-//! So every finding says how much weight it deserves, and the rule is the one obSCEne
-//! already uses: a certain finding is a defect, a possible one is a conversation. Nothing
-//! here reports `Certain` unless the trace *shows* it rather than suggests it (D179).
+//! Confidence is the load-bearing field, because a confidently wrong suggestion gets acted on. A
+//! certain finding is a defect and a possible one is a conversation; nothing reports `Certain`
+//! unless the trace shows it (D179).
 
 use crate::trace::{CallTrace, TracedCall};
 
@@ -41,8 +27,8 @@ pub enum Confidence {
 
 /// What kind of gap a finding describes.
 ///
-/// The kind is what lets a consumer route a finding without parsing prose - implement a
-/// function, name a hash, and fix a contract are three different jobs.
+/// The kind lets a consumer route a finding without parsing prose: implementing a function, naming
+/// a hash and fixing a contract are different jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Gap {
@@ -52,28 +38,22 @@ pub enum Gap {
     Unnamed,
     /// A placeholder error code being used by the guest as a pointer or handle.
     ///
-    /// The single most productive signal this project has: it names the function that
-    /// answered wrongly *and* proves the guest believed the answer.
+    /// It names the function that answered wrongly and shows that the guest believed the answer.
     ErrorUsedAsPointer,
     /// The guest gave up deliberately.
     GuestGaveUp,
     /// The guest died touching an address, and the address says which kind of mistake.
     ///
-    /// **The commonest outcome in this project produced no finding at all.** A run that
-    /// faulted printed a region and an offset and stopped, so the calls leading in, the
-    /// registers and the arguments all had to be read out of the trace by hand - which is
-    /// the tool asking a person to do its job (D198).
+    /// The finding carries the calls leading in, the registers and the arguments, so none of them
+    /// has to be read out of the trace by hand.
     Faulted,
-    /// The guest entered the kernel through an instruction orbistoun implements no handler for -
-    /// a `syscall`/`hlt`, or an `int` on a vector nothing has measured. Distinct from
-    /// [`Self::Faulted`] because it is a different job: not "find the bad pointer" but "characterise
-    /// this kernel entry and add its handler". It surfaced as a `Faulted` "read of -1" and walled a
-    /// title for an afternoon (worklog 603, 605).
+    /// The guest entered the kernel through an instruction orbistoun has no handler for: a
+    /// `syscall` or `hlt`, or an `int` on an unmeasured vector.
     ///
-    /// **`int 0x41` no longer classifies here.** It was this class's motivating case, and the
-    /// obSCEne measurement it was waiting on came back "fatal on hardware too, no return"
-    /// (REQ-...b3c2) - so it is a guest trap reached via an upstream wrong value, a [`Self::Faulted`],
-    /// not an entry awaiting a handler. This variant is what is left: the vectors still unmeasured.
+    /// Distinct from [`Self::Faulted`] because the job differs: characterise this kernel entry and
+    /// add its handler, rather than find a bad pointer. `int 0x41` is not in this class: it is
+    /// fatal on hardware with no return, so reaching it is a [`Self::Faulted`] caused by an
+    /// upstream wrong value.
     KernelEntryUnimplemented,
     /// One call dominating the run, which means the guest is not progressing.
     Spinning,
@@ -83,18 +63,14 @@ pub enum Gap {
     ShortRead,
     /// Arguments captured because somebody asked for them by name.
     ///
-    /// **The one finding that is an answer rather than a gap.** A dump was only ever shown
-    /// hanging off some *other* finding about the same import, so naming an implemented import
-    /// with `ORBISTOUN_DUMP` captured its arguments and then discarded them - which is precisely
-    /// the case forcing was added for: "the case that matters is when the implementation is
-    /// yours and you suspect it" (D198, D625).
+    /// An answer rather than a gap: naming an implemented import with `ORBISTOUN_DUMP` shows its
+    /// arguments even though no other finding is about that import.
     Captured,
     /// The guest handed a command buffer to the graphics driver.
     ///
-    /// **Progress, not a wall.** Like [`Self::Captured`] it is an answer rather than a gap: a
-    /// guest that reaches a submission has built a real command stream, and the finding says what
-    /// is in it so the next work - translating the shaders its registers name, then a backend to
-    /// run them - is ranked rather than guessed at (3861).
+    /// Progress, not a wall. Like [`Self::Captured`] it is an answer rather than a gap: the finding
+    /// says what the command stream holds, so the next work (translating the shaders its registers
+    /// name, then a backend to run them) is ranked rather than guessed at.
     Submitted,
 }
 
@@ -122,12 +98,8 @@ impl Gap {
 
 /// How the call leading into a wall is marked in [`Finding::evidence`].
 ///
-/// Declared here rather than matched on by eye downstream: the subject of a fault is the
-/// *region the guest died in*, so anything wanting the call that led there has to read it
-/// out of the evidence, and a second copy of this prefix elsewhere is one that drifts.
-///
-/// Found the hard way. A dispatcher took the subject as the call and swept `image`, which
-/// planted nothing across every argument and would have read as a clean negative.
+/// The subject of a fault is the region the guest died in, so anything wanting the call that led
+/// there reads it out of the evidence by this one prefix.
 pub const PRECEDED_BY: &str = "just before: ";
 
 /// One thing worth doing about a run.
@@ -142,7 +114,7 @@ pub struct Finding {
     pub subject: Option<String>,
     /// One sentence stating the problem.
     pub what: String,
-    /// Why the run says so. **Facts from the trace, never inference.**
+    /// Why the run says so: facts from the trace, never inference.
     pub evidence: Vec<String>,
     /// What would address it, if that is knowable from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,36 +123,31 @@ pub struct Finding {
     pub weight: u64,
 }
 
-/// Placeholder codes this project answers with.
-///
-/// Deliberately in a range no real firmware value occupies (principle 3), which is exactly
-/// what makes them findable in a guest's arguments afterwards.
-/// What each integer argument arrives in, so a finding can say **which** one carried the value.
-///
-/// Saying "its first argument" when the value was in `rdx` sends a reader to the wrong place, and
-/// a finding that misdirects is worse than one that says less (D570).
+/// What each integer argument arrives in, so a finding can say which one carried the value.
 const ARGUMENT_REGISTERS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
-/// The base of the placeholder block, from the core's single definition rather than a restated
-/// literal - so when D670 moved it from `0x7FFF_0000` to `0xF7FF_0000` (the high bit set, to read as
-/// negative to a guest's own `rc < 0` check) the detector followed instead of going blind (ed20).
+/// The base of the placeholder block, from the core's single definition.
+///
+/// Placeholders sit in a range no real firmware value occupies, which makes them findable in a
+/// guest's arguments. The high bit is set so a guest's own `rc < 0` check reads them as negative
+/// (D670).
 const PLACEHOLDER_LOW: u64 = orbistoun_core::PLACEHOLDER_BASE as u64;
-/// One past the fixed `GuestError` codes (`PLACEHOLDER_BASE | 0x1..=0x4`); tagged placeholders begin here.
+/// One past the fixed `GuestError` codes (`PLACEHOLDER_BASE | 0x1..=0x4`); tagged placeholders
+/// begin here.
 const PLACEHOLDER_HIGH: u64 = PLACEHOLDER_LOW + 0x10;
 
 /// One past every placeholder, tagged ones included.
 ///
 /// `ORBISTOUN_TAG_PLACEHOLDERS` gives each stub `PLACEHOLDER_BASE | (0x10 + its slot)`, so a tagged
-/// value sits above [`PLACEHOLDER_HIGH`] and still inside the half-word this project reserves - now
-/// carrying the same high bit D670 gave the untagged code.
+/// value sits above [`PLACEHOLDER_HIGH`] and inside the reserved half-word, with the same high bit
+/// as the untagged code.
 const PLACEHOLDER_TAGGED_HIGH: u64 = PLACEHOLDER_LOW + 0x1_0000;
 
 /// Folds a placeholder widened from `int` to `long` back to 32 bits.
 ///
-/// A negative code sign-extends: `0xF7FF_0001` becomes `0xFFFF_FFFF_F7FF_0001` when a guest widens
-/// it before using it, so a value whose top half is all ones is tested by its low half - the same
-/// normalisation `orbistoun_core::placeholder_named` does, and a case that only exists since the high
-/// bit went on (D670). Anything else above 32 bits is left alone, and is not one of ours.
+/// A negative code sign-extends (`0xF7FF_0001` becomes `0xFFFF_FFFF_F7FF_0001`), so a value whose
+/// top half is all ones is tested by its low half, the same normalisation
+/// `orbistoun_core::placeholder_named` does (D670). Anything else above 32 bits is not one of ours.
 fn low32_if_sign_extended(value: u64) -> u64 {
     if value >> 32 == 0xFFFF_FFFF {
         value & 0xFFFF_FFFF
@@ -191,8 +158,8 @@ fn low32_if_sign_extended(value: u64) -> u64 {
 
 /// Which stub produced a tagged placeholder, if this value is one.
 ///
-/// [`None`] for an untagged placeholder - the ordinary `PLACEHOLDER_BASE | 0x1` says only that *some*
-/// unimplemented function answered, which is the whole reason tagging exists (D567).
+/// [`None`] for an untagged placeholder: `PLACEHOLDER_BASE | 0x1` says only that some unimplemented
+/// function answered (D567).
 fn tagged_stub(value: u64) -> Option<usize> {
     let value = low32_if_sign_extended(value);
     if !(PLACEHOLDER_HIGH..PLACEHOLDER_TAGGED_HIGH).contains(&value) {
@@ -203,8 +170,7 @@ fn tagged_stub(value: u64) -> Option<usize> {
 
 /// The import a tagged placeholder came from, named from the run's own call list.
 ///
-/// The trace indexes every call by the stub it landed on, which is the same numbering the tag
-/// carries - so no new plumbing is needed to turn a value back into a name.
+/// The trace indexes every call by the stub it landed on, the same numbering the tag carries.
 fn source_of(trace: &CallTrace, value: u64) -> Option<&str> {
     let slot = tagged_stub(value)?;
     trace
@@ -216,15 +182,13 @@ fn source_of(trace: &CallTrace, value: u64) -> Option<&str> {
 
 /// Whether a value looks like one of our placeholders, at any small offset.
 ///
-/// The offset matters: a guest that treats an error code as a struct pointer reads a field
-/// through it, so the *faulting* address is the code plus or minus a little. Matching the
-/// bare value alone would miss every case where the guest did anything with it (D125).
+/// A guest that treats an error code as a struct pointer reads a field through it, so the faulting
+/// address is the code plus or minus a little.
 fn looks_like_placeholder(value: u64) -> bool {
     const NEAR: u64 = 0x1000;
     let value = low32_if_sign_extended(value);
-    // The upper bound is the tagged range's, not the fixed one's: under
-    // `ORBISTOUN_TAG_PLACEHOLDERS` a placeholder can be any `PLACEHOLDER_BASE | 0xxxxx`, and a
-    // detector that only knew the first sixteen would go blind exactly when asked to say more (D567).
+    // The upper bound is the tagged range's, so the detector also sees every `PLACEHOLDER_BASE |
+    // 0xxxxx` under `ORBISTOUN_TAG_PLACEHOLDERS` (D567).
     value >= PLACEHOLDER_LOW.saturating_sub(NEAR)
         && value < PLACEHOLDER_TAGGED_HIGH.saturating_add(NEAR)
 }
@@ -236,8 +200,7 @@ fn share(part: u64, whole: u64) -> u64 {
 
 /// Everything a run says is worth doing, most actionable first.
 ///
-/// Pure, so the rules are testable without running a guest - which matters more here than
-/// usual, because a wrong rule produces a confident wrong instruction.
+/// Pure, so the rules are testable without running a guest.
 pub fn findings(trace: &CallTrace) -> Vec<Finding> {
     let mut out = Vec::new();
     out.extend(gave_up(trace));
@@ -249,14 +212,13 @@ pub fn findings(trace: &CallTrace) -> Vec<Finding> {
     out.extend(faulted(trace));
     out.extend(unnamed(trace));
     out.extend(unimplemented(trace));
-    // Last, because it is the only one that asks what the others already claim: an
-    // unimplemented import keeps its dump where it has always been shown.
+    // Last, because it asks what the others already claim: an unimplemented import keeps its dump
+    // where it is shown.
     let claimed = captured(trace, &out);
     out.extend(claimed);
 
-    // Ranked by how much can be trusted, then by how much of the run it concerns. A
-    // consumer taking the top item should be taking the one least likely to waste its
-    // time.
+    // Ranked by confidence, then by how much of the run it concerns, so the top item is the one
+    // least likely to waste a consumer's time.
     out.sort_by(|a, b| {
         a.confidence
             .cmp(&b.confidence)
@@ -267,31 +229,26 @@ pub fn findings(trace: &CallTrace) -> Vec<Finding> {
 
 /// The guest died touching memory, and what can be said about where.
 ///
-/// Classification is deliberately mechanical - it reads the address and the regions the
-/// run recorded, and says nothing it cannot support. "Not in any region this run mapped"
-/// is a fact; "the allocator returned null" is a story, and stories are what a reader
-/// should be forming rather than reading (D198).
+/// Classification is mechanical: it reads the address and the regions the run recorded and says
+/// nothing it cannot support. "Not in any region this run mapped" is a fact; "the allocator
+/// returned null" is a diagnosis, which is the reader's (D179).
 fn faulted(trace: &CallTrace) -> Option<Finding> {
     let f = trace.fault.as_ref()?;
-    // A guest that stopped itself is reported by `gave_up`; reporting both would rank one
-    // outcome twice and put the less informative one above real gaps.
+    // A guest that stopped itself is reported by `gave_up`; reporting both would rank one outcome
+    // twice.
     if trace.stopped.is_some() {
         return None;
     }
 
-    // **The instruction is checked before the address.** A trap instruction - `int 0x41`,
-    // `syscall`, `hlt` - raises a general-protection fault the host reports as a read of some
-    // arbitrary address (often -1), so the address-arithmetic shapes below would call it "an
-    // address in no region" and send a reader off after a pointer that does not exist. It is a
-    // different wall entirely: the guest entered the kernel and orbistoun has no handler. Named as
-    // its own gap, with its own action (worklog 605).
+    // The instruction is checked before the address. A trap instruction (`int 0x41`, `syscall`,
+    // `hlt`) raises a general-protection fault the host reports as a read of an arbitrary address,
+    // often -1, which the address shapes below would misread as a bad pointer.
     if let Some(kind) = crate::trace::classify_trap(&f.instruction) {
         return Some(kernel_entry_finding(trace, f, kind));
     }
 
-    // Three shapes, distinguished only by arithmetic on the address. Each names a
-    // different mistake, and the differences are what a reader would otherwise work out
-    // by hand every time.
+    // Three shapes, distinguished only by arithmetic on the address; each names a different
+    // mistake.
     let shape = if f.address == 0 {
         "a null pointer - something answered zero and the guest did not check".to_owned()
     } else if f.address < NEAR_NULL {
@@ -304,36 +261,26 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         "an address in no region this run mapped".to_owned()
     };
 
-    // **This thread's calls, then a couple of somebody else's, labelled.** The tail is every
-    // thread's and the fault is one thread's; reading them as one sequence is what turned a wait
-    // blocked on one thread into the presumed cause of a fault on another, across four
-    // decisions, without anybody having checked (D621).
-    //
-    // The other threads are still shown, because a guest that faults while another thread holds
-    // something is a real situation, and hiding it would replace one wrong reading with a
-    // blinder one.
+    // This thread's calls, then a few of other threads', labelled. The tail is every thread's and
+    // the fault is one thread's, so they are not read as one sequence (D621).
     let last: Vec<String> = on_this_thread(trace, f.host_thread)
         .into_iter()
         .chain(on_other_threads(trace, f.host_thread))
         .collect();
 
-    // **The call that supplied the bad pointer, named rather than left to a search.** This is the
-    // half that makes a null dereference route itself: the base the guest dereferenced was answered
-    // by some call, and this finds the most recent one whose return matches it (worklog 606).
+    // The call that supplied the bad pointer: the most recent one whose return matches the
+    // dereferenced base.
     let source = pointer_source(trace, f.address, f.host_thread);
 
-    // **The copy that faulted reading its source, when the fault is one.** Read from the recorded
-    // argument, so a copy from a null-page source is named here rather than mis-read off the
-    // register dump (worklog 740). `None` for any fault that is not a byte copy reading its source.
+    // The copy that faulted reading its source, read from the recorded argument rather than the
+    // register dump. `None` for any fault that is not a byte copy reading its source.
     let copy = copy_reading_fault(trace, f.address, f.host_thread);
 
     let mut evidence = vec![format!("{} {:#x} is {shape}", f.kind, f.address)];
     if let Some(c) = source {
-        // The sound observation, stated as one and no more: this call's answer is the value the
-        // guest went on to dereference. Whether *that call* is the gap or an earlier one is left
-        // open, because a call answering the dereferenced value is not proof it answered wrongly -
-        // `__cxa_guard_release` answers zero correctly, and blaming it would be the confident-wrong
-        // diagnosis this whole class of change exists to avoid.
+        // Stated as an observation only: this call's answer is the value the guest dereferenced.
+        // Whether this call or an earlier one is the gap is left open, because a call can answer
+        // zero correctly.
         evidence.push(format!(
             concat!(
                 ">> {} answered {} immediately before, and the guest dereferenced that value ",
@@ -344,24 +291,23 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
                 .map_or_else(|| "that".to_owned(), |r| format!("{r:#x}")),
         ));
     }
-    // The lead when a copy is the fault, from its recorded source - or nothing when no copy read
-    // there. Built in a helper so this body stays within the line lint (see `copy_source_lead`).
+    // The lead when a copy is the fault, from its recorded source, or nothing when no copy read
+    // there.
     evidence.extend(copy_source_lead(copy, f.address));
     if let Some(r) = &f.registers {
-        // Name the null base before the raw dump, so the one register that mattered is not left
-        // for the reader to find by matching sixteen values against the address.
+        // Names the null base before the raw dump, so the register that mattered is not left to be
+        // matched by hand.
         evidence.extend(null_base_registers(f.address, r));
         evidence.extend(r.lines());
     }
-    // After the raw dump, because it is longer and a reader wants the values first. Empty
-    // unless something the guest held pointed at memory this run had mapped (D522).
+    // After the raw dump, which a reader wants first. Empty unless something the guest held pointed
+    // at memory this run had mapped.
     evidence.extend(f.pointees.iter().cloned());
     evidence.extend(last);
 
     Some(Finding {
         gap: Gap::Faulted,
-        // Certain about *what happened*; the shape is described rather than diagnosed, so
-        // nothing here rests on a guess about cause.
+        // Certain about what happened; the shape is described rather than diagnosed.
         confidence: Confidence::Certain,
         subject: f.region.clone(),
         what: format!(
@@ -369,22 +315,18 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
             describe_site(f),
             f.kind,
             f.address,
-            // **Which thread, when there is one.** The calls listed underneath are every
-            // thread's, so without this a reader pairs a fault with a call that happened
-            // somewhere else - which is how a blocked wait came to be treated as the cause of
-            // a fault nobody had linked it to (D621).
+            // Which thread, when there is one: the calls listed underneath are every thread's
+            // (D621).
             f.thread
                 .map_or_else(String::new, |t| format!(", on guest thread {t:#x}"))
         ),
         evidence,
-        // Routed to the supplying call when the trace shows one, and to the general search when
-        // it does not - but stated as a lead with both readings, never a verdict, because the
-        // immediately-preceding call answering the dereferenced value is a sound observation and
-        // not a sound accusation (an implemented function answering zero is usually correct).
+        // Routed to the supplying call when the trace shows one and to the general search when it
+        // does not, stated as a lead rather than a verdict: an implemented function answering zero
+        // is usually correct.
         action: Some(fault_action(copy, source)),
-        // Weighted like `gave_up`, because they are the same class of statement: how the
-        // run ended. Ranked below them it sat under findings about functions called twice,
-        // which is the opposite of what a reader opening a failed run wants first.
+        // Weighted like `gave_up`: both state how the run ended, which a reader opening a failed
+        // run wants first.
         weight: trace.total_calls,
     })
 }
@@ -392,9 +334,8 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
 /// What to do about a memory fault: follow a copy's source, or the call that supplied the pointer.
 fn fault_action(copy: Option<&TracedCall>, source: Option<&TracedCall>) -> String {
     if let Some(c) = copy {
-        // A copy that faulted reading its source is a faithful primitive, not the gap. Route to
-        // whatever produced the source pointer and say so, so the reader does not "fix" memcpy -
-        // the confident-wrong turn a copy line invites (principle 3; a wall is orbistoun's).
+        // A copy that faulted reading its source is a faithful primitive, not the gap: route to
+        // whatever produced the source pointer, never to the copy itself.
         format!(
             concat!(
                 "{} is a faithful byte copy - it moved what it was given. The gap is whatever ",
@@ -428,12 +369,11 @@ fn fault_action(copy: Option<&TracedCall>, source: Option<&TracedCall>) -> Strin
     }
 }
 
-/// The finding for a fault whose instruction is a trap - a kernel entry, or a guest-raised abort.
+/// The finding for a fault whose instruction is a trap: a kernel entry, or a guest-raised abort.
 ///
-/// Split from [`faulted`] so the two kinds each state their own job. A kernel entry is orbistoun's
-/// to implement and needs the vector characterised; a `ud2` is the guest aborting on a check it
-/// failed, and points upstream. Both keep the fault's evidence (registers, pointees, the calls
-/// leading in), because the neighbourhood is still what a reader wants next.
+/// A kernel entry is orbistoun's to implement and needs the vector characterised; a `ud2` is the
+/// guest aborting on a check it failed, and points upstream. Both keep the fault's evidence
+/// (registers, pointees, the calls leading in).
 fn kernel_entry_finding(
     trace: &CallTrace,
     f: &crate::trace::FaultSite,
@@ -453,13 +393,10 @@ fn kernel_entry_finding(
     evidence.extend(last);
 
     let (gap, what, action) = match kind {
-        // **int 0x41 is measured, and the measurement refuted the hypothesis this class was built
-        // on.** A bare `int 0x41` from userspace on retail raises a signal and never returns
-        // (obSCEne REQ-...b3c2: selectors 0x0 and 0x1 both fault, no return) - so it is not a
-        // kernel service orbistoun can add a handler for. A guest reaching it took a path that
-        // faults on hardware too, which means an upstream wrong value sent it there, exactly like a
-        // `ud2`. So it routes as a trap whose cause is upstream, not as a kernel entry awaiting a
-        // handler. Every *other* vector is still unmeasured and may genuinely be a service.
+        // `int 0x41` from userspace raises a signal on hardware and never returns (selectors 0x0
+        // and 0x1 both fault), so it is not a kernel service to add a handler for. A guest reaching
+        // it took a path that faults on hardware too, so it routes as a trap with an upstream
+        // cause, like `ud2`. Every other vector is unmeasured and may be a service.
         TrapKind::KernelEntry { vector: Some(0x41) } => (
             Gap::Faulted,
             format!(
@@ -533,22 +470,17 @@ fn describe_site(f: &crate::trace::FaultSite) -> String {
 
 /// Whether a faulting address is one of this project's own markers, and which.
 ///
-/// **The arithmetic nobody should do by hand.** A run under a marker block faults on an
-/// address like `0x5e2700002000`, and reading that as *field two* means dividing by a stride
-/// a reader has to go and look up. The decoders live in `orbistoun-abi`, which is where the
-/// markers are made; this only asks them (D369).
-///
-/// Two depths, because there are two. A **field** marker is what a handoff structure's
-/// unestablished slot holds, so faulting on one means the guest used that field. A
-/// **content** marker is what sits *behind* such a field, so faulting on one means the guest
-/// read through the field and then used what it found - which names an offset as well.
+/// Decoding a marker address such as `0x5e2700002000` into a field means dividing by a stride; the
+/// decoders live in `orbistoun-abi`, where the markers are made (D365). A field marker is what an
+/// unestablished handoff slot holds, so faulting on one means the guest used that field. A content
+/// marker sits behind such a field, so faulting on one means the guest read through the field and
+/// used what it found, which names an offset as well.
 fn marker(address: u64) -> Option<String> {
     use orbistoun_abi::enter::{content_slot, sentinel_slot};
 
-    // The firmware skeleton, named before the handoff markers because a guest that reached into
-    // it did so deliberately - it computed the address from a base and an offset - and "firmware
-    // plus 0x2885e00" is the phrase that makes that arithmetic legible where a bare address hides
-    // it (see orbistoun-firmware, and the sibling D404).
+    // The firmware skeleton, named before the handoff markers because a guest that reached into it
+    // computed the address from a base and an offset, and "firmware plus 0x2885e00" makes that
+    // arithmetic legible (see `orbistoun-firmware`).
     if let Some(offset) = orbistoun_firmware::firmware_slot(address) {
         return Some(format!(
             concat!(
@@ -582,19 +514,14 @@ fn marker(address: u64) -> Option<String> {
 
 /// Below this, an address is a small offset from null rather than a pointer.
 ///
-/// A page. A field read through a null pointer lands within one; anything further is a
-/// number that was never a pointer at all.
+/// One page: a field read through a null pointer lands within it.
 const NEAR_NULL: u64 = 0x1000;
 
-/// The register(s) that look like the null base of a null-ish fault.
+/// The registers that look like the null base of a null-ish fault.
 ///
-/// A fault at or just above zero is a dereference of a pointer that was zero, plus a struct
-/// field offset. The dump already has all sixteen registers, but *which one was the pointer* is
-/// left for a reader to work out by matching values against the address by hand - the exact step
-/// the report exists to spare them, and the one that turns a null-write into an afternoon. This
-/// does it: any register at or below the null page, where the fault address is that register
-/// plus a field-sized offset, is named as the likely culprit. More than one may qualify when
-/// several registers are zero; all are listed rather than a guess picked between them.
+/// A fault at or just above zero is a dereference of a zero pointer plus a field offset. Any
+/// register at or below the null page, where the fault address is that register plus a field-sized
+/// offset, is named. When several registers qualify, all are listed rather than one guessed.
 fn null_base_registers(fault_address: u64, r: &crate::trace::Registers) -> Vec<String> {
     let candidates: Vec<(&str, u64)> = [
         ("rax", r.rax),
@@ -619,9 +546,9 @@ fn null_base_registers(fault_address: u64, r: &crate::trace::Registers) -> Vec<S
         *value < NEAR_NULL && fault_address >= *value && fault_address - *value < NEAR_NULL
     })
     .collect();
-    // A textbook null dereference has a base of *exactly* zero; when any register is zero those
-    // are the culprits, and a small-but-nonzero register - often the value being stored, which
-    // matched only by coincidence - is noise to be dropped.
+    // A null dereference has a base of exactly zero; when any register is zero those are the
+    // culprits, and a small nonzero register (often the stored value, matching by coincidence) is
+    // dropped.
     let any_zero = candidates.iter().any(|(_, value)| *value == 0);
     candidates
         .into_iter()
@@ -637,26 +564,21 @@ fn null_base_registers(fault_address: u64, r: &crate::trace::Registers) -> Vec<S
 
 /// The call whose return became the bad pointer the guest dereferenced, if the trace shows one.
 ///
-/// **This is what turns "find where rax was set to zero" from an instruction into an answer - but
-/// only when the link is sound.** A function's return lands in `rax`, so the value the guest
-/// carries to `[rax + offset]` is the return of the **immediately preceding** call, and only that
-/// one, by the calling convention. A call further back that happens to return the same value is not
-/// evidence - matching on "any recent call that answered zero" pointed ASTRO BOT's null at
-/// `__cxa_guard_release`, four calls back and returning zero correctly, while the real preceding
-/// calls were `strcmp`s. That is the confident-wrong-diagnosis this whole class of change exists to
-/// prevent, so this matches the *last* call and no other.
+/// A function's return lands in `rax`, so the value the guest carries to `[rax + offset]` is the
+/// return of the immediately preceding call, and only that one. An earlier call that happens to
+/// return the same value is not evidence (`__cxa_guard_release` answers zero correctly), so only
+/// the last call is matched.
 ///
-/// Returns it only when its answer is at or just below the faulting base (zero for a null
-/// dereference, the address itself for a wild pointer). When the last call answered something else,
-/// the null came from further back than one call - stored earlier, or loaded from memory - and the
-/// honest answer is the general search, not a name.
+/// Returned only when its answer is at or just below the faulting base (zero for a null
+/// dereference, the address itself for a wild pointer). Otherwise the null came from further back
+/// and the answer is the general search, not a name.
 fn pointer_source(
     trace: &CallTrace,
     fault_address: u64,
     host_thread: Option<u64>,
 ) -> Option<&TracedCall> {
-    // The pointer's base: zero for a null-ish fault, the address itself for a wild one (the
-    // offset from the base is small either way, which the window below absorbs).
+    // The pointer's base: zero for a null-ish fault, the address itself for a wild one. The offset
+    // is small either way, and the window below absorbs it.
     let base = if fault_address < NEAR_NULL {
         0
     } else {
@@ -672,30 +594,21 @@ fn pointer_source(
         .then_some(last)
 }
 
-/// The call the giving-up code made **itself**, just before it stopped, and how far back.
+/// The call the giving-up code made itself, just before it stopped, and how far back.
 ///
-/// A deliberate stop - `abort`, `exit`, a `ud2` - is almost always gated on one call's answer:
-/// the guest calls something, tests what it got, and stops a few instructions later. That call
-/// is the closest one *below* where the stop was decided, on the same thread - the giving-up
-/// function called it, then `0x4d` bytes later called `abort` (PPSA28061's measured mapper gate,
-/// D677). The distance is the discriminator and it is stark: the gate sits dozens of bytes back,
-/// where the calls before *it* are in another module and sit gigabytes away.
+/// A deliberate stop (`abort`, `exit`, a `ud2`) is usually gated on one call's answer: the guest
+/// calls something, tests the result and stops a few instructions later. That call is the closest
+/// one below where the stop was decided, on the same thread. The distance is returned with it so
+/// the finding shows it rather than asserting a cause: a few dozen bytes reads as the same
+/// function, a gigabyte as another module.
 ///
-/// Naming the near one is what stops a reader blaming a call two frames back that answered `0x0`
-/// in a *different image* - which is exactly the misread D677 had to correct by hand, and the one
-/// this project made again reading PPSA28061's own trace. The delta is returned with it so the
-/// finding shows the distance rather than asserting a cause: `0x4d` reads as the same function,
-/// a gigabyte reads as "not this decision", and the reader judges from the number.
-///
-/// [`None`] when nothing was called from below the stop on its thread - then the finding says
-/// only what it always did, rather than reaching for an unrelated call to name.
+/// [`None`] when nothing was called from below the stop on its thread.
 fn gave_up_gate(trace: &CallTrace) -> Option<(&TracedCall, u64)> {
     let decided = trace.tail.last()?;
     let mut gate: Option<&TracedCall> = None;
     for c in trace.tail.iter().rev().skip(1) {
-        // Same thread, and a call site below where it stopped: the giving-up frame's own last
-        // action sits just under its `abort`. `rev` visits most-recent first and the update is
-        // strict, so a function that reached here twice keeps the more recent of the two.
+        // Same thread, and a call site below where it stopped. `rev` visits most recent first and
+        // the update is strict, so of two calls from one site the more recent is kept.
         if c.thread != decided.thread || c.from >= decided.from {
             continue;
         }
@@ -709,11 +622,10 @@ fn gave_up_gate(trace: &CallTrace) -> Option<(&TracedCall, u64)> {
 /// The guest stopped itself.
 fn gave_up(trace: &CallTrace) -> Option<Finding> {
     let stopped = trace.stopped.as_ref()?;
-    // What it called immediately before deciding, which is the closest thing to a reason
-    // the guest offers.
+    // What it called immediately before deciding, the closest thing to a reason the guest offers.
     let last: Vec<String> = trace.tail.iter().rev().take(4).map(traced_line).collect();
-    // The one call the giving-up code made itself, singled out from the recent history so the
-    // near call it gated on is not read as equal to the far ones behind it (D677).
+    // The one call the giving-up code made itself, singled out so it is not read as equal to the
+    // far calls behind it.
     let gate = gave_up_gate(trace);
     Some(Finding {
         gap: Gap::GuestGaveUp,
@@ -748,12 +660,11 @@ fn gave_up(trace: &CallTrace) -> Option<Finding> {
     })
 }
 
-/// One traced call as an evidence line: what was called, its first argument, what it
-/// **answered** where that is known, and the call site.
+/// One traced call as an evidence line: what was called, its first argument, what it answered where
+/// that is known, and the call site.
 ///
-/// The return is shown only when it was recorded. The faulting call's own frame, and any
-/// call still running, has none - and `-> ?` there would read as an answer of "unknown"
-/// where saying nothing is the honest thing (D459).
+/// The return is shown only when recorded: the faulting call's own frame, and any call still
+/// running, has none (D459).
 fn traced_line(c: &TracedCall) -> String {
     let operands = copy_operands(c);
     match c.returned {
@@ -765,21 +676,16 @@ fn traced_line(c: &TracedCall) -> String {
     }
 }
 
-/// The source and length a byte-copy call carries in `arg1`/`arg2`, which showing `arg0` alone
-/// hides - and which are the whole evidence when the copy is the fault.
+/// The source and length a byte-copy call carries in `arg1`/`arg2`.
 ///
-/// A copy from a null (or near-null) source is this project's commonest graphics wall: a producer
-/// that should have filled a buffer left its pointer zero, and the copy faults reading it. `arg0`
-/// is the destination, valid by the time the copy runs; the fault is `arg1`, and a line that
-/// prints only the destination hides exactly the field that names the bug - as `libc::memcpy(0x…)
-/// from 0x…` did on PPSA02664's wall, where the source was `0x0` and the count `0xa8` all along.
-/// This is D570's case for a placeholder handed on as a *size*, applied to the copy family: show
-/// the operands so the null source is legible in the trace without a second run. It states values
-/// only, never a cause (principle 3).
+/// A copy from a null or near-null source is the common shape of a producer that left a buffer
+/// pointer zero. `arg0` is the destination, valid by the time the copy runs; the fault is in
+/// `arg1`, so the operands are shown to make a null source legible without a second run. Values
+/// only, never a cause.
 fn copy_operands(c: &TracedCall) -> String {
     let label = c.label.as_str();
     if is_source_copy(label) {
-        // arg1 = source (rsi), arg2 = length (rdx) - System V order (`ARGUMENT_REGISTERS`).
+        // arg1 = source (rsi), arg2 = length (rdx), in System V order (`ARGUMENT_REGISTERS`).
         format!(" src {:#x} n {:#x}", c.args[1], c.args[2])
     } else if label.contains("memset") {
         // arg2 = length (rdx); arg1 is the fill byte, not a pointer, so it is not shown as one.
@@ -789,27 +695,22 @@ fn copy_operands(c: &TracedCall) -> String {
     }
 }
 
-/// Whether a call is a byte copy that **reads through a source pointer** in `arg1`.
+/// Whether a call is a byte copy that reads through a source pointer in `arg1`.
 ///
-/// `memcpy`/`memmove` do; `memset` does not - its `arg1` is a fill byte, so a copy-from-null
-/// check must not treat it as a pointer. Kept as one predicate so the operands line and the
-/// faulting-copy finder agree on what counts as a source copy.
+/// `memcpy`/`memmove` do; `memset` does not, since its `arg1` is a fill byte. One predicate, so the
+/// operands line and the faulting-copy finder agree.
 fn is_source_copy(label: &str) -> bool {
     label.contains("memcpy") || label.contains("memmove")
 }
 
-/// The byte copy whose source range covers the faulting address - the copy that faulted reading
-/// its own source.
+/// The byte copy whose source range covers the faulting address: the copy that faulted reading its
+/// own source.
 ///
-/// The faulting address is the copy's source pointer, or a byte into it, and that value was
-/// captured **at the call** in `arg1`. The mid-copy register dump is not: there `rdx` is memcpy's
-/// *remaining* count, which read as the length sent PPSA02664's null-source wall down eleven
-/// worklogs before the recorded argument was read instead (worklog 740). Matching the recorded
-/// source range `[src, src+n)` against the fault names the copy soundly - which call read there,
-/// not why the pointer was wrong (principle 3).
-///
-/// Most-recent-first on the faulting thread, so the copy that is still running - the one that
-/// faulted, recorded with no return - is the one found.
+/// The source pointer was captured at the call in `arg1`; the mid-copy register dump is not a
+/// reliable source, since there `rdx` is the remaining count. Matching the recorded range `[src,
+/// src+n)` against the fault names which call read there, not why the pointer was wrong. Most
+/// recent first on the faulting thread, so the copy still running (recorded with no return) is the
+/// one found.
 fn copy_reading_fault(
     trace: &CallTrace,
     fault_address: u64,
@@ -818,8 +719,8 @@ fn copy_reading_fault(
     trace.tail.iter().rev().find(|c| {
         host_thread.is_none_or(|t| c.thread == t)
             && is_source_copy(&c.label)
-            // `src <= fault` then `fault - src < n`: the fault lies within this copy's source
-            // span, written to avoid the overflow a bare `src + n` risks near the top of the range.
+            // `src <= fault` then `fault - src < n`: the fault lies in this copy's source span,
+            // written to avoid the overflow `src + n` risks near the top of the range.
             && c.args[1] <= fault_address
             && fault_address - c.args[1] < c.args[2]
     })
@@ -827,10 +728,8 @@ fn copy_reading_fault(
 
 /// The lead evidence line for a copy that faulted reading its source, or nothing when none did.
 ///
-/// Split out of [`faulted`] so its body stays within the line lint, and so the arithmetic - where
-/// in the source the read landed, and whether the base is in the null page - sits beside the finder
-/// it reads from. Values and their arithmetic only; the cause (what left the source wrong) is the
-/// finding's action, never asserted here (principle 3).
+/// Beside the finder it reads from: where in the source the read landed, and whether the base is in
+/// the null page. Values and arithmetic only; the cause is the finding's action.
 fn copy_source_lead(copy: Option<&TracedCall>, fault_address: u64) -> Option<String> {
     let c = copy?;
     let (src, n) = (c.args[1], c.args[2]);
@@ -854,8 +753,7 @@ fn copy_source_lead(copy: Option<&TracedCall>, fault_address: u64) -> Option<Str
 
 /// The last few calls made on the thread a fault happened on.
 ///
-/// With no thread recorded - an older trace, or a fault before anything claimed a thread - this
-/// is the last few calls full stop, which is what it always was.
+/// With no thread recorded, the last few calls of the run.
 fn on_this_thread(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
     trace
         .tail
@@ -867,10 +765,9 @@ fn on_this_thread(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
         .collect()
 }
 
-/// A couple of calls from whatever else was running, said to be somebody else's.
+/// A few calls from other threads, labelled as another thread's.
 ///
-/// Empty when no thread was recorded, because then there is nothing to contrast with and every
-/// line would read as an aside.
+/// Empty when no thread was recorded, since there is nothing to contrast with.
 fn on_other_threads(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
     trace
         .tail
@@ -883,13 +780,10 @@ fn on_other_threads(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
 }
 /// The last few calls a run made, as evidence lines.
 ///
-/// Shared by the findings whose action tells a reader to look at them, so the list a person is
-/// sent to and the list a dispatcher sweeps are the same list (D299).
+/// Shared by the findings whose action tells a reader to look at them, so the list a person is sent
+/// to and the list a dispatcher sweeps are the same list.
 fn preceding(trace: &CallTrace) -> Vec<String> {
-    // **The faulting thread's calls first, and the rest said to be somebody else's.** The tail is
-    // every thread's, and a fault is one thread's. Reading them as one sequence is what turned a
-    // wait blocked on one thread into the presumed cause of a fault on another, across four
-    // decisions, without anybody having checked (D621).
+    // The faulting thread's calls first, then the rest labelled as other threads' (D621).
     let faulted_on = trace.fault.as_ref().and_then(|f| f.host_thread);
     let mine: Vec<&TracedCall> = trace
         .tail
@@ -919,11 +813,9 @@ fn preceding(trace: &CallTrace) -> Vec<String> {
 fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
     let mut out = Vec::new();
 
-    // The guest passing one of our codes *into* a later call. Whatever answered it is the
-    // function to fix, and the call that received it names the moment.
-    // **Every argument, not only the first.** A placeholder handed on as a *size* is visible only
-    // if the size happens to be argument zero - `malloc`'s is, which is the sole reason D564's four
-    // gigabytes were ever seen. The same value in `rdx` left no trace at all until now (D570).
+    // The guest passing one of our codes into a later call. Whatever answered it is the function to
+    // fix, and the call that received it names the moment. Every argument is checked, since a
+    // placeholder handed on as a size can arrive in any register.
     for (call, register) in trace
         .tail
         .iter()
@@ -950,10 +842,8 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
                 ),
             },
             evidence: {
-                // **The calls this finding's own action points at.** It says "find what
-                // answered with that code just before", and a finding whose action sends a
-                // reader looking must carry what they are to look at - otherwise the search
-                // is a person's by construction rather than by choice (D299).
+                // The calls this finding's action points at, carried with it so the reader is not
+                // sent searching.
                 let mut e = vec![
                     format!("call #{} from {:#x}", call.sequence, call.from),
                     "the guest is treating an unimplemented answer as data".to_owned(),
@@ -962,8 +852,7 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
                 e
             },
             action: Some(match source_of(trace, value) {
-                // D299: a finding that sends a reader looking must carry what they are to
-                // look at. With a tag there is nothing to look for - the value is the answer.
+                // With a tag there is nothing to look for: the value names its source.
                 Some(source) => format!(
                     concat!(
                         "give {} a real return - a function whose answer is read as data ",
@@ -983,8 +872,7 @@ fn error_used_as_pointer(trace: &CallTrace) -> Vec<Finding> {
         });
     }
 
-    // And the same code arriving as a faulting address, which is the guest having
-    // dereferenced it.
+    // The same code arriving as a faulting address: the guest dereferenced it.
     if let Some(fault) = &trace.fault {
         if looks_like_placeholder(fault.address) {
             out.push(Finding {
@@ -1120,9 +1008,8 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
 
 /// The first command buffer the guest handed to the graphics driver.
 ///
-/// Progress rather than a wall: a guest that reaches a submission has built a real command stream,
-/// and this says what is in it so the next work is ranked rather than guessed at (3861). `None` for
-/// every run that has not got this far, which is all of them today - the corpus stalls before submit.
+/// Progress rather than a wall: this says what the command stream holds so the next work is ranked.
+/// `None` for a run that did not reach a submission.
 fn submitted(trace: &CallTrace) -> Option<Finding> {
     let submission = trace.submission.as_ref()?;
     let mut evidence = vec![
@@ -1139,7 +1026,7 @@ fn submitted(trace: &CallTrace) -> Option<Finding> {
             submission.shaders_translated, submission.shaders_found
         ),
     ];
-    // Why each one that did not - the reason a draw arrives at the backend with nothing bound.
+    // Why each one did not: the reason a draw reaches the backend with nothing bound.
     evidence.extend(
         submission
             .shader_failures
@@ -1168,12 +1055,8 @@ fn submitted(trace: &CallTrace) -> Option<Finding> {
 
 /// Named functions the guest used that nothing implements.
 ///
-/// **The most directly actionable category.** It names a function, says how much the guest
-/// leaned on it, and the work is unambiguous - unlike a fault, which says where something
-/// went wrong without saying what would fix it.
-///
-/// Unnamed hashes are excluded: they are already reported as a naming gap, and "implement
-/// `libkernel::0xcedb06001fd4c617`" is not an instruction anyone can follow.
+/// The most directly actionable category: it names a function and how much the guest leaned on it.
+/// Unnamed hashes are excluded; they are reported as a naming gap.
 fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
     trace
         .calls
@@ -1190,18 +1073,13 @@ fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
             evidence: {
                 let mut evidence =
                     vec!["the call landed on a stub, which answered a placeholder".to_owned()];
-                // The signature the guest's own calls imply, so the finding says what to
-                // implement, not only that something is missing. Empty for a function whose
-                // arguments were never sampled; then it simply is not claimed.
+                // The signature the guest's own calls imply, so the finding says what to implement.
+                // Empty for a function whose arguments were never sampled, and then not claimed.
                 if !c.shape.is_empty() {
                     evidence.push(format!("the guest called it as {}", c.shape));
                 }
-                // **The pointers it was handed belong to the finding, not to whoever prints
-                // it.** A shim was rendering these beside the finding while the finding itself
-                // carried one sentence, so anything reading a finding programmatically - the
-                // dispatcher above all - could not see that the call had been given a
-                // structure at all. Principle 13: a shim holding what the crate should is how
-                // the other two drift (D586).
+                // The pointers it was handed belong to the finding, so a programmatic reader such
+                // as the dispatcher sees that the call was given a structure.
                 evidence.extend(pointer_arguments(trace, &c.label));
                 evidence
             },
@@ -1216,13 +1094,9 @@ fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
 
 /// Every argument of `label` that pointed somewhere the run could read.
 ///
-/// **Only the ones with bytes**, which is the run's own test for whether an argument was a
-/// pointer at all: the dump reads a value only from a span published as readable, so a scalar
-/// such as a size, a flag or a count comes back with none. Rendering a count as an address
-/// would send a reader, or a dispatcher, to whatever happens to live at that number.
-///
-/// Written as the shim rendered it, `value -> region+offset`, because that shape is what a
-/// reader already recognises and what `orbistoun-turn` parses an address out of.
+/// Only arguments with bytes: the dump reads a value only from a span published as readable, so a
+/// scalar such as a size, flag or count has none. Rendered as `value -> region+offset`, the shape a
+/// reader recognises and `orbistoun-turn` parses an address out of.
 fn pointer_arguments(trace: &CallTrace, label: &str) -> Vec<String> {
     trace
         .dumps
@@ -1234,27 +1108,13 @@ fn pointer_arguments(trace: &CallTrace, label: &str) -> Vec<String> {
 
 /// Arguments captured for imports nothing else in this report speaks for.
 ///
-/// # Why forcing a dump could produce nothing
-///
-/// Dumps reach a reader only through [`pointer_arguments`], which is consulted while building a
-/// finding *about that import*. Every finding that consults it is about an import nothing
-/// implements. So naming an implemented import with `ORBISTOUN_DUMP` took the dump, kept it in
-/// the trace, and printed none of it - and the run looked exactly like one where the guest never
-/// made the call.
-///
-/// That is the case forcing exists for. D198 put it plainly: *"the case that matters is when the
-/// implementation is yours and you suspect it"*. Collection honoured that from the start and
-/// reporting never did, which is a third instance of the same shape this session - a tool
-/// answering while omitting what it was asked (D613, D615, D623).
-///
-/// `already` is every subject some other finding covers, so an unimplemented import's dump is
-/// still shown where it always was rather than a second time here.
+/// Dumps otherwise reach a reader only through [`pointer_arguments`], consulted by findings about
+/// unimplemented imports, so a dump forced on an implemented import would print nothing. `already`
+/// is every subject another finding covers, so an unimplemented import's dump is not repeated here.
 fn captured(trace: &CallTrace, already: &[Finding]) -> Vec<Finding> {
-    // **Only imports somebody named.** A dump is taken for every unimplemented import as well,
-    // and the default condition tests the integer handler - so a function answering in `xmm0`
-    // has none, is dumped, and is not unimplemented, which put `libc::acos` and `libc::asin` at
-    // the head of the findings list ahead of the wall. An answer is only an answer to somebody
-    // who asked (D637).
+    // Only imports somebody named. A dump is also taken for every unimplemented import, and a
+    // function answering in `xmm0` has no integer handler yet is not unimplemented, so without this
+    // it would be reported unasked.
     let mut labels: Vec<&str> = trace
         .dumps
         .iter()
@@ -1268,13 +1128,12 @@ fn captured(trace: &CallTrace, already: &[Finding]) -> Vec<Finding> {
         .into_iter()
         .filter(|label| !already.iter().any(|f| f.subject.as_deref() == Some(*label)))
         .map(|label| {
-            // **No evidence lines of its own.** The printer already renders every dump whose
-            // label appears in `what`, so listing the pointer arguments here as well printed
-            // each of them twice - which reads as two calls (D625).
+            // No evidence lines of its own: the printer already renders every dump whose label
+            // appears in `what`, and repeating them would read as two calls.
             let calls = trace.dumps.iter().filter(|d| d.label == label).count();
             Finding {
                 gap: Gap::Captured,
-                // It is a recording, not an inference: these are the bytes that were there.
+                // A recording, not an inference: these are the bytes that were there.
                 confidence: Confidence::Certain,
                 subject: Some(label.to_owned()),
                 what: format!("{label} was asked about, and here is what it was passed"),
@@ -1286,8 +1145,7 @@ fn captured(trace: &CallTrace, already: &[Finding]) -> Vec<Finding> {
                     )
                     .to_owned(),
                 ),
-                // Below every gap: an answer to a question somebody asked is worth printing
-                // and worth nothing as a ranking, and this must never outrank a fault.
+                // Below every gap: an answer to a question somebody asked never outranks a fault.
                 weight: 0,
             }
         })
@@ -1296,12 +1154,9 @@ fn captured(trace: &CallTrace, already: &[Finding]) -> Vec<Finding> {
 
 /// Imports still known only by hash.
 ///
-/// **The advice differs by who wrote the symbol.** A vendor library's unnamed hash is a gap in
-/// this project's vocabulary and the name search is the answer. A hash from a module the *title
-/// ships* is the game's own symbol: no vendor word list will ever hold it, no amount of searching
-/// will find it, and saying "extend the vocabulary" sends a reader to spend an afternoon on
-/// something that cannot work. Six of the seven unnamed imports in the corpus are that kind,
-/// including the busiest call ever recorded here (D630, D631).
+/// The advice depends on who wrote the symbol. A vendor library's unnamed hash is a vocabulary gap
+/// and the name search answers it. A hash from a module the title ships is the title's own symbol,
+/// which no vendor word list holds, so the advice differs (D640).
 fn unnamed(trace: &CallTrace) -> Vec<Finding> {
     trace
         .calls
@@ -1329,16 +1184,14 @@ fn unnamed(trace: &CallTrace) -> Vec<Finding> {
                         "the hash resolved to no name in the symbol database".to_owned()
                     }];
                     // The inferred signature narrows a bare hash: a name candidate whose arity
-                    // disagrees with how the guest actually called it is wrong before the hash is
-                    // even computed.
+                    // disagrees with how the guest called it is wrong before the hash is computed.
                     if !c.shape.is_empty() {
                         evidence.push(format!("the guest called it as {}", c.shape));
                     }
                     evidence
                 },
-                // Names the commands, because "extend the vocabulary" is advice and a command
-                // is an action. `suggest` is mentioned rather than run: it is slow, optional,
-                // and nothing on this path should ever wait on a model.
+                // Names the commands, so the advice is an action. `suggest` is mentioned rather
+                // than run: it is slow and optional, and nothing on this path waits on a model.
                 action: Some(if c.implemented {
                     concat!(
                         "nothing here blocks reach - orbistoun answers this by its NID and a ",
@@ -1382,16 +1235,14 @@ mod tests {
     };
     use orbistoun_core::GuestError;
 
-    /// The untagged placeholder every unimplemented call answers since D670, as the tests read it -
-    /// `0xF7FF_0001`, derived from the core rather than restated so a later move takes the tests with
-    /// it (ed20).
+    /// The untagged placeholder every unimplemented call answers (`0xF7FF_0001`), derived from the
+    /// core so the tests follow it.
     fn placeholder_code() -> u64 {
         u64::from(GuestError::Unimplemented.as_raw())
     }
 
-    /// Registers with every field a distinct value well above the null page, so a test can zero
-    /// exactly the ones it means to and nothing matches the null-base check by accident. (The
-    /// real hazard the default `0` would hide: every unset field looking like a null base.)
+    /// Registers with every field a distinct value well above the null page, so a test zeroes
+    /// exactly the ones it means to and no unset field matches the null-base check.
     fn well_placed_registers() -> Registers {
         Registers {
             rax: 0x4001,
@@ -1413,14 +1264,11 @@ mod tests {
         }
     }
 
-    /// **A submitted command buffer is a finding, and a run that never reached one is not.**
-    ///
-    /// The handover surfaced: a trace carrying a submission produces a `Gap::Submitted` finding
-    /// naming its packet, draw and shader-candidate counts; an ordinary run, whose `submission` is
-    /// `None`, produces none - which is every run today, so the negative is the one that must hold.
+    /// A submitted command buffer is a finding, naming its packet, draw and shader-candidate
+    /// counts, and a run that never reached one produces none.
     #[test]
     fn a_submitted_command_buffer_is_a_finding_and_an_ordinary_run_is_not() {
-        // No submission: no finding. The corpus stalls before submit, so this is the common case.
+        // No submission: no finding.
         assert!(
             !findings(&empty()).iter().any(|f| f.gap == Gap::Submitted),
             "a run that reached no submission produces no Submitted finding"
@@ -1445,7 +1293,7 @@ mod tests {
             .find(|f| f.gap == Gap::Submitted)
             .expect("a submission produces a finding");
         assert_eq!(submission.subject.as_deref(), Some("sceAgcDriverSubmitDcb"));
-        // Why a draw has nothing bound is named, not left as a count (worklog 818).
+        // Why a draw has nothing bound is named, not left as a count.
         assert!(
             submission
                 .evidence
@@ -1470,14 +1318,12 @@ mod tests {
         assert_eq!(submission.weight, 40, "ranked by packet count");
     }
 
-    /// **The register that was the null pointer is named, and the value that merely looked like
-    /// one is not.** A null-plus-offset fault has a base of exactly zero and a small offset; a
-    /// register holding the stored value can match the same arithmetic by coincidence, and
-    /// listing it would send a reader after the wrong register - the manual step this removes.
+    /// The register that was the null pointer is named, and a register whose value merely matches
+    /// the address arithmetic is not.
     #[test]
     fn the_null_base_register_is_named_and_a_coincidence_is_not() {
         // `mov [r12+0x10], r14d` with r12 zero: the fault is at 0x10, r12 is the base, and r14
-        // holds the stored value 0x10 - which matches the address with a zero offset by chance.
+        // holds the stored value 0x10, which matches the address with a zero offset by chance.
         let mut regs = well_placed_registers();
         regs.r12 = 0;
         regs.r14 = 0x10;
@@ -1507,8 +1353,7 @@ mod tests {
         assert_eq!(named.len(), 2, "both zero registers: {named:?}");
     }
 
-    /// A fault far from zero names nothing - the check is for null bases, not any register that
-    /// happens to sit below an address.
+    /// A fault far from zero names nothing: the check is for null bases.
     #[test]
     fn a_fault_that_is_not_null_ish_names_no_base() {
         let mut regs = well_placed_registers();
@@ -1519,11 +1364,7 @@ mod tests {
         );
     }
 
-    /// **The arithmetic a reader should not be doing** (D369).
-    ///
-    /// A run under a marker block faults on an address like `0x5e2700002000`, and reading
-    /// that as *field two* means dividing by a stride you have to go and look up. It came up
-    /// three times in one session before this existed.
+    /// A marker-block fault address is decoded into the field it names (D365).
     #[test]
     fn a_marker_address_is_named_rather_than_left_as_arithmetic() {
         use orbistoun_abi::enter::{CONTENT_BASE, CONTENT_STRIDE, SENTINEL_BASE, SENTINEL_STRIDE};
@@ -1584,25 +1425,19 @@ mod tests {
         }
     }
 
-    /// **A byte copy's source and length are shown, because a copy from a null source is this
-    /// project's commonest wall and `arg0` alone hides it.** The destination is valid by the time
-    /// the copy runs; the fault is the source in `arg1`, so a line printing only `arg0` cannot show
-    /// the null that caused it - which is exactly what `libc::memcpy(0x…f070) from 0x…` did on
-    /// PPSA02664, whose source was `0x0` and count `0xa8` the whole time. Both directions: the copy
-    /// family gains the operands, and an ordinary call does not, so the extra text is confined to
-    /// where it is evidence (the D570 case for a placeholder handed on as a size).
+    /// A byte copy's line shows its source and length, and an ordinary call's line does not.
     #[test]
     fn a_byte_copy_line_shows_its_source_and_length_so_a_copy_from_null_is_legible() {
         let mut memcpy = call("libc::memcpy", 0x7400_0218_f070);
-        memcpy.args[1] = 0x0; // the null source - the bug
-        memcpy.args[2] = 0xa8; // the length that faulted
+        memcpy.args[1] = 0x0; // the null source
+        memcpy.args[2] = 0xa8; // the length
         let line = traced_line(&memcpy);
         assert!(
             line.contains("src 0x0") && line.contains("n 0xa8"),
             "a memcpy line must show its null source and length: {line}"
         );
 
-        // An ordinary call keeps the short form, so the operands appear only where they are evidence.
+        // An ordinary call keeps the short form: operands appear only where they are evidence.
         let ordinary = call("libSceAgc::sceAgcDcbDrawIndexAuto", 0x7400_0218_7868);
         assert!(
             !traced_line(&ordinary).contains(" src "),
@@ -1620,17 +1455,8 @@ mod tests {
         );
     }
 
-    /// **A captured-arguments finding answers a question, so it needs somebody to have asked.**
-    ///
-    /// Arguments are dumped for every unimplemented import as well, and the default condition
-    /// tests the *integer* handler - so a function answering in `xmm0` has none, gets dumped, and
-    /// is not unimplemented either. Without the forced list this fired for those, and `libc::acos`
-    /// and `libc::asin` printed ahead of the actual wall in an ordinary run of the corpus's own
-    /// conformance eboot (D637).
-    ///
-    /// Both directions, because a version that emitted nothing at all would satisfy the first
-    /// assertion on its own - and emitting nothing is what this finding did for its whole first
-    /// day (D625).
+    /// A captured-arguments finding appears only for an import somebody named, and does appear for
+    /// one.
     #[test]
     fn arguments_are_reported_only_for_imports_somebody_named() {
         let dump = |label: &str| ArgumentDump {
@@ -1660,15 +1486,8 @@ mod tests {
         );
     }
 
-    /// **A hash from a module the title ships gets different advice, and it has to.**
-    ///
-    /// The other branch tells a reader to extend a vendor vocabulary and re-run the search.
-    /// For a symbol the game's own module exports, that search cannot succeed however long it
-    /// is run - and six of the seven unnamed imports in this corpus are that kind, including
-    /// the busiest call ever recorded here (D630, D631).
-    ///
-    /// Both branches are asserted, because a version that gave the new advice to everything
-    /// would satisfy the first half alone.
+    /// A hash from a module the title ships gets different advice from a vendor library's hash, and
+    /// each branch keeps its own.
     #[test]
     fn an_unnamed_hash_from_the_titles_own_module_is_not_sent_to_a_vendor_word_list() {
         let mut trace = empty();
@@ -1687,8 +1506,8 @@ mod tests {
                 implemented: false,
                 shape: String::new(),
             },
-            // An unnamed hash orbistoun already answers by NID (the phantom GetSize): a name
-            // would document it, but it is not a reach gap, so it must not be sent to the search.
+            // An unnamed hash orbistoun already answers by NID: not a reach gap, so not sent to the
+            // search.
             CalledImport {
                 index: 2,
                 label: "libSceAgc::0x7d86501b8094ef57".to_owned(),
@@ -1724,8 +1543,7 @@ mod tests {
             "and a vendor library's unnamed hash still gets the search that can find it"
         );
 
-        // The implemented one is answered by NID: it must not be told to search a vocabulary,
-        // because that is the advice a reader wastes time on for a call that already runs.
+        // The implemented one is answered by NID, so it is not told to search a vocabulary.
         let handled = found
             .iter()
             .find(|f| f.subject.as_deref() == Some("libSceAgc::0x7d86501b8094ef57"))
@@ -1742,9 +1560,7 @@ mod tests {
 
     #[test]
     fn a_called_function_nothing_implements_is_the_clearest_instruction_there_is() {
-        // It names a function, says how much the guest leaned on it, and the work is
-        // unambiguous - unlike a fault, which says where something broke without saying
-        // what would fix it.
+        // An unimplemented named function is reported with how much the guest leaned on it.
         let mut trace = empty();
         trace.total_calls = 40;
         trace.calls = vec![CalledImport {
@@ -1765,11 +1581,8 @@ mod tests {
         );
     }
 
-    /// **The inferred signature reaches the finding, so the work says what to implement.**
-    ///
-    /// A shape carried on the import must surface as evidence on its unimplemented finding -
-    /// otherwise the characterisation is computed and thrown away. Made to fail by asserting the
-    /// exact signature string is present, and that an import with no shape does not invent one.
+    /// The inferred signature reaches the unimplemented finding, and an import with no shape gets
+    /// none.
     #[test]
     fn an_inferred_signature_is_carried_into_the_unimplemented_finding() {
         let mut trace = empty();
@@ -1792,7 +1605,7 @@ mod tests {
             found[0].evidence
         );
 
-        // No shape, no claim: the finding must not manufacture a signature it never saw.
+        // No shape, no claim.
         trace.calls[0].shape.clear();
         let bare = findings(&trace);
         assert!(
@@ -1804,8 +1617,7 @@ mod tests {
 
     #[test]
     fn an_unnamed_hash_is_a_naming_gap_and_not_an_implementation_one() {
-        // "Implement libkernel::0xcedb06001fd4c617" is not an instruction anyone can
-        // follow - it has to be named before it can be written.
+        // An unnamed hash must be named before it can be implemented.
         let mut trace = empty();
         trace.total_calls = 3;
         trace.calls = vec![CalledImport {
@@ -1821,15 +1633,13 @@ mod tests {
 
     #[test]
     fn a_clean_run_produces_nothing_to_do() {
-        // The list must be empty when there is nothing wrong, or every run reports work
-        // and the ranking stops meaning anything.
+        // Nothing wrong means no findings, or the ranking stops meaning anything.
         assert!(findings(&empty()).is_empty());
     }
 
     #[test]
     fn a_placeholder_passed_as_an_argument_is_reported_with_certainty() {
-        // The most productive signal this project has: it names the call that received a
-        // bad answer and proves the guest believed it.
+        // It names the call that received a bad answer and shows the guest believed it.
         let mut trace = empty();
         trace.tail = vec![call(
             "libSceVideoOut::sceVideoOutRegisterBuffers2",
@@ -1845,14 +1655,7 @@ mod tests {
         );
     }
 
-    /// **The post-D670 placeholder is recognised, in `rdx` and as a faulting address.**
-    ///
-    /// Since D670 an unimplemented call answers `0xF7FF_0001` (`GuestError::Unimplemented.as_raw()`),
-    /// not the `0x7FFF_0001` the detector was built for. The sites that gate on
-    /// `looks_like_placeholder` (a placeholder handed to a later call, and one dereferenced) went
-    /// silent on exactly the wall this corpus produces: the `0xf7ff0001`-into-`memcpy` wall of
-    /// worklogs 594/616 was found by hand. Both directions are asserted, and the register is `rdx`
-    /// rather than `rdi` because `error_used_as_pointer` reads every argument, not the first (ed20).
+    /// The negative placeholder is recognised in `rdx` and as a faulting address (D670).
     #[test]
     fn the_post_d670_placeholder_is_recognised_in_a_register_and_as_a_fault() {
         let code = placeholder_code();
@@ -1895,9 +1698,8 @@ mod tests {
 
     #[test]
     fn a_placeholder_is_recognised_at_an_offset_from_itself() {
-        // A guest treating a code as a struct pointer reads a *field* through it, so the
-        // address that faults is the code plus or minus a little. Matching the bare value
-        // would miss every case where the guest did anything with it.
+        // A guest treating a code as a struct pointer reads a field through it, so the faulting
+        // address is the code plus or minus a little.
         assert!(looks_like_placeholder(placeholder_code()));
         assert!(looks_like_placeholder(0xF7FF_0019), "code plus 0x18");
         assert!(looks_like_placeholder(0xF7FE_FFF9), "code minus 8");
@@ -1922,8 +1724,7 @@ mod tests {
 
     #[test]
     fn a_short_run_dominated_by_one_call_is_not_a_spin() {
-        // A guest that calls `memset` four times out of five during startup is busy, not
-        // stuck, and reporting that as a spin would bury the real ones.
+        // A guest that calls `memset` four times out of five during startup is busy, not stuck.
         let mut trace = empty();
         trace.total_calls = 5;
         trace.calls = vec![CalledImport {
@@ -1938,8 +1739,8 @@ mod tests {
 
     #[test]
     fn giving_up_outranks_everything_else_and_carries_its_last_calls() {
-        // A guest that stopped deliberately said the most useful thing in the run, and it
-        // said it in the calls immediately before.
+        // A guest that stopped deliberately said the most useful thing in the calls immediately
+        // before.
         let mut trace = empty();
         trace.total_calls = 53;
         trace.stopped = Some("the guest called abort".to_owned());
@@ -1954,13 +1755,10 @@ mod tests {
 
     #[test]
     fn the_gate_named_is_the_giving_up_codes_own_last_call_not_a_far_one() {
-        // PPSA28061's measured shape (D677): the guest calls the mapper in game.bin (0x4800...),
-        // tests the answer, and aborts 0x4d bytes later. Its abort path then opens an error dialog
-        // - a call into a *different* module (0x4000...), and the **most recent** call before the
-        // abort. So "the last thing it called" is the wrong signal: it names the error dialog. The
-        // gate is the call closest *below* where it stopped, which is the near mapper - the same
-        // `-> 0x80020006` gate D677 read by hand, and the discriminator that would have kept this
-        // project from blaming a cross-module call the abort path made on its way down.
+        // The guest calls a mapper in its executable (0x4800...), tests the answer and aborts 0x4d
+        // bytes later. Its abort path opens an error dialog in a different module (0x4000...), the
+        // most recent call before the abort. The gate is the call closest below where it stopped,
+        // the near mapper, not the most recent call.
         let near_mapper = TracedCall {
             thread: 7,
             sequence: 1,
@@ -1988,8 +1786,8 @@ mod tests {
         let mut trace = empty();
         trace.total_calls = 391;
         trace.stopped = Some("the guest called abort".to_owned());
-        // Order: gate, then the far dialog the abort path made, then abort. Most-recent picks the
-        // dialog; closest-below picks the mapper. Only the second is right.
+        // Order: gate, then the far dialog the abort path made, then abort. Most recent picks the
+        // dialog; closest below picks the mapper.
         trace.tail = vec![near_mapper, error_dialog, abort];
 
         let found = findings(&trace);
@@ -2020,10 +1818,8 @@ mod tests {
 
     #[test]
     fn a_give_up_with_nothing_called_below_it_names_no_gate() {
-        // The near-call rule must not invent a gate. A stop whose only preceding call is on
-        // another thread has nothing the giving-up code itself did below it, so the finding falls
-        // back to what it always said rather than pointing at an unrelated call - the same
-        // discipline the null-deref router learned when it blamed a call four frames back.
+        // The near-call rule must not invent a gate: a stop whose only preceding call is on another
+        // thread falls back to the plain finding rather than naming an unrelated call.
         let other_thread = TracedCall {
             thread: 9,
             sequence: 1,
@@ -2065,8 +1861,7 @@ mod tests {
 
     #[test]
     fn findings_are_ranked_by_confidence_before_weight() {
-        // A consumer taking the top item must be taking the one least likely to waste its
-        // time - a heavy guess must not outrank a light certainty.
+        // A heavy guess must not outrank a light certainty.
         let mut trace = empty();
         trace.reads = ReadReport {
             reads: 100,
@@ -2082,8 +1877,7 @@ mod tests {
 
     #[test]
     fn every_finding_says_where_to_look() {
-        // The point of a classification is that a consumer can route it without reading
-        // the prose.
+        // A consumer can route a finding by its classification without reading the prose.
         let mut trace = empty();
         trace.fault = Some(FaultSite {
             instruction: Vec::new(),
@@ -2105,19 +1899,11 @@ mod tests {
         }
     }
 
-    /// **A kernel-entry fault names itself as one, in the ranked finding, not just the crash print.**
+    /// A trap-instruction fault is classified in the ranked finding, not only in the crash print.
     ///
-    /// A trap instruction raises a GP fault the host reports as `read of 0xffff...`, so the
-    /// address-arithmetic shapes would call it "an address in no region" and hand back "find the bad
-    /// pointer". It is a different job and the finding has to say so, name the vector, and point at
-    /// the right next step. This walled a title for an afternoon because the finding did not
-    /// (worklog 603, 605).
-    ///
-    /// **`int 0x41` and an unmeasured vector now take different steps, and this pins the split.**
-    /// obSCEne measured `int 0x41` fatal on hardware (REQ-...b3c2), so it is a guest trap whose cause
-    /// is upstream - a [`Gap::Faulted`], routed to sweep the call before it - not a
-    /// [`Gap::KernelEntryUnimplemented`] awaiting a handler. Every other vector is still unmeasured
-    /// and keeps the "characterise it, then add the handler" job.
+    /// `int 0x41` is fatal on hardware, so it is a [`Gap::Faulted`] routed to the call before it;
+    /// any other unmeasured vector is a [`Gap::KernelEntryUnimplemented`] to characterise and then
+    /// handle.
     #[test]
     fn int_0x41_is_a_measured_fatal_trap_and_an_unmeasured_vector_still_awaits_a_handler() {
         let int_41 = |instruction: Vec<u8>| {
@@ -2129,7 +1915,7 @@ mod tests {
                 host_thread: None,
                 pointees: Vec::new(),
                 kind: "read of".to_owned(),
-                address: u64::MAX, // the GP-fault masquerade a trap raises
+                address: u64::MAX, // the general-protection read a trap raises
                 instruction_pointer: 0x4000_0019_6b91_u64,
                 region: Some("image".to_owned()),
                 offset: Some(0x0196_b91a),
@@ -2143,7 +1929,7 @@ mod tests {
                 .expect("a fault finding")
         };
 
-        // int 0x41: measured fatal, so a guest trap pointing upstream - not a kernel entry to add.
+        // int 0x41: fatal on hardware, so a guest trap pointing upstream.
         let fatal = int_41(vec![0xcd, 0x41]);
         assert_eq!(
             fatal.gap,
@@ -2166,7 +1952,7 @@ mod tests {
             fatal_action
         );
 
-        // int 0x42: no measurement, so still a kernel entry that needs one, then a handler.
+        // int 0x42: unmeasured, so still a kernel entry to characterise, then handle.
         let unmeasured = int_41(vec![0xcd, 0x42]);
         assert_eq!(
             unmeasured.gap,
@@ -2196,12 +1982,8 @@ mod tests {
         );
     }
 
-    /// **A null dereference routes itself to the call that answered zero.**
-    ///
-    /// The base the guest dereferenced was somebody's return value; naming that call is the
-    /// difference between an answer and "go find where rax was set to zero" (worklog 606). The
-    /// negative half matters as much: when nothing in the trace answered the base, the finding must
-    /// fall back to the general search rather than blame an unrelated call.
+    /// A null dereference routes itself to the call that answered zero, and falls back to the
+    /// general search when nothing in the trace answered the base.
     #[test]
     fn a_null_dereference_names_the_call_that_answered_zero() {
         let mut trace = empty();
@@ -2276,22 +2058,15 @@ mod tests {
         );
     }
 
-    /// **A copy that faults reading its source is named as the fault, from the recorded argument -
-    /// and the memcpy is not blamed for it.**
-    ///
-    /// PPSA02664's wall is `read of 0xa8` inside a byte copy whose source pointer is `0xa8`, a
-    /// null-page pointer captured in `arg1` at the call - where the mid-copy register dump shows
-    /// only `rdx` as a *remaining* count, and reading that as the length cost the wall eleven
-    /// worklogs (740). The finding must name the copy from its recorded source, mark the null-page
-    /// base, and route the action to whatever produced the pointer, never to "fix memcpy" - which is
-    /// faithful. The negative half holds it to copies whose recorded source actually covers the
-    /// fault, so it is a range match and not "any memcpy in a faulting tail".
+    /// A copy that faults reading its source is named from its recorded argument, with the
+    /// null-page base marked and the action routed to the pointer's producer rather than the copy;
+    /// a copy whose source range does not cover the fault is not named.
     #[test]
     fn a_copy_that_faults_reading_a_null_source_is_named_not_the_memcpy() {
         let mut trace = empty();
         trace.total_calls = 100;
         let mut memcpy = call("libc::memcpy", 0x7400_0218_f070); // arg0 = destination, valid
-        memcpy.args[1] = 0xa8; // the null-page source - the fault
+        memcpy.args[1] = 0xa8; // the null-page source
         memcpy.args[2] = 0x50; // the length
         trace.tail = vec![memcpy];
         trace.fault = Some(FaultSite {
@@ -2337,7 +2112,7 @@ mod tests {
         let mut valid = empty();
         valid.total_calls = 100;
         let mut good = call("libc::memcpy", 0x7400_0218_f068);
-        good.args[1] = 0x6000_007f_c2f8; // a valid stack source, nowhere near 0xa8
+        good.args[1] = 0x6000_007f_c2f8; // a valid stack source, far from 0xa8
         good.args[2] = 0x8;
         valid.tail = vec![good];
         valid.fault = Some(FaultSite {
@@ -2411,20 +2186,10 @@ mod tests {
         }
     }
 
-    /// **A tagged placeholder names the function that answered it.**
+    /// A tagged placeholder names the function that answered it (D567).
     ///
-    /// The whole point of D567. Untagged, every stub answers `PLACEHOLDER_BASE | 0x1`, so a
-    /// placeholder in a guest's argument says *some* unimplemented function produced it - and the
-    /// finding could only tell a reader to go looking, which D299 says a finding must not do.
-    ///
-    /// The tag is `PLACEHOLDER_BASE | (0x10 + slot)`, and the trace indexes calls by the same slot,
-    /// so the value resolves to a name with no new plumbing.
-    ///
-    /// # What this cannot assert
-    ///
-    /// That the slot numbering the service tags with is the one the trace records. They are the
-    /// same global stub index today; nothing here would notice if one of them started counting
-    /// differently, and the symptom would be a confident finding naming the wrong function.
+    /// The tag is `PLACEHOLDER_BASE | (0x10 + slot)` and the trace indexes calls by the same global
+    /// stub index; this test cannot detect the two numberings diverging.
     #[test]
     fn a_tagged_placeholder_names_its_source() {
         let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
@@ -2438,15 +2203,11 @@ mod tests {
             source_of(&trace, base | 0x225),
             Some("libSceAgc::sceAgcCreateShader")
         );
-        // **A tag for a slot this run never called resolves to nothing**, and this is the
-        // load-bearing half rather than hygiene: a garbage value landing in the tag range must not
-        // be read as a confident attribution (D570). `base | 0x999` decodes to a slot this run
-        // never called, so it resolves to nothing.
+        // A tag for a slot this run never called resolves to nothing, so a stray value in the tag
+        // range is not read as a confident attribution.
         assert_eq!(source_of(&trace, base | 0x999), None);
-        // And PPSA28061's real stale registers `0x7fff0201` / `0x7fffbe01` (measured guest garbage)
-        // now fall *outside* the placeholder block entirely, since D670 moved it onto the high bit -
-        // so they cannot even be mistaken for a tag, which the old positive range could. The
-        // measured values are kept; only the block they miss has moved.
+        // Measured stale register values `0x7fff0201` and `0x7fffbe01` fall outside the placeholder
+        // block, so they cannot be mistaken for a tag.
         assert_eq!(
             source_of(&trace, 0x7fff_0201),
             None,
@@ -2455,12 +2216,8 @@ mod tests {
         assert_eq!(source_of(&trace, 0x7fff_be01), None, "and the other one");
     }
 
-    /// **An untagged placeholder names nothing, and must not pretend to.**
-    ///
-    /// `PLACEHOLDER_BASE | 0x1` is what every stub answers when tagging is off, and the fixed
-    /// `GuestError` codes live below `PLACEHOLDER_BASE | 0x10`. Reading one of those as a slot would
-    /// attribute a finding to whichever import happened to be at index 0 - a confident, wrong
-    /// answer, which is worse than the vague one it replaced.
+    /// An untagged placeholder or a fixed `GuestError` code names nothing, rather than the import
+    /// at index 0.
     #[test]
     fn an_untagged_placeholder_attributes_nothing() {
         let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
@@ -2475,11 +2232,7 @@ mod tests {
         }
     }
 
-    /// **The detector still recognises a tagged placeholder as one of ours.**
-    ///
-    /// `looks_like_placeholder` bounded itself at `PLACEHOLDER_BASE | 0x10` - the fixed codes. A
-    /// tagged run answers far above that, so the detector would have gone blind **exactly when it
-    /// was asked to say more**, and the diagnostic would have silently reported nothing.
+    /// The detector recognises a tagged placeholder, which sits above the fixed codes.
     #[test]
     fn the_detector_sees_tagged_placeholders_too() {
         let base = u64::from(orbistoun_core::PLACEHOLDER_BASE);
@@ -2489,18 +2242,13 @@ mod tests {
                 "{tagged:#x} is one of ours and the detector missed it"
             );
         }
-        // And still recognises the untagged one, and still rejects an ordinary address.
+        // And still recognises the untagged one, and rejects an ordinary address.
         assert!(looks_like_placeholder(placeholder_code()));
         assert!(!looks_like_placeholder(0x4000_0000_0000));
     }
 
-    /// **Every tagged value the service can produce is negative and is recognised.**
-    ///
-    /// The service hands out `PLACEHOLDER_BASE | (0x10 + slot)`, and D670's whole point is that a
-    /// placeholder reads as negative to a guest's own `rc < 0` - so bit 31 must be set on the tagged
-    /// codes as well as the untagged one, and the detector must catch every one. Checked across the
-    /// slot range the tags span, from the first to the last that stays inside the reserved half-word.
-    /// A tag that lost the high bit is exactly the regression D670 removed and ed20 keeps removed.
+    /// Every tagged value the service can produce has bit 31 set and is recognised, across the
+    /// whole slot range inside the reserved half-word (D670).
     #[test]
     fn every_tag_the_service_produces_is_negative_and_recognised() {
         const FLOOR: u64 = 0x10;

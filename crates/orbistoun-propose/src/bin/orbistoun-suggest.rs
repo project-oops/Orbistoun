@@ -1,33 +1,14 @@
-//! Ask a local model for candidate vocabulary, and keep what the hash confirms.
+//! Asks a local model for candidate vocabulary, and keeps what the hash confirms.
 //!
 //! ```text
 //! orbistoun-suggest [rounds]
 //! ```
 //!
-//! # Why this is its own binary
-//!
-//! **Nothing on the path a person actually runs may wait on a model.** A round here takes
-//! seconds to minutes; a boot of the guest takes about a tenth of a second. Putting this
-//! behind `orbistoun-cli` would make every user of `./bin/orbistoun run` carry the model
-//! runtime for a branch almost none of them reach, on the one command that has to stay
-//! fast. So it is separate, opt-in, and the run report mentions it rather than invoking it.
-//!
-//! # What it can and cannot do wrong
-//!
-//! It proposes words. The NID hash decides every one, so a wrong proposal costs a sweep and
-//! vanishes - it cannot enter the database, cannot produce a false name, and cannot mislead
-//! anybody reading the output later. That property is why a model is allowed to guess here
-//! and nowhere else in this project.
-//!
-//! Words the hash confirms are written to `symbols/proposed-<slot>.txt`. **Promoting one
-//! into the grammar is a separate and deliberate act**, because it changes what every
-//! future search enumerates.
-//!
-//! # Before running it
-//!
-//! `cargo test -p orbistoun-propose --release --test shapes -- --nocapture` says whether the
-//! names this project cannot spell are short of *vocabulary* or short of *shapes*. When the
-//! answer is shapes, more words buy nothing. Ask for words when the measurement says words.
+//! Its own binary so nothing a person runs routinely waits on a model or carries its runtime
+//! (D265). The NID hash decides every proposed word, so a wrong one costs a sweep and cannot
+//! produce a false name. Confirmed words go to `symbols/proposed-<slot>.txt`; promoting one into
+//! the grammar is a separate, deliberate change. The `shapes` test in this crate says whether
+//! unspelled names are short of vocabulary or of shapes; words help only in the first case.
 
 use orbistoun_names::Grammar;
 use orbistoun_names::solve::Targets;
@@ -40,9 +21,8 @@ const DATABASE: &str = "symbols/generated.json";
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = std::env::args().nth(1);
     let benchmarking = first.as_deref() == Some("benchmark");
-    // Three per position by default. Measured over thirty-six rounds, effectively all of
-    // the yield was in the first round of each - a model re-proposes its own ideas rather
-    // than finding new ones - so a long run is not a better one.
+    // Three rounds per position by default: the yield is almost all in each position's first
+    // round, because a model re-proposes its own ideas.
     let rounds: u64 = match &first {
         Some(a) if !benchmarking => a
             .parse()
@@ -50,25 +30,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => 3,
     };
 
-    // **The one path resolver, not a second guess at it.** This invented its own default
-    // of `.orbistoun` in the working directory, which is the repository when run from
-    // here - so the first run downloaded a model runtime into the tree and tripped the
-    // provenance guard. `Paths::resolve` already knows where data belongs, honours the
-    // portable-mode and data-directory settings, and is what every other entry point uses.
-    // An optional second argument names the entry to ask first - `claude-code`,
-    // `managed`, an id from the registry. Not persisted: choosing once for one run should
-    // not quietly rewrite what every later run does.
+    // The data root comes from `Paths::resolve`, as for every entry point, never the working
+    // directory. An optional second argument names the entry to ask first (`claude-code`,
+    // `managed`, a registry id); it applies to this run only and is not persisted.
     let prefer = std::env::args().nth(2);
 
     let paths = orbistoun_paths::Paths::resolve();
     let mut llm = orbistoun_llm::Llm::open(paths.data_root())?;
     if let Some(id) = &prefer {
-        // **A registry written before an engine existed does not know about it.** The
-        // list is seeded once and then kept, so a machine that gained a command-line
-        // model since - or gained the command itself - has a registry that predates it.
-        // Re-seeding is safe exactly when nobody has customised the list, which is what
-        // `retune` checks, so it is tried once before giving up rather than telling
-        // somebody an entry does not exist when what is stale is the file.
+        // A registry seeded before an engine existed does not list it. Re-seeding is safe when nobody
+        // has customised the list, which `retune` checks, so it is tried once before reporting the
+        // entry missing.
         if !llm.prefer(id) && llm.retune()? {
             println!("  (re-checked this machine: the registry predated {id})");
             llm.prefer(id);
@@ -125,11 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rounds,
     };
     let summary = session.run(|slot, round, outcome| {
-        // **Which engine answered, on every round.** There is now more than one kind -
-        // a downloaded local model, a server on this machine, and an installed command
-        // that answers over somebody else's account - and they differ in where the
-        // prompt goes. A person running this is entitled to know which one it was
-        // without reading a configuration file to work it out.
+        // Which engine answered, every round: engines differ in where the prompt goes.
         println!(
             "  [{slot}] round {round}: {} ({}) offered {} accepted {} banked {} swept {}",
             outcome.backend,
@@ -153,9 +121,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary.earned.len(),
         summary.banked
     );
-    // **The number that says whether anything was learned is `banked`, not `confirmed`.**
-    // A name confirmed from words the grammar already had teaches nothing - it was already
-    // reachable, and the search would have found it. Only a banked word is new.
+    // `banked`, not `confirmed`, says whether anything was learned: a name confirmed from words the
+    // grammar already had was reachable anyway.
     if summary.banked == 0 {
         println!("nothing new. The words it proposed were ones the grammar already holds.");
     } else {
@@ -169,30 +136,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Measures every configured entry and reorders the ladder by what came back.
-///
-/// Its own function because it is a different job from proposing words, and because
-/// `main` doing both was longer than the lint allows - which is the lint being right.
 fn benchmark(llm: &mut orbistoun_llm::Llm) -> Result<(), Box<dyn std::error::Error>> {
-    // **The real question, not an easier one.** Asked plainly for twelve nouns, a
-    // local model returned twelve and tied the engine that beats it six to one in the
-    // loop. What discriminates is the actual prompt: library context, decomposed
-    // examples, a sample of the vocabulary, and the requirement that none of it be
-    // repeated. Built here rather than in the engine crate because it is this
-    // caller's question, and it is the one worth being ranked on (D334).
+    // Ranked on the real prompt - library context, decomposed examples, a vocabulary sample, and
+    // the rule that none of it be repeated - because a plain request for nouns does not
+    // discriminate between engines. Built here because it is this caller's question (D334).
     let grammar = Grammar::builtin()?;
     let examples = suggest::examples(std::path::Path::new(DATABASE))?;
     let (slot, role) = suggest::SLOTS[0];
     let context = suggest::context_for(&grammar, 0, role, &examples);
-    // Sampled exactly as the loop samples. The first version asked at the default
-    // temperature of zero while the loop asks at 0.9, which is not the same question
-    // - and a benchmark that asks a different question ranks on a different thing.
+    // Sampled at the loop's temperature, so the benchmark asks the loop's question.
     let request = orbistoun_llm::engine::Request::new(orbistoun_propose::vocabulary::prompt(
         &context, &grammar, slot,
     ))
     .with_temperature(orbistoun_propose::vocabulary::DEFAULT_TEMPERATURE);
 
-    // What the loop would refuse before it cost anything, so the score is words this
-    // machine does not already hold rather than words returned.
+    // Words the loop would refuse, so the score counts words this machine does not already hold.
     let known: std::collections::BTreeSet<String> = grammar
         .vocabulary
         .values()
@@ -200,11 +158,8 @@ fn benchmark(llm: &mut orbistoun_llm::Llm) -> Result<(), Box<dyn std::error::Err
         .map(|w| w.to_lowercase())
         .collect();
 
-    // **Scored the way the loop reads, not more strictly.** A reply is parsed with the
-    // same three fallbacks the proposal loop uses - a JSON array, then quoted strings,
-    // then bare tokens - because an engine that would have contributed there must not
-    // score zero here. Measured: a strict JSON-only scorer failed an engine that answers
-    // coherently in prose, which is a fact about the scorer (D335).
+    // Parsed with the loop's own fallbacks (a JSON array, then quoted strings, then bare tokens),
+    // so an engine that would contribute there does not score zero here.
     let score = |text: &str| {
         orbistoun_propose::vocabulary::read_words(text).map_or(0, |(words, _)| {
             words
@@ -219,8 +174,7 @@ fn benchmark(llm: &mut orbistoun_llm::Llm) -> Result<(), Box<dyn std::error::Err
         })
     };
 
-    // Every entry, not just the one that answers today - an engine nobody ever runs
-    // is one nobody can find out about.
+    // Every entry, including ones not in use, so each can be measured.
     println!(
         "benchmarking every entry on the real `{slot}` question, scoring words this machine does not already hold"
     );

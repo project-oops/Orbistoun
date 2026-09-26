@@ -2,9 +2,8 @@
 //!
 //! A [`crate::pipeline::Submission`] carries a frame's resources and the ordered commands that
 //! reference them. This runs it against a [`RenderBackend`]: make each resource resident, carry
-//! out each command in order, then present. It is deliberately small - the ordering is the
-//! frontend's, decoded from the guest's own stream, so a backend stays a recorder and the loop
-//! lives here (D701) rather than inside every backend.
+//! out each command in order, then present. The ordering is the frontend's, decoded from the
+//! guest's stream, so a backend stays a recorder and the loop lives here (D701).
 
 use crate::backend::{
     BackendError, RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage,
@@ -33,10 +32,8 @@ const fn command_name(command: &RenderCommand) -> &'static str {
 
 /// The result of driving one submission through a backend.
 ///
-/// A frame is legible from this alone: how many resources were made resident, how many commands
-/// the backend carried out, and how many it refused - which is a gap it named honestly (D010),
-/// not a failure. A frame where `refused` is high and `executed` low is a backend that has not
-/// grown the arm the guest needs yet, and the count says so rather than a black screen.
+/// How many resources were made resident, how many commands the backend carried out, and how
+/// many it refused. A refusal is a gap the backend names (D010), not a failure.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FrameOutcome {
     /// Resources made resident for this frame.
@@ -45,11 +42,7 @@ pub struct FrameOutcome {
     pub executed: usize,
     /// Commands the backend refused as unsupported - a named gap, not an error.
     pub refused: usize,
-    /// Why, by the name each refusal carried, with how many times, most frequent first.
-    ///
-    /// **A count names no work; the names do.** Every `Unsupported` carries the command it refused,
-    /// and dropping it left "450 refused" as the whole of what Neverball's first draw submission said
-    /// (worklog 818).
+    /// The refusal reasons, by the name each refusal carried, with counts, most frequent first.
     pub refusals: Vec<(&'static str, usize)>,
     /// Whether the frame was presented.
     pub presented: bool,
@@ -57,12 +50,10 @@ pub struct FrameOutcome {
 
 /// Drives one submission through a backend: resident, then executed, then presented.
 ///
-/// A refused command is **counted, not fatal**: a partially-implemented backend reports its gaps
-/// and the frame continues, which is what lets the executor grow arm by arm while a real guest
-/// keeps submitting. A **residency error is fatal** to the frame - a resource that could not be
-/// made resident is one the commands cannot reference, so continuing would refuse everything for
-/// a reason the caller already has - and a **device error from a command** is fatal too, because
-/// it is a real failure rather than a gap the backend chose to name.
+/// A refused command is counted, not fatal, so a partial backend reports its gaps and the frame
+/// continues. A residency error is fatal, because the commands cannot reference a resource that
+/// is not resident. A device error from a command is fatal, because it is a real failure rather
+/// than a named gap.
 pub fn drive(
     backend: &mut dyn RenderBackend,
     submission: &Submission,
@@ -85,15 +76,15 @@ pub fn drive(
         outcome.resident += 1;
     }
 
-    // The frame's guest-memory window, before the commands that read it. Frame-level state, set once
-    // (D703): a shader fetches its vertices from it, so it has to be in place before a draw runs.
+    // The frame's guest-memory window, set once before the commands: a shader fetches its vertices
+    // from it (D703).
     crate::perf::span(crate::perf::Span::GuestWindow, || {
         backend.set_guest_memory(&submission.guest_memory);
     });
 
     let mut refusals = std::collections::BTreeMap::<&'static str, usize>::new();
     // The shaders bound at each command, so a device error names the draw that raised it and the
-    // modules it ran (worklog 833) rather than only that something on the device failed.
+    // modules it ran.
     let mut bound: Vec<(ShaderStage, ResourceId)> = Vec::new();
     // And the inputs it ran with: each stage's user data and the texture's extent.
     let mut inputs: Vec<(ShaderStage, Vec<u32>)> = Vec::new();
@@ -196,12 +187,10 @@ mod tests {
         assert_eq!(backend.recorded().len(), 2);
     }
 
-    /// **A render target is made resident alongside the modules, so a `SetRenderTargets` finds it.**
+    /// A render target is made resident alongside the modules, so a `SetRenderTargets` finds it.
     ///
-    /// The target carries no bytes, only its size, and rides in a separate map - but the driver must
-    /// still make it resident before the commands run, exactly as it does a shader module (D701).
-    /// Made to fail against a driver that made only modules resident: the target would then be
-    /// counted `resident: 1`, and a backend selecting it would find nothing.
+    /// The target carries only its size and rides in a separate map, but the driver makes it
+    /// resident before the commands run, as it does a shader module (D701).
     #[test]
     fn a_render_target_is_made_resident() {
         use crate::registers::ColourTargetExtent;
@@ -229,10 +218,7 @@ mod tests {
         );
     }
 
-    /// **The driver hands the frame's guest-memory window to the backend before the commands.**
-    ///
-    /// A shader reads its vertices from the window, so it must be set before a draw runs. Made to
-    /// fail against a driver that never set it: the recorder would report an empty window.
+    /// The driver hands the frame's guest-memory window to the backend before the commands.
     #[test]
     fn the_guest_memory_window_reaches_the_backend() {
         let mut submission = submission();
@@ -278,8 +264,8 @@ mod tests {
 
     #[test]
     fn refused_commands_are_counted_and_do_not_abort_the_frame() {
-        // A backend with no arms yet still makes resources resident and runs to the end of the
-        // stream; the refusals are the report, not a stop.
+        // A backend that refuses every command still makes resources resident and runs to the end
+        // of the stream; the refusals are the report.
         let mut backend = RefusingBackend::default();
         let outcome = drive(&mut backend, &submission()).expect("residency succeeded");
         assert_eq!(
@@ -320,8 +306,8 @@ mod tests {
 
     #[test]
     fn a_residency_error_ends_the_frame() {
-        // A resource that cannot be made resident is one the commands cannot reference, so the
-        // frame stops rather than refusing every command for a reason already known.
+        // A resource that cannot be made resident ends the frame rather than refusing every
+        // command.
         let mut backend = BrokenResidency;
         let error = drive(&mut backend, &submission()).expect_err("residency failed");
         assert_eq!(error, BackendError::UnknownResource(ResourceId(1)));

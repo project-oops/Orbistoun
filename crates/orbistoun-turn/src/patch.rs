@@ -1,31 +1,11 @@
 //! Turning a measured finding into a change the emulator can carry.
 //!
-//! The loop measures a contract, satisfies it, and proves it helped. This is what it does
-//! next: emit the change, in a form that costs no rebuild and reverts by deleting a line.
-//!
-//! # Three tiers, and the third is the smallest
-//!
-//! | tier | who proposes | what it emits | rebuild |
-//! |---|---|---|---|
-//! | **1** | a rule | a policy entry | no |
-//! | **2** | a model | a policy entry | no |
-//! | **3** | a person, or a model | Rust | yes |
-//!
-//! **The output being data is what removes the person, not the model being good.** A policy
-//! entry is one line in a file that is already a runtime input: blast radius is one line, undo
-//! is deleting it, the loop re-runs in seconds. Rust is none of those things and no amount of
-//! model quality changes any of them - which is why anything expressible as an effect belongs
-//! in the first two tiers, and only real logic is left for the third (D296).
-//!
-//! # What may be accepted on what evidence
-//!
-//! `FURTHER` means the guest executed code it could not reach before. It does **not** mean the
-//! behaviour is right, and principle 3's opening sentence is this exact failure: *"a stub that
-//! returns success is indistinguishable from working code until forty thousand frames later"*.
-//!
-//! So a trial that changes only a **return value** may be accepted on `FURTHER`, and a trial
-//! that **writes memory** may not - that needs a conformance check covering it. [`Evidence`]
-//! carries the distinction so a caller cannot lose it.
+//! A fix the loop proposes is a policy entry, from a rule or from a model: one line in a file that
+//! is already a runtime input, reverted by deleting it, with no rebuild (D296). Behaviour no effect
+//! can express is Rust, written by a person and graded by the conformance probe. `FURTHER` shows
+//! the guest got past something, not that the behaviour is right, so a trial that changes only a
+//! return value may be kept on `FURTHER` and one that writes memory needs a conformance check;
+//! [`Evidence`] carries the distinction.
 
 use crate::turn::bare;
 use orbistoun_hle::learned::{Evidence as Known, Measurement};
@@ -33,9 +13,8 @@ use orbistoun_hle::{Delivery, StubRegion, StubReturn};
 
 /// A change the loop earned, in the shape the policy file takes.
 ///
-/// **Proposed, never applied here.** Producing it is a judgement about what the measurement
-/// supports; writing a file is a decision about a machine, and the two belong to different
-/// layers - the same split `promote` already makes for a knowledge entry (D291).
+/// Proposed, never applied here: producing it is a judgement about what the measurement supports,
+/// and writing a file is the caller's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Patch {
     /// The function this changes, bare.
@@ -52,55 +31,45 @@ pub struct Patch {
 
 /// What has to be observed before a patch is kept.
 ///
-/// **A field rather than a judgement made at the time**, for the same reason `Effect` is one
-/// in `orbistoun-env`: the distinction decides what a result means, and one made by hand at
-/// the point of reading is one that gets made differently next time.
+/// A field rather than a judgement made at the point of reading, so it is made the same way every
+/// time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Evidence {
     /// The guest reached code it could not reach before.
     ///
-    /// Enough **only** for a patch that changes what a function answers. A wrong answer that
-    /// buys progress is visible as a wall that moved; a wrong *write* is not visible at all
-    /// until something unrelated breaks.
+    /// Enough only for a patch that changes what a function answers. A wrong answer that buys
+    /// progress shows as a wall that moved; a wrong write shows only when something unrelated
+    /// breaks.
     Further,
     /// A conformance check covering this function passed.
     ///
-    /// Required for any patch that touches guest memory. The probe announces each check by
-    /// name and grades against a spec, which is the only oracle here that says *correct*
-    /// rather than *proceeded*.
+    /// Required for any patch that touches guest memory: the probe grades named checks against a
+    /// spec, the only oracle here that says correct rather than proceeded.
     ConformanceCheck,
 }
 
 /// The rule tier: a patch derived from a finding, with nothing guessed.
 ///
-/// `None` when the finding establishes no contract - which is the common answer and not a
-/// failure. A sweep that concluded `Unmoved` measured every slot and found none of them, and
-/// turning that into a change would be inventing one.
+/// `None` when the finding establishes no contract, which is the common answer: a sweep that
+/// concluded `Unmoved` found no slot, and turning that into a change would invent one.
 ///
-/// # What it assumes, and says so
-///
-/// The size of the region behind the base is **not measured**: a sweep sees where the guest
-/// faulted, not what it asked for. A number goes in because one has to, it is recorded as an
-/// assumption, and it lives in a file where changing it costs a re-run rather than a rebuild -
-/// which is the whole reason policy is data (D291, D295).
+/// The size of the region behind the base is not measured, since a sweep sees where the guest
+/// faulted, not what it asked for. The number is recorded as an assumption in a file where changing
+/// it costs a re-run (D300).
 #[must_use]
 pub fn from_finding(target: &str, finding: &crate::experiment::Finding) -> Option<Patch> {
     /// How much space a region gets, as a multiple of the offset the guest indexed by.
     ///
-    /// Twice, because the sweep measures the one access that faulted rather than the extent
-    /// the guest intends to use, and a region sized to exactly that access answers a narrower
-    /// question than the one worth asking - the reasoning `axis::around` already gives.
+    /// Twice, because the sweep measures the one access that faulted rather than the extent the
+    /// guest intends to use, the reasoning `axis::around` gives.
     const HEADROOM: u64 = 2;
     /// Never smaller than this, so a tiny offset does not produce a region a page could not
     /// hold.
     const SMALLEST: u64 = 0x1_0000;
     /// Page size, which a region is rounded up to.
     ///
-    /// **Rounded here rather than only where it is reserved.** `0xfffe0` doubled is `0x1fffc0`,
-    /// half a page short of covering its own last byte - and a run at exactly that size faults
-    /// *inside the region it was just given*, which reads as "the base was not the problem".
-    /// The service rounds too, so this is belt and braces; what it buys is a number in the
-    /// file that means what it says (D289).
+    /// Rounded here as well as where it is reserved, so the number in the file covers its own last
+    /// byte: `0xfffe0` doubled is half a page short.
     const PAGE: u64 = 0x1000;
 
     let crate::experiment::Finding::OutParameter {
@@ -125,12 +94,9 @@ pub fn from_finding(target: &str, finding: &crate::experiment::Finding) -> Optio
 
     Some(Patch {
         function,
-        // Only where the sweep found the read to be gated on it. A patch that forced an answer
-        // nothing measured would be a guess wearing a measurement's clothes.
-        // **Refused rather than narrowed.** A stub answers a thirty-two-bit code, so a measured
-        // answer that does not fit one cannot be expressed - and folding it to `Ok` would put a
-        // value in the file that nothing measured, which is the one thing a patcher must never
-        // do (principle 3). Dropping it leaves the write, which is still earned.
+        // Only where the sweep found the read gated on it. A stub answers a thirty-two-bit code, so
+        // a measured answer that does not fit one is dropped rather than folded to `Ok`; the write
+        // is still earned.
         answers: answer
             .and_then(|value| u32::try_from(value).ok())
             .map(|raw| {
@@ -146,10 +112,8 @@ pub fn from_finding(target: &str, finding: &crate::experiment::Finding) -> Optio
         }),
         // This one writes memory, so a moved wall is not enough to keep it (D296).
         evidence: Evidence::ConformanceCheck,
-        // **Everything the sweep did not establish.** It measures which slot is read and what
-        // is added to it; it measures nothing about how large a region the guest intends to
-        // use or what the other arguments select. Left out, the entry would read as though it
-        // had (D291).
+        // Everything the sweep did not establish: it measures which slot is read and what is added
+        // to it, and nothing about the region's size or what the other arguments select (D291).
         assumptions: vec![
             format!(
                 "{bytes:#x} bytes is a guess: the sweep measured where the guest faulted, not how much it asked for"
@@ -163,25 +127,14 @@ pub fn from_finding(target: &str, finding: &crate::experiment::Finding) -> Optio
 
 /// A patch for the function whose placeholder the guest dereferenced.
 ///
-/// **The only shape here that is auto-keepable.** It changes what a function *answers* and
-/// writes no memory, so `FURTHER` is sufficient by the rule in [`Evidence`] - a wrong answer
-/// that buys progress shows up as a wall that moved, where a wrong write does not show up
-/// until something unrelated breaks (D296).
-///
-/// # Why zero rather than something chosen
-///
-/// D125 settled it: *"for anything the caller dereferences, an error code is a wild pointer -
-/// so those answer zero, which is what a caller already tests for."* And the premise is
-/// **measured**, not assumed: the guest treating the answer as an address is the evidence that
-/// the function returns something dereferenceable (D299).
-///
-/// Zero is not a guess at the right answer. It is the answer a caller is entitled to test, and
-/// a null it checks is worth more than a wild pointer it follows.
+/// The one auto-keepable shape: it changes what a function answers and writes no memory, so
+/// `FURTHER` is sufficient (D296). Zero, because for anything the caller dereferences an error code
+/// is a wild pointer, and zero is what a caller tests for (D125). The premise is measured: the
+/// guest treating the answer as an address shows the function returns something dereferenceable.
 #[must_use]
 pub fn from_placeholder_source(function: &str) -> Patch {
     Patch {
-        // Bare, like `from_finding` - the qualified form is what the caller needed to keep
-        // the library, and a `Patch` names a function (D355).
+        // Bare, like `from_finding`: a `Patch` names a function.
         function: bare(function).to_owned(),
         answers: Some(StubReturn::Ok),
         region: None,
@@ -198,21 +151,15 @@ pub fn from_placeholder_source(function: &str) -> Patch {
 
 /// The other answer for a function whose placeholder the guest dereferenced.
 ///
-/// **The hypothesis the rule made it impossible to state.** D125 says a pointer-returning
-/// function must not answer an error code, so the loop answered zero and the guest accepted it.
-/// Zero is what a caller may *test*; it is not what an allocator is *for*. Until a region could
-/// be delivered through the return, there was nothing to compare "answer zero" against, and a
-/// result nothing was compared against is a rule that was followed rather than a measurement
-/// (D300).
-///
-/// Both are proposed and both are run. Whichever reaches further is the one kept, which is the
-/// exhaustive-rather-than-ranked discipline every other sweep here already uses (D231).
+/// Zero is what a caller may test, not what an allocator is for, so a region delivered through the
+/// return is the hypothesis to compare against it (D300). Both are proposed and run, and whichever
+/// reaches further is kept.
 #[must_use]
 pub fn from_placeholder_source_as_region(function: &str) -> Patch {
     /// What an allocator gets when nothing has measured what it wanted.
     ///
-    /// **A number in a file, and labelled.** Nothing observed says how much the guest intends
-    /// to use; a snapshot of what it actually touches would say, and does not exist yet.
+    /// A number in a file, labelled as unmeasured: nothing observed says how much the guest intends
+    /// to use.
     const UNMEASURED: u64 = 0x10_000;
 
     Patch {
@@ -237,46 +184,15 @@ pub fn from_placeholder_source_as_region(function: &str) -> Patch {
     }
 }
 
-// --- Tier 2: a model proposing entries in the same grammar --------------------
-//
-// **Not built.** The shape is settled and the reason for the order is measured: tier 1 needs
-// no model and closes the loop for the contract it already produces, and tier 2's vocabulary
-// is worth sizing against a title nobody has worked on before it is written. Of the six gaps
-// the probe still reports, one is effect-shaped and five are real logic - so the vocabulary's
-// value is front-loaded and mostly already spent on functions written by hand (D296).
-//
-// When it is built it emits a [`Patch`] like this one and is checked the same way, so the only
-// new thing is where the proposal comes from - which is the arrangement `Step::NameAHash`
-// already uses, and the only one this project trusts a model inside.
-
-// --- Tier 3: Rust, for behaviour no effect can express ------------------------
-//
-// **Not built, and deliberately the smallest.** A pseudo-random sequence, a symbol lookup,
-// formatted output: none is an effect, all need code, and code needs a rebuild - which turns a
-// try-measure-revert cycle from milliseconds into minutes and inverts the economics the whole
-// dispatcher was designed around (D231).
-//
-// Its oracle is the conformance probe rather than `FURTHER`, because `FURTHER` cannot tell
-// `sqrt` from a `sqrt` that returns its argument, and the probe grades against a spec.
-
-// --- Promotion: a measurement, as the change that ships it -------------------
+// Promotion: a measurement, as the change that ships it.
 
 /// A measurement, written as the knowledge-file entry it implies.
 ///
-/// # Why this is the change worth generating
-///
-/// `learned.toml` is one machine's cache. A knowledge file is what the emulator **ships**, so
-/// a measurement becoming an entry is the moment a thing one person watched happen turns into
-/// something the project claims - which is exactly what promotion means here (D297).
-///
-/// **Every field comes from the measurement, and none is invented.** That is what keeps a
-/// generated change clear of principle 1: nothing is recalled, so nothing can be recall
-/// dressed as reasoning. The entry is deliberately partial - no `purpose`, no `arity`, no
-/// argument list - because a sweep measured none of those, and filling them in from the name
-/// is the exact move the provenance rules exist to stop.
-///
-/// The assumptions travel. They are the difference between a measurement and an assertion,
-/// and an entry that shed them on the way would arrive stronger than it left.
+/// `learned.toml` is one machine's cache; a knowledge file is what the emulator ships, so this is
+/// where an observation becomes a claim (D297). Every field comes from the measurement: no
+/// `purpose`, no `arity`, no argument list, since a sweep measured none of those and filling them
+/// in from the name is what the provenance rules stop. The assumptions travel with it, so the entry
+/// never arrives stronger than the observation.
 #[must_use]
 pub fn knowledge_entry(measurement: &Measurement) -> String {
     use core::fmt::Write as _;
@@ -284,12 +200,8 @@ pub fn knowledge_entry(measurement: &Measurement) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "\n[[function]]");
     let _ = writeln!(out, "name = {}", quoted(&measurement.function));
-    // **No `found_by`.** That field says how the *name* was found - harvested, generated,
-    // supplied - and a measurement establishes how the *behaviour* was. Claiming one from the
-    // other put `generated` on a name the symbol database re-derives as `static`, and the
-    // shipped-files provenance check caught it within a minute of the patch being applied. A
-    // generated entry inventing a field is the single thing this function is written not to
-    // do, and it did it in the first draft (D328).
+    // No `found_by`: that field says how the name was found, and a measurement establishes how the
+    // behaviour was.
     let _ = writeln!(out, "known_by = {}", quoted(measurement.known.label()));
     let _ = writeln!(out, "found_in = [{}]", quoted(&measurement.measured));
     let _ = writeln!(out, "found_on = {}", quoted(&measurement.on));
@@ -341,9 +253,8 @@ fn delivery(via: Delivery) -> String {
 
 /// A TOML string, with the characters that would end it escaped.
 ///
-/// Small and hand-written because the alternative is a serialiser in a crate that has no
-/// other reason to hold one - and because a measurement's strings are prose, where the only
-/// hazards are a quote and a backslash.
+/// Hand-written rather than a serialiser this crate would hold for nothing else; a measurement's
+/// strings are prose, where the only hazards are a quote and a backslash.
 fn quoted(text: &str) -> String {
     let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
@@ -351,16 +262,9 @@ fn quoted(text: &str) -> String {
 
 /// A unified diff that appends to a file, ready for `git apply`.
 ///
-/// # Why an append, and only an append
-///
-/// **A diff that cannot fail to apply is worth more than one that reads better.** Inserting
-/// into the middle of a file means matching context that may have moved, and a generated patch
-/// that half-applies is worse than none - a reviewer then has to work out what the generator
-/// meant rather than what it did. Appending needs three lines of context at the end of a file
-/// nobody else is appending to.
-///
-/// Returns nothing when the file already names the function: a second entry for one function
-/// is two claims about the same thing, and nothing here can say which is current.
+/// An append needs only the context at the end of the file, so it cannot fail to apply, where a
+/// generated patch that half-applies is worse than none. Returns nothing when the file already
+/// names the function: a second entry is a second claim about the same thing.
 #[must_use]
 pub fn appending_diff(path: &str, existing: &str, addition: &str) -> String {
     use core::fmt::Write as _;
@@ -389,19 +293,10 @@ pub fn appending_diff(path: &str, existing: &str, addition: &str) -> String {
 
 /// A unified diff that inserts lines directly after an anchor line.
 ///
-/// # Why an insertion and not another append
-///
-/// An **answer** belongs inside the entry whose question it settles, and appending would add
-/// a second entry for a function that already has one - two claims about the same thing, which
-/// `Learned::record` refuses for exactly this reason. So this matches a line and puts the
-/// addition under it.
-///
-/// Three lines of context either side, which is what `git apply` wants and what makes a stale
-/// patch fail loudly rather than land in the wrong place.
-///
-/// `None` when the anchor is absent or appears more than once: a patch aimed at a line that
-/// might be either of two is a patch nobody can check, and refusing beats guessing which
-/// (D358).
+/// An answer belongs inside the entry whose question it settles; appending would add a second
+/// entry, which `Learned::record` refuses. Three lines of context either side, so a stale patch
+/// fails loudly rather than landing in the wrong place. `None` when the anchor is absent or appears
+/// more than once, since a patch aimed at either of two lines cannot be checked.
 #[must_use]
 pub fn inserting_diff(path: &str, existing: &str, anchor: &str, addition: &str) -> Option<String> {
     use core::fmt::Write as _;
@@ -444,16 +339,9 @@ const CONTEXT: usize = 3;
 
 /// A unified diff that replaces one line with another.
 ///
-/// # Why an answer needs this and an insertion will not do
-///
-/// The first version of this inserted `edge_cases = [...]` under the entry's name. It applied
-/// cleanly and produced **`duplicate key edge_cases in table function`** - a file the tool
-/// could no longer read, from a patch `git apply` was perfectly happy with.
-///
-/// A key that already exists has to be *joined*, not added again. `git apply` checks that a
-/// patch fits the text; nothing in it checks that the result means anything, which is the same
-/// distinction that let a generated entry claim `found_by = generated` for a name the database
-/// re-derives as static (D328, D358).
+/// A key that already exists has to be joined, not added again: inserting a second `edge_cases =
+/// [...]` applies cleanly and produces a duplicate key the tool cannot read. `git apply` checks
+/// that a patch fits the text, not that the result means anything.
 #[must_use]
 pub fn replacing_diff(path: &str, existing: &str, at: usize, replacement: &str) -> Option<String> {
     use core::fmt::Write as _;
@@ -482,11 +370,10 @@ pub fn replacing_diff(path: &str, existing: &str, at: usize, replacement: &str) 
 
 /// Where one entry's list of a given key starts, by line.
 ///
-/// **Scoped to the entry, because the file has many.** Searching the whole file for
-/// `edge_cases = [` would find whichever came first and put an answer about one function into
-/// another's entry - a patch that applies, parses, and is a lie.
+/// Scoped to the entry, because the file has many: a whole-file search would find whichever came
+/// first and put one function's answer into another's entry.
 ///
-/// `None` when the entry has no such key, which is the caller's signal that adding one is safe.
+/// `None` when the entry has no such key, the caller's signal that adding one is safe.
 #[must_use]
 pub fn key_line_of(existing: &str, function: &str, key: &str) -> Option<usize> {
     let lines: Vec<&str> = existing.lines().collect();
@@ -529,11 +416,7 @@ mod tests {
         }
     }
 
-    /// **The entry says only what was measured.**
-    ///
-    /// No `purpose`, no `arity`, no argument list: a sweep measured none of those, and filling
-    /// them in from the name is the move principle 1 exists to stop. What a generated change
-    /// must never do is arrive looking better-founded than the observation behind it.
+    /// The entry says only what was measured: no `purpose`, no `arity`, no argument list.
     #[test]
     fn a_generated_entry_invents_nothing_and_keeps_its_assumptions() {
         let entry = super::knowledge_entry(&measured());
@@ -553,10 +436,8 @@ mod tests {
             !entry.contains("arity") && !entry.contains("purpose"),
             "a sweep measured neither: {entry}"
         );
-        // **And not how the name was found.** `found_by` is about the *name* - harvested,
-        // generated, supplied - and a measurement is about the behaviour. The first draft
-        // claimed `generated` and the shipped-files provenance check refused it, because the
-        // symbol database re-derives that name as `static` (D328).
+        // Nor how the name was found: `found_by` is about the name, a measurement about the
+        // behaviour.
         assert!(
             !entry.contains("found_by"),
             "a measurement does not know how the name was found: {entry}"
@@ -565,8 +446,7 @@ mod tests {
 
     /// The generated block is valid TOML that parses as a knowledge file.
     ///
-    /// **The property a generator has to earn.** A patch that produces a file the tool cannot
-    /// read is worse than no patch: it costs a reviewer the time to find out.
+    /// A patch that produces a file the tool cannot read is worse than no patch.
     #[test]
     fn the_generated_entry_parses_as_a_knowledge_file() {
         let file = format!(
@@ -583,11 +463,7 @@ mod tests {
         );
     }
 
-    /// **A quote in an assumption does not end the string it is in.**
-    ///
-    /// Assumptions are prose written by whoever ran the loop, so this is reachable rather
-    /// than theoretical - and a generator that emits unparseable TOML on one entry has
-    /// produced a patch nobody can apply and a reviewer has to debug.
+    /// A quote in an assumption, which is prose, does not end the string it is in.
     #[test]
     fn prose_containing_a_quote_survives_into_valid_toml() {
         let mut awkward = measured();
@@ -607,11 +483,7 @@ mod tests {
         );
     }
 
-    /// **The diff appends, and the header counts the lines it actually writes.**
-    ///
-    /// A hunk header that disagrees with its body is rejected by `git apply`, and a generated
-    /// patch that does not apply is worse than none - a reviewer works out what the generator
-    /// meant rather than what it did.
+    /// The diff appends, and the hunk header counts the lines it writes, as `git apply` requires.
     #[test]
     fn an_appending_diff_has_a_header_matching_its_body() {
         let existing = "library = \"libkernel\"\na = 1\nb = 2\nc = 3\n";
@@ -663,9 +535,8 @@ mod tests {
 
     /// A patch that writes memory is never keepable on a moved wall alone.
     ///
-    /// **The rule this file exists to hold.** A wrong answer that buys progress shows up as a
-    /// wall that moved; a wrong *write* shows up as something unrelated breaking much later,
-    /// which is principle 3's opening sentence (D296).
+    /// A wrong write shows as something unrelated breaking much later, unlike a wrong answer
+    /// (D296).
     #[test]
     fn a_patch_that_writes_memory_needs_a_conformance_check() {
         let patch = from_finding(
@@ -703,9 +574,8 @@ mod tests {
 
     /// The placeholder patch is keepable on a moved wall, and the only one that is.
     ///
-    /// **The distinction the whole `Evidence` field exists for.** This changes an answer and
-    /// touches no memory, so the cheap oracle is enough; every other patch here writes, and
-    /// a wrong write is invisible until something unrelated breaks (D296, D299).
+    /// It changes an answer and touches no memory, so the cheap oracle is enough; every other patch
+    /// here writes (D299).
     #[test]
     fn an_answer_only_patch_is_keepable_on_further_alone() {
         let patch = from_placeholder_source("sceKernelGetGPI");
@@ -738,10 +608,7 @@ mod tests {
         }
     }
 
-    /// **An answer goes inside the entry whose question it settles.**
-    ///
-    /// Appending would add a second entry for a function that already has one - two claims
-    /// about the same thing, which is what `Learned::record` refuses (D358).
+    /// An answer goes inside the entry whose question it settles, not in a second entry.
     #[test]
     fn an_insertion_lands_under_its_anchor_with_context() {
         let file = "a = 1\nb = 2\nname = \"sceFoo\"\nc = 3\nd = 4\n";
@@ -763,10 +630,7 @@ mod tests {
         assert_eq!(context, 5);
     }
 
-    /// **An anchor that appears twice is refused rather than guessed at.**
-    ///
-    /// A patch aimed at a line that might be either of two is a patch nobody can check, and
-    /// landing it in the wrong entry is worse than not producing one.
+    /// An anchor that appears twice is refused rather than guessed at.
     #[test]
     fn an_ambiguous_anchor_produces_no_patch() {
         let file = "name = \"sceFoo\"\nx = 1\nname = \"sceFoo\"\n";

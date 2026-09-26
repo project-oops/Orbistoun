@@ -1,46 +1,16 @@
 //! Walking a submitted command buffer into packets.
 //!
-//! # What a submission actually is
+//! A submission is a buffer of dwords for the GPU's command processor. Each packet header says
+//! what kind it is and how many dwords follow, so the stream is walked without understanding any
+//! command. Unknown packet types are counted and reported, never skipped; a walk that
+//! desynchronises says so, and a packet extending past the buffer is reported, not followed.
 //!
-//! When a guest calls the submit function it hands over a buffer of dwords addressed
-//! to the GPU's command processor. That buffer is a packet stream: each packet has a
-//! header saying what kind it is and how many dwords follow, so the stream can be
-//! walked without understanding a single command.
-//!
-//! Walking it is the entire first step of GPU work, and it is worth doing long before
-//! anything is translated. A submission decoded into "set these registers, bind that,
-//! draw N times" is the difference between an opaque blob and a work list.
-//!
-//! # The same discipline as everywhere else
-//!
-//! Unknown packet types are **counted and reported**, never skipped. A walk that
-//! desynchronises says so. A packet claiming to extend past the end of the buffer is
-//! a strong signal that a length rule is wrong, and is reported rather than followed
-//! into whatever memory happens to sit after the buffer.
-//!
-//! # Provenance
-//!
-//! The packet format is public: AMD documents it, and the open-source Linux driver
-//! and Mesa parse these exact structures. Hardware documentation from the chip
-//! vendor, not console firmware.
-//!
-//! The values below were **transcribed and unverified** for as long as there was nothing to
-//! check them against. As of D565 there is: obSCEne called four `libSceAgc` command builders on
-//! hardware and captured what each wrote, with an **independently measured length** for every
-//! one - bytes it saw change, owing nothing to any header field.
-//!
-//! `tests/measured_packets.rs` walks all four. The length rule consumes three of them **exactly**,
-//! including one that decomposes into three packets of 16, 28 and 12 bytes landing on a measured
-//! 56. Dropping the count adjustment, doubling it, or moving the opcode field all make it fail.
-//!
-//! So this is no longer transcribed-and-unchecked; it is transcribed **and agreed with hardware
-//! on four buffers**. That is not the same as verified line by line - a rule that erred on a
-//! packet none of the four contains would still pass - and the caveat narrows rather than lifts.
+//! The packet format is public: the GPU vendor documents it, and the open-source Linux driver and
+//! Mesa parse these structures. The length rule agrees with hardware captures of the vendor's own
+//! command builders, each with an independently measured length (`tests/measured_packets.rs`).
 
-/// Packet header field positions.
-///
-/// Kept as named constants rather than inline literals so a correction happens in one
-/// place, and so the report can quote what it used.
+/// Packet header field positions, as named constants so a correction happens in one place and the
+/// report can quote what it used.
 mod field {
     /// Packet type occupies the top two bits of every header.
     pub(super) const TYPE_SHIFT: u32 = 30;
@@ -66,16 +36,16 @@ pub enum PacketKind {
     },
     /// Filler. Carries no body and exists to pad a buffer.
     Filler,
-    /// A command, identified by opcode. The interesting one - draws, dispatches,
-    /// state changes and shader binds all arrive as these.
+    /// A command, identified by opcode. Draws, dispatches, state changes and shader binds all
+    /// arrive as these.
     Command {
         /// Which command.
         opcode: u8,
     },
     /// A header whose type field is reserved.
     ///
-    /// Its length is therefore unknown, which is what makes it a desynchronising
-    /// event rather than merely an unrecognised one.
+    /// Its length is unknown, which makes it a desynchronising event rather than an unrecognised
+    /// one.
     Reserved,
 }
 
@@ -109,13 +79,11 @@ impl Packet {
 pub struct PacketWalk {
     /// Every packet, in order.
     pub packets: Vec<Packet>,
-    /// A reserved packet type was encountered, so its length was unknown.
-    ///
-    /// Everything after that point is suspect.
+    /// A reserved packet type was encountered, so its length was unknown and everything after it is
+    /// suspect.
     pub desynchronised: bool,
-    /// A packet claimed to extend past the end of the buffer.
-    ///
-    /// The best single indicator that a length rule here is wrong.
+    /// A packet claimed to extend past the end of the buffer - the best single indicator that a
+    /// length rule here is wrong.
     pub overran: bool,
     /// Bytes left over that were not a whole dword.
     pub trailing_bytes: usize,
@@ -132,10 +100,8 @@ impl PacketWalk {
         self.packets.iter().filter(|p| p.kind == kind).count()
     }
 
-    /// Every distinct command opcode seen, with occurrence counts, in a stable order.
-    ///
-    /// Ordered so two walks of the same buffer produce byte-identical reports - these
-    /// get diffed, and spurious reordering trains a reader to ignore the diff.
+    /// Every distinct command opcode seen, with occurrence counts, in a stable order, so two walks
+    /// of the same buffer produce identical reports.
     pub fn command_histogram(&self) -> Vec<(u8, usize)> {
         let mut counts = std::collections::BTreeMap::new();
         for packet in &self.packets {
@@ -152,9 +118,8 @@ pub const MIN_PACKET_BYTES: u32 = 4;
 
 /// Walks a submitted command buffer.
 ///
-/// Never fails. A buffer that cannot be walked is a finding reported through
-/// [`PacketWalk`], not an error - a sweep over many submissions has to say how many
-/// were strange, not stop at the first one.
+/// Never fails. A buffer that cannot be walked is a finding reported through [`PacketWalk`], so a
+/// sweep over many submissions says how many were strange rather than stopping at the first.
 pub fn walk(bytes: &[u8]) -> PacketWalk {
     let mut result = PacketWalk {
         trailing_bytes: bytes.len() % 4,
@@ -170,16 +135,13 @@ pub fn walk(bytes: &[u8]) -> PacketWalk {
             bytes[offset + 3],
         ]);
 
-        // The count field holds one less than the number of body dwords, so a packet
-        // with a single body dword stores zero. Reading it without the adjustment
-        // truncates every packet by four bytes and desynchronises immediately.
+        // The count field holds one less than the number of body dwords, so a packet with one body
+        // dword stores zero; reading it unadjusted truncates every packet by four bytes.
         //
-        // A count of all ones is the exception: a header-only packet. Measured twice:
-        // the console's own no-op builder writes exactly four bytes, `0xffff1000`
-        // (obSCEne `166-agc/cb-nop`, sweep 20260914-100833), and the GL cube capture
-        // ends in sixteen such words that the hardware ran past to retire its fence
-        // (tests/captures/agc-gl-cube-fw1240-a). Read as `0x3fff + 1` body dwords it
-        // would describe a 64 KiB packet and every stream padded this way would overrun.
+        // A count of all ones is a header-only packet: the hardware's no-op builder writes exactly
+        // `0xffff1000` (obSCEne `166-agc/cb-nop`), and the GL cube capture
+        // (`tests/captures/agc-gl-cube-fw1240-a`) ends in such words that the hardware runs past.
+        // Read as `0x3fff + 1` body dwords it would describe a 64 KiB packet and overrun.
         let count = (header >> field::COUNT_SHIFT) & field::COUNT_MASK;
         let body_dwords = if count == field::COUNT_MASK {
             0
@@ -202,8 +164,8 @@ pub fn walk(bytes: &[u8]) -> PacketWalk {
                 4 + body_dwords * 4,
             ),
             _ => {
-                // Reserved. Its length is not defined, so where the next packet begins
-                // is a guess - advance minimally and mark the walk suspect.
+                // Reserved: its length is undefined, so where the next packet begins is a guess.
+                // Advance minimally and mark the walk suspect.
                 result.desynchronised = true;
                 (PacketKind::Reserved, MIN_PACKET_BYTES)
             }
@@ -233,18 +195,17 @@ pub fn walk(bytes: &[u8]) -> PacketWalk {
 /// Building command packets - the write side of [`walk`].
 ///
 /// The same header format, produced rather than parsed, so a packet this writes walks back to the
-/// packet it stood for. It is public because the GNM command builders (`sceGnmDispatch*`) are
-/// exactly this job: they hand a guest a buffer of PM4 that the guest submits later, and the submit
-/// path then [`walk`]s. Provenance is the walker's - AMD's public packet format and mesa's opcode
-/// values, not console firmware.
+/// packet it stood for. Public because the `sceGnmDispatch*` command builders hand a guest a buffer
+/// of PM4 that it submits later, and the submit path then [`walk`]s it. The format is the vendor's
+/// public packet format with Mesa's opcode values.
 pub mod build {
     use super::field;
 
-    /// The header of a **type-3** command packet: an `opcode`, then `body_dwords` dwords.
+    /// The header of a type-3 command packet: an `opcode`, then `body_dwords` dwords.
     ///
     /// `body_dwords` is the true count; the field stores one less, the adjustment [`super::walk`]
-    /// undoes. It must be at least one - a type-3 packet with an empty body is not a thing - and a
-    /// caller passing zero gets a debug-time panic rather than a header that walks back wrong.
+    /// undoes. It must be at least one, since a type-3 packet has a body; zero panics in debug
+    /// builds.
     #[must_use]
     pub const fn command_header(opcode: u8, body_dwords: u32) -> u32 {
         debug_assert!(
@@ -256,29 +217,23 @@ pub mod build {
             | ((opcode as u32) << field::OPCODE_SHIFT)
     }
 
-    /// A **type-2** filler: one dword, no body. Valid PM4 that does nothing, for reserving space
-    /// whose contents are not yet modelled honestly rather than left as whatever was there.
+    /// A type-2 filler: one dword, no body. Valid PM4 that does nothing, for reserving space whose
+    /// contents are not modelled.
     #[must_use]
     pub const fn filler() -> u32 {
         2 << field::TYPE_SHIFT
     }
 
-    /// `IT_DISPATCH_DIRECT`, the opcode that issues a compute dispatch. A public AMD value - mesa's
-    /// `PKT3_DISPATCH_DIRECT`.
+    /// `IT_DISPATCH_DIRECT`, the opcode that issues a compute dispatch (Mesa's
+    /// `PKT3_DISPATCH_DIRECT`).
     pub const DISPATCH_DIRECT: u8 = 0x15;
 
     /// The dwords of a direct compute dispatch of `x` by `y` by `z` thread groups.
     ///
-    /// A `DISPATCH_DIRECT` packet: the three dimensions and the dispatch initiator, whose one set
-    /// bit enables the compute shader and so begins the dispatch. Five dwords. What a console's own
-    /// builder writes *around* it - the hardware state it assumes is already set - is not modelled
-    /// here; this is the dispatch itself, in the documented encoding.
-    ///
-    /// **The header routes the packet to the compute pipe.** Bit 1 of a type-3 header is the
-    /// shader-type: a dispatch is always compute, so it is set - obSCEne's `165-gnm/dispatch-direct`
-    /// measured the header as `0xc0031502` on hardware, where an unset bit would give `0xc0031500`.
-    /// (The count the same check reports is `6` to this packet's `5`: the sixth dword is the
-    /// surrounding state above, which is deliberately not modelled, not part of this packet.)
+    /// A five-dword `DISPATCH_DIRECT` packet: the three dimensions and the dispatch initiator,
+    /// whose one set bit enables the compute shader. The hardware state a builder writes around it
+    /// is not modelled. Bit 1 of the header is the shader type, set for the compute pipe: obSCEne's
+    /// `165-gnm/dispatch-direct` measures the header as `0xc0031502`.
     #[must_use]
     pub fn dispatch_direct(x: u32, y: u32, z: u32) -> [u32; 5] {
         /// `COMPUTE_DISPATCH_INITIATOR` with `COMPUTE_SHADER_EN` (bit 0) set.
@@ -294,16 +249,11 @@ pub mod build {
         ]
     }
 
-    /// Opcodes measured coming out of the console's own command builders.
+    /// Opcodes measured coming out of the hardware's own command builders.
     ///
-    /// **Every value below was read off a packet `libSceAgc` wrote**, not transcribed from a
-    /// document and hoped to match - obSCEne sweep `20260914-100833` called each builder with known
-    /// arguments and recorded the header it produced (orbistoun worklog 534). The public PM4 names
-    /// are mesa's `PKT3_*`; the numbers are ours.
-    ///
-    /// Every one satisfies the type-3 length rule: the header's count field plus two dwords is
-    /// exactly the byte count the builder advanced, on all ten. That is the field split D565 derived
-    /// from four builders and could not then confirm.
+    /// Every value was read off a packet `libSceAgc` wrote when called with known arguments; the
+    /// public PM4 names are Mesa's `PKT3_*`. Each satisfies the type-3 length rule: the header's
+    /// count field plus two dwords is exactly the byte count the builder advanced.
     pub mod measured {
         /// `IT_INDEX_BUFFER_SIZE`, from `sceAgcDcbSetIndexCount` (header `0xc0001300`).
         pub const INDEX_BUFFER_SIZE: u8 = 0x13;
@@ -325,69 +275,58 @@ pub mod build {
         pub const SET_UCONFIG_REG: u8 = 0x79;
         /// `IT_SET_UCONFIG_REG_INDEX`, from `sceAgcDcbSetIndexSize` (header `0xc0017a00`).
         ///
-        /// **Distinct from [`SET_UCONFIG_REG`], and the pair is what shows it.** Measured in one
-        /// run, `0x79` carried selector `0x242` with no high bits while `0x7a` carried
-        /// `0x20000243` - same low-half register offset space, an index in the high half. Derived
-        /// from the two packets side by side, not cited.
+        /// Distinct from [`SET_UCONFIG_REG`]: measured side by side, `0x79` carried selector
+        /// `0x242` with no high bits while `0x7a` carried `0x20000243` - the same register offset
+        /// space with an index in the high half.
         pub const SET_UCONFIG_REG_INDEX: u8 = 0x7a;
-        /// `IT_SET_CONTEXT_REG_INDIRECT`, from `sceAgcDcbSetCxRegistersIndirect`
-        /// (header `0xc0039f00`, four body dwords, 20 bytes total).
+        /// `IT_SET_CONTEXT_REG_INDIRECT`, from `sceAgcDcbSetCxRegistersIndirect` (header
+        /// `0xc0039f00`, four body dwords, 20 bytes total; `166-agc/patch-cx-registers-indirect`).
         ///
-        /// **The opcode and the extent are measured; the body is not.** `166-agc/patch-cx-registers-indirect`
-        /// dumped one producer call (`REQ-...4386`): header `0xc0039f00`, cursor delta `0x14`. The
-        /// body it carried reflects obSCEne's own arguments, not a general encoding, so the encoder
-        /// reserves the measured length and writes only the header - the argument-to-body mapping
-        /// needs a sweep this single before/after cannot give.
+        /// The opcode and extent are measured; the body reflects the probe's own arguments, so the
+        /// encoder reserves the measured length and writes only the header.
         pub const SET_CONTEXT_REG_INDIRECT: u8 = 0x9f;
         /// `IT_NOP`, from `sceAgcCbNop` (the whole packet is the header `0xffff1000`, 4 bytes).
         pub const NOP: u8 = 0x10;
         /// `IT_ACQUIRE_MEM`, from `sceAgcDcbAcquireMem` (header `0xc0065800`, seven body dwords,
         /// 32 bytes total).
         pub const ACQUIRE_MEM: u8 = 0x58;
-        /// `IT_RELEASE_MEM`, from `sceAgcCbReleaseMem` (header `0xc0064900`, seven body dwords,
-        /// 32 bytes total). Measured in `166-agc/cb-release-mem`, sweep `20260915-174357` (the zero-
-        /// argument pass wrote the header then seven zeroed dwords; the arg-to-body map is unpinned).
+        /// `IT_RELEASE_MEM`, from `sceAgcCbReleaseMem` (header `0xc0064900`, seven body dwords, 32
+        /// bytes total; `166-agc/cb-release-mem`). The argument-to-body map is not pinned.
         pub const RELEASE_MEM: u8 = 0x49;
         /// `IT_DMA_DATA`, from `sceAgcDcbDmaData` (header `0xc0055000`, six body dwords, 28 bytes
-        /// total). Measured in `166-agc/dcb-dma-data`, sweep `20260915-174357`.
+        /// total; `166-agc/dcb-dma-data`).
         pub const DMA_DATA: u8 = 0x50;
         /// `IT_SET_BASE`, from `sceAgcDcbSetBaseIndirectArgs` (header `0xc0021100`, three body
-        /// dwords, 16 bytes total). Measured in `166-agc/dcb-set-base-indirect-args`, sweep
-        /// `20260915-174357`.
+        /// dwords, 16 bytes total; `166-agc/dcb-set-base-indirect-args`).
         pub const SET_BASE: u8 = 0x11;
         /// `IT_DISPATCH_INDIRECT`, from `sceAgcDcbDispatchIndirect`/`AcbDispatchIndirect` (headers
-        /// `0xc0011600` / `0xc0021600`). Measured in `166-agc/dcb-dispatch-indirect` and
-        /// `acb-dispatch-indirect`, sweep `20260915-203058` (REQ-...a70f).
+        /// `0xc0011600` / `0xc0021600`; `166-agc/dcb-dispatch-indirect` and
+        /// `acb-dispatch-indirect`).
         pub const DISPATCH_INDIRECT: u8 = 0x16;
         /// `IT_DRAW_INDIRECT`, from `sceAgcDcbDrawIndirect` (header `0xc0032400`, four body dwords,
-        /// 20 bytes). Measured in `166-agc/dcb-draw-indirect`, sweep `20260915-203058`.
+        /// 20 bytes; `166-agc/dcb-draw-indirect`).
         pub const DRAW_INDIRECT: u8 = 0x24;
         /// `IT_DRAW_INDEX_INDIRECT`, from `sceAgcDcbDrawIndexIndirect` (header `0xc0032500`, four
-        /// body dwords, 20 bytes). Measured in `166-agc/dcb-draw-index-indirect`, sweep
-        /// `20260915-203058`.
+        /// body dwords, 20 bytes; `166-agc/dcb-draw-index-indirect`).
         pub const DRAW_INDEX_INDIRECT: u8 = 0x25;
         /// `IT_SET_SH_REG_INDIRECT`, from `sceAgcDcbSetShRegistersIndirect` (header `0xc0036300`,
-        /// four body dwords, 20 bytes). Measured in `166-agc/dcb-set-sh-registers-indirect`, sweep
-        /// `20260915-203058`.
+        /// four body dwords, 20 bytes; `166-agc/dcb-set-sh-registers-indirect`).
         pub const SET_SH_REG_INDIRECT: u8 = 0x63;
         /// `IT_SET_UCONFIG_REG_INDIRECT`, from `sceAgcDcbSetUcRegistersIndirect` (header
-        /// `0xc0036400`, four body dwords, 20 bytes). Measured in
-        /// `166-agc/dcb-set-uc-registers-indirect`, sweep `20260915-203058`.
+        /// `0xc0036400`, four body dwords, 20 bytes; `166-agc/dcb-set-uc-registers-indirect`).
         pub const SET_UCONFIG_REG_INDIRECT: u8 = 0x64;
         /// The stall from `sceAgcDcbStallCommandBufferParser` (header `0xc0004200`, one body dword,
-        /// 8 bytes). Measured in `166-agc/dcb-stall-cb-parser`, sweep `20260915-203058`.
+        /// 8 bytes; `166-agc/dcb-stall-cb-parser`).
         pub const STALL_COMMAND_BUFFER_PARSER: u8 = 0x42;
     }
 
-    /// A **reservation skeleton** for a builder measured only by its header and its extent: the
-    /// measured `opcode`, the measured `body_dwords`, and a zeroed body.
+    /// A reservation skeleton for a builder measured only by its header and extent: the measured
+    /// `opcode`, the measured `body_dwords`, and a zeroed body (D696).
     ///
-    /// This is the shape [`acquire_mem_skeleton`] and the DmaData/ReleaseMem/SetBase skeletons take,
-    /// generalised for the batch REQ-...a70f measured in one pass each: a header and a length are
-    /// solid, the argument-to-body permutation is not, so the body is zero and the value is a **real
-    /// cursor** where an unwired builder handed the guest a placeholder to `memcpy` through (D696,
-    /// worklog 600). The header is rebuilt from the opcode through [`command_header`], so it walks
-    /// back to the packet it stands for; the caller cites which measured opcode it passed.
+    /// The argument-to-body permutation is unmeasured, so the body is zero and the guest gets a
+    /// real cursor advanced by the measured length. The header is rebuilt through
+    /// [`command_header`], so it walks back to the packet it stands for; the caller cites which
+    /// measured opcode it passed.
     #[must_use]
     pub fn reservation(opcode: u8, body_dwords: u32) -> Vec<u32> {
         let mut out = vec![command_header(opcode, body_dwords)];
@@ -395,37 +334,34 @@ pub mod build {
         out
     }
 
-    /// The `SET_UCONFIG_REG` header the marker and wait builders write, with the set bit in its
+    /// The `SET_UCONFIG_REG` header the marker and wait builders write, with a bit set in its
     /// reserved low byte that `command_header` does not produce.
     ///
     /// `sceAgcDcbPushMarker`/`PopMarker` write a 12-byte `SET_UCONFIG_REG` (opcode `0x79`, two body
-    /// dwords) to the command-processor marker register `0x342`; the header came back `0xc0017904`,
-    /// not the `0xc0017900` [`command_header`] builds - a bit set in the reserved low byte, inert to
-    /// the packet walk (which reads only type, count and opcode) and kept because it is what obSCEne
-    /// measured (`166-agc/dcb-push-marker`/`pop-marker`, sweep `20260915-174357`).
+    /// dwords) to the command-processor marker register `0x342` with header `0xc0017904`
+    /// (`166-agc/dcb-push-marker`/`pop-marker`). The reserved bit is inert to the walk, which reads
+    /// only type, count and opcode.
     const MARKER_HEADER: u32 = 0xc001_7904;
 
     /// A push/pop debug-marker skeleton: the measured 12-byte header, body zeroed.
     ///
     /// Both markers write the same `0x79` packet to register `0x342`, the value distinguishing push
-    /// from pop. The value is left zero because one pass cannot separate a constant from a colour
-    /// argument (the skeleton discipline); what this buys is a **real cursor** where the unwired
-    /// marker handed the guest a placeholder to `memcpy` through (worklog 618).
+    /// from pop. The value is zero because one pass cannot separate a constant from a colour
+    /// argument (D696).
     #[must_use]
     pub fn marker_skeleton() -> [u32; 3] {
         [MARKER_HEADER, 0, 0]
     }
 
-    /// A `WAIT_REG_MEM` skeleton - the measured 56-byte compound stream, every header kept, body zero.
+    /// A `WAIT_REG_MEM` skeleton - the measured 56-byte compound stream, every header kept, body
+    /// zero.
     ///
-    /// `sceAgcDcbWaitRegMem` writes three packets (`166-agc/dcb-wait-reg-mem`, sweep
-    /// `20260915-174357`; the framing confirmed again by REQ-...3d1e): a `SET_UCONFIG_REG`
-    /// (`0xc0027904`, four dwords), a `WAIT_REG_MEM` (`0xc0053c00`, seven dwords), and a second
-    /// `SET_UCONFIG_REG` (`MARKER_HEADER`, three dwords) - 56 bytes. The bodies carry the polled
-    /// address and value, an argument mapping one pass does not pin, so they are zeroed; the three
-    /// headers are kept so the reservation walks back to three packets and advances the cursor by the
-    /// measured 56. The `WAIT_REG_MEM` header is `command_header(0x3c, 6)`; the two `SET_UCONFIG`
-    /// headers carry the reserved-byte bit, so they are the raw measured values.
+    /// `sceAgcDcbWaitRegMem` writes three packets (`166-agc/dcb-wait-reg-mem`): a `SET_UCONFIG_REG`
+    /// (`0xc0027904`, four dwords), a `WAIT_REG_MEM` (`0xc0053c00`, seven dwords) and a second
+    /// `SET_UCONFIG_REG` (`MARKER_HEADER`, three dwords). The bodies carry the polled address and
+    /// value, an unpinned argument mapping, so they are zeroed; the headers are kept so the
+    /// reservation walks back to three packets. The two `SET_UCONFIG` headers are raw measured
+    /// values because of their reserved-byte bit.
     #[must_use]
     pub fn wait_reg_mem_skeleton() -> [u32; 14] {
         [
@@ -446,23 +382,14 @@ pub mod build {
         ]
     }
 
-    /// A `sceAgcDcbResetQueue` skeleton - the measured 32-byte writer-struct, every header kept, body
+    /// A `sceAgcDcbResetQueue` skeleton - the measured 32-byte stream, every header kept, body
     /// zero. Eight dwords: a NOP filler, then two `SET_UCONFIG_REG` packets.
     ///
-    /// `sceAgcDcbResetQueue` writes 32 bytes on a caller-owned writer struct
-    /// (`166-agc/dcb-reset-queue`, sweep `20260910-174437`, REQ-...b7e4): `0xffff1000` (the same
-    /// empty-slot filler [`nop`] emits, whose `0x3fff` count is not a length), a four-dword
-    /// `SET_UCONFIG_REG` (`0xc0027904`) and a three-dword one (`MARKER_HEADER`), both to the
-    /// command-processor marker register `0x342`. obSCEne measured it with **zero arguments** (and
-    /// again with `0x400` in arg1, which changed nothing), so the two marker values it wrote -
-    /// `0xce200000` and `0xcea00000`, address-shaped and differing between the packets - are as likely
-    /// a pointer into obSCEne's own writer struct as a constant, and one zero-argument pass cannot
-    /// tell them apart. So the bodies are zeroed on the same skeleton discipline as [`marker_skeleton`]
-    /// and [`wait_reg_mem_skeleton`], which write these identical headers, and the headers are kept so
-    /// the reservation walks back to two packets and advances the cursor by the measured 32. The
-    /// reservation is the load-bearing part: D559 records PPSA02664 calling this on its writer twice
-    /// before any other AGC use, so a real cursor is what lets the title's first command-buffer setup
-    /// proceed past the placeholder an unwired builder handed it.
+    /// Measured in `166-agc/dcb-reset-queue`: `0xffff1000` (the [`nop`] filler), a four-dword
+    /// `SET_UCONFIG_REG` (`0xc0027904`) and a three-dword one (`MARKER_HEADER`), both to the marker
+    /// register `0x342`. The marker values the zero-argument pass wrote are address-shaped and may
+    /// point into the probe's own writer struct, so the bodies are zeroed (D696) and the headers
+    /// kept so the reservation walks back to two packets and advances the cursor by 32.
     #[must_use]
     pub fn reset_queue_skeleton() -> [u32; 8] {
         [0xffff_1000, 0xc002_7904, 0, 0, 0, MARKER_HEADER, 0, 0]
@@ -471,21 +398,12 @@ pub mod build {
     /// A `SET_CONTEXT_REG_INDIRECT` skeleton - the packet a guest patches with register data. Five
     /// dwords, 20 bytes.
     ///
-    /// **The header and the extent are measured; the body is deliberately zero.** `REQ-...4386`
-    /// dumped one producer call and the immediately following patch: the producer wrote a 20-byte
-    /// packet with header `0xc0039f00`, and `sceAgcSetCxRegIndirectPatchAddRegisters` then amended
-    /// it *in place* without advancing the cursor. So the packet a guest gets from this builder is a
-    /// skeleton it fills through the patch family, and the one thing the producer must get right for
-    /// that to work is the reservation: a real cursor, advanced by exactly the measured length, so
-    /// the patch's target address and the guest's own `memcpy` land in real command-buffer memory
-    /// rather than on the loud placeholder a missing builder answers (worklog 553).
-    ///
-    /// The header (0xc0039f00), extent (20 bytes / 5 dwords) and format word (0x80000000 in dw3:
-    /// data_format bit 31 = 1 offset_and_data, reg_offset = 0) are measured against live hardware
-    /// (obSCEne sweep 20260920-110931, reports/hardware/20260920-110931-eboot.obs.log, check
-    /// 166-agc/patch-cx-registers-indirect - cited to the log rows, which obSCEne's worklog carries no
-    /// resolution for). dw1-dw2 hold the base GPU VA (amended by sceAgcSetCxRegIndirectPatchSetAddress);
-    /// dw4 holds the register count (incremented by sceAgcSetCxRegIndirectPatchAddRegisters).
+    /// The producer writes a 20-byte packet with header `0xc0039f00`, and
+    /// `sceAgcSetCxRegIndirectPatchAddRegisters` then amends it in place without advancing the
+    /// cursor. The format word `0x80000000` in dw3 (offset-and-data, register offset 0) is measured
+    /// (`166-agc/patch-cx-registers-indirect`). dw1-dw2 hold the base GPU address, set by
+    /// `sceAgcSetCxRegIndirectPatchSetAddress`; dw4 holds the register count, incremented by
+    /// `sceAgcSetCxRegIndirectPatchAddRegisters`. The rest of the body is zero (D696).
     #[must_use]
     pub fn set_cx_registers_indirect_skeleton() -> [u32; 5] {
         [
@@ -499,25 +417,18 @@ pub mod build {
 
     /// A `NOP` - a header-only no-op packet, one dword, four bytes.
     ///
-    /// **Measured whole** (`166-agc/cb-nop`): `sceAgcCbNop` writes exactly `0xffff1000` and nothing
-    /// after it - a type-3 header with an all-ones count, the header-only form `walk` already knows.
-    /// No arguments enter it, so unlike the reservation skeletons this is complete, not a stand-in.
+    /// Measured whole (`166-agc/cb-nop`): `sceAgcCbNop` writes exactly `0xffff1000`, a type-3
+    /// header with an all-ones count. No arguments enter it, so it is complete, not a skeleton.
     #[must_use]
     pub fn nop() -> [u32; 1] {
         [0xffff_1000]
     }
 
-    /// An `ACQUIRE_MEM` skeleton - the packet reserved, its cursor real, its argument-body zeroed.
+    /// An `ACQUIRE_MEM` skeleton - the packet reserved, its cursor real, its argument body zeroed.
     ///
-    /// **Header and extent measured, body deliberately not** (`166-agc/dcb-acquire-mem`, REQ-...72d7,
-    /// c74f): the builder emits `0xc0065800` and advances 32 bytes across every sentinel, so the
-    /// reservation is solid. The seven body dwords, though, are a permutation of the arguments with
-    /// shifts the sweep summary does not pin exactly - `dw2` carries arg5 masked, `dw4` arg4, `dw7`
-    /// arg3, with `dw1`/`dw6` constant - and encoding a mapping this fingerprinted from a summary
-    /// would be guessing. So the body is zeroed, on the same terms as
-    /// [`set_cx_registers_indirect_skeleton`]: a guest gets a real cursor advanced by the right
-    /// length where an unwired builder gave it the loud placeholder, which is what moves the wall;
-    /// the exact body waits on the systematic sweep (REQ-...a70f).
+    /// Header and extent are measured (`166-agc/dcb-acquire-mem`): the builder emits `0xc0065800`
+    /// and advances 32 bytes. The seven body dwords are a permutation of the arguments with
+    /// unpinned shifts, so the body is zeroed (D696).
     #[must_use]
     pub fn acquire_mem_skeleton() -> [u32; 8] {
         [
@@ -535,14 +446,9 @@ pub mod build {
     /// A `RELEASE_MEM` skeleton - the packet reserved, its cursor real, its body zeroed. Eight
     /// dwords, 32 bytes.
     ///
-    /// **Header and extent measured, body deliberately not** (`166-agc/cb-release-mem`, sweep
-    /// `20260915-174357`, REQ-...a70f). Called with zero arguments the builder wrote `0xc0064900`
-    /// then seven zeroed dwords and advanced 32 bytes - so the reservation is solid and the zero-arg
-    /// body is reproduced exactly, while the argument-to-body permutation (a `RELEASE_MEM` carries an
-    /// event selector and a write-back address/data) is left unencoded on the same terms as
-    /// [`acquire_mem_skeleton`]: a guest gets a real cursor advanced by the right length where an
-    /// unwired builder handed it the loud placeholder to `memcpy` through (worklog 600). It is in
-    /// the command-builder cluster the retail titles reach on their command buffers.
+    /// Header and extent are measured (`166-agc/cb-release-mem`): with zero arguments the builder
+    /// writes `0xc0064900` then seven zeroed dwords, which this reproduces. The argument-to-body
+    /// map (event selector, write-back address and data) is left unencoded (D696).
     #[must_use]
     pub fn release_mem_skeleton() -> [u32; 8] {
         [
@@ -560,12 +466,9 @@ pub mod build {
     /// A `DMA_DATA` skeleton - the packet reserved, its cursor real, its body zeroed. Seven dwords,
     /// 28 bytes.
     ///
-    /// **Header and extent measured, body deliberately not** (`166-agc/dcb-dma-data`, sweep
-    /// `20260915-174357`, REQ-...a70f). The zero-argument pass wrote `0xc0055000` then six zeroed
-    /// dwords, 28 bytes; a `DMA_DATA` carries a source and a destination address and a size, which is
-    /// exactly the arg-to-body map a single zero-argument pass cannot pin - and two captures of it
-    /// this session disagreed on the body, which is the disagreement that says "do not encode it from
-    /// one pass". So the reservation stands and the body is zero, like [`acquire_mem_skeleton`].
+    /// Header and extent are measured (`166-agc/dcb-dma-data`): `0xc0055000` then six dwords. A
+    /// `DMA_DATA` body carries source, destination and size, an argument map one zero-argument pass
+    /// cannot pin, so the body is zero (D696).
     #[must_use]
     pub fn dma_data_skeleton() -> [u32; 7] {
         [command_header(measured::DMA_DATA, 6), 0, 0, 0, 0, 0, 0]
@@ -574,13 +477,10 @@ pub mod build {
     /// A `SET_BASE` skeleton for the indirect-args base - the packet reserved, cursor real, body
     /// zeroed. Four dwords, 16 bytes.
     ///
-    /// **Header and extent measured, body deliberately not** (`166-agc/dcb-set-base-indirect-args`,
-    /// sweep `20260915-174357`, REQ-...a70f): header `0xc0021100`, 16 bytes. The one measured pass
-    /// carried `1` in the first body dword - which the public `SET_BASE` layout calls the base-index
-    /// selector, and `1` is the draw-indirect base this builder's name sets - then a zeroed address.
-    /// That single pass cannot separate a constant selector from an argument, and the address is
-    /// plainly the argument, so the whole body is zeroed rather than half-encoded: the reservation is
-    /// what the guest needs and it is what is measured.
+    /// Header and extent are measured (`166-agc/dcb-set-base-indirect-args`): `0xc0021100`, 16
+    /// bytes. The one pass carried `1` in the first body dword (the base-index selector for the
+    /// draw-indirect base) and then an address; one pass cannot separate a constant selector from
+    /// an argument, so the whole body is zeroed (D696).
     #[must_use]
     pub fn set_base_indirect_args_skeleton() -> [u32; 4] {
         [command_header(measured::SET_BASE, 3), 0, 0, 0]
@@ -588,11 +488,9 @@ pub mod build {
 
     /// An `EVENT_WRITE` for `event_type`. Two dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-event-write`): `sceAgcDcbEventWrite(dcb, 62, 0)` wrote
-    /// `0xc0004600` then `0x3e`, advancing 8 bytes. The event type passes through unchanged.
-    ///
-    /// This is the **short, address-less form**. A longer form that carries a destination address
-    /// exists - another implementation publishes four dwords for it - and is not this function.
+    /// Measured whole (`166-agc/dcb-event-write`): `sceAgcDcbEventWrite(dcb, 62, 0)` wrote
+    /// `0xc0004600` then `0x3e`, advancing 8 bytes. This is the short, address-less form; a longer
+    /// form carrying a destination address is not this function.
     #[must_use]
     pub fn event_write(event_type: u32) -> [u32; 2] {
         [command_header(measured::EVENT_WRITE, 1), event_type]
@@ -600,9 +498,8 @@ pub mod build {
 
     /// An `INDEX_BUFFER_SIZE` declaring how many indices a subsequent draw reads. Two dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-set-index-count`): `sceAgcDcbSetIndexCount(dcb, 36)` wrote
-    /// `0xc0001300` then `0x24`, advancing 8 bytes - and its own `GetSize` answered 8 in the same
-    /// run, so the reservation and the packet agree.
+    /// Measured whole (`166-agc/dcb-set-index-count`): `sceAgcDcbSetIndexCount(dcb, 36)` wrote
+    /// `0xc0001300` then `0x24`, advancing 8 bytes, and its own `GetSize` answered 8.
     #[must_use]
     pub fn set_index_count(indices: u32) -> [u32; 2] {
         [command_header(measured::INDEX_BUFFER_SIZE, 1), indices]
@@ -610,8 +507,8 @@ pub mod build {
 
     /// A `NUM_INSTANCES` setting the instance count for subsequent draws. Two dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-set-num-instances`): `sceAgcDcbSetNumInstances(dcb, 1)`
-    /// wrote `0xc0002f00` then `1`, advancing 8 bytes.
+    /// Measured whole (`166-agc/dcb-set-num-instances`): `sceAgcDcbSetNumInstances(dcb, 1)` wrote
+    /// `0xc0002f00` then `1`, advancing 8 bytes.
     #[must_use]
     pub fn set_num_instances(instances: u32) -> [u32; 2] {
         [command_header(measured::NUM_INSTANCES, 1), instances]
@@ -619,8 +516,8 @@ pub mod build {
 
     /// A `DRAW_INDEX_AUTO` - a draw whose indices are generated rather than fetched. Three dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-draw-auto`): `sceAgcDcbDrawIndexAuto(dcb, 3, 2)` wrote
-    /// `0xc0012d00`, `3`, `2`, advancing 12 bytes. Both arguments appear in order.
+    /// Measured whole (`166-agc/dcb-draw-auto`): `sceAgcDcbDrawIndexAuto(dcb, 3, 2)` wrote
+    /// `0xc0012d00`, `3`, `2`, advancing 12 bytes.
     #[must_use]
     pub fn draw_index_auto(index_count: u32, initiator: u32) -> [u32; 3] {
         [
@@ -632,9 +529,8 @@ pub mod build {
 
     /// An `INDEX_BASE` carrying the 64-bit address of the index buffer. Three dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-set-index-buffer`): `sceAgcDcbSetIndexBuffer(dcb,
-    /// 0x12345678)` wrote `0xc0012600`, `0x12345678`, `0`, advancing 12 bytes - the address split
-    /// low half first.
+    /// Measured whole (`166-agc/dcb-set-index-buffer`): `sceAgcDcbSetIndexBuffer(dcb, 0x12345678)`
+    /// wrote `0xc0012600`, `0x12345678`, `0`, advancing 12 bytes: the address, low half first.
     #[must_use]
     pub fn set_index_base(address: u64) -> [u32; 3] {
         let lo = u32::try_from(address & 0xffff_ffff).unwrap_or_default();
@@ -644,9 +540,8 @@ pub mod build {
 
     /// A `SET_CONTEXT_REG` writing one value into one context register. Three dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-set-cx-reg`): the builder takes the register offset and the
-    /// value packed into one quadword as `(value << 32) | offset`, and wrote `0xc0016900`, `0x200`,
-    /// `0x12345678` - the pair unpacked into the packet in that order, advancing 12 bytes.
+    /// Measured whole (`166-agc/dcb-set-cx-reg`): the builder takes `(value << 32) | offset` as one
+    /// quadword and wrote `0xc0016900`, `0x200`, `0x12345678`, advancing 12 bytes.
     #[must_use]
     pub fn set_context_register(offset: u16, value: u32) -> [u32; 3] {
         [
@@ -658,9 +553,9 @@ pub mod build {
 
     /// A `SET_UCONFIG_REG` writing one value into one user-config register. Three dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-set-uc-reg`): same packed-quadword argument as
+    /// Measured whole (`166-agc/dcb-set-uc-reg`): the same packed-quadword argument as
     /// [`set_context_register`]; `(4 << 32) | 0x242` wrote `0xc0017900`, `0x242`, `4`, advancing 12
-    /// bytes. Its own `GetSize` answered 12 in the same run.
+    /// bytes.
     #[must_use]
     pub fn set_uconfig_register(offset: u16, value: u32) -> [u32; 3] {
         [
@@ -672,17 +567,12 @@ pub mod build {
 
     /// A `SET_SH_REG` writing a run of consecutive shader registers. `values.len() + 2` dwords.
     ///
-    /// **Measured whole** (`166-agc/dcb-set-sh-reg-direct`):
-    /// `sceAgcCbSetShRegisterRangeDirect(cb, 0x08, values, 2)` wrote `0xc0027600`, `8`,
-    /// `0x12345678`, `0x9abcdef0` - one header, one selector, one dword per register - advancing 16
-    /// bytes. So `n` registers cost `n + 2` dwords.
+    /// Measured whole (`166-agc/dcb-set-sh-reg-direct`): `sceAgcCbSetShRegisterRangeDirect(cb,
+    /// 0x08, values, 2)` wrote `0xc0027600`, `8`, `0x12345678`, `0x9abcdef0`, advancing 16 bytes,
+    /// with no leading marker. Another project's table gives `n + 4`; the measurement governs
+    /// (D683).
     ///
-    /// **This refutes a specific published claim.** Another implementation gives `n + 4` for this
-    /// builder and states that the real library prepends a two-dword marker. The measured packet
-    /// begins with the register write itself and carries no marker (worklog 534, D683).
-    ///
-    /// Returns an empty vector for an empty run: a zero-register write is not a packet, and
-    /// `command_header` would have to claim a body dword that does not exist.
+    /// Returns an empty vector for an empty run: a zero-register write is not a packet.
     #[must_use]
     pub fn set_sh_register_range(offset: u16, values: &[u32]) -> Vec<u32> {
         if values.is_empty() {
@@ -700,18 +590,13 @@ pub mod build {
 
     /// A `SET_UCONFIG_REG_INDEX` selecting the index buffer's entry width. Three dwords.
     ///
-    /// **Measured across eight argument pairs** (`166-agc/dcb-set-index-size`, sweep
-    /// `20260914-222710`): `sceAgcDcbSetIndexSize(dcb, type, flags)` for `type` 0-3 and `flags` 0-1
-    /// produced `0x400, 0x440, 0x401, 0x441, 0x402, 0x442, 0x403, 0x443` - so the value is
-    /// `0x400 | (flags << 6) | type`, with the selector `0x20000243` constant throughout.
-    ///
-    /// **Bounded by what was swept.** Only `type` 0-3 and `flags` 0-1 were tried, which is what
-    /// fixes the two low bits and bit 6; nothing establishes what a larger argument does, and this
-    /// masks rather than guesses so a wild value cannot corrupt the neighbouring fields.
+    /// Measured across eight argument pairs (`166-agc/dcb-set-index-size`): `type` 0-3 and `flags`
+    /// 0-1 give `0x400 | (flags << 6) | type`, with the selector `0x20000243` constant. Larger
+    /// arguments are masked so a wild value cannot corrupt neighbouring fields.
     #[must_use]
     pub fn set_index_size(index_type: u32, flags: u32) -> [u32; 3] {
-        /// The `0x20000243` selector, constant across all eight measured calls. Its low half is an
-        /// ordinary register offset; the high bits are what distinguish opcode `0x7a` from `0x79`.
+        /// The `0x20000243` selector, constant across all measured calls. Its low half is an
+        /// ordinary register offset; the high bits distinguish opcode `0x7a` from `0x79`.
         const SELECTOR: u32 = 0x2000_0243;
         /// Bit 10, set in every measured value.
         const BASE: u32 = 0x400;
@@ -724,16 +609,10 @@ pub mod build {
 
     /// A `DRAW_INDEX_2` - an indexed draw from a bound index buffer. Six dwords.
     ///
-    /// **Three of the five body dwords are measured; two are transcribed.**
     /// `sceAgcDcbDrawIndex(dcb, 3, 0x12345678, 0)` wrote header `0xc0042700` and advanced 24 bytes,
-    /// and the check read back the address low half, its high half, and the index count at body
-    /// positions 1, 2 and 3 (`166-agc/dcb-draw-index`). It did **not** read positions 0 and 4, so
-    /// `max_size` and `initiator` are placed by the published PM4 field order rather than by
-    /// measurement, and are named here so a caller supplies them rather than inheriting a zero
-    /// somebody invented.
-    ///
-    /// The size is not in doubt - 24 bytes, measured, against another implementation's 7 dwords
-    /// (worklog 534).
+    /// with the address low half, high half and index count at body positions 1, 2 and 3
+    /// (`166-agc/dcb-draw-index`). Positions 0 and 4, `max_size` and `initiator`, follow the public
+    /// PM4 field order and are caller-supplied.
     #[must_use]
     pub fn draw_index_2(max_size: u32, address: u64, index_count: u32, initiator: u32) -> [u32; 6] {
         let lo = u32::try_from(address & 0xffff_ffff).unwrap_or_default();
@@ -757,7 +636,7 @@ mod tests {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
-    /// Builds a type-3 command header. **Generated, never extracted** (D051).
+    /// Builds a type-3 command header, generated rather than extracted (D051).
     fn command(opcode: u8, body_dwords: u32) -> u32 {
         (3 << 30) | ((body_dwords - 1) << 16) | (u32::from(opcode) << 8)
     }
@@ -785,8 +664,8 @@ mod tests {
 
     #[test]
     fn the_count_field_is_read_as_one_less_than_the_body() {
-        // The single easiest thing to get wrong here. Without the adjustment every
-        // packet is short by one dword and the walk desynchronises on packet two.
+        // Without the count adjustment every packet is short by one dword and the walk
+        // desynchronises on packet two.
         let bytes = stream(&[command(0x10, 1), 0x1111_1111, command(0x11, 1), 0x2222_2222]);
         let result = walk(&bytes);
         assert_eq!(result.packets.len(), 2, "both packets found");
@@ -809,8 +688,7 @@ mod tests {
 
     #[test]
     fn a_header_only_no_op_is_one_dword() {
-        // Count all ones: the packet is its header. The console's no-op builder writes
-        // exactly this word and nothing after it (obSCEne 166-agc/cb-nop).
+        // Count all ones: the packet is its header, as the hardware's no-op builder writes it.
         let bytes = stream(&[0xFFFF_1000, command(0x05, 1), 0xDEAD_BEEF]);
         let result = walk(&bytes);
         assert_eq!(result.packets[0].kind, PacketKind::Command { opcode: 0x10 });
@@ -821,8 +699,7 @@ mod tests {
 
     #[test]
     fn filler_carries_no_body() {
-        // Filler has no count field to honour; treating it as though it did would
-        // swallow whatever follows.
+        // Filler has no count field; honouring one would swallow whatever follows.
         let bytes = stream(&[0x8000_0000, command(0x05, 1), 0xDEAD_BEEF]);
         let result = walk(&bytes);
         assert_eq!(result.packets[0].kind, PacketKind::Filler);
@@ -833,8 +710,7 @@ mod tests {
 
     #[test]
     fn a_reserved_packet_type_desynchronises_the_walk() {
-        // Its length is undefined, so the next packet's position is a guess. Saying so
-        // is what stops a reader trusting the rest of the walk.
+        // Its length is undefined, so the next packet's position is a guess, and the walk says so.
         let bytes = stream(&[0x4000_0000, command(0x05, 1), 0xDEAD_BEEF]);
         let result = walk(&bytes);
         assert!(result.desynchronised);
@@ -852,7 +728,7 @@ mod tests {
 
     #[test]
     fn a_histogram_counts_commands_in_a_stable_order() {
-        // Reports get diffed between runs; hash ordering would make every one differ.
+        // Reports are diffed between runs, so the order is stable.
         let bytes = stream(&[
             command(0x30, 1),
             0x0,
@@ -867,8 +743,7 @@ mod tests {
 
     #[test]
     fn an_empty_submission_walks_to_nothing_without_complaint() {
-        // A guest legitimately submits an empty buffer. Treating it as malformed would
-        // fill a report with noise.
+        // An empty buffer is a legitimate submission, not a malformed one.
         let result = walk(&[]);
         assert!(result.packets.is_empty());
         assert!(result.is_trustworthy());
@@ -883,12 +758,8 @@ mod tests {
         assert!(!result.is_trustworthy());
     }
 
-    /// **A header the builder writes is a header the walker reads back as the same packet.**
-    ///
-    /// The write side and the read side share one format, and this is the guard that they agree:
-    /// the builder's `command_header` must equal the independently-computed one above, and a
-    /// dispatch it builds must walk back to a single `DISPATCH_DIRECT` command of the right length.
-    /// If they ever drift, a submission orbistoun handed the guest would desynchronise its own walk.
+    /// A header the builder writes is a header the walker reads back as the same packet: a built
+    /// dispatch walks back to one `DISPATCH_DIRECT` command of the right length.
     #[test]
     fn a_built_dispatch_walks_back_to_the_packet_it_stood_for() {
         use super::build;

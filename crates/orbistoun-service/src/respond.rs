@@ -1,21 +1,9 @@
 //! What orbistoun says when a driver asks it the conformance probe's questions.
 //!
-//! # Why this is here and not in a shim
-//!
-//! "What does orbistoun know about itself" is a question, not a presentation of one, and
-//! both shims want the answer - the CLI to serve it over a socket, the window to serve it
-//! from a menu without either of them re-deriving it. Three things the CLI had quietly
-//! absorbed came out the moment a second shim needed them, and that is the rule this
-//! obeys rather than the exception (principle 13, D160).
-//!
-//! # It never claims to be the platform
-//!
-//! The first `part` written after negotiation says `kind=emulator`, unprompted. A driver
-//! pointing at this and at a probe is comparing an answer with a *reference*, and if it
-//! cannot tell which end is which the comparison means nothing. Machine identity is
-//! operator-asserted everywhere else in this project for the same reason - a probe cannot
-//! certify its own machine - so the one thing this end can honestly certify is that it is
-//! not one (D225).
+//! Here rather than in a shim because both shims serve it, the CLI over a socket and the window
+//! from a menu. The first `part` written after negotiation says `kind=emulator`, unprompted:
+//! a driver comparing this with a probe must know which end is the reference, and the one thing
+//! this end can certify is that it is not the platform (D225).
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher as _, Hasher as _};
@@ -27,14 +15,9 @@ use crate::Service;
 
 /// Answers the command protocol out of a [`Service`].
 ///
-/// # What it declines to offer, and why that is the point
-///
-/// Only [`Capability::Report`] is announced. `call` and `read` need a guest that is
-/// loaded and running, and this borrows a service rather than a run - so announcing them
-/// would put a capability in the `hello` reply that every later command refuses. A driver
-/// plans against that reply: a capability offered and then withheld is worse than one
-/// never offered, because by the time the refusal arrives the driver has already decided
-/// the comparison was possible.
+/// Only [`Capability::Report`] is announced. `call` and `read` need a loaded, running guest, and
+/// this borrows a service rather than a run, so announcing them would offer in `hello` what every
+/// later command refuses.
 #[derive(Debug)]
 pub struct ServiceAnswers<'a> {
     service: &'a Service,
@@ -45,12 +28,9 @@ pub struct ServiceAnswers<'a> {
 impl<'a> ServiceAnswers<'a> {
     /// Answers from this service, with a freshly generated secret.
     ///
-    /// For a single session - one connection, served and finished. A listener that accepts
-    /// more than one wants [`Self::generate_secret`] and [`Self::with_secret`], because
-    /// the secret has to exist before anybody can present it.
-    ///
-    /// Never compiled in, either way: a secret built into a binary is shared by everyone
-    /// holding that binary.
+    /// For a single session. A listener that accepts more than one wants [`Self::generate_secret`]
+    /// and [`Self::with_secret`], because the secret has to exist before anybody can present it. A
+    /// secret is never compiled in, since everyone holding the binary would share it.
     pub fn new(service: &'a Service) -> Self {
         Self {
             service,
@@ -61,11 +41,9 @@ impl<'a> ServiceAnswers<'a> {
 
     /// Answers with a secret somebody else already generated and displayed.
     ///
-    /// **Per startup, not per connection.** A secret minted when a driver connects is one
-    /// the driver could not possibly have presented, so the listener generates it once,
-    /// shows it once, and every session checks against that. The *session identifier* is
-    /// still fresh each time, which is what lets a driver tell a reconnection from a
-    /// continuation.
+    /// Per startup, not per connection: the listener generates it once, shows it once, and every
+    /// session checks against it. The session identifier is fresh each time, so a driver can tell a
+    /// reconnection from a continuation.
     pub fn with_secret(service: &'a Service, secret: Option<String>) -> Self {
         Self {
             service,
@@ -82,8 +60,8 @@ impl<'a> ServiceAnswers<'a> {
 
     /// Answers with no secret required.
     ///
-    /// For a responder bound to the loopback interface by somebody who started it
-    /// deliberately. Anything reachable from a network wants [`Self::new`].
+    /// For a responder bound to the loopback interface by somebody who started it deliberately.
+    /// Anything reachable from a network wants [`Self::new`].
     pub fn unauthenticated(service: &'a Service) -> Self {
         Self {
             service,
@@ -113,7 +91,7 @@ impl Answers for ServiceAnswers<'_> {
 
     fn describe(&self) -> Vec<(String, String)> {
         vec![
-            // First, and unprompted. See the module documentation.
+            // First, and unprompted (D225).
             ("kind".to_owned(), "emulator".to_owned()),
             ("name".to_owned(), "orbistoun".to_owned()),
             ("build".to_owned(), orbistoun_env::build::line()),
@@ -126,14 +104,11 @@ impl Answers for ServiceAnswers<'_> {
         let mut records = vec![
             Record::Build {
                 build: orbistoun_env::build::line(),
-                // `host` rather than `module` or `payload`: this is not running on the
-                // target and the record format has a word for that.
+                // `host` rather than `module` or `payload`: this is not running on the target.
                 kind: "host".to_owned(),
             },
-            // The distinction a `sym` record has no field for. A name orbistoun declares
-            // is *present*, and whether a real handler is attached behind it is a
-            // different question - one this project cares about more than any other, so it
-            // is stated rather than smuggled into a field that means linkage.
+            // A `sym` record has no field for whether a handler is attached behind a declared name,
+            // so the counts are stated here rather than smuggled into a field that means linkage.
             Record::SysInfo {
                 field: "symbols-declared".to_owned(),
                 state: "known".to_owned(),
@@ -148,13 +123,10 @@ impl Answers for ServiceAnswers<'_> {
         records.extend(declared.into_iter().map(|symbol| Record::Sym {
             library: symbol.library,
             symbol: symbol.symbol,
-            // What this end can honestly say: the name is one orbistoun declares. Whether
-            // the *platform* has it is the question the other end of the comparison
-            // answers, and this saying anything about that would be inventing the result.
+            // The name is one orbistoun declares. Whether the platform has it is the other end's
+            // answer.
             presence: "present".to_owned(),
-            // Linkage, not implementation status - the counts above carry that. Writing
-            // `stub` here would make every line differ from a probe's on an axis the field
-            // does not mean.
+            // Linkage, not implementation status, which the counts above carry.
             availability: "shared".to_owned(),
         }));
         Ok(records)
@@ -163,11 +135,9 @@ impl Answers for ServiceAnswers<'_> {
 
 /// A token that differs between runs.
 ///
-/// [`RandomState`] is seeded by the operating system, which is the strongest source
-/// available without taking a dependency for it. **Called best-effort deliberately:** this
-/// is not a cryptographic generator, the socket it protects is cleartext, and anyone who
-/// can watch the link reads the secret out of the `hello` that presents it. It raises the
-/// cost of an unattended scan finding an open responder, and nothing more than that.
+/// [`RandomState`] is seeded by the operating system. Best-effort, not cryptographic: the socket is
+/// cleartext and the secret is readable in the `hello` that presents it. It stops an unattended
+/// scan from finding an open responder, nothing more.
 fn token() -> String {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u32(std::process::id());

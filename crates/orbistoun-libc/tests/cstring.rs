@@ -1,29 +1,12 @@
 //! The C string, character-class and integer-conversion functions, exercised as a guest
 //! reaches them.
 //!
-//! # Why through the table, and not the functions
-//!
-//! Every function in `cstring` is private; only `implementations()` is public. That is the
-//! right shape - the registry is the only thing that ever calls one - and it means a test
-//! here reaches exactly what a resolved import reaches. A function dropped from the table
-//! would fail these tests even while it still compiled, which is the same class of bug as a
-//! module registered without its implementations (D281).
-//!
-//! # Guest addresses are host addresses
-//!
-//! The identity mapping (D014) means a guest pointer is a host pointer, so a `Vec<u8>` with
-//! a terminator on the end is a valid C string as far as these functions are concerned.
-//! `Text` holds the storage alive for the duration of a test and hands out its exposed
-//! address.
-//!
-//! # What is deliberately not pinned here
-//!
-//! These are C standard functions, so the oracle is the standard rather than the platform,
-//! and almost everything below asserts against it. Two behaviours are the implementation's
-//! own choice inside undefined territory and are marked where they appear: `abs` of the
-//! most negative value wraps, and a conversion that consumes no digits reports no
-//! consumption. Both are stated in the source; the tests exist so a change to either is
-//! visible rather than silent.
+//! Every function is reached through `implementations()`, as a resolved import is, so a
+//! function dropped from the table fails here even while it compiles. Under the
+//! identity mapping a `Vec<u8>` with a terminator is a valid guest C string. The oracle is the
+//! C standard; the two choices inside undefined territory (`abs` of the most negative value
+//! wraps, a conversion that consumes no digits reports no consumption) are pinned where they
+//! appear.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -31,8 +14,7 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 struct Text(Vec<u8>);
 
 impl Text {
-    /// From text. The bytes are the guest's, so nothing here assumes UTF-8 beyond the
-    /// convenience of writing ASCII in a test.
+    /// From text; ASCII in a test is a convenience, not an assumption.
     fn new(s: &str) -> Self {
         Self::raw(s.as_bytes())
     }
@@ -44,8 +26,7 @@ impl Text {
         Self(v)
     }
 
-    /// The address a guest would pass, with provenance exposed so the reads inside are
-    /// sound rather than merely working.
+    /// The address a guest would pass, with provenance exposed so the reads inside are sound.
     fn at(&self) -> u64 {
         self.0.as_ptr().expose_provenance() as u64
     }
@@ -68,9 +49,7 @@ impl Wide {
 
 /// The implementation registered under `name`.
 ///
-/// Panics rather than returning an option: a name that is not in the table is a test asking
-/// about a function no guest can reach, and reporting that as a skipped assertion would
-/// hide it.
+/// Panics on a missing name, which is a function no guest can reach.
 fn implementation(name: &str) -> GuestFn {
     orbistoun_libc::cstring::implementations()
         .iter()
@@ -81,10 +60,8 @@ fn implementation(name: &str) -> GuestFn {
         )
 }
 
-/// Calls one, filling the unused argument registers with a poison value.
-///
-/// The poison matters: a function that read an argument it does not take would otherwise
-/// see a plausible zero and behave, and the mistake would only appear against a guest.
+/// Calls one, filling the unused argument registers with a poison value, so reading an
+/// argument the function does not take shows up.
 fn call(name: &str, args: &[u64]) -> u64 {
     let mut regs = [0xDEAD_BEEF_DEAD_BEEF_u64; GUEST_ARG_REGISTERS];
     for (slot, value) in regs.iter_mut().zip(args) {
@@ -98,14 +75,9 @@ fn classify(name: &str, b: u8) -> u64 {
     call(name, &[u64::from(b)])
 }
 
-// --- the table itself ---------------------------------------------------------------
+// The table itself.
 
 /// Every name is distinct, and the table is not empty.
-///
-/// A duplicate would mean the registry silently picks one of two, and the pair could
-/// disagree for a long time before anything noticed. The emptiness check is there because
-/// every other test in this file would pass vacuously against an empty table - it would
-/// simply never be reached, since `implementation` panics.
 #[test]
 fn the_table_names_each_function_once() {
     let mut seen = std::collections::BTreeSet::new();
@@ -118,12 +90,9 @@ fn the_table_names_each_function_once() {
     );
 }
 
-// --- character classes --------------------------------------------------------------
+// Character classes.
 
-/// Each class answers for the letters, digits and punctuation the C locale defines.
-///
-/// Asserted per class on a member and a non-member, because a predicate that answered
-/// `true` for everything would pass a members-only test.
+/// Each class answers for its C-locale members and not for a non-member.
 #[test]
 fn the_character_classes_follow_the_c_locale() {
     for (name, member, outsider) in [
@@ -148,11 +117,7 @@ fn the_character_classes_follow_the_c_locale() {
     }
 }
 
-/// `isspace` covers the vertical tab, which Rust's own `is_ascii_whitespace` leaves out.
-///
-/// The single place where the standard library's classification and C's disagree, so it is
-/// the one worth a test of its own - a refactor that dropped the extra term would read as a
-/// simplification.
+/// `isspace` covers the vertical tab, which Rust's `is_ascii_whitespace` leaves out.
 #[test]
 fn isspace_includes_the_vertical_tab() {
     for b in [b' ', b'\t', b'\n', 0x0b, 0x0c, b'\r'] {
@@ -161,11 +126,7 @@ fn isspace_includes_the_vertical_tab() {
     assert_eq!(classify("isspace", 0x00), 0);
 }
 
-/// The classes take an `int`, so a value that is not a byte belongs to none of them.
-///
-/// C requires the argument to be representable as `unsigned char` or equal to `EOF`, and a
-/// table-driven implementation would index out of bounds on anything else. Here the answer
-/// is simply "not a member", including for `EOF`, which is in no class.
+/// A value that is not a byte, `EOF` included, belongs to no class.
 #[test]
 fn a_value_that_is_not_a_byte_is_in_no_class() {
     let eof = (-1_i64) as u64;
@@ -202,13 +163,9 @@ fn case_conversion_touches_only_letters() {
     }
 }
 
-// --- searching ------------------------------------------------------------------------
+// Searching.
 
 /// `strstr` returns an address inside the haystack, not an index.
-///
-/// The distinction is the whole function: a caller does pointer arithmetic on the result,
-/// so returning the offset would appear to work for a match at position zero and corrupt
-/// every other case.
 #[test]
 fn strstr_returns_an_address_inside_the_haystack() {
     let haystack = Text::new("alpha beta gamma");
@@ -219,10 +176,7 @@ fn strstr_returns_an_address_inside_the_haystack() {
     );
 }
 
-/// An empty needle matches at the start, which the standard requires.
-///
-/// A windows-based search returns nothing for a zero-length window, so this is the case a
-/// rewrite loses first.
+/// An empty needle matches at the start, as the standard requires.
 #[test]
 fn an_empty_needle_matches_at_the_start() {
     let haystack = Text::new("alpha");
@@ -267,9 +221,6 @@ fn strpbrk_finds_the_first_byte_from_the_set() {
 }
 
 /// `strspn` and `strcspn` are complements over the same input.
-///
-/// Asserted together because the pair is easy to write with one negation missing, and each
-/// alone looks right.
 #[test]
 fn strspn_and_strcspn_are_complements() {
     let text = Text::new("   alpha");
@@ -309,9 +260,6 @@ fn strcasecmp_ignores_ascii_case() {
 }
 
 /// Folding is ASCII-only, so a high byte is not any letter's other case.
-///
-/// The locale trap: a case-folding routine that used a host locale would make this pair
-/// equal on some machines and not on others.
 #[test]
 fn folding_does_not_reach_past_ascii() {
     let a = Text::raw(&[0xC0]);
@@ -333,10 +281,8 @@ fn strncasecmp_compares_at_most_n_bytes() {
     assert_eq!(call("strncasecmp", &[a.at(), diverging.at(), 0]), 0);
 }
 
-/// A limit beyond either string compares the whole of both.
-///
-/// The bound is applied to the bytes actually present, so an enormous `n` must not read
-/// past a terminator looking for more to compare.
+/// A limit beyond either string compares the whole of both without reading past a
+/// terminator.
 #[test]
 fn a_limit_beyond_the_strings_compares_all_of_them() {
     let short = Text::new("a");
@@ -347,7 +293,7 @@ fn a_limit_beyond_the_strings_compares_all_of_them() {
     );
 }
 
-// --- integer conversion ---------------------------------------------------------------
+// Integer conversion.
 
 /// `atoi` skips leading space, takes a sign, and stops at the first non-digit.
 #[test]
@@ -376,9 +322,6 @@ fn atoi_of_something_that_is_not_a_number_is_zero() {
 }
 
 /// `atoi` is decimal even when the text looks octal, and `strtol` with base zero is not.
-///
-/// The one place the two families genuinely differ, and the reason the shared parser takes
-/// a base rather than working it out unconditionally.
 #[test]
 fn atoi_is_always_decimal_but_base_zero_reads_the_prefix() {
     let octal = Text::new("010");
@@ -402,7 +345,7 @@ fn the_atoi_family_truncates_to_its_own_width() {
     assert_eq!(call("atoll", &[big.at()]), 4_294_967_298);
 }
 
-/// Base 16 accepts the prefix but does not require it, which the standard demands.
+/// Base 16 accepts the `0x` prefix but does not require it.
 #[test]
 fn base_sixteen_accepts_the_prefix_without_needing_it() {
     let prefixed = Text::new("0xFF");
@@ -423,9 +366,6 @@ fn an_arbitrary_base_stops_at_the_first_digit_outside_it() {
 }
 
 /// `strtol` writes where it stopped, so a caller can walk a list.
-///
-/// The failure this guards is a hang rather than a wrong answer: a loop that advances by
-/// the reported end pointer never terminates if the pointer never moves.
 #[test]
 fn strtol_reports_where_it_stopped() {
     let text = Text::new("12,34");
@@ -441,9 +381,6 @@ fn strtol_reports_where_it_stopped() {
 }
 
 /// With no digits, nothing is consumed and the end pointer stays put.
-///
-/// Deliberate, and stated in the source: a caller's loop sees no progress and terminates,
-/// rather than advancing past text it never converted.
 #[test]
 fn a_conversion_that_reads_no_digits_consumes_nothing() {
     for text in ["abc", "", "  ", "-"] {
@@ -455,19 +392,15 @@ fn a_conversion_that_reads_no_digits_consumes_nothing() {
     }
 }
 
-/// A null `endptr` is not written, and is not a crash.
-///
-/// Guests pass null here constantly; the branch that skips the write is the one that keeps
-/// the process alive.
+/// A null `endptr` is not written.
 #[test]
 fn a_null_end_pointer_is_simply_not_written() {
     let text = Text::new("77");
     assert_eq!(call("strtol", &[text.at(), 0, 10]), 77);
 }
 
-/// The `strtol` family differs only in the width and signedness it reports.
-///
-/// `strtoul` of a negative wraps, which C specifies rather than leaves to an accident.
+/// The `strtol` family differs only in the width and signedness it reports; `strtoul` of a
+/// negative wraps, as C specifies.
 #[test]
 fn the_strtol_family_differs_only_in_width_and_sign() {
     let negative = Text::new("-1");
@@ -478,9 +411,6 @@ fn the_strtol_family_differs_only_in_width_and_sign() {
 }
 
 /// A number too long for the accumulator saturates instead of panicking.
-///
-/// Guest input is hostile by assumption. A debug build that overflowed here would abort the
-/// emulator on a string, which is a worse outcome than any wrong number.
 #[test]
 fn an_absurdly_long_number_saturates_rather_than_panicking() {
     let digits = "9".repeat(200);
@@ -495,7 +425,7 @@ fn an_absurdly_long_number_saturates_rather_than_panicking() {
     );
 }
 
-// --- absolute value --------------------------------------------------------------------
+// Absolute value.
 
 /// Absolute value, at each declared width.
 #[test]
@@ -507,9 +437,6 @@ fn absolute_value_is_taken_at_the_declared_width() {
 }
 
 /// The most negative value wraps rather than panicking.
-///
-/// Undefined in C, so there is no right answer to match - but there is a wrong outcome,
-/// which is aborting the emulator in a debug build. Pinned so the choice stays deliberate.
 #[test]
 fn the_most_negative_value_wraps_instead_of_aborting() {
     assert_eq!(call("abs", &[u64::from(i32::MIN as u32)]) as i32, i32::MIN);
@@ -517,13 +444,9 @@ fn the_most_negative_value_wraps_instead_of_aborting() {
     assert_eq!(call("llabs", &[i64::MIN as u64]) as i64, i64::MIN);
 }
 
-// --- wide strings ----------------------------------------------------------------------
+// Wide strings.
 
-/// `wcslen` counts characters, not bytes.
-///
-/// The assumption under it is that `wchar_t` is 32-bit, as on every FreeBSD-derived system.
-/// A 16-bit one would make this count double, and nothing in a trace would say so - which
-/// is why the count, rather than a byte length, is what is asserted.
+/// `wcslen` counts 32-bit characters, not bytes.
 #[test]
 fn wcslen_counts_characters_rather_than_bytes() {
     let text = Wide::new(&[u32::from(b'a'), u32::from(b'b'), 0x1F600]);
@@ -539,12 +462,9 @@ fn a_null_wide_string_is_length_zero() {
     assert_eq!(call("wcslen", &[0]), 0);
 }
 
-// --- null inputs -----------------------------------------------------------------------
+// Null inputs.
 
-/// Every string function tolerates a null pointer.
-///
-/// Not because passing one is legal C - it is not - but because a guest that does must not
-/// take the emulator with it. The answer given is the empty-string answer in each case.
+/// Every string function tolerates a null pointer, answering as for the empty string.
 #[test]
 fn a_null_string_is_treated_as_empty_rather_than_crashing() {
     assert_eq!(call("strstr", &[0, 0]), 0);
@@ -557,8 +477,7 @@ fn a_null_string_is_treated_as_empty_rather_than_crashing() {
     assert_eq!(call("strtol", &[0, 0, 10]), 0);
 }
 
-/// A null haystack with a real needle finds nothing, rather than treating the needle's
-/// address as an offset into nowhere.
+/// A null haystack with a real needle finds nothing.
 #[test]
 fn a_null_haystack_with_a_real_needle_finds_nothing() {
     let needle = Text::new("x");

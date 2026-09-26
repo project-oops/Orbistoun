@@ -1,30 +1,12 @@
 //! Generating candidate symbol names, so a hash can be turned back into one.
 //!
-//! A NID is a truncated SHA-1 and is not invertible, so there is exactly one way back:
-//! hash names you can think of and see which ones match. Everything here exists to
-//! think of a great many names cheaply.
-//!
-//! # Two very different sources, and only one of them is guesswork
-//!
-//! - **Published standards.** The target's C library is FreeBSD-derived, so a large
-//!   part of it is ISO C and POSIX with the names those standards fix. Those are not
-//!   guesses at all, and they are exactly the lawful reference principle 1 points at.
-//! - **Vendor naming conventions.** Everything else follows a regular shape - a prefix,
-//!   a module, an action, an object - so candidates can be enumerated combinatorially.
-//!   This is guesswork, but structured guesswork, and a match is self-verifying: the
-//!   hash either agrees or it does not.
-//!
-//! # The vocabulary is data, not code
-//!
-//! Adding a word must never mean a rebuild (principle 5). Defaults are embedded so the
-//! tool works out of the box, and any file of the same shape replaces them.
-//!
-//! # Why patterns are indexable rather than iterated
-//!
-//! Each pattern can produce its `n`th name directly, by treating the index as a
-//! mixed-radix number over its vocabularies. That is what lets the search be split
-//! across threads by range with no shared state and no coordination - and it makes the
-//! generator testable, since a specific index has a specific answer.
+//! A NID is a truncated SHA-1 and cannot be inverted, so names are generated and hashed until
+//! one matches, and a match verifies itself (D068). Two sources feed it: published standards
+//! (the FreeBSD-derived C library's ISO C and POSIX names, not guesses) and the vendor naming
+//! convention, a regular shape of prefix, module, action and object enumerated combinatorially.
+//! The vocabulary is data, so adding a word needs no rebuild. Each pattern produces its `n`th
+//! name directly by reading the index as a mixed-radix number, so a search splits across
+//! threads by range and a given index has a testable answer.
 
 pub mod affix;
 pub mod harvest;
@@ -35,10 +17,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-/// Vocabulary and patterns shipped with the tool.
-///
-/// A starting point, not an authority - the file is expected to grow as names are
-/// confirmed, and a user file replaces it entirely.
+/// Vocabulary and patterns shipped with the tool: a starting point that grows as names are
+/// confirmed, which a user file replaces entirely.
 pub const DEFAULT_VENDOR_GRAMMAR: &str = include_str!("../data/vendor.toml");
 
 /// Names fixed by ISO C and POSIX, which the target's C library is derived from.
@@ -46,30 +26,15 @@ pub const DEFAULT_STANDARD_NAMES: &str = include_str!("../data/standard.txt");
 
 /// Every published name, respelled the way the vendor spells it.
 ///
-/// # One rule, and it is a derivation rather than a guess
-///
-/// The target's C library is FreeBSD-derived and its threading interface is POSIX with a
-/// vendor prefix. The respelling is mechanical: take a harvested name, capitalise each
-/// underscore-separated part, and join them. `pthread_mutexattr_settype` becomes
-/// `PthreadMutexattrSettype`, and with the prefix that is the exact symbol a real title
-/// imports.
-///
-/// **Checked against names the generator could not previously reach.** Two titles printed
-/// four of these themselves once `printf` existed to carry the message (D187); this rule
-/// regenerates all four from the harvested list alone, which is what turns them from
-/// *observed* into *derivable* and lets the provenance audit account for them.
-///
-/// Why it was missing: the vocabulary was built from vendor-shaped parts - a module, a
-/// verb, an object - and no combination of those spells `Mutexattr`. The gap was never a
-/// missing word. It was a missing *shape*, and the shape is "a POSIX name, whole" (D189).
-///
-/// Cheap: one candidate per harvested name, against millions from the compositional
-/// patterns.
+/// The threading interface is POSIX with a vendor prefix, so the respelling is mechanical:
+/// capitalise each underscore-separated part and join them, making `pthread_mutexattr_settype`
+/// into `PthreadMutexattrSettype`. No combination of vendor-shaped parts spells `Mutexattr`, so
+/// this adds the missing shape, "a POSIX name, whole", at one candidate per harvested name.
 pub fn posix_vocabulary() -> Vec<String> {
     /// Shortest underscore part worth keeping on its own.
     ///
-    /// Two letters and under are `in`, `t`, `vm` - they combine with everything and buy
-    /// nothing, and each one multiplies a pattern's candidates by the size of the list.
+    /// Parts of two letters or fewer (`in`, `t`, `vm`) combine with everything and multiply every
+    /// pattern's candidates for nothing.
     const SHORTEST_PART: usize = 3;
 
     let capitalise = |part: &str| {
@@ -82,19 +47,13 @@ pub fn posix_vocabulary() -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     for name in DEFAULT_STANDARD_NAMES.split_whitespace() {
         let parts: Vec<&str> = name.trim_matches('_').split('_').collect();
-        // The whole name, joined - what a vendor name inherits wholesale, and what this
-        // function produced on its own until now.
+        // The whole name, joined: what a vendor name inherits wholesale.
         let joined: String = parts.iter().copied().map(capitalise).collect();
         if !joined.is_empty() {
             words.push(joined);
         }
-        // **And each part on its own.** A vendor name borrows a *morpheme*, not always a
-        // whole standard name: `pmap_unset` and `rpcb_unset` both carry `unset`, and
-        // joining them produced `PmapUnset` and `RpcbUnset` while `Unset` - the piece a
-        // vendor name actually reuses - was never offered to the generator at all.
-        //
-        // This is the same shape as the gap that kept `sceKernelUsleep` out of reach: the
-        // material was present and the form it was presented in could not be used (D258).
+        // Each part on its own as well: a vendor name can borrow a part rather than a whole standard
+        // name (`pmap_unset` and `rpcb_unset` both carry `unset`).
         if parts.len() > 1 {
             words.extend(
                 parts
@@ -129,17 +88,9 @@ pub struct PatternSpec {
     pub parts: Vec<String>,
     /// Why this shape is not swept, if it is not.
     ///
-    /// # Why a reason rather than a boolean
-    ///
-    /// **Presence is the disabling**, so a shape cannot be turned off without saying what it
-    /// cost and what would bring it back. The same rule `CompatEntry::reason` already
-    /// carries: an entry without one is how a file becomes a graveyard of unexplained
-    /// exceptions - and a shape switched off by a bare `false` is exactly that, six months
-    /// later, to somebody deciding whether to switch it on again.
-    ///
-    /// Kept in the file rather than deleted, because a shape that costs more than it earns
-    /// *today* may be the right shape once the vocabulary it needs exists. Deleting loses the
-    /// measurement; this keeps it where the next person will find it (D342).
+    /// A reason rather than a boolean, so a shape cannot be turned off without saying what it cost
+    /// and what would bring it back. Kept in the file rather than deleted, since a shape too
+    /// expensive today may pay once its vocabulary exists (D342).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<String>,
 }
@@ -152,9 +103,7 @@ pub enum GrammarError {
     Parse(#[from] toml::de::Error),
     /// A pattern referred to a vocabulary that does not exist.
     ///
-    /// Refused rather than skipped: a silently dropped part produces names that look
-    /// plausible and are systematically wrong, and the search then reports nothing with
-    /// no indication why.
+    /// Refused rather than skipped: a dropped part produces plausible, systematically wrong names.
     #[error("pattern {pattern} refers to vocabulary {missing}, which is not defined")]
     UnknownVocabulary {
         /// The pattern at fault.
@@ -164,9 +113,8 @@ pub enum GrammarError {
     },
     /// A pattern has more parts than the generator will decode.
     ///
-    /// Refused rather than truncated. The hot path decodes an index into a fixed stack
-    /// array, and quietly dropping the parts past the end would generate names that are
-    /// not the ones the grammar describes.
+    /// Refused rather than truncated: the hot path decodes into a fixed stack array, and dropping
+    /// parts would generate names the grammar does not describe.
     #[error("pattern {pattern} has {parts} parts, more than the {max} supported")]
     TooManyParts {
         /// The pattern at fault.
@@ -181,8 +129,8 @@ pub enum GrammarError {
 impl Grammar {
     /// Parses a grammar file.
     ///
-    /// The `posix` vocabulary is added afterwards, derived rather than written - see
-    /// [`posix_vocabulary`]. A grammar that never mentions it is unaffected.
+    /// The `posix` vocabulary is added afterwards, derived rather than written (see
+    /// [`posix_vocabulary`]); a grammar that never mentions it is unaffected.
     pub fn parse(text: &str) -> Result<Self, GrammarError> {
         let mut grammar: Self = toml::from_str(text)?;
         grammar
@@ -198,15 +146,11 @@ impl Grammar {
 
     /// Resolves every pattern against the vocabulary.
     ///
-    /// **Shapes carrying a [`PatternSpec::disabled`] reason are left out**, so a disabled
-    /// shape costs a sweep nothing rather than being skipped by whoever remembers to. It is
-    /// still parsed, still validated against the vocabulary, and still in the file with its
-    /// reason attached - only unswept (D342).
+    /// Shapes carrying a [`PatternSpec::disabled`] reason are left out of the sweep, but still
+    /// parsed and validated (D342).
     pub fn patterns(&self) -> Result<Vec<Pattern>, GrammarError> {
-        // **Validated first, filtered second.** Skipping a disabled shape before resolving it
-        // would let one carry a vocabulary name that does not exist - and the error would
-        // surface only when somebody re-enabled it, which is the moment they have least
-        // context for it.
+        // Validated first, filtered second, so a disabled shape naming a missing vocabulary fails now
+        // rather than when it is re-enabled.
         let resolved = self
             .pattern
             .iter()
@@ -243,12 +187,8 @@ impl Grammar {
             .collect())
     }
 
-    /// Every shape the grammar holds but does not sweep, and why.
-    ///
-    /// **So a disabled shape is reportable rather than merely absent.** A sweep that silently
-    /// covered less than the file describes would be the same failure as a report that
-    /// counted its silent diagnostics: the thing that is not happening is the thing worth
-    /// saying (D331, D342).
+    /// Every shape the grammar holds but does not sweep, and why, so a sweep covering less than the
+    /// file describes says so (D342).
     #[must_use]
     pub fn disabled(&self) -> Vec<(&str, &str)> {
         self.pattern
@@ -260,9 +200,7 @@ impl Grammar {
 
 /// Most parts a single pattern may have.
 ///
-/// A fixed ceiling so the hot path can decode an index into a stack array rather than a
-/// vector. Generous - a name built from more than this many pieces is not a naming
-/// convention, it is a sentence.
+/// A fixed ceiling so the hot path decodes an index into a stack array rather than a vector.
 pub const MAX_PARTS: usize = 12;
 
 /// A resolved shape: the actual word lists, ready to enumerate.
@@ -281,9 +219,8 @@ pub struct Pattern {
 impl Pattern {
     /// Builds a pattern from its vocabularies, in order.
     pub fn new(name: String, parts: Vec<Vec<String>>) -> Self {
-        // Saturating, so an absurd grammar reports an enormous number rather than
-        // wrapping to a small one - which would silently search a fraction of what was
-        // asked for.
+        // Saturating, so an absurd grammar reports an enormous count rather than wrapping to a small
+        // one and searching a fraction of what was asked for.
         let len = if parts.is_empty() {
             0
         } else {
@@ -295,12 +232,8 @@ impl Pattern {
         Self { name, parts, len }
     }
 
-    /// How many names this pattern can produce.
-    ///
-    /// A field read. The search asks every pattern this question for every candidate it
-    /// tries, so computing it walked the whole vocabulary list - one heap allocation per
-    /// part - billions of times, to arrive at a number that was fixed before the search
-    /// began (D216).
+    /// How many names this pattern can produce: a field read, because the search asks for it on
+    /// every candidate.
     pub fn len(&self) -> u64 {
         self.len
     }
@@ -312,10 +245,8 @@ impl Pattern {
 
     /// The `index`th name, or `None` past the end.
     ///
-    /// The index is read as a mixed-radix number, least-significant part **last**, so
-    /// consecutive indices vary the final word first. That ordering matters for a
-    /// partial search: it sweeps whole families of related names rather than one word
-    /// from each of many.
+    /// The index is a mixed-radix number, least-significant part last, so consecutive indices vary
+    /// the final word first and a partial search sweeps whole families of related names.
     pub fn name_at(&self, index: u64) -> Option<String> {
         if index >= self.len() {
             return None;
@@ -332,24 +263,18 @@ impl Pattern {
 
     /// Which index would produce `name`, if any.
     ///
-    /// **The inverse of [`Self::name_at`], and it exists because searching for it was costing
-    /// hours.** `name_at` reads the index as a mixed-radix number; recovering it is the same
-    /// arithmetic backwards, once the name has been split against the vocabularies that
-    /// produced it. `solve::derive` was walking `0..len()` instead - a linear scan of a space
-    /// this project measures in trillions, for something a division answers (D304).
-    ///
-    /// Splitting needs backtracking: several words in one slot may start the remainder, and
-    /// only some of those choices leave a suffix the later slots can spell. Bounded by
-    /// vocabulary size times depth rather than by their product.
+    /// The inverse of [`Self::name_at`]: once the name is split against the pattern's vocabularies,
+    /// the index is the same arithmetic backwards, never a scan of the space. Splitting backtracks,
+    /// since several words in one slot may start the remainder; the cost is bounded by vocabulary
+    /// size times depth.
     #[must_use]
     pub fn index_of(&self, name: &str) -> Option<u64> {
         let mut chosen = vec![0_usize; self.parts.len()];
         if !self.split_into(0, name, &mut chosen) {
             return None;
         }
-        // Most-significant part first, mirroring the decode - which takes the *last* part as
-        // the least significant digit. Assembling it the other way round yields a real index
-        // for a different name, which is the failure mode worth being explicit about.
+        // Most-significant part first, mirroring the decode, which takes the last part as the least
+        // significant digit; the other order yields a real index for a different name.
         let mut index: u64 = 0;
         for (slot, part) in self.parts.iter().enumerate() {
             index = index
@@ -361,9 +286,8 @@ impl Pattern {
 
     /// Chooses a word from each remaining slot that spells `rest` exactly.
     ///
-    /// Depth-first with backtracking. A greedy longest-first match is not enough: a short word
-    /// can consume a prefix that leaves a remainder no later slot can spell, and the name is
-    /// then reported as ungenerable when it is not.
+    /// Depth-first with backtracking: a greedy match can take a prefix that leaves a remainder no
+    /// later slot can spell.
     fn split_into(&self, slot: usize, rest: &str, chosen: &mut [usize]) -> bool {
         let Some(part) = self.parts.get(slot) else {
             // Every slot filled: this is a match only if the whole name was consumed.
@@ -382,19 +306,15 @@ impl Pattern {
 
     /// Writes the `index`th name into `buffer`, replacing its contents.
     ///
-    /// The form a large search wants: no allocation per candidate. Testing billions of
-    /// names means the allocator, not SHA-1, decides how long the search takes unless
-    /// the buffer is reused.
-    ///
-    /// Returns `false` past the end, leaving the buffer empty.
+    /// No allocation per candidate, so the allocator does not dominate a large search. Returns
+    /// `false` past the end, leaving the buffer empty.
     pub fn write_at(&self, index: u64, buffer: &mut Vec<u8>) -> bool {
         buffer.clear();
         if index >= self.len() {
             return false;
         }
-        // Decode the mixed-radix index from the last part backwards, then emit forwards -
-        // the digits come out in reverse order, and a name assembled in that order is a
-        // different name that happens to hash to something.
+        // Decode the index from the last part backwards, then emit forwards; the digits come out
+        // reversed.
         debug_assert!(
             self.parts.len() <= MAX_PARTS,
             "Grammar::patterns refuses anything longer, so this cannot happen"
@@ -443,18 +363,16 @@ mod index_tests {
             vec![
                 vec!["sce".to_owned()],
                 vec!["Kernel".to_owned(), "Net".to_owned()],
-                // `Create` and `CreateEx` overlap on purpose: a greedy match takes the short
-                // one and leaves a remainder the last slot cannot spell.
+                // `Create` and `CreateEx` overlap on purpose: a greedy match takes the short one and leaves a
+                // remainder the last slot cannot spell.
                 vec!["Create".to_owned(), "CreateEx".to_owned()],
                 vec!["Sema".to_owned(), "Ex".to_owned()],
             ],
         )
     }
 
-    /// **The property, stated against `name_at` rather than against a table.**
-    ///
-    /// Every index this pattern can produce round-trips. A hand-written expectation would be a
-    /// second implementation of the encoding, and the two would drift.
+    /// Every index round-trips through the name it produces, stated against `name_at` rather than a
+    /// hand-written table.
     #[test]
     fn every_index_round_trips_through_the_name_it_produces() {
         let pattern = pattern();
@@ -468,11 +386,8 @@ mod index_tests {
         }
     }
 
-    /// A greedy split would give up here; backtracking does not.
-    ///
-    /// `sceKernelCreateEx` can be spelled `Create` + `Ex`, but only if the earlier slot gives
-    /// up `CreateEx` first. Taking the longest match and stopping reports a name the pattern
-    /// *can* produce as one it cannot (D304).
+    /// A choice that strands a later slot is backtracked: `sceKernelCreateEx` is `Create` + `Ex`
+    /// only if the earlier slot gives up `CreateEx`.
     #[test]
     fn a_choice_that_strands_a_later_slot_is_backtracked() {
         let pattern = pattern();
@@ -506,19 +421,19 @@ mod tests {
         )
     }
 
+    /// A pattern counts the product of its parts.
     #[test]
     fn a_pattern_counts_the_product_of_its_parts() {
-        // The count drives how the search is split across threads, so an inaccurate one
-        // means part of the space is never looked at.
+        // The count drives how the search is split, so an inaccurate one leaves space unsearched.
         let p = pattern(&[&["a", "b"], &["x", "y", "z"]]);
         assert_eq!(p.len(), 6);
         assert!(!p.is_empty());
     }
 
+    /// Every index produces a distinct name, and the set is complete.
     #[test]
     fn every_index_produces_a_distinct_name_and_the_set_is_complete() {
-        // A collision here would silently shrink the search space; a gap would skip
-        // candidates. Both are invisible without checking directly.
+        // A collision would shrink the search space and a gap would skip candidates.
         let p = pattern(&[&["sce", "x"], &["Kernel", "Audio"], &["Open", "Close"]]);
         let all: Vec<String> = p.iter().collect();
         assert_eq!(all.len(), 8);
@@ -528,39 +443,39 @@ mod tests {
         assert!(all.contains(&"xAudioClose".to_owned()));
     }
 
+    /// The last part varies fastest.
     #[test]
     fn the_last_part_varies_fastest() {
-        // So a partial search sweeps whole families of related names rather than one
-        // word from each of many.
+        // So a partial search sweeps whole families of related names.
         let p = pattern(&[&["a", "b"], &["1", "2", "3"]]);
         let all: Vec<String> = p.iter().collect();
         assert_eq!(all, vec!["a1", "a2", "a3", "b1", "b2", "b3"]);
     }
 
+    /// An index past the end produces nothing rather than wrapping.
     #[test]
     fn an_index_past_the_end_produces_nothing_rather_than_wrapping() {
-        // Threads take ranges that may overshoot the end; wrapping would make them
-        // re-search the beginning and report duplicates.
+        // Thread ranges may overshoot the end; wrapping would re-search the beginning.
         let p = pattern(&[&["a"], &["b"]]);
         assert_eq!(p.name_at(0).as_deref(), Some("ab"));
         assert_eq!(p.name_at(1), None);
         assert_eq!(p.name_at(u64::MAX), None);
     }
 
+    /// A pattern with no parts produces nothing, not one empty name.
     #[test]
     fn a_pattern_with_no_parts_produces_nothing_not_one_empty_name() {
-        // An empty name hashes to something, and that something would be reported as a
-        // match for whatever it collided with.
+        // An empty name hashes to something, which would be reported as a match.
         let p = pattern(&[]);
         assert_eq!(p.len(), 0);
         assert!(p.is_empty());
         assert_eq!(p.name_at(0), None);
     }
 
+    /// A pattern naming an unknown vocabulary is refused, not skipped.
     #[test]
     fn a_pattern_naming_an_unknown_vocabulary_is_refused_not_skipped() {
-        // Dropping the part silently would produce names that look plausible and are
-        // systematically wrong, and the search would report nothing with no hint why.
+        // A dropped part would produce plausible, systematically wrong names.
         let g = Grammar::parse(
             r#"
             [vocabulary]
@@ -574,6 +489,7 @@ mod tests {
         assert!(g.patterns().is_err());
     }
 
+    /// The builtin grammar is valid and produces names.
     #[test]
     fn the_builtin_grammar_is_valid_and_produces_names() {
         // It ships with the tool, so a typo in it breaks the feature for everyone.
@@ -591,26 +507,25 @@ mod tests {
         }
     }
 
+    /// Comments and blank lines are ignored in a word list.
     #[test]
     fn comments_and_blank_lines_are_ignored_in_a_word_list() {
         let list = word_list("# a comment\n\nalpha\n  beta  \n\n# another\ngamma\n");
         assert_eq!(list, vec!["alpha", "beta", "gamma"]);
     }
 
+    /// The standard names cover every harvested library, system-call stubs included.
     #[test]
     fn the_standard_names_cover_every_library_harvested() {
-        // Not guesses - read from FreeBSD's own version scripts (D126). One name per
-        // library, because a harvest that silently drops a whole library still reports
-        // success: `libthr` declares its exports in `pthread.map`, and a harvester
-        // looking only for `Symbol.map` lost every `pthread_*` name while announcing
-        // 2,497 of them (D127).
+        // Read from FreeBSD's own version scripts (D126). One name per library, because a harvest that
+        // drops a whole library still reports success.
         let names = standard_names();
         assert!(names.len() > 2000, "only {} names", names.len());
         for expected in [
             "memcpy",         // libc, string
             "snprintf",       // libc, stdio
             "__cxa_atexit",   // libc, C++ runtime - reserved, and the most-called
-            "pthread_create", // libthr, which lives in a differently-named script
+            "pthread_create", // libthr, whose script is `pthread.map`
             "sqrt",           // msun
         ] {
             assert!(
@@ -619,17 +534,7 @@ mod tests {
             );
         }
 
-        // Syscall stubs, which this asserted the *absence* of until 2026-08-22.
-        //
-        // The note here read: FreeBSD generates these from `syscalls.master` at build
-        // time, so no version script declares them and no harvest can find them. That was
-        // stated as a fact about the world and was an inference from a search that missed
-        // - `lib/libsys/Symbol.sys.map` declares every one of them, and the harvest was
-        // skipping the file because its walker tested for the name `Symbol.map` (D191).
-        //
-        // The assertion is kept, inverted. It was written to fail if the belief ever
-        // stopped holding, and that is exactly what it did - which is the whole argument
-        // for asserting a known limitation rather than writing it in a comment.
+        // System-call stubs, declared in `lib/libsys/Symbol.sys.map`.
         for expected in ["clock_gettime", "socket", "sched_yield"] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -637,10 +542,10 @@ mod tests {
             );
         }
     }
+    /// Writing into a buffer agrees with building a string.
     #[test]
     fn writing_into_a_buffer_agrees_with_building_a_string() {
-        // Two ways to produce the same name, and the fast one is the one that runs
-        // billions of times - so it is the one that must not drift.
+        // The buffer path runs on every candidate, so it must agree with the string path.
         let p = pattern(&[&["sce", "x"], &["Kernel", "Audio"], &["Open", "Close"]]);
         let mut buffer = Vec::new();
         for i in 0..p.len() {
@@ -653,20 +558,20 @@ mod tests {
         }
     }
 
+    /// Writing past the end reports it and leaves the buffer empty.
     #[test]
     fn writing_past_the_end_reports_it_and_leaves_the_buffer_empty() {
-        // A thread whose range overshoots must not hash whatever the last candidate
-        // left behind, which would be reported as a match for the wrong index.
+        // An overshooting thread must not hash what the last candidate left behind.
         let p = pattern(&[&["a"], &["b"]]);
         let mut buffer = vec![0xFF; 8];
         assert!(!p.write_at(99, &mut buffer));
         assert!(buffer.is_empty());
     }
 
+    /// A pattern with too many parts is refused rather than truncated.
     #[test]
     fn a_pattern_with_too_many_parts_is_refused_rather_than_truncated() {
-        // Dropping the parts past the ceiling would generate names the grammar does not
-        // describe, and the search would report nothing with no hint why.
+        // Dropping parts past the ceiling would generate names the grammar does not describe.
         let parts: Vec<String> = (0..=super::MAX_PARTS).map(|_| "w".to_owned()).collect();
         let mut vocabulary = std::collections::BTreeMap::new();
         vocabulary.insert("w".to_owned(), vec!["a".to_owned()]);
@@ -680,16 +585,12 @@ mod tests {
         };
         assert!(g.patterns().is_err());
     }
+    /// The POSIX shape regenerates names the vendor parts cannot spell.
     #[test]
     fn the_posix_shape_regenerates_names_the_parts_could_not_spell() {
-        // **The check that makes this a derivation rather than a story.** Two titles
-        // printed these four names themselves, and the hash confirmed them - but a name
-        // the generator cannot produce is one the provenance audit cannot account for
-        // (D119). This rule regenerates all four from the harvested list alone.
-        //
-        // It also pins what the gap actually was. No combination of module, verb and
-        // object spells `Mutexattr`, because the vendor did not compose that name - it
-        // inherited it from POSIX whole. The vocabulary was never missing a word.
+        // Names confirmed by hash but not generable cannot be accounted for by the provenance audit
+        // (D213); this rule regenerates them from the harvested list. The vendor inherited these names
+        // from POSIX whole, so no module, verb and object combination spells them.
         let vocab = super::posix_vocabulary();
         for expected in [
             "PthreadMutexattrInit",
@@ -704,10 +605,11 @@ mod tests {
         }
     }
 
+    /// The derived vocabulary reaches every grammar.
     #[test]
     fn the_derived_vocabulary_reaches_every_grammar() {
-        // Added after parsing, so a user grammar gets it too - and a grammar that never
-        // mentions `posix` is unchanged, which is why adding it silently is safe.
+        // Added after parsing, so a user grammar gets it too; a grammar that never mentions `posix` is
+        // unchanged.
         let g = Grammar::parse(
             "[vocabulary]
 prefix = [\"sce\"]
@@ -718,9 +620,10 @@ prefix = [\"sce\"]
         assert!(!g.vocabulary["posix"].is_empty());
     }
 
+    /// The shipped grammar uses the POSIX shape.
     #[test]
     fn the_shipped_grammar_uses_the_posix_shape() {
-        // A vocabulary nothing references generates nothing, and would look wired up.
+        // A vocabulary nothing references generates nothing.
         let g = Grammar::builtin().expect("builtin");
         assert!(
             g.pattern
@@ -731,11 +634,7 @@ prefix = [\"sce\"]
         g.patterns().expect("and it must resolve");
     }
 
-    /// **A disabled shape is not swept, and is still validated.**
-    ///
-    /// Both halves matter. Skipping it before resolving would let one carry a vocabulary name
-    /// that does not exist, and the error would surface only when somebody re-enabled it -
-    /// the moment they have least context for it (D342).
+    /// A disabled shape is left out of the sweep but still validated (D342).
     #[test]
     fn a_disabled_shape_is_left_out_of_the_sweep_but_still_checked() {
         let mut vocabulary = std::collections::BTreeMap::new();
@@ -779,11 +678,8 @@ prefix = [\"sce\"]
         );
     }
 
-    /// The shipped grammar turns off the two shapes that made the vocabulary quadratic.
-    ///
-    /// Pinned because the whole argument for the ceiling depends on it: `learned` appearing
-    /// twice in a shape caps the list at 483 words against 16,042, and 6,966 corpus names are
-    /// blocked on vocabulary against 1,025 on shapes (D342).
+    /// No swept shape uses the `learned` slot twice, which would make the vocabulary cost quadratic
+    /// (D342).
     #[test]
     fn no_swept_shape_uses_the_learned_slot_twice() {
         let grammar = Grammar::builtin().expect("the shipped grammar parses");

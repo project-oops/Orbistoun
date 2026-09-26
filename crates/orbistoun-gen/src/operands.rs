@@ -1,23 +1,15 @@
 //! Solving per-opcode operand layouts from assembled probes.
 //!
-//! `crates/orbistoun-shader/data/opcode-operands.toml`
-//!
-//! # Solved, not transcribed
+//! Writes `crates/orbistoun-shader/data/opcode-operands.toml` (D085).
 //!
 //! Each entry is the one bit field that explains every probe sample of that opcode. Probes
 //! use varied and high register numbers so a coincidence cannot survive and a too-narrow
-//! field cannot win. **An opcode whose operands could not be solved unambiguously is absent
-//! rather than approximated** - that refusal is the whole design, and most of the comments
-//! below are about cases where it fired for the right reason and cases where it fired for
-//! the wrong one.
+//! field cannot win. An opcode whose operands cannot be solved unambiguously is absent
+//! rather than approximated.
 //!
-//! # The oracle seam
-//!
-//! Three questions here cannot be answered from bits alone - whether an unexplained operand
-//! is genuinely implicit, whether a probe *could* reach the bits a widening had to guess at,
-//! and what code a symbolic name like `mrt0` carries. All three are answered by assembling
-//! something and looking, so they go through [`Oracle`] - which the tests substitute, and
-//! which is what makes the solver testable with no toolchain at all.
+//! Three questions need the assembler (whether an unexplained operand is implicit, whether
+//! a probe can reach bits a widening guessed at, and what code a symbolic name like `mrt0`
+//! carries), so they go through [`Oracle`], which the tests substitute.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -29,22 +21,13 @@ use crate::table::Encoding;
 
 /// Tokens the reference prints among the operands that are not operands at all.
 ///
-/// `off` says there is no scalar base register; the cache hints say how the access behaves.
-/// None of them is a field, and treating them as one made every flat load and store
-/// unsolvable - the solver looked for bits encoding the word "off".
+/// `off` says there is no scalar base register; the cache hints and an export's `done`,
+/// `compr` and `vm` flags say how the access behaves. None is an operand field. The list
+/// must match the decoder's copy, so a solved layout compares with a printed one.
 ///
-/// **They are skipped as operands and still worth setting in a probe.** `unorm` is one bit
-/// immediately above the image family's `dmask`, so probes that left it clear let a five-bit
-/// window explain every sample as well as the four-bit field does - and the solver wrote the
-/// five, which would read `dmask` as sixteen greater on any shader that sets it. Varying it
-/// is what makes the narrower field the only answer.
-/// **`done`, `compr` and `vm` were missing from this list and are in the decoder's.** They are
-/// an export's flags: the last export of its kind, a compressed one, and one whose result the
-/// memory pipeline waits on. Nothing noticed while the solver took the *fewest* operands any
-/// sample had, because an export without `done` set the count and the flag was never reached.
-/// Taking the most exposed the drift immediately - as a phantom operand no field could explain
-/// (worklog 565). The decoder's copy of this list carries the note that the two agreeing is
-/// what makes a solved layout comparable with a printed one; that was true and unenforced.
+/// They are still worth setting in a probe: `unorm` sits immediately above the image
+/// family's `dmask`, and probes that leave it clear let a five-bit window fit as well as
+/// the real four-bit field.
 const MODIFIERS: [&str; 14] = [
     "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv", "unorm", "done",
     "compr", "vm",
@@ -52,38 +35,17 @@ const MODIFIERS: [&str; 14] = [
 
 /// Field shapes worth trying, for register selectors.
 ///
-/// Register fields in this architecture are six to nine bits. **Five**, because a buffer
-/// resource selector names a *group* of four consecutive scalar registers rather than a
-/// register, so it needs a quarter of the range and a quarter of the bits. Every field
-/// solved before that one selected a single register and none was narrower than six, which
-/// is why the lower bound had never been tested - the buffer accesses simply reported as
-/// unsolvable, and an unsolvable opcode looks like a gap in the probes rather than a gap in
-/// the solver.
+/// Register fields in this architecture are six to nine bits, and five for a buffer
+/// resource selector, which names a group of four consecutive scalar registers.
 const WIDTHS: std::ops::Range<u32> = 5..10;
 
 /// Widths an immediate field can have.
 ///
-/// Immediates are far wider than register selectors and their widths are not the same set -
-/// a memory offset and a branch target are both immediates and neither is eight bits.
-///
-/// **Two and three**, because a *selector* is an immediate too and they are tiny: an
-/// interpolation names one of four channels in two bits. Without them the three
-/// interpolation opcodes had no candidate for that operand at all.
-///
-/// **Four**, because the image family's channel mask is four bits with `unorm` immediately
-/// above it. Without four the only candidate was the five-bit window that swallows `unorm` -
-/// which fitted every sample while that bit stayed clear, and the solver wrote it. Probes
-/// that set it left the mask with no candidate at all, which is the refusal working: the
-/// answer was missing from the search, not wrong in the table.
-///
-/// **Twelve**, because a flat access's byte offset is that wide with its cache hints in the
-/// bits above. It is the same shape as the image mask and it went the same way twice: without
-/// the width there was no candidate at all and four opcodes reported unsolvable, and with only
-/// thirteen the field swallowed the hint above it - which probes that left that hint clear could
-/// not see and the differential test against compiled output could, immediately (worklog 565).
-///
-/// Widening the search cannot produce a wrong answer, only fewer answers: an extra width
-/// that also fits makes an operand *ambiguous*, and the solver refuses rather than picking.
+/// A different set from register selectors: two and three for selectors (an interpolation
+/// names one of four channels in two bits), four for the image family's channel mask below
+/// `unorm`, twelve for a flat access's byte offset below its cache hints, and the wider
+/// offsets and branch targets. An extra width cannot produce a wrong answer: a second fit
+/// makes the operand ambiguous, and the solver refuses.
 const IMMEDIATE_WIDTHS: [u32; 9] = [2, 3, 4, 12, 13, 16, 20, 21, 32];
 
 /// How a field's bits are read.
@@ -91,7 +53,7 @@ const IMMEDIATE_WIDTHS: [u32; 9] = [2, 3, 4, 12, 13, 16, 20, 21, 32];
 pub(crate) enum Kind {
     /// A direct vector-register index.
     Vgpr,
-    /// The shared source numbering - registers, special registers, inline constants.
+    /// The shared source numbering: registers, special registers, inline constants.
     Source,
     /// A plain number.
     Immediate,
@@ -131,9 +93,8 @@ pub(crate) struct Field {
 
 /// Something that can assemble one instruction and say what came back.
 ///
-/// The seam. Live, it shells out; in a test it is a table of canned answers, which is what
-/// lets every path below - including the two that ask the assembler a question - run with no
-/// toolchain installed.
+/// Live, it shells out; in a test it is a table of canned answers, so every path runs with
+/// no toolchain installed.
 pub(crate) trait Oracle {
     /// Assembles one line. An empty result means it was refused.
     fn assemble_one(&self, text: &str) -> Vec<Sample>;
@@ -141,9 +102,8 @@ pub(crate) trait Oracle {
 
 /// Splits one comma-separated piece into the operands it actually contains.
 ///
-/// Usually one. A piece carrying trailing modifiers becomes the operand plus whatever named
-/// immediates followed it, in the order printed - so a field the reference reports only as
-/// `name:value` still gets a slot the solver can find.
+/// Usually one. A piece carrying trailing modifiers becomes the operand plus the named
+/// immediates after it, in printed order, so a `name:value` field still gets a slot.
 #[must_use]
 pub(crate) fn split_operand(piece: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -152,14 +112,9 @@ pub(crate) fn split_operand(piece: &str) -> Vec<String> {
             continue;
         }
         if let Some((number, channel)) = crate::patterns::attribute(token) {
-            // Split into two operands rather than skipped, because both are real fields
-            // the decoder has to read: which attribute, and which of its four channels.
-            //
-            // `xyzw` = 0 to 3 is the only ordering they could have - and it is *checked*
-            // rather than assumed, because the solver only finds a field if the values it
-            // was given fit one consistently across every sample. Give it the wrong
-            // ordering and no field explains the samples, so it refuses. An input to a
-            // solve that would fail if it were wrong is a different thing from a guess.
+            // Two operands, both real fields: which attribute, and which of its four
+            // channels. The `xyzw` ordering is checked by the solve, which finds no field
+            // if it is wrong.
             out.push(number);
             out.push(channel.to_string());
             continue;
@@ -178,13 +133,10 @@ type Reading = (Kind, i64, u32);
 
 /// Every reading of an operand.
 ///
-/// A field holds a *code*, not a register number, and one operand text can be consistent
-/// with more than one reading - a vector register is a direct index in some fields and sits
-/// at 256 upward in the shared numbering. All plausible readings are returned and the
-/// samples decide between them.
-///
-/// A multi-register operand is reduced to its base. The field encodes where the group
-/// starts; how far it extends is a property of the instruction.
+/// A field holds a code, not a register number, and one operand can have several readings:
+/// a vector register is a direct index in some fields and sits at 256 upward in the shared
+/// numbering. All plausible readings are returned and the samples decide. A multi-register
+/// operand is reduced to its base.
 #[must_use]
 pub(crate) fn expected(
     operand: &str,
@@ -192,13 +144,13 @@ pub(crate) fn expected(
     symbolic: &BTreeMap<String, i64>,
 ) -> Option<Vec<Reading>> {
     if let Some(&code) = symbolic.get(operand) {
-        // An export target or an interpolation parameter: a selector, not a register, so
-        // the only reading offered is the raw number. Its code was measured.
+        // An export target or an interpolation parameter: a selector with a measured code,
+        // so the only reading is the raw number.
         return Some(vec![(Kind::Immediate, code, 1)]);
     }
     if let Some(&code) = named.get(operand) {
-        // A special register or an inline float. Its code is fixed, and these are what push
-        // a source field past the range registers alone can reach.
+        // A special register or an inline float, whose fixed codes reach past the register
+        // range.
         return Some(vec![(Kind::Source, code, 1)]);
     }
     if let Some((is_vector, number)) = crate::patterns::register(operand) {
@@ -209,11 +161,8 @@ pub(crate) fn expected(
                 (Kind::Source, number + 256, 1),
             ]);
         }
-        // Scale four as well as two: a *pair* is named by a field holding half its base
-        // register, and a *quad* - a buffer resource constant - by one holding a quarter.
-        // Only the readings listed here are ever looked for, so an operand whose scale is
-        // absent has no candidate field at all and its opcode reports as unsolvable, which
-        // reads as a gap in the probes rather than a gap in the solver.
+        // Scale two and four: a pair is named by a field holding half its base register,
+        // and a quad (a buffer resource constant) by one holding a quarter.
         return Some(vec![
             (Kind::Source, number, 1),
             (Kind::Source, number, 2),
@@ -222,15 +171,13 @@ pub(crate) fn expected(
     }
     let value = crate::patterns::immediate(operand)?;
     let mut readings = vec![(Kind::Immediate, value, 1)];
-    // A small integer written plainly is an inline constant in a source field, and the same
-    // text in an offset field is just the number. Both are offered.
+    // A small integer is an inline constant in a source field and the number itself in an
+    // offset field; both are offered.
     if (0..=64).contains(&value) {
         readings.push((Kind::Source, 128 + value, 1));
     } else if (-16..=-1).contains(&value) {
         // The negative inline constants sit above the positive ones: -1 through -16 at 193
-        // upward. Omitting them made `s_mov_b64` unsolvable, with nothing to say why - the
-        // sample using -1 had no reading any field could explain, and one operand with no
-        // candidates fails the whole opcode.
+        // upward.
         readings.push((Kind::Source, 192 + (-value), 1));
     }
     Some(readings)
@@ -238,21 +185,11 @@ pub(crate) fn expected(
 
 /// Every field shape and reading that explains this operand in every sample.
 ///
-/// `reserved` maps a word index to the bits of that word the encoding table has already
-/// spoken for - the family's fixed bits, its opcode field, and any continuation of that
-/// opcode. No operand can live in those, and a candidate overlapping them is reading a
-/// constant, or a bit belonging to the opcode, as part of a value.
-///
-/// **Keyed by word rather than a single mask** because an opcode is not always kept in the
-/// first one. The typed-buffer family puts its fourth opcode bit at 53, which is bit 21 of
-/// the second word, and a mask covering only the first word would leave a candidate free to
-/// swallow it.
-///
-/// That filter is not tidiness. `v_cmp_lt_f32_e32` was unsolvable without it: its second
-/// source is an eight-bit vector register at bit 9, and a *nine*-bit window at the same
-/// place reads the register plus 256 - which is exactly that register in the shared
-/// numbering. Both readings explained every sample and always would, because the ninth bit
-/// is part of the opcode and is 1 for this opcode in every instruction that has it.
+/// `reserved` maps a word index to the bits the encoding table already claims (see
+/// [`reserved_bits_for`]); a candidate overlapping them would read a constant or opcode bit as
+/// part of a value. Without it, a nine-bit window over `v_cmp_lt_f32_e32`'s eight-bit
+/// vector source reads the register plus 256, which is the same register in the shared
+/// numbering, and the solve stays ambiguous.
 #[must_use]
 pub(crate) fn candidates_for(
     samples: &[Sample],
@@ -261,9 +198,8 @@ pub(crate) fn candidates_for(
     symbolic: &BTreeMap<String, i64>,
     reserved: &BTreeMap<usize, u32>,
 ) -> Vec<Field> {
-    // Samples that carry this operand. One that does not carry it says nothing about it -
-    // the reference omits an operand at its default - so it is left out rather than treated
-    // as evidence of absence.
+    // Samples that carry this operand. The reference omits an operand at its default, so a
+    // sample without it is not evidence of absence.
     let mut wanted: Vec<(&Sample, Vec<Reading>)> = Vec::new();
     for sample in samples {
         let Some(operand) = sample.operands.get(position) else {
@@ -295,12 +231,8 @@ pub(crate) fn candidates_for(
                     (Kind::Vgpr, 1_u32),
                     (Kind::Source, 1),
                     (Kind::Source, 2),
-                    // Four, because a buffer resource constant lives in *four* consecutive
-                    // scalar registers and its field holds the group index rather than the
-                    // register number. Without this the buffer accesses solved to a field
-                    // one bit lower at scale two - the same product for every sample given,
-                    // and wrong for the first one with a high data register, because the
-                    // bit it borrowed belonged to the field next door.
+                    // Four, because a buffer resource constant spans four consecutive scalar
+                    // registers and its field holds the group index.
                     (Kind::Source, 4),
                     (Kind::Immediate, 1),
                 ] {
@@ -329,28 +261,12 @@ pub(crate) fn candidates_for(
 
 /// Bits no operand can occupy, per word.
 ///
-/// Three sources, and they are the same argument three times.
-///
-/// The **opcode field**, because the encoding table extracts the opcode from those bits, so
-/// an operand cannot also live there (D109).
-///
-/// The **family's fixed bits** - the encoding's own mask - because they are constant across
-/// every instruction in the family by definition. A candidate overlapping them is reading a
-/// constant as part of a value, and it will fit every sample forever, which is what makes it
-/// so hard to notice.
-///
-/// The **opcode's continuation**, where a family keeps its opcode in two pieces. This is why
-/// the result is keyed by word: the typed-buffer family's fourth opcode bit is at 53, in the
-/// *second* word, and a first-word mask cannot exclude it.
-///
-/// D109 excluded only the first and left the second, and the gap cost the two most common
-/// instructions in the set. `v_mov_b32_e32` writes its destination at bit 17, and a nine-bit
-/// window there reaches bit 25 - the low bit of VOP1's mask, permanently 1. So the window
-/// reads `v0` as 256, which is exactly `v0`'s code in the shared numbering: an eight-bit
-/// vector register and a nine-bit source both explain every sample, neither can be
-/// eliminated, and the solve stops as ambiguous. The symptom was the whole opcode missing
-/// rather than a wrong field - the solver behaving correctly - which also means a move
-/// decoded with no operands at all, and nothing said why.
+/// The opcode field, the family's fixed bits (constant across the family, so a candidate
+/// overlapping them fits every sample), and the opcode's continuation where a family splits
+/// it. Keyed by word, because the typed-buffer family's fourth opcode bit is at 53, in the
+/// second word. Without the fixed bits, a nine-bit window at `v_mov_b32_e32`'s destination
+/// reaches the always-set low bit of VOP1's mask and reads `v0` as 256, making the solve
+/// ambiguous.
 #[must_use]
 pub(crate) fn reserved_bits_for(family: &str, encodings: &[Encoding]) -> BTreeMap<usize, u32> {
     let mut out = BTreeMap::new();
@@ -405,17 +321,10 @@ pub(crate) fn solve(
     reserved: &BTreeMap<usize, u32>,
     oracle: &dyn Oracle,
 ) -> Option<Vec<Field>> {
-    // **The most operands any sample has, not the fewest.** An operand the reference omits
-    // when it is at its default - a flat access's byte offset, printed only when non-zero -
-    // is absent from some samples and present in others, and taking the minimum meant one
-    // zero-offset probe hid the field from every probe that had it. The field then did not
-    // exist as far as the decoder was concerned, and a translation built on that layout
-    // ignored the offset rather than refusing it: an access sixteen bytes along read the word
-    // at zero, silently (worklog 565).
-    //
-    // A position only some samples carry is solved from those samples. That is not a
-    // weakening: a position one sample carries has many fields that explain it, which is
-    // ambiguous, and ambiguous is refused.
+    // The most operands any sample has, not the fewest: the reference omits an operand at
+    // its default (a flat access's byte offset prints only when non-zero), so the fewest
+    // would hide real fields. A position only some samples carry is solved from those; too
+    // few samples leave it ambiguous, and ambiguous is refused.
     let count = samples.iter().map(|s| s.operands.len()).max()?;
     if count == 0 {
         return Some(Vec::new());
@@ -425,19 +334,14 @@ pub(crate) fn solve(
     for position in 0..count {
         let mut found = candidates_for(samples, position, named, symbolic, reserved);
         if found.is_empty() {
-            // No field anywhere explains this operand. Two things look like that, and they
-            // are not the same: the operand is *implicit* and the encoding does not carry
-            // it, or the probes never varied it and a real field went unnoticed.
-            //
-            // Identical text in every sample is consistent with **both**, so it is a
-            // precondition and not the answer. The answer comes from the assembler.
+            // No field explains this operand: either it is implicit, or the probes never
+            // varied it. Identical text in every sample fits both, so the assembler decides.
             let texts: BTreeSet<&str> = samples
                 .iter()
                 .filter_map(|s| s.operands.get(position).map(String::as_str))
                 .collect();
             if texts.len() == 1 && samples.len() > 1 {
-                // Not implicit. Stopping the solve is right: continuing would record a
-                // field that exists as one that does not.
+                // Not implicit, so the solve stops rather than record a real field as absent.
                 if implicit_operand_carries_no_bits(&samples[0], position, oracle) == Some(false) {
                     return None;
                 }
@@ -451,40 +355,29 @@ pub(crate) fn solve(
                 });
                 continue;
             }
-            // Anything unexplained stops the solve. A partial operand list presented as
-            // complete is the failure this whole effort exists to avoid.
+            // Anything unexplained stops the solve rather than yield a partial operand list.
             return None;
         }
 
-        // A multi-register operand names an *aligned* group - a pair is always even, a quad
-        // always a multiple of four - so a scaled reading of some other field always fits
-        // alongside the unscaled reading of the real one. That is a genuine ambiguity in the
-        // samples and it made every wide load and store unsolvable.
-        //
-        // Scaling is the exception rather than the rule, so an unscaled reading wins where
-        // one exists. Safe because where scaling is real the unscaled reading simply does
-        // not fit: a base field holding 3 for register 6 is explained by scale two and by
-        // nothing else.
+        // A multi-register operand names an aligned group, so a scaled reading of another
+        // field always fits beside the real unscaled one. An unscaled reading wins where one
+        // exists; where scaling is real, no unscaled reading fits.
         if found.iter().any(|f| f.scale == 1) {
             found.retain(|f| f.scale == 1);
         }
 
-        // What remains must agree on how the bits are read. Two readings that decode
-        // differently are not a tie to be broken - a field holding 242 is vector register
-        // 242 under one and the constant 1.0 under the other, and samples that only ever put
-        // a register there cannot tell them apart. Reported as unsolved; the cure is a
-        // better probe, not a coin toss.
+        // What remains must agree on how the bits are read: 242 is vector register 242 under
+        // one reading and the constant 1.0 under another. A disagreement is unsolved and
+        // calls for a better probe.
         let kinds: BTreeSet<(Kind, u32)> = found.iter().map(|f| (f.kind, f.scale)).collect();
         if kinds.len() > 1 {
             return None;
         }
 
-        // Narrowest wins, then lowest word, then lowest shift, so the answer is
-        // deterministic. High register numbers alone are not enough to make that safe:
-        // scalar registers stop at 101, so a seven-bit field explains every register sample
-        // a real eight-bit field does. The probes therefore also use inline constants and
-        // special registers, whose codes reach the top of the space - and with those in the
-        // set, the narrowest consistent field is the real one.
+        // Narrowest, then lowest word, then lowest shift, so the answer is deterministic.
+        // Scalar registers stop at 101, so probes also use inline constants and special
+        // registers, whose codes reach the top of the space; with those, the narrowest
+        // consistent field is the real one.
         found.sort_by_key(|f| (f.width, f.word, f.shift));
         solved.push(found.remove(0));
     }
@@ -493,27 +386,19 @@ pub(crate) fn solve(
 
 /// Whether an operand no field explains genuinely occupies no bits.
 ///
-/// **Asking instead of asserting.** Substitute a different value into that operand and
-/// assemble. Three outcomes, and the third is the one an earlier version's prose did not
-/// allow for:
-///
-/// - **refused** - nothing else is legal there, so the operand is fixed. Implicit.
-/// - **accepted, words identical** - the strongest evidence available. The operand
-///   demonstrably occupies no bits, because changing it changed no bit.
-/// - **accepted, words differ** - there *is* a field and the probes missed it. Calling that
-///   implicit records an operand as un-encoded while the encoding carries it, and every
-///   decode silently prints the sample's value instead of the real one.
-///
-/// `None` when nothing was accepted or refused informatively enough to say - the caller
-/// keeps the original text-identity rule rather than losing a solve to an inconclusive probe.
+/// Substitutes a different value into the operand and assembles. Refused means nothing
+/// else is legal there, so it is implicit; accepted with identical words means it occupies
+/// no bits; accepted with different words means a field the probes missed, so it is not
+/// implicit. `None` when the probes are inconclusive, and the caller keeps the text-identity
+/// rule.
 pub(crate) fn implicit_operand_carries_no_bits(
     sample: &Sample,
     position: usize,
     oracle: &dyn Oracle,
 ) -> Option<bool> {
     let current = sample.operands.get(position)?;
-    // Spread across register files and the special names, so at least one is plausible
-    // wherever the operand sits. A candidate equal to what is already there proves nothing.
+    // Candidates span register files and special names, so one is plausible wherever the
+    // operand sits; one equal to the current value proves nothing.
     let mut conclusive = false;
     for candidate in ["vcc", "exec", "s[0:1]", "v0", "s0", "vcc_lo"] {
         if candidate == current {
@@ -524,8 +409,7 @@ pub(crate) fn implicit_operand_carries_no_bits(
         };
         let assembled = oracle.assemble_one(&text);
         let Some(first) = assembled.first() else {
-            // Refused. Consistent with the operand being fixed; keep looking in case
-            // something else is accepted, which would be more informative.
+            // Refused: consistent with a fixed operand. Keep looking for an acceptance.
             conclusive = true;
             continue;
         };
@@ -539,10 +423,9 @@ pub(crate) fn implicit_operand_carries_no_bits(
 
 /// `sample` with operand `position` replaced by `candidate`, modifiers intact.
 ///
-/// **Not `operands.join(", ")`.** That drops the modifiers, and for some families the
-/// modifiers are what make the instruction legal - a typed buffer access needs its
-/// `format:[...]` and an addressing mode, and without them it is refused. Rebuilt from the
-/// text the reference printed instead, replacing one token in place.
+/// Rebuilt from the printed text, replacing one token in place, rather than
+/// `operands.join(", ")`, which drops modifiers some families need to be legal (a typed
+/// buffer access needs `format:[...]` and an addressing mode).
 #[must_use]
 pub(crate) fn substitute(sample: &Sample, position: usize, candidate: &str) -> Option<String> {
     let target = sample.operands.get(position)?;
@@ -576,26 +459,15 @@ pub(crate) fn substitute(sample: &Sample, position: usize, candidate: &str) -> O
 
 /// Widens a field to what the rest of its family reads at the same position.
 ///
-/// A source field is a property of the *encoding*, so two opcodes of one family reading the
-/// same bits at different widths cannot both be right. Usually the narrow one solved that way
-/// because no probe put a high enough value in that slot, and the cure is a better probe.
-///
-/// Sometimes no probe can. `v_cndmask_b32` takes a sixty-four-bit mask as its third source,
-/// and a mask is always a scalar pair - so the highest value that field can legally hold is
-/// the execution mask's code, and the top bits are unreachable by any instruction the
-/// assembler will emit. Left alone it would warn forever, and **a check that always warns is
-/// a check nobody reads**.
-///
-/// So the family's widest reading is adopted, and every adoption is reported. Only widths
-/// are reconciled: two readings that disagree about *kind* or *scale* decode differently and
-/// are a real ambiguity, which stays a warning.
+/// A source field belongs to the encoding, so two opcodes of one family reading the same
+/// bits at different widths cannot both be right. Sometimes no probe can reach the top
+/// bits: `v_cndmask_b32`'s third source is always a scalar pair, so it never exceeds the
+/// execution mask's code. The family's widest reading is adopted and every adoption is
+/// reported. Only widths are reconciled; a disagreement about kind or scale stays a warning.
 pub(crate) fn reconcile_widths(solved: &mut BTreeMap<(String, u32), Solved>) -> Vec<String> {
-    // Deliberately **not** keyed by kind. A field's width is a property of the encoding; how
-    // a particular opcode reads those bits is not. The interpolation family proves the
-    // point - `v_interp_p1` reads bits 7:0 as a vector register and `v_interp_mov` reads the
-    // same bits as a parameter selector, and the selector has only three legal spellings, so
-    // it solves two bits wide and nothing can probe it wider. Keyed by kind, those two never
-    // met and reconciliation had nothing to compare.
+    // Not keyed by kind: width belongs to the encoding, how an opcode reads the bits does
+    // not. `v_interp_p1` reads bits 7:0 as a vector register and `v_interp_mov` reads them
+    // as a selector with three legal spellings, which solves two bits wide.
     let mut widest: BTreeMap<(String, usize, u32, u32), u32> = BTreeMap::new();
     for ((family, _), entry) in solved.iter() {
         for field in &entry.fields {
@@ -630,22 +502,15 @@ pub(crate) fn reconcile_widths(solved: &mut BTreeMap<(String, u32), Solved>) -> 
 
 /// Names fields that opcodes of one family read differently.
 ///
-/// This has happened four times, in three separate sittings, and every time it was caught by
-/// a person putting the generated rows side by side and noticing. **That is not a check, it
-/// is a habit** - and the last round produced three opcodes each too narrow in a *different*
-/// source slot, which is exactly the pattern reading down a column misses.
-///
-/// A warning rather than a failure. The narrower reading is not necessarily wrong: a field
-/// genuinely can differ between opcodes, and refusing to generate would make an unprovable
-/// claim in the other direction. Naming it is enough, because the cure is always the same.
+/// A warning rather than a failure: a field can genuinely differ between opcodes, so the
+/// narrower reading is not necessarily wrong.
 #[must_use]
 pub(crate) fn disagreements(solved: &BTreeMap<(String, u32), Solved>) -> Vec<String> {
     let mut positions: BTreeMap<(String, usize, u32), BTreeMap<u32, Vec<String>>> = BTreeMap::new();
     for ((family, _), entry) in solved {
         for field in &entry.fields {
-            // No bits, so no width to disagree about - and every implicit slot nominally
-            // sits at word 0 bit 0, which would otherwise collide with a real field there
-            // and report a disagreement that is not one.
+            // No bits, so no width; every implicit slot nominally sits at word 0 bit 0 and
+            // would otherwise collide with a real field there.
             if field.kind == Kind::Implicit {
                 continue;
             }
@@ -686,11 +551,9 @@ pub(crate) fn disagreements(solved: &BTreeMap<(String, u32), Solved>) -> Vec<Str
 
 /// Operand codes that have documented names, read from the decoder's own table.
 ///
-/// Needed because a probe using a special register or an inline constant is the only way to
-/// force a source field to its full width: scalar registers stop at 101, so samples using
-/// only registers can be explained by a seven-bit field when the real one is eight. The first
-/// attempt used registers alone and solved exactly that too-narrow field - correct on every
-/// sample it was given, and wrong on the first instruction carrying a literal.
+/// A probe using a special register or an inline constant is the only way to force a source
+/// field to its full width: scalar registers stop at 101, so register-only samples fit a
+/// seven-bit field when the real one is eight.
 pub(crate) fn load_named_codes(path: &std::path::Path) -> Result<BTreeMap<String, i64>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading the operand table at {}", path.display()))?;
@@ -713,13 +576,9 @@ pub(crate) fn parse_named_codes(text: &str) -> Result<BTreeMap<String, i64>> {
         }
     }
 
-    // A sixty-four-bit operand names the pair by its low half, and the disassembler spells
-    // that without the suffix: `exec`, not `exec_lo`. Same code, different width, so this is
-    // an alias for reading probe output rather than a second entry the decoder should carry.
-    //
-    // Without it, every `s_mov_b64` sample touching the execution mask has no expected
-    // reading at all, and the opcode reports as unsolved with nothing to say why. That is
-    // exactly the instruction the mask is manipulated with, so the samples cannot be dropped.
+    // A sixty-four-bit operand names the pair by its low half, which the disassembler
+    // spells without the suffix (`exec`, not `exec_lo`). An alias for reading probe output,
+    // not a second decoder entry; `s_mov_b64` on the execution mask needs it.
     for (wide, half) in [("exec", "exec_lo"), ("vcc", "vcc_lo")] {
         if let Some(&code) = codes.get(half) {
             codes.insert(wide.to_owned(), code);
@@ -795,7 +654,7 @@ mod tests {
         }
     }
 
-    /// An oracle that accepts, and returns different bits: the case that must NOT be
+    /// An oracle that accepts and returns different bits: the case that must not be
     /// recorded as implicit.
     struct AcceptsDifferently;
     impl Oracle for AcceptsDifferently {
@@ -804,8 +663,7 @@ mod tests {
         }
     }
 
-    /// Modifiers are not operands, and treating one as a field made every flat access
-    /// unsolvable - the solver looked for bits encoding the word "off".
+    /// Modifiers such as `off` are not operands.
     #[test]
     fn modifiers_are_not_operands() {
         assert_eq!(split_operand(" v0 glc slc "), ["v0"]);
@@ -814,9 +672,7 @@ mod tests {
 
     /// A named immediate becomes its value, so the field carrying it gets a slot.
     ///
-    /// Splitting on commas alone leaves `v2 offset:16` as one operand, which matches no
-    /// register pattern - so the opcode reports as unsolvable and the offset field, which is
-    /// real and which a translator must read, is never looked for.
+    /// Splitting on commas alone would leave `v2 offset:16` as one operand.
     #[test]
     fn a_named_immediate_becomes_a_slot() {
         assert_eq!(split_operand(" v2 offset:16"), ["v2", "16"]);
@@ -833,24 +689,17 @@ mod tests {
 
     /// A symbolic modifier is a field of the encoding, not a register operand.
     ///
-    /// Recognised explicitly rather than left to fall through: an unrecognised token has no
-    /// reading the solver can find, so every typed-buffer opcode would report as unsolvable -
-    /// which looks like a gap in the probes and is not one.
+    /// Recognised explicitly, since an unrecognised token has no reading and would leave
+    /// every typed-buffer opcode unsolvable.
     #[test]
     fn a_symbolic_modifier_is_skipped() {
         assert_eq!(split_operand(" v0 format:[BUF_FMT_32_FLOAT] idxen"), ["v0"]);
-        // The same kind of thing without brackets, which is how the image family prints the
-        // one it has. Unrecognised, every image opcode reported as unsolvable - which looks
-        // like a gap in the probes and was a gap in the token rules.
+        // The same without brackets, as the image family prints it.
         assert_eq!(split_operand(" v[4:7] dim:SQ_RSRC_IMG_2D"), ["v[4:7]"]);
     }
 
-    /// A named immediate is **not** a symbolic modifier, however much it looks like one.
-    ///
-    /// The first character of the value keeps them apart: a digit makes it a number the
-    /// encoding carries in a field a translator must read. Widening the symbolic pattern to
-    /// reach `dim:` could have swallowed every flat offset instead, and a dropped offset is
-    /// an access somewhere the guest did not mean.
+    /// A named immediate is not a symbolic modifier: a digit as the value's first character
+    /// makes it a number in a field a translator must read.
     #[test]
     fn a_named_immediate_is_not_a_symbolic_modifier() {
         assert_eq!(split_operand("v2 offset:16"), ["v2", "16"]);
@@ -879,9 +728,7 @@ mod tests {
 
     /// Negative inline constants sit above the positive ones.
     ///
-    /// Omitting them made `s_mov_b64` unsolvable with nothing to say why: the sample using
-    /// -1 had no reading any field could explain, and one operand with no candidates fails
-    /// the whole opcode.
+    /// Without them a sample using -1 has no reading, which fails the whole opcode.
     #[test]
     fn negative_inline_constants_are_offered() {
         let readings = expected("-1", &BTreeMap::new(), &BTreeMap::new()).expect("known");
@@ -891,10 +738,7 @@ mod tests {
         assert!(readings.contains(&(Kind::Immediate, 3, 1)));
     }
 
-    /// Reserved bits cover the mask, the opcode, **and** a continuation in another word.
-    ///
-    /// D109 excluded only the first word and the gap cost the two most common instructions
-    /// in the set.
+    /// Reserved bits cover the mask, the opcode, and a continuation in another word.
     #[test]
     fn reserved_bits_cover_a_continuation_in_another_word() {
         let encodings = crate::table::parse(
@@ -934,11 +778,7 @@ opcode_extension = { shift = 21, width = 1, word = 1 }
         assert!(blocked.is_empty(), "every bit was spoken for");
     }
 
-    /// An operand accepted with *different* bits is not implicit.
-    ///
-    /// **The case the original prose did not allow for.** Recording it as implicit would
-    /// mark an operand as un-encoded while the encoding carries it, and every decode would
-    /// silently print the sample's value instead of the real one.
+    /// An operand accepted with different bits is not implicit: the encoding carries it.
     #[test]
     fn an_operand_that_changes_the_bits_is_not_implicit() {
         let samples = [
@@ -1028,8 +868,8 @@ opcode_extension = { shift = 21, width = 1, word = 1 }
 
     /// A disagreement is named, and an implicit slot never causes a false one.
     ///
-    /// Every implicit slot nominally sits at word 0 bit 0, which would otherwise collide
-    /// with a real field there and report a disagreement that is not one.
+    /// Every implicit slot nominally sits at word 0 bit 0 and must not collide with a real
+    /// field there.
     #[test]
     fn an_implicit_slot_does_not_cause_a_false_disagreement() {
         let implicit = Field {
@@ -1111,30 +951,22 @@ pub(crate) struct LiveOracle<'a> {
     pub(crate) source: &'a crate::assembler::Source,
     /// Where to write recordings, when one is being taken.
     ///
-    /// Carried rather than ignored: these probes are the part of the solve that cannot be
-    /// replayed without them, so a recording that omitted them replays into a *different*
-    /// table - quietly, and only for the two families that need symbolic codes.
+    /// Carried because these probes must be recorded too, or a replay yields a different
+    /// table for the families that need symbolic codes.
     pub(crate) record: Option<&'a std::path::Path>,
 }
 
 impl Oracle for LiveOracle<'_> {
     fn assemble_one(&self, text: &str) -> Vec<Sample> {
         let input = format!("{text}\n");
-        // **Keyed by what is being asked, not by the fact that something is.** A single
-        // fixed key works live - each call re-invokes the assembler - and is silently wrong
-        // on replay, where all forty-seven symbolic-code probes read the same recording and
-        // get the same canned answer. The codes then come out empty and the two families
-        // that need them, `exp` and `v_interp_mov`, drop out of the table entirely.
-        //
-        // Found by diffing a replay against the committed table, which is the whole reason
-        // that diff exists (D209).
+        // Keyed by the question, so on replay each symbolic-code probe reads its own
+        // recording rather than one shared answer (D209).
         let key = format!("operands-probe-{}", crate::assembler::key_for(&input));
         let Ok(output) = crate::assembler::assemble(self.source, &key, &input, self.record) else {
             return Vec::new();
         };
         let parsed = crate::assembler::parse(&input, &output);
-        // A refusal anywhere makes the whole answer untrustworthy: the caller is asking
-        // whether *this* line assembled, and a partial result would answer about another.
+        // A refusal anywhere voids the answer: the caller asks whether this line assembled.
         if parsed.rejected.is_empty() {
             parsed.samples
         } else {
@@ -1145,20 +977,10 @@ impl Oracle for LiveOracle<'_> {
 
 /// Codes for operands that are names rather than registers or numbers.
 ///
-/// # Deriving rather than transcribing
-///
-/// The obvious approach is to write down that `mrt0` is 0 and `pos0` is 12, from the
-/// reference. That is not done here, for the same reason nothing else is: a transcribed
-/// number cannot be checked without the document it came from, and the failure mode is a
-/// decoder that reports the wrong export target for the rest of the project's life.
-///
-/// Instead the code is **measured**, by the same move the encoding solver uses to find a
-/// family's mask. Assemble the same instruction twice, changing only the name. Everything
-/// that stays the same is not the field; the bits that move are.
-///
-/// The candidate *spellings* are enumerated. That is not the same as transcribing their
-/// values: a spelling that does not exist is refused by the assembler and drops out, and one
-/// that does exist has its code read off the encoding rather than assumed.
+/// Measured rather than transcribed (D085): assemble the same instruction with only the
+/// name changed, and the bits that move are the field. The candidate spellings are
+/// enumerated; a spelling that does not exist is refused, and one that does has its code
+/// read off the encoding.
 #[must_use]
 pub(crate) fn derive_symbolic_codes(oracle: &dyn Oracle) -> BTreeMap<String, i64> {
     let mut exports: Vec<String> = (0..8).map(|n| format!("mrt{n}")).collect();
@@ -1187,13 +1009,9 @@ pub(crate) fn derive_symbolic_codes(oracle: &dyn Oracle) -> BTreeMap<String, i64
             continue;
         }
 
-        // Bits that differ between any two spellings, tracked **per word**. Everything else
-        // is the rest of the instruction, which was deliberately held constant.
-        //
-        // Per word rather than combined: an export keeps its target in the first word and
-        // its sources in the second, and a single mask over both would not say which word
-        // the field is in. Combining them happened to work for these two families and would
-        // have been wrong for the first family where it mattered.
+        // Bits that differ between any two spellings, per word: an export keeps its target
+        // in the first word and its sources in the second, and a combined mask would not
+        // say which word holds the field.
         let reference = assembled[0].1.clone();
         let width = assembled.iter().map(|(_, w)| w.len()).min().unwrap_or(0);
         let mut varying = vec![0_u32; width];
@@ -1205,16 +1023,14 @@ pub(crate) fn derive_symbolic_codes(oracle: &dyn Oracle) -> BTreeMap<String, i64
 
         let moved: Vec<usize> = (0..width).filter(|&i| varying[i] != 0).collect();
         if moved.len() != 1 {
-            // Nothing varied, or more than one word did. Either way this is not one field
-            // and reading it as one would invent a number.
+            // Nothing varied, or more than one word did: not one field.
             continue;
         }
         let word_index = moved[0];
         let bits = varying[word_index];
         let shift = bits.trailing_zeros();
         let mask = bits >> shift;
-        // A field is contiguous. Bits that moved in more than one run mean more than one
-        // thing changed with the name, and their combined value is not a code.
+        // A field is contiguous; non-contiguous moving bits mean more than one thing changed.
         if mask & mask.wrapping_add(1) != 0 {
             continue;
         }
@@ -1234,9 +1050,8 @@ pub(crate) struct Report {
     pub(crate) probed: usize,
     /// Probes this target rejected.
     ///
-    /// Printed in full rather than counted: these are the probes this generation does not
-    /// have, and the list is the retarget worklist. A count says how much work there is and
-    /// nothing about what it is.
+    /// Printed in full rather than counted: these are the probes this generation lacks, and
+    /// the list is the retarget work.
     pub(crate) rejected: Vec<String>,
     /// Opcodes whose operands could not be solved unambiguously.
     pub(crate) unsolved: Vec<String>,
@@ -1255,9 +1070,7 @@ pub(crate) fn run(
     record: Option<&std::path::Path>,
 ) -> Result<Report> {
     let oracle = LiveOracle { source, record };
-    // Measured before anything is solved, because two families' operands cannot be read
-    // without it. One round trip, and it is the difference between those opcodes solving and
-    // reporting as a gap in the probes.
+    // Measured first, because two families' operands cannot be read without it.
     let symbolic = derive_symbolic_codes(&oracle);
 
     let mut by_opcode: BTreeMap<(String, u32), Vec<Sample>> = BTreeMap::new();
@@ -1292,13 +1105,8 @@ pub(crate) fn run(
             if sample.words.is_empty() {
                 continue;
             }
-            // **Re-split with this module's rules, not the shared ones.** The shared parser
-            // splits on whitespace, which is right for the encoding solver and wrong here:
-            // it leaves `off` and `glc` as operands, keeps `v2 offset:16` as one token, and
-            // never separates `attr3.y` into the two fields it is. Every flat access, every
-            // typed buffer access and every interpolation reported as unsolvable when the
-            // splitting was shared, because the solver was looking for bits encoding the
-            // word "off".
+            // Re-split with this module's rules: the shared whitespace split keeps `off` and
+            // `glc` as operands, `v2 offset:16` as one token, and `attr3.y` whole.
             let sample = Sample {
                 operands: sample.printed.split(',').flat_map(split_operand).collect(),
                 ..sample
@@ -1329,14 +1137,12 @@ pub(crate) fn run(
         }
     }
 
-    // Reconciled before anything is rendered: it edits the fields in place, and a line
-    // already formatted would not see the change.
+    // Reconciled before rendering, because it edits the fields in place.
     report.adopted = reconcile_widths(&mut report.solved);
     report.disagreements = disagreements(&report.solved);
 
-    // **A run that solved nothing must not write an empty table over the committed one.**
-    // Same reasoning as the fixture generator: without a toolchain every probe is refused,
-    // and a table with no rows in it silently removes every operand layout the decoder has.
+    // A run that solved nothing must not write an empty table over the committed one:
+    // without a toolchain every probe is refused.
     anyhow::ensure!(
         !report.solved.is_empty(),
         concat!(

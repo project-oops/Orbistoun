@@ -1,26 +1,12 @@
 //! Solving the typed-buffer format table by asking the assembler what each code means.
 //!
-//! `crates/orbistoun-shader/data/buffer-formats.toml`
+//! Writes `crates/orbistoun-shader/data/buffer-formats.toml`.
 //!
-//! # Why this is derived rather than typed in
-//!
-//! A typed buffer access carries a seven-bit format saying how to read what it fetched: how
-//! many components, how wide each one is, and how to turn the bits into a number. A
-//! translator that guesses gets a shader that runs and draws the wrong colours, which is
-//! the failure mode this project spends most of its effort avoiding.
-//!
-//! The assembler already knows. Give it `format:N` and it emits the encoding; disassemble
-//! that and it prints `format:[BUF_FMT_...]`. So the mapping from code to meaning can be
-//! *measured*, one code at a time, and the structure is in the name: `BUF_FMT_32_32_FLOAT`
-//! is two components of thirty-two bits read as floating point.
-//!
-//! # What is deliberately not decided here
-//!
-//! Nothing about *conversion*. This records what a format is, not what the translator
-//! should do about it - a normalised eight-bit component is a real format with a real
-//! meaning and this table says so, whether or not anything can translate it yet. Mixing
-//! "what it is" with "what we support" is how a data table starts encoding the limitations
-//! of the code that happened to read it first.
+//! A typed buffer access carries a seven-bit format: component count, widths and how the
+//! bits become a number. Given `format:N` the assembler emits the encoding, and the
+//! disassembler prints `format:[BUF_FMT_...]`, so each code's meaning is measured; the name
+//! carries the structure (`BUF_FMT_32_32_FLOAT` is two 32-bit floating-point components).
+//! The table records what a format is, not what the translator supports.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -37,8 +23,7 @@ const FORMAT_WIDTH: u32 = 7;
 
 /// The component type suffixes a format name can end in.
 ///
-/// **Order matters: the longest match wins**, so `SSCALED` is not read as `SCALED` with a
-/// stray `S`.
+/// The longest match wins, so `SSCALED` is not read as `SCALED` with a stray `S`.
 const TYPES: [&str; 8] = [
     "USCALED", "SSCALED", "UNORM", "SNORM", "FLOAT", "UINT", "SINT", "SRGB",
 ];
@@ -67,10 +52,9 @@ pub(crate) struct Solved {
     pub(crate) recovered: usize,
     /// Probes the assembler refused, in the by-name pass.
     ///
-    /// Reported rather than discarded. A refused candidate means this generation has no
-    /// such format spelling, which is a fact about the target - and a run where *every*
-    /// candidate was refused looks identical to a run that found nothing, unless the
-    /// difference is printed.
+    /// Reported rather than discarded: a refusal means this generation has no such format
+    /// spelling, and a run where every candidate was refused must not look like one that
+    /// found nothing.
     pub(crate) refused: usize,
 }
 
@@ -93,9 +77,8 @@ pub(crate) fn parse_name(name: &str) -> Option<(Vec<u32>, String)> {
 
 /// The probe line for one numeric code.
 ///
-/// One instruction per code. The mnemonic is irrelevant to the format field, so the
-/// single-channel load is used throughout - the *format* names the component count, and a
-/// mismatch between the two is legal and common.
+/// One instruction per code. The mnemonic does not affect the format field, so the
+/// single-channel load is used throughout.
 fn probe_for_code(code: u32) -> String {
     format!("tbuffer_load_format_x v0, v1, s[8:11], 0 format:{code} idxen")
 }
@@ -126,15 +109,9 @@ pub(crate) fn solve_numeric(output: &assembler::Output) -> Solved {
         let Some(first) = words.first() else { continue };
         let encoded = (first >> FORMAT_SHIFT) & ((1 << FORMAT_WIDTH) - 1);
 
-        // Two different things print no name, and they are not the same fact.
-        //
-        //   - the *default* format, which the disassembler omits the way it omits any
-        //     modifier sitting at its default. It is a real format with a real meaning.
-        //   - a code with no meaning at all, which prints back numerically as `format:78`.
-        //     Those are reserved, and a shader carrying one is wrong.
-        //
-        // Told apart by whether the number came back: `format:N` in the output means the
-        // assembler had nothing to call it.
+        // Two cases print no name: the default format, omitted like any modifier at its
+        // default, and a reserved code, which prints back numerically as `format:78`. A
+        // number in the output marks the reserved case.
         let Some(name) = crate::patterns::buffer_format(line) else {
             solved.reserved.push(encoded);
             continue;
@@ -159,9 +136,8 @@ pub(crate) fn solve_numeric(output: &assembler::Output) -> Solved {
 
 /// The names to try in the second pass, given what the first found.
 ///
-/// Every combination of a component layout already observed with every component type
-/// already observed - so nothing is invented, and a name that assembles is a measurement
-/// rather than a guess.
+/// Every combination of an observed component layout with an observed component type, so
+/// nothing is invented.
 #[must_use]
 pub(crate) fn name_candidates(solved: &Solved) -> Vec<String> {
     let mut layouts: Vec<String> = solved
@@ -188,10 +164,8 @@ pub(crate) fn name_candidates(solved: &Solved) -> Vec<String> {
 
 /// Folds the by-name pass into what the numeric sweep found.
 ///
-/// **The default's meaning is not printed anywhere**, so it is asked for by name instead.
-/// It is the same question from the other end: the numeric sweep asks "what is code N
-/// called", this asks "what code is name X", and only the second can reach a format whose
-/// name is never printed.
+/// The default format's name is never printed, so this asks which code a name assembles
+/// to, the reverse of the numeric sweep.
 pub(crate) fn solve_by_name(
     solved: &mut Solved,
     candidates: &[String],
@@ -211,12 +185,8 @@ pub(crate) fn solve_by_name(
         if solved.formats.contains_key(&encoded) {
             continue;
         }
-        // The name comes from what was *asked for*, not from what came back. The default
-        // prints nothing, which is the entire reason this second pass exists - reading the
-        // output would find no name and skip exactly the code being looked for.
-        //
-        // It is trusted only because the encoding was checked: the field really does hold
-        // this code, so the name really does mean it.
+        // The name comes from what was asked for, since the default prints nothing. It is
+        // trusted because the encoding was checked to hold this code.
         let Some(name) = candidates.get(line) else {
             continue;
         };
@@ -354,9 +324,7 @@ mod tests {
 
     /// The longest type suffix wins.
     ///
-    /// `SSCALED` ends in `SCALED`, and a shorter-first match would read
-    /// `BUF_FMT_8_SSCALED` as widths `[8, S]` - which fails to parse and silently drops a
-    /// real format from the table.
+    /// A shorter-first match would read `BUF_FMT_8_SSCALED` as widths `[8, S]` and drop it.
     #[test]
     fn the_longest_type_suffix_wins() {
         assert_eq!(
@@ -386,7 +354,7 @@ mod tests {
         assert!(probes.contains("format:127 idxen"));
     }
 
-    /// Candidates are combinations of what was *observed*, never invented layouts.
+    /// Candidates are combinations of what was observed, never invented layouts.
     #[test]
     fn candidates_combine_only_observed_layouts() {
         let mut solved = Solved::default();

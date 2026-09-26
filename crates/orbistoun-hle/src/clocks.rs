@@ -1,31 +1,12 @@
 //! Which clock a guest asked for, and what it reads.
 //!
-//! # Why this is here and not in the library that implements `clock_gettime`
-//!
-//! Two surfaces ask the same question. POSIX `clock_gettime` is implemented in
-//! `orbistoun-libc`; `sceKernelClockGettime` is the same call under the platform's own name and
-//! belongs to `libkernel`, which `orbistoun-kernel` declares - and **`orbistoun-kernel` does not
-//! depend on `orbistoun-libc`**, nor should it: they are sibling subsystems.
-//!
-//! Copying thirty lines into the second one would have worked and would have drifted. The clock
-//! identifiers come from a harvested table, the families that can be answered are a judgement,
-//! and the monotonic origin is process-wide - all three are facts about the *platform* rather
-//! than about either library, which is what makes this the right floor for them (D536).
-//!
-//! # One origin, not one per crate
-//!
-//! [`since_start`] measures from the first call anywhere in the process. When the same code sat
-//! in one library that was true by accident; here it is true by construction, and it matters:
-//! a monotonic clock read through two names must not answer two different elapsed times.
-//!
-//! # What is deliberately refused
-//!
-//! The per-process and per-thread CPU clocks, `CLOCK_UPTIME`, and the second-resolution
-//! variants. A guest measuring its own CPU time and receiving wall time gets a number that
-//! looks right and is not - which is the failure principle 3 exists to prevent, and answering
-//! "the nearest thing available" is how it happens.
-//!
-//! Reference: identifiers from `sys/sys/_clock_id.h`, via the harvested table.
+//! POSIX `clock_gettime` lives in `orbistoun-libc` and `sceKernelClockGettime` in
+//! `orbistoun-kernel`, sibling subsystems that do not depend on each other. The clock
+//! identifiers, the answerable families and the monotonic origin are platform facts, so they
+//! live here once (D536), and a monotonic clock read through two names answers one elapsed
+//! time. Per-process and per-thread CPU clocks, `CLOCK_UPTIME` and the second-resolution
+//! variants are refused rather than answered with the nearest clock. Identifiers come from
+//! `sys/sys/_clock_id.h` through the harvested table.
 
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -46,9 +27,8 @@ const MONOTONIC: &[&str] = &[
 
 /// When this process started, for the monotonic clocks.
 ///
-/// **A baseline rather than the host's own uptime.** A monotonic clock's zero is unspecified;
-/// what is specified is that it never goes backwards. Process start is a legitimate origin and
-/// the one thing here that is certainly stable for the life of the guest.
+/// A monotonic clock's zero is unspecified; only that it never goes backwards is. Process start
+/// is a stable origin for the life of the guest.
 fn started() -> Instant {
     static START: OnceLock<Instant> = OnceLock::new();
     *START.get_or_init(Instant::now)
@@ -56,24 +36,16 @@ fn started() -> Instant {
 
 /// Where the wall clock starts when it is not the host's.
 ///
-/// A fixed instant, so a guest that formats a date gets the same string every run. `2026-01-01
-/// 00:00:00 UTC`, chosen for being obviously synthetic rather than plausibly today - a
-/// timestamp a reader might mistake for a real one is the failure principle 3 names.
+/// A fixed instant, so a guest formatting a date gets the same string every run.
+/// `2026-01-01 00:00:00 UTC`, chosen to read as synthetic rather than as a real timestamp.
 const FIXED_EPOCH_SECONDS: u64 = 1_767_225_600;
 
 /// How far the logical clock moves each time a guest looks at it.
 ///
-/// # Why it moves at all, and why by this much
-///
-/// D256 refused to pin the clock, and was right about the reason: *"pinning it would stop any
-/// title that waits for time to pass"*. A clock that repeats does not have to be a clock that
-/// stands still - one that advances by a fixed step per observation does both, and that is the
-/// option D256 did not have in front of it.
-///
-/// One microsecond because it is small enough that a guest timing its own work reads a
-/// plausible number, and large enough that a spin-wait on a millisecond terminates in a
-/// thousand reads rather than a million. A guest that sleeps advances it by what it asked for,
-/// through [`advance`], so waiting for real durations still works.
+/// A clock that advances a fixed step per observation repeats across runs without stopping a
+/// guest that waits for time to pass (D582). One microsecond: plausible for a guest timing its
+/// work, and a spin-wait on a millisecond ends in a thousand reads. A sleep advances it by the
+/// requested time through [`advance`].
 const STEP_NANOS: u128 = 1_000;
 
 /// The logical clock, in nanoseconds since the guest started.
@@ -84,17 +56,15 @@ static LOGICAL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Cached, because this is read on every clock call a guest makes and `Var::get` allocates.
 fn logical() -> bool {
     static LOGICAL: OnceLock<bool> = OnceLock::new();
-    // Anything but an explicit `host` is the repeating clock: the default is the one that
-    // makes a run comparable, because a measurement that cannot be repeated is not one
-    // (D181, D238, D582).
+    // Anything but an explicit `host` is the repeating clock, because a run is comparable only if
+    // it repeats (D582).
     *LOGICAL.get_or_init(|| orbistoun_env::CLOCK.get().as_deref() != Some("host"))
 }
 
 /// Nanoseconds since the guest started, from whichever clock this run reads.
 ///
-/// **One source, so two names cannot disagree.** The platform's `GetProcessTime`, its tick
-/// counter and POSIX `clock_gettime` are the same span in different units, and a guest
-/// converting between them lands somewhere else if they are read from different clocks.
+/// One source, so `GetProcessTime`, the tick counter and POSIX `clock_gettime` stay the same
+/// span in different units.
 #[must_use]
 pub fn since_start_nanos() -> u128 {
     if logical() {
@@ -109,10 +79,8 @@ pub fn since_start_nanos() -> u128 {
 
 /// Moves the logical clock forward by `nanos`, for a guest that asked to wait.
 ///
-/// **A sleep is time passing, and the clock has to agree.** A guest that sleeps ten
-/// milliseconds and then reads a clock that moved a microsecond concludes the sleep did not
-/// happen - which is the failure D275 records for a tick counter that did not advance at all.
-/// Does nothing under the host clock, where the sleep moved it already.
+/// A guest that sleeps ten milliseconds and reads a clock that moved a microsecond concludes the
+/// sleep did not happen. Does nothing under the host clock, where the sleep moved it already.
 pub fn advance(nanos: u128) {
     if !logical() {
         return;
@@ -158,8 +126,7 @@ pub fn since_start() -> (u64, u64) {
 
 /// What the clock `asked` names reads, or [`None`] for one this cannot answer.
 ///
-/// The identifiers come from the harvested table rather than from recall, because the numbers
-/// differ between platforms and a wrong one is a guest silently reading the wrong clock.
+/// Identifiers come from the harvested table, because the numbers differ between platforms.
 #[must_use]
 pub fn reading(asked: i64) -> Option<(u64, u64)> {
     let matches = |name: &&str| crate::constants::abi_constant("clock", name) == Some(asked);
@@ -174,20 +141,10 @@ pub fn reading(asked: i64) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    /// **The families are told apart, and everything else is refused.**
+    /// Each family answers from its own source, and an unanswerable clock answers `None`.
     ///
-    /// # What this asserts
-    ///
-    /// That the identifiers resolve through the harvested table and that an unanswerable clock
-    /// answers `None` rather than the nearest thing. The second half is the point: a guest
-    /// asking for its own CPU time and receiving wall time cannot tell.
-    ///
-    /// # What it cannot assert
-    ///
-    /// That the values are right. A wall clock and an elapsed time are not reproducible, so
-    /// what is checked is *which* source answered - the monotonic reading is small because the
-    /// process just started, and the real-time one is not. That distinguishes them without
-    /// pinning either to a number no run can repeat.
+    /// Values are not reproducible, so the check is which source answered: the monotonic reading
+    /// is small because the process just started, and the real-time one is not.
     #[test]
     fn each_family_answers_from_its_own_source_and_the_rest_are_refused() {
         let id = |name: &str| {
@@ -227,11 +184,7 @@ mod tests {
         }
     }
 
-    /// **A clock that repeats must still move**, or every spin-wait becomes an infinite loop.
-    ///
-    /// This is the whole of D256's objection to pinning the clock, and the property that makes
-    /// the logical one an answer to it rather than an override of it. Watched failing: with
-    /// `STEP_NANOS` set to zero, two readings are equal and this rejects it.
+    /// A repeating clock still advances on every reading, so a spin-wait terminates.
     #[test]
     fn the_clock_advances_on_every_reading() {
         let first = super::since_start_nanos();
@@ -243,15 +196,10 @@ mod tests {
     }
 
     /// A sleep moves the clock by what was asked for.
-    ///
-    /// A guest that sleeps ten milliseconds and reads a clock that moved a microsecond concludes
-    /// the sleep did not happen - the failure D275 records for a counter that never advanced,
-    /// arriving by a different route.
     #[test]
     fn a_sleep_moves_the_clock_by_what_it_asked_for() {
         if !super::repeats() {
-            // Under the host clock the sleep moved it already and `advance` is a no-op, which
-            // is the documented behaviour rather than something to assert against.
+            // Under the host clock the sleep moved it already and `advance` is a no-op.
             return;
         }
         let before = super::since_start_nanos();
@@ -274,8 +222,7 @@ mod tests {
             seconds >= super::FIXED_EPOCH_SECONDS,
             "the wall clock ran before its own epoch"
         );
-        // Two years of guest time would be a run nobody has had; the point is that this is
-        // nowhere near a real 'now', so a reader cannot mistake it for one.
+        // Nowhere near a real "now", so a reader cannot mistake it for one.
         assert!(
             seconds < super::FIXED_EPOCH_SECONDS + 63_072_000,
             "the wall clock is far enough from its epoch to look like a real timestamp"

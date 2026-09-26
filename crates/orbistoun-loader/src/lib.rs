@@ -1,22 +1,12 @@
-//! The loader - where interception actually happens.
+//! The ELF loader: places guest modules and binds their imports by dynamic linker relocation.
 //!
-//! Loading a guest module is five steps, in this order:
+//! Loading parses the container (`orbistoun-elf`), reserves the address space it demands
+//! (`orbistoun-mem`), resolves every imported NID against the registry (`orbistoun-hle`),
+//! applies relocations, and sets up thread-local storage before handing over the entry point.
+//! The relocation is the binding: the guest calls whatever address its slot holds, and
+//! orbistoun is the linker that writes it.
 //!
-//! 1. Parse the container (`orbistoun-elf`).
-//! 2. Reserve the address space the module demands (`orbistoun-mem`).
-//! 3. Resolve every imported NID against the registry (`orbistoun-hle`).
-//! 4. Apply relocations, writing resolved addresses into the guest's slots.
-//! 5. Set up thread-local storage and hand over the entry point.
-//!
-//! Step 3 is the interception. There is no hooking pass, no instrumentation
-//! injection: the guest calls whatever address the relocation put there, and that
-//! address is ours because we are the linker.
-//!
-//! # The static import dump
-//!
-//! Steps 1 and 3 alone answer "what does this title need?" without executing
-//! anything. That is [`survey`], and it is the project's first useful output -
-//! available before memory, threading, or any subsystem shim exists.
+//! [`survey`] parses and resolves without executing anything, answering what a title imports.
 
 pub mod image;
 pub mod process;
@@ -47,8 +37,8 @@ pub enum LoadError {
     AddressTooLarge(u64),
     /// A relocation would write outside the image it belongs to.
     ///
-    /// A corrupt or hostile table, and honouring it would scribble on unrelated
-    /// memory - so it is refused rather than clamped.
+    /// A corrupt table would write over unrelated memory, so it is refused rather than
+    /// clamped.
     #[error(
         "relocation targets {target:#x}, outside the image span          {span_base:#x}..{:#x}", span_base.saturating_add(*span_len)
     )]
@@ -77,8 +67,8 @@ pub struct SurveyedImport {
     pub known: bool,
     /// Whether the guest wants code or data here.
     ///
-    /// **Not cosmetic.** `known` says orbistoun has something to put in the slot; this
-    /// says whether a thunk is the right kind of thing to put there at all (D307).
+    /// `known` says orbistoun has something for the slot; this says whether a thunk is the
+    /// right kind of thing to put there (D307).
     pub kind: orbistoun_elf::dynamic::Kind,
 }
 
@@ -94,8 +84,7 @@ pub struct Survey {
 impl Survey {
     /// How many imports orbistoun cannot answer.
     ///
-    /// The number to drive down, and the honest headline for a compatibility
-    /// report - far more meaningful than a screenshot.
+    /// The headline figure for a compatibility report.
     pub fn unresolved(&self) -> usize {
         self.imports.iter().filter(|i| !i.known).count()
     }
@@ -107,11 +96,11 @@ impl Survey {
 /// NID against `registry`.
 pub fn survey(bytes: &[u8], registry: &Registry) -> Result<Survey, LoadError> {
     let container = Container::parse(bytes)?;
-    // The registry's own hasher, not a fresh one: a name hashed with a different suffix
-    // resolves to nothing, and does so silently (D305).
+    // The registry's own hasher: a name hashed with a different suffix resolves to nothing,
+    // silently (D305).
     let raw = container.raw_imports(bytes, registry.hasher())?;
-    // The table the ids actually index. `DT_NEEDED` is a different list and using it
-    // produced attributions that fit and meant nothing (D117).
+    // The table the ids index. `DT_NEEDED` is a different list and gives attributions that
+    // fit and mean nothing.
     let libraries = container.import_libraries(bytes)?;
 
     let imports = raw
@@ -122,10 +111,8 @@ pub fn survey(bytes: &[u8], registry: &Registry) -> Result<Survey, LoadError> {
             SurveyedImport {
                 symbol_index: import.symbol_index,
                 kind: import.kind,
-                // Prefer what we declare; fall back to the library the module itself
-                // named. A resolved entry knows more, but an unresolved import is
-                // still attributable to a library, which is what makes the report a
-                // work list rather than a wall of hashes.
+                // Prefer the declared library; fall back to the one the module named, so an
+                // unresolved import is still attributed to a library.
                 library: resolved.map_or_else(
                     || {
                         import
@@ -152,6 +139,7 @@ mod tests {
     use super::{Survey, SurveyedImport};
     use orbistoun_nid::Nid;
 
+    /// `unresolved` counts only imports the registry does not know.
     #[test]
     fn unresolved_counts_only_unknown_imports() {
         let survey = Survey {

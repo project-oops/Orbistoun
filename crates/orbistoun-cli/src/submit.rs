@@ -6,15 +6,12 @@ use anyhow::{Context, Result};
 
 /// Every title result this machine holds, both slots.
 ///
-/// Reads the same directory `compat list` does, because a submission has to carry what the
-/// tree carries - two readers of one record is how they come to disagree (D160).
+/// Reads the same directory `compat list` does, so a submission carries what the tree carries.
 fn gathered_results(dir: &std::path::Path) -> Result<orbistoun_submit::Results> {
     let mut results = orbistoun_submit::Results::default();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        // Not an error. A machine that has recorded no title still has measurements worth
-        // sending, and refusing here would make the common binary-only case unable to
-        // contribute anything at all.
+        // Not an error: a machine with no recorded title still has measurements worth sending.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(results),
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     };
@@ -47,9 +44,7 @@ fn gathered_bundle(
 ) -> Result<orbistoun_submit::Bundle> {
     let learned = orbistoun_hle::learned::Learned::load(&paths.learned_file())
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    // **Generated first, then whatever a person wrote.** A hand-written patch is the more
-    // considered of the two and must not be displaced by one this produced, so it is added
-    // second and wins on name.
+    // Generated patches first, then hand-written ones, which are added second and win on name.
     let into = std::path::Path::new(orbistoun_submit::PATCHES_DIR);
     let mut proposals = generated_proposals(&learned, into)?;
     for written in local_proposals()? {
@@ -68,25 +63,18 @@ fn gathered_bundle(
 
 /// The promotion each measurement implies, as a patch a maintainer can apply.
 ///
-/// # What the loop can generate without recalling anything
-///
-/// `learned.toml` is one machine's cache; a knowledge file is what the emulator **ships**. So
-/// the change a measurement is asking for is an entry in one, and every field of it comes from
-/// the measurement - which is what keeps a generated patch clear of principle 1. Nothing is
-/// recalled, so nothing can be recall dressed as reasoning (D328).
-///
-/// **Skipped where the entry already exists**, because a second entry for one function is two
-/// claims about the same thing and nothing here can say which is current. Skipped too where
-/// nothing knows which library declares it - a patch aimed at a guessed file is a patch
-/// somebody has to undo.
+/// `learned.toml` is one machine's cache; a knowledge file is what the emulator ships. Every field
+/// of the generated entry comes from the measurement, so nothing is recalled (D322). Skipped where
+/// the entry already exists, since nothing can say which of two entries is current, and where no
+/// library is known, since a patch aimed at a guessed file has to be undone.
 fn generated_proposals(
     learned: &orbistoun_hle::learned::Learned,
     into: &std::path::Path,
 ) -> Result<Vec<orbistoun_submit::Proposal>> {
     let mut out = Vec::new();
     for measurement in &learned.measurements {
-        // No library, no patch. A promotion aimed at a guessed file is one somebody has to
-        // undo, and a measurement recorded before the field existed genuinely does not say.
+        // No library, no patch: a measurement recorded without one does not say which file it
+        // belongs in.
         if measurement.library.is_empty() {
             continue;
         }
@@ -94,8 +82,7 @@ fn generated_proposals(
         let Ok(existing) = std::fs::read_to_string(&path) else {
             continue;
         };
-        // One claim per function. The knowledge file already naming it means somebody has
-        // promoted this, and re-proposing it would ask a reviewer to decide which is current.
+        // One claim per function: an existing entry means this was already promoted.
         if existing.contains(&format!("name = \"{}\"", measurement.function)) {
             continue;
         }
@@ -112,10 +99,8 @@ fn generated_proposals(
             file,
             what: format!("promote {} into {display}", measurement.function),
             proposed_by: build_stamp(),
-            // **The measurement's own oracle, carried rather than restated.** A promotion is
-            // no better known than the observation behind it, and a generator that claimed
-            // otherwise would be manufacturing the one field that stops provenance being
-            // assumed.
+            // The measurement's own oracle: a promotion is no better known than the observation
+            // behind it.
             known: measurement.known,
             evidence: format!("measured against {}", measurement.measured),
             assumes: measurement.assumes.clone(),
@@ -126,9 +111,8 @@ fn generated_proposals(
 
 /// Source changes waiting in `patches/`, and what each rests on.
 ///
-/// **Read from a file a person writes, not inferred from the diffs.** A patch cannot say
-/// where the behaviour in it came from - only whoever produced it can - and inferring it
-/// would manufacture the one field that exists to stop provenance being assumed (principle 1).
+/// Read from a file a person writes, not inferred from the diffs: only whoever produced a patch can
+/// say where its behaviour came from.
 fn local_proposals() -> Result<Vec<orbistoun_submit::Proposal>> {
     let path =
         std::path::Path::new(orbistoun_submit::PATCHES_DIR).join(orbistoun_submit::PROPOSALS_FILE);
@@ -142,8 +126,8 @@ fn local_proposals() -> Result<Vec<orbistoun_submit::Proposal>> {
         .map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
     for proposal in &held.proposal {
         let diff = std::path::Path::new(orbistoun_submit::PATCHES_DIR).join(&proposal.file);
-        // **Refused rather than skipped.** A proposal naming a diff that is not there would
-        // travel as a description of a change nobody can read, which is worse than no entry.
+        // Refused rather than skipped: a proposal naming an absent diff describes a change nobody
+        // can read.
         anyhow::ensure!(
             diff.exists(),
             "{} names {} and it does not exist",
@@ -171,9 +155,8 @@ fn cmd_submit_export(
 ) -> Result<()> {
     let bundle = gathered_bundle(paths, compat_dir)?;
     if bundle.is_empty() {
-        // **Refused, and the reason is the message.** An empty bundle reads as "this machine
-        // found nothing" when it almost always means the loop was never turned, and those
-        // are different facts (principle 3).
+        // Refused with the reason: an empty bundle almost always means the loop was never run, not
+        // that the machine found nothing.
         anyhow::bail!(
             concat!(
                 "nothing to export - no measurements in {} and no title records in {}.\n\n",
@@ -190,8 +173,8 @@ fn cmd_submit_export(
         let path = out.join(name);
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
     }
-    // The diffs travel as files, because a patch is read with the tools people already read
-    // patches with. `local_proposals` has already refused any entry naming one that is absent.
+    // The diffs travel as files, read with ordinary patch tools. `local_proposals` has already
+    // refused any entry naming an absent one.
     if !bundle.proposals.is_empty() {
         let into = out.join(orbistoun_submit::PATCHES_DIR);
         std::fs::create_dir_all(&into).with_context(|| format!("creating {}", into.display()))?;
@@ -208,9 +191,8 @@ fn cmd_submit_export(
         bundle.manifest.measurements, bundle.manifest.titles, bundle.manifest.by
     );
     if bundle.manifest.by.contains("unknown") {
-        // **Said where it is produced.** A claim that cannot name the tree it came from is
-        // not checkable by whoever receives it, and this is the last moment anybody can fix
-        // it before it leaves the machine.
+        // Reported here, the last point before the bundle leaves the machine: a claim that cannot
+        // name its tree cannot be checked by the receiver.
         println!("  ! this build cannot name its commit, so a receiver cannot check it");
         println!("    against a tree - commit first, or set ORBISTOUN_COMMIT");
     }
@@ -219,9 +201,8 @@ fn cmd_submit_export(
             "  send the directory. Nothing in it is a title file: it carries claims, each one\n  reproducible by anybody holding the same title"
         );
     } else {
-        // **Said separately, because it is a different offer.** The claims are checkable by
-        // a command; a patch is somebody's reading time, and a summary that folded the two
-        // together would understate what is being asked for (D322).
+        // Reported separately: claims are checkable by a command, a patch needs a person to read it
+        // (D322).
         println!(
             "  {} source change(s) as well, in {}/ - those are not claims and nothing",
             bundle.proposals.len(),
@@ -260,9 +241,8 @@ fn cmd_submit_check(
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     let ours = gathered_bundle(paths, compat_dir)?;
 
-    // **Counted from the contents.** Quoting the manifest would report the sender's
-    // arithmetic as this machine's measurement, and a bundle edited after it was written
-    // then announces totals nothing here checked (D315).
+    // Counted from the contents, not quoted from the manifest, so an edited bundle cannot announce
+    // totals nothing here checked (D315).
     let (measurements, titles) = theirs.counts();
     println!(
         "{measurements} measurement(s) and {titles} title result(s), submitted by {} on {}",
@@ -275,10 +255,8 @@ fn cmd_submit_check(
         );
     }
 
-    // **Listed apart from everything else, because nothing here can check them.** A
-    // measurement is settled by re-deriving it; a patch is settled by a person reading it and
-    // running the gate. Printing them in the same list would let a diff inherit the trust the
-    // measurements earned (D322).
+    // Listed apart because nothing here can check them: a patch is settled by a person reading it
+    // and running the gate, and must not inherit the measurements' trust (D322).
     if !theirs.proposals.is_empty() {
         println!();
         println!(
@@ -311,8 +289,8 @@ fn cmd_submit_check(
         }
     }
 
-    // **Re-derived, not trusted.** Agreement is silence, and the differences are named
-    // individually rather than counted - a count cannot be acted on (D297).
+    // Re-derived, not trusted (D297). Agreement prints nothing; each difference is named
+    // individually.
     let disagreements = ours.disagreements(&theirs);
     if disagreements.is_empty() {
         println!("  everything in it agrees with what this machine found");

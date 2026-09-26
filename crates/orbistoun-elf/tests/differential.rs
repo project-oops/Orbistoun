@@ -1,22 +1,11 @@
 //! Two readers over one corpus, and every field where they disagree.
 //!
-//! # Why a second reader is worth a dev-dependency
-//!
-//! `orbistoun-elf` and `selfish-elf` are the same knowledge written twice - SELFish's reader was
-//! built from this one and both have moved since. A parser has no oracle: hostile bytes produce a
-//! plausible answer whatever it does, and the only cheap instrument for its own bugs is another
-//! parser that was written from the same facts and has drifted. obSCEne's migration to these
-//! crates found four defects that way, two of them in SELFish and two in obSCEne, and none of them
-//! visible to either project alone (SELFish REQ-20260909T1452Z-b91d, D653).
-//!
-//! **A differential, not a migration.** Nothing here replaces orbistoun's reader; the test reports
-//! disagreements and asserts nothing about which side is right, because deciding that needs a
-//! person and a third source.
-//!
-//! # It skips when the corpus is absent, and says so
-//!
-//! The modules are installed titles, not repository fixtures, so a clean checkout has none. A
-//! skip prints what it looked for - a silent pass would be indistinguishable from agreement.
+//! `orbistoun-elf` and `selfish-elf` encode the same knowledge twice and have drifted. A
+//! parser has no oracle, so a second parser written from the same facts is the cheap check
+//! on each (D653). This reports disagreements and asserts nothing about which side is right:
+//! deciding that needs a person and a third source. The modules are installed titles, not
+//! repository fixtures; when the corpus is absent the test prints what it looked for and
+//! skips, since a silent pass would read as agreement.
 
 use std::path::{Path, PathBuf};
 
@@ -25,21 +14,17 @@ struct Disagreement {
     field: &'static str,
     ours: String,
     theirs: String,
-    /// Whether this is a difference in *units* rather than in what the two readers found.
+    /// Whether this is a difference in units rather than in what the two readers found.
     ///
-    /// **Counted apart, because the headline is what anybody reads.** Every module with encoded
-    /// imports differs on NID byte order, and reporting that as 28 disagreements says the two
-    /// readers disagree about 28 modules when they agree about all of them. The line still
-    /// prints - a convention nobody wrote down is how three of D654's four errors happened.
+    /// Counted apart so the headline counts real disagreements: every module with encoded
+    /// imports differs on NID byte order. The line still prints.
     units: bool,
 }
 
-/// Compares one module and returns every field the two readers answer differently.
-/// The tables, once both readers have found one.
+/// Compares the tables, once both readers have found one.
 ///
-/// Split from [`compare`] so each half stays under the line limit and, more usefully, so the two
-/// questions stay apart: whether a file *has* a vendor dynamic table, and what is *in* it. The
-/// first is where the two readers actually differ.
+/// Split from [`compare`] so whether a file has a vendor dynamic table and what is in it stay
+/// separate questions; the first is where the readers differ.
 fn compare_tables(
     our_info: &orbistoun_elf::dynamic::DynamicInfo,
     their_info: &selfish_elf::dynamic::Info,
@@ -56,18 +41,16 @@ fn compare_tables(
             });
         }
     };
-    // **Legacy, not `is_some`, and that was the third harness error.** The two fields have
-    // different meanings: orbistoun's says the values it holds came from *vendor* tags, SELFish's
-    // says which convention the file follows - and `Current` means the standard tables come from
-    // standard tags, which is exactly when orbistoun answers `false`. Compared as `is_some` every
-    // module in the corpus disagreed, and none of them actually did (D654).
+    // Legacy, not `is_some`: orbistoun's field says its values came from vendor tags, while
+    // SELFish's says which convention the file follows, and `Current` means standard tables
+    // from standard tags, exactly when orbistoun answers `false`.
     note(
         "table values came from vendor tags",
         our_info.vendor_tables.to_string(),
         matches!(their_info.table, Some(selfish_elf::dynamic::Table::Orbis)).to_string(),
     );
-    // Rebased into orbistoun's units before comparing, per the same request: SELFish measures
-    // from the slice it returns, orbistoun from the image.
+    // Rebased into orbistoun's units before comparing: SELFish measures from the slice it
+    // returns, orbistoun from the image.
     for (field, ours, theirs) in [
         ("strtab", our_info.strtab, base + their_info.strtab),
         ("strsz", our_info.strsz, their_info.strsz),
@@ -81,8 +64,8 @@ fn compare_tables(
     ] {
         note(field, format!("{ours:#x}"), format!("{theirs:#x}"));
     }
-    // The packed entries themselves, not only how many: two tables of equal length holding
-    // different ids answer every count identically and every lookup differently.
+    // The packed entries themselves, not only how many: equal-length tables holding different
+    // ids answer every count identically and every lookup differently.
     for (field, ours, theirs) in [
         (
             "import library entries",
@@ -102,13 +85,9 @@ fn compare_tables(
 
 /// The virtual address the slice `Elf::tables` returns is based at.
 ///
-/// **The units, which are the third thing this harness got wrong.** SELFish returns table
-/// positions as offsets into the byte slice it hands back beside them; orbistoun returns virtual
-/// addresses. Comparing them raw reported six disagreements on every module and one suspicious
-/// constant - the constant being this number (SELFish REQ-20260909T1730Z-5f28, D654).
-///
-/// Found by matching the slice's file offset against the program headers, so it is read from the
-/// file rather than assumed from the one module where the constant was noticed.
+/// SELFish returns table positions as offsets into the byte slice it hands back; orbistoun
+/// returns virtual addresses. The base is found by matching the slice's file offset against
+/// the program headers, so it is read from the file rather than assumed.
 fn slice_base(elf: &selfish_elf::Elf<'_>, whole: &[u8], slice: &[u8]) -> u64 {
     let at = (slice.as_ptr() as usize).saturating_sub(whole.as_ptr() as usize) as u64;
     elf.program_headers()
@@ -118,12 +97,9 @@ fn slice_base(elf: &selfish_elf::Elf<'_>, whole: &[u8], slice: &[u8]) -> u64 {
 }
 /// The bytes to hand SELFish's reader, for a module inside a signed container.
 ///
-/// **Spliced, not extracted, and that was the correction.** The first version of this test pulled
-/// the inner ELF out of the container with orbistoun's own wrapper and handed SELFish the view.
-/// The view has program headers describing segments whose payloads live in the container's entry
-/// list, so 22 of 29 modules came back refused. `selfish_container` splices those payloads back
-/// in and returns an ELF that reads all the way through - so the answer was not to unwrap more
-/// carefully but to not unwrap at all (SELFish REQ-20260909T1730Z-5f28, D654).
+/// `selfish_container` splices the segment payloads from the container's entry list back into
+/// the ELF, so SELFish reads the whole file. An inner ELF unwrapped by orbistoun has program
+/// headers whose payloads live elsewhere, and SELFish refuses it.
 fn readable_by_selfish(bytes: &[u8]) -> Option<Vec<u8>> {
     selfish_container::Container::parse(bytes)
         .ok()?
@@ -131,11 +107,9 @@ fn readable_by_selfish(bytes: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 fn compare(outer: &[u8]) -> Result<Vec<Disagreement>, String> {
-    // **Each reader is handed the bytes its own entry point expects.** Orbistoun's `Container`
-    // unwraps the signed container itself; SELFish's `Elf` wants an ELF whose segment payloads are
-    // present, which `selfish_container` produces by splicing. Handing both the same *file* is
-    // what makes this a differential; handing both the same *slice* is what made the first two
-    // runs measure the harness (D654).
+    // Each reader gets the bytes its own entry point expects: orbistoun's `Container` unwraps
+    // the signed container itself, and SELFish's `Elf` wants the spliced ELF. Both read the same
+    // file, which is what makes this a differential.
     let ours = orbistoun_elf::Container::parse(outer).map_err(|e| format!("orbistoun: {e}"))?;
     let spliced = readable_by_selfish(outer);
     let for_them: &[u8] = spliced.as_deref().unwrap_or(outer);
@@ -160,9 +134,8 @@ fn compare(outer: &[u8]) -> Result<Vec<Disagreement>, String> {
         }
     };
 
-    // **The no-vendor-tables case first, because it is the one already known to differ.** A plain
-    // freestanding ELF has no vendor dynamic table at all, and a reader that finds one there is
-    // reading a standard tag as a vendor tag - the exact defect obSCEne's migration found.
+    // The no-vendor-tables case first. A plain freestanding ELF has no vendor dynamic table,
+    // and a reader that finds one is reading a standard tag as a vendor tag.
     let (our_info, their_info, base, segment) = match (our_dyn, their_tables) {
         (Some(dyn_bytes), Some((base, segment, their_info))) => (
             orbistoun_elf::dynamic::DynamicInfo::parse(dyn_bytes),
@@ -171,10 +144,9 @@ fn compare(outer: &[u8]) -> Result<Vec<Disagreement>, String> {
             segment,
         ),
         (ours_had, theirs_had) => {
-            // **Like for like, and this was the fourth harness error.** `dynamic_bytes` answers
-            // "is there a `PT_DYNAMIC`", which a plain freestanding ELF has; `tables()` answers
-            // "are there resolvable vendor tables", which it has not. Compared directly, the one
-            // module in the corpus that is a plain ELF looked like orbistoun over-reporting.
+            // Like for like: `dynamic_bytes` answers "is there a `PT_DYNAMIC`", which a plain
+            // freestanding ELF has; `tables()` answers "are there resolvable vendor tables",
+            // which it has not.
             let ours_vendor = ours.vendor_segments().is_ok_and(|v| !v.is_empty());
             note(
                 "carries the vendor dynamic segment",
@@ -201,23 +173,15 @@ fn compare(outer: &[u8]) -> Result<Vec<Disagreement>, String> {
 
 /// The symbol level: counts, import triples, and the relocation census.
 ///
-/// # Three meanings checked before anything was compared
+/// Three differences in meaning, each taken from the two crates' own source:
 ///
-/// D654 cost four rounds to the same mistake - two fields sharing a name and not a meaning - so
-/// each of these was established from the two crates' own source before a line of comparison was
-/// written, and each is stated here because the next reader cannot see that work:
-///
-/// - **The NID is byte-reversed between the two.** Orbistoun prints the big-endian read of the
-///   hash's first eight bytes, SELFish the little-endian one. `0x53bbd82b51d172db` here is
-///   `0xdb72d1512bd8bb53` there. Compared raw, every import in the corpus would differ.
-/// - **SELFish's `imports` returns encoded names only.** A plain undefined symbol - what an open
-///   toolchain emits - is skipped there and carried here as `NameForm::Plain`. Counting both
-///   lists would report a difference on every module that has one, so the plain ones are counted
-///   apart and reported rather than compared.
-/// - **The library and module come out differently.** Orbistoun carries the raw ids and resolves
-///   them through its own tables; SELFish resolves them for you. The *names* are the comparable
-///   thing, and they are also the thing worth comparing: a wrong id attributes an import to the
-///   wrong module and produces a name that fits and means nothing, which is D117.
+/// - The NID is byte-reversed between the two. Orbistoun prints the big-endian read of the
+///   hash's first eight bytes, SELFish the little-endian one.
+/// - SELFish's `imports` returns encoded names only. A plain undefined symbol is carried here
+///   as `NameForm::Plain`, so plain imports are counted apart and reported, not compared.
+/// - Orbistoun carries raw library and module ids and resolves them through its own tables;
+///   SELFish resolves them. The names are compared, since a wrong id gives a name that fits
+///   and means nothing.
 fn compare_symbols(
     ours: &orbistoun_elf::Container<'_>,
     outer: &[u8],
@@ -225,9 +189,8 @@ fn compare_symbols(
     their_info: &selfish_elf::dynamic::Info,
     found: &mut Vec<Disagreement>,
 ) -> Result<(usize, usize), String> {
-    // The shipped suffix, so a plain name hashes to what the rest of this project would compute.
-    // Only the encoded imports are compared below, where the hash comes from the name rather than
-    // from this - but a wrong suffix here would silently change the plain count.
+    // The shipped suffix, so a plain name hashes as the rest of this project computes it. Only
+    // encoded imports are compared, but a wrong suffix would change the plain count.
     let hasher = orbistoun_nid::NidHasher::new(orbistoun_nid::default_suffix());
     let our_imports = ours
         .raw_imports(outer, &hasher)
@@ -252,18 +215,15 @@ fn compare_symbols(
         }
     };
 
-    // **Two derivations of one number, which is why it is worth comparing at all.** Orbistoun
-    // takes the symbol count from the hash table's `nchain`; SELFish divides `symtabsz` by
-    // `syment`. They are independent readings of the same file and a disagreement means one of
-    // them is wrong.
+    // Two derivations of one number: orbistoun takes the symbol count from the hash table's
+    // `nchain`, SELFish divides `symtabsz` by `syment`. A disagreement means one is wrong.
     match (ours.symbol_count(outer), their_info.symbol_count()) {
         (Ok(our_count), Some(their_count)) => note(
             "dynamic symbol count",
             our_count.to_string(),
             their_count.to_string(),
         ),
-        // **Said rather than skipped.** A comparison that never ran is indistinguishable from one
-        // that agreed, which is the failure this whole test exists to avoid one level down.
+        // Said rather than skipped: a comparison that never ran would read as agreement.
         (ours_said, theirs_said) => note(
             "dynamic symbol count could not be compared",
             format!("{ours_said:?}"),
@@ -281,8 +241,7 @@ fn compare_symbols(
         their_imports.len().to_string(),
     );
 
-    // Joined on the symbol index, because that is what a relocation names and the only thing that
-    // makes the two lists the same list.
+    // Joined on the symbol index, which is what a relocation names.
     let theirs_by_index: std::collections::BTreeMap<u32, &selfish_elf::dynamic::Import<'_>> =
         their_imports.iter().map(|i| (i.index, i)).collect();
     let tally = tally_triples(&encoded, &theirs_by_index, &our_libs, &our_mods);
@@ -307,9 +266,8 @@ fn compare_symbols(
             "0".to_owned(),
         );
     }
-    // Reported as a field only when the two orders are mixed within one module, which would mean
-    // neither reader has a convention and something is wrong in one of them. A module that is
-    // wholly one or wholly the other is a units fact, stated once by the caller.
+    // Reported as a field only when the two orders are mixed within one module, which means
+    // something is wrong in one reader. A module wholly one way is a units fact, stated once.
     if tally.same_order > 0 && tally.swapped > 0 {
         note(
             "NID byte order is not consistent within the module",
@@ -338,8 +296,8 @@ struct TripleTally {
 
 /// Walks the two import lists, joined on symbol index.
 ///
-/// Split from [`compare_symbols`] to keep each under the line limit, and because the join is the
-/// part with the three unit differences in it - it deserves to be read on its own.
+/// Split from [`compare_symbols`] to keep each under the line limit; the join carries the
+/// three unit differences.
 fn tally_triples(
     encoded: &[&orbistoun_elf::dynamic::RawImport],
     theirs_by_index: &std::collections::BTreeMap<u32, &selfish_elf::dynamic::Import<'_>>,
@@ -365,10 +323,8 @@ fn tally_triples(
         else {
             continue;
         };
-        // **The byte order is measured, not assumed.** Orbistoun's hasher documents a
-        // little-endian read and SELFish's answer to REQ-20260909T1250Z-1f74 said orbistoun prints
-        // these reversed. Rather than pick one and be wrong in the D654 way, both are tried and
-        // which agreed is counted.
+        // The byte order is measured, not assumed: both orders are tried and the one that
+        // agreed is counted.
         let theirs_nid = theirs.nid.value();
         if import.nid == theirs_nid {
             tally.same_order += 1;
@@ -403,11 +359,9 @@ fn tally_triples(
 
 /// The relocation census, by type, for both tables.
 ///
-/// **Counted by type rather than compared entry by entry**, because a difference in one entry and
-/// a difference in a thousand mean the same thing to whoever has to look: one of the two readers
-/// is walking the table wrongly. The type is also the field that matters most - a relocation
-/// resolved as the wrong kind writes an address into a slot the guest reads as data, and neither
-/// reader would report that as a failure.
+/// Counted by type rather than entry by entry: any difference means one reader walks the table
+/// wrongly. The type matters most, since a relocation of the wrong kind writes an address into
+/// a slot the guest reads as data, and neither reader reports it.
 fn compare_relocations(
     ours: &orbistoun_elf::Container<'_>,
     outer: &[u8],
@@ -456,9 +410,8 @@ fn compare_relocations(
                 .map(selfish_elf::reloc::Rela::kind)
                 .collect(),
         );
-        // **An empty census agrees with an empty census.** Two tables nobody located compare
-        // equal and report nothing, which is the same vacuous pass as a comparison that never
-        // ran - so say it rather than count it as agreement.
+        // Two empty censuses would compare equal vacuously, so this is said rather than
+        // counted as agreement.
         if ours_table.is_empty() && theirs_table.is_empty() {
             found.push(Disagreement {
                 units: false,
@@ -488,10 +441,9 @@ fn compare_relocations(
 }
 /// The dynamic tags a module actually carries, low ones and vendor ones counted apart.
 ///
-/// **Evidence, not another opinion.** When the two readers disagree about which convention a file
-/// uses, the file itself settles it: a module with standard tags and no vendor tags is not a
-/// vendor module however a detector reads it. Printing this beside the disagreement turns "these
-/// differ" into something the other project can act on without re-deriving it (D653).
+/// When the readers disagree about a file's convention, the file settles it: standard tags
+/// and no vendor tags is not a vendor module. Printed beside the disagreement so the other
+/// project can act on it (D653).
 fn tag_census(bytes: &[u8]) -> String {
     let Ok(elf) = selfish_elf::Elf::parse(bytes) else {
         return "unreadable".to_owned();
@@ -554,8 +506,8 @@ fn titles_root() -> Option<PathBuf> {
     root.is_dir().then_some(root)
 }
 
-/// **The differential.** Reports rather than asserts: a disagreement is a defect in one of two
-/// repositories and which one is not this test's to decide.
+/// Reports rather than asserts: a disagreement is a defect in one of two repositories, and
+/// which one is not this test's to decide.
 #[test]
 fn both_readers_agree_on_every_module_in_the_corpus() {
     let modules = corpus();

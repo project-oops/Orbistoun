@@ -1,42 +1,20 @@
 //! The maths library, exercised across the floating-point call boundary.
 //!
-//! # What these are really testing
-//!
-//! Not arithmetic. The host computes `sqrt`, and the host is right by construction - both
-//! sides are IEEE 754 doubles on the same architecture. What is worth pinning is the
-//! **boundary**: that the argument is read out of the floating-point registers and the
-//! answer is written back into them at the declared width.
-//!
-//! That boundary is exactly what was missing. The call carried only integer registers, so
-//! a handler read six registers that did not contain the argument and answered in `rax`,
-//! which the guest was not reading. `sqrt(4)` came back as **4** - the guest's own
-//! argument, still sitting in `xmm0` because nothing had overwritten it. Thirteen
-//! conformance checks failed that way (D268).
-//!
-//! So the shape of most tests here is: pick an input whose answer is *not* the input, and
-//! assert the difference. An echo passes any test that only checks a fixed point.
-//!
-//! # Widths are the other half
-//!
-//! A single-precision function must compute in `f32` rather than narrowing an `f64`, which
-//! rounds twice, and must answer in the low half of the register with the upper half left
-//! alone. Both are asserted directly, because both are invisible in a value that happens
-//! to be exactly representable.
+//! What is pinned is the boundary (D268): the argument is read from the floating-point
+//! registers and the answer written back at the declared width. Inputs are chosen so the
+//! answer differs from the input, since an echo passes any fixed-point test. Single-precision
+//! functions compute in `f32` and answer in the low half with the upper half zero.
 
-// Exact comparison is the assertion, not an oversight. `sqrt` is correctly rounded by
-// IEEE 754 and the rounding functions are exact by definition, so there is one right
-// answer and a tolerance would hide a wrong one - `round(2.5)` landing on 2 is within any
-// epsilon that admits floating-point noise. Where an answer genuinely is not
-// bit-determined - every transcendental below - `near` is used instead, and the two are
-// kept visibly distinct.
+// Exact comparison is deliberate: `sqrt` is correctly rounded by IEEE 754 and the rounding
+// functions are exact, so a tolerance would hide a wrong answer. The transcendentals use
+// `near`.
 #![allow(clippy::float_cmp)]
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GUEST_FLOAT_REGISTERS, GuestFloatFn};
 
 /// The implementation registered under `name`.
 ///
-/// Panics rather than returning an option: a name absent from the table is a function no
-/// guest can reach, and a skipped assertion would hide that.
+/// Panics on a missing name, which is a function no guest can reach.
 fn implementation(name: &str) -> GuestFloatFn {
     orbistoun_libc::math::implementations()
         .iter()
@@ -47,11 +25,8 @@ fn implementation(name: &str) -> GuestFloatFn {
         )
 }
 
-/// Poison for registers the call does not use.
-///
-/// Chosen so that reading the wrong register produces a wildly wrong number rather than a
-/// plausible zero: as a `double` these bits are a large negative value, and as an integer
-/// they are not a valid address.
+/// Poison for registers the call does not use: a large negative `double` and an invalid
+/// address, so reading the wrong register is obvious.
 const POISON: u64 = 0xDEAD_BEEF_DEAD_BEEF;
 
 /// Calls a `double` function with the given floating-point arguments.
@@ -70,8 +45,8 @@ fn call_f64(name: &str, args: &[f64]) -> f64 {
 fn call_f32_raw(name: &str, args: &[f32]) -> u64 {
     let mut floats = [POISON; GUEST_FLOAT_REGISTERS];
     for (slot, value) in floats.iter_mut().zip(args) {
-        // A single-precision argument occupies the low half; the upper half is poison,
-        // because that is what a real caller leaves there and a handler must not read it.
+        // A single-precision argument occupies the low half; the upper half is poison, which a
+        // handler must not read.
         *slot = u64::from(value.to_bits()) | 0xFFFF_FFFF_0000_0000;
     }
     implementation(name)(&[POISON; GUEST_ARG_REGISTERS], &floats)
@@ -88,13 +63,9 @@ fn near(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-12 * b.abs().max(1.0)
 }
 
-// --- the table -----------------------------------------------------------------------
+// The table.
 
 /// Every name appears once, and the table is not empty.
-///
-/// The emptiness check is load-bearing: every other test here reaches the table through
-/// `implementation`, which panics on a missing name, so an empty table would fail loudly
-/// rather than pass quietly - but a *shrunken* one would not, and this is what notices.
 #[test]
 fn the_table_names_each_function_once() {
     let mut seen = std::collections::BTreeSet::new();
@@ -107,13 +78,9 @@ fn the_table_names_each_function_once() {
     );
 }
 
-// --- the boundary itself ---------------------------------------------------------------
+// The boundary itself.
 
-/// No function answers with its own argument.
-///
-/// **This is D268 as a test.** Every input below is chosen so the correct answer differs
-/// from the input, so a handler that failed to write the result register - leaving the
-/// guest's argument in place - fails here rather than thirteen conformance checks later.
+/// No function answers with its own argument (D268).
 #[test]
 fn no_function_answers_with_the_argument_it_was_given() {
     for (name, input) in [
@@ -168,11 +135,8 @@ fn no_single_precision_function_answers_with_its_argument() {
     }
 }
 
-/// A two-argument function reads the *second* floating-point register, not a repeat of the
+/// A two-argument function reads the second floating-point register, not a repeat of the
 /// first.
-///
-/// The failure it catches is subtle and self-consistent: `pow(x, x)` looks plausible for
-/// every input a casual test would try.
 #[test]
 fn a_two_argument_function_reads_the_second_register() {
     assert!(near(call_f64("pow", &[2.0, 10.0]), 1024.0));
@@ -182,18 +146,13 @@ fn a_two_argument_function_reads_the_second_register() {
     ));
     assert!(near(call_f64("fmod", &[7.0, 3.0]), 1.0));
 
-    // Deliberately asymmetric: a handler reading `xmm0` twice would answer 3^3 = 27, and
-    // one reading `xmm1` twice would answer 2^2 = 4. Neither is 8.
+    // Asymmetric: reading `xmm0` twice answers 27 and reading `xmm1` twice answers 4.
     assert!(near(call_f64("pow", &[2.0, 3.0]), 8.0));
     assert!((call_f32("powf", &[2.0, 3.0]) - 8.0).abs() < 1e-5);
     assert!((call_f32("fmodf", &[7.0, 3.0]) - 1.0).abs() < 1e-6);
 }
 
 /// A single-precision answer leaves the upper half of the register zero.
-///
-/// Nothing defines what a caller finds there, so writing anything into it would be
-/// inventing a value. Asserted on the raw register, since the answer itself cannot show
-/// it.
 #[test]
 fn a_single_precision_answer_leaves_the_upper_half_alone() {
     for (name, input) in [("sqrtf", 4.0_f32), ("fabsf", -1.0), ("floorf", 1.5)] {
@@ -208,21 +167,15 @@ fn a_single_precision_answer_leaves_the_upper_half_alone() {
 }
 
 /// A single-precision argument is read from the low half, ignoring whatever is above it.
-///
-/// A handler that read the full 64 bits as an `f64` would see the poison in the upper half
-/// and answer nonsense; one that narrowed an `f64` would round twice.
 #[test]
 fn a_single_precision_argument_ignores_the_upper_half() {
     assert!((call_f32("sqrtf", &[9.0]) - 3.0).abs() < 1e-6);
     assert!((call_f32("fabsf", &[-2.5]) - 2.5).abs() < 1e-6);
 }
 
-// --- the answers the standard fixes ------------------------------------------------------
+// The answers the standard fixes.
 
-/// `sqrt` is correctly rounded by IEEE 754, so exactness is the right assertion.
-///
-/// The transcendentals below it are not, and are checked to a tolerance instead - stated
-/// so the difference reads as deliberate rather than as an inconsistent standard of proof.
+/// `sqrt` is correctly rounded by IEEE 754, so it is asserted exactly.
 #[test]
 fn sqrt_is_exact_because_the_standard_requires_it() {
     assert_eq!(call_f64("sqrt", &[4.0]), 2.0);
@@ -231,10 +184,7 @@ fn sqrt_is_exact_because_the_standard_requires_it() {
     assert_eq!(call_f32("sqrtf", &[16.0]), 4.0);
 }
 
-/// `round` goes away from zero at a halfway case, which is what C specifies.
-///
-/// **Not banker's rounding and not `rint`.** The distinction only shows at exactly .5, so
-/// a test on 2.4 and 2.6 would pass against either rule.
+/// `round` goes away from zero at a halfway case, as C specifies.
 #[test]
 fn round_takes_halfway_cases_away_from_zero() {
     assert_eq!(call_f64("round", &[2.5]), 3.0);
@@ -244,11 +194,8 @@ fn round_takes_halfway_cases_away_from_zero() {
     assert_eq!(call_f32("roundf", &[-2.5]), -3.0);
 }
 
-/// The four rounding functions disagree on a negative, which is the only place they can.
-///
-/// `floor`, `ceil`, `trunc` and `round` all answer 2 for 2.4. Given -2.5 they answer four
-/// different things, so one function wired to another's implementation shows up here and
-/// nowhere else.
+/// The four rounding functions answer four different things for -2.5, so none is wired to
+/// another's implementation.
 #[test]
 fn the_rounding_functions_differ_on_a_negative() {
     assert_eq!(call_f64("floor", &[-2.5]), -3.0);
@@ -261,11 +208,7 @@ fn the_rounding_functions_differ_on_a_negative() {
     assert_eq!(call_f32("truncf", &[-2.5]), -2.0);
 }
 
-/// `log` is the natural logarithm, not a logarithm waiting for a base.
-///
-/// Rust spells the natural one `ln`, and its `log` takes a base - so the obvious
-/// transcription answers a different question from the same call. `log(e) == 1` catches it
-/// and `log(1) == 0` does not, since every base agrees there.
+/// `log` is the natural logarithm: `log(e) == 1`.
 #[test]
 fn log_is_the_natural_logarithm() {
     assert!(near(call_f64("log", &[std::f64::consts::E]), 1.0));
@@ -273,7 +216,7 @@ fn log_is_the_natural_logarithm() {
     assert!(near(call_f64("log2", &[8.0]), 3.0));
     assert!((call_f32("logf", &[std::f32::consts::E]) - 1.0).abs() < 1e-6);
 
-    // The three disagree on the same input, so none can be standing in for another.
+    // The three disagree on the same input, so none stands in for another.
     let x = 100.0;
     assert!(!near(call_f64("log", &[x]), call_f64("log10", &[x])));
     assert!(!near(call_f64("log2", &[x]), call_f64("log10", &[x])));
@@ -297,8 +240,7 @@ fn the_inverse_trigonometric_functions_answer_in_radians() {
     assert!(near(call_f64("cos", &[call_f64("acos", &[0.25])]), 0.25));
 }
 
-/// `atan2` uses both signs to pick a quadrant, which is the whole reason it exists
-/// alongside `atan`.
+/// `atan2` uses both signs to pick a quadrant.
 #[test]
 fn atan2_distinguishes_the_quadrants() {
     let quarter = std::f64::consts::FRAC_PI_4;
@@ -308,11 +250,8 @@ fn atan2_distinguishes_the_quadrants() {
     assert!(near(call_f64("atan2", &[-1.0, 1.0]), -quarter));
 }
 
-/// The identities that tie the trigonometric family together.
-///
-/// Cheaper than pinning constants, and it fails if any one of the three is wired to
-/// another: `sin` and `cos` swapped would still satisfy the Pythagorean identity, but not
-/// the individual values beside it.
+/// The identities that tie the trigonometric family together, with individual values so a
+/// swap of `sin` and `cos` is caught.
 #[test]
 fn the_trigonometric_functions_satisfy_their_identities() {
     let x = 0.7;
@@ -345,10 +284,10 @@ fn fabs_clears_only_the_sign() {
     assert_eq!(call_f32("fabsf", &[-3.5]), 3.5);
 }
 
-// --- the two that read an integer register ------------------------------------------------
+// The two that read an integer register.
 
-/// A NUL-terminated string at a real address, since a guest pointer is a host pointer under
-/// the identity mapping (D014).
+/// A NUL-terminated string at a real address, which under the identity mapping is a guest
+/// pointer.
 struct Text(Vec<u8>);
 
 impl Text {
@@ -373,9 +312,6 @@ fn call_mixed(name: &str, text: u64, end: u64) -> u64 {
 }
 
 /// `strtod` reads a pointer from an integer register and answers in a floating-point one.
-///
-/// The reason both argument arrays are carried together rather than a function being one
-/// kind or the other.
 #[test]
 fn strtod_crosses_from_an_integer_register_to_a_floating_point_one() {
     let text = Text::new("2.5");
@@ -387,10 +323,7 @@ fn strtod_crosses_from_an_integer_register_to_a_floating_point_one() {
     assert_eq!(raw >> 32, 0, "strtof wrote into the upper half");
 }
 
-/// The longest parsable prefix is taken, which C specifies and Rust's own parser does not.
-///
-/// Rust rejects a trailing suffix outright, so handing it the whole string would answer
-/// zero for every number a real guest passes - which is always followed by something.
+/// The longest parsable prefix is taken, as C specifies.
 #[test]
 fn a_conversion_takes_the_longest_prefix_that_parses() {
     for (input, want) in [
@@ -409,10 +342,7 @@ fn a_conversion_takes_the_longest_prefix_that_parses() {
     }
 }
 
-/// The end pointer lands past what was consumed, including the whitespace that was skipped.
-///
-/// A caller walks a list of numbers with it, so a pointer that never advances is a hang
-/// rather than a wrong value.
+/// The end pointer lands past what was consumed, including skipped whitespace.
 #[test]
 fn a_conversion_reports_where_it_stopped() {
     let text = Text::new("  2.5,3.5");
@@ -454,11 +384,8 @@ fn a_null_pointer_is_zero_rather_than_a_fault() {
     assert_eq!(f64::from_bits(call_mixed("strtod", text.at(), 0)), 6.5);
 }
 
-/// The single-precision conversion parses as an `f32` rather than narrowing a `double`.
-///
-/// Narrowing rounds twice, and a value exactly between two `f32`s lands on the wrong one.
-/// The literal below is chosen to sit at that midpoint: parsed directly it rounds to even,
-/// and parsed-then-narrowed it does not.
+/// The single-precision conversion parses as an `f32` rather than narrowing a `double`,
+/// checked at a value where double rounding differs.
 #[test]
 fn the_single_precision_conversion_does_not_round_twice() {
     let text = Text::new("16777217"); // 2^24 + 1, the first integer an f32 cannot hold
@@ -468,11 +395,7 @@ fn the_single_precision_conversion_does_not_round_twice() {
     assert_eq!(answer, 16_777_216.0);
 }
 
-/// The single-precision conversion reports where it stopped, exactly as the double does.
-///
-/// Its own copy of the walk, so its own test: the two are separate functions precisely so
-/// neither narrows the other's result, and that separation means a fix applied to one can
-/// miss the other.
+/// The single-precision conversion reports where it stopped, as the double does.
 #[test]
 fn the_single_precision_conversion_also_reports_where_it_stopped() {
     let text = Text::new("  1.5e2;rest");

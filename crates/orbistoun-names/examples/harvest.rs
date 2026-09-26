@@ -1,8 +1,7 @@
-//! Harvesting FreeBSD symbol maps, without going through the command-line tool.
+//! Harvests FreeBSD symbol maps without going through the command-line tool.
 //!
-//! Does exactly what `orbistoun-cli harvest` does. It exists because the tool links the
-//! whole workspace, so a crate anybody is mid-edit on can stop the harvest working - and
-//! the harvest has no business depending on the shader translator.
+//! Does what `orbistoun-cli harvest` does. The tool links the whole workspace, so a crate
+//! mid-edit could stop the harvest, which has no business depending on the shader translator.
 //!
 //! ```text
 //! cargo run -p orbistoun-names --example harvest -- <freebsd-src> <revision>
@@ -54,8 +53,8 @@ fn main() {
         if path.is_dir() {
             find_maps(&path, &mut maps);
         } else {
-            // Named rather than silently skipped: a sparse checkout missing one library
-            // yields a smaller list, and the reader should know which.
+            // Named rather than skipped silently: a sparse checkout missing one library yields a smaller
+            // list, and the reader should know which.
             eprintln!("note: {} is not present, skipping", path.display());
         }
     }

@@ -1,29 +1,14 @@
 //! Telling a tap on the shell button from a hold.
 //!
-//! # Why this is its own thing, and pure
-//!
-//! One button means two different things depending on how long it is held, and that is a
-//! decision with a clock in it - which is exactly the kind that gets written inline in a
-//! draw loop, tested by pressing the button, and then quietly wrong at the edges. So it
-//! takes elapsed milliseconds as an argument rather than reading a clock, and every edge
-//! below is an assertion instead of something somebody tried once (principle 8).
-//!
-//! # The behaviour, and why it is this one
-//!
-//! A hold fires **while the button is still down**, not on release. That is how hardware
-//! that does this behaves, and the reason is that a person holding a button needs to be
-//! told they have held it long enough - otherwise the only feedback is at release, by which
-//! point they have already held it too long or let go too early.
-//!
-//! It follows that a release after a hold produces *nothing*. The hold already happened;
-//! reporting a tap as well would open one menu on top of the other.
+//! Pure: it takes elapsed milliseconds rather than reading a clock, so every edge is a test.
+//! A hold fires while the button is still down, as hardware that does this behaves, so the
+//! person holding it gets feedback before letting go. A release after a hold reports nothing,
+//! so one press does not open two menus.
 
 /// How long the shell button must be held to mean the second thing.
 ///
-/// **A choice, not a measurement.** Long enough that a hurried tap cannot reach it, short
-/// enough that somebody holding on purpose does not wonder whether it is working. If it
-/// ever needs to differ per person it becomes a setting; it is a constant until somebody
-/// wants that.
+/// A choice, not a measurement: long enough that a hurried tap cannot reach it, short enough
+/// that a deliberate hold does not feel unresponsive.
 pub const HOLD_MS: u32 = 600;
 
 /// What a press turned out to be.
@@ -42,19 +27,16 @@ pub enum ShellPress {
 pub struct ShellButton {
     /// How long it has been down, or zero when it is up.
     held_ms: u32,
-    /// Whether this press has already been reported as a hold.
-    ///
-    /// **The field that makes a hold happen once.** Without it, every frame past the
-    /// threshold reports another hold, and a menu opened by one press opens sixty times a
-    /// second for as long as somebody keeps their thumb down.
+    /// Whether this press has already been reported as a hold, so a hold fires once rather than
+    /// every frame past the threshold.
     fired: bool,
 }
 
 impl ShellButton {
     /// Advances by one frame and says what happened.
     ///
-    /// `elapsed_ms` is the time since the last call. Passed in rather than measured so the
-    /// whole behaviour is testable without waiting for real seconds to pass.
+    /// `elapsed_ms` is the time since the last call, passed in so the behaviour is testable
+    /// without waiting.
     pub fn update(&mut self, down: bool, elapsed_ms: u32) -> ShellPress {
         if down {
             self.held_ms = self.held_ms.saturating_add(elapsed_ms);
@@ -65,8 +47,8 @@ impl ShellButton {
             return ShellPress::None;
         }
 
-        // Released. A press that never reached the threshold was a tap; one that did has
-        // already been reported and must not be reported again.
+        // Released. A press that never reached the threshold was a tap; one that did has already
+        // been reported.
         let was_down = self.held_ms > 0;
         let tapped = was_down && !self.fired;
         self.held_ms = 0;
@@ -78,10 +60,8 @@ impl ShellButton {
         }
     }
 
-    /// How far through a hold this press is, in `0.0..=1.0`.
-    ///
-    /// For drawing something while somebody holds. A hold with no visible progress is a
-    /// button that appears not to work for six hundred milliseconds.
+    /// How far through a hold this press is, in `0.0..=1.0`, for drawing progress while the
+    /// button is held.
     #[must_use]
     pub fn hold_progress(&self) -> f32 {
         if self.fired {
@@ -108,9 +88,7 @@ mod tests {
         assert_eq!(button.update(false, 16), ShellPress::Tap);
     }
 
-    /// **A hold fires while the button is still down.**
-    ///
-    /// Not on release, because the only feedback a person gets before letting go is this.
+    /// A hold fires while the button is still down, not on release.
     #[test]
     fn a_long_press_reports_the_hold_before_it_is_released() {
         let mut button = ShellButton::default();
@@ -118,10 +96,7 @@ mod tests {
         assert_eq!(button.update(true, 1), ShellPress::Hold, "at the threshold");
     }
 
-    /// **A hold happens once, however long somebody keeps holding.**
-    ///
-    /// The failure this prevents: a menu opened by one press reopening every frame for as
-    /// long as a thumb stays down.
+    /// A hold is reported once, however long the button stays down.
     #[test]
     fn a_hold_is_reported_once_and_not_every_frame_after() {
         let mut button = ShellButton::default();
@@ -131,9 +106,7 @@ mod tests {
         }
     }
 
-    /// **Releasing after a hold is not also a tap.**
-    ///
-    /// Otherwise one press opens the power menu and then the shell menu on top of it.
+    /// Releasing after a hold is not also a tap.
     #[test]
     fn releasing_after_a_hold_reports_nothing() {
         let mut button = ShellButton::default();
@@ -151,9 +124,6 @@ mod tests {
     }
 
     /// The press after a hold behaves like a fresh press.
-    ///
-    /// State that survives a release is state that makes the second press wrong, which is
-    /// the kind of bug somebody reproduces once and then cannot.
     #[test]
     fn a_press_after_a_hold_can_still_be_a_tap() {
         let mut button = ShellButton::default();

@@ -1,32 +1,12 @@
-//! Networking HLE - the libraries a title imports and nothing answers yet.
+//! Networking HLE - the libraries a title imports for HTTP, sockets, TLS and the platform's
+//! account services.
 //!
-//! # Why a crate with no implementations
-//!
-//! A title in the corpus imports **sixty-eight** functions across seven networking
-//! libraries - HTTP, sockets, TLS, and the platform's account services - and orbistoun
-//! declared none of them. Every one was reported as an unresolved import or, where the
-//! library id did not map, as `unknown::`, which meant a guest reaching the network could
-//! not be named or counted.
-//!
-//! This crate is the honest home for those names: it is where an implementation would go,
-//! so putting the declarations anywhere else would have to be undone later. Nothing here is
-//! implemented and every library is listed in `SERVES_NOTHING` with that reason - see
-//! `orbistoun-gpu`'s `agc` module for the argument in full (D504).
-//!
-//! # Names confirmed, arities not
-//!
-//! Every name is read out of a real module's import table. The arities are `6`, the
-//! trampoline's full capture, which is not a claim that these take six arguments: with
-//! nothing established, recording every argument register loses no information where
-//! guessing low discards it.
-//!
-//! # What networking is not going to be
-//!
-//! Worth saying now, because a networking stack is the kind of thing that grows by
-//! accident. `docs/SCOPE.md` puts online services out of scope; what these declarations
-//! buy is that a title asking for the network is **visible in a report** rather than dying
-//! on an unresolved import, and that a guest which tolerates a refused connection can carry
-//! on. Answering a socket call with success it can act on is a different project.
+//! Declaring the names makes a title that asks for the network visible in a report instead
+//! of failing on an unresolved import, and lets a guest that tolerates a refused connection
+//! carry on. Every name comes from a real import table (D504); unmeasured arities are `6`,
+//! the trampoline's full capture, which loses no argument where a low guess would. Only
+//! `socket` serves anything; the other libraries are listed in `SERVES_NOTHING`. Online
+//! services are out of scope (`docs/SCOPE.md`).
 
 pub mod http;
 pub mod http2;
@@ -38,55 +18,27 @@ pub mod ssl;
 
 /// The vendor spellings this crate serves, by symbol name.
 ///
-/// Only `socket` has any - the rest of the libraries here are declarations, and say so in
-/// their own module notes. Gathered at the crate root because that is the shape
-/// `orbistoun-service` collects: one call per crate, so a new module cannot be added and
-/// silently left unregistered.
+/// Gathered at the crate root because `orbistoun-service` collects one call per crate, so a
+/// new module cannot be left unregistered.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, orbistoun_core::GuestFn)] {
     socket::implementations()
 }
 
-/// The base libSceNet numbers its errors from: `0x8041_0100`, **not** `0x8041_0000`.
+/// The base libSceNet numbers its errors from: `0x8041_0100`, not `0x8041_0000`.
 ///
-/// # Two spellings of one condition, in one sweep
-///
-/// Every other subsystem measured so far uses a plain high half-word - the kernel's
-/// `0x8002_0000`, audio's `0x8026_0000`, the pad's `0x8092_0000` - and by analogy this one would
-/// be `0x8041_0000`. It is not, and the low byte is not noise in the errno either.
-///
-/// A single obSCEne sweep exercised the same two conditions through **both** the vendor calls and
-/// the POSIX ones, and recorded the vendor code beside the `__error()` value:
-///
-/// | condition | `sceNet*` answered | `errno` held | errno in hex |
-/// |---|---|---|---|
-/// | recv on a connected socket with nothing to read | `0x8041_0123` | 35 `EAGAIN` | `0x23` |
-/// | recv on a listening socket | `0x8041_0139` | 57 `ENOTCONN` | `0x39` |
-///
-/// Both fit `base | errno` with `base = 0x8041_0100`, and the pairing is what establishes it:
-/// either code alone says nothing about which byte is the errno. A third measured value,
-/// `sceNetBind` refusing with `0x8041_0130`, is consistent - `0x30` is 48, `EADDRINUSE`, and the
-/// POSIX `bind` in the same check had already taken the address - but its errno was not read
-/// independently, so it corroborates rather than confirms.
-///
-/// # What would falsify it
-///
-/// A libSceNet code whose low byte is not a BSD errno for the condition that produced it, or one
-/// above `0x8041_01ff`. Two points fit a line; nothing here has yet seen a code that could not.
-/// Recorded at this strength rather than asserted as the scheme, because a reimplementation that
-/// guessed `0x8041_0000 | errno` would be wrong by exactly `0x100` on every value - close enough
-/// to look right in a log and never match a guest's comparison.
+/// A libSceNet code is `base | errno`. One obSCEne sweep read both the vendor code and
+/// `__error()` for the same conditions: a would-block recv answers `0x8041_0123` with errno
+/// 35 (`EAGAIN`), a recv on a listening socket `0x8041_0139` with 57 (`ENOTCONN`). A code whose
+/// low byte is not the BSD errno for its condition, or one above `0x8041_01ff`, would falsify
+/// the scheme. The analogous `0x8041_0000 | errno` is wrong by `0x100` on every value.
 pub const NET_ERROR_BASE: u32 = 0x8041_0100;
 
 #[cfg(test)]
 mod tests {
     use super::NET_ERROR_BASE;
 
-    /// **The three measured codes, reconstructed from their errnos** (D627).
-    ///
-    /// Asserted as failures rather than as a count: each line is a value a console actually
-    /// answered, and the test is that this base plus the ordinary BSD number produces it. A
-    /// change to the base that still compiled would break every one of them.
+    /// The measured codes are this base plus the ordinary BSD errno.
     #[test]
     fn the_measured_codes_are_this_base_plus_a_bsd_errno() {
         /// `EAGAIN`, held in `__error()` after a would-block recv on a connected socket.
@@ -113,11 +65,7 @@ mod tests {
         );
     }
 
-    /// **The obvious guess is wrong, and wrong by a whole `0x100`.**
-    ///
-    /// The negative case, written because a guard nobody has watched reject something is a guard
-    /// nobody knows anything about. Every other subsystem's base ends in four zero digits, so
-    /// this is the one somebody will "correct".
+    /// The base by analogy with other subsystems, `0x8041_0000`, is not this one.
     #[test]
     fn the_plain_high_half_word_does_not_produce_the_measured_codes() {
         /// What analogy with every other subsystem would suggest.

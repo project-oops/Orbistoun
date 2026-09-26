@@ -1,23 +1,11 @@
-//! The AGC packet builders, held against what the console's own builders wrote.
+//! The command-packet builders, held against what the hardware's own builders wrote.
 //!
-//! # What makes this evidence
-//!
-//! `tests/measured_packets.rs` walks buffers a console produced and asks whether the *walker*
-//! agrees. This asks the other half: whether what orbistoun **emits** is what the console emitted,
-//! dword for dword, for the same arguments.
-//!
-//! obSCEne sweep `20260914-100833` called ten `libSceAgc` builders with known arguments on firmware
-//! 12.40 and recorded the header, the body dwords it read back, and - separately, without reference
-//! to any header field - how many bytes the builder advanced. Each case below replays those exact
-//! arguments through `packet::build` and asserts the same bytes come out (orbistoun worklog 534).
-//!
-//! # What it cannot establish
-//!
-//! That a builder is right for arguments nobody passed. Every case here is one argument set, and
-//! two builders are argument-sensitive in ways this sweep proved rather than resolved
-//! (`sceAgcDcbWaitRegMem` wrote a different extent for different arguments; `sceAgcDcbEventWrite`
-//! has a longer address-carrying form that was not called). A builder agreeing on one call is not a
-//! builder verified.
+//! `tests/measured_packets.rs` checks that the walker agrees with buffers the hardware produced.
+//! This checks that what orbistoun emits is what the hardware emitted, dword for dword, for the
+//! same arguments. obSCEne called `libSceAgc` builders with known arguments and recorded the
+//! header, the body dwords and, independently of any header field, the bytes each advanced. Each
+//! case replays those arguments through `packet::build`. One argument set per case does not verify
+//! a builder for arguments nobody passed.
 
 use orbistoun_gpu::packet::{PacketKind, build, walk};
 
@@ -151,7 +139,7 @@ fn set_uconfig_register_matches_the_capture() {
 }
 
 /// `sceAgcCbSetShRegisterRangeDirect(cb, 8, [0x12345678, 0x9abcdef0], 2)` wrote
-/// `0xc0027600 8 0x12345678 0x9abcdef0`, 16 bytes - and **no leading marker**.
+/// `0xc0027600 8 0x12345678 0x9abcdef0`, 16 bytes, with no leading marker.
 #[test]
 fn set_sh_register_range_matches_the_capture() {
     let built = build::set_sh_register_range(8, &[0x1234_5678, 0x9abc_def0]);
@@ -246,11 +234,8 @@ fn every_measured_builder_closes_its_own_length_arithmetic() {
     }
 }
 
-/// **All eight measured argument pairs**, from the sweep that made this builder implementable.
-///
-/// `sceAgcDcbSetIndexSize(dcb, type, flags)` for `type` 0-3 and `flags` 0-1
-/// (`166-agc/dcb-set-index-size`, sweep `20260914-222710`). One point fixes nothing - worklog 536
-/// refused this builder on exactly that ground - and eight fix the two low bits and bit 6.
+/// All eight measured argument pairs of `sceAgcDcbSetIndexSize(dcb, type, flags)` for `type` 0-3
+/// and `flags` 0-1 (`166-agc/dcb-set-index-size`), which fix the two low bits and bit 6.
 #[test]
 fn set_index_size_matches_every_measured_pair() {
     let measured = [
@@ -273,8 +258,7 @@ fn set_index_size_matches_every_measured_pair() {
     }
 }
 
-/// `sceAgcDcbDrawIndex(dcb, 3, 0x12345678, 0)` wrote `0xc0042700 3 0x12345678 0 3 0`, 24 bytes -
-/// including the two dwords worklog 536 could not place.
+/// `sceAgcDcbDrawIndex(dcb, 3, 0x12345678, 0)` wrote `0xc0042700 3 0x12345678 0 3 0`, 24 bytes.
 #[test]
 fn draw_index_2_matches_the_capture_in_full() {
     let built = build::draw_index_2(3, 0x1234_5678, 3, 0);

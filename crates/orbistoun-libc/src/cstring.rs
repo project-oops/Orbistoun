@@ -1,18 +1,8 @@
 //! The string, character-class and integer-conversion parts of the C library.
 //!
-//! # Why these arrive as one batch
-//!
-//! The conformance probe's `035-libc` section failed sixteen checks, and almost every one
-//! named a function that simply was not there - `strstr`, `strspn`, `toupper`, `atol`,
-//! `strtoul`, `strncasecmp`. They are defined by the C standard rather than by the
-//! platform, so there is one right answer per function and no room for a guess (D270).
-//!
-//! # The bytes are the guest's, and none of this assumes they are text
-//!
-//! A C string is bytes terminated by NUL, not UTF-8. Everything here works on `u8` and
-//! uses the C locale's classification rules, which are defined only for ASCII - a byte
-//! above 127 is not a letter here, and treating it as one is how a locale-dependent
-//! answer becomes a wrong one on somebody else's machine.
+//! These are defined by the C standard rather than by the platform, so each has one right
+//! answer. A C string is bytes terminated by NUL, not UTF-8: everything here works on `u8`
+//! with the C locale's classification, where only ASCII bytes are letters.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -23,8 +13,8 @@ fn bytes(address: u64) -> Vec<u8> {
     if address == 0 {
         return Vec::new();
     }
-    // SAFETY: a guest-supplied string under the identity mapping (D014), bounded by the
-    // same limit every other string function here uses.
+    // SAFETY: a guest-supplied string under the identity mapping, bounded by the limit every
+    // string function here uses.
     let len = unsafe { c_len(address) };
     // SAFETY: `len` bytes are readable by the scan that just measured them.
     unsafe { std::slice::from_raw_parts(ptr(address), len) }.to_vec()
@@ -45,13 +35,9 @@ const fn fold(b: u8) -> u8 {
     b.to_ascii_lowercase()
 }
 
-// --- character classes -------------------------------------------------------------
-//
-// Each takes an `int` and returns non-zero or zero. **The argument is an `int`, not a
-// `char`**: C requires it to be representable as `unsigned char` or equal to `EOF`, and a
-// guest passing a sign-extended byte would otherwise index out of a table. Here the value
-// is simply masked, which answers `false` for anything outside a byte - including `EOF`,
-// which is not a member of any class.
+// Character classes. Each takes an `int` and returns non-zero or zero. C requires the
+// argument to be representable as `unsigned char` or equal to `EOF`; it is masked, so
+// anything outside a byte, `EOF` included, is in no class.
 
 /// Builds a classification function from a predicate on the byte.
 macro_rules! class {
@@ -101,7 +87,7 @@ fn tolower(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-// --- searching ---------------------------------------------------------------------
+// Searching.
 
 /// `strstr(haystack, needle)` - the address of the first match, or null.
 ///
@@ -164,16 +150,13 @@ fn order(a: impl Iterator<Item = u8>, b: impl Iterator<Item = u8>) -> u64 {
     }
 }
 
-// --- integer conversion ------------------------------------------------------------
+// Integer conversion.
 
 /// Parses a C integer: optional space, optional sign, digits in `base`.
 ///
-/// `base` of zero means "work it out from the prefix", which is what `strtol` does and
-/// what `atoi` must not do - `atoi("010")` is ten, not eight.
-///
-/// Returns the value and how many bytes were consumed, so `strtol` can report where it
-/// stopped. **A caller uses that to walk a list**, and one that never advances is a hang
-/// rather than a wrong answer.
+/// `base` of zero takes the base from the prefix, as `strtol` does and `atoi` must not
+/// (`atoi("010")` is ten). Returns the value and how many bytes were consumed, so `strtol` can
+/// report where it stopped; a caller walking a list relies on that to advance.
 fn parse_int(text: &[u8], base: u32) -> Parsed {
     let mut at = 0;
     while at < text.len() && (text[at].is_ascii_whitespace() || text[at] == 0x0b) {
@@ -191,8 +174,7 @@ fn parse_int(text: &[u8], base: u32) -> Parsed {
         _ => false,
     };
     let mut base = base;
-    // Where a `0x` began, so a prefix with nothing usable after it can fall back to the zero
-    // it started with. See the refusal below for why that is not the same as reading nothing.
+    // Where a `0x` began, so a prefix with nothing usable after it falls back to its zero.
     let before_prefix = at;
     let mut took_prefix = false;
     if base == 0 || base == 16 {
@@ -208,12 +190,9 @@ fn parse_int(text: &[u8], base: u32) -> Parsed {
         }
     }
     let start = at;
-    // **The magnitude, unsigned and saturating** - not the signed value. A conversion that
-    // overflows has to answer its type's limit, and which limit depends on the caller's type
-    // and on the sign, neither of which this knows. Accumulating into a signed value and
-    // truncating at the end answered a wrapped number instead: `strtoul` on twenty-three
-    // nines returned `0x2c7e14af67fffff`, which is not merely wrong but *plausible*, so a
-    // caller range-checking the result saw something in range and carried on (D479).
+    // The magnitude, unsigned and saturating. An overflowing conversion answers its type's
+    // limit, which depends on the caller's type and the sign, so accumulating a signed value
+    // and truncating would answer a wrapped, plausible number instead.
     let mut magnitude: u128 = 0;
     while let Some(digit) = text.get(at).and_then(|b| (*b as char).to_digit(base)) {
         magnitude = magnitude
@@ -222,12 +201,9 @@ fn parse_int(text: &[u8], base: u32) -> Parsed {
         at += 1;
     }
     if at == start {
-        // **`0x` with nothing usable after it is a conversion, not a refusal.** ISO C
-        // 7.22.1.4 defines the subject sequence as the *longest initial subsequence of the
-        // expected form*, and for `"0x"` that is `"0"` - so the value is zero and `endptr`
-        // points at the `x`, one past the zero. Reading it as "no conversion" costs a caller
-        // the difference between a parsed zero and a parse failure, which is the whole of
-        // what `endptr` is for. Found by the differential against glibc (D498).
+        // `0x` with nothing usable after it is a conversion, not a refusal: ISO C 7.22.1.4 takes
+        // the longest initial subsequence of the expected form, which for `"0x"` is `"0"`, so the
+        // value is zero and `endptr` points at the `x`.
         if took_prefix {
             return Parsed {
                 magnitude: 0,
@@ -235,8 +211,8 @@ fn parse_int(text: &[u8], base: u32) -> Parsed {
                 consumed: before_prefix.saturating_add(1),
             };
         }
-        // No digits at all: C says the value is zero and nothing was consumed, so an `endptr`
-        // points back at the original string and a caller's loop terminates.
+        // No digits at all: the value is zero and nothing was consumed, so `endptr` points back at
+        // the original string.
         return Parsed::default();
     }
     Parsed {
@@ -260,9 +236,7 @@ struct Parsed {
 impl Parsed {
     /// The value an unsigned conversion of this width answers.
     ///
-    /// **A negative subject is not an error and is not clamped to zero.** ISO C has an
-    /// unsigned conversion negate the value, so `strtoul("-1")` is `ULONG_MAX` - which is the
-    /// case that stops this being a plain clamp into range.
+    /// A negative subject is negated, not clamped: ISO C makes `strtoul("-1")` `ULONG_MAX`.
     const fn unsigned(self, highest: u64) -> u64 {
         if self.magnitude > highest as u128 {
             return highest;
@@ -297,10 +271,8 @@ impl Parsed {
 macro_rules! ascii_to_int {
     ($name:ident, $width:ty) => {
         fn $name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-            // **Truncates where the `strtol` family clamps**, and the difference is the
-            // standard's rather than an inconsistency: ISO C 7.22.1.2 leaves `atoi` on a
-            // value it cannot represent *undefined*, while `strtol` is required to answer
-            // its limit. A test pins the truncation, so it is a choice already made.
+            // Truncates where the `strtol` family clamps: ISO C 7.22.1.2 leaves `atoi` on an
+            // unrepresentable value undefined, while `strtol` must answer its limit.
             let read = parse_int(&bytes(args[0]), 10);
             let value = read.magnitude as i128;
             (if read.negative { -value } else { value } as $width) as u64
@@ -322,8 +294,8 @@ macro_rules! string_to_int {
             let consumed = read.consumed;
             if args[1] != 0 {
                 if let Ok(at) = usize::try_from(args[1]) {
-                    // SAFETY: a guest-supplied `char **` under the identity mapping (D014),
-                    // written only when the guest passed a non-null pointer.
+                    // SAFETY: a guest-supplied `char **` under the identity mapping, written only
+                    // when the guest passed a non-null pointer.
                     unsafe {
                         std::ptr::write_unaligned(
                             std::ptr::with_exposed_provenance_mut::<u64>(at),
@@ -341,9 +313,7 @@ macro_rules! string_to_int {
     };
 }
 
-// **Each supplies its own limits, because ISO C's are per type and per signedness.** A
-// conversion that overflows answers the limit it overflowed, and answering the other one - or
-// a wrapped value - is a number a caller cannot tell from a real answer.
+// Each supplies its own limits, because ISO C's are per type and per signedness.
 string_to_int!(strtol, |r: Parsed| r.signed(i64::MIN, i64::MAX) as u64);
 string_to_int!(strtoll, |r: Parsed| r.signed(i64::MIN, i64::MAX) as u64);
 string_to_int!(strtoul, |r: Parsed| r.unsigned(u64::MAX));
@@ -351,9 +321,8 @@ string_to_int!(strtoull, |r: Parsed| r.unsigned(u64::MAX));
 
 /// Builds an absolute-value function.
 ///
-/// **`abs(INT_MIN)` is undefined in C and must not panic here.** Wrapping is what the
-/// hardware does and what every real implementation returns, so that is what happens -
-/// stated rather than left to a debug build to discover.
+/// `abs(INT_MIN)` is undefined in C and must not panic here; it wraps, as the hardware and
+/// every real implementation do.
 macro_rules! absolute {
     ($name:ident, $width:ty) => {
         fn $name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -369,9 +338,8 @@ absolute!(llabs, i64);
 
 /// `wcslen(text)` - wide characters, which are four bytes here.
 ///
-/// The target's `wchar_t` is 32-bit, as it is on every FreeBSD-derived system. Recorded as
-/// an assumption: a 16-bit `wchar_t` would make this count double and nothing in a trace
-/// would say so.
+/// The target's `wchar_t` is 32-bit, as on every FreeBSD-derived system: an assumption, since
+/// a 16-bit `wchar_t` would double the count silently.
 fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     /// As many wide characters as the byte limit allows.
     const MAX_WIDE: u64 = 16 * 1024 * 1024;
@@ -384,8 +352,8 @@ fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let Ok(at) = usize::try_from(args[0].saturating_add(count.saturating_mul(4))) else {
             break;
         };
-        // SAFETY: a guest-supplied wide string under the identity mapping (D014), read one
-        // character at a time so the scan cannot overrun a mapping by more than it reads.
+        // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
+        // time so the scan cannot overrun a mapping by more than it reads.
         let wide = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u32>(at)) };
         if wide == 0 {
             break;
@@ -397,9 +365,8 @@ fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `wcsrchr(s, c)` - the address of the last wide character in `s` equal to `c`, or null.
 ///
-/// Wide characters are four bytes, the 32-bit `wchar_t` [`wcslen`] assumes. The terminator is
-/// part of the string, so `wcsrchr(s, 0)` answers a pointer to it, which the standard requires;
-/// `c` is compared as a full 32-bit value, so its low half is what matters.
+/// The terminator is part of the string, so `wcsrchr(s, 0)` answers a pointer to it, as the
+/// standard requires; `c` is compared as a full 32-bit value.
 fn wcsrchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     /// As many wide characters as the byte limit allows, matching `wcslen`.
     const MAX_WIDE: u64 = 16 * 1024 * 1024;
@@ -415,8 +382,8 @@ fn wcsrchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let Ok(at) = usize::try_from(address) else {
             break;
         };
-        // SAFETY: a guest-supplied wide string under the identity mapping (D014), read one
-        // character at a time so the scan cannot overrun a mapping by more than it reads.
+        // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
+        // time so the scan cannot overrun a mapping by more than it reads.
         let wide = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u32>(at)) };
         if u64::from(wide) == wanted {
             last = address;
@@ -434,9 +401,8 @@ const WIDE: usize = 4;
 
 /// What an Annex K function answers when its runtime constraints are not met.
 ///
-/// The standard requires only "a nonzero value" (ISO/IEC 9899:2011 K.3.6.1.1). A documented
-/// errno is answered rather than an arbitrary number, because a guest printing it gets
-/// something meaningful; the value is not load-bearing and nothing here depends on which it is.
+/// The standard requires only "a nonzero value" (ISO/IEC 9899:2011 K.3.6.1.1); a documented
+/// errno gives a guest printing it something meaningful.
 const CONSTRAINT_VIOLATION: u64 = orbistoun_core::errno::INVALID as u64;
 
 /// Reads at most `limit` wide characters of a guest string, stopping at its terminator.
@@ -450,8 +416,8 @@ fn wide_bytes(address: u64, limit: usize) -> Vec<u32> {
             break;
         };
         let at = base + index * WIDE;
-        // SAFETY: a guest-supplied wide string under the identity mapping (D014), read one
-        // character at a time so a scan cannot overrun a mapping by more than it reads.
+        // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
+        // time so a scan cannot overrun a mapping by more than it reads.
         let value = unsafe { std::ptr::read_unaligned(at as *const u32) };
         if value == 0 {
             break;
@@ -466,17 +432,15 @@ fn write_bytes(at: u64, data: &[u8]) {
     if at == 0 || data.is_empty() {
         return;
     }
-    // SAFETY: a guest-supplied buffer under the identity mapping (D014). Every caller has
-    // already checked `data.len()` against the size the guest declared for the buffer, which
-    // is the whole contract of the bounded functions below.
+    // SAFETY: a guest-supplied buffer under the identity mapping. Every caller has already
+    // checked `data.len()` against the size the guest declared for the buffer.
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr(at), data.len()) };
 }
 
 /// `strlcpy(dst, src, dstsize)` - a bounded copy that always terminates.
 ///
-/// Reference: FreeBSD `strlcpy(3)`. **Answers the length of `src`, not how much was copied**,
-/// so a caller can tell truncation from a fit by comparing it against `dstsize` - which is the
-/// entire reason the function exists and the half that is easy to get wrong.
+/// Reference: FreeBSD `strlcpy(3)`. Answers the length of `src`, not how much was copied, so a
+/// caller can detect truncation by comparing it against `dstsize`.
 fn strlcpy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (dst, src, size) = (args[0], args[1], args[2]);
     let source = bytes(src);
@@ -513,7 +477,7 @@ fn strnstr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     };
     let hay = bytes(haystack);
-    // Bounded by the terminator *and* by `len`, whichever comes first.
+    // Bounded by the terminator and by `len`, whichever comes first.
     let bounded = &hay[..hay.len().min(len)];
     if bounded.len() < wanted.len() {
         return 0;
@@ -541,8 +505,8 @@ fn wcscmp(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `wcsncpy(dst, src, n)` - at most `n` wide characters, padded with nulls.
 ///
-/// Reference: ISO/IEC 9899 7.29.4.2.2. **Does not terminate when `src` is `n` or longer**, and
-/// pads with nulls when it is shorter - both halves of a specification that surprises people.
+/// Reference: ISO/IEC 9899 7.29.4.2.2. Does not terminate when `src` is `n` or longer, and pads
+/// with nulls when it is shorter.
 fn wcsncpy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (dst, src, n) = (args[0], args[1], args[2]);
     let Ok(n) = usize::try_from(n) else {
@@ -564,8 +528,8 @@ fn wcsncpy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The shared shape of an Annex K refusal: answer nonzero, and scrub what the caller gave.
 ///
 /// Reference: ISO/IEC 9899:2011 K.3.7.1.1. On a constraint violation the destination is left
-/// as an empty string rather than holding whatever it held, so a caller that ignores the return
-/// value reads something safe instead of a stale buffer that looks like a result.
+/// as an empty string, so a caller that ignores the return value does not read a stale buffer
+/// as a result.
 fn refuse_annex_k(s1: u64, s1max: u64, terminate_only: bool) -> u64 {
     if s1 != 0 && s1max > 0 {
         if terminate_only {
@@ -579,8 +543,8 @@ fn refuse_annex_k(s1: u64, s1max: u64, terminate_only: bool) -> u64 {
 
 /// `memcpy_s(s1, s1max, s2, n)` - a copy that checks the destination is big enough.
 ///
-/// Reference: ISO/IEC 9899:2011 K.3.7.1.1. `RSIZE_MAX` is implementation-defined and is
-/// deliberately not asserted: the constraint this exists for is `n <= s1max`.
+/// Reference: ISO/IEC 9899:2011 K.3.7.1.1. `RSIZE_MAX` is implementation-defined and not
+/// asserted; the constraint enforced is `n <= s1max`.
 fn memcpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (s1, s1max, s2, n) = (args[0], args[1], args[2], args[3]);
     if s1 == 0 || s2 == 0 || n > s1max {
@@ -589,8 +553,8 @@ fn memcpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(count) = usize::try_from(n) else {
         return refuse_annex_k(s1, s1max, false);
     };
-    // SAFETY: guest buffers under the identity mapping (D014); `n <= s1max` was just checked,
-    // so the destination has room for every byte read from the source.
+    // SAFETY: guest buffers under the identity mapping; `n <= s1max` was just checked, so the
+    // destination has room for every byte read from the source.
     unsafe { std::ptr::copy_nonoverlapping(ptr(s2).cast_const(), ptr(s1), count) };
     0
 }
@@ -606,17 +570,16 @@ fn memmove_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(count) = usize::try_from(n) else {
         return refuse_annex_k(s1, s1max, false);
     };
-    // SAFETY: guest buffers under the identity mapping (D014), `n <= s1max` checked. `copy`
-    // rather than `copy_nonoverlapping` because overlapping is what this one permits.
+    // SAFETY: guest buffers under the identity mapping, `n <= s1max` checked. `copy` because
+    // this one permits overlap.
     unsafe { std::ptr::copy(ptr(s2).cast_const(), ptr(s1), count) };
     0
 }
 
 /// `memset_s(s, smax, c, n)` - a fill that checks the buffer is big enough.
 ///
-/// Reference: ISO/IEC 9899:2011 K.3.7.4.1. **The write happens even when it refuses**, which
-/// is what makes it usable for scrubbing a secret: the standard requires the store not to be
-/// optimised away or skipped on a constraint violation.
+/// Reference: ISO/IEC 9899:2011 K.3.7.4.1. The write happens even when it refuses, which makes
+/// it usable for scrubbing a secret.
 fn memset_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (s, smax, c, n) = (args[0], args[1], args[2], args[3]);
     let Ok(size) = usize::try_from(smax) else {
@@ -675,8 +638,7 @@ fn strncat_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `strncpy_s(s1, s1max, s2, n)` - a bounded copy that always terminates.
 ///
-/// Reference: ISO/IEC 9899:2011 K.3.7.1.4. Unlike `strncpy` this **does** terminate, which is
-/// the whole point of the `_s` variant.
+/// Reference: ISO/IEC 9899:2011 K.3.7.1.4. Unlike `strncpy`, this terminates.
 fn strncpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (s1, s1max, s2, n) = (args[0], args[1], args[2], args[3]);
     if s1 == 0 || s2 == 0 || s1max == 0 {
@@ -694,8 +656,7 @@ fn strncpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `wcsncpy_s(s1, s1max, s2, n)` - [`strncpy_s`] in wide characters.
 ///
-/// Reference: ISO/IEC 9899:2011 K.3.9.2.1.1. `s1max` and `n` count **wide characters**, not
-/// bytes - the mistake that would make a bounds-checked function overrun by a factor of four.
+/// Reference: ISO/IEC 9899:2011 K.3.9.2.1.1. `s1max` and `n` count wide characters, not bytes.
 fn wcsncpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (s1, s1max, s2, n) = (args[0], args[1], args[2], args[3]);
     let scrub = s1max.saturating_mul(WIDE as u64);
@@ -717,10 +678,8 @@ fn wcsncpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `_Stoul(text, end, base)` - the runtime's own name for `strtoul`.
 ///
-/// The Dinkumware runtime this platform carries (D468) puts the conversion in `_Stoul` and
-/// makes `strtoul` a thin caller of it, so a guest built against it imports whichever of the
-/// two its headers named. Delegated rather than reimplemented: two copies of a parser is two
-/// answers to the same question, and the one nobody exercises is the one that drifts.
+/// The platform's C runtime puts the conversion in `_Stoul` and makes `strtoul` a thin caller
+/// of it, so a guest imports whichever its headers named. Delegated, so there is one parser.
 fn stoul(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     strtoul(args)
 }
@@ -732,9 +691,8 @@ fn stoull(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `strtoumax(text, end, base)` - ISO/IEC 9899 7.8.2.4.
 ///
-/// `uintmax_t` is sixty-four bits on this target, which is what `strtoull` already converts to,
-/// so this is that function under the name `<inttypes.h>` gives it. Delegated rather than
-/// copied for the reason [`stoul`] is.
+/// `uintmax_t` is sixty-four bits on this target, so this is `strtoull` under the
+/// `<inttypes.h>` name, delegated as [`stoul`] is.
 fn strtoumax(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     strtoull(args)
 }
@@ -822,8 +780,8 @@ mod bounded_strings {
         &at[..end]
     }
 
-    /// `strlcpy` answers the length of the **source**, which is what lets a caller detect
-    /// truncation. Answering the copied length would look right in every fitting case.
+    /// `strlcpy` answers the length of the source, which is what lets a caller detect
+    /// truncation.
     #[test]
     fn strlcpy_answers_the_source_length_even_when_it_truncates() {
         let (src, src_at) = buffer(b"abcdef\0", 0);
@@ -835,7 +793,8 @@ mod bounded_strings {
         drop(src);
     }
 
-    /// A zero-sized destination is written to at all, and the source length still answered.
+    /// A zero-sized destination is not written to at all, and the source length is still
+    /// answered.
     #[test]
     fn strlcpy_writes_nothing_into_a_zero_sized_destination() {
         let (src, src_at) = buffer(b"abc\0", 0);
@@ -846,8 +805,8 @@ mod bounded_strings {
         drop(src);
     }
 
-    /// `strnstr` must not look past its limit, which is the only thing separating it from
-    /// `strstr` - a match starting inside the window but running past it does not count.
+    /// `strnstr` does not look past its limit: a match starting inside the window but running
+    /// past it does not count.
     #[test]
     fn strnstr_will_not_match_past_its_limit() {
         let (hay, hay_at) = buffer(b"abcdef\0", 0);
@@ -865,9 +824,7 @@ mod bounded_strings {
         drop((hay, needle));
     }
 
-    /// **The Annex K guard, made to fail.** A copy larger than the destination must be refused
-    /// *and* the destination scrubbed - a caller ignoring the return value must not find a
-    /// half-written buffer that reads like a result.
+    /// A copy larger than the destination is refused and the destination scrubbed.
     #[test]
     fn memcpy_s_refuses_and_scrubs_when_the_destination_is_too_small() {
         let (src, src_at) = buffer(b"abcdefgh", 0);
@@ -888,8 +845,7 @@ mod bounded_strings {
         drop(src);
     }
 
-    /// `memset_s` writes **even when it refuses**, which is what makes it usable to scrub a
-    /// secret. A version that returned early on the violation would leave the secret there.
+    /// `memset_s` writes even when it refuses, so it can scrub a secret.
     #[test]
     fn memset_s_still_writes_when_it_refuses() {
         let (dst, dst_at) = buffer(b"secret", 0);
@@ -902,7 +858,7 @@ mod bounded_strings {
         );
     }
 
-    /// `strncpy_s` terminates where `strncpy` would not - the reason the variant exists.
+    /// `strncpy_s` terminates where `strncpy` would not.
     #[test]
     fn strncpy_s_always_terminates() {
         let (src, src_at) = buffer(b"abc\0", 0);
@@ -925,8 +881,7 @@ mod bounded_strings {
         drop(src);
     }
 
-    /// `wcsncpy_s` counts **wide characters**, not bytes. Counting bytes would let four times
-    /// too much through a bounds check, which is the one mistake that matters here.
+    /// `wcsncpy_s` counts wide characters, not bytes.
     #[test]
     fn wcsncpy_s_counts_wide_characters_not_bytes() {
         let src: Box<[u32]> = vec![u32::from(b'a'), u32::from(b'b'), 0].into_boxed_slice();
@@ -946,8 +901,7 @@ mod bounded_strings {
         drop(src);
     }
 
-    /// `wcsncpy` pads with nulls and does *not* terminate a source that fills the field -
-    /// both halves of a specification that surprises people.
+    /// `wcsncpy` pads with nulls and does not terminate a source that fills the field.
     #[test]
     fn wcsncpy_pads_but_does_not_terminate_a_full_field() {
         let src: Box<[u32]> = vec![u32::from(b'a'), u32::from(b'b'), 0].into_boxed_slice();

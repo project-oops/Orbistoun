@@ -1,17 +1,12 @@
 //! NID hashing and symbol-name resolution.
 //!
-//! A guest module imports a library plus a **NID**: a 64-bit hash of the symbol name,
-//! encoded in a base64 alphabet. Resolving an import has two halves:
-//!
-//! 1. **Forward**: name -> NID, to match a known symbol against what a module asks for.
-//!    This is [`NidHasher`], which applies `selfish-nid`'s hash with a configurable suffix.
-//! 2. **Reverse**: NID -> name, by lookup only, since a hash is not invertible. This is
-//!    [`SymbolDb`].
+//! A guest module imports a library plus a NID: a 64-bit hash of the symbol name, encoded
+//! in a base64 alphabet. [`NidHasher`] maps a name forward to its NID; [`SymbolDb`] maps a
+//! NID back to a name by lookup, since a hash is not invertible.
 //!
 //! The hash suffix is runtime data supplied with the symbol database (D071); the default is
-//! `selfish-nid`'s committed suffix. `docs/SYMBOLS.md` describes the file format.
-//!
-//! [`Nid`] holds the first digest byte as its most significant byte, the reverse of
+//! `selfish-nid`'s committed suffix. `docs/SYMBOLS.md` describes the file format. [`Nid`]
+//! holds the first digest byte as its most significant byte, the reverse of
 //! `selfish_nid::Nid`; the two convert with one byte swap and encode to the same characters.
 
 use std::collections::HashMap;
@@ -54,9 +49,9 @@ impl std::fmt::Display for Nid {
 
 /// An import as it appears in a dynamic symbol name.
 ///
-/// Real symbol names take the form `H2e8t5ScQGc#B#C`: an encoded NID, then a library
-/// id, then a module id, both small base64-encoded integers indexing the dynamic
-/// table's library and module entries.
+/// Symbol names take the form `H2e8t5ScQGc#B#C`: an encoded NID, then a library id, then a
+/// module id, both small base64-encoded integers indexing the dynamic table's library and
+/// module entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedImport {
     /// The hash, decoded.
@@ -69,8 +64,8 @@ pub struct EncodedImport {
 
 /// Decodes a dynamic symbol name of the form `<nid>#<library>#<module>`.
 ///
-/// Returns `None` for any name that is not in that form - ordinary symbol names exist
-/// too, and a name that does not encode an import is not an error.
+/// Returns `None` for any name that is not in that form: ordinary symbol names exist too,
+/// and a name that does not encode an import is not an error.
 pub fn decode_symbol_name(name: &str) -> Option<EncodedImport> {
     let import = selfish_nid::decode_symbol_name(name)?;
     Some(EncodedImport {
@@ -87,9 +82,8 @@ pub fn default_suffix() -> Vec<u8> {
 
 /// Decodes an even-length hex string.
 ///
-/// Returns `None` on an odd length or a non-hex digit, rather than skipping the bad
-/// character - a suffix silently missing a byte hashes to something plausible and
-/// matches nothing, which is the hardest kind of wrong to notice.
+/// Returns `None` on an odd length or a non-hex digit rather than skipping the character:
+/// a suffix missing a byte hashes to plausible values that match nothing.
 pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 {
         return None;
@@ -101,8 +95,8 @@ pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
 
 /// Decodes a bare eleven-character NID, with no library or module beside it.
 ///
-/// The form a conformance probe reading an export table has. `None` unless the input is
-/// exactly eleven characters of the alphabet: any other length decodes to a plausible
+/// The form a conformance probe reading an export table reports. `None` unless the input
+/// is exactly eleven characters of the alphabet: any other length decodes to a plausible
 /// number that agrees with nothing.
 #[must_use]
 pub fn decode_nid(encoded: &str) -> Option<Nid> {
@@ -116,8 +110,8 @@ pub fn encode_nid(nid: Nid) -> String {
 
 /// Renders bytes as lowercase hex.
 ///
-/// The inverse of [`decode_hex`], so a suffix can be written back into a database file
-/// exactly as it will be read out of one.
+/// The inverse of [`decode_hex`], so a suffix is written back into a database file exactly
+/// as it is read out of one.
 pub fn encode_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -129,9 +123,8 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 
 /// Computes NIDs from symbol names.
 ///
-/// [`NidHasher::default`] uses the suffix orbistoun ships with, which is what a caller
-/// wants unless it is deliberately testing something else. Cheap to clone; hold one per
-/// loader.
+/// [`NidHasher::default`] uses the suffix orbistoun ships with. Cheap to clone; hold one
+/// per loader.
 #[derive(Debug, Clone)]
 pub struct NidHasher {
     suffix: Vec<u8>,
@@ -145,8 +138,8 @@ impl NidHasher {
 
     /// The suffix itself, for a consumer that has to hash somewhere this hasher cannot reach.
     ///
-    /// The kernel resolves a `sceKernelDlsym` name against guest export tables and so must
-    /// hash at the call, where a `NidHasher` built from configuration does not reach (D517).
+    /// The kernel resolves a `sceKernelDlsym` name against guest export tables at the call,
+    /// where a `NidHasher` built from configuration does not reach (D517).
     pub fn suffix_bytes(&self) -> &[u8] {
         &self.suffix
     }
@@ -159,11 +152,9 @@ impl Default for NidHasher {
 }
 
 impl NidHasher {
-    /// Creates a hasher using `suffix` as the trailing bytes appended to each
-    /// symbol name before hashing.
+    /// Creates a hasher that appends `suffix` to each symbol name before hashing.
     ///
-    /// An empty suffix is accepted (and useful in tests) but will not match real
-    /// guest imports.
+    /// An empty suffix is accepted for tests but matches no real guest import.
     pub fn new(suffix: impl Into<Vec<u8>>) -> Self {
         Self {
             suffix: suffix.into(),
@@ -178,10 +169,8 @@ impl NidHasher {
 
 /// Maps NIDs back to symbol names.
 ///
-/// Populated from a symbol-database file. Lookups that miss are the normal case
-/// early on and must be handled, not treated as an error: an unknown NID means
-/// "a function we have no name for yet", which is still perfectly reportable in
-/// an import dump.
+/// Populated from a symbol-database file. A lookup that misses is a normal result, not an
+/// error: an unknown NID is still reportable in an import dump.
 #[derive(Debug, Clone, Default)]
 pub struct SymbolDb {
     by_nid: HashMap<Nid, String>,
@@ -189,25 +178,21 @@ pub struct SymbolDb {
 
 /// The on-disk shape of a symbol database.
 ///
-/// One file carries both the hash suffix and the known names, so a single input
-/// fully determines resolution behaviour.
+/// One file carries both the hash suffix and the known names, so a single input determines
+/// resolution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolDbFile {
     /// Hex-encoded byte suffix appended to a name before hashing.
     pub suffix_hex: String,
-    /// Known symbol names. NIDs are derived, not stored, so the file cannot
-    /// disagree with itself.
+    /// Known symbol names. NIDs are derived, not stored, so the file cannot disagree with
+    /// itself.
     pub names: Vec<String>,
     /// How each name was arrived at, keyed by name.
     ///
-    /// **The provenance record.** A name is only as defensible as the account of where
-    /// it came from, and "we brute-forced it" is a claim until something can check it.
-    /// Each entry says which of this repository's own inputs produced the name and
-    /// where in them - so anyone can re-derive it, in isolation, in microseconds.
-    ///
-    /// Optional and separate from `names`, so a database from elsewhere still loads.
-    /// A name with no entry here is not an error; it is simply unaccounted for, which
-    /// is exactly what an audit should surface (D073).
+    /// Each entry says which of this repository's inputs produced the name and where in
+    /// them, so the name can be re-derived in isolation (D213). Optional and separate from
+    /// `names`, so a database from elsewhere still loads; a name with no entry is reported
+    /// as unaccounted for by an audit.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub derivations: std::collections::BTreeMap<String, Derivation>,
 }
@@ -215,20 +200,9 @@ pub struct SymbolDbFile {
 impl SymbolDbFile {
     /// The database that ships with the tool.
     ///
-    /// # Why this is loaded unless told otherwise
-    ///
-    /// It was not, and every run reported hashes it could already name. `printf` and
-    /// `memalign` were both in this file while the corpus reports listed them as
-    /// "has no name" and told the reader to go and extend the vocabulary - work already
-    /// done, in a file already committed, that nothing loaded (D188).
-    ///
-    /// That is worse than a missing feature. The findings are the output this project is
-    /// *for*, and they were confidently recommending the wrong next action - which is the
-    /// same failure as a stub that reports success, one layer up.
-    ///
-    /// Embedded rather than read from disk so a portable build and an installed one behave
-    /// the same, matching how the knowledge files ship. `--symbols-db` still overrides it,
-    /// because a database under construction has to be testable before it is committed.
+    /// Loaded by default so every run names the hashes the shipped file already knows
+    /// (D188). Embedded rather than read from disk so a portable build and an installed one
+    /// behave the same; `--symbols-db` overrides it for a database under construction.
     ///
     /// # Panics
     ///
@@ -240,19 +214,13 @@ impl SymbolDbFile {
 
 /// The symbol database shipped with the tool.
 ///
-/// Read from `symbols/` at the workspace root rather than copied into this crate, so there
-/// is one file and it cannot drift from the one CI audits. The cost is that this crate no
-/// longer builds outside its workspace, which is a cost worth paying here: nothing in this
-/// project is published as a standalone crate, and two copies of a symbol database is
-/// precisely the shape that ends with the audited one and the loaded one disagreeing.
+/// Read from `symbols/` at the workspace root rather than copied into this crate, so the
+/// loaded file is the one CI audits. This crate therefore builds only inside its workspace.
 const EMBEDDED_DB: &str = include_str!("../../../symbols/generated.json");
 
 /// Where a name came from, when, and any context worth keeping.
 ///
-/// **Every name carries one.** A hash-to-name mapping is the one artefact here somebody
-/// could reasonably ask hard questions about, and "we worked it out ourselves" is a
-/// claim like any other unless something records *how* - at the time, by whatever did
-/// the work (D073).
+/// Every name carries one, recorded by whatever did the work at the time (D213).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Derivation {
     /// How it was arrived at.
@@ -260,13 +228,12 @@ pub struct Derivation {
     pub method: Method,
     /// The day it was recorded, as `YYYY-MM-DD`.
     ///
-    /// Coarse on purpose. The point is to say roughly when a name entered the tree, not
-    /// to timestamp it to the second.
+    /// Day resolution: the record says when a name entered the tree, not to the second.
     pub on: String,
     /// Anything a reader would want and cannot reconstruct.
     ///
-    /// Which title, which probe, what the guest was doing. Free text, because the
-    /// interesting cases are the ones a schema would not have anticipated.
+    /// Which title, which probe, what the guest was doing. Free text, because the cases
+    /// worth noting are the ones a schema would not anticipate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -291,41 +258,26 @@ impl Derivation {
 
 /// How a name was arrived at.
 ///
-/// # Two questions, and they are not the same question
-///
-/// Every variant here records **how a candidate was proposed**. None of them records how
-/// it was *confirmed*, because confirmation is the same act in every case: the candidate
-/// is hashed, and the hash either equals one a real module declares it needs or it does
-/// not. There is one oracle and it is arithmetic (`docs/PROVENANCE.md`).
-///
-/// So the interesting axes are what kind of material the candidate came out of - see
-/// [`Evidence`] - and what somebody else would have to hold in order to do it again - see
-/// [`Reproducible`]. Both are derived from the variant rather than stored, so a record
-/// cannot claim a tier its own method does not support.
-///
-/// # Why `observed` is not one of these any more
-///
-/// It used to be, and it covered two unrelated things: reading a literal string out of a
-/// file at rest, and learning something from a guest actually executing. Its own
-/// documentation said "watching something run" while 137 of the 154 names carrying it had
-/// never run anything. A vocabulary that cannot tell those apart cannot answer the
-/// question it exists for (D213).
+/// Every variant records how a candidate was proposed. Confirmation is the same in every
+/// case: the candidate's hash equals one a real module imports (`docs/PROVENANCE.md`).
+/// [`Evidence`] (what material the candidate came from) and [`Reproducible`] (what someone
+/// else needs to repeat it) are derived from the variant rather than stored, so a record
+/// cannot claim a tier its method does not support (D213).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "found", rename_all = "kebab-case")]
 pub enum Method {
     /// A name published by ISO C or POSIX, taken from the standard-library word list.
     ///
-    /// Not a guess at all: these names are fixed by public standards, and the list
-    /// shipped in this repository is the whole of what was tried.
+    /// These names are fixed by public standards, and the shipped list is the whole of what
+    /// was tried.
     PublishedStandard {
         /// Which shipped list it came from.
         list: String,
     },
     /// A name the generator built, and exactly where.
     ///
-    /// `pattern` and `index` together identify one candidate out of hundreds of
-    /// millions. Re-running that single pattern at that single index reproduces the
-    /// name, so the claim costs a microsecond to check rather than a full sweep.
+    /// `pattern` and `index` together identify one candidate; re-running that pattern at
+    /// that index reproduces the name without a full sweep.
     Generated {
         /// The pattern in the grammar file.
         pattern: String,
@@ -334,36 +286,20 @@ pub enum Method {
     },
     /// A name derived from a name this project already held, by a stated rule.
     ///
-    /// # Why this is its own tier and not [`Method::Generated`]
-    ///
-    /// The generator builds a name out of *words*: a prefix, a module, a verb, an object.
-    /// This builds one out of a **whole name already proved correct** - `snprintf` becomes
-    /// `snprintf_s`, `getpeername` becomes `_getpeername`, `sceKernelGetAppInfo` becomes
-    /// `sceKernelGetAppInfo2`. The seed is not a guess and the rule is one line, so what a
-    /// reader has to accept is far smaller than an index into a trillion candidates.
-    ///
-    /// It is also **more** checkable than a generated name, not less. Rechecking a
-    /// `Generated` claim means resolving a grammar and indexing it; rechecking this means
-    /// applying one rule to one string. Both are [`Reproducible::FromRepository`]; only one
-    /// of them is legible.
-    ///
-    /// # What it does not claim
-    ///
-    /// Nothing about *why* the variant exists. That `foo` and `_foo` are both exported is a
-    /// fact about the platform, and this method has no opinion on it - the hash agreeing is
-    /// the whole of the claim, exactly as everywhere else (D606).
+    /// The seed is a whole name already proved correct and the rule is one line: `snprintf`
+    /// becomes `snprintf_s`, `getpeername` becomes `_getpeername`. Rechecking it means
+    /// applying one rule to one string. The record claims only that the hash agrees, not why
+    /// the platform exports the variant (D606).
     Affixed {
         /// The name it was derived from, which must itself be a name this project holds.
         seed: String,
         /// The rule applied, as spelled in the affix file.
         rule: String,
     },
-    /// A name read out of guest material at rest. **Nothing was executed.**
+    /// A name read out of guest material at rest, with nothing executed.
     ///
-    /// The candidate was already lying in a file this project parses anyway. That makes
-    /// it deterministic - the same module yields the same candidates every time - and it
-    /// makes it reproducible by anyone holding the same title, which is a materially
-    /// stronger claim than the old `observed` was able to make.
+    /// Deterministic: the same module yields the same candidates every time, so anyone
+    /// holding the same title reproduces it.
     Static {
         /// Which static harvester proposed it.
         by: StaticSource,
@@ -372,9 +308,8 @@ pub enum Method {
     },
     /// A name learned from something actually executing.
     ///
-    /// Reproducible by running the same thing again, and no more precisely than that: a
-    /// guest is not obliged to reach the same place twice, so this tier says "do what we
-    /// did" rather than "evaluate this index".
+    /// Reproducible only by running the same thing again: a guest is not obliged to reach
+    /// the same place twice.
     Runtime {
         /// Which runtime harvester proposed it.
         by: RuntimeSource,
@@ -383,9 +318,8 @@ pub enum Method {
     },
     /// A name that came from outside this project.
     ///
-    /// Recorded distinctly and never folded in with the rest. This is the variant that
-    /// says "this repository did not derive this", which is the honest thing for it to
-    /// say - and it is why an audit can be trusted at all.
+    /// Recorded distinctly and never folded in with the rest, so an audit can tell what
+    /// this repository did not derive.
     Supplied {
         /// Where it came from.
         source: String,
@@ -394,34 +328,25 @@ pub enum Method {
 
 /// Which static harvester proposed a candidate.
 ///
-/// Closed on purpose. The failure the old free-text `how` field allowed was 137 records
-/// describing one mechanism in several different sentences, with nothing able to count
-/// them (D213). A new mechanism adds a variant here; it does not add a new sentence.
+/// A closed set, so records are countable by mechanism (D213). A new mechanism adds a
+/// variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StaticSource {
-    /// Identifier-shaped runs of bytes in the module's own data (D193).
+    /// Identifier-shaped runs of bytes in the module's own data.
     ///
-    /// Diagnostic format strings and assertion text leave real function names in a
-    /// binary. The candidate is the vendor's own spelling, not a guess at it.
+    /// Diagnostic format strings and assertion text leave real function names in a binary.
     ModuleStrings,
     /// A string harvested from one module that named an import of a different one.
     ///
-    /// The same mechanism as [`StaticSource::ModuleStrings`], pooled across a corpus.
-    /// Recorded apart because it answers a question the per-module form cannot: the name
-    /// was in material the module needing it does not contain.
+    /// The same mechanism as [`StaticSource::ModuleStrings`], pooled across a corpus: the
+    /// name was in material the module needing it does not contain.
     CrossModule,
-    /// The firmware layout, reached through an address the console's own export table gave.
+    /// The firmware layout, reached through an address a hardware export table gave.
     ///
-    /// **Two sources meeting, which is why it is its own variant.** A conformance probe
-    /// enumerates the kernel export table and reports hash-to-address for every entry; the
-    /// firmware layout this project holds maps address-to-name. Neither answers "what is this
-    /// hash called" on its own, and together they do - and then the hash confirms it, as every
-    /// name here must be confirmed.
-    ///
-    /// It reaches names the generator cannot: `sceKernelMapperGetParam` survived 3.9 billion
-    /// generated candidates across eleven patterns, and a title calls it and then `abort`s
-    /// (D642).
+    /// A conformance probe enumerates the kernel export table as hash-to-address, and the
+    /// firmware layout maps address-to-name. Together they propose a name the generator
+    /// cannot reach, and the hash confirms it.
     FirmwareLayout,
 }
 
@@ -433,31 +358,27 @@ pub enum StaticSource {
 pub enum RuntimeSource {
     /// Reasoning about what a real call trace showed, then confirmed by hash.
     ///
-    /// Not automated and not pretending to be: a person read a trace, the trace narrowed
-    /// the family, and the hash settled it. The `how` field carries the argument.
+    /// A person read a trace, the trace narrowed the family, and the hash settled it. The
+    /// `how` field carries the argument.
     CallTrace,
     /// Bytes read out of guest memory while it ran, because it passed them to a function.
     ///
-    /// The dispatch path already captures what a pointer argument points at. That memory
-    /// is post-relocation and can hold text no module contains as a literal - a path
-    /// assembled at runtime, a name read out of a data file.
+    /// Memory captured by the dispatch path is post-relocation and can hold text no module
+    /// contains as a literal, such as a path assembled at runtime.
     ArgumentDump,
     /// A name a conformance probe reported, running on real hardware.
     ///
-    /// The only source here that this project cannot reproduce on its own machines, and
-    /// the reason [`Reproducible`] has a tier above [`Reproducible::FromRun`]. obSCEne is
-    /// ours and its transcripts are ours; the console is not something CI has.
+    /// The one source this project cannot reproduce on its own machines, and the reason
+    /// [`Reproducible`] has a tier above [`Reproducible::FromRun`].
     ProbeTranscript,
 }
 
 /// What kind of material a candidate came out of.
 ///
-/// The axis the old vocabulary could not express. Derived from [`Method`] rather than
-/// stored, so it cannot disagree with the record it describes.
+/// Derived from [`Method`] rather than stored, so it cannot disagree with its record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Evidence {
-    /// Built from inputs that live in this repository. No guest material involved in
-    /// proposing it - only in confirming it.
+    /// Built from inputs in this repository. Guest material only confirms it.
     Derived,
     /// Read out of guest material at rest.
     Static,
@@ -481,27 +402,21 @@ impl Evidence {
 
 /// What somebody else would need in order to arrive at the same name.
 ///
-/// # Why this is a tier rather than a boolean
-///
-/// The audit used to sort names into "re-derived" and "documented, not verified", and the
-/// second bucket was doing far too much work. A string read out of a title is not
-/// unverifiable - it is verifiable by anyone holding that title, deterministically, and
-/// saying so is both truer and stronger than declining to classify it (D213).
-///
-/// Ordered from cheapest to check to most expensive, which is also how an audit prints
-/// them.
+/// A string read out of a title is verifiable by anyone holding that title, so the tiers
+/// say what is needed rather than sorting names into verified and not (D213). Ordered from
+/// cheapest to check to most expensive, which is also how an audit prints them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reproducible {
     /// This repository, and nothing else. What CI can check on every commit.
     FromRepository,
-    /// This repository and the same guest module. Deterministic, and the module is not
-    /// here and never will be (`docs/SCOPE.md`).
+    /// This repository and the same guest module. Deterministic; the module is never in
+    /// the repository (`docs/SCOPE.md`).
     FromModule,
     /// This repository, the same module, and a run of it.
     FromRun,
     /// Hardware this project does not own and CI cannot have.
     FromHardware,
-    /// Nothing here reproduces it. You would have to go back to wherever it came from.
+    /// Nothing here reproduces it; only its original source does.
     OnlyFromItsSource,
 }
 
@@ -519,15 +434,10 @@ impl Reproducible {
 
     /// How much this tier is worth, lowest first.
     ///
-    /// **Ordered by what a reader has to have, not by how the name was found.** Something
-    /// re-derivable from this repository alone is worth more than the same name harvested
-    /// out of a module, because CI can check the first every commit and can never check the
-    /// second - however the search happened to arrive at each.
-    ///
-    /// Exists because a name can be settled by more than one source in a single run, and the
-    /// sweep used to keep whichever came first. Sources run strings-first, so a published C
-    /// name that also appears in a module's bytes was recorded as a static harvest: a true
-    /// record of a weaker claim than the run actually had (D607).
+    /// Ordered by what a reader needs, not by how the name was found: a name re-derivable
+    /// from this repository alone outranks the same name harvested from a module, because
+    /// CI checks the first on every commit. A name settled by several sources in one run
+    /// keeps the highest rank.
     pub const fn rank(self) -> u8 {
         match self {
             Self::FromRepository => 0,
@@ -559,9 +469,8 @@ impl Method {
                 Reproducible::FromRepository
             }
             Self::Static { .. } => Reproducible::FromModule,
-            // A probe transcript is the one runtime source that escapes its own tier: the
-            // evidence is ours, the console it came off is not something anybody here can
-            // hand you.
+            // A probe transcript escapes its runtime tier: the hardware it came from is not
+            // something this repository can provide.
             Self::Runtime {
                 by: RuntimeSource::ProbeTranscript,
                 ..
@@ -574,9 +483,7 @@ impl Method {
     /// Whether this claim can be rechecked mechanically, with no trust involved.
     ///
     /// True only for the tier that needs nothing but this repository, because that is the
-    /// only tier CI can actually re-run. The rest are reproducible elsewhere and are
-    /// reported as such rather than counted here, which is the distinction the whole
-    /// mechanism exists to keep honest.
+    /// only tier CI re-runs.
     pub const fn is_mechanically_checkable(&self) -> bool {
         matches!(self.reproducible(), Reproducible::FromRepository)
     }
@@ -589,9 +496,8 @@ impl Method {
 
 /// Today, as `YYYY-MM-DD`, for stamping a derivation.
 ///
-/// Hand-rolled from the civil-calendar algorithm rather than taking a date crate for
-/// one function. Days-from-epoch to a calendar date is arithmetic, and a dependency
-/// that pulls in time zones and parsing to do it is not worth the supply chain.
+/// Hand-rolled from the civil-calendar algorithm rather than taking a date crate with time
+/// zones and parsing for one function.
 pub fn today() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -607,15 +513,8 @@ pub fn date_of(unix_seconds: u64) -> String {
 
 /// A timestamp as `YYYY-MM-DD HH:MM`, in UTC.
 ///
-/// # Why this lives beside the date rather than in a date crate
-///
-/// The same reason [`today`] does: days-to-calendar is arithmetic, and a dependency that
-/// brings time zones and parsing along to do it is not worth the supply chain. Adding the
-/// clock is a division - it shares `civil_from_days` rather than repeating it, which is
-/// the whole point of putting it here instead of wherever it was needed.
-///
-/// UTC, and unapologetically. A build stamp is compared against another build stamp, and a
-/// local time that shifts twice a year makes two of them incomparable for no benefit.
+/// Shares `civil_from_days` with [`today`] for the same reason. UTC, so two build stamps
+/// are always comparable.
 pub fn timestamp_of(unix_seconds: u64) -> String {
     let seconds_today = unix_seconds % 86_400;
     format!(
@@ -628,9 +527,8 @@ pub fn timestamp_of(unix_seconds: u64) -> String {
 
 /// Converts days since the Unix epoch to a calendar date.
 ///
-/// Howard Hinnant's `civil_from_days`, which is public-domain arithmetic and correct
-/// for any date in range. It shifts the year to start in March so the leap day lands at
-/// the end, which is what removes every special case.
+/// Howard Hinnant's public-domain `civil_from_days`. It shifts the year to start in March
+/// so the leap day lands at the end, which removes every special case.
 const fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -657,9 +555,8 @@ impl SymbolDbFile {
 
     /// The hash suffix, decoded from its hex form.
     ///
-    /// Returns `None` for malformed hex rather than a partial suffix - a suffix that
-    /// silently lost a byte would produce hashes that match nothing, and the failure
-    /// would look like "no names known" rather than "your file is wrong".
+    /// Returns `None` for malformed hex rather than a partial suffix, so a bad file reads as
+    /// an error and not as "no names known".
     pub fn suffix(&self) -> Option<Vec<u8>> {
         let text = self.suffix_hex.trim();
         if text.len() % 2 != 0 {
@@ -684,9 +581,8 @@ impl SymbolDb {
 
     /// How many of `nids` this database can name.
     ///
-    /// The self-verifying measure from D025: a name list and a suffix are correct
-    /// exactly to the extent that they explain hashes a real module actually imports.
-    /// No external authority is needed - a collision is the proof.
+    /// A name list and a suffix are correct exactly to the extent that they explain hashes
+    /// a real module imports (D068).
     pub fn explains(&self, nids: impl IntoIterator<Item = Nid>) -> usize {
         nids.into_iter().filter(|n| self.name(*n).is_some()).count()
     }
@@ -714,9 +610,8 @@ impl SymbolDb {
 
     /// Every name it holds, in no particular order.
     ///
-    /// For a search that derives candidates from proved names rather than from words.
-    /// Unordered because the map is: a caller that needs a stable list sorts it, and one
-    /// that does not should not pay for the sort (D606).
+    /// For a search that derives candidates from proved names. Unordered because the map is;
+    /// a caller that needs a stable list sorts it.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.by_nid.values().map(String::as_str)
     }
@@ -742,18 +637,18 @@ mod tests {
         default_suffix, encode_nid,
     };
 
+    /// Timestamps render to fixed known instants in UTC.
     #[test]
     fn a_timestamp_renders_as_a_date_and_a_clock() {
-        // Pinned against known instants rather than round-tripped, because the point of a
-        // build stamp is that two people reading two of them agree about what they mean.
+        // Pinned against known instants rather than round-tripped, so two readers agree
+        // about what a stamp means.
         assert_eq!(super::timestamp_of(0), "1970-01-01 00:00");
         assert_eq!(super::date_of(0), "1970-01-01");
-        // 2026-08-24 21:40 UTC - a date past the 2000 leap-year special case, which is
-        // where the civil arithmetic would show an error if it had one.
+        // Past the 2000 leap-year special case.
         assert_eq!(super::timestamp_of(1_787_607_600), "2026-08-24 21:40");
-        // A minute before midnight, where an hours/minutes split goes wrong if it can.
+        // A minute before midnight.
         assert_eq!(super::timestamp_of(86_399), "1970-01-01 23:59");
-        // `today` is the same function underneath, so it cannot drift from these.
+        // `today` shares the function underneath.
         assert_eq!(super::today(), super::date_of(now_unix()));
     }
 
@@ -764,19 +659,20 @@ mod tests {
             .map_or(0, |d| d.as_secs())
     }
 
+    /// An encoded symbol name decodes to its NID, library id and module id.
     #[test]
     fn an_encoded_symbol_name_decodes_to_a_nid_and_two_ids() {
-        // The shape real dynamic symbol names take.
         let got = decode_symbol_name("H2e8t5ScQGc#B#C").expect("valid encoded import");
         assert_eq!(got.nid.as_raw(), 0x6740_9c94_b7bc_671f);
         assert_eq!(got.library_id, 1, "B is index 1");
         assert_eq!(got.module_id, 2, "C is index 2");
     }
 
+    /// Decoding agrees with an independent implementation of the same rule.
     #[test]
     fn decoding_matches_an_independent_implementation() {
-        // Cross-checked against a separate implementation of the same rule, so a
-        // transcription slip in either shows up rather than being self-consistent.
+        // Cross-checked against a separate implementation, so a transcription slip in
+        // either shows up.
         for (name, expected) in [
             ("H2e8t5ScQGc#B#C", 0x6740_9c94_b7bc_671f_u64),
             ("ZT4ODD2Ts9o#B#C", 0xdab3_933d_0c0e_3e65),
@@ -790,10 +686,10 @@ mod tests {
         }
     }
 
+    /// A name that is not an encoded import decodes to `None`.
     #[test]
     fn ordinary_symbol_names_are_not_imports_and_that_is_not_an_error() {
-        // Plenty of names are just names. Returning None rather than erroring is what
-        // lets a symbol walk skip them without special-casing.
+        // `None` rather than an error lets a symbol walk skip ordinary names.
         for name in [
             "main",
             "_init",
@@ -810,16 +706,18 @@ mod tests {
         }
     }
 
+    /// An encoded NID is exactly eleven characters.
     #[test]
     fn the_encoded_length_is_what_carries_a_64_bit_value() {
-        // Eleven characters is 66 bits, of which two are padding. Any other length
-        // cannot be a NID, which is why it is rejected rather than padded.
+        // Eleven characters is 66 bits, two of them padding. Any other length cannot be a
+        // NID.
         assert_eq!(ENCODED_NID_LEN, 11);
         assert!(decode_symbol_name(&format!("{}#B#C", "A".repeat(10))).is_none());
         assert!(decode_symbol_name(&format!("{}#B#C", "A".repeat(12))).is_none());
         assert!(decode_symbol_name(&format!("{}#B#C", "A".repeat(11))).is_some());
     }
 
+    /// Library and module ids decode as base64 integers.
     #[test]
     fn library_and_module_ids_decode_as_base64_integers() {
         let got = decode_symbol_name("AAAAAAAAAAA#BA#CB").expect("valid");
@@ -827,21 +725,21 @@ mod tests {
         assert_eq!(got.module_id, 128 + 1, "CB is 2*64 + 1");
     }
 
+    /// Hashing is deterministic and depends on the suffix.
     #[test]
     fn hashing_is_stable_and_suffix_sensitive() {
         let a = NidHasher::new(*b"\x01\x02\x03\x04");
         let b = NidHasher::new(*b"\x05\x06\x07\x08");
 
-        // Same input, same hasher: identical. This is the property the whole
-        // import-resolution path depends on.
+        // Same input, same hasher: identical.
         assert_eq!(a.hash("sceAudioOutInit"), a.hash("sceAudioOutInit"));
-        // Different suffix must give a different hash, or the suffix is not
-        // actually participating.
+        // A different suffix gives a different hash.
         assert_ne!(a.hash("sceAudioOutInit"), b.hash("sceAudioOutInit"));
-        // Different names must not collide on anything we test with.
+        // Different names do not collide.
         assert_ne!(a.hash("sceAudioOutInit"), a.hash("sceAudioOutOpen"));
     }
 
+    /// A database file round-trips and derives its NIDs from its names.
     #[test]
     fn a_database_file_round_trips_and_derives_its_own_hashes() {
         let json = r#"{"suffix_hex":"0102feff","names":["sceAudioOutInit","sceAudioOutOpen"]}"#;
@@ -860,10 +758,11 @@ mod tests {
         );
     }
 
+    /// A malformed suffix is rejected, not truncated.
     #[test]
     fn a_malformed_suffix_is_rejected_rather_than_silently_truncated() {
-        // A suffix that lost a byte produces hashes matching nothing, and the failure
-        // would read as "no names known" rather than "your file is wrong".
+        // A suffix that lost a byte would read as "no names known" rather than as a bad
+        // file.
         for bad in ["abc", "zz", "0102fe0"] {
             let file = SymbolDbFile {
                 suffix_hex: bad.to_owned(),
@@ -875,11 +774,11 @@ mod tests {
         }
     }
 
+    /// `explains` counts the real hashes a name list accounts for.
     #[test]
     fn explains_measures_a_name_list_against_real_hashes() {
-        // The self-verifying loop from D025: a name list and a suffix are correct
-        // exactly to the extent that they explain hashes a real module imports. A
-        // collision is the proof; no external authority is involved.
+        // A name list and a suffix are correct exactly to the extent that they explain
+        // hashes a real module imports.
         let hasher = NidHasher::new(*b"salt");
         let db = SymbolDb::from_names(&hasher, ["known_a", "known_b"]);
 
@@ -894,11 +793,12 @@ mod tests {
             "two of three hashes are explained"
         );
 
-        // A wrong suffix explains nothing, which is exactly how a wrong guess reads.
+        // A wrong suffix explains nothing.
         let wrong = SymbolDb::from_names(&NidHasher::new(*b"different"), ["known_a", "known_b"]);
         assert_eq!(wrong.explains(observed), 0);
     }
 
+    /// Reverse lookup names a known NID and returns `None` for an unknown one.
     #[test]
     fn reverse_lookup_resolves_known_and_admits_unknown() {
         let hasher = NidHasher::new(*b"salt");
@@ -908,15 +808,15 @@ mod tests {
             db.name(hasher.hash("sceAudioOutInit")),
             Some("sceAudioOutInit")
         );
-        // A name the DB never saw resolves to nothing - not a panic, not a
-        // fabricated name.
+        // An unknown name resolves to nothing: no panic, no fabricated name.
         assert_eq!(db.name(hasher.hash("sceNeverHeardOfIt")), None);
         assert_eq!(db.len(), 2);
     }
+    /// The shipped suffix is valid hex of the expected length.
     #[test]
     fn the_shipped_suffix_is_valid_and_the_expected_length() {
-        // It is embedded, so a typo in the data file breaks import resolution for every
-        // user and would otherwise surface as "nothing resolves" much later.
+        // Embedded, so a typo in the data file would break import resolution for every
+        // user.
         let suffix = default_suffix();
         assert_eq!(suffix.len(), 16, "the suffix is sixteen bytes");
         assert!(
@@ -926,12 +826,11 @@ mod tests {
         assert_eq!(NidHasher::default().suffix_len(), suffix.len());
     }
 
+    /// A hash decodes back to itself through an encoded symbol name.
     #[test]
     fn a_hash_survives_the_round_trip_through_a_symbol_name() {
-        // **The invariant that was missing.** A hasher and a decoder that disagree about
-        // byte order are each perfectly self-consistent, so every test passed while the
-        // two produced values that could never match. Nothing catches that except
-        // checking a hash back through the decoder.
+        // A hasher and a decoder that disagree about byte order are each self-consistent;
+        // only a round trip through both catches it.
         let hasher = NidHasher::default();
         for name in ["memcpy", "sceKernelAllocateDirectMemory", "a", ""] {
             let nid = hasher.hash(name);
@@ -943,11 +842,11 @@ mod tests {
         }
     }
 
+    /// A bare eleven-character NID decodes without library and module ids.
     #[test]
     fn a_bare_encoded_hash_decodes_without_a_library_and_module_beside_it() {
-        // The form a console's own export table hands over: eleven characters, an
-        // address, and nothing else. `decode_symbol_name` cannot read it, because there
-        // is no `#B#C` to read (D605).
+        // The form a hardware export table reports: eleven characters and an address, with
+        // no `#B#C` for `decode_symbol_name` to read.
         let hasher = NidHasher::default();
         for name in [
             "memcpy",
@@ -961,8 +860,7 @@ mod tests {
                 Some(nid),
                 "bare decode disagreed for {name}"
             );
-            // And it must agree with the decoder that reads a whole symbol name, or the
-            // two have drifted and only one of them is right.
+            // It agrees with the decoder that reads a whole symbol name.
             assert_eq!(
                 decode_nid(&encoded),
                 decode_symbol_name(&format!("{encoded}#A#A")).map(|i| i.nid),
@@ -971,10 +869,11 @@ mod tests {
         }
     }
 
+    /// A bare NID of the wrong length or alphabet is refused.
     #[test]
     fn a_bare_hash_of_the_wrong_length_or_alphabet_is_refused() {
-        // Asserting on the refusal rather than on the passes: ten characters decode to a
-        // perfectly plausible number, and a plausible hash agrees with nothing.
+        // Ten characters decode to a plausible number that agrees with nothing, so the
+        // refusal is what is asserted.
         assert!(
             decode_nid(&"A".repeat(ENCODED_NID_LEN - 1)).is_none(),
             "short"
@@ -994,6 +893,7 @@ mod tests {
         );
     }
 
+    /// Encoding inverts decoding for any 64-bit value.
     #[test]
     fn encoding_is_the_exact_inverse_of_decoding_for_arbitrary_values() {
         // Including the extremes, where a sign or padding mistake shows up.
@@ -1007,10 +907,10 @@ mod tests {
         }
     }
 
+    /// Odd-length or non-hex input is refused, not partially decoded.
     #[test]
     fn odd_length_or_non_hex_is_refused_rather_than_partially_decoded() {
-        // A suffix silently missing a byte hashes to something plausible and matches
-        // nothing, which is the hardest kind of wrong to notice.
+        // A suffix missing a byte hashes to plausible values that match nothing.
         assert!(decode_hex("abc").is_none(), "odd length");
         assert!(decode_hex("zz").is_none(), "not hex");
         assert_eq!(decode_hex("00ff").as_deref(), Some(&[0, 255][..]));

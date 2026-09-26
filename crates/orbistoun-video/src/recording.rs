@@ -1,24 +1,11 @@
 //! `libSceVideoRecording` - game-capture recording.
 //!
-//! **Four names, declared and not implemented**, and the four are the ones modules in the
-//! recorded corpus are seen calling.
+//! The declared names are the ones modules in the recorded corpus call; a name from a candidate
+//! list without an import or a resolution is not declared. None is implemented, so the module is
+//! listed in `SERVES_NOTHING`.
 //!
-//! # Six more names were here and have been taken out
-//!
-//! They came from obSCEne's `106-encoder/rec-symbols` check, which I read as measuring that
-//! those symbols *resolve* on hardware. It measures the opposite: the record is emitted in the
-//! branch where the lookup returned null, and the `0` beside it is filler for a status field.
-//! There is not one `vaddr` or `handle` measurement in the whole encoder group - **every symbol
-//! it probed failed to resolve** - and obSCEne's own `related-libs` check separately records
-//! this library as *absent* in that process.
-//!
-//! So those six had no provenance at all: not an import table, not a resolution. A name from a
-//! candidate list is the one thing this project's declarations are not allowed to be (D506).
-//!
-//! Names confirmed, arities not: arity `6` is the trampoline's full capture and not a claim.
-//! See `orbistoun-gpu`'s `agc` module for the argument (D504).
-//!
-//! Listed in `SERVES_NOTHING` because nothing here is implemented.
+//! Every arity is `6`, the trampoline's full capture, not a claim about how many arguments a
+//! function takes.
 
 use orbistoun_hle::guest_module;
 

@@ -1,44 +1,16 @@
-//! Waiting for a descriptor to be ready, the way a server that expects many of them does.
+//! Waiting for many descriptors to be ready: `kqueue` and `kevent`.
 //!
-//! # Why `select` was not enough
+//! A server with a listener and many clients makes a queue, registers what it wants to hear
+//! about, and asks the queue what happened. `struct kevent` has two shapes in
+//! `sys/sys/event.h`: the current 64-byte one with `ext[4]` at 32, and the 32-byte
+//! `freebsd11_kevent`. Everything up to `udata` is at the same offset in both. The choice is
+//! the same setting [`crate::metadata`] uses for `stat` and `dirent`, since all three changed
+//! at one ABI boundary (D374).
 //!
-//! `select` turns the loop of a server with one listener. `zftpd` has a listener, an HTTP
-//! port, and up to thirty-two clients, so it uses the interface built for that: it makes a
-//! queue, registers what it wants to hear about, and asks the queue what happened. With
-//! nothing answering `kqueue`, it printed **`Listening on 0.0.0.0:2120`**, failed to make the
-//! queue, and shut itself down in the same breath (D385).
-//!
-//! # The structure has two shapes, and it is the same fork as `stat`
-//!
-//! ```text
-//! sys/sys/event.h
-//!     struct kevent {                     struct freebsd11_kevent {
-//!         __uintptr_t ident;   offset  0      __uintptr_t ident;   offset  0
-//!         short       filter;  offset  8      short       filter;  offset  8
-//!         u_short     flags;   offset 10      u_short     flags;   offset 10
-//!         u_int       fflags;  offset 12      u_int       fflags;  offset 12
-//!         __int64_t   data;    offset 16      __intptr_t  data;    offset 16
-//!         void       *udata;   offset 24      void       *udata;   offset 24
-//!         __uint64_t  ext[4];  offset 32  };                       32 bytes
-//!     };                       64 bytes
-//! ```
-//!
-//! The checkout carries both, and names the older one for the release it belongs to - so this
-//! is the **same fork** [`crate::metadata`] already has for `stat` and `dirent`, decided by
-//! the same setting, because all three moved at the same ABI boundary (D374). Everything up
-//! to `udata` is at the same offset in both, which is why a run under the wrong one still
-//! half-works and is worth being suspicious of.
-//!
-//! # What this can and cannot report
-//!
-//! `EVFILT_READ` and `EVFILT_WRITE` on a descriptor, which is what a server registers. Every
-//! other filter - timers, signals, processes, vnodes - is **refused rather than accepted
-//! silently**: accepting a timer this never fires would park a guest forever on a wakeup that
-//! was promised and cannot come, and the refusal is a number the caller can act on.
-//!
-//! Readiness is asked exactly as [`crate::select`] asks it, through the same descriptor
-//! table, by polling. So it inherits the same honesty: the latency is this project's rather
-//! than the platform's, and asking never consumes (D373).
+//! `EVFILT_READ` and `EVFILT_WRITE` on a descriptor are served; every other filter is
+//! refused, since a timer that never fires would park a guest forever. Readiness is polled
+//! through the descriptor table exactly as [`crate::select`] polls it, and asking never
+//! consumes.
 
 use std::collections::BTreeMap;
 
@@ -49,21 +21,14 @@ const FAILED: u64 = -1_i64 as u64;
 
 /// How long to wait between asking every registration again.
 ///
-/// A millisecond, as [`crate::select`] uses, and for the same reason.
+/// A millisecond, as [`crate::select`] uses.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// The numbers this module tests against, read from the harvested `sys/sys/event.h`.
 ///
-/// # Why this is a struct rather than a lookup per use
-///
-/// A helper answering `unwrap_or(0)` for a name the table does not hold is the same disease
-/// the harvester had: **a value that is wrong and says nothing**. Zero is not a filter, so
-/// every comparison against it would quietly fail to match and a guest would register things
-/// that never fire.
-///
-/// So the whole set is resolved once, and if any of it is missing this build cannot serve
-/// `kqueue` at all - which it says, once, and then refuses. A refusal is a number the caller
-/// acts on; a filter that silently matches nothing is a hang.
+/// Resolved once as a whole: a name missing from the table would read as zero, which is no
+/// filter, so every comparison would fail to match and registrations would never fire. If
+/// any is missing this build refuses `kqueue`, saying so once.
 #[derive(Debug, Clone, Copy)]
 struct Numbers {
     /// `EVFILT_READ`.
@@ -138,9 +103,8 @@ impl Numbers {
 
 /// What a guest asked one queue to watch, keyed the way the interface keys it.
 ///
-/// **`(ident, filter)` is the identity of a registration**, which is why the same descriptor
-/// can be registered for reading and for writing and they are two entries rather than one
-/// overwriting the other.
+/// `(ident, filter)` identifies a registration, so one descriptor registered for reading and
+/// for writing is two entries.
 pub(crate) type Registrations = BTreeMap<(u64, i16), Registration>;
 
 /// One thing a queue is watching.
@@ -157,7 +121,7 @@ pub(crate) struct Registration {
 /// A `struct kevent`, in whichever of the two shapes this run uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Event {
-    /// What the event is about - a descriptor, for the two filters served here.
+    /// What the event is about: a descriptor, for the two filters served here.
     ident: u64,
     /// Which filter.
     filter: i16,
@@ -172,7 +136,7 @@ struct Event {
 }
 
 impl Event {
-    /// Bytes one occupies, which is the fork this module inherits.
+    /// Bytes one occupies in this run's shape.
     fn len() -> usize {
         match crate::metadata::Layout::configured() {
             crate::metadata::Layout::FreeBsd11 => 32,
@@ -186,14 +150,12 @@ impl Event {
 
     /// Reads the one at `address`.
     ///
-    /// **One copy, then safe decoding.** The fields are read out of a local array rather than
-    /// through six raw pointers, so there is one unsafe operation with one invariant to state
-    /// instead of six that each restate it.
+    /// Copied once into a local array and decoded safely, so there is one unsafe operation.
     ///
     /// # Safety
     ///
-    /// `address` must point at a `struct kevent` in guest memory - the same contract the real
-    /// call has under the identity mapping (D014).
+    /// `address` must point at a `struct kevent` in guest memory, the same contract the real
+    /// call has under the identity mapping.
     unsafe fn read(address: u64) -> Option<Self> {
         let at = usize::try_from(address).ok()?;
         if at == 0 {
@@ -209,9 +171,8 @@ impl Event {
                 Self::HEAD,
             );
         }
-        // Every slice below is a fixed range of a fixed-size array, so the conversions
-        // cannot fail - which is why they are unwrapped with a default rather than carried
-        // as an error nobody could act on.
+        // Every slice below is a fixed range of a fixed-size array, so the conversions cannot
+        // fail.
         let eight = |from: usize| -> [u8; 8] { head[from..from + 8].try_into().unwrap_or([0; 8]) };
         let four = |from: usize| -> [u8; 4] { head[from..from + 4].try_into().unwrap_or([0; 4]) };
         let two = |from: usize| -> [u8; 2] { head[from..from + 2].try_into().unwrap_or([0; 2]) };
@@ -227,9 +188,7 @@ impl Event {
 
     /// Writes it at `address`, filling the whole structure this run's shape defines.
     ///
-    /// **The tail is zeroed rather than left alone.** `ext[4]` is thirty-two bytes a caller
-    /// hands over uninitialised, and a guest that prints or compares them would be reading
-    /// its own stack back with a kernel's name on it.
+    /// The `ext[4]` tail is zeroed rather than left as the caller's uninitialised bytes.
     ///
     /// # Safety
     ///
@@ -251,7 +210,7 @@ impl Event {
         bytes[24..32].copy_from_slice(&self.udata.to_le_bytes());
         let width = Self::len();
         // SAFETY: the caller guarantees `Event::len()` writable bytes, which is what is
-        // written - 32 or 64, both within `bytes`.
+        // written: 32 or 64, both within `bytes`.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
@@ -262,7 +221,7 @@ impl Event {
     }
 }
 
-/// `kqueue()` - a new event queue.
+/// `kqueue()`: a new event queue.
 ///
 /// Answers a descriptor, from the same table files and sockets come from, so `close` on it
 /// works without knowing what it is.
@@ -286,9 +245,8 @@ enum Wait {
 
 /// Reads the `timespec` a caller passed, or [`Wait::Forever`] for a null one.
 ///
-/// A null timeout means block; a zeroed one means ask once and answer. `select` takes a
-/// `timeval` and this takes a `timespec` - seconds and *nanoseconds* - which is a difference
-/// worth not getting wrong by a factor of a thousand.
+/// A null timeout means block; a zeroed one means ask once and answer. This takes a
+/// `timespec` (seconds and nanoseconds), where `select` takes a `timeval`.
 ///
 /// # Safety
 ///
@@ -301,8 +259,8 @@ unsafe fn read_timeout(address: u64) -> Wait {
         return Wait::Forever;
     }
     let base = std::ptr::with_exposed_provenance::<u64>(at);
-    // SAFETY: the caller guarantees a `timespec` here - two machine words, from
-    // `sys/sys/_timespec.h`, as `orbistoun-libc`'s clock module records.
+    // SAFETY: the caller guarantees a `timespec` here, two machine words from
+    // `sys/sys/_timespec.h`.
     let seconds = unsafe { std::ptr::read_unaligned(base) };
     // SAFETY: the second field of the same structure.
     let nanos_at = unsafe { base.add(1) };
@@ -313,14 +271,13 @@ unsafe fn read_timeout(address: u64) -> Wait {
 
 /// Applies one change to a queue's registrations.
 ///
-/// Answers the `errno` to report against this change, or zero when it was accepted. A change
-/// list is applied in order and **a bad one does not stop the ones after it**: the interface
-/// reports each failure as its own event, which is what `EV_ERROR` is for.
+/// Answers the `errno` to report against this change, or zero when it was accepted. A bad
+/// change does not stop the ones after it: each failure is reported as its own `EV_ERROR`
+/// event.
 fn apply(numbers: Numbers, held: &mut Registrations, change: Event) -> i64 {
     let key = (change.ident, change.filter);
     if !numbers.serves(change.filter) {
-        // Refused rather than accepted silently. A filter this never reports on is a wakeup
-        // a guest is waiting for that cannot come.
+        // A filter this never reports on is a wakeup the guest waits for and never gets.
         return numbers.invalid;
     }
     if change.flags & numbers.delete != 0 {
@@ -355,8 +312,7 @@ fn apply(numbers: Numbers, held: &mut Registrations, change: Event) -> i64 {
 
 /// Whether a registration would report right now.
 ///
-/// Asked of the descriptor table, exactly as `select` asks it, so the two cannot come to
-/// disagree about what "ready" means.
+/// Asked of the descriptor table exactly as `select` asks it, so the two agree on "ready".
 fn ready(numbers: Numbers, ident: u64, which: i16) -> bool {
     if crate::descriptor::is_standard(ident) {
         return true;
@@ -376,9 +332,8 @@ fn ready(numbers: Numbers, ident: u64, which: i16) -> bool {
 /// Answers how many events were written, zero for a timeout, `-1` for a descriptor that is
 /// not a queue.
 ///
-/// **The changes are applied before the wait, and their failures are reported first.** A
-/// caller passing a bad change and a full event list gets the errors it earned rather than a
-/// wait it did not ask for - which is the order the interface documents.
+/// The changes are applied before the wait and their failures reported first, as the
+/// interface documents.
 ///
 /// Reference: FreeBSD `kevent(2)`.
 fn kevent(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -394,14 +349,14 @@ fn kevent(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // Every change, in order, each failure carried back as its own event.
     for index in 0..change_count {
         // SAFETY: a guest-supplied array of `nchanges` `struct kevent` under the identity
-        // mapping (D014), read within the count the guest itself declared.
+        // mapping, read within the count the guest declared.
         let Some(change) = (unsafe { Event::read(changes_at + index * stride) }) else {
             break;
         };
         let Some(failure) =
             crate::descriptor::with_queue(queue, |held| apply(numbers, held, change))
         else {
-            // Not a queue at all, which is the caller's mistake and not a per-change one.
+            // Not a queue at all: the caller's mistake, not a per-change one.
             return FAILED;
         };
         if failure != 0 || change.flags & numbers.receipt != 0 {
@@ -414,8 +369,7 @@ fn kevent(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 
     if event_count == 0 {
-        // A caller asking only to register. The changes are applied and there is nowhere to
-        // report to, which is ordinary rather than an error.
+        // Only registering: the changes are applied and there is nowhere to report to.
         return 0;
     }
 
@@ -423,9 +377,8 @@ fn kevent(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let wait = unsafe { read_timeout(timeout_at) };
     let started = std::time::Instant::now();
     loop {
-        // **Copied out before anything is asked.** Testing readiness takes the descriptor
-        // table's own lock, and holding a queue's lock across that is how two locks taken in
-        // two orders become a hang nobody can reproduce.
+        // Copied out before anything is asked: testing readiness takes the descriptor table's
+        // lock, and holding a queue's lock across that would take two locks in two orders.
         let Some(watching) = crate::descriptor::with_queue(queue, |held| {
             held.iter()
                 .filter(|(_, entry)| entry.enabled)
@@ -447,9 +400,8 @@ fn kevent(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                     filter: which,
                     flags: 0,
                     fflags: 0,
-                    // How much is waiting, which this cannot know without consuming it (D373).
-                    // Zero is what it reports, and a caller reading that as a byte count would
-                    // be wrong - recorded as an assumption rather than passed off as a fact.
+                    // How much is waiting cannot be known without consuming it (D373), so zero
+                    // is reported.
                     data: 0,
                     udata: entry.udata,
                 });
@@ -468,7 +420,7 @@ fn kevent(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             reports.extend(fired);
             for (index, event) in reports.iter().enumerate() {
                 // SAFETY: a guest-supplied array of `nevents` `struct kevent`, written within
-                // the count the guest declared - the loop above never collects more.
+                // the count the guest declared; the loop above never collects more.
                 unsafe { event.write(events_at + index as u64 * stride) };
             }
             return reports.len() as u64;
@@ -491,8 +443,7 @@ mod tests {
         Numbers::get().expect("the harvested sys/sys/event.h names every filter and flag")
     }
 
-    /// **The filters are harvested and present**, which they were not until the harvester
-    /// stopped requiring bare digits (D385).
+    /// The filters are harvested and present (D385).
     #[test]
     fn the_filters_come_from_the_header() {
         let numbers = numbers();
@@ -524,7 +475,7 @@ mod tests {
         assert_eq!(memory[0], 7, "ident is the first field");
     }
 
-    /// **Adding, disabling and deleting are three different things.**
+    /// Adding, disabling and deleting are three different things.
     #[test]
     fn a_change_list_is_applied_the_way_the_interface_says() {
         let numbers = numbers();
@@ -563,7 +514,7 @@ mod tests {
         );
     }
 
-    /// **A filter nothing reports on is refused**, rather than accepted and never fired.
+    /// A filter nothing reports on is refused rather than accepted and never fired.
     #[test]
     fn an_unserved_filter_is_refused() {
         let numbers = numbers();

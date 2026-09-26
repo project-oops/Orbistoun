@@ -1,24 +1,11 @@
 //! Where a guest path lands on the host.
 //!
-//! # One mount, and why that is enough for now
-//!
-//! A title asks for `/app0/game.bin` and `/app0/Textures/ui_assets.gnf`. Both are sitting
-//! in the title's own directory - the files exist, there was simply nothing to hand them
-//! over. So `/app0` maps to the directory the module was loaded from, and that single
-//! mapping serves every path observed so far.
-//!
-//! More mounts will be needed (save data, downloads, the system's own paths) and the
-//! table takes them without changing shape. What it will not take is a special case for a
-//! particular title - per-title behaviour belongs in the overrides layer, keyed by a named
-//! setting, never by an `if` on a title id.
-//!
-//! # Escaping the mount is refused, and that is not paranoia
-//!
-//! A guest chooses these paths, and `/app0/../../../windows/system32/config/sam` is a
-//! path. Resolving it naively hands arbitrary host files to guest code we are deliberately
-//! running without trusting. So resolution walks components and refuses anything that
-//! climbs out, rather than resolving first and checking afterwards - a check after the
-//! fact is one symlink away from being wrong (D165).
+//! `/app0` maps to the directory the module was loaded from, and the table takes further
+//! mounts without changing shape. Per-title behaviour belongs in the overrides layer, keyed
+//! by a named setting, never by a title id here. A guest chooses these paths, and
+//! `/app0/../../x` is one, so resolution walks components and refuses anything that climbs
+//! out rather than resolving first and checking afterwards: a check after the fact is one
+//! symbolic link away from being wrong.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -29,22 +16,18 @@ pub const APP_MOUNT: &str = "/app0";
 
 /// Where a guest may write.
 ///
-/// The console gives an application writable storage separate from its read-only title,
-/// and orbistoun had nothing there - so every `open` under it failed. The conformance
-/// probe does that in its first few calls, to create its report, and then hands the
-/// failure straight to `read` as though it were a descriptor (D250).
+/// The platform gives an application writable storage separate from its read-only title; a
+/// conformance probe creates its report there in its first few calls (D250).
 pub const DATA_MOUNT: &str = "/data";
 
-/// Where a RAGE-engine title reads its built asset cache from.
+/// Where one engine's titles read their built asset cache from.
 ///
-/// A title whose content is a read-only [`APP_MOUNT`] routes its `rpf.cache` to the host device
-/// and opens `/host//ap/rpf.cache` - the doubled slash is the engine's own naive join, and the
-/// literal path is what the guest passes (measured, PPSA04263, worklog 758). The console serves
-/// it from the title's own storage, so [`mount_title`] layers the title directory here as well
-/// and the shipped `rpf.cache` answers the read with **no copied file**. This is not a per-title
-/// id special case (which belongs in the overrides layer): it is one engine's fixed cache path,
-/// and a title that never opens it resolves nothing here. The wall it clears is orbistoun's, not
-/// the title's - the file existed the whole time, at the title root (D709).
+/// A title whose content is a read-only [`APP_MOUNT`] opens `/host//ap/rpf.cache`; the
+/// doubled slash is the engine's own join and the literal path the guest passes. The
+/// platform serves it from the title's own storage, so [`mount_title`] layers the title
+/// directory here too and the shipped `rpf.cache` answers with no copied file (D709). It is
+/// one engine's fixed cache path, not a title-id special case: a title that never opens it
+/// resolves nothing here.
 pub const RAGE_HOST_APP_MOUNT: &str = "/host//ap";
 
 /// The mount table.
@@ -55,8 +38,7 @@ fn mounts() -> &'static Mutex<BTreeMap<String, Vec<PathBuf>>> {
 
 /// Points a guest prefix at a host directory.
 ///
-/// Replaces any previous mapping for that prefix, because a run configures its mounts
-/// once and two mappings for one prefix has no meaning.
+/// Replaces any previous mapping for that prefix: a run configures its mounts once.
 pub fn mount(guest_prefix: &str, host_root: PathBuf) {
     if let Ok(mut mounts) = mounts().lock() {
         mounts.insert(guest_prefix.to_owned(), vec![host_root]);
@@ -65,16 +47,10 @@ pub fn mount(guest_prefix: &str, host_root: PathBuf) {
 
 /// Puts a host directory *over* whatever is already mounted at a prefix.
 ///
-/// # Why a mount is a stack rather than a directory
-///
-/// The console's tree is one thing and a title's own files are another, and the guest must
-/// see them as a single namespace. Merging them on disk would mean copying the base tree
-/// per title and losing track of which files came from where; merging them here costs a
-/// list walk per resolve and keeps the base reproducible - it can be deleted and rebuilt
-/// from its manifest at any time, which is the test that it really is derived (D251).
-///
-/// The overlay goes first, so a file a title has written shadows the base, and every write
-/// lands in the overlay by construction rather than by a rule somebody has to remember.
+/// The base tree and a title's own files are one namespace to the guest. Merging them here
+/// costs a list walk per resolve and keeps the base reproducible from its manifest (D251).
+/// The overlay goes first, so a file a title has written shadows the base and every write
+/// lands in the overlay.
 pub fn layer(guest_prefix: &str, host_root: PathBuf) {
     if let Ok(mut mounts) = mounts().lock() {
         mounts
@@ -86,19 +62,14 @@ pub fn layer(guest_prefix: &str, host_root: PathBuf) {
 
 /// Mounts a title's own directory as `/app0`.
 ///
-/// Takes the *module* path - the thing that was run - because that is what every caller
-/// already has, and deriving the directory here means nobody has to remember to.
+/// Takes the module path, the thing that was run, because every caller has it.
 pub fn mount_title(module: &Path) {
     if let Some(directory) = module.parent() {
-        // **Layered, not mounted.** `mount` replaces every root at a prefix, so this used
-        // to discard the base tree installed underneath it - and installing the base
-        // afterwards discarded the title instead, which cost one title its textures. The
-        // title goes *over* the base: its own files answer first, and anything the console
-        // provides is still there behind them (D269).
+        // Layered, not mounted: `mount` replaces every root at a prefix and would discard the
+        // base tree. The title goes over the base, so its own files answer first (D251).
         layer(APP_MOUNT, directory.to_path_buf());
-        // The same directory under RAGE's host-device cache path, so a title that reads its
-        // built cache from `/host//ap/rpf.cache` finds the file it shipped rather than the
-        // ENOENT it aborts on (D709, worklog 758).
+        // The same directory under the engine's host-device cache path, so a title reading
+        // `/host//ap/rpf.cache` finds the file it shipped (D709).
         layer(RAGE_HOST_APP_MOUNT, directory.to_path_buf());
     }
 }
@@ -109,10 +80,10 @@ pub const STAGING_MOUNT: &str = "/data/homebrew";
 /// Mounts a staged title: its directory at `/data/homebrew/<id>` and at `/app0`, both under
 /// one writable top layer, `<overlay>/data/homebrew/<id>`.
 ///
-/// On the console a title staged on the user partition runs with `/app0` being that directory, and
-/// `/data` is read-write, so the title writes into its own directory. Here the title's files are
-/// the library's, which are never written: the shared top layer takes every write, and a file
-/// written through either path is seen through the other (D722).
+/// On the hardware a title staged on the user partition runs with `/app0` being that
+/// directory, and `/data` is read-write. Here the title's files are the library's, which are
+/// never written: the shared top layer takes every write, and a file written through either
+/// path is seen through the other (D722).
 pub fn stage_title(module: &Path, overlay: &Path, id: &str) {
     let Some(directory) = module.parent() else {
         return;
@@ -128,9 +99,8 @@ pub fn stage_title(module: &Path, overlay: &Path, id: &str) {
 
 /// Points `/data` at a host directory a guest may write into.
 ///
-/// Created here rather than at first write: a guest asking for a file under a mount whose
-/// host directory does not exist gets the same failure as one asking for a file that is
-/// not there, and the two call for completely different responses.
+/// Created here rather than at first write: a missing host directory would read as a
+/// missing file, which calls for a different response.
 pub fn mount_data(host_root: PathBuf) {
     let _ = std::fs::create_dir_all(&host_root);
     mount(DATA_MOUNT, host_root);
@@ -144,10 +114,8 @@ fn writable() -> &'static Mutex<BTreeSet<String>> {
 
 /// Records that a guest may write under `guest_prefix`.
 ///
-/// Set from the filesystem manifest rather than from a constant here. Which directories a
-/// guest may write to is a fact about the console, so it belongs beside the rest of what
-/// this project claims about it, with the same account of how it is known - not spelled a
-/// second time in code where the two can drift (D251).
+/// Set from the filesystem manifest rather than a constant here, so which directories are
+/// writable is stated once, beside how it is known (D251).
 pub fn allow_writes(guest_prefix: &str) {
     if let Ok(mut writable) = writable().lock() {
         writable.insert(guest_prefix.to_owned());
@@ -156,9 +124,8 @@ pub fn allow_writes(guest_prefix: &str) {
 
 /// Whether a guest path lies under a mount a guest may write to.
 ///
-/// A title's own directory is the material being measured, and a guest able to write into
-/// it would be editing its own evidence. Asked by prefix, so a path that climbs out of a
-/// mount is still refused by [`resolve`] as it always was (D250).
+/// A guest writing into a title's own directory would be editing the material being run.
+/// Asked by prefix; a path that climbs out of a mount is still refused by [`resolve`] (D250).
 pub fn is_writable(guest_path: &str) -> bool {
     let path = guest_path.replace('\\', "/");
     let Ok(writable) = writable().lock() else {
@@ -181,12 +148,10 @@ pub fn clear() {
 
 /// Whether a guest path stays inside its mount.
 ///
-/// Walks components rather than resolving and checking afterwards. `..` is refused
-/// outright rather than cancelled against a preceding component, because cancelling is
-/// only correct when nothing in the path is a symbolic link - and a guest supplies these.
-///
-/// Pure, and therefore testable without a filesystem, which is the shape principle 8 asks
-/// for: the rule is the part worth protecting.
+/// Walks components rather than resolving and checking afterwards. `..` is refused outright
+/// rather than cancelled against a preceding component, because cancelling is correct only
+/// when nothing in the path is a symbolic link. Pure, so the rule is testable without a
+/// filesystem.
 pub fn is_contained(relative: &str) -> bool {
     !relative.is_empty()
         && Path::new(relative)
@@ -194,34 +159,21 @@ pub fn is_contained(relative: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(part) if !part.is_empty()))
 }
 
-/// The host path a guest path names, or `None`.
-///
-/// `None` covers a path under no mount and a path that tries to climb out of one. Both are
-/// refusals rather than errors: a guest asking for something it cannot have gets the same
-/// answer as a guest asking for something that is not there, which is what the interface
-/// it thinks it is calling would tell it.
 /// Whether the guest's path components (`rest`, under orbistoun's host `root`) exist on disk
-/// **case-sensitively**, matching the console's FreeBSD-derived filesystem.
+/// case-sensitively, as on the platform's FreeBSD-derived filesystem.
 ///
-/// # Why the host's own answer is not enough
-///
-/// The console's filesystem is case-sensitive: `Foo.dat` and `foo.dat` are different names, and a
-/// guest that opens one when only the other exists is answered `ENOENT`. `Path::exists` on a **Windows**
-/// host is case-*in*sensitive, so it would report the file present under the wrong case - the guest
-/// then reads a file the console would not have found, a host-semantic leak of exactly the class that
-/// answered PPSA04263's `/app0` directory open wrong (worklog 615, 624). Only the guest-supplied
-/// components are checked; orbistoun's own `root` case is orbistoun's concern.
-///
-/// On a case-sensitive host (Unix), `exists` is already the right answer, so this is a plain check.
+/// `Path::exists` on a Windows host is case-insensitive and would report a wrong-case name
+/// present that the platform answers `ENOENT` for. Only the guest-supplied components are
+/// checked. On a case-sensitive host this is a plain `exists`.
 #[cfg(not(windows))]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
     root.join(rest).exists()
 }
 
-/// The Windows half: `canonicalize` returns the path's **real on-disk case**, so a wrong-case request
-/// resolves to a different spelling than it asked for, and that mismatch is the not-found the console
-/// gives. Compared over the guest's trailing components only, so the host root's own case (and the
-/// `\\?\` prefix canonicalize adds) is not part of the test.
+/// The Windows half: `canonicalize` returns the path's real on-disk case, so a wrong-case
+/// request resolves to a different spelling, which is the not-found the platform gives.
+/// Compared over the guest's trailing components only, so the host root's case and the
+/// `\\?\` prefix are not part of the test.
 #[cfg(windows)]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
     let Ok(real) = std::fs::canonicalize(root.join(rest)) else {
@@ -239,13 +191,12 @@ fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
             .all(|(on_disk, asked)| on_disk == asked)
 }
 
-/// A path under a mount with its `.` components (and the empty ones a doubled slash leaves) dropped.
+/// A path under a mount with its `.` components (and the empty ones a doubled slash leaves)
+/// dropped.
 ///
-/// **Only `.`, never `..`.** A `.` stays where it is, so dropping it cannot climb out of a mount or
-/// step through a symbolic link, and the rule [`is_contained`] protects is untouched: `..` survives
-/// this and is still refused there. Neverball names its data `/app0/./data` - its base directory
-/// joined to upstream's `./data` - and `Path::components` keeps a *leading* `.` as a component, so
-/// the containment walk refused a path every POSIX lookup accepts (worklog 812).
+/// Only `.`, never `..`: dropping `.` cannot climb out of a mount or step through a symbolic
+/// link, so [`is_contained`] still refuses `..`. `Path::components` keeps a leading `.`, so
+/// `/app0/./data` would otherwise be refused where every POSIX lookup accepts it.
 fn without_current_dir(rest: &str) -> String {
     rest.split('/')
         .filter(|component| !component.is_empty() && *component != ".")
@@ -253,30 +204,28 @@ fn without_current_dir(rest: &str) -> String {
         .join("/")
 }
 
-/// Maps a guest path to its host path - the existing layer if it has one, else the writable layer
-/// where a new file would go. **Path mapping, not an existence check**: a title's own copy shadows
-/// the base, and a not-yet-created file still maps to where it belongs. Creates and the tests that
-/// pin the mapping use this; reads that must fail when the path is not there use [`resolve_existing`].
+/// Maps a guest path to its host path: the existing layer if it has one, else the writable
+/// layer where a new file would go. Path mapping, not an existence check. `None` for a path
+/// under no mount or one that climbs out, the same answer as for a missing file. Reads that
+/// must fail on a missing path use [`resolve_existing`].
 pub fn resolve(guest_path: &str) -> Option<PathBuf> {
     resolve_inner(guest_path, true)
 }
 
-/// The host path for a guest path that **exists**, case-sensitively - `None` when it is not there,
-/// including when it exists only under a different case, which the console (case-sensitive) would not
-/// find either.
+/// The host path for a guest path that exists, case-sensitively; `None` when it is not
+/// there, including when it exists only under a different case.
 ///
-/// The read resolver. Reads must not use [`resolve`]'s mapping, because it answers where a file
-/// *could* be written even when nothing is there - and on a case-insensitive host `File::open` would
-/// then open a wrong-case file that maps to that same location, the leak worklog 624 closes.
+/// The read resolver. [`resolve`] answers where a file could be written even when nothing is
+/// there, and on a case-insensitive host `File::open` would then open a wrong-case file.
 pub fn resolve_existing(guest_path: &str) -> Option<PathBuf> {
     resolve_inner(guest_path, false)
 }
 
-/// Where a guest's write to `guest_path` goes: always the top layer of its mount, never one below.
+/// Where a guest's write to `guest_path` goes: always the top layer of its mount.
 ///
-/// `None` unless the path is under a writable prefix. A file that exists only in a lower layer - the
-/// base tree, or a staged title's library copy under its writable `/app0` (D722) - is copied up
-/// first, so the write modifies the guest's own copy and the lower layer is never touched.
+/// `None` unless the path is under a writable prefix. A file that exists only in a lower
+/// layer (the base tree, or a staged title's library copy under `/app0`) is copied up first,
+/// so the lower layer is never touched (D722).
 pub fn resolve_for_write(guest_path: &str) -> Option<PathBuf> {
     let (top, below) = locate_for_write(guest_path)?;
     if let Some(lower) = below {
@@ -292,19 +241,18 @@ pub fn resolve_for_write(guest_path: &str) -> Option<PathBuf> {
     Some(top)
 }
 
-/// Where a guest's truncating create of `guest_path` goes: the top layer, with nothing copied up,
-/// because the old contents are discarded either way. `None` unless the path is writable.
+/// Where a guest's truncating create of `guest_path` goes: the top layer, with nothing copied
+/// up, since the old contents are discarded. `None` unless the path is writable.
 pub fn resolve_for_create(guest_path: &str) -> Option<PathBuf> {
     locate_for_write(guest_path).map(|(top, _)| top)
 }
 
-/// Where a guest's removal or rename of `guest_path` acts: the top layer's path, and only when the
-/// name does not also exist in a layer below it.
+/// Where a guest's removal or rename of `guest_path` acts: the top layer's path, and only
+/// when the name does not also exist in a lower layer.
 ///
-/// Removing the top copy of a name a lower layer also holds would leave the lower one visible, so the
-/// guest would see its delete fail to happen; and removing the lower one would write to the library.
-/// Answering that correctly needs a whiteout, which this overlay does not keep - so it is refused
-/// rather than answered wrong (D722).
+/// Removing the top copy would leave the lower one visible, and removing the lower one would
+/// write to the library. That needs a whiteout, which this overlay does not keep, so it is
+/// refused (D722).
 pub fn resolve_for_removal(guest_path: &str) -> Option<PathBuf> {
     let (top, _) = locate_for_write(guest_path)?;
     (!lower_layer_holds(guest_path)).then_some(top)
@@ -339,8 +287,8 @@ fn lower_layer_holds(guest_path: &str) -> bool {
             continue;
         }
         let rest = without_current_dir(rest);
-        // A lower root may be the same host directory as the top one (a writable entry's overlay
-        // stacked twice), which is not a second copy.
+        // A lower root may be the same host directory as the top one (a writable entry's
+        // overlay stacked twice), which is not a second copy.
         return !rest.is_empty()
             && is_contained(&rest)
             && roots
@@ -373,14 +321,12 @@ fn resolve_top(guest_path: &str) -> Option<PathBuf> {
 }
 
 fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
-    // Normalised so `\` from a guest that mixes conventions cannot slip a component past
-    // the component walk below.
+    // Normalised so `\` from a guest that mixes conventions cannot slip a component past the
+    // component walk.
     let guest_path = guest_path.replace('\\', "/");
     let mounts = mounts().lock().ok()?;
-    // **The most specific mount answers first.** A mount nested in another - a title at
-    // `/user/app/<id>` inside `/user/app` - sorts after its parent, so walking in reverse key order
-    // reaches it first; in forward order the parent answered for every path under it and the
-    // nested mount was unreachable (worklog 842).
+    // The most specific mount answers first: a nested mount such as `/user/app/<id>` sorts
+    // after its parent `/user/app`, so reverse key order reaches it first.
     for (prefix, roots) in mounts.iter().rev() {
         let Some(rest) = guest_path.strip_prefix(prefix.as_str()) else {
             continue;
@@ -394,9 +340,8 @@ fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
         if !guest_path[prefix.len()..].starts_with('/') {
             continue;
         }
-        // `.` names the directory it sits in, so `/app0/./data` is `/app0/data`, as a POSIX
-        // lookup has it. Collapsed only after the whole-component check, so `/app0.` stays a
-        // different name from `/app0`.
+        // `.` names the directory it sits in, so `/app0/./data` is `/app0/data`. Collapsed
+        // after the whole-component check, so `/app0.` stays a different name from `/app0`.
         let rest = without_current_dir(rest);
         if rest.is_empty() {
             return roots.first().cloned();
@@ -407,8 +352,7 @@ fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
         let mut found = None;
         for (index, root) in roots.iter().enumerate() {
             let candidate = root.join(&rest);
-            // The first layer that actually has it. A title's own copy shadows the base,
-            // which is the whole point of layering rather than merging.
+            // The first layer that has it: a title's own copy shadows the base.
             if exists_case_sensitive(root, &rest) {
                 return Some(candidate);
             }
@@ -416,8 +360,8 @@ fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
                 found = Some(candidate);
             }
         }
-        // Nowhere yet: for a create, answer the writable layer so the new file lands where a title's
-        // data belongs; for a read, it is genuinely not there.
+        // Nowhere yet: a create gets the writable layer, where a title's data belongs; a read
+        // gets `None`.
         return if writable_fallback { found } else { None };
     }
     None
@@ -425,37 +369,17 @@ fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
 
 /// Names that exist at `guest_path` only because a mount lies below it.
 ///
-/// # Why the mount table is the only thing that knows
-///
-/// `/app0` and `/data` are directories a guest can enter, and **no host directory holds
-/// them**: they are prefixes this project maps onto host roots that live somewhere else
-/// entirely. So `resolve("/")` answers nothing, `opendir("/")` finds nothing, and the first
-/// thing an FTP client does - `CWD /`, then `LIST` - has nowhere to go. `zftpd` logged a
-/// client in and then answered `550 Not a directory.` (D385).
-///
-/// This synthesises the missing half. For `/` it answers `app0` and `data`; for a mount at
-/// `/system_data/priv` it answers `system_data` at the root and `priv` under that, so an
-/// intermediate directory nobody mounted still exists as far as a guest walking down to the
-/// mount can tell.
-///
-/// **Only the next component**, never a whole prefix: a listing of `/` holds `system_data`,
-/// not `system_data/priv`, because that is what a directory entry is.
-///
-/// Answers an empty list for a path with no mount below it, which is how a caller tells
-/// "a directory this synthesises" from "not a directory at all".
+/// `/app0` and `/data` are directories a guest can enter that no host directory holds, so
+/// without this `/` would list nothing and an FTP client's `CWD /` then `LIST` would fail.
+/// For `/` it answers `app0` and `data`; for a mount at `/system_data/priv` it answers
+/// `system_data` at the root and `priv` under that. Only the next component, as a directory
+/// entry is. An empty list means no mount lies below the path.
 #[must_use]
 pub fn mounts_under(guest_path: &str) -> Vec<String> {
     let path = guest_path.replace('\\', "/");
-    // **An empty path is not the root, and a relative one is not either.**
-    //
-    // `/` and `""` both trim to nothing, so trimming first made them the same path - and
-    // `stat("")` answered *a directory with two entries in it*. `zftpd` stats every name in
-    // a listing and passes an empty one for each, which on a real system fails and sends it
-    // to `d_type` instead; here it succeeded, and every file came back as `drwxr-xr-x` of
-    // size zero (D387).
-    //
-    // Nothing here has a working directory, which `getcwd` already reports, so a path that
-    // does not start at the root names nothing this can find.
+    // An empty or relative path is not the root: `/` and `""` both trim to nothing, and
+    // `stat("")` must fail as on a real system (D387). Nothing here has a working directory,
+    // so a path not starting at the root names nothing.
     if !path.starts_with('/') {
         return Vec::new();
     }
@@ -469,7 +393,7 @@ pub fn mounts_under(guest_path: &str) -> Vec<String> {
             continue;
         };
         // A prefix must be below this path by a whole component: `/app0extra` is not under
-        // `/app0`, and a path equal to the prefix is the mount itself rather than under it.
+        // `/app0`, and a path equal to the prefix is the mount itself.
         let Some(rest) = rest.strip_prefix('/') else {
             continue;
         };
@@ -484,7 +408,7 @@ pub fn mounts_under(guest_path: &str) -> Vec<String> {
 /// Whether a guest path names a directory, whether or not the host has one.
 ///
 /// True for anything that resolves to a host directory, and for a path that exists only
-/// because a mount sits below it - which is what makes `/` a directory.
+/// because a mount sits below it, such as `/`.
 #[must_use]
 pub fn is_directory(guest_path: &str) -> bool {
     if !mounts_under(guest_path).is_empty() {
@@ -495,10 +419,7 @@ pub fn is_directory(guest_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// **The root lists its mounts, and an empty path lists nothing.**
-    ///
-    /// The pair matters: `/` and `""` both trim to nothing, so a rule written by trimming
-    /// first makes them one path - and `stat("")` then answers a directory (D387).
+    /// The root lists its mounts, and an empty path lists nothing (D387).
     #[test]
     fn the_root_holds_its_mounts_and_an_empty_path_holds_nothing() {
         let _guard = with_app_mount("/titles/one");
@@ -546,15 +467,10 @@ mod tests {
 
     use super::{APP_MOUNT, clear, is_contained, mount, mount_title, resolve};
 
-    /// Mounts are process-global, so the tests that touch them set their own up and the
-    /// assertions never depend on what another test left behind.
     /// Sets up a lone `/app0` mount, holding the crate-wide lock for the caller.
     ///
-    /// **The guard has to be returned, not dropped here.** The mount table is
-    /// process-global and these tests replace it wholesale; without holding the lock for
-    /// the length of the test, another module's test clears it mid-assertion. That is the
-    /// same race that made the descriptor tests fail two runs in five (D241), in the one
-    /// module whose tests had never taken the lock.
+    /// The guard is returned, not dropped: the mount table is process-global and these tests
+    /// replace it, so another module's test could clear it mid-assertion.
     fn with_app_mount(root: &str) -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::exclusively();
         clear();
@@ -562,10 +478,9 @@ mod tests {
         guard
     }
 
+    /// A title path lands in the title directory.
     #[test]
     fn a_title_path_lands_in_the_title_directory() {
-        // The whole point: the files a guest asks for are already on disk, in the
-        // directory the module came from.
         let _guard = with_app_mount("/titles/one");
         assert_eq!(
             resolve("/app0/game.bin"),
@@ -577,11 +492,8 @@ mod tests {
         );
     }
 
-    /// **A RAGE title finds its shipped cache at the host path it reads, from its own directory.**
-    ///
-    /// PPSA04263 opens `/host//ap/rpf.cache` (measured, doubled slash and all) and aborts on the
-    /// ENOENT when nothing serves it - the file it ships at the title root the whole time. Both
-    /// the host path and `/app0` must name that one shipped file, with no copy (D709, worklog 758).
+    /// A title reading its shipped cache at the engine's host path gets the file from its own
+    /// directory, and `/app0` names the same file (D709).
     #[test]
     fn a_rage_title_reads_its_shipped_cache_from_the_host_app_path() {
         let _guard = crate::exclusively();
@@ -601,11 +513,10 @@ mod tests {
         );
     }
 
+    /// Climbing out of a mount is refused.
     #[test]
     fn climbing_out_of_a_mount_is_refused() {
-        // A guest chooses these strings, and this one is a path like any other. Resolving
-        // it would hand arbitrary host files to code we are running precisely because we
-        // do not trust it.
+        // Resolving it would hand arbitrary host files to guest code.
         let _guard = with_app_mount("/titles/one");
         assert_eq!(resolve("/app0/../../etc/passwd"), None);
         assert_eq!(resolve("/app0/a/../../b"), None);
@@ -616,9 +527,7 @@ mod tests {
         );
     }
 
-    /// **`.` names the directory it is in; `..` is still refused.** Neverball asks for
-    /// `/app0/./data/ttf/DejaVuSans-Bold.ttf` - its base directory joined to `./data` - and was
-    /// answered ENOENT for a font shipped in its own package (worklog 812).
+    /// `.` names the directory it is in; `..` is still refused.
     #[test]
     fn a_current_directory_component_names_the_directory_it_is_in() {
         let _guard = with_app_mount("/titles/one");
@@ -641,22 +550,21 @@ mod tests {
         );
     }
 
+    /// A backslash cannot slip a component past the containment check.
     #[test]
     fn a_backslash_cannot_smuggle_a_component_past_the_check() {
-        // A guest that mixes conventions must not get a different answer than one that
-        // does not, or the check is decoration.
         let _guard = with_app_mount("/titles/one");
         assert_eq!(resolve(r"/app0\..\..\secret"), None);
     }
 
+    /// A prefix must match a whole component.
     #[test]
     fn a_prefix_must_match_a_whole_component() {
-        // `/app0extra` is not inside `/app0`, and matching on the string alone would say
-        // it was.
         let _guard = with_app_mount("/titles/one");
         assert_eq!(resolve("/app0extra/game.bin"), None);
     }
 
+    /// A path under no mount is refused.
     #[test]
     fn a_path_under_no_mount_is_refused_rather_than_guessed_at() {
         let _guard = with_app_mount("/titles/one");
@@ -664,6 +572,7 @@ mod tests {
         assert_eq!(resolve("relative/path"), None);
     }
 
+    /// The mount itself resolves to its root.
     #[test]
     fn the_mount_itself_resolves_to_its_root() {
         let _guard = with_app_mount("/titles/one");
@@ -677,6 +586,7 @@ mod tests {
         );
     }
 
+    /// Containment is decided on components, not on spelling.
     #[test]
     fn containment_is_decided_on_components_not_on_spelling() {
         assert!(is_contained("a/b/c.bin"));

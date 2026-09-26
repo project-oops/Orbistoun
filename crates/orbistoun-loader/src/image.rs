@@ -1,16 +1,9 @@
 //! Placing a container's segments into reserved memory.
 //!
-//! Step two of loading, after parsing and before relocation. It takes a parsed
-//! container and a reserved span and copies each loadable segment to where the guest
-//! expects to find it.
-//!
-//! # Two sizes per segment, and the difference matters
-//!
-//! A segment has `p_filesz` bytes in the container and occupies `p_memsz` bytes in
-//! memory. When `memsz` exceeds `filesz` the remainder is `.bss` and **must be
-//! zeroed** - the guest is entitled to assume it is. Leaving it as whatever the
-//! allocator returned produces a guest that works or fails depending on what ran
-//! before it, which is the least debuggable failure there is.
+//! Runs after parsing and before relocation: copies each loadable segment of a parsed
+//! container to the address the guest expects. A segment has `p_filesz` bytes in the
+//! container and occupies `p_memsz` bytes in memory; the remainder is `.bss` and is zeroed,
+//! because the guest is entitled to assume it is.
 
 use orbistoun_elf::Container;
 use orbistoun_mem::{AddressSpace, Protection};
@@ -33,7 +26,7 @@ pub struct PlacedSegment {
 }
 
 impl PlacedSegment {
-    /// Bytes the segment occupies in memory - what it was copied plus its `.bss`.
+    /// Bytes the segment occupies in memory: what was copied plus its `.bss`.
     pub const fn memsz(&self) -> u64 {
         self.copied.saturating_add(self.zeroed)
     }
@@ -58,17 +51,8 @@ pub struct Image {
 
 /// Writes each eight-byte slot of `.bss` with a marker holding its own guest address.
 ///
-/// # What this buys over a constant byte
-///
-/// A constant establishes *that* a guest reads uninitialised `.bss` - which is what found
-/// the payload wall (D359). It cannot say **which** global, and "an unknown number of
-/// globals" was the reason that route looked worse than working out the handoff structure.
-///
-/// A marker carrying the slot's own address answers it: the guest loads one, uses it, and
-/// faults on a value that reads back as `bss+offset`. One boot names the global.
-///
-/// The top byte is the fill byte, so a marker is recognisable on sight and cannot be
-/// confused with a real guest address.
+/// A fault on a marker names the global the guest read without setting it (D325). The top
+/// byte is the fill byte, so a marker is recognisable and cannot be a real guest address.
 fn mark_bss(tail: usize, len: u64, byte: u8) {
     let byte = u64::from(byte);
     let slots = usize::try_from(len / 8).unwrap_or(0);
@@ -85,27 +69,12 @@ fn mark_bss(tail: usize, len: u64, byte: u8) {
     }
 }
 
-/// What `.bss` is filled with - zero, unless a run asked for something it can recognise.
+/// What `.bss` is filled with: zero, unless a run asks for a recognisable fill.
 ///
-/// # Why this is worth being able to change
-///
-/// Zero is **correct**: C guarantees it and the guest is entitled to assume it. But zero is
-/// also what an uninitialised function pointer looks like, and what a guest that never ran
-/// its runtime start looks like. A guest that jumps to null and a guest that reads a global
-/// nobody set produce the identical fault, and no amount of staring at `0x0` separates them.
-///
-/// Filling with something else does. Entering the payloads at `main` skips `__crt_start`
-/// (D343), and both of them then jumped to null out of their own `find_pid`. Three
-/// candidates were eliminated by experiment - the `sysctl` refusal, `signal`'s return value,
-/// the zeroed data-import storage - and this is what found it: with `.bss` filled the fault
-/// changed completely, which is only possible if the guest was reading it (D359).
-///
-/// **A diagnostic, and a run under it is not an ordinary run.** Zeroed `.bss` is the
-/// contract; this deliberately breaks it to see who notices.
-///
-/// Read once. A fill that changed part-way through a load would make the run
-/// unreproducible in the one dimension it exists to measure.
-/// The fill byte, read once.
+/// Zero is the C guarantee, and also what an unset function pointer looks like, so a
+/// non-zero fill separates a guest reading an unset global from a jump to null. A run
+/// under a fill is a diagnostic, not an ordinary run (D325). Read once, so the fill is
+/// constant across a load.
 static BSS_BYTE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
 fn bss_byte() -> u8 {
@@ -114,12 +83,8 @@ fn bss_byte() -> u8 {
 
 /// Reads a fill byte from what a run asked for.
 ///
-/// Pure, so the one thing that can go wrong here - a value that does not parse silently
-/// becoming a fill nobody asked for - is testable without an environment.
-///
-/// **Zero for anything unusable**, which is the contract: an unparseable value means the
-/// diagnostic is off, and off is `.bss` behaving exactly as C promises. The alternative is
-/// a run that quietly poisons memory because somebody typed `0xzz`.
+/// Pure, so parsing is testable without an environment. Anything unusable gives zero:
+/// the diagnostic is off and `.bss` is zeroed as C promises (D325).
 fn parse_fill(asked: Option<&str>) -> u8 {
     asked
         .and_then(|raw| u8::from_str_radix(raw.trim_start_matches("0x"), 16).ok())
@@ -154,8 +119,7 @@ impl Image {
 
     /// The address space backing this image, mutably.
     ///
-    /// Needed to re-protect after population: the image is written as read-write and
-    /// only then made executable.
+    /// The image is written read-write and re-protected after population.
     pub const fn space_mut(&mut self) -> &mut AddressSpace {
         &mut self.space
     }
@@ -169,20 +133,17 @@ impl Image {
 
     /// Whether the entry point lies in a segment the guest may execute.
     ///
-    /// Checked before handing over control, because jumping to an address that is not
-    /// executable is certain to fault - and the fault alone says nothing about why. A
-    /// refusal here names the actual problem: the entry is outside every executable
-    /// segment, which usually means the container declares one this loader did not
-    /// place, or the entry was never adjusted for the placement base.
+    /// Checked before handing over control: a jump to non-executable memory faults without
+    /// saying why. A refusal names the problem, usually a segment this loader did not place
+    /// or an entry not adjusted for the placement base.
     pub fn entry_is_executable(&self) -> bool {
         self.is_executable(self.entry)
     }
 
     /// Whether `address` lies inside a segment the guest may execute.
     ///
-    /// Generalised from [`Self::entry_is_executable`] because a run may be told to start
-    /// somewhere other than the declared entry - a diagnostic, and one that must be
-    /// refused just as loudly when it points at data (D326).
+    /// A run may start somewhere other than the declared entry, and that address is
+    /// refused just as loudly when it points at data (D343).
     pub fn is_executable(&self, address: u64) -> bool {
         self.segment_containing(address)
             .is_some_and(|s| s.protection().execute)
@@ -204,8 +165,7 @@ const PT_LOAD: u32 = 1;
 
 /// Places every loadable segment of a container at `base`.
 ///
-/// The whole span is reserved once rather than per segment (D054), then written
-/// through.
+/// The whole span is reserved once rather than per segment, then written through.
 pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
     let container = Container::parse(whole)?;
     let headers = container.program_headers()?;
@@ -235,10 +195,8 @@ pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
         .max()
         .unwrap_or(base);
 
-    // The span base must satisfy the **host allocation granularity**, which is
-    // coarser than the guest page on Windows (64 KiB). Rounding only to the page size
-    // passes on Unix and is refused on Windows - the worst kind of platform
-    // difference, and one that only showed up by running it.
+    // The span base must satisfy the host allocation granularity, which is coarser than
+    // the guest page on Windows (64 KiB).
     let granularity = orbistoun_mem::allocation_granularity().max(page);
     let span_base = lowest / granularity * granularity;
     let span_len = highest.div_ceil(page).saturating_mul(page) - span_base;
@@ -270,7 +228,7 @@ pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
             );
         }
 
-        // `.bss`: everything beyond what the container held must read as zero.
+        // `.bss`: everything beyond what the container held reads as zero.
         let zeroed = memsz.saturating_sub(copied);
         if zeroed > 0 {
             let tail = dest.saturating_add(copy_len);
@@ -283,10 +241,8 @@ pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
                     usize::try_from(zeroed).unwrap_or(0),
                 );
             }
-            // **Markers that name themselves.** A constant byte says only *that* the guest
-            // depends on `.bss`; a marker carrying its own address says *which* global,
-            // because the fault reports the value the guest used (D360). The identity
-            // mapping (D014) makes the host address the guest sees the same one.
+            // Markers that carry their own address, so a fault names the global the guest
+            // used (D325). Host and guest addresses are the same.
             if bss_byte() != 0 {
                 mark_bss(tail, zeroed, bss_byte());
             }
@@ -312,12 +268,7 @@ pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
 
 #[cfg(test)]
 mod tests {
-    /// **A marker decodes back to the address it sits at.**
-    ///
-    /// The whole point of marking rather than filling with a constant: a guest that loads a
-    /// global and uses it as an address faults on a value that says *which* global. It has
-    /// not fired on a guest yet - both payloads read `.bss` and derive something else - so
-    /// this is what shows the mechanism is right rather than merely present (D360).
+    /// A marker decodes back to the address it sits at.
     #[test]
     fn a_bss_marker_names_the_slot_it_occupies() {
         const SLOTS: usize = 4;
@@ -340,11 +291,7 @@ mod tests {
         }
     }
 
-    /// **An unusable value leaves `.bss` zeroed**, rather than poisoning it by accident.
-    ///
-    /// Zeroed is the contract C guarantees; the fill deliberately breaks it to find a guest
-    /// that depends on a global nobody initialised (D359). A typo silently turning that on
-    /// would make an ordinary run behave like a diagnostic one, which is the worst of both.
+    /// An unusable fill value leaves `.bss` zeroed rather than turning the diagnostic on.
     #[test]
     fn a_fill_is_only_applied_when_it_was_actually_asked_for() {
         assert_eq!(super::parse_fill(None), 0, "no request, no fill");
@@ -370,10 +317,9 @@ mod tests {
     use super::place;
     use crate::LoadError;
 
-    /// A bare ELF with one loadable segment. **Generated, never extracted** (D051).
+    /// A bare ELF with one loadable segment, generated (D051).
     ///
-    /// `filesz` and `memsz` are supplied separately so the `.bss` behaviour can be
-    /// exercised, which is the part most easily got wrong.
+    /// `filesz` and `memsz` are separate so the `.bss` behaviour can be exercised.
     fn elf_with_segment(vaddr: u64, filesz: u64, memsz: u64, fill: u8) -> Vec<u8> {
         const EHDR: usize = 64;
         const PHDR: usize = 56;
@@ -406,10 +352,10 @@ mod tests {
         v
     }
 
-    /// Far from anything a normal process maps, so a test is about the mechanism
-    /// rather than about luck.
+    /// Far from anything a normal process maps.
     const TEST_BASE: u64 = 0x0000_5000_0000_0000;
 
+    /// Segment bytes land at the guest's expected address.
     #[test]
     fn segment_bytes_land_at_the_address_the_guest_expects() {
         let bytes = elf_with_segment(0x1000, 64, 64, 0xAB);
@@ -429,10 +375,9 @@ mod tests {
         assert!(seen.iter().all(|b| *b == 0xAB), "segment content is wrong");
     }
 
+    /// `.bss` beyond the container's bytes is zeroed.
     #[test]
     fn bss_beyond_the_container_is_zeroed() {
-        // The guest is entitled to assume this. Leaving it as whatever the allocator
-        // returned makes a guest work or fail depending on what ran before it.
         let bytes = elf_with_segment(0x1000, 16, 4096, 0xFF);
         let image = place(&bytes, TEST_BASE + 0x10_0000, 4096).expect("place");
 
@@ -453,15 +398,16 @@ mod tests {
         assert!(seen[16..].iter().all(|b| *b == 0), "bss must be zero");
     }
 
+    /// The entry point is adjusted for the placement base.
     #[test]
     fn the_entry_point_is_adjusted_for_the_placement_base() {
-        // A module links at zero, so an unadjusted entry would jump into whatever
-        // happens to live at the raw address.
+        // A module links at zero, so an unadjusted entry jumps to the raw address.
         let bytes = elf_with_segment(0x2000, 32, 32, 0x11);
         let image = place(&bytes, TEST_BASE + 0x20_0000, 4096).expect("place");
         assert_eq!(image.entry(), TEST_BASE + 0x20_0000 + 0x2000);
     }
 
+    /// The reserved span is page-aligned outwards.
     #[test]
     fn the_span_is_page_aligned_outwards() {
         let bytes = elf_with_segment(0x1234, 16, 16, 0x22);
@@ -472,10 +418,9 @@ mod tests {
         assert!(span_base <= image.segments()[0].address);
     }
 
+    /// A container with no loadable segment is refused, not loaded as an empty image.
     #[test]
     fn a_container_with_nothing_loadable_is_refused() {
-        // Returning an empty image would look like a successful load of a module that
-        // does nothing, which is never what happened.
         let mut bytes = elf_with_segment(0x1000, 16, 16, 0x33);
         bytes[64..68].copy_from_slice(&0_u32.to_le_bytes()); // PT_NULL
         assert!(matches!(
@@ -484,6 +429,7 @@ mod tests {
         ));
     }
 
+    /// Copied and zeroed totals account for every byte.
     #[test]
     fn totals_account_for_every_byte() {
         let bytes = elf_with_segment(0x1000, 100, 500, 0x44);

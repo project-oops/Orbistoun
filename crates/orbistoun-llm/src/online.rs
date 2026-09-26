@@ -1,25 +1,10 @@
 //! Endpoints somebody else runs.
 //!
-//! Two wire formats, chosen by data rather than by vendor. Most hosted providers - and
-//! every local model server worth naming - speak the OpenAI-shaped request, so one
-//! client covers them. One does not, and this is the part worth being careful about:
-//! two sibling projects both list `api.anthropic.com/v1/chat/completions` as though it
-//! were OpenAI-compatible. It is not an endpoint that exists, and the failure is a
-//! 404 that reads like a network problem.
-//!
-//! # What is deliberately not sent
-//!
-//! The Messages API **rejects** `temperature` on its current models rather than
-//! ignoring it, so this engine does not send one and says so in [`Engine::describe`].
-//! Silently dropping a caller's parameter would be worse than either sending it or
-//! refusing: the caller asked for randomness, did not get it, and has no way to know.
-//!
-//! # No streaming
-//!
-//! Every reply this crate asks for is bounded and small - a proposal, a ranking, a
-//! short piece of JSON. Streaming exists to keep a long generation under an HTTP
-//! timeout and to show a human progress, and neither applies to a machine reading a
-//! whole answer before it can act on it.
+//! Two wire formats, chosen by data. Most hosted providers and local model servers speak the
+//! OpenAI-shaped request; the Messages API does not, and has no `/v1/chat/completions`
+//! endpoint. The Messages API rejects `temperature` on its current models, so this engine does
+//! not send one and says so in [`Engine::describe`]. There is no streaming: every reply asked
+//! for is small and bounded, and a machine reads the whole answer before acting.
 
 use std::time::Duration;
 
@@ -30,18 +15,12 @@ use crate::catalog::{Catalog, Online, Wire};
 use crate::config::Integration;
 use crate::engine::{Engine, Request};
 
-/// The version header the Messages API requires on every request.
-///
-/// A dated constant rather than "latest": the wire format is versioned precisely so a
-/// client can pin one, and a client that follows the newest by default has an API
-/// that changes without a commit.
+/// The version header the Messages API requires on every request, pinned so the wire format
+/// changes only with a commit.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// How long to wait for a hosted reply.
-///
-/// Generous, because a large hosted model thinking about a fault trace is legitimately
-/// slow, and short enough that a dead endpoint falls through to the next entry in the
-/// ladder rather than hanging a run.
+/// How long to wait for a hosted reply: generous for a slow large model, short enough that a
+/// dead endpoint falls through to the next ladder entry.
 const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// An HTTP engine.
@@ -60,9 +39,8 @@ impl OnlineEngine {
     ///
     /// # Errors
     ///
-    /// If the entry names no provider and supplies no endpoint of its own - there is
-    /// then nowhere to send anything, and the honest report is that rather than a
-    /// request to a guessed address.
+    /// If the entry names no provider and supplies no endpoint of its own, since there is nowhere
+    /// to send anything.
     pub fn new(integration: &Integration, catalog: &Catalog) -> Result<Self, Error> {
         let provider: Option<&Online> = catalog.online(&integration.source);
         let endpoint = integration
@@ -113,15 +91,13 @@ impl OnlineEngine {
                 if !request.stop.is_empty() {
                     body["stop"] = json!(request.stop);
                 }
-                // Honoured by some servers and ignored by others, which is why it is
-                // sent rather than relied upon. The Messages API has no equivalent.
+                // Honoured by some servers and ignored by others. The Messages API has no equivalent.
                 body["seed"] = json!(request.seed);
                 body
             }
             Wire::Anthropic => {
-                // The system message is a top-level field here, not a message with a
-                // role - putting it in the array is accepted and then behaves
-                // differently, which is the worst of both.
+                // The system message is a top-level field here; putting it in the array is accepted and then
+                // behaves differently.
                 let mut body = json!({
                     "model": self.model,
                     "max_tokens": request.max_tokens,
@@ -147,10 +123,8 @@ impl OnlineEngine {
                 .map(str::to_owned)
                 .ok_or_else(|| Error::Protocol(shape_of(reply))),
             Wire::Anthropic => {
-                // A refusal arrives as a successful response with an empty reply, so
-                // checking the status code is not enough. Reporting it as a refusal
-                // rather than as an empty answer is the whole difference between a
-                // caller retrying and a caller silently proposing nothing.
+                // A refusal arrives as a successful response with an empty reply, so the status code is not
+                // enough; reporting it as a refusal lets a caller tell it from an empty answer.
                 if reply.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
                     return Err(Error::Refused(
                         reply
@@ -220,8 +194,7 @@ impl Engine for OnlineEngine {
             .text()
             .map_err(|e| Error::Transport(e.to_string()))?;
         if !status.is_success() {
-            // The body carries the reason and the status alone does not, so both go in
-            // - a bare "400" from a hosted endpoint is unactionable.
+            // The body carries the reason and the status does not, so both are reported.
             return Err(Error::Rejected {
                 status: status.as_u16(),
                 body: truncate(&body),
@@ -296,11 +269,7 @@ mod tests {
         OnlineEngine::new(&integration(source), &Catalog::default()).expect("builds")
     }
 
-    /// The Messages API gets its own request shape.
-    ///
-    /// `system` is a top-level field, not a message with a role. Sending it as a
-    /// message is accepted and then behaves differently, which is the failure mode
-    /// worth pinning: no error, different answers.
+    /// The Messages API puts `system` at the top level, not in the message array.
     #[test]
     fn the_messages_api_puts_system_at_the_top_level() {
         let body = engine("anthropic").body(&Request::new("hi").with_system("rules"));
@@ -309,17 +278,14 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], json!("user"));
     }
 
-    /// The Messages API is never sent a temperature.
-    ///
-    /// Its current models reject the parameter outright, so sending the crate's own
-    /// default of zero would fail every request to a correctly configured provider.
+    /// The Messages API is never sent a temperature: its current models reject the parameter.
     #[test]
     fn the_messages_api_is_never_sent_a_temperature() {
         let body = engine("anthropic").body(&Request::new("hi").with_temperature(0.7));
         assert!(body.get("temperature").is_none(), "{body}");
     }
 
-    /// And the engine says so, rather than dropping the parameter quietly.
+    /// The engine states that it drops the temperature.
     #[test]
     fn dropping_the_temperature_is_stated_not_hidden() {
         assert!(engine("anthropic").describe().contains("temperature"));
@@ -360,10 +326,8 @@ mod tests {
         assert_eq!(anthropic, "yes");
     }
 
-    /// A thinking block is not mistaken for the answer.
-    ///
-    /// The Messages API returns a content *array*, and taking element zero rather than
-    /// filtering on type reads whatever happens to be first.
+    /// Only text blocks become the answer; a thinking block first in the content array is not
+    /// taken for it.
     #[test]
     fn only_text_blocks_become_the_answer() {
         let text = engine("anthropic")
@@ -377,11 +341,7 @@ mod tests {
         assert_eq!(text, "yes");
     }
 
-    /// A refusal is an error, not an empty answer.
-    ///
-    /// It arrives as a *successful* response, so a caller checking only the status
-    /// code sees a healthy request that proposed nothing - and proposing nothing is
-    /// indistinguishable from having nothing to propose.
+    /// A refusal is an error, not an empty answer, though it arrives as a successful response.
     #[test]
     fn a_refusal_is_reported_as_a_refusal() {
         let err = engine("anthropic")
@@ -394,10 +354,8 @@ mod tests {
         assert!(err.to_string().contains("cyber"), "{err}");
     }
 
-    /// An unrecognised reply is described by its shape, never by its content.
-    ///
-    /// Error bodies carry account identifiers and echoes of the prompt, and this
-    /// string lands in logs and run reports.
+    /// An unrecognised reply is described by its shape, never by its content, which can carry
+    /// account identifiers or the prompt.
     #[test]
     fn an_unexpected_reply_is_described_without_quoting_it() {
         let err = engine("openai")
@@ -408,9 +366,8 @@ mod tests {
         assert!(rendered.contains("error"), "{rendered}");
     }
 
-    /// An entry with neither a known provider nor an endpoint is refused.
-    ///
-    /// The alternative is inventing an address, which principle 3 rules out.
+    /// An entry with neither a known provider nor an endpoint is refused rather than sent to an
+    /// invented address.
     #[test]
     fn an_entry_with_nowhere_to_send_is_refused() {
         let mut entry = integration("not-a-provider");

@@ -1,25 +1,10 @@
 //! The allocator, formatted output, and the two functions that call back into the guest.
 //!
-//! # Why these three together
-//!
-//! They are what is left of the library once the pure string work is covered, and they
-//! share the property that makes them worth testing: each one hands the guest something it
-//! will immediately act on without checking. A block it will write to, a string it will
-//! parse, a pointer it will dereference. A wrong answer from any of them surfaces somewhere
-//! with no connection to the call that produced it, which is the failure principle 3 is
-//! about.
-//!
-//! # Process-wide state
-//!
-//! Formatted writes are counted in process-wide atomics, and `getopt` and `signal` keep
-//! position and handlers in statics. Tests run in parallel threads in one binary, so those
-//! counters are **shared between every test here**. Assertions on them are therefore
-//! written as "at least", never as an exact total, and the one test that reads them says
-//! so. A test demanding an exact count would fail depending on which other test happened to
-//! run first (`docs/TESTING.md`).
-//!
-//! What *is* asserted exactly is per-call behaviour: what a refusal writes into the
-//! destination and what it answers. That is race-free, and it is the part a guest sees.
+//! Each hands the guest something it acts on without checking: a block, a string, a
+//! pointer. Formatted writes are counted in process-wide atomics, and `getopt` and `signal`
+//! keep state in statics, so tests running in parallel share them: assertions on the counters
+//! are "at least", never exact (`docs/TESTING.md`). Per-call behaviour, what a refusal writes
+//! and answers, is asserted exactly.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -41,8 +26,7 @@ impl Buf {
         Self::new(v)
     }
 
-    /// The address comes from a mutable pointer, so writes through it are sound rather than
-    /// merely working.
+    /// The address comes from a mutable pointer, so writes through it are sound.
     fn new(mut storage: Vec<u8>) -> Self {
         let at = storage.as_mut_ptr().expose_provenance() as u64;
         Self { storage, at }
@@ -103,13 +87,9 @@ fn poke(at: u64, value: u8) {
     }
 }
 
-// --- the allocator ---------------------------------------------------------------------
+// The allocator.
 
-/// A block from `malloc` is writable, distinct, and readable back.
-///
-/// The failure this rules out is the one that started the whole allocator: unimplemented,
-/// `malloc` returned the placeholder error code, and the guest took *that* as its buffer
-/// and handed it to `memset`, which faithfully wrote there (D128).
+/// A block from `malloc` is writable, distinct, and readable back (D128).
 #[test]
 fn a_malloc_block_is_real_memory_the_guest_can_use() {
     let a = call("malloc", &[64]);
@@ -132,12 +112,8 @@ fn a_malloc_block_is_real_memory_the_guest_can_use() {
     call("free", &[b]);
 }
 
-/// **A zero-size request answers a unique pointer, not null** (D383).
-///
-/// The standard permits either. This emulator's job is the platform, FreeBSD answers a
-/// pointer, and the near-universal caller idiom is `if (!p) fail` - so answering null turns a
-/// zero-sized request into an allocation failure. `ftpsrv` asked how many processes were
-/// running, was told none, allocated nothing for the list, and reported a memory failure.
+/// A zero-size request answers a unique pointer, not null (D383): FreeBSD answers a pointer,
+/// and callers treat null as an allocation failure.
 #[test]
 fn allocating_nothing_answers_a_unique_pointer() {
     let empty = call("malloc", &[0]);
@@ -152,7 +128,7 @@ fn allocating_nothing_answers_a_unique_pointer() {
     assert_ne!(call("calloc", &[0, 16]), 0);
     assert_ne!(call("calloc", &[16, 0]), 0);
 
-    // Freeable like any other, which is what makes it a real allocation rather than a token.
+    // Freeable like any other allocation.
     call("free", &[empty]);
     call("free", &[another]);
 }
@@ -168,21 +144,15 @@ fn calloc_zeroes_what_it_returns() {
     call("free", &[block]);
 }
 
-/// `calloc` checks its own multiplication, which is half the reason it exists.
-///
-/// An unchecked product wraps to a small number, and the caller then writes the size it
-/// asked for into a block that size never described.
+/// `calloc` checks its own multiplication, so a wrapped product is refused.
 #[test]
 fn calloc_refuses_a_product_that_would_overflow() {
     assert_eq!(call("calloc", &[u64::MAX, 2]), 0);
     assert_eq!(call("calloc", &[1 << 62, 1 << 62]), 0);
 }
 
-/// `free` of null, and of an address this library never handed out, both decline quietly.
-///
-/// Declining is the point: `free` on a wild pointer must become a no-op rather than a
-/// `dealloc` against a layout nobody allocated, which would corrupt a heap this process
-/// shares with the emulator itself.
+/// `free` of null, and of an address this library never handed out, both decline quietly,
+/// rather than deallocating a layout nobody allocated.
 #[test]
 fn freeing_something_that_was_never_allocated_declines() {
     assert_eq!(call("free", &[0]), 0);
@@ -205,9 +175,6 @@ fn memalign_returns_an_aligned_block() {
 }
 
 /// An alignment that is not a power of two is refused rather than rounded up.
-///
-/// Rounding on the caller's behalf would hide a bug in the caller, and every allocator
-/// interface requires a power of two anyway.
 #[test]
 fn memalign_refuses_an_alignment_that_is_not_a_power_of_two() {
     assert_eq!(call("memalign", &[24, 100]), 0);
@@ -232,7 +199,7 @@ fn realloc_preserves_what_was_there() {
         );
     }
 
-    // Shrinking keeps the leading bytes and drops the rest, which is all it promises.
+    // Shrinking keeps the leading bytes.
     poke(grown + 8, 0x11);
     let shrunk = call("realloc", &[grown, 16]);
     assert_ne!(shrunk, 0);
@@ -242,16 +209,13 @@ fn realloc_preserves_what_was_there() {
     call("free", &[shrunk]);
 }
 
-/// A quiet run stays quiet: no heap fill was asked for, so there is nothing to report.
-///
-/// The alternative - a line saying "0 allocations filled" on every run - is the noise that
-/// makes a real one invisible.
+/// No heap fill was asked for, so there is nothing to report.
 #[test]
 fn an_unasked_heap_fill_reports_nothing() {
     assert_eq!(orbistoun_libc::heap_fill_summary(), None);
 }
 
-// --- formatted output ----------------------------------------------------------------------
+// Formatted output.
 
 /// Renders a format through the bounded writer, returning what landed and what was claimed.
 fn render(format: &str, args: &[u64]) -> (String, u64) {
@@ -263,17 +227,14 @@ fn render(format: &str, args: &[u64]) -> (String, u64) {
     (dest.as_str().to_owned(), answer)
 }
 
-/// Every integer conversion renders in its own base and signedness.
-///
-/// `%d` and `%u` on the same bits are the pair worth asserting together: one is `-1` and
-/// the other is a very large number, so a conversion wired to the wrong one is obvious
-/// here and invisible on any positive input.
+/// Every integer conversion renders in its own base and signedness; `%d` and `%u` on the
+/// same bits differ.
 #[test]
 fn the_integer_conversions_each_render_their_own_way() {
     let minus_one = (-1_i64) as u64;
     assert_eq!(render("%d", &[minus_one]).0, "-1");
     assert_eq!(render("%i", &[minus_one]).0, "-1");
-    // `%u` is an *unsigned int*, so it reads thirty-two bits; `%lu` reads the whole word.
+    // `%u` is an `unsigned int`, so it reads thirty-two bits; `%lu` reads the whole word.
     assert_eq!(render("%u", &[minus_one]).0, format!("{}", u32::MAX));
     assert_eq!(render("%lu", &[minus_one]).0, format!("{}", u64::MAX));
     assert_eq!(render("%d", &[42]).0, "42");
@@ -283,11 +244,8 @@ fn the_integer_conversions_each_render_their_own_way() {
     assert_eq!(render("%p", &[0x1000]).0, "0x1000");
 }
 
-/// A length modifier is consumed, and says how many of the argument's bits count.
-///
-/// **It used to change nothing**, on the reasoning that every argument is a register - true
-/// until arguments started coming off the stack, where a slot narrower than eight bytes has
-/// an unspecified upper half (D385).
+/// A length modifier is consumed, and says how many of the argument's bits count: a stack
+/// slot narrower than eight bytes has an unspecified upper half.
 #[test]
 fn a_length_modifier_says_how_wide_the_argument_is() {
     for format in ["%d", "%ld", "%lld", "%zd", "%jd", "%td", "%hd", "%hhd"] {
@@ -302,9 +260,6 @@ fn a_length_modifier_says_how_wide_the_argument_is() {
 }
 
 /// A literal percent is emitted and consumes no argument.
-///
-/// The consuming half is what a test on `"%%"` alone would miss: a `%%` that took an
-/// argument would shift everything after it by one.
 #[test]
 fn a_literal_percent_consumes_no_argument() {
     assert_eq!(render("100%%", &[]).0, "100%");
@@ -318,16 +273,13 @@ fn the_string_conversions_read_guest_memory() {
     assert_eq!(render("[%s]", &[text.at()]).0, "[alpha]");
     assert_eq!(render("%c", &[u64::from(b'Z')]).0, "Z");
 
-    // Precision bounds a string, which is how a guest prints a field that is not
-    // terminated where it wants the print to stop.
+    // Precision bounds a string, so a guest can print a field that is not terminated where it
+    // wants the print to stop.
     assert_eq!(render("%.3s", &[text.at()]).0, "alp");
     assert_eq!(render("%.99s", &[text.at()]).0, "alpha");
 }
 
 /// A null string prints `(null)` rather than faulting inside formatting.
-///
-/// What every implementation of note does, and a guest relying on it would otherwise take
-/// the emulator down from inside a diagnostic.
 #[test]
 fn a_null_string_argument_prints_a_placeholder() {
     assert_eq!(render("[%s]", &[0]).0, "[(null)]");
@@ -339,18 +291,15 @@ fn width_and_flags_pad_the_rendered_value() {
     assert_eq!(render("[%5d]", &[42]).0, "[   42]");
     assert_eq!(render("[%-5d]", &[42]).0, "[42   ]");
     assert_eq!(render("[%05d]", &[42]).0, "[00042]");
-    // Left alignment wins over zero padding, because padding on the right with zeroes
-    // would change the value being read back.
+    // Left alignment wins over zero padding.
     assert_eq!(render("[%-05d]", &[42]).0, "[42   ]");
     assert_eq!(render("[%5s]", &[Buf::text("ab", 4).at()]).0, "[   ab]");
     // A width narrower than the value never truncates it.
     assert_eq!(render("[%2d]", &[12345]).0, "[12345]");
 }
 
-/// The answer is the length the whole rendering would have been, not the part that fit.
-///
-/// **A caller detects truncation by comparing it against the size it passed**, so reporting
-/// the copied length would hide exactly the case the bounded variant exists to report.
+/// The answer is the length the whole rendering would have been, not the part that fit, so a
+/// caller can detect truncation.
 #[test]
 fn a_truncated_write_still_reports_the_full_length() {
     let dest = Buf::zeroed(8);
@@ -367,11 +316,8 @@ fn a_truncated_write_still_reports_the_full_length() {
     assert_eq!(dest.bytes()[7], 0);
 }
 
-/// A refused format writes an empty, terminated destination and answers zero.
-///
-/// **Not a partial rendering.** A guest receiving `"texture_"` where it expected
-/// `"texture_47.gnf"` opens the wrong file, and the failure surfaces somewhere with no
-/// connection to formatting. Empty is also wrong, but bounded and immediate.
+/// A refused format writes an empty, terminated destination and answers zero, not a partial
+/// rendering (D183).
 #[test]
 fn a_refused_format_produces_nothing_rather_than_something_plausible() {
     for format in [
@@ -400,9 +346,6 @@ fn a_refused_format_produces_nothing_rather_than_something_plausible() {
 }
 
 /// A format ending in a bare percent is malformed and is refused, not dropped.
-///
-/// The guest built this string and got it wrong; rendering the part before it would hand
-/// back a string that looks finished.
 #[test]
 fn a_format_ending_in_a_bare_percent_is_refused() {
     let (text, answer) = render("done %", &[]);
@@ -410,11 +353,8 @@ fn a_format_ending_in_a_bare_percent_is_refused() {
     assert_eq!(text, "");
 }
 
-/// A format calling for more arguments than arrived is refused rather than invented.
-///
-/// Six integer registers arrive and the bounded writer spends three on its own fixed
-/// parameters, so the fourth conversion has nothing behind it. The rest were passed on the
-/// stack, which is reachable but not from the argument array alone (D183).
+/// A format calling for more arguments than arrived is refused rather than invented: the
+/// bounded writer spends three of the six integer registers on its own parameters.
 #[test]
 fn a_format_wanting_more_arguments_than_arrived_is_refused() {
     assert_eq!(render("%d %d %d", &[1, 2, 3]).0, "1 2 3");
@@ -426,15 +366,8 @@ fn a_format_wanting_more_arguments_than_arrived_is_refused() {
     assert_eq!(dest.as_str(), "");
 }
 
-/// A destination that cannot be written to answers zero - **except when the size is zero.**
-///
-/// The exception is the standard's, not an inconsistency. A null destination and a null
-/// format are both "there is nothing to do here". A *size* of zero is a question: ISO C
-/// 7.21.6.5 has `snprintf` write nothing and still return the length the output would have
-/// needed, because that is how a caller sizes a buffer before allocating it.
-///
-/// This test asserted zero for all three, and so pinned the bug. A reference library answered
-/// the length where orbistoun answered zero, which is what surfaced it (D479).
+/// A destination that cannot be written to answers zero, except when the size is zero: ISO C
+/// 7.21.6.5 has `snprintf` write nothing and return the length the output would need.
 #[test]
 fn a_write_with_nowhere_to_go_answers_zero_but_no_room_answers_the_length() {
     let dest = Buf::zeroed(16);
@@ -460,10 +393,8 @@ fn a_write_with_nowhere_to_go_answers_zero_but_no_room_answers_the_length() {
     );
 }
 
-/// `sprintf` renders the same way with no bound at all.
-///
-/// Unbounded is the whole hazard: nothing here can stop an overrun, because the guest
-/// promised the buffer is large enough and there is no size to check against.
+/// `sprintf` renders the same way with no bound; the guest promised the buffer is large
+/// enough.
 #[test]
 fn sprintf_renders_without_a_bound() {
     let dest = Buf::zeroed(64);
@@ -480,11 +411,8 @@ fn sprintf_renders_without_a_bound() {
 
 /// Formatted writes are counted, and the first thing one could not do is remembered.
 ///
-/// **"At least", never an exact total.** The counters are process-wide and every other test
-/// in this binary contributes to them, so an exact assertion would pass or fail depending
-/// on scheduling. What is checked is that a refusal moves the refused counter and that a
-/// fault was recorded at all - the *kind* of the first one belongs to whichever test ran
-/// first, which is not a fact about this one.
+/// Asserted as "at least": the counters are process-wide. The kind of the first fault belongs
+/// to whichever test ran first.
 #[test]
 fn formatted_writes_are_counted_and_the_first_fault_is_remembered() {
     let before = orbistoun_libc::format_stats();
@@ -510,7 +438,7 @@ fn formatted_writes_are_counted_and_the_first_fault_is_remembered() {
     );
 }
 
-// --- calling back into the guest -------------------------------------------------------------
+// Calling back into the guest.
 
 /// Reads a four-byte value at a guest address.
 fn read_i32(at: u64) -> i32 {
@@ -527,12 +455,10 @@ extern "sysv64" fn ascending(a: u64, b: u64) -> u64 {
     }
 }
 
-/// The same order, answering a **32-bit** negative with a clean upper half.
+/// The same order, answering a 32-bit negative with a clean upper half.
 ///
-/// The guest answers an `int`, which occupies the low half of `rax` and leaves the rest
-/// whatever it was. A whole-word test on the result reads `0x0000_0000_FFFF_FFFF` as a
-/// large positive number and reverses the comparison - silently, and only for the elements
-/// that happened to compare less.
+/// A guest answers an `int` in the low half of `rax`; a whole-word test would read
+/// `0x0000_0000_FFFF_FFFF` as a large positive number.
 extern "sysv64" fn ascending_narrow(a: u64, b: u64) -> u64 {
     match read_i32(a).cmp(&read_i32(b)) {
         std::cmp::Ordering::Less => 0x0000_0000_FFFF_FFFF,
@@ -562,10 +488,7 @@ fn read_array(buf: &Buf, count: usize) -> Vec<i32> {
         .collect()
 }
 
-/// `qsort` sorts through a comparator in the guest's own code.
-///
-/// The first time this crate *makes* a call rather than answering one: the caller hands
-/// over a function pointer into its own image and expects it to be used (D274).
+/// `qsort` sorts through a comparator in the guest's own code (D274).
 #[test]
 fn qsort_sorts_through_a_guest_comparator() {
     let values = [5_i32, 3, 9, 1, 7, 3];
@@ -579,10 +502,6 @@ fn qsort_sorts_through_a_guest_comparator() {
 
 /// A comparator answering a 32-bit negative sorts the same way as one answering a 64-bit
 /// negative.
-///
-/// The two disagree only if the result is tested as a whole word, and then only for the
-/// pairs that compare less - so a reversed answer looks like a partially sorted array
-/// rather than an obviously broken one.
 #[test]
 fn a_thirty_two_bit_negative_result_is_still_negative() {
     let values = [5_i32, 3, 9, 1];
@@ -613,11 +532,7 @@ fn a_sort_with_nothing_to_do_leaves_the_array_alone() {
     }
 }
 
-/// `bsearch` answers a pointer into the array, and null for a miss.
-///
-/// **Null, never an error code.** A count-shaped placeholder here would be a wild pointer
-/// the guest dereferences immediately, which is the shape this project keeps finding
-/// (D125, D273).
+/// `bsearch` answers a pointer into the array, and null for a miss (D125).
 #[test]
 fn bsearch_answers_a_pointer_into_the_array_or_null() {
     let values = [1_i32, 3, 5, 7, 9, 11];
@@ -667,14 +582,9 @@ fn a_search_with_nothing_to_search_finds_nothing() {
     }
 }
 
-// --- the rest -----------------------------------------------------------------------------
+// The rest.
 
-/// `errno` is a real, writable, thread-local address.
-///
-/// **It must be real because every use of `errno` in a guest dereferences it.** A stub
-/// answering a placeholder hands back a wild pointer the guest then reads and writes, which
-/// is exactly what happened: a read of orbistoun's own placeholder value, taken as an
-/// address (D344).
+/// `errno` is a real, writable, thread-local address, since every guest use dereferences it.
 #[test]
 fn errno_is_a_real_address_and_is_not_shared_between_threads() {
     let mine = call("__error", &[]);
@@ -685,7 +595,7 @@ fn errno_is_a_real_address_and_is_not_shared_between_threads() {
         "and it must be stable per thread"
     );
 
-    // Writable, which is the half a read-only answer would fail.
+    // Writable too.
     poke(mine, 9);
     assert_eq!(peek(mine), 9);
 
@@ -698,15 +608,10 @@ fn errno_is_a_real_address_and_is_not_shared_between_threads() {
     );
 }
 
-/// `signal` records a handler and answers the one it replaced.
+/// `signal` records a handler and answers the one it replaced, and never fails.
 ///
-/// **One test, because the handler table is process-wide** - two tests installing on the
-/// same number would each see the other's handler. Distinct numbers within one test keep
-/// the sequence deterministic.
-///
-/// What must never happen is a failure answer: the first thing a network server does is ask
-/// for `SIGPIPE` to be ignored, and an error there sends a correctly written program down
-/// its error path before it has done anything at all (D343).
+/// One test, because the handler table is process-wide. A network server's first act is to
+/// ignore `SIGPIPE`, and a failure there sends it down its error path.
 #[test]
 fn signal_records_a_handler_and_reports_the_previous_one() {
     const SIGPIPE: u64 = 0xd;
@@ -723,16 +628,13 @@ fn signal_records_a_handler_and_reports_the_previous_one() {
     );
     assert_eq!(call("signal", &[SIGPIPE, 0]), 2);
 
-    // A number past the table answers the default rather than refusing - refusing would be
-    // a claim about which signals exist that nothing here has measured.
+    // A number past the table answers the default rather than refusing, which would be an
+    // unmeasured claim about which signals exist.
     assert_eq!(call("signal", &[9999, 1]), 0);
     assert_eq!(call("signal", &[u64::MAX, 1]), 0);
 }
 
-/// `getopt` answers "nothing left" as a 32-bit `-1`.
-///
-/// The guest reads `eax`, so what it must find there is `-1` in 32 bits. Answering a 64-bit
-/// `-1` would look identical in a debugger and be a different number to the guest.
+/// `getopt` answers "nothing left" as a 32-bit `-1`, since the guest reads `eax`.
 #[test]
 fn getopt_reports_nothing_left_as_a_thirty_two_bit_minus_one() {
     let options = Buf::text("abc", 8);
@@ -742,20 +644,15 @@ fn getopt_reports_nothing_left_as_a_thirty_two_bit_minus_one() {
     assert_eq!(call("getopt", &[0, argv.at(), options.at()]), done);
     assert_eq!(call("getopt", &[1, argv.at(), options.at()]), done);
 
-    // A count that did not come from a real process image is refused rather than walked:
-    // iterating a pointer array sized by a stray value would fault inside this call, and be
-    // reported as the guest's fault.
+    // A count that did not come from a real process image is refused rather than walked.
     assert_eq!(call("getopt", &[u64::MAX, argv.at(), options.at()]), done);
     assert_eq!(call("getopt", &[1_000_000, argv.at(), options.at()]), done);
     assert_eq!(call("getopt", &[2, 0, options.at()]), done);
     assert_eq!(call("getopt", &[2, argv.at(), 0]), done);
 }
 
-/// Registration functions accept, and answer that they accepted.
-///
-/// A non-zero answer from either makes a C++ runtime believe registration failed, and the
-/// standard behaviour then is to abort - so "accepted and never run" is the honest option
-/// and "refused" is not (D124).
+/// Registration functions accept, and answer that they accepted: a non-zero answer makes a
+/// C++ runtime abort.
 #[test]
 fn the_registration_functions_accept_rather_than_refuse() {
     assert_eq!(call("atexit", &[0x1000]), 0);

@@ -1,65 +1,13 @@
 //! Turning decoded guest shaders into SPIR-V.
 //!
-//! # The mismatch this crate exists to bridge
-//!
-//! The guest architecture runs sixty-four lanes in lockstep under an explicit
-//! execution mask. There is no `if` in its machine code - a branch is mask arithmetic
-//! followed by a jump taken when no lane survives. Structure is *implied*.
-//!
-//! SPIR-V is the opposite. It describes one invocation, and it demands **structured**
-//! control flow: explicit merge blocks forming a reducible graph, with the hardware
-//! handling divergence.
-//!
-//! # Two axes, not one
-//!
-//! [`Strategy`] chooses how *control flow* is expressed. [`Fidelity`] chooses how the
-//! *wavefront* is modelled. They are separate questions and were conflated at first.
-//!
-//! Fidelity is a field of [`Strategy::Predicated`] rather than a parameter beside it,
-//! because the combinations are not free: structured reconstruction implies the
-//! per-lane model and nothing else. Making it a field means an invalid pairing cannot
-//! be written down, which is better than rejecting one at run time.
-//!
-//! # Why three fidelity levels rather than one
-//!
-//! Not as a fallback ladder. As a **differential oracle**.
-//!
-//! Run one shader at [`Fidelity::Wavefront`] and at [`Fidelity::Lane`]. If they
-//! disagree, the faster one has a bug, and it is localised to that shader and
-//! bisectable to an instruction - with no reference hardware, no console and no title
-//! involved. That is the same trick the decoder's differential test plays, one layer
-//! up, and it is worth more than either level alone.
-//!
-//! # What is built
-//!
-//! | Level | Model | State |
-//! |---|---|---|
-//! | [`Fidelity::Lane`] | one invocation per lane; lanes never interact | built |
-//! | [`Fidelity::Wavefront`] | one invocation simulates all lanes; mask is a value | built |
-//! | [`Fidelity::Subgroup`] | one invocation per lane; mask via subgroup ballot | **stub** |
-//!
-//! Every unbuilt path is an error naming what it would do, never a quiet substitution.
-//! A silent fallback would present as unexplained slowness or - worse, since these
-//! differ in *correctness* rather than only speed - as output that is subtly wrong with
-//! nothing to point at. Principle 3, applied to a subsystem. (D098)
-//!
-//! # The execution mask is where the levels stop being interchangeable
-//!
-//! [`Fidelity::Wavefront`] holds the mask as an ordinary value in two scalar registers,
-//! so the guest's own mask arithmetic - `s_mov_b64 exec, …`, `s_and_b64 exec, exec, …`,
-//! `s_andn2_b64` for an else-branch - translates directly rather than being
-//! reconstructed. Every vector write and every store then selects on the lane's bit.
-//!
-//! [`Fidelity::Lane`] has no mask and **refuses** any shader that writes one. It cannot
-//! represent an inactive lane, so ignoring the write would run every lane regardless:
-//! plausible output, wrong answer, nothing in it to indicate the problem. That refusal
-//! is what makes [`Fidelity::Auto`] able to choose - it picks the wavefront model for a
-//! shader that touches the mask and the lane model otherwise, rather than defaulting to
-//! one and hoping.
-//!
-//! What is still missing is **branching**. The mask can be computed and honoured; a
-//! jump taken when no lane survives it cannot yet be expressed, because SPIR-V demands
-//! structured control flow and the guest's is implied.
+//! The guest runs sixty-four (or thirty-two) lanes in lockstep under an explicit execution
+//! mask, with branches as mask arithmetic; SPIR-V describes one invocation with structured
+//! control flow. [`Strategy`] chooses how control flow is expressed and [`Fidelity`] how the
+//! wavefront is modelled; fidelity is a field of [`Strategy::Predicated`] so an invalid
+//! pairing cannot be written. The fidelity levels are a differential oracle: two levels
+//! disagreeing localises a bug to one shader and instruction (D100). [`Fidelity::Lane`] has
+//! no mask and refuses a shader that writes one, which lets [`Fidelity::Auto`] choose; an
+//! unbuilt path is an error, never a substitution (D098).
 
 pub mod blocks;
 mod buffer;
@@ -75,10 +23,8 @@ use orbistoun_shader::{Decode, EncodingTable};
 
 /// How the wavefront is modelled.
 ///
-/// The guest executes sixty-four lanes in lockstep. SPIR-V describes one invocation.
-/// This is the choice of how to reconcile those, and the levels differ in
-/// **correctness**, not only in speed - which is why picking one silently would be
-/// worse than refusing.
+/// The guest executes sixty-four lanes in lockstep; SPIR-V describes one invocation. The
+/// levels differ in correctness, not only speed, so none is picked silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Fidelity {
     /// Pick the cheapest level valid for this shader on this machine.
@@ -87,27 +33,22 @@ pub enum Fidelity {
 
     /// One invocation per lane, and lanes never interact.
     ///
-    /// The execution mask is implicit and cross-lane instructions are impossible.
-    /// Correct only for shaders that never look at the wavefront as an object - which
-    /// is a real and useful subset, and not most shaders.
+    /// The execution mask is implicit and cross-lane instructions are impossible, so it is
+    /// correct only for shaders that never treat the wavefront as an object.
     Lane,
 
     /// One invocation per lane, with the mask materialised by subgroup ballot.
     ///
-    /// Cross-lane instructions become subgroup operations. Correct and fast **when the
-    /// hardware's subgroup size matches the guest's wavefront**, which is not
-    /// guaranteed: the guest is sixty-four wide and some hardware is thirty-two.
+    /// Cross-lane instructions become subgroup operations. Correct when the host subgroup
+    /// size matches the guest wavefront, which is not guaranteed.
     Subgroup,
 
     /// One invocation simulates an entire wavefront.
     ///
-    /// Registers are arrays indexed by lane and the execution mask is an ordinary
-    /// value, so cross-lane instructions are array reads and the mask can be
-    /// manipulated arithmetically exactly as the guest does.
-    ///
-    /// Very slow, and correct unconditionally - no subgroup dependency, no size to
-    /// match, nothing to negotiate. That combination is what makes it the oracle the
-    /// other two are judged against.
+    /// Registers are arrays indexed by lane and the execution mask is an ordinary value,
+    /// so cross-lane instructions are array reads and mask arithmetic translates directly.
+    /// Very slow and unconditionally correct, which makes it the oracle the other levels
+    /// are judged against.
     Wavefront,
 }
 
@@ -132,7 +73,7 @@ pub enum Strategy {
         /// How many lanes the shader was compiled for.
         width: Width,
     },
-    /// Reconstructed structured control flow. **Not implemented.**
+    /// Reconstructed structured control flow. Refused as not implemented (D098).
     Structured,
 }
 
@@ -147,21 +88,12 @@ impl Default for Strategy {
 
 /// How many lanes a shader's wavefront has.
 ///
-/// # Why this is the caller's to say
-///
-/// This architecture generation runs shaders at either width, chosen **per shader** when
-/// it is compiled, and nothing in the instruction stream states which - the encodings are
-/// identical either way (D141). A 32-lane shader is recognisable only by which mask
-/// instructions it uses, and inferring from that would mean guessing from an absence for
-/// any shader whose masks are all still untouched at the point of the guess.
-///
-/// So it is supplied. On a real target it comes from the pipeline state the guest set up
-/// alongside the shader; here it comes from whoever is calling, and defaults to the wider
-/// one because that is what the previous generation had and what every existing fixture
-/// is.
+/// The width is chosen per shader at compile time and the encodings are identical either
+/// way, so it is supplied by the caller from the pipeline state rather than inferred
+/// (D145). Defaults to sixty-four, the previous generation's width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Width {
-    /// Thirty-two lanes. The narrow mode this generation added.
+    /// Thirty-two lanes, the narrow mode this generation adds.
     Wave32,
     /// Sixty-four lanes.
     #[default]
@@ -179,8 +111,7 @@ impl Width {
 
     /// Whether a lane mask needs a second register to hold its upper half.
     ///
-    /// The narrow mode's mask fits in one, which is why its shaders use the 32-bit mask
-    /// instructions rather than the 64-bit ones.
+    /// The narrow mode's mask fits in one, so its shaders use the 32-bit mask instructions.
     pub const fn needs_upper_half(self) -> bool {
         matches!(self, Self::Wave64)
     }
@@ -212,9 +143,8 @@ pub enum TranslateError {
 
     /// A fidelity level that has not been built was asked for.
     ///
-    /// Deliberately not a fallback, and for a sharper reason than the strategy above:
-    /// the levels differ in *correctness*, so substituting one would produce output
-    /// that is wrong rather than merely slow, with nothing to point at.
+    /// Not a fallback: the levels differ in correctness, so a substitution would produce
+    /// wrong output with nothing to point at.
     #[error(
         "the {level} model is not implemented ({would}). This is not falling back to another level, because the levels differ in correctness rather than only in speed - a substitution would render something subtly wrong with nothing to indicate it"
     )]
@@ -243,9 +173,8 @@ pub enum TranslateError {
 
     /// An instruction this translator does not handle yet.
     ///
-    /// Never silently skipped. A shader missing one instruction computes the wrong
-    /// thing while appearing to work, which is far harder to find than a translator
-    /// that stops and names what it hit.
+    /// Never silently skipped: a shader missing one instruction computes the wrong thing
+    /// while appearing to work.
     #[error("instruction at {offset:#x} cannot be translated: {detail}")]
     Unsupported {
         /// Byte offset within the shader.
@@ -265,44 +194,31 @@ pub enum TranslateError {
 
     /// The module built does not hang together.
     ///
-    /// A translator bug rather than anything about the guest, and caught here because
-    /// the alternative is a driver fault with no diagnosis attached. Emitting the
-    /// module anyway and letting the device decide has been tried twice; both times it
-    /// cost hours and the answer came from `spirv-val` in the end.
+    /// A translator bug, caught here rather than as an undiagnosed driver fault.
     #[error("the translated module is malformed: {0}. This is a translator bug")]
     MalformedModule(#[from] orbistoun_spirv::ModuleError),
 }
 
 /// Something worth telling the caller about a translation that succeeded.
 ///
-/// Distinct from [`TranslateError`], which is a translation that did not happen. These
-/// all describe output that is *correct* and costs something the caller may not have
-/// expected.
+/// Distinct from [`TranslateError`]: these describe output that is correct and costs
+/// something the caller may not expect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
     /// [`Fidelity::Auto`] had to fall back to the slowest level.
     ///
-    /// # Why this is said out loud
-    ///
-    /// The lane model has no execution mask, so a shader that turns lanes off cannot use
-    /// it and `Auto` falls back to simulating a whole wavefront inside one invocation -
-    /// sixty four lanes, in a loop, per instruction.
-    ///
-    /// That is correct and it is *enormously* slower, and until now the only sign was a
-    /// field on the result. A field is something you have to know to look for; a warning
-    /// is something you have to decide to ignore. One instruction touching `exec`
-    /// anywhere in a shader is enough to trigger it, which is most real shaders, so the
-    /// difference matters.
+    /// The lane model has no execution mask, so a shader that turns lanes off falls back to
+    /// simulating the whole wavefront in one invocation, sixty-four lanes per instruction.
+    /// One instruction touching `exec` triggers it, so it is a warning rather than only a
+    /// field.
     SlowestFidelity {
         /// What in the shader forced it.
         because: &'static str,
         /// The width a subgroup would have to be for the faster masking level to work.
         ///
-        /// Carried because it is the actionable part: [`Fidelity::Subgroup`] is as fast
-        /// as the lane model *and* has a mask, and whether it fits is a property of the
-        /// device rather than of the shader. The translator cannot check it - it has
-        /// never seen the device - so it reports what would be needed and leaves the
-        /// comparison to whoever knows.
+        /// [`Fidelity::Subgroup`] is as fast as the lane model and has a mask; whether it fits
+        /// is a property of the device, which the translator has not seen, so it reports what
+        /// would be needed.
         subgroup_would_need: u32,
     },
 }
@@ -336,27 +252,22 @@ pub struct Translated {
     pub strategy: Strategy,
     /// The level actually used, with [`Fidelity::Auto`] already resolved.
     ///
-    /// Reported rather than inferred: "it is slow" and "it quietly dropped to a slower
-    /// level" look identical from the outside, and only one of them is worth
-    /// investigating.
+    /// Reported so a silently slower level is distinguishable from a slow shader.
     pub fidelity: Fidelity,
     /// Guest instructions translated.
     pub instructions: usize,
     /// Things the caller should be told rather than left to look for.
     ///
-    /// Empty is the common case. The list exists because a fact recorded in a field is a
-    /// fact somebody has to go and read, and the one thing here costs a factor of sixty
-    /// four - see [`Warning`].
+    /// Empty in the common case; see [`Warning`].
     pub warnings: Vec<Warning>,
     /// The host subgroup width this module needs, when it needs a particular one.
     ///
-    /// Set only by [`Fidelity::Subgroup`], where one invocation is one guest lane and
-    /// the two widths therefore have to match. Reported rather than checked here: the
-    /// translator does not know what device this will run on, and inventing a default
-    /// would produce a module that is silently wrong on half of them.
+    /// Set only by [`Fidelity::Subgroup`], where one invocation is one guest lane and the
+    /// widths must match. Reported rather than checked: the translator does not know the
+    /// device.
     pub required_subgroup: Option<u32>,
-    /// The textures the module samples, in binding order, and where each one's descriptor came from
-    /// (worklog 840). Empty for a module that samples nothing and for every model but the wavefront.
+    /// The textures the module samples, in binding order, and where each one's descriptor
+    /// came from. Empty for a module that samples nothing and for every model but the wavefront.
     pub textures: Vec<wavefront::TextureSource>,
 }
 
@@ -370,24 +281,9 @@ impl Translated {
 /// Picks the cheapest fidelity level valid for a shader.
 ///
 /// [`Fidelity::Lane`] unless the shader touches the execution mask, in which case
-/// [`Fidelity::Wavefront`]. The lane model has one invocation per lane and no way to
-/// represent an inactive one, so a shader that disables lanes would run every lane
-/// regardless: plausible output, wrong answer, and nothing in it to indicate the
-/// problem.
-///
-/// # This used to be safe by accident
-///
-/// The answer was previously always the lane model, on the reasoning that any shader
-/// needing more would contain an instruction the translator refused anyway - so the
-/// wrong level could not be chosen, not by analysis but because translation stopped
-/// first. That reasoning expired the moment `s_mov_b64 exec, …` became translatable,
-/// and the note saying so was written before it did.
-///
-/// # Why this is not the silent substitution D098 forbids
-///
-/// Because the caller asked for [`Fidelity::Auto`], which is a request to be told what
-/// the shader needs. Asking for the lane model explicitly and getting it is not affected -
-/// that shader is refused, loudly, by the model that cannot represent it.
+/// [`Fidelity::Wavefront`]: the lane model cannot represent an inactive lane and would run
+/// every lane. This is not a silent substitution (D098), because `Auto` asks to be told what
+/// the shader needs; an explicit request for the lane model is refused by that model.
 fn resolve(requested: Fidelity, decode: &Decode, encodings: &EncodingTable) -> Fidelity {
     match requested {
         Fidelity::Auto => {
@@ -403,15 +299,10 @@ fn resolve(requested: Fidelity, decode: &Decode, encodings: &EncodingTable) -> F
                 else {
                     return false;
                 };
-                // Asked by name, because whether an instruction touches a lane mask is a
-                // property of the instruction and not of the number this generation
-                // happens to give it.
-                //
-                // An opcode with no recorded name answers `false` here, which picks the
-                // lane model. That is deliberate: translation refuses the instruction
-                // either way, and it refuses on the *name lookup*, so the report says
-                // the opcode is unknown rather than blaming a fidelity that was never
-                // the problem.
+                // Asked by name: touching a lane mask is a property of the instruction,
+                // not of its number on this generation. An opcode with no recorded name
+                // answers `false`; translation then refuses it on the name lookup, so the
+                // report names the unknown opcode rather than the fidelity.
                 encodings
                     .mnemonic_for(family, instruction.opcode)
                     .is_some_and(|name| model::touches_mask(instruction, name))
@@ -428,12 +319,9 @@ fn resolve(requested: Fidelity, decode: &Decode, encodings: &EncodingTable) -> F
 
 /// Translates a decoded shader as a compute dispatch.
 ///
-/// Refuses rather than approximates. Every error here is a case where producing
-/// *something* would mean inventing behaviour the guest did not ask for.
-///
-/// Callers that know which stage bound the shader want [`translate_staged`]: a fragment
-/// shader translated as a compute dispatch is refused at its first interpolation, for a reason
-/// that is about the question rather than about the shader.
+/// Refuses rather than approximates. Callers that know which stage bound the shader want
+/// [`translate_staged`]: a fragment shader translated as a compute dispatch is refused at
+/// its first interpolation.
 pub fn translate(
     decode: &Decode,
     encodings: &EncodingTable,
@@ -444,13 +332,8 @@ pub fn translate(
 
 /// Translates a decoded shader for the stage that bound it.
 ///
-/// # Why a stage forces the model
-///
-/// Only the wavefront model has fragment inputs and a colour output; the per-lane one has
-/// neither, so a fragment shader translated there is refused for want of an attribute that
-/// its stage was never given. Rather than refuse, this raises the fidelity and **says so** in
-/// the same warning the automatic resolution already uses - the cost is real and a caller
-/// should not have to infer it.
+/// Only the wavefront model has fragment inputs and a colour output, so a graphics stage
+/// raises the fidelity to it and says so with the same warning automatic resolution uses.
 pub fn translate_staged(
     decode: &Decode,
     encodings: &EncodingTable,
@@ -468,19 +351,13 @@ pub fn translate_staged(
 
 /// Translates a decoded shader for a stage, over a guest-memory window at a given address.
 ///
-/// # Why the window is a parameter
-///
-/// A translated shader reaches guest memory through one storage buffer covering a fixed span of
-/// the address space, and every access is checked against it. Anchored at zero - which is what
-/// it was until this existed - that span contains nothing a guest ever addresses, so a real
-/// shader's every read answered zero and its every write went nowhere (worklog 561).
-///
-/// Where the span *should* sit is the caller's knowledge, not this crate's: it is wherever the
-/// buffers this shader was compiled against were put.
-///
+/// A translated shader reaches guest memory through one storage buffer over a fixed span of
+/// the address space, with every access checked against it. Where the span sits is the
+/// caller's knowledge: wherever the shader's buffers were put. A window at zero covers
+/// nothing a guest addresses.
 /// # Errors
 ///
-/// Whatever the translation refuses - an unsupported instruction, an untrustworthy decode.
+/// Whatever the translation refuses: an unsupported instruction, an untrustworthy decode.
 pub fn translate_windowed(
     decode: &Decode,
     encodings: &EncodingTable,
@@ -488,8 +365,8 @@ pub fn translate_windowed(
     stage: wavefront::Stage,
     window: wavefront::Window,
 ) -> Result<Translated, TranslateError> {
-    // A caller binding a mesh stage whose topology it decoded uses `translate_windowed_primitive`;
-    // every other wants the measured triangle (`-0c58`).
+    // A caller binding a mesh stage whose topology it decoded uses
+    // `translate_windowed_primitive`; every other gets the default triangle.
     translate_windowed_primitive(
         decode,
         encodings,
@@ -504,7 +381,7 @@ pub fn translate_windowed(
 ///
 /// # Errors
 ///
-/// Whatever the translation refuses - an unsupported instruction, an untrustworthy decode.
+/// Whatever the translation refuses: an unsupported instruction, an untrustworthy decode.
 pub fn translate_windowed_primitive(
     decode: &Decode,
     encodings: &EncodingTable,
@@ -523,8 +400,8 @@ pub fn translate_windowed_primitive(
     )
 }
 
-/// As [`translate_windowed_primitive`], for a module that reads its stage's user data at entry from
-/// the push-constant block a draw supplies (worklog 826). A graphics stage is always the wavefront
+/// As [`translate_windowed_primitive`], for a module that reads its stage's user data at entry
+/// from the push-constant block a draw supplies. A graphics stage is always the wavefront
 /// model, which is the one that reads it.
 ///
 /// # Errors
@@ -549,8 +426,8 @@ pub fn translate_with_user_data(
         fidelity = Fidelity::Wavefront;
     }
 
-    // Said out loud rather than left in a field. `Auto` reaching the wavefront model is
-    // the common case for any shader that masks, and it costs a factor of sixty four.
+    // Said as a warning rather than left in a field: the wavefront model costs a factor of
+    // sixty-four.
     let warnings = if staged && asked_for != Fidelity::Wavefront {
         vec![Warning::SlowestFidelity {
             because: concat!(
@@ -635,8 +512,7 @@ pub fn translate_with_user_data(
                 textures: Vec::new(),
             })
         }
-        // `resolve` turns Auto into something concrete, so reaching here would mean it
-        // stopped doing that.
+        // `resolve` turns Auto into a concrete level, so this is unreachable.
         Fidelity::Auto => Err(TranslateError::FidelityNotImplemented {
             level: fidelity,
             would: "have been resolved to a concrete level before dispatch",
@@ -650,13 +526,9 @@ mod tests {
     use crate::predicated::MEMORY_WORDS;
     use crate::wavefront::Window;
 
-    /// **A module that reads user data declares the push-constant block; one that reads none does
-    /// not; a stage wanting more than its share is refused** (worklog 826).
-    ///
-    /// `s_endpgm` alone, translated for a fragment stage three ways. With two words the module holds
-    /// an `OpVariable` in the `PushConstant` storage class; with none it holds no such variable and is
-    /// word for word what it was; with seventeen - more than a stage's sixteen - it is refused, rather
-    /// than truncated to a shader that reads zero where a word never arrived.
+    /// A module that reads user data declares the push-constant block; one that reads none
+    /// does not and is unchanged; a stage wanting more than its sixteen words is refused
+    /// rather than truncated.
     #[test]
     fn user_data_declares_the_block_only_when_read_and_refuses_too_much() {
         use crate::wavefront::{MeshPrimitive, Stage, UserData};
@@ -720,12 +592,11 @@ mod tests {
         assert!(with(17).is_err(), "more than a stage's share is refused");
     }
 
-    /// **A length that is not a power of two is refused, not rounded.**
+    /// A window length that is not a power of two is refused, not rounded.
     ///
     /// `Model::word_index` masks with `words - 1` and `address_within_window` compares against
-    /// `words`. Those agree only for a power of two; give them 100 and the check admits word 99
-    /// while the mask folds it to word 35. That is the silent aliasing `address_within_window`
-    /// exists to prevent, so the length cannot be set to one that reintroduces it.
+    /// `words`; they agree only for a power of two (with 100, the check admits word 99 while
+    /// the mask folds it to word 35).
     #[test]
     fn a_window_length_that_would_alias_is_refused() {
         for bad in [3_u32, 5, 100, 1000, u32::MAX] {
@@ -736,14 +607,13 @@ mod tests {
         }
     }
 
-    /// Zero words is refused too: `words - 1` underflows to `u32::MAX`, which as a mask admits
-    /// every address there is - the widest possible window from the narrowest possible request.
+    /// Zero words is refused: `words - 1` underflows to a mask admitting every address.
     #[test]
     fn a_window_of_no_words_is_refused() {
         assert!(Window::spanning(0x900_000, 0).is_none());
     }
 
-    /// The lengths that do work, and that the window carries what it was given.
+    /// Power-of-two windows keep their length and base.
     #[test]
     fn a_power_of_two_window_keeps_its_length_and_base() {
         for good in [1_u32, 2, 64, 4096, 32_768, 1 << 31] {
@@ -753,17 +623,12 @@ mod tests {
         }
     }
 
-    /// **The declared buffer is the window's length, not a constant beside it.**
+    /// The declared buffer is the window's length, not a constant beside it.
     ///
-    /// `Model::word_index` masks with the window's length and `address_within_window` compares
-    /// against it, but the SPIR-V array the shader actually indexes is declared separately. Let
-    /// that declaration keep reading a fixed constant and a widened window admits an index the
-    /// buffer does not hold - an out-of-bounds access inside the shader rather than the refusal
-    /// the check promises.
-    ///
-    /// So this asserts the number reaches the module: translated at 65,536 words the literal is
-    /// there, and at the default it is not. 65,536 is the size a real frame wants - the console's
-    /// own canary sits 32,768 words past its base, which no default window can reach.
+    /// The SPIR-V array the shader indexes is declared separately from the checks, so this
+    /// asserts a widened length reaches the module: at 65,536 words the literal is present,
+    /// and at the default it is not. A real frame's buffers reach 32,768 words past the base,
+    /// beyond the default window.
     #[test]
     fn a_widened_window_reaches_the_declared_buffer() {
         let (encodings, operands) = tables();
@@ -802,8 +667,7 @@ mod tests {
         assert!(narrow.module.contains(&MEMORY_WORDS));
     }
 
-    /// **The default is unchanged**, so every caller that had a window before this existed
-    /// still gets the one it had.
+    /// The default window keeps the default length and a zero base.
     #[test]
     fn the_default_window_is_the_length_it_always_was() {
         assert_eq!(Window::default().words(), MEMORY_WORDS);
@@ -826,6 +690,7 @@ mod tests {
     /// A shader the lane model handles, for testing everything that is not the shader.
     const TRIVIAL: &[u32] = &[0xBF81_0000];
 
+    /// Asking for the structured strategy is an error, not a fallback.
     #[test]
     fn asking_for_the_unbuilt_strategy_is_an_error_not_a_fallback() {
         let (table, operands) = tables();
@@ -836,16 +701,9 @@ mod tests {
         assert!(text.contains("not falling back"), "got: {text}");
     }
 
+    /// `Auto` falling back to the wavefront model warns, naming the subgroup width needed.
     #[test]
     fn falling_back_to_the_slowest_level_is_a_warning_not_a_footnote() {
-        // `Auto` picking the wavefront model costs a factor of sixty four, and one
-        // instruction touching a lane mask anywhere in a shader is enough to trigger it -
-        // which is most real shaders. It used to be recorded only in a field, and a field
-        // is something a caller has to know to look for.
-        //
-        // The warning also carries the width a subgroup would need, because that is the
-        // actionable part: the subgroup level is as fast as the lane model and has a mask,
-        // and whether it fits is a property of the device rather than of the shader.
         let (table, operands) = tables();
 
         // `s_mov_b64 exec, 0`: a mask write, so the lane model cannot take it.
@@ -877,24 +735,16 @@ mod tests {
         };
         assert_eq!(*subgroup_would_need, Width::default().lanes());
 
-        // And a shader that does not need a mask says nothing, so the warning stays worth
-        // reading rather than becoming noise every caller learns to skip.
+        // A shader that needs no mask produces no warning.
         let quiet = decode(&stream(TRIVIAL), &table, &operands);
         let quiet = translate(&quiet, &table, Strategy::default()).expect("translates");
         assert_eq!(quiet.fidelity, Fidelity::Lane);
         assert!(quiet.warnings.is_empty(), "{:?}", quiet.warnings);
     }
 
+    /// `Auto` is never reported as itself, and only the subgroup level sets a subgroup width.
     #[test]
     fn asking_for_automatic_fidelity_reports_the_level_it_chose() {
-        // **Every level is built now**, so there is no longer an unimplemented one to
-        // assert about - this test used to check that the subgroup level refused, and it
-        // was the only thing doing so, which would have quietly required it to stay
-        // unimplemented.
-        //
-        // What is still worth pinning is that `Auto` never escapes as itself. It is a
-        // request to be told, and a caller that got `Auto` back would have learned
-        // nothing about which semantics its shader actually ran under.
         let (table, operands) = tables();
         let decoded = decode(&stream(TRIVIAL), &table, &operands);
 
@@ -918,10 +768,9 @@ mod tests {
         );
     }
 
+    /// `Auto` resolves a trivial shader to the lane model and reports it.
     #[test]
     fn auto_resolves_to_a_built_level_and_reports_which() {
-        // A caller asking for `auto` must be able to find out what it got. Otherwise
-        // "slow" and "silently dropped a level" are indistinguishable.
         let (table, operands) = tables();
         let decoded = decode(&stream(TRIVIAL), &table, &operands);
         let translated = translate(&decoded, &table, Strategy::default()).expect("auto");
@@ -933,6 +782,7 @@ mod tests {
         );
     }
 
+    /// The default strategy is predicated, automatic fidelity, sixty-four lanes.
     #[test]
     fn the_default_is_the_combination_that_works() {
         assert_eq!(
@@ -944,6 +794,7 @@ mod tests {
         );
     }
 
+    /// A desynchronised decode is refused.
     #[test]
     fn an_untrustworthy_decode_is_refused() {
         let (table, operands) = tables();
@@ -955,6 +806,7 @@ mod tests {
         ));
     }
 
+    /// An instruction with no operand layout is refused.
     #[test]
     fn an_instruction_with_no_operand_layout_is_refused() {
         let (table, operands) = tables();

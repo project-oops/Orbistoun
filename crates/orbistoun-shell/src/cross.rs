@@ -1,26 +1,10 @@
-//! Moving around a row of categories with a column under each.
+//! Navigation over a row of categories with a column of items under each.
 //!
-//! # Why the navigation is here and not in the window
-//!
-//! It is four rules and every one of them has an edge: what happens at the ends, what
-//! happens to the highlighted item when the column beside it is shorter, and what happens
-//! when a category is empty. Written inline in a draw function those are discovered by
-//! somebody holding a direction until something looks wrong.
-//!
-//! So it is a pure type over a *shape* - how many items each category holds - and the edges
-//! below are assertions (principle 8). The window supplies the shape and draws the result.
-//!
-//! # The rules, and why these
-//!
-//! **Nothing wraps.** Holding a direction should come to rest against the end rather than
-//! cycling past it: a person navigating by feel counts presses, and a list that wraps turns
-//! one press too many into a journey back around.
-//!
-//! **The item is clamped, not remembered per category.** Moving from a category of twelve
-//! titles to one of three settings lands on the last setting rather than nothing. Keeping a
-//! separate position per category was the alternative and it is worse in the common case:
-//! coming back to a long list and finding the highlight where you left it sounds right, and
-//! in practice it means the highlight is somewhere off screen that you did not choose.
+//! A pure type over a shape (how many items each category holds), so the edge cases are
+//! tested here rather than in the window, which supplies the shape and draws the result.
+//! Nothing wraps: holding a direction comes to rest at the end. The item is clamped to the
+//! new column rather than remembered per category, so moving to a shorter category lands
+//! on its last item.
 
 /// Which way somebody pushed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +31,8 @@ pub struct Cross {
 impl Cross {
     /// Moves the highlight, given how many items each category holds.
     ///
-    /// `shape` is one count per category; an empty shape leaves everything where it is,
-    /// because there is nowhere to go and pretending otherwise would put the highlight on a
-    /// category that does not exist.
+    /// `shape` is one count per category. An empty shape leaves the highlight where it is,
+    /// because there is no category to move to.
     pub fn steer(&mut self, direction: Move, shape: &[usize]) {
         if shape.is_empty() {
             return;
@@ -66,18 +49,16 @@ impl Cross {
 
     /// Brings the highlight back inside the shape.
     ///
-    /// Called after every move, and **also worth calling when the shape changes underneath**:
-    /// a library rescan that finds fewer titles than last time would otherwise leave the
-    /// highlight past the end, which draws as nothing selected.
+    /// Called after every move, and by the caller whenever the shape changes: a rescan that
+    /// finds fewer titles would otherwise leave the highlight past the end.
     pub fn clamp(&mut self, shape: &[usize]) {
         if shape.is_empty() {
             *self = Self::default();
             return;
         }
         self.category = self.category.min(shape.len() - 1);
-        // An empty category is a real thing to be looking at - "no titles here yet" is a
-        // screen somebody has to be able to reach - so the item rests at zero rather than
-        // the category being skipped over.
+        // An empty category is reachable ("no titles here yet"), so the item rests at zero
+        // rather than the category being skipped.
         self.item = self.item.min(shape[self.category].saturating_sub(1));
     }
 }
@@ -89,7 +70,7 @@ mod tests {
     /// Three categories holding twelve, three and one.
     const SHAPE: [usize; 3] = [12, 3, 1];
 
-    /// **Nothing wraps, at either end of either axis.**
+    /// Nothing wraps, at either end of either axis.
     #[test]
     fn the_highlight_comes_to_rest_against_the_ends() {
         let mut at = Cross::default();
@@ -109,10 +90,7 @@ mod tests {
         assert_eq!(at.item, 0, "the last category holds one item");
     }
 
-    /// **Moving to a shorter category lands on its last item, not past it.**
-    ///
-    /// The bug this prevents draws as nothing being selected, which reads as the window
-    /// having stopped responding.
+    /// Moving to a shorter category lands on its last item, not past it.
     #[test]
     fn the_item_is_clamped_when_the_column_beside_it_is_shorter() {
         let mut at = Cross::default();
@@ -126,10 +104,7 @@ mod tests {
         assert_eq!(at.item, 2, "the second category holds three");
     }
 
-    /// A category with nothing in it is somewhere you can be.
-    ///
-    /// "No titles here yet" is a screen somebody has to be able to reach, so an empty
-    /// category is not skipped over.
+    /// An empty category is reachable, not skipped over.
     #[test]
     fn an_empty_category_can_be_selected_and_rests_at_zero() {
         let shape = [0_usize, 2];
@@ -140,10 +115,7 @@ mod tests {
         assert_eq!(at.item, 0);
     }
 
-    /// **A shape that shrinks underneath the highlight is brought back in.**
-    ///
-    /// A rescan finding fewer titles than last time is ordinary, and a highlight left past
-    /// the end draws as no selection at all.
+    /// A shape that shrinks underneath the highlight brings it back inside.
     #[test]
     fn clamping_recovers_from_the_shape_changing() {
         let mut at = Cross {

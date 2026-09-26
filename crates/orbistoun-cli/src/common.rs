@@ -12,9 +12,8 @@ pub(crate) fn percent(part: usize, whole: usize) -> f64 {
 
 /// The trace a previous run of this module left behind.
 ///
-/// A thin wrapper over `orbistoun_report::trace::load_previous`, kept only to supply the
-/// traces directory - the reading and the format knowledge live below the shims, because
-/// the GUI compares runs from the same files (D160).
+/// Supplies the traces directory to `orbistoun_report::trace::load_previous`; reading the format
+/// lives below the shims because the GUI compares runs from the same files (D034).
 pub(crate) fn previous_trace(
     module: &std::path::Path,
 ) -> Option<orbistoun_report::trace::CallTrace> {
@@ -27,12 +26,10 @@ pub(crate) fn knowledge_path(library: &str) -> std::path::PathBuf {
     std::path::Path::new("crates/orbistoun-hle/data/knowledge").join(format!("{library}.toml"))
 }
 
-/// Every measurement a turn established, in the shape the learned file keeps.
+/// Every measurement a turn established, in the shape the learned file keeps (D297).
 ///
-/// **Everything the run knew and used to throw away.** Which guest demonstrated it, when,
-/// which build, and what the claim rests on that nothing measured - all of it was printed to a
-/// terminal and lost before the file carried it, and all of it is what makes an entry
-/// checkable by somebody else (D297).
+/// Each carries the guest that demonstrated it, the date, the build and what it assumes, so
+/// somebody else can check it.
 pub(crate) fn measurements(
     title: &std::path::Path,
     plan: &[orbistoun_turn::turn::Step],
@@ -43,17 +40,15 @@ pub(crate) fn measurements(
 
     let mut out = Vec::new();
     for (step, result) in plan.iter().zip(taken.iter()) {
-        // Two shapes produce a measurement: a swept out-parameter contract, and the function
-        // whose placeholder the guest was found to be dereferencing. The second is the only
-        // one keepable on a moved wall, because it writes nothing (D296, D299).
-        // The qualified name travels beside the patch, because the library half is the part
-        // `from_finding` strips and the part a promotion needs (D328).
+        // Two shapes produce a measurement: a swept out-parameter contract, and the function whose
+        // placeholder the guest dereferences. The second writes nothing, so it is keepable on a
+        // moved wall (D296). The qualified name travels beside the patch because `from_finding`
+        // strips the library half and promotion needs it.
         let proposed = match (step, result) {
             (turn::Step::SweepArguments { target }, turn::Taken::Swept(finding)) => {
                 patch::from_finding(target, finding).map(|patch| (target.as_str(), patch))
             }
-            // **Whichever of the two answers reached further.** Both were run; recording the
-            // rule's one regardless would make the comparison decorative (D300).
+            // The answer that reached further; both were run.
             (
                 _,
                 turn::Taken::Sourced {
@@ -78,8 +73,8 @@ pub(crate) fn measurements(
             library: qualified
                 .split_once("::")
                 .map_or_else(String::new, |(library, _)| library.to_owned()),
-            // The containing directory, not the path: a path is a fact about one machine, and
-            // an entry meant to travel should carry nothing about the sender's disk.
+            // The containing directory, not the path: an entry meant to travel carries nothing
+            // about the sender's disk.
             measured: title_id(title).unwrap_or_else(|| "unknown".to_owned()),
             on: orbistoun_nid::today(),
             by: build_stamp(),
@@ -115,20 +110,15 @@ pub(crate) fn library_or(given: Option<&std::path::Path>) -> std::path::PathBuf 
 
 /// The title a module path belongs to.
 ///
-/// The containing directory, which is the same identifier the knowledge files already use
-/// in `found_in` - and deliberately **not** the file name: a bare `eboot.bin` is identical
-/// in every title and would have them all sharing one record.
+/// The containing directory, the same identifier the knowledge files use in `found_in`. Not the
+/// file name: every title has a file called `eboot.bin`.
 pub(crate) fn title_id(path: &std::path::Path) -> Option<String> {
     path.parent()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
 }
 
-/// A count with thousands separated, because one title makes ninety-nine million calls.
-///
-/// The hand-written table had these and the first generated one did not, which is a small
-/// thing and exactly the kind of small thing that makes a generated table read as a
-/// regression rather than a repair.
+/// A count with thousands separated; a title can make tens of millions of calls.
 pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -143,8 +133,8 @@ pub(crate) fn grouped(n: u64) -> String {
 
 /// How often each function has been called, across every trace on disk.
 ///
-/// Keyed by the bare function name so it joins against the knowledge base, which does not
-/// know about libraries the way a trace label does.
+/// Keyed by the bare function name so it joins against the knowledge base, which does not key on
+/// library.
 pub(crate) fn calls_by_function() -> std::collections::BTreeMap<String, (u64, usize)> {
     let mut totals: std::collections::BTreeMap<String, (u64, usize)> =
         std::collections::BTreeMap::new();
@@ -176,8 +166,8 @@ pub(crate) fn calls_by_function() -> std::collections::BTreeMap<String, (u64, us
 
 /// What a record says was done, in one line, for the audit's per-tier listing.
 ///
-/// The subtype comes first because it is the closed vocabulary - it is what can be
-/// counted and grepped - and the free text after it is the part only a person reads.
+/// The subtype comes first because it is the closed vocabulary that can be counted and grepped; the
+/// free text after it is for a person.
 pub(crate) fn how_it_was_found(method: &orbistoun_nid::Method) -> String {
     use orbistoun_nid::{Method, RuntimeSource, StaticSource};
     match method {

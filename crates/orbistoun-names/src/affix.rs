@@ -1,27 +1,10 @@
 //! Deriving a candidate name from a name this project already holds.
 //!
-//! # The gap this fills
-//!
-//! [`crate::Grammar`] builds names out of words. It reaches `sceKernelGetAppInfo` because
-//! `Kernel`, `Get`, `App` and `Info` are all in its lists. It cannot reach
-//! `sceKernelGetAppInfo2`, and no amount of extending those lists will help: the missing
-//! piece is not a word, it is *a rule applied to a finished name*.
-//!
-//! A console's own kernel export table is what made that visible. Thirty-eight of its
-//! addresses carry two hashes each - one function under two names - and wherever both sides
-//! were already named, the second was the first with something stuck on it. Nothing
-//! compositional appeared once (D606).
-//!
-//! # What a seed is
-//!
-//! A name already proved correct. Not a candidate, not a word: a string that hashed to
-//! something a module actually imports. That is what makes this tier cheap to believe -
-//! `snprintf_s` rests on `snprintf`, and `snprintf` rests on a published standard.
-//!
-//! # The asymmetry, again
-//!
-//! A match is proof and a miss proves only "not in what was tried". This module cannot say
-//! a name has no variant; it can only say which variants it tried.
+//! [`crate::Grammar`] builds names from words, so it reaches `sceKernelGetAppInfo` but never
+//! `sceKernelGetAppInfo2`: that needs a rule applied to a finished name. A kernel export table
+//! shows one function under two names, the second being the first with an affix (D606). A seed
+//! is a name already proved by hash, so `snprintf_s` rests on `snprintf`, which rests on a
+//! published standard. A match is proof; a miss proves only that the tried variants failed.
 
 use serde::Deserialize;
 
@@ -90,13 +73,9 @@ impl Affixes {
 
     /// Every candidate this rule set derives from one seed, each with the rule that made it.
     ///
-    /// **The identity is not offered.** A prefix and suffix that are both empty reproduce
-    /// the seed, which is already known - hashing it again would burn a candidate to
-    /// rediscover something the database holds, and worse, it would let a record claim a
-    /// name was derived from itself.
-    ///
-    /// A substitution that does not apply yields nothing rather than the seed unchanged,
-    /// for the same reason.
+    /// The identity is not offered: empty prefix and suffix reproduce the seed, which is already
+    /// known and must not be recorded as derived from itself. A substitution that does not apply
+    /// likewise yields nothing.
     pub fn variants_of<'a>(&'a self, seed: &'a str) -> impl Iterator<Item = (String, String)> + 'a {
         let affixed = self.prefixes.iter().flat_map(move |prefix| {
             self.suffixes
@@ -122,10 +101,8 @@ impl Affixes {
         affixed.chain(substituted)
     }
 
-    /// Whether `name` is what applying `rule` to `seed` produces.
-    ///
-    /// The whole of what a recheck has to do, which is the point of this tier: no grammar
-    /// to resolve and no index to walk, one rule against one string.
+    /// Whether `name` is what applying `rule` to `seed` produces: one rule against one string,
+    /// with no grammar or index to resolve.
     #[must_use]
     pub fn produces(&self, seed: &str, rule: &str, name: &str) -> bool {
         self.variants_of(seed)
@@ -135,17 +112,15 @@ impl Affixes {
 
 /// How a rule is spelled in a derivation record.
 ///
-/// Both ends always, so `_foo` and `foo_r` are distinguishable from each other and from
-/// `_foo_r` - a label naming only the end that was non-empty would collide.
+/// Both ends always, so `_foo`, `foo_r` and `_foo_r` stay distinct.
 fn rule_label(prefix: &str, suffix: &str) -> String {
     format!("{prefix}*{suffix}")
 }
 
 /// Hashes every variant of every seed, keeping those that match something wanted.
 ///
-/// **Seeds are names, not candidates.** Passing this a list of guesses would produce
-/// derivations claiming a proved name was built from an unproved one, which is a lie the
-/// provenance audit has no way to catch - so the caller owes it names the database holds.
+/// Seeds must be names the database holds: a guessed seed would record a proved name as built
+/// from an unproved one, which the provenance audit cannot catch.
 pub fn solve_affixed<I, S>(
     hasher: &NidHasher,
     targets: &Targets,
@@ -190,9 +165,8 @@ where
 
 /// Searches every rule for one that derives `name` from a held seed.
 ///
-/// The audit's question, answered without the search that found it: given the names this
-/// project holds and the shipped rules, could `name` have been derived at all? A `None`
-/// here is what makes a name need explaining.
+/// The audit's question: could `name` have been derived from held names and shipped rules at
+/// all? `None` means the name needs explaining.
 #[must_use]
 pub fn derive_affixed<'a>(
     name: &str,
@@ -201,9 +175,8 @@ pub fn derive_affixed<'a>(
 ) -> Option<Derivation> {
     let stamp = today();
     for seed in seeds {
-        // A name is never its own seed, which `variants_of` already refuses - but saying so
-        // here as well means a caller handing over the whole database cannot record `foo`
-        // as derived from `foo`.
+        // A name is never its own seed; `variants_of` refuses it, and so does this, for a caller
+        // handing over the whole database.
         if seed == name {
             continue;
         }
@@ -233,6 +206,7 @@ pub fn hashes_to(hasher: &NidHasher, name: &str, nid: Nid) -> bool {
 mod tests {
     use super::*;
 
+    /// The shipped rules parse and offer both prefixes and suffixes.
     #[test]
     fn the_shipped_rules_parse_and_offer_both_ends() {
         let affixes = Affixes::builtin().expect("the shipped affix rules must parse");
@@ -247,11 +221,11 @@ mod tests {
         assert!(!affixes.substitution.is_empty(), "and the substitutions");
     }
 
+    /// A seed is never offered back as its own variant.
     #[test]
     fn a_seed_is_never_offered_back_as_its_own_variant() {
-        // The failure this guards: an empty prefix and an empty suffix reproduce the seed,
-        // and a record saying `snprintf` was derived from `snprintf` would be accepted by
-        // every check in this crate.
+        // Empty prefix and suffix reproduce the seed, and a record deriving `snprintf` from itself
+        // would pass every other check in this crate.
         let affixes = Affixes::builtin().expect("parses");
         assert!(
             !affixes
@@ -261,11 +235,11 @@ mod tests {
         );
     }
 
+    /// The shipped rules reach every variant the export-table evidence shows.
     #[test]
     fn the_rules_reach_the_variants_the_export_table_showed() {
-        // Each of these is one half of an address the console exports two hashes at, or a
-        // name this project proved by hash once the rules existed. They are the evidence
-        // the file was written from, so a rule going missing has to fail here (D606).
+        // Each pair is either half of a doubly-exported kernel function or a name proved once the rules
+        // existed: the evidence the file was written from (D606).
         let affixes = Affixes::builtin().expect("parses");
         for (seed, wanted) in [
             ("getpeername", "_getpeername"),
@@ -286,6 +260,7 @@ mod tests {
         }
     }
 
+    /// A rule that does not apply produces nothing rather than the seed.
     #[test]
     fn a_rule_that_does_not_apply_produces_nothing_rather_than_the_seed() {
         // A substitution whose left side is absent must not quietly yield the seed back.
@@ -301,10 +276,11 @@ mod tests {
         assert_eq!(affixes.variants_of("_ZC1Ev").count(), 1);
     }
 
+    /// A recheck refuses a rule that does not produce the name.
     #[test]
     fn a_recheck_refuses_a_rule_that_does_not_produce_the_name() {
-        // Asserting on the refusal. `produces` returning true for everything would pass
-        // every audit ever run against it and be noticed by nobody.
+        // Asserting on the refusal: a `produces` that answered true for everything would pass every
+        // audit.
         let affixes = Affixes::builtin().expect("parses");
         assert!(affixes.produces("snprintf", "*_s", "snprintf_s"));
         assert!(
@@ -321,6 +297,7 @@ mod tests {
         );
     }
 
+    /// A solved affix carries the seed and the rule that made it.
     #[test]
     fn a_solved_affix_carries_the_seed_and_the_rule_that_made_it() {
         let hasher = NidHasher::default();
@@ -341,6 +318,7 @@ mod tests {
         );
     }
 
+    /// Nothing is found when no rule reaches the target.
     #[test]
     fn nothing_is_found_when_no_rule_reaches_the_target() {
         let hasher = NidHasher::default();
@@ -352,6 +330,7 @@ mod tests {
         assert!(stats.tried > 0, "and it must have actually tried");
     }
 
+    /// The audit re-derives a name without the search that found it.
     #[test]
     fn the_audit_can_re_derive_a_name_without_the_search_that_found_it() {
         let affixes = Affixes::builtin().expect("parses");

@@ -1,17 +1,15 @@
 //! Reading a guest module's own `SHT_SYMTAB`, and refusing to invent one.
 //!
-//! The open-toolchain guests are unstripped and every commercial title is not, so both
-//! answers have to be right: a list of functions for the first, an empty list and no error
-//! for the second (D628).
+//! Open-toolchain guests are unstripped and commercial titles are stripped, so the reader
+//! returns a list of functions for the first and an empty list, with no error, for the
+//! second.
 
 use orbistoun_elf::Container;
 
-/// **A module with no section table answers empty, not an error.**
+/// A module with no section table answers empty, not an error.
 ///
-/// The case that matters most, because it is every commercial title. An error here would
-/// make the reader unusable on the guests it is meant to serve alongside, and the fault
-/// reporter would have to special-case it - which is where a `unwrap_or_default` gets
-/// written and a real parse failure starts reading as "stripped".
+/// Every commercial title is this case. An error would push callers to swallow it, and a
+/// real parse failure would then read as "stripped".
 #[test]
 fn a_module_without_a_section_table_names_nothing_and_does_not_fail() {
     let bytes = minimal_elf(0, 0);
@@ -25,12 +23,10 @@ fn a_module_without_a_section_table_names_nothing_and_does_not_fail() {
     );
 }
 
-/// **A section table pointing off the end of the file names nothing.**
+/// A section table pointing off the end of the file names nothing.
 ///
-/// The negative case, written because a guard nobody has watched reject something is a guard
-/// nobody knows anything about. Hostile bytes reach this parser the same way they reach every
-/// other one here, and the only acceptable answers are "nothing" and "these symbols" - never
-/// a panic and never a read past the end.
+/// The only acceptable answers to hostile bytes are "nothing" and "these symbols": never a
+/// panic and never a read past the end.
 #[test]
 fn a_section_table_past_the_end_of_the_file_names_nothing() {
     // Twenty-four headers at an offset well beyond a 64-byte file.
@@ -45,12 +41,11 @@ fn a_section_table_past_the_end_of_the_file_names_nothing() {
     );
 }
 
-/// **The real payload, if it is here: its own function names.**
+/// The conformance payload, when present, names its own functions.
 ///
-/// Skipped rather than failed when the corpus has not been fetched, because the corpus is
-/// not committed. When it is present this is the only test that exercises a genuine
-/// `SHT_SYMTAB` - and it asserts on a name the probe's own source defines, so a reader that
-/// found a table and mis-walked it fails rather than passing on a non-empty list.
+/// Skipped when the corpus has not been fetched, since it is not committed. It is the one
+/// test on a genuine `SHT_SYMTAB`, and it asserts on a name the probe's source defines, so a
+/// mis-walked table fails rather than passing on a non-empty list.
 #[test]
 fn the_conformance_payload_names_its_own_functions() {
     let path = std::path::Path::new("../../titles/obscene-payload/eboot.bin");

@@ -1,26 +1,15 @@
-//! Dumping every dynamic tag a real module carries, known or not.
+//! Dumps every dynamic tag a real module carries, known or not.
 //!
-//! The import library table is somewhere in here. orbistoun has been indexing
-//! `DT_NEEDED` with ids that do not fit it - 52 entries against ids running to 54 - so
-//! the ids belong to a table this crate does not read (D117).
-//!
-//! Rather than guess which tag it is, this prints all of them with enough context to
-//! recognise one: the raw tag, how many times it appears, and - where the value looks
-//! like a string-table offset - the string it points at. A tag whose values resolve to
-//! library names, in the right quantity, is the answer and will be obvious.
-//!
-//! That question is answered - `SCE_IMPORT_LIB` and `SCE_IMPORT_MODULE` are now parsed
-//! properly - but this is kept, because the *next* unknown tag will be found the same
-//! way and there is no cheaper instrument for it.
-//!
-//! Nothing was read to write this. It prints what the file contains.
+//! Prints each raw tag, how many times it appears, and, where a value looks like a
+//! string-table offset, the string it points at, so an unknown table is recognisable by
+//! its contents and entry count. It prints what the file contains.
 
 use std::collections::BTreeMap;
 
 use orbistoun_elf::Container;
 use orbistoun_elf::dynamic::{DYNAMIC_ENTRY_SIZE, read_cstr, tag};
 
-/// Tags the standard defines, so the output can lead with what is *not* one of them.
+/// Tags the standard defines, so the output leads with what is not one of them.
 fn standard_name(raw: u64) -> Option<&'static str> {
     Some(match raw {
         tag::NEEDED => "NEEDED",
@@ -76,7 +65,7 @@ fn main() {
     let strings = bytes.get(strtab_at..strtab_at + strsz).unwrap_or(&[]);
     println!("string table: {strsz} bytes at file offset {strtab_at:#x}\n");
 
-    // Every entry, grouped by tag, so a table with 55 entries stands out from a tag that
+    // Every entry, grouped by tag, so a table with many entries stands out from a tag that
     // appears once.
     let mut by_tag: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for chunk in dyn_bytes.chunks_exact(DYNAMIC_ENTRY_SIZE) {
@@ -91,8 +80,8 @@ fn main() {
     println!("{:<14} {:>6}  WHAT THE VALUES LOOK LIKE", "TAG", "COUNT");
     for (t, values) in &by_tag {
         let known = standard_name(*t).unwrap_or("--");
-        // The vendor packs an id and a string offset into one value for its own tables,
-        // so both halves are worth resolving before deciding a tag is uninteresting.
+        // The vendor packs an id and a string offset into one value for its own tables, so
+        // both halves are resolved.
         let whole: Vec<&str> = values
             .iter()
             .filter_map(|v| read_cstr(strings, usize::try_from(*v).ok()?))

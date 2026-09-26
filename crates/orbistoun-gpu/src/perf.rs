@@ -1,14 +1,11 @@
-//! Where a running title's time goes (worklog 844).
+//! Where a running title's time goes.
 //!
-//! Cumulative nanoseconds per phase and counts of what happened, since the last [`take`]. Every layer
-//! that does a part of presenting a frame adds to it - the command processor reading and writing the
-//! target, the backend building and running draws, the worker presenting a flip - and the worker
-//! reads it once a second and streams it, so the window can say what the frame rate is and which part
-//! of a frame is the one to make faster. A frame rate with no breakdown says only that something is
-//! slow; the breakdown says what.
+//! Cumulative nanoseconds per phase and counts of events, since the last [`take`]. Each layer that
+//! takes part in presenting a frame adds to it, and the worker reads and streams it once a second,
+//! so the window shows the frame rate and which part of a frame costs the most.
 //!
-//! Atomics rather than a lock: the phases are timed on guest threads and the host thread that runs
-//! the draws, and a sink that blocks a guest thread has changed the program it observes (principle 9).
+//! Atomics rather than a lock: phases are timed on guest threads and the draw thread, and a sink
+//! that blocks a guest thread changes the program it observes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,13 +33,12 @@ pub enum Phase {
     WriteTarget,
     /// A flipped buffer detiled and handed to the window.
     Present,
-    /// A whole graphics submit, from the guest's call to its return - **containing** the phases from
+    /// A whole graphics submit, from the guest's call to its return. It contains the phases from
     /// [`Self::Prepare`] to [`Self::WriteTarget`], so it is reported beside them rather than summed
-    /// with them: what it holds beyond them is the submit's own unmeasured work, and what the window
-    /// holds beyond it and [`Self::Present`] is the guest's.
+    /// with them.
     Submit,
-    /// The **device's** busy time, by its own clock (worklog 847) - alongside the host's, not part of
-    /// it, so it is reported as a share of the window of its own and never summed with the rest.
+    /// The device's busy time, by its own clock. Reported as a share of the window on its own,
+    /// never summed with the host phases.
     Gpu,
 }
 
@@ -147,12 +143,10 @@ pub fn take() -> Snapshot {
     }
 }
 
-/// A finer span of presenting a frame, measured only when [`set_detail`] asked for it (worklog 852).
+/// A finer span of presenting a frame, measured only when [`set_detail`] asks for it.
 ///
-/// The phases above are always on, and cheap enough to be. These cut a submission finer - where it
-/// overlaps the phases, across the thread hand-offs, around the command processor's own steps - for
-/// when the question is which part of a submission to make faster. Kept rather than re-added each
-/// time that question comes back; off, each costs one relaxed load.
+/// The phases above are always on. These cut a submission finer, for finding which part of it to
+/// make faster; when off, each costs one relaxed load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Span {
     /// The guest's submit call, whole.
@@ -175,7 +169,7 @@ pub enum Span {
     OtherMemory,
     /// Writing the pending frame back at the flip.
     FlipWriteBack,
-    /// Carrying out a deferred copy (D717, D719).
+    /// Carrying out a deferred copy (D717).
     CarryOut,
     /// Driving a submission's commands into the backend, on the device thread.
     Drive,
@@ -329,7 +323,7 @@ pub fn take_spans() -> [(u64, u64); SPANS] {
 mod tests {
     use super::{Count, Phase, Span};
 
-    /// **A span is measured only when detail is on** (worklog 852), and taking resets it.
+    /// A span is measured only when detail is on, and taking resets it.
     #[test]
     fn a_span_counts_only_with_detail_on() {
         super::set_detail(false);
@@ -346,7 +340,7 @@ mod tests {
         super::set_detail(false);
     }
 
-    /// **What is added is what is taken, and taking resets it.**
+    /// What is added is what is taken, and taking resets it.
     #[test]
     fn a_take_answers_what_was_added_and_starts_again() {
         let _ = super::take();

@@ -1,8 +1,7 @@
-//! Writes the minimal module to a file, so a real validator can judge it.
+//! Writes the example modules to files, so a real validator can judge them.
 //!
-//! An example rather than a test: the validator lives outside this toolchain, so the
-//! Rust side produces the artefact and `tools/validate-spirv.sh` runs `spirv-val` over
-//! it. A crate cannot validate its own output by asserting that it likes it.
+//! An example rather than a test: `tools/validate-spirv.sh` runs `spirv-val`, which lives
+//! outside this toolchain, over what this writes.
 
 fn main() {
     let path = std::env::args()
@@ -22,17 +21,14 @@ fn main() {
         "storage-write.spv",
         orbistoun_spirv::storage_buffer_write_module(0xABCD_1234, 4),
     );
-    // The mesh oracle, which is the one module here a validator has something new to say
-    // about: its stage, its execution modes and the instruction that declares its output
-    // counts were all read out of a compiled reference rather than known.
+    // The mesh oracle: its stage, execution modes and output-count instruction were read
+    // from a compiled reference.
     write(
         "mesh.spv",
         orbistoun_spirv::triangle_mesh_module([[0.0, 1.0, 0.0, 1.0]; 3]),
     );
-    // The sampling oracle, whose image type, sampled-image type and sampling instructions are
-    // all new here and none of which this crate can judge for itself. Both forms, because they
-    // are different instructions: a guest asks for level zero by name and a fragment stage may
-    // let the implementation choose.
+    // The sampling oracle, in both forms: a guest asks for level zero by name, and a fragment
+    // stage may let the implementation choose.
     write(
         "sampling.spv",
         orbistoun_spirv::sampling_fragment_module(orbistoun_spirv::Lod::Implicit),
@@ -41,9 +37,8 @@ fn main() {
         "sampling-lod0.spv",
         orbistoun_spirv::sampling_fragment_module(orbistoun_spirv::Lod::Zero),
     );
-    // The storing oracle, whose storage image type, write instruction and format-less
-    // capability are all new here - and whose capability is the one a validator has most to say
-    // about, because a module may not write a format-less image without declaring it.
+    // The storing oracle: a module may not write a format-less image without declaring the
+    // capability.
     write(
         "storing.spv",
         orbistoun_spirv::storing_fragment_module([1, 0], [0.0, 1.0, 0.0, 1.0]),

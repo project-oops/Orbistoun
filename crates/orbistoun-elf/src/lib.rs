@@ -1,21 +1,12 @@
 //! Vendor ELF and PRX container parsing.
 //!
-//! A target executable is an ELF64 with vendor extensions: vendor-specific
-//! `e_type` values, and program headers in the OS-specific range that carry the
-//! dynamic-link data an ordinary ELF keeps in sections. The standard parts are
-//! parsed here exactly; the vendor parts are the interesting work.
+//! A target executable is an ELF64 with vendor extensions: vendor-specific `e_type` values,
+//! and program headers in the OS-specific range that carry the dynamic-link data an ordinary
+//! ELF keeps in sections. Parsing covers the container wrapper, the ELF64 headers, the
+//! wrapper-to-program-header mapping, the dynamic table, imports and relocation tables.
 //!
-//! # No unsafe
-//!
-//! All structure reads go through `zerocopy`, which validates size and alignment
-//! before handing back a typed reference. Parsing attacker-shaped bytes is the
-//! last place that should contain hand-rolled pointer casts, and it does not.
-//!
-//! # Status
-//!
-//! Container wrapper, ELF64 headers, the wrapper-to-program-header mapping (D052),
-//! the dynamic table, imports (D053), and relocation tables all parse. Verified
-//! against real material: 1,410 imports from a commercial executable.
+//! All structure reads go through `zerocopy`, which validates size and alignment before
+//! returning a typed reference, so parsing untrusted bytes needs no pointer casts.
 
 pub mod dynamic;
 pub mod procparam;
@@ -55,8 +46,8 @@ pub enum ElfError {
     NotWrapped,
     /// The descriptor count is implausible.
     ///
-    /// A limit rather than trust: the count comes from arbitrary bytes, and an
-    /// unchecked one is an allocation sized by the input.
+    /// A limit rather than trust: the count comes from arbitrary bytes, and an unchecked
+    /// one sizes an allocation by the input.
     #[error("segment count {count} exceeds the {max} sanity limit")]
     AbsurdSegmentCount {
         /// Count the header claimed.
@@ -156,8 +147,8 @@ pub use selfish_elf::segment;
 /// A parsed container, borrowing the file bytes.
 ///
 /// Handles both shapes: a plain ELF, and the wrapped form real material uses (D049).
-/// `bytes` is the *inner* image in both cases, so everything downstream is unaware of
-/// the difference.
+/// `bytes` is the inner image in both cases, so everything downstream is unaware of the
+/// difference.
 #[derive(Debug)]
 pub struct Container<'a> {
     bytes: &'a [u8],
@@ -167,16 +158,14 @@ pub struct Container<'a> {
 
 /// The dynamic symbol table, its strings, how many symbols there are, and the entry stride.
 ///
-/// Named because the tuple is four wide and two callers unpack it: a reader meeting
-/// `(&[u8], &[u8], u64, usize)` has to work out which slice is which from the call site.
+/// Named because the tuple is four wide and two callers unpack it.
 type SymbolTables<'bytes> = (&'bytes [u8], &'bytes [u8], u64, usize);
 
 impl<'a> Container<'a> {
     /// Parses a container, unwrapping it first if it is wrapped.
     ///
-    /// Real executables are wrapped; the synthetic fixtures and hand-built test cases
-    /// are usually not. Both are accepted, and [`Container::wrapper`] says which was
-    /// found.
+    /// Real executables are wrapped; synthetic fixtures usually are not. Both are accepted,
+    /// and [`Container::wrapper`] says which was found.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ElfError> {
         if Wrapper::is_either_generation(bytes) {
             let wrapper = Wrapper::parse(bytes)?;
@@ -268,9 +257,8 @@ impl<'a> Container<'a> {
 
     /// The bytes backing one program header, whichever container shape this is.
     ///
-    /// For a wrapped container the descriptor table locates them (D052); for a bare
-    /// ELF the header addresses the file directly. A caller should not have to know
-    /// which shape it was handed.
+    /// For a wrapped container the descriptor table locates them; for a bare ELF the header
+    /// addresses the file directly.
     pub fn segment_data<'b>(
         &self,
         whole: &'b [u8],
@@ -293,8 +281,8 @@ impl<'a> Container<'a> {
     /// Empty for an unwrapped container, where program headers address the file
     /// directly and no mapping is needed.
     ///
-    /// Headers absent from the list are not missing: several describe regions
-    /// *inside* another header's data rather than carrying their own descriptor.
+    /// Headers absent from the list are not missing: several describe regions inside
+    /// another header's data rather than carrying their own descriptor.
     pub fn mapped_program_headers(&self, whole: &[u8]) -> Result<Vec<usize>, ElfError> {
         let Some(wrapper) = self.wrapper else {
             return Ok(Vec::new());
@@ -321,17 +309,9 @@ impl<'a> Container<'a> {
     /// Translates a guest virtual address to a position in the whole container.
     ///
     /// Finds the program header whose virtual range covers `vaddr`, then locates that
-    /// header's bytes through the wrapper (D052). The headers' own `p_offset` values
-    /// are not usable **in a wrapped container** - there they describe the decrypted image
-    /// while the file holds the wrapper's descriptors, so they routinely point past
-    /// end-of-file.
-    ///
-    /// In an **unwrapped** container they are the only thing there is, and they are
-    /// authoritative. This returned [`None`] for every address of every bare ELF until
-    /// somebody ran one: the container parsed, the loader mapped its segments, and then
-    /// nothing downstream could locate a single byte - which surfaced as *no `PT_DYNAMIC`
-    /// segment, or its address could not be located* about a module that plainly had one
-    /// (D237).
+    /// header's bytes. In a wrapped container they are found through the wrapper: the
+    /// headers' own `p_offset` values describe the decrypted image and routinely point past
+    /// end-of-file. In an unwrapped container `p_offset` is authoritative.
     pub fn vaddr_to_offset(&self, whole: &[u8], vaddr: u64) -> Result<Option<usize>, ElfError> {
         let Some(wrapper) = self.wrapper else {
             return self.bare_vaddr_to_offset(whole, vaddr);
@@ -371,21 +351,13 @@ impl<'a> Container<'a> {
 
     /// Translates an address through the program headers' own file offsets.
     ///
-    /// # Why a `PT_LOAD` wins when two headers claim the same address
-    ///
-    /// Because more than one can, and they mean different things. A vendor segment
-    /// carrying dynamic data is commonly declared at virtual address zero - its contents
-    /// are addressed as offsets into itself rather than as addresses in the image - and a
-    /// module whose first `PT_LOAD` also starts at zero then has two headers covering the
-    /// same low range. The `PT_LOAD` is the one describing the image a guest executes, so
-    /// it is the one an address in that image means.
-    ///
-    /// **This is a preference, not a proof.** An address that is really an offset into a
-    /// vendor segment will resolve against the `PT_LOAD` instead and give the wrong bytes.
-    /// The wrapper path does not have the problem because a descriptor table says which
-    /// header owns which run of file. Distinguishing them here needs the vendor segment's
-    /// own conventions, which is a separate piece of work and is called out rather than
-    /// guessed at (D237).
+    /// A `PT_LOAD` wins when two headers claim the same address. A vendor segment carrying
+    /// dynamic data is commonly declared at virtual address zero, addressed as offsets into
+    /// itself, and a module whose first `PT_LOAD` also starts at zero has two headers
+    /// covering the same low range. The `PT_LOAD` describes the image a guest executes. This
+    /// is a preference, not a proof: an address that is really an offset into the vendor
+    /// segment resolves against the `PT_LOAD` and gives the wrong bytes. The wrapper path
+    /// avoids this because its descriptor table says which header owns which run of file.
     fn bare_vaddr_to_offset(&self, whole: &[u8], vaddr: u64) -> Result<Option<usize>, ElfError> {
         const PT_LOAD: u32 = 1;
         let headers = self.program_headers()?;
@@ -397,9 +369,8 @@ impl<'a> Container<'a> {
             }
             let within = vaddr - base;
             let at = usize::try_from(ph.offset.get().checked_add(within)?).ok()?;
-            // Bounds-checked against the file rather than trusted. A header may describe
-            // more than the file holds, and a truncated container should read as "cannot
-            // locate that" rather than as a panic.
+            // Bounds-checked against the file: a header may describe more than the file
+            // holds, and a truncated container reads as "cannot locate" rather than a panic.
             (at < whole.len()).then_some(at)
         };
         Ok(headers
@@ -411,30 +382,17 @@ impl<'a> Container<'a> {
 
     /// The dynamic table's bytes, if the container has one.
     ///
-    /// # Why this is the segment's own file offset and not its address
-    ///
-    /// **On a real title `PT_DYNAMIC` has no address.** It carries `vaddr 0` and sits at the
-    /// *tail of `PT_SCE_DYNLIBDATA`*, which is a vendor segment that is also at `vaddr 0`:
+    /// In a bare container this is the segment's own `p_offset`. On a real title
+    /// `PT_DYNAMIC` carries `vaddr 0` and sits at the tail of `PT_SCE_DYNLIBDATA`, which is
+    /// also at `vaddr 0`, so resolving it by address finds two covering segments:
     ///
     /// ```text
     /// PT_SCE_DYNLIBDATA  off 0x8c130  filesz 0x3760  vaddr 0   -> ends 0x8f890
     /// PT_DYNAMIC         off 0x8f450  filesz 0x0440  vaddr 0   -> ends 0x8f890
     /// ```
     ///
-    /// So resolving it by address asks "which segment covers address zero", and **two of them
-    /// do**. Which one wins is the order they happen to appear in the header table: the right
-    /// answer by luck, or the start of the vendor blob, which is the wrong bytes entirely.
-    ///
-    /// So in a **bare** container the segment's own `p_offset` is used, which is where its
-    /// bytes are and is unambiguous.
-    ///
-    /// # And why only a bare one
-    ///
-    /// In a **wrapped** container `p_offset` describes the decrypted image while the file
-    /// holds the wrapper's descriptors, so it routinely points past end-of-file - which
-    /// [`Self::vaddr_to_offset`] has said since D052 and this ignored. Generalising the
-    /// hardware finding to both paths stopped every real title loading, and the doc comment
-    /// on the function next door already explained why it would (D391).
+    /// In a wrapped container `p_offset` describes the decrypted image and points past
+    /// end-of-file, so the table is resolved through the wrapper instead.
     pub fn dynamic_bytes<'b>(&self, whole: &'b [u8]) -> Result<Option<&'b [u8]>, ElfError> {
         const PT_DYNAMIC: u32 = 2;
         for ph in self.program_headers()? {
@@ -442,10 +400,8 @@ impl<'a> Container<'a> {
                 continue;
             }
             let size = usize::try_from(ph.filesz.get()).unwrap_or(0);
-            // The address route, the way a header with a real virtual address is read. A
-            // descriptor table makes the wrapper authoritative; a bare ELF reads its own
-            // file offset. Bounds-checked against the file: a header may describe more than
-            // the file holds, and that reads as "cannot locate that" rather than a panic.
+            // The address route: a descriptor table makes the wrapper authoritative; a bare
+            // ELF reads its own file offset. Bounds-checked against the file.
             let at = if self.wrapper.is_some() {
                 self.vaddr_to_offset(whole, ph.vaddr.get())?
             } else {
@@ -454,13 +410,11 @@ impl<'a> Container<'a> {
             let by_vaddr =
                 at.and_then(|at| at.checked_add(size).and_then(|end| whole.get(at..end)));
 
-            // **A module built the platform's way defeats the address route (D247).** It
-            // carries its dynamic table *inside* `PT_SCE_DYNLIBDATA` and gives the segment a
-            // virtual address of zero, which collides with the first `PT_LOAD` - so the
-            // address above lands on code and the table reads as absent though it is present.
-            // When the addressed bytes are not a usable table, locate it by file offset
-            // within the segment whose data actually contains it. Retail titles keep a real
-            // address here and never reach this branch.
+            // A module built the platform's way carries its dynamic table inside
+            // `PT_SCE_DYNLIBDATA` at virtual address zero, colliding with the first `PT_LOAD`,
+            // so the address route lands on code (D247). When the addressed bytes are not a
+            // usable table, locate it by file offset within the segment whose data contains
+            // it. Retail titles keep a real address and never reach this branch.
             let usable = |bytes: &[u8]| dynamic::DynamicInfo::parse(bytes).is_usable();
             if self.wrapper.is_some() && !by_vaddr.is_some_and(usable) {
                 if let Some(bytes) = self.dynamic_bytes_by_offset(whole, ph.offset.get(), size)? {
@@ -476,7 +430,7 @@ impl<'a> Container<'a> {
         Ok(None)
     }
 
-    /// The dynamic table located by **file offset** rather than address, for a module that
+    /// The dynamic table located by file offset rather than address, for a module that
     /// carries it inside `PT_SCE_DYNLIBDATA` with a zero virtual address (D247).
     ///
     /// Its own program header owns no descriptor run, so its bytes sit inside the enclosing
@@ -546,14 +500,9 @@ impl<'a> Container<'a> {
 
     /// Where a table named by a dynamic tag actually begins in the file.
     ///
-    /// **Two different meanings for the same field.** A standard tag holds a virtual
-    /// address; a vendor tag holds an offset into `PT_SCE_DYNLIBDATA`. Resolving one the
-    /// other way lands at a plausible file offset holding the wrong bytes - which is how
-    /// the probe's minimal module reported two relocations of an unsupported type when it
-    /// has two ordinary ones (D247).
-    ///
-    /// One method rather than a closure at each site, because two of them already existed
-    /// and only one had been taught the difference.
+    /// A standard tag holds a virtual address; a vendor tag holds an offset into
+    /// `PT_SCE_DYNLIBDATA` (D247). Resolving one the other way lands at a plausible file
+    /// offset holding the wrong bytes, so every site resolves through this method.
     pub fn table_offset(
         &self,
         whole: &[u8],
@@ -571,20 +520,19 @@ impl<'a> Container<'a> {
         self.vaddr_to_offset(whole, value)
     }
 
-    /// File offset of the vendor data segment, where a console loader finds the tables.
+    /// File offset of the vendor data segment, where a hardware loader finds the tables.
     ///
-    /// `PT_SCE_DYNLIBDATA`. The vendor's dynamic tags are offsets into this rather than
-    /// virtual addresses, so without it they cannot be resolved at all (D247).
+    /// `PT_SCE_DYNLIBDATA`. The vendor dynamic tags are offsets into this rather than
+    /// virtual addresses (D247).
     pub fn vendor_data_offset(&self, whole: &[u8]) -> Result<Option<usize>, ElfError> {
         for (index, ph) in self.program_headers()?.iter().enumerate() {
             if ph.p_type.get() != segment::SCE_DYNLIBDATA {
                 continue;
             }
-            // In a wrapper container the header's own file offset is a logical inner-ELF
-            // offset - for a properly-built module it lands past the end of the file - and
-            // the segment's bytes actually sit in the descriptor block the wrapper assigns
-            // to this header. The vendor tags are offsets relative to the start of that
-            // data, so that block's start is the base they are measured from (D247).
+            // In a wrapped container the header's file offset is a logical inner-ELF offset,
+            // past the end of the file for a properly built module; the segment's bytes sit
+            // in the descriptor block the wrapper assigns to this header, and the vendor tags
+            // are measured from that block's start (D247).
             let at = if let Some(wrapper) = self.wrapper {
                 let mut found = None;
                 for seg in wrapper.segments(whole)? {
@@ -600,8 +548,7 @@ impl<'a> Container<'a> {
             } else {
                 usize::try_from(ph.offset.get()).unwrap_or(0)
             };
-            // Bounds-checked here rather than at each use: an offset past the end of the
-            // file would otherwise become three separate confusing failures downstream.
+            // Bounds-checked here once rather than at each use downstream.
             return Ok((at <= whole.len()).then_some(at));
         }
         Ok(None)
@@ -609,10 +556,8 @@ impl<'a> Container<'a> {
 
     /// The dynamic symbol table and its strings, located and bounded.
     ///
-    /// Shared by [`Self::raw_imports`] and [`Self::raw_exports`], which read the **same
-    /// table** and differ only in which side of `SHN_UNDEF` they keep. Locating it twice
-    /// would be thirty lines that have to stay identical, and the day they stopped being
-    /// identical one of the two would read a table the other did not.
+    /// Shared by [`Self::raw_imports`] and [`Self::raw_exports`], which read the same table
+    /// and differ only in which side of `SHN_UNDEF` they keep.
     ///
     /// # Errors
     ///
@@ -668,11 +613,10 @@ impl<'a> Container<'a> {
         dynamic::imports_from_symbols(symbols, strings, nchain, syment, hasher)
     }
 
-    /// Every symbol this module **provides**, read from the same table.
+    /// Every symbol this module provides, read from the same table.
     ///
-    /// The other half of [`Self::raw_imports`], and the half that makes a second module worth
-    /// loading: an import is a NID somebody needs, an export is that NID plus where in this
-    /// module it lives.
+    /// An import is a NID a module needs; an export is that NID plus where in this module
+    /// it lives.
     ///
     /// # Errors
     ///
@@ -688,30 +632,24 @@ impl<'a> Container<'a> {
 
     /// The symbol count, from whichever hash table the module carries.
     ///
-    /// **`DT_HASH` first, because it states the answer.** A module carrying both is
-    /// describing one table twice, and the one that says `nchain` outright cannot be
-    /// walked wrong. `DT_GNU_HASH` is the fallback rather than the preference for that
-    /// reason alone - and it is the only one an open toolchain emits, which is why it has
-    /// to be there at all (D305).
-    ///
-    /// [`None`] means neither table could be located, which callers distinguish from a
-    /// count of zero.
+    /// `DT_HASH` first, because it states `nchain` outright; `DT_GNU_HASH` is the fallback,
+    /// and the only one an open toolchain emits (D305). [`None`] means neither table could
+    /// be located, which callers distinguish from a count of zero.
     fn count_symbols(
         &self,
         whole: &[u8],
         info: &dynamic::DynamicInfo,
     ) -> Result<Option<u64>, ElfError> {
-        // **Not `info.hash != 0` under vendor tags.** A vendor tag holds an offset into the
-        // data segment and offset zero is the first byte of it, which is where a real
-        // module puts a table - testing the value for zero is the exact mistake D247 was
-        // written about, and it would refuse a module whose tables are all present.
+        // Not `info.hash != 0` under vendor tags: a vendor tag holds an offset into the data
+        // segment, and offset zero is its first byte, where a real module puts a table
+        // (D247).
         if info.vendor_tables || info.hash != 0 {
             if let Some(at) = self.table_offset(whole, info, info.hash)? {
                 return Self::symbol_count_at(whole, at).map(Some);
             }
         }
-        // Only a standard tag from here: the vendor's tables have no GNU hash, and a zero
-        // here is an absent tag rather than an offset.
+        // Only a standard tag from here: the vendor tables have no GNU hash, and zero here
+        // is an absent tag rather than an offset.
         if !info.vendor_tables && info.gnu_hash != 0 {
             if let Some(at) = self.table_offset(whole, info, info.gnu_hash)? {
                 let table = whole.get(at..).unwrap_or(&[]);
@@ -723,26 +661,23 @@ impl<'a> Container<'a> {
 
     /// How many entries the dynamic symbol table holds.
     ///
-    /// Relocations index this table, so it also fixes how many thunks a module needs.
-    /// Read from the hash table rather than inferred, for the reason below.
+    /// Relocations index this table, so it also fixes how many thunks a module needs. Read
+    /// from the hash table rather than inferred.
     pub fn symbol_count(&self, whole: &[u8]) -> Result<u64, ElfError> {
         let Some(dyn_bytes) = self.dynamic_bytes(whole)? else {
             return Ok(0);
         };
         let info = dynamic::DynamicInfo::parse(dyn_bytes);
-        // The third site that had to learn the difference, and the one whose failure was
-        // silent: it returns 0 rather than an error, so a module whose hash table it could
-        // not locate produced a thunk table with no entries and every relocation against it
-        // reported "unresolved" - naming the symbol, not the missing table (D247).
+        // Resolves the hash table through `table_offset` (D247). Returns 0 rather than an
+        // error when the table cannot be located.
         Ok(self.count_symbols(whole, &info)?.unwrap_or(0))
     }
 
     /// Reads `nchain` from a hash table already located in the file.
     ///
     /// `DT_HASH` is `[nbucket][nchain]`, and `nchain` is the symbol count. There is no
-    /// `DT_SYMSZ`, and inferring the size from table adjacency would be wrong here -
-    /// the string table sits before the symbol table in real material, so the gap
-    /// between them is not the symbol table at all.
+    /// `DT_SYMSZ`, and table adjacency cannot give the size: the string table sits before
+    /// the symbol table in real material.
     fn symbol_count_at(whole: &[u8], hash_at: usize) -> Result<u64, ElfError> {
         whole
             .get(hash_at + 4..hash_at + 8)
@@ -755,9 +690,9 @@ impl<'a> Container<'a> {
 
     /// The libraries an import's library id refers to, keyed by that id.
     ///
-    /// **Use this, not [`Self::needed_libraries`], to attribute an import.** They are
-    /// different lists: `DT_NEEDED` names what the module links against, while this is
-    /// the table the ids inside encoded symbol names actually index (D117).
+    /// Use this, not [`Self::needed_libraries`], to attribute an import: `DT_NEEDED` names
+    /// what the module links against, while this is the table the ids inside encoded symbol
+    /// names index.
     pub fn import_libraries(
         &self,
         whole: &[u8],
@@ -783,10 +718,8 @@ impl<'a> Container<'a> {
             return Ok(std::collections::BTreeMap::new());
         };
         let info = dynamic::DynamicInfo::parse(dyn_bytes);
-        // **Through `table_offset`, not by address.** For a vendor module `strtab` is an
-        // offset into `PT_SCE_DYNLIBDATA`, and resolving it as an address only worked
-        // because that segment sits at address zero - the same coincidence that made the
-        // dynamic table findable by luck (D247, D391).
+        // Through `table_offset`, not by address: for a vendor module `strtab` is an offset
+        // into `PT_SCE_DYNLIBDATA` (D247).
         let Some(strtab_at) = self.table_offset(whole, &info, info.strtab)? else {
             return Ok(std::collections::BTreeMap::new());
         };
@@ -809,10 +742,8 @@ impl<'a> Container<'a> {
             return Ok(Vec::new());
         };
         let info = dynamic::DynamicInfo::parse(dyn_bytes);
-        // **Through `table_offset`, not by address.** For a vendor module `strtab` is an
-        // offset into `PT_SCE_DYNLIBDATA`, and resolving it as an address only worked
-        // because that segment sits at address zero - the same coincidence that made the
-        // dynamic table findable by luck (D247, D391).
+        // Through `table_offset`, not by address: for a vendor module `strtab` is an offset
+        // into `PT_SCE_DYNLIBDATA` (D247).
         let Some(strtab_at) = self.table_offset(whole, &info, info.strtab)? else {
             return Ok(Vec::new());
         };
@@ -830,25 +761,15 @@ impl<'a> Container<'a> {
 
 /// Raw ELF64 section header.
 ///
-/// # Why this exists when the loader never reads one
-///
-/// Loading a module needs program headers and nothing else - the section table is a link-time
-/// artefact and a stripped binary has none. Every commercial title here is stripped, so this
-/// parser ignored sections entirely for its whole life.
-///
-/// **The open-toolchain guests are not stripped.** obSCEne's payload carries twenty-four
-/// sections including `.symtab`, and it is the guest this project runs most and understands
-/// least at a fault: a report saying `image+0x28a163` names the byte and not the function,
-/// while the answer is sitting in the file (D628).
-///
-/// Nothing here is on the load path. It is read once, before entry, purely so a report can
-/// speak.
+/// Loading needs only program headers, and a stripped commercial title has no section
+/// table. Open-toolchain guests are not stripped and carry `.symtab`, so a report can name
+/// the function at a fault address. Read once before entry; not on the load path.
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct Elf64SectionHeader {
     /// Offset into the section-name string table.
     pub name: little_endian::U32,
-    /// Section type - [`SHT_SYMTAB`] is the one this reads.
+    /// Section type; [`SHT_SYMTAB`] is the one this reads.
     pub sh_type: little_endian::U32,
     /// Section attribute flags.
     pub flags: little_endian::U64,
@@ -858,7 +779,7 @@ pub struct Elf64SectionHeader {
     pub offset: little_endian::U64,
     /// Size of the section in bytes.
     pub size: little_endian::U64,
-    /// Section index this one links to - for a symbol table, its string table.
+    /// Section index this one links to: for a symbol table, its string table.
     pub link: little_endian::U32,
     /// Extra information, section-type dependent.
     pub info: little_endian::U32,
@@ -878,7 +799,7 @@ pub const SHT_SYMTAB: u32 = 2;
 pub struct Elf64Symbol {
     /// Offset into the linked string table.
     pub name: little_endian::U32,
-    /// Type and binding, packed - see [`STT_FUNC`].
+    /// Type and binding, packed; see [`STT_FUNC`].
     pub info: u8,
     /// Visibility.
     pub other: u8,
@@ -898,8 +819,8 @@ pub const STT_FUNC: u8 = 2;
 pub struct StaticSymbol {
     /// The name as the producer spelled it, unmangled and not hashed.
     pub name: String,
-    /// Its address, as the module was linked - so an offset from the image base for a
-    /// position-independent one, which is every guest here.
+    /// Its address as the module was linked: an offset from the image base for a
+    /// position-independent module, which every guest is.
     pub value: u64,
     /// Its extent, or zero where the producer recorded none.
     pub size: u64,
@@ -908,18 +829,14 @@ pub struct StaticSymbol {
 impl Container<'_> {
     /// Every function named in this module's own `SHT_SYMTAB`, if it has one.
     ///
-    /// An empty list is the ordinary answer for a stripped module and is **not** an error: a
-    /// commercial title has no section table at all, and refusing one would make this
-    /// unusable for the guests it is meant to help alongside.
-    ///
-    /// Only `STT_FUNC` with a non-zero address, because the purpose is naming a code address
-    /// and a data symbol at the same value would shadow the function that is actually there.
+    /// An empty list is the ordinary answer for a stripped module, not an error. Only
+    /// `STT_FUNC` with a non-zero address, because the purpose is naming a code address and a
+    /// data symbol at the same value would shadow the function.
     ///
     /// # Errors
     ///
-    /// Never - a malformed or absent section table yields an empty list, which is what
-    /// "this module cannot tell me" means. Kept in the `Result` shape of its neighbours so
-    /// that a future reader which *can* fail does not change every call site.
+    /// Never: a malformed or absent section table yields an empty list. The `Result` shape
+    /// matches its neighbours.
     pub fn function_symbols(&self, whole: &[u8]) -> Result<Vec<StaticSymbol>, ElfError> {
         let Some((symbols, strings)) = self.symtab_bytes(whole) else {
             return Ok(Vec::new());
@@ -929,8 +846,7 @@ impl Container<'_> {
             let Ok(symbol) = Elf64Symbol::read_from_bytes(entry) else {
                 continue;
             };
-            // The low nibble is the type; the high nibble is the binding, which does not
-            // matter here - a static function and a global one both name an address.
+            // The low nibble is the type; the binding in the high nibble does not matter.
             if symbol.info & 0x0f != STT_FUNC || symbol.value.get() == 0 {
                 continue;
             }
@@ -951,10 +867,8 @@ impl Container<'_> {
 
     /// The bytes of the first `SHT_SYMTAB` and of the string table it links to.
     ///
-    /// [`None`] whenever anything does not add up - no section table, a header that does not
-    /// fit, a link out of range, a table running past the end of the file. Hostile bytes reach
-    /// this the same way they reach every other parser here, so every index is checked and
-    /// nothing is assumed to be consistent with anything else.
+    /// [`None`] whenever anything does not add up: no section table, a header that does not
+    /// fit, a link out of range, a table past the end of the file. Every index is checked.
     fn symtab_bytes<'bytes>(&self, whole: &'bytes [u8]) -> Option<(&'bytes [u8], &'bytes [u8])> {
         let entry = usize::from(self.header.shentsize.get());
         if entry < size_of::<Elf64SectionHeader>() {
@@ -980,9 +894,8 @@ impl Container<'_> {
             if header.sh_type.get() != SHT_SYMTAB {
                 continue;
             }
-            // **The linked string table, not `.strtab` by name.** A section's name is itself a
-            // string-table lookup, so trusting the name would mean trusting the very table
-            // being located. `sh_link` says it directly.
+            // The linked string table, not `.strtab` by name: a section's name is itself a
+            // lookup in the table being located. `sh_link` says it directly.
             let strings = read(usize::try_from(header.link.get()).ok()?)?;
             return Some((contents(&header)?, contents(&strings)?));
         }
@@ -1009,12 +922,14 @@ mod tests {
         v
     }
 
+    /// Bytes without the ELF magic are refused.
     #[test]
     fn rejects_non_elf() {
         let bytes = vec![0_u8; 64];
         assert!(matches!(Container::parse(&bytes), Err(ElfError::NotElf)));
     }
 
+    /// Input shorter than a header is refused as truncated.
     #[test]
     fn rejects_truncated_input() {
         assert!(matches!(
@@ -1023,6 +938,7 @@ mod tests {
         ));
     }
 
+    /// A 32-bit or big-endian ELF is refused.
     #[test]
     fn rejects_32_bit_and_big_endian() {
         let mut v = minimal_elf();
@@ -1033,6 +949,7 @@ mod tests {
         ));
     }
 
+    /// A minimal header with an empty program table parses.
     #[test]
     fn accepts_minimal_header_with_empty_program_table() {
         let v = minimal_elf();

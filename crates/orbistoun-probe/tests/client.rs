@@ -1,15 +1,7 @@
-//! Driving a session, without a socket.
+//! Driving a client session over in-memory buffers, without a socket.
 //!
-//! # Why none of this opens a connection
-//!
-//! The client talks to anything that reads and writes bytes, so these drive it over
-//! in-memory buffers. That is not a convenience: **CI must never require a socket or a
-//! plugged-in console**, and the paths worth testing are the ones where the far end stops
-//! answering - which are unreachable from a happy-path run against real hardware even when
-//! hardware is to hand.
-//!
-//! A probe that dies mid-command is the normal case, not the exceptional one. These are the
-//! tests for the normal case.
+//! CI never requires a socket or attached hardware, and the paths worth testing are those
+//! where the far end stops answering. A probe dying mid-command is a normal outcome.
 
 use std::io::{Cursor, Read, Write};
 use std::time::Duration;
@@ -19,9 +11,8 @@ use orbistoun_probe::{Capability, Outcome, Refusal};
 
 /// A stream that replays canned lines and records what was written to it.
 ///
-/// Stands in for a socket. Reading returns whatever the probe would have said; writing is
-/// captured so a test can assert what the client actually put on the wire, which is where
-/// the sequence-number rules live.
+/// Stands in for a socket. Writes are captured so a test can assert what the client put on
+/// the wire, including sequence numbers.
 struct Fake {
     incoming: Cursor<Vec<u8>>,
     outgoing: Vec<u8>,
@@ -80,9 +71,7 @@ fn negotiation_reads_the_session_and_what_the_probe_can_do() {
 
 #[test]
 fn a_verb_the_probe_never_announced_is_not_sent() {
-    // The check belongs on this side. A client that sends anyway and waits to be refused
-    // has already put a verb on the wire that this probe does not implement - and on a
-    // target that faults easily, that is not a free thing to do.
+    // The check is the client's, so an unannounced verb never reaches the target.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -112,9 +101,8 @@ fn a_verb_the_probe_never_announced_is_not_sent() {
 
 #[test]
 fn a_command_acknowledged_then_cut_off_is_a_death_and_carries_no_value() {
-    // The case the whole design exists for. `ack` is flushed before the command runs, so an
-    // acknowledgement followed by a closed stream means exactly one thing: that command did
-    // not return. It is not recorded as returning zero. It is not recorded as returning.
+    // `ack` is flushed before the command runs, so an acknowledgement followed by a closed
+    // stream means the command did not return; no value is recorded.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -138,9 +126,8 @@ fn a_command_acknowledged_then_cut_off_is_a_death_and_carries_no_value() {
 
 #[test]
 fn a_stream_that_closes_before_acknowledging_is_ambiguous_rather_than_a_death() {
-    // Without an acknowledgement nothing establishes that the command ran at all, so this
-    // is `lost` - recorded as the ambiguity it is rather than resolved into the more
-    // specific answer, which would be a guess wearing an observation's clothes.
+    // Without an acknowledgement nothing shows the command ran, so this is `lost`, not
+    // `died`.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -158,8 +145,8 @@ fn a_stream_that_closes_before_acknowledging_is_ambiguous_rather_than_a_death() 
 
 #[test]
 fn silence_within_the_budget_is_a_timeout_and_not_a_death() {
-    // A blocked call and a dead process look identical from one end of a socket. The record
-    // says which was observed - silence - rather than which was guessed.
+    // A blocked call and a dead process look identical from one end; the record says what
+    // was observed, silence.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -167,12 +154,10 @@ fn silence_within_the_budget_is_a_timeout_and_not_a_death() {
             "OBS|done|1|ok||\n",
             "OBS|ack|2|report\n"
         )),
-        // Zero budget: the deadline has passed before the first read, so the client gives
-        // up rather than reading on to the end of the script.
+        // Zero budget: the deadline has passed before the first read.
         Duration::ZERO,
     );
-    // Negotiation is exempt from nothing, so it times out too - which is itself the right
-    // behaviour and is why the session is checked rather than assumed.
+    // Negotiation times out too, so the session is checked rather than assumed.
     let negotiated = client.hello(1, None);
     assert!(
         negotiated.is_err(),
@@ -227,7 +212,7 @@ fn a_refusal_is_reported_rather_than_read_as_an_answer() {
     );
     client.hello(1, None).expect("negotiates");
 
-    // Announced, so the client sends it - and today the probe reserves it and refuses.
+    // Announced, so the client sends it, and the probe refuses it as reserved.
     let refused = client.command("resolve", &["libkernel", "sceKernelOpen"]);
     assert!(
         matches!(refused, Err(ClientError::Refused(Refusal::UnknownVerb))),
@@ -237,9 +222,8 @@ fn a_refusal_is_reported_rather_than_read_as_an_answer() {
 
 #[test]
 fn the_transcript_can_be_replayed_by_the_reader() {
-    // The session is transient and the corpus is the product. What the client saw has to be
-    // readable by the same parser that reads a committed corpus, or the live path and the
-    // file path would drift into two different truths.
+    // The transcript reads through the same parser as a committed corpus, so the live and
+    // file paths agree.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -277,10 +261,8 @@ fn the_default_port_is_the_one_the_protocol_names() {
 
 #[test]
 fn a_call_that_returns_yields_its_value_and_one_that_dies_yields_none() {
-    // `call` is live now, and the two outcomes are not variations on a theme. A well-formed
-    // but fatal address is *called* - the probe executes it and dies - so it arrives as an
-    // acknowledgement with no result. Null is called rather than rejected, because "what
-    // does this platform do when you call null" is a real question with a real answer.
+    // A well-formed but fatal address is called and the probe dies, which arrives as an
+    // acknowledgement with no result. Null is called rather than rejected.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -298,7 +280,7 @@ fn a_call_that_returns_yields_its_value_and_one_that_dies_yields_none() {
     assert_eq!(returned.outcome, Outcome::Returned(0x2a));
     assert_eq!(returned.outcome.value(), Some(0x2a));
 
-    // And the null call, which is the one the feedback was explicit about.
+    // The null call.
     let died = client.call(0, &[0, 0]).expect("sends");
     assert_eq!(died.outcome, Outcome::Died);
     assert_eq!(
@@ -324,10 +306,8 @@ fn a_call_that_returns_yields_its_value_and_one_that_dies_yields_none() {
 
 #[test]
 fn a_read_returns_bytes_and_a_bad_address_can_answer_either_way() {
-    // Two legitimate answers for an address that cannot be read, and they are different
-    // facts. A platform that can test before touching answers `unmapped`; one that cannot
-    // faults, and that arrives as a death. The serving build today does not pre-validate,
-    // so a caller must handle both - which build is on the other end is not knowable here.
+    // An unreadable address has two permitted answers: `unmapped` from a probe that tests
+    // first, or a death from one that faults. A caller must handle both.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -368,8 +348,7 @@ fn a_read_returns_bytes_and_a_bad_address_can_answer_either_way() {
 
 #[test]
 fn a_read_that_pre_validates_is_refused_rather_than_fatal() {
-    // The other half of the same question, so the consumer is pinned to distinguishing them
-    // rather than merely tolerating whichever it met first.
+    // The other answer, so the consumer must distinguish them.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -391,9 +370,7 @@ fn a_read_that_pre_validates_is_refused_rather_than_fatal() {
 
 #[test]
 fn half_a_byte_is_not_a_byte() {
-    // An odd number of hexadecimal digits is refused rather than rounded. Guessing which
-    // half was meant would put a value in a buffer that nothing observed, and a buffer is
-    // exactly where an invented value is least visible.
+    // An odd number of hexadecimal digits is refused rather than guessed at.
     let text = concat!(
         "OBS|bytes|read/0x1000|(memory)|contents|0|7f454c4\n",
         "OBS|bytes|read/0x1000|(memory)|contents|4|deadbeef\n"
@@ -414,13 +391,8 @@ fn half_a_byte_is_not_a_byte() {
 
 #[test]
 fn a_streamed_report_arrives_between_the_acknowledgement_and_the_answer() {
-    // `report` streams its full record set over the socket now, rather than only a summary.
-    // That makes this the primary way records arrive, so it is worth proving end to end
-    // rather than assuming the collection path handles it.
-    //
-    // Nothing needed changing to support it, which is the point: records between `ack` and
-    // `done` were always collected, and a consumer that ignores kinds it does not recognise
-    // needs no change when new ones appear. This test is what makes that claim checkable.
+    // `report` streams its full record set; records between `ack` and `done` are collected,
+    // and kinds the consumer does not recognise survive.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -448,8 +420,7 @@ fn a_streamed_report_arrives_between_the_acknowledgement_and_the_answer() {
         answer.records
     );
 
-    // And the wire replays into the same reader a committed corpus goes through, so the
-    // live path and the file path cannot become two different truths.
+    // The wire replays through the same reader as a committed corpus.
     let transcript = orbistoun_probe::Transcript::read(&client.transcript().join("\n"))
         .expect("the wire replays");
 
@@ -474,8 +445,8 @@ fn a_streamed_report_arrives_between_the_acknowledgement_and_the_answer() {
         1
     );
 
-    // `tally` is a kind this version does not model, and it survives rather than being
-    // dropped - which is the property that lets obSCEne add records without breaking this.
+    // `tally` is a kind this version does not model; it survives, so obSCEne can add records
+    // without breaking this.
     assert!(
         transcript
             .records
@@ -491,9 +462,7 @@ fn a_streamed_report_arrives_between_the_acknowledgement_and_the_answer() {
 
 #[test]
 fn nothing_is_expected_to_arrive_before_a_command_asks_for_it() {
-    // A serving build is interactive-first: it listens immediately and the suite runs on
-    // demand. A client that assumed a report on connect would block forever against a probe
-    // that is behaving correctly, so negotiation must complete on negotiation alone.
+    // A serving build runs the suite on demand, so negotiation completes without a report.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -520,17 +489,8 @@ fn nothing_is_expected_to_arrive_before_a_command_asks_for_it() {
 
 #[test]
 fn a_report_that_dies_partway_keeps_what_arrived_before_the_cut() {
-    // A run is tens of thousands of records and a faulting check ends it. What arrived
-    // before the fault was still observed - discarding it because the command did not
-    // complete would throw away most of a run to report the last second of it.
-    //
-    // So the outcome is `died` and the records are kept. Both halves matter: keeping the
-    // records without the death would read as a completed run, and the death without the
-    // records would lose the evidence.
-    //
-    // Written because this was claimed to obSCEne as working before it was tested. It is
-    // true of the implementation and was not pinned, which is the same gap this session has
-    // found in other people's documents twice.
+    // A faulting check ends a run: the outcome is `died` and the records that arrived before
+    // the fault are kept.
     let mut client = Client::new(
         Fake::new(concat!(
             "OBS|ack|1|hello\n",
@@ -560,8 +520,8 @@ fn a_report_that_dies_partway_keeps_what_arrived_before_the_cut() {
         answer.records
     );
 
-    // And the partial run still reads as a run - the section, the finding that concluded,
-    // and the check that did not.
+    // The partial run still reads as a run: the section, the finding that concluded, and
+    // the check that did not.
     let transcript = orbistoun_probe::Transcript::read(&client.transcript().join("\n"))
         .expect("the partial wire replays");
     assert_eq!(transcript.sections().len(), 1);

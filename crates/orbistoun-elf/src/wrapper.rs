@@ -1,7 +1,7 @@
 //! The vendor container wrapper.
 //!
-//! Real executables are not plain ELFs (D049). They are wrapped: a fixed-size header,
-//! a table of segment descriptors, then the inner ELF image.
+//! Real executables are wrapped ELFs (D049): a fixed-size header, a table of segment
+//! descriptors, then the inner ELF image.
 //!
 //! ```text
 //! 0x00  magic  54 14 f5 ee
@@ -12,16 +12,9 @@
 //!  ...  inner ELF
 //! ```
 //!
-//! # The offset is derived and then verified, never assumed
-//!
-//! The inner ELF begins after the descriptor table, so its offset is
-//! `HEADER_SIZE + segment_count * SEGMENT_SIZE`. Every file inspected put it at 416,
-//! consistent with twelve descriptors - but 416 is an *observation*, not a constant,
-//! and hardcoding it would silently mis-parse anything with a different count.
-//!
-//! So the offset is computed, and then the ELF magic is checked at that offset. If the
-//! derivation is wrong the parse fails loudly (D010) rather than reading whatever
-//! happened to be there.
+//! The inner ELF begins after the descriptor table, at `HEADER_SIZE + segment_count *
+//! SEGMENT_SIZE`. The offset is computed from the count and then verified by the ELF magic
+//! there, so a wrong derivation fails loudly rather than reading whatever is at that offset.
 
 use zerocopy::{FromBytes, Immutable, KnownLayout, little_endian};
 
@@ -30,19 +23,18 @@ use crate::ElfError;
 /// Magic at offset zero of a wrapped container.
 pub const WRAPPER_MAGIC: [u8; 4] = [0x54, 0x14, 0xf5, 0xee];
 
-/// Magic used by the previous console generation's wrapper.
+/// Magic used by the previous generation's wrapper.
 ///
-/// Recognised only so the error can say *which* format it is rather than "not a
-/// container". Both generations coexist inside a single title: bundled modules use
-/// the current format, substituted stub libraries the older one.
+/// Both generations coexist inside a single title: bundled modules use the current format,
+/// substituted stub libraries the older one.
 pub const PREVIOUS_GENERATION_MAGIC: [u8; 4] = [0x4f, 0x15, 0x3d, 0x1d];
 
-/// Which console generation a container was built for.
+/// Which hardware generation a container was built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Generation {
     /// The current target.
     Current,
-    /// The previous console.
+    /// The previous generation.
     Previous,
 }
 
@@ -62,15 +54,15 @@ pub const HEADER_SIZE: usize = 32;
 /// Size of one segment descriptor.
 pub const SEGMENT_SIZE: usize = 32;
 
-/// Upper bound on the descriptor count, to reject an absurd header before it is used
-/// for arithmetic. Real files observed carry twelve.
+/// Upper bound on the descriptor count, to reject an absurd header before it is used for
+/// arithmetic.
 pub const MAX_SEGMENTS: u16 = 4096;
 
 /// The wrapper header, exactly as it appears on disk.
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct WrapperHeader {
-    /// Magic - see [`WRAPPER_MAGIC`].
+    /// Magic; see [`WRAPPER_MAGIC`].
     pub magic: [u8; 4],
     /// Format version.
     pub version: u8,
@@ -87,12 +79,10 @@ pub struct WrapperHeader {
     /// Size of the metadata region.
     pub meta_size: little_endian::U16,
     /// A size the header states.
+    /// A size the header states.
     ///
-    /// **Not the file length.** Observed consistently *smaller* than the file, by a
-    /// variable amount (38 bytes on one module, 10,670 on an executable), so it
-    /// measures some region rather than the whole container. What region is not yet
-    /// established, so nothing is inferred from it (D010) - it is reported and left
-    /// alone.
+    /// Not the file length: it is smaller than the file by a variable amount, so it
+    /// measures some unidentified region. Nothing is inferred from it (D010).
     pub stated_size: little_endian::U64,
     /// Number of segment descriptors following the header.
     pub segment_count: little_endian::U16,
@@ -104,9 +94,8 @@ pub struct WrapperHeader {
 
 /// Bit in a segment's flags marking it as carrying program-header data.
 ///
-/// Descriptors come in pairs: one small block per data segment (0x20 or 0x60 bytes,
-/// almost certainly digests) and one carrying the actual bytes. Only the latter has
-/// this bit.
+/// Descriptors come in pairs: one small metadata block per data segment (0x20 or 0x60
+/// bytes) and one carrying the bytes. Only the latter has this bit.
 pub const SEGMENT_FLAG_HAS_DATA: u64 = 0x800;
 
 /// Shift applied to a segment's flags to recover the program-header index it serves.
@@ -114,16 +103,10 @@ pub const SEGMENT_PHDR_INDEX_SHIFT: u32 = 20;
 
 /// One segment descriptor.
 ///
-/// # How the wrapper and the inner ELF relate
-///
-/// The inner ELF's program headers describe a *virtual* layout, and their `p_offset`
-/// values routinely point past the end of the container - so they are not file
-/// offsets. The wrapper's descriptors are what actually locate the bytes: each
-/// data-bearing descriptor names a program-header index in the top bits of its flags,
-/// and its `stored_size` equals that header's `p_filesz`.
-///
-/// Verified against real material: every data-bearing descriptor matched its program
-/// header's size exactly, across an executable and three modules.
+/// The inner ELF's program headers describe a virtual layout, and their `p_offset` values
+/// routinely point past the end of the container. The descriptors locate the bytes: each
+/// data-bearing descriptor names a program-header index in the top bits of its flags, and
+/// its `stored_size` equals that header's `p_filesz`.
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct WrapperSegment {
@@ -140,10 +123,8 @@ pub struct WrapperSegment {
 impl WrapperSegment {
     /// Which program header this descriptor serves.
     ///
-    /// **Only meaningful when [`Self::has_data`] is true.** On the paired metadata
-    /// blocks the same bits carry something else - observed holding the *wrapper
-    /// table* index of the data descriptor they accompany, not a program-header
-    /// index - so reading it off a metadata block is a mistake.
+    /// Only meaningful when [`Self::has_data`] is true. On the paired metadata blocks the
+    /// same bits hold the wrapper-table index of the data descriptor they accompany.
     pub fn program_header_index(&self) -> usize {
         (self.flags.get() >> SEGMENT_PHDR_INDEX_SHIFT) as usize
     }
@@ -155,9 +136,8 @@ impl WrapperSegment {
 
     /// The byte range this descriptor occupies in the container.
     ///
-    /// Saturating: a corrupt descriptor claiming an enormous size must produce a
-    /// range that fails the bounds check, never an arithmetic panic. Parsers see
-    /// hostile input by definition.
+    /// Saturating: a corrupt descriptor claiming an enormous size produces a range that fails
+    /// the bounds check, never an arithmetic panic.
     pub fn range(&self) -> std::ops::Range<usize> {
         let start = self.offset.get() as usize;
         let end = start.saturating_add(self.stored_size.get() as usize);
@@ -185,9 +165,8 @@ impl Wrapper {
 
     /// Which generation's wrapper `bytes` carries, if either.
     ///
-    /// Reported rather than flattened: the two parse identically, but a title built for
-    /// the previous console is a different emulation problem, and a report that cannot
-    /// say which one it read is hiding the single most useful fact about it.
+    /// The two parse identically, but a title built for the previous generation is a
+    /// different emulation problem, so a report says which it read.
     pub fn generation(bytes: &[u8]) -> Option<Generation> {
         if Self::is_wrapped(bytes) {
             Some(Generation::Current)
@@ -200,11 +179,8 @@ impl Wrapper {
 
     /// Whether `bytes` starts with either generation's wrapper magic.
     ///
-    /// **The two headers are byte-for-byte the same shape.** Read with the current
-    /// layout, a previous-generation header yields the same version, mode, endianness,
-    /// attributes, key type and header sizes, and a segment count and descriptors that
-    /// are all plausible. The generations differ in the four magic bytes and in what the
-    /// segments contain - not in how the wrapper is read (D176).
+    /// The two headers have the same shape and differ only in the four magic bytes and in
+    /// what the segments contain, not in how the wrapper is read (D049).
     pub fn is_either_generation(bytes: &[u8]) -> bool {
         Self::is_wrapped(bytes) || Self::is_previous_generation(bytes)
     }
@@ -231,7 +207,7 @@ impl Wrapper {
             });
         }
 
-        // Derived, not assumed. Checked below against the ELF magic.
+        // Derived, then checked below against the ELF magic.
         let elf_offset = HEADER_SIZE + (count as usize) * SEGMENT_SIZE;
         if elf_offset + 4 > bytes.len() {
             return Err(ElfError::Truncated {
@@ -290,9 +266,8 @@ impl Wrapper {
 
     /// The bytes backing a given program header, located through the descriptor table.
     ///
-    /// `None` when no descriptor serves that header - which is normal and not an
-    /// error: several program headers describe regions *inside* another header's data
-    /// rather than having their own descriptor.
+    /// `None` when no descriptor serves that header, which is normal: several program headers
+    /// describe regions inside another header's data.
     pub fn data_for_program_header<'a>(
         &self,
         bytes: &'a [u8],
@@ -324,9 +299,8 @@ mod tests {
     };
     use crate::ElfError;
 
-    /// Builds a wrapper around a minimal inner ELF. **Generated, never extracted**
-    /// (D051): this is constructed from the documented structure, not carved out of
-    /// any real file.
+    /// Builds a wrapper around a minimal inner ELF, generated from the documented structure
+    /// (D051).
     fn wrapped(segment_count: u16, inner: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(&WRAPPER_MAGIC);
@@ -388,14 +362,13 @@ mod tests {
         v[..4].copy_from_slice(b"\x7fELF");
         v[4] = 2; // 64-bit
         v[5] = 1; // little-endian
-        v[7] = 9; // ELFOSABI_FREEBSD, as observed on real material
+        v[7] = 9; // ELFOSABI_FREEBSD
         v
     }
 
+    /// The ELF offset is computed from the descriptor count.
     #[test]
     fn the_offset_is_derived_from_the_segment_count_not_hardcoded() {
-        // Twelve descriptors is what real files carry, giving 416 - but the parser
-        // must compute it, or a file with a different count is mis-parsed silently.
         for count in [0_u16, 1, 7, 12, 40] {
             let bytes = wrapped(count, &minimal_elf());
             let w = Wrapper::parse(&bytes).expect("parses");
@@ -405,15 +378,14 @@ mod tests {
                 "offset must follow the count"
             );
         }
-        // And the observed case lands where the real files do.
+        // Twelve descriptors, the common case, lands at 416.
         let w = Wrapper::parse(&wrapped(12, &minimal_elf())).expect("parses");
         assert_eq!(w.elf_offset(), 416);
     }
 
+    /// A derived offset that does not land on an ELF fails loudly.
     #[test]
     fn a_derivation_that_does_not_land_on_an_elf_fails_loudly() {
-        // The check that makes deriving safe: if the arithmetic is wrong, say so
-        // rather than parsing whatever happened to be at that offset.
         let mut bytes = wrapped(12, &minimal_elf());
         bytes[0x18] = 11; // claim eleven descriptors, so the offset lands 32 bytes early
         let err = Wrapper::parse(&bytes).expect_err("must not guess");
@@ -424,16 +396,11 @@ mod tests {
         );
     }
 
+    /// Both generations parse, and are reported apart.
     #[test]
     fn both_generations_parse_and_are_told_apart() {
-        // **This test asserted the opposite.** The previous generation was refused with a
-        // named error, on the assumption that it needed different handling - and nobody
-        // had checked. Read with the current layout, its header yields the same version,
-        // mode, endianness, attributes and key type, a plausible segment count, and
-        // descriptors that parse. Two real titles then loaded end to end (D176).
-        //
-        // Reported separately rather than flattened: they parse the same, but a title
-        // built for the previous console is a different emulation problem.
+        // Read with the current layout, a previous-generation header yields the same
+        // fields, a plausible segment count and descriptors that parse (D049).
         let mut current = [0_u8; HEADER_SIZE];
         current[..4].copy_from_slice(&WRAPPER_MAGIC);
         let mut previous = [0_u8; HEADER_SIZE];
@@ -445,6 +412,7 @@ mod tests {
         assert!(Wrapper::is_either_generation(&previous));
     }
 
+    /// A plain ELF is reported as unwrapped, not corrupt.
     #[test]
     fn a_plain_elf_is_reported_as_unwrapped_not_as_corrupt() {
         assert!(matches!(
@@ -453,6 +421,7 @@ mod tests {
         ));
     }
 
+    /// An absurd segment count is rejected before any arithmetic uses it.
     #[test]
     fn an_absurd_segment_count_is_rejected_before_it_is_used_for_arithmetic() {
         let mut bytes = wrapped(1, &minimal_elf());
@@ -466,6 +435,7 @@ mod tests {
         ));
     }
 
+    /// Truncation after the header is caught.
     #[test]
     fn truncation_after_the_header_is_caught() {
         let bytes = wrapped(12, &minimal_elf());
@@ -476,6 +446,7 @@ mod tests {
         ));
     }
 
+    /// A header shorter than the struct is caught.
     #[test]
     fn a_header_shorter_than_the_struct_is_caught() {
         assert!(matches!(
@@ -484,6 +455,7 @@ mod tests {
         ));
     }
 
+    /// The segment table parses to the stated count.
     #[test]
     fn the_segment_table_parses_and_matches_the_count() {
         let bytes = wrapped(12, &minimal_elf());
@@ -495,11 +467,10 @@ mod tests {
         assert_eq!(segs[0].stored_size.get(), 0x0001_9cc0);
     }
 
+    /// The stated size is read and nothing is inferred from it.
     #[test]
     fn the_stated_size_is_read_but_nothing_is_inferred_from_it() {
-        // On real material this field is consistently SMALLER than the file, by a
-        // variable amount, so it measures a region rather than the container. It is
-        // reported and not used for any check until what it measures is established.
+        // It is smaller than the file by a variable amount, so no check uses it.
         let bytes = wrapped(12, &minimal_elf());
         let w = Wrapper::parse(&bytes).expect("parses");
         assert_eq!(
@@ -517,11 +488,11 @@ mod tests {
         );
     }
 
+    /// Descriptor flags decode to a program-header index and a data bit.
     #[test]
     fn segment_flags_decode_to_a_program_header_index_and_a_data_bit() {
-        // The relationship verified against real material: a data-bearing descriptor
-        // names its program header in the top bits, and its stored size equals that
-        // header's filesz.
+        // A data-bearing descriptor names its program header in the top bits, and its
+        // stored size equals that header's filesz.
         let bytes = wrapped_with_flags(&[(0x0000_2804, 0x40), (0x0011_0004, 0x20)]);
         let w = Wrapper::parse(&bytes).expect("parses");
         let segs = w.segments(&bytes).expect("segments");
@@ -531,21 +502,18 @@ mod tests {
             "0x800 marks the data-bearing descriptor"
         );
         assert_eq!(segs[0].program_header_index(), 0);
-        // The paired metadata block carries no program data, and its index bits mean
-        // something else entirely - observed holding the wrapper-table index of the
-        // descriptor it accompanies, not a program-header index. Reading it as one
-        // would be a mistake, which is why `program_header_index` documents that it
-        // is only meaningful when `has_data` is true.
+        // The paired metadata block carries no program data, and its index bits hold the
+        // wrapper-table index of the descriptor it accompanies.
         assert!(
             !segs[1].has_data(),
             "the paired block carries no program data"
         );
     }
 
+    /// Program-header data is located through the descriptor table.
     #[test]
     fn program_header_data_is_located_through_the_descriptor_table() {
-        // The inner ELF's p_offset values routinely point past end-of-file, so the
-        // descriptor table is the only way to reach the bytes.
+        // The inner ELF's p_offset values point past end-of-file.
         let bytes = wrapped_with_flags(&[(0x0030_2804, 0x40)]);
         let w = Wrapper::parse(&bytes).expect("parses");
 
@@ -566,6 +534,7 @@ mod tests {
         );
     }
 
+    /// A descriptor pointing past the end of the file is caught.
     #[test]
     fn a_descriptor_pointing_past_the_end_is_caught() {
         let mut bytes = wrapped_with_flags(&[(0x0000_2804, 0x40)]);
@@ -579,6 +548,7 @@ mod tests {
         ));
     }
 
+    /// Header fields read back as written.
     #[test]
     fn header_fields_read_back_as_written() {
         let bytes = wrapped(12, &minimal_elf());

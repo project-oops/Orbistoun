@@ -2,8 +2,7 @@
 
 use crate::common::calls_by_function;
 
-/// `worklist` - rank what to implement next, across every run so far.
-/// One thing this project has written down that it does not know.
+/// One thing the knowledge base records that it does not know.
 #[derive(serde::Serialize)]
 struct OpenQuestion {
     /// The function it is about - a name, or a hash where there is no name yet.
@@ -14,23 +13,21 @@ struct OpenQuestion {
     question: String,
     /// How many times guests have called it across every run so far.
     ///
-    /// **The ranking.** A question about a function called nine hundred times is worth
-    /// more than one about a function nothing has reached, and without this the queue is
-    /// alphabetical - which is the same as unordered.
+    /// The ranking: a question about a heavily called function is worth more than one nothing has
+    /// reached.
     calls: u64,
     /// How many titles called it.
     modules: usize,
     /// What the function hands back, where that is established.
     ///
-    /// Carried because it is the dispatch key for a property: everything returning a
-    /// handle can be asked the same questions, and so can everything returning a count.
-    /// A probe can generate tests from the shape without knowing the function.
+    /// The dispatch key for a property: every function returning a handle can be asked the same
+    /// questions, so a probe can generate tests from the shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     returns: Option<String>,
     /// How many integer arguments it takes, where that is established.
     #[serde(skip_serializing_if = "Option::is_none")]
     arity: Option<u8>,
-    /// What it currently rests on, so an answer can be seen to upgrade it.
+    /// What it rests on, so an answer can be seen to upgrade it.
     #[serde(skip_serializing_if = "Option::is_none")]
     known_by: Option<String>,
 }
@@ -42,10 +39,7 @@ pub(crate) fn cmd_questions(top: Option<usize>, json: bool, premises: bool) {
 
     let mut queue: Vec<OpenQuestion> = Vec::new();
     for f in knowledge.functions() {
-        // Asked of the entry rather than assembled here. This shim used to apply the rule
-        // itself - items, plus one for a silent guess - while `open_questions` applied a
-        // different one, so `knows` reported 80 and this reported 70 of the same knowledge
-        // base and neither said which it meant (D239).
+        // Asked of the entry so `knows` and `questions` count open questions by the same rule.
         let asked = f.open_questions_asked();
         let (calls, modules) = called.get(&f.name).copied().unwrap_or((0, 0));
         for question in asked {
@@ -61,17 +55,15 @@ pub(crate) fn cmd_questions(top: Option<usize>, json: bool, premises: bool) {
             });
         }
     }
-    // Most-called first; then by name so the order is total and a diff means something.
+    // Most-called first, then by name, so the order is total and a diff is meaningful.
     queue.sort_by(|a, b| {
         b.calls
             .cmp(&a.calls)
             .then_with(|| a.function.cmp(&b.function))
             .then_with(|| a.question.cmp(&b.question))
     });
-    // **Before `top` truncates.** A premise is the set of entries resting on it, so
-    // grouping a shortened queue answers a different question with the same words: it
-    // would report that four functions share something fourteen of them share, and say so
-    // as confidently as the full run does.
+    // Grouped before `top` truncates: grouping a shortened queue would under-count the functions
+    // sharing a premise (D538).
     if premises {
         print_premises(&queue, json, top);
         return;
@@ -115,25 +107,16 @@ pub(crate) fn cmd_questions(top: Option<usize>, json: bool, premises: bool) {
 
 /// Print the queue grouped by the premise its entries share.
 ///
-/// # Why this is worth a mode of its own
-///
-/// The per-function listing is the right shape for "what is unknown about this function"
-/// and the wrong shape for "what would a console sweep have to establish". Most of the
-/// queue is one sentence repeated: the entries resting on the commonest premise are a
-/// large fraction of the whole list, and read one at a time they look like that many
-/// separate asks. Grouped, a probe can sample a premise instead of enumerating it.
-///
-/// **Ranked by the calls behind the premise, not by how many entries carry it.** A premise
-/// shared by a hundred functions nothing ever calls is worth less than one shared by two
-/// that a guest is in constantly, and calls are the ranking this command already uses.
+/// Much of the queue is one sentence repeated across a family; grouped, a probe can sample a
+/// premise instead of enumerating it. Ranked by the calls behind the premise, not by how many
+/// entries carry it.
 fn print_premises(queue: &[OpenQuestion], json: bool, top: Option<usize>) {
     let asked: Vec<(String, String)> = queue
         .iter()
         .map(|q| (q.function.clone(), q.question.clone()))
         .collect();
-    // Calls are per function, and a function may rest on several premises - so a premise
-    // is credited with the calls of each function under it, and the totals across premises
-    // deliberately sum to more than the number of calls made.
+    // A function may rest on several premises and is credited to each, so the totals across
+    // premises sum to more than the calls made.
     let calls: std::collections::HashMap<&str, u64> = queue
         .iter()
         .map(|q| (q.function.as_str(), q.calls))
@@ -171,7 +154,7 @@ fn print_premises(queue: &[OpenQuestion], json: bool, top: Option<usize>) {
                 .collect();
             libraries.sort_unstable();
             libraries.dedup();
-            // Named, because a sweep has to pick which of them to sample.
+            // Listed, because a sweep picks which of them to sample.
             let mut functions = premise.functions.clone();
             functions.sort_unstable();
             functions.dedup();
@@ -235,12 +218,11 @@ struct SharedAsk {
     question: String,
     /// Every entry asking it, so a sweep can choose which to sample.
     functions: Vec<String>,
-    /// Which libraries those span. A premise crossing two is the more interesting kind.
+    /// Which libraries those span.
     libraries: Vec<String>,
     /// The calls behind it - each function's total, summed.
     ///
-    /// A function resting on several premises is counted in each, so these deliberately
-    /// sum to more than the calls a guest made. The number ranks the premise; it is not a
-    /// share of anything.
+    /// A function resting on several premises is counted in each, so this ranks the premise and is
+    /// not a share of anything.
     calls: u64,
 }

@@ -1,32 +1,15 @@
-//! The address map in `docs/ADDRESS_MAP.md` is checked against the source it describes.
+//! The address map in `docs/ADDRESS_MAP.md` is checked against the source it describes (D513).
 //!
-//! # Why a gate here and not a habit
-//!
-//! D510 argued against gating prose, and the argument holds: a limitation written in English
-//! cannot be checked against the code that lifts it without writing every limitation twice.
-//!
-//! This is the case that argument excludes. A base is a **constant with a name and a value**,
-//! so "the document lists every base the source declares" is a claim about two machine-
-//! readable sets, and checking it costs one file walk. The alternative is the failure this
-//! whole document exists because of: a base chosen after grepping the two crates anybody
-//! remembers, landing on the mapping arena, and taking a run from 2077 import calls to 219
-//! (D513).
-//!
-//! # What it cannot check
-//!
-//! That a *span* fits. Each base is a start and the map records no length, so two regions
-//! four gibibytes apart pass here and would still collide if one grew past four gibibytes.
-//! The heap region is sixty-four mebibytes and the largest of them is far short of it, but
-//! nothing in this file would notice if that changed. Said here rather than left to be
-//! assumed.
+//! A base is a named constant with a value, so "the document lists every base the source declares"
+//! compares two machine-readable sets. A base chosen without that list can land on the mapping
+//! arena. The map records starts, not lengths, so this cannot check that a span fits: two regions
+//! four gibibytes apart pass here and would still collide if one grew past that.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// How close two bases may be before this refuses them.
-///
-/// Four gibibytes, which is the spacing of the `0x5E2*` family - the tightest packing the
-/// tree uses. Everything outside that family is a tebibyte apart.
+/// How close two bases may be before this refuses them: four gibibytes, the spacing of the `0x5E2*`
+/// family and the tightest packing the tree uses.
 const CLOSEST: u64 = 4 * 1024 * 1024 * 1024;
 
 fn repository() -> PathBuf {
@@ -39,10 +22,8 @@ fn repository() -> PathBuf {
 
 /// Every `const *_BASE: u64` the tree declares at the top level of a source file.
 ///
-/// **Top level only, by design.** A constant indented inside a `mod tests` is a test's own
-/// scratch address and collides with nothing real; every production base in this tree is at
-/// column zero, and a base that needs to be checked but is nested is a base that should be
-/// lifted out rather than a rule that should be loosened.
+/// Top level only: a constant inside `mod tests` is a test's own scratch address. A production base
+/// that is nested should be lifted out rather than the rule loosened.
 fn declared() -> BTreeMap<String, u64> {
     let mut found = BTreeMap::new();
     let crates = repository().join("crates");
@@ -165,10 +146,8 @@ fn the_map_describes_the_tree_it_claims_to() {
     }
 }
 
-/// No two regions start close enough together to be in doubt.
-///
-/// This is the assertion that would have refused the fixed heap at `0x7400_0000_0000`, which
-/// is `MAPPING_BASE` exactly - distance zero.
+/// No two regions start close enough together to be in doubt, such as a fixed heap placed at
+/// `MAPPING_BASE` exactly.
 #[test]
 fn no_two_bases_are_within_four_gibibytes() {
     let declared = declared();

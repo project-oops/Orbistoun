@@ -1,46 +1,18 @@
-//! What the capability report claims, against what the device was actually created with.
+//! What the capability report claims, against what the device was created with.
 //!
-//! # The distinction this is about
-//!
-//! A Vulkan feature is off until a device is created asking for it. So there are two different
-//! answers to "can a fragment shader write a storage buffer here": what the silicon offers, and
-//! what this process may use. **They differ on this machine** - an RTX 5070 Ti reports
-//! `fragmentStoresAndAtomics` as available, and orbistoun creates its device requesting no
-//! features at all (D552).
-//!
-//! Reporting the first would be a capability nothing backs: a translated fragment module built
-//! on it would be invalid at pipeline creation, and the report would have said it was fine.
+//! A Vulkan feature is off until a device is created asking for it, so what the device offers and
+//! what this process may use can differ. Reporting the first would claim a capability nothing
+//! backs: a module built on it would fail at pipeline creation.
 
 use ash::vk;
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 
-/// **The report describes the device that exists, not the one that could have been created.**
+/// The report describes the device that exists, not the one that could have been created.
 ///
-/// # What this asserts
-///
-/// That `Properties::fragment_stores` says what the session actually enabled - no more and no
-/// less - checked against the same physical device asked directly.
-///
-/// It fails if somebody reports the physical device's capability instead of the enabled set,
-/// which is the mistake it exists to prevent and the easier of the two to write.
-///
-/// # This used to assert the opposite, and the change is the point
-///
-/// The session requested nothing at all, on the reasoning that the fragment path was designed
-/// not to need `fragmentStoresAndAtomics` (D552): a translated module keeps its registers in
-/// `Private` storage, so the only storage-buffer writes were the observation window - which a
-/// fragment module skips - and a guest-memory store, which nothing emitted.
-///
-/// A guest's pixel shader emits one. The GL cube's writes a canary word every frame, and when
-/// that shader was first offered to a driver the validation layer named this feature among
-/// five errors the tests could not see (worklog 554). So the session asks for it where the
-/// device offers it, and this asserts the report tracks that rather than a fixed answer.
-///
-/// # What it cannot assert
-///
-/// That the feature is *sufficient*, or that any module needs no others. One feature is enough
-/// to pin the rule that a report describes the enabled set; a list would be a list to maintain,
-/// and `tools/validate-device.sh` asks a validator about all of them at once.
+/// `Properties::fragment_stores` says what the session enabled, checked against the same physical
+/// device asked directly, so reporting the physical capability instead fails. A guest's pixel
+/// shader stores to guest memory, so the session requests `fragmentStoresAndAtomics` where the
+/// device offers it. `tools/validate-device.sh` asks a validator about every feature at once.
 #[test]
 fn the_capability_report_describes_what_was_enabled() {
     let Availability::Available { properties } = probe() else {
@@ -48,9 +20,9 @@ fn the_capability_report_describes_what_was_enabled() {
         return;
     };
 
-    // What the silicon offers, asked of the same physical device the session opened.
-    // SAFETY: loading the Vulkan loader. `probe` above already opened it successfully, so the
-    // library is present and the process is not mid-teardown.
+    // SAFETY: loading the Vulkan loader, which `probe` above already opened successfully, so the
+    // library is present and the process is not tearing down. The features are then asked of the
+    // same physical device the session opened.
     let entry = unsafe { ash::Entry::load() }.expect("the loader is present, a device was found");
     let app = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 3, 0));
     let create = vk::InstanceCreateInfo::default().application_info(&app);
@@ -63,7 +35,7 @@ fn the_capability_report_describes_what_was_enabled() {
         let features = unsafe { instance.get_physical_device_features(*physical) };
         features.fragment_stores_and_atomics == vk::TRUE
     });
-    // SAFETY: nothing created from this instance outlives it - the loop above copied values.
+    // SAFETY: nothing created from this instance outlives it; the loop above copied values.
     unsafe { instance.destroy_instance(None) };
 
     assert_eq!(
@@ -89,15 +61,10 @@ fn the_capability_report_describes_what_was_enabled() {
     }
 }
 
-/// **What this device says about block-compressed sampling, reported rather than assumed.**
+/// What this device says about block-compressed sampling, reported rather than assumed.
 ///
-/// Not an assertion about the answer - a device is allowed to say no, and one that does makes a
-/// decoder a requirement instead of a fallback. The point is that the question is now *asked*:
-/// G15 splits surface layout into detiling, which is blocked on a capture nobody has taken, and
-/// compression, which is blocked on nothing because Vulkan consumes BC data natively.
-///
-/// Printed so a run of the suite on a new machine records its answer, the way the subgroup size
-/// is reported rather than fixed.
+/// A device may say no, which makes a decoder a requirement rather than a fallback. Vulkan consumes
+/// BC data natively where supported. Printed so a run on a new machine records its answer.
 #[test]
 fn whether_this_device_samples_compressed_textures_is_recorded() {
     let Availability::Available { properties } = probe() else {

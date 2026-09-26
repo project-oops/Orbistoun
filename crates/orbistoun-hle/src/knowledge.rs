@@ -1,34 +1,11 @@
-//! What we know about guest functions, as opposed to what a tool worked out.
+//! What is known about guest functions, as opposed to what a tool worked out.
 //!
-//! There are exactly two kinds of fact about a guest function, and they want different
-//! homes:
-//!
-//! - **Derived** - which pattern generated a name, at which index, on which day. A
-//!   search produces this, `symbols/generated.json` holds it, and that file is
-//!   **overwritten on every search**. Hand-editing it would be a lie, and anything
-//!   irreplaceable stored there would be destroyed on the next run.
-//! - **Known** - how many arguments a function takes, what they mean, what it is for,
-//!   what it does at its edges. No tool can produce any of this. Only observation can,
-//!   and once observed it must never be lost.
-//!
-//! This is the second kind. It accumulates and is never regenerated (D122).
-//!
-//! # This is the output of the loop, not documentation about it
-//!
-//! Every turn of the development cycle produces exactly these facts: run a title, watch
-//! what a function does, learn something. Until now that landed in decision-log prose
-//! and could only be recovered by grepping - so `sceKernelDirectMemoryQuery` had its
-//! argument layout, its ignored return value and its buffer-clearing requirement
-//! established by measurement, and none of it attached to the function.
-//!
-//! Written by tooling as much as by hand, for the same reason: a session that has just
-//! learned something should record it with a command, not by editing TOML and hoping the
-//! formatting survives.
-//!
-//! # The NID is not in here
-//!
-//! Derived from the name, never stored, so a file cannot hold a pair that disagrees with
-//! itself. Same rule `docs/SYMBOLS.md` sets for symbol databases.
+//! Derived facts (which pattern generated a name, at which index) live in
+//! `symbols/generated.json`, which every search overwrites. Known facts (arity, argument meaning,
+//! purpose, edge behaviour) come only from observation and are kept here, accumulated and never
+//! regenerated (D122). This is the output of the development loop, written by tooling as much as
+//! by hand. The NID is not stored: it is derived from the name, so no entry can disagree with
+//! itself.
 
 use std::collections::BTreeMap;
 
@@ -85,10 +62,8 @@ const EMBEDDED: &[(&str, &str)] = &[
         "libSceUlt",
         include_str!("../data/knowledge/libSceUlt.toml"),
     ),
-    // The rest, in the order the directory holds them. **Registered by the guard below rather
-    // than by hand**: twelve of these were written into the repository and no build loaded
-    // one of them, so `orbistoun-cli learn` was recording behaviour the emulator could not
-    // see, and the accounting reported it as recorded (D668).
+    // The rest, in directory order. The guard test below checks that every file on disk is listed,
+    // so none is written and never loaded.
     (
         "libSceAgcDriver",
         include_str!("../data/knowledge/libSceAgcDriver.toml"),
@@ -153,8 +128,8 @@ pub struct Argument {
     /// What to call it. Empty when only its position is known.
     #[serde(default)]
     pub name: String,
-    /// Its shape - `u64`, `ptr`, `u32`, and so on. Deliberately loose: a guess at a
-    /// width is worth recording, a guess at a C type is not.
+    /// Its shape - `u64`, `ptr`, `u32`, and so on. Loose on purpose: a width is worth recording,
+    /// a guessed C type is not.
     #[serde(default)]
     pub kind: String,
     /// Anything a reader would want and cannot infer.
@@ -162,28 +137,12 @@ pub struct Argument {
     pub note: String,
 }
 
-/// How a *behavioural* claim was established.
+/// How a behavioural claim was established.
 ///
-/// # Why this exists, and why there is no value for "I already knew it"
-///
-/// [`FunctionKnowledge::found_by`] records how a **name** was arrived at, and CI re-derives
-/// every committed name from this repository's own inputs. Nothing did the same for
-/// behaviour - an arity, a return kind, what happens at an edge - and those are the facts
-/// that change what the emulator does.
-///
-/// The gap matters more than it used to. Facts increasingly arrive by way of a model that
-/// has read the public internet, so "this is what the function does" can be *recalled* and
-/// then dressed as reasoning. That is the convergence problem principle 1 exists to
-/// prevent, arriving by a route the principle does not name.
-///
-/// So the vocabulary is the enforcement. **Every value here is falsifiable**, and there is
-/// deliberately none meaning "known from experience": recording a fact requires committing
-/// to a checkable claim about where it came from, which is a different act from absorbing
-/// one silently.
-///
-/// One field answers three separate worries - a licence question (did this come from
-/// someone else's source?), a quality one (is this reasoned or generated?), and an
-/// operational one (which of our facts are actually guesses?).
+/// [`FunctionKnowledge::found_by`] covers the name; this covers behaviour (an arity, a return
+/// kind, an edge), which changes what the emulator does. Every value is falsifiable and none
+/// means "known from experience", so recording a fact commits to a checkable source rather than
+/// absorbing a recalled one (D180). It answers licence, quality and "which facts are guesses".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Oracle {
@@ -192,34 +151,22 @@ pub enum Oracle {
     Published,
     /// Run against a published implementation of the same interface, and they agreed.
     ///
-    /// **Not a measurement of the target, and the distinction is load-bearing.** A FreeBSD
-    /// box answering what orbistoun answers establishes that orbistoun implements the
-    /// analogue correctly; it establishes nothing about whether the console implements the
-    /// analogue. D468 is this project watching that gap open: the ctype tables were written
-    /// from FreeBSD's documented layout, hardware was measured, and the layout was different.
-    ///
-    /// Stronger than [`Self::Published`], which is a reading of the same source rather than a
-    /// verification of it, and weaker than [`Self::Measured`], which is the target itself. It
-    /// stays [`Self::is_probeable`] for exactly that reason - hardware can still contradict
-    /// it (D478).
+    /// Not a measurement of the target: it shows orbistoun implements the analogue as that
+    /// implementation does, and the hardware may still differ. Stronger than [`Self::Published`],
+    /// weaker than [`Self::Measured`], and probeable (D478).
     Differential,
-    /// Measured on real hardware by a conformance probe.
-    ///
-    /// The cleanest provenance in the list. Observing what a box you own does with an
-    /// input you chose is nobody else's work, and unlike every other entry here it scales:
-    /// one hardware run answers a batch of questions rather than one.
+    /// Measured on real hardware by a conformance probe: nobody else's work, and one run answers a
+    /// batch of questions.
     Measured,
     /// The guest itself - it proceeded when answered this way, and stopped otherwise.
     ///
-    /// One bit per boot, and the bit is *consistency*, not correctness: a guest proceeds
-    /// happily past an answer that is wrong in a way it never checks. Enough to rule things
-    /// out, never enough to call something confirmed.
+    /// One bit per boot, and the bit is consistency, not correctness: enough to rule things out,
+    /// never to confirm.
     GuestObserved,
     /// Nobody knows. The value recorded is a placeholder chosen to be least harmful.
     ///
-    /// **Not a failure state, and not rare.** Much of this project is here, and saying so
-    /// is the entire point: an assumption that is written down can be counted, ranked,
-    /// probed and retired, where one written as though it were a fact never will be.
+    /// Common and not a failure: an assumption written down can be counted, ranked, probed and
+    /// retired.
     Assumed,
 }
 
@@ -235,11 +182,8 @@ impl Oracle {
         }
     }
 
-    /// Whether this claims support from something outside this repository.
-    ///
-    /// Those have to say where. A citation is what lets someone who was not there check
-    /// the claim, and an uncheckable claim of external support is worth strictly less than
-    /// an honest [`Oracle::Assumed`] - it looks like evidence and is not.
+    /// Whether this claims support from something outside this repository, and so must cite it:
+    /// an uncheckable claim of external support is worth less than an honest [`Oracle::Assumed`].
     pub const fn needs_citation(self) -> bool {
         matches!(self, Self::Published | Self::Differential | Self::Measured)
     }
@@ -249,42 +193,20 @@ impl Oracle {
         matches!(self, Self::Assumed)
     }
 
-    /// Whether an answer with this provenance is **knowledge**, or a prop holding a run up.
+    /// Whether an answer with this provenance is knowledge, or a prop holding a run up.
     ///
-    /// # The line, and why it falls where it does
-    ///
-    /// A compatibility record distinguishes a run that measures the emulator as it stands from
-    /// one that was helped along, and until now it drew that line at *whether a function was
-    /// answered by name at all* - which counts a hardware measurement and a wild guess as the
-    /// same act. They are not: an answer taken from the target is the emulator being **right**,
-    /// and a run that used it is honest.
-    ///
-    /// [`Self::GuestObserved`] is on the prop side, and that is the decision worth arguing
-    /// with. The guest proceeding is one bit of *consistency*, not correctness - somebody tried
-    /// answers until the guest moved, which is the definition of being helped along. A run
-    /// resting on one is an experiment.
-    ///
-    /// [`Self::Differential`] is on the evidence side even though it stays
-    /// [`Self::is_probeable`]: agreeing with a published implementation is not the last word,
-    /// but nobody tuned it to move a guest.
-    ///
-    /// **This is not [`Self::needs_citation`], which today covers the same three.** That asks
-    /// whether a claim owes a reader a source; this asks whether a run leaned on something.
-    /// They coincide by accident of extension and answer different questions - reusing one for
-    /// the other is the "gate checked a different field from the one it claimed" failure that
-    /// principle 3 names (D557).
+    /// An answer from the target or a published implementation is the emulator being right, so a
+    /// run using it is honest. [`Self::GuestObserved`] is a prop: answers were tried until the guest
+    /// moved. Distinct from [`Self::needs_citation`], which asks whether a claim owes a source; the
+    /// two cover the same values but answer different questions (D557).
     pub const fn is_evidence(self) -> bool {
         matches!(self, Self::Published | Self::Differential | Self::Measured)
     }
 
-    /// Whether a conformance probe on real hardware could settle it.
-    ///
-    /// What makes the assumption count a worklist rather than an apology.
+    /// Whether a conformance probe on real hardware could settle it, which makes the assumption
+    /// count a worklist.
     pub const fn is_probeable(self) -> bool {
-        // `Differential` is here on purpose: agreeing with FreeBSD is not the end of the
-        // line, because the console is free to disagree with FreeBSD and has done (D468,
-        // D478). A tier that counted it as finished would retire the very questions worth
-        // asking on hardware.
+        // `Differential` is here on purpose: the hardware may disagree with FreeBSD.
         matches!(
             self,
             Self::Assumed | Self::GuestObserved | Self::Differential
@@ -299,8 +221,7 @@ pub struct FunctionKnowledge {
     pub name: String,
     /// How many integer arguments it takes, where that has been established.
     ///
-    /// `None` means unknown rather than zero - and the difference matters, because zero
-    /// is a real answer that a trace would render very differently.
+    /// `None` means unknown, not zero; a trace renders zero differently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arity: Option<u8>,
     /// What the function is for, in prose.
@@ -308,120 +229,63 @@ pub struct FunctionKnowledge {
     pub purpose: String,
     /// What kind of value it hands back.
     ///
-    /// **Load-bearing, not documentation.** An unimplemented function has to answer
-    /// something, and the right answer depends entirely on this: an error code is
-    /// correct for a function returning status and is a **wild pointer** for one
-    /// returning a handle - which the guest then dereferences (D125).
+    /// Decides what an unimplemented function answers: an error code suits a status return and is a
+    /// wild pointer for a handle the guest dereferences (D125).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<Returns>,
     /// A block of guest memory to reserve and hand this function, and how it arrives.
     ///
-    /// **Why this ships here and [`Self::returns`] does not need to.** A return *kind* picks a
-    /// scalar an unimplemented stub answers - null, zero - and the dispatcher can decide that at
-    /// the call. A region is not a value: the service has to reserve guest address space
-    /// *before* the guest starts and then hand the base back, because a trampoline on the
-    /// guest's stack is the wrong layer to allocate from (D300). So a function that answers a
-    /// pointer to memory it owns - `sceAgcGetRegisterDefaults2` returns a defaults descriptor the
-    /// caller dereferences at `+0x38` - records that here, and the knowledge file is the shipped,
-    /// `assumed` home for it rather than the per-machine `learned.toml`, which only a measurement
-    /// writes. The reserved region is fresh and therefore zero-filled, which is the answer for a
-    /// descriptor whose count field a guest reads and then loops over.
+    /// A region is reserved before the guest starts, not at the call, since a trampoline on the
+    /// guest's stack is the wrong layer to allocate from (D300). A function that returns a pointer
+    /// to memory it owns (`sceAgcGetRegisterDefaults2` returns a descriptor read at `+0x38`) records
+    /// it here as the shipped, `assumed` home; the fresh region is zero-filled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<crate::StubRegion>,
     /// The arguments, in register order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<Argument>,
-    /// What this function does **not** do, when it is implemented but not completely.
+    /// What this function does not do, when it is implemented but not completely.
     ///
-    /// # Why a field rather than a comment
-    ///
-    /// The gap report counts whether a symbol resolves to code. It cannot tell a finished
-    /// function from one that answers the easy case and gives up: `getopt` handles a process
-    /// with no arguments and nothing else, and said so only in prose, so it counted as done.
-    /// A caveat a person has to read is a caveat a report cannot subtract.
-    ///
-    /// So this is the same claim in a form the tooling can count, and the count is the point:
-    /// "implemented" and "implemented, with these edges missing" are different states of a
-    /// project and the difference should be visible without reading the source.
-    ///
-    /// Empty means no incompleteness has been **declared** - which is not the same as
-    /// complete, and the report says so rather than claiming otherwise.
+    /// A field rather than a comment so the gap report can count it: "implemented" and
+    /// "implemented with these edges missing" are different states. Empty means no incompleteness
+    /// is declared, which is not the same as complete.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub partial: String,
 
-    /// Behaviour a reimplementation would otherwise get wrong.
-    ///
-    /// The expensive knowledge. Each entry here cost an experiment.
+    /// Behaviour a reimplementation would otherwise get wrong; each entry cost an experiment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_cases: Vec<String>,
     /// Experiments that would answer this entry's open questions, by name.
     ///
-    /// # Why a label rather than prose
-    ///
-    /// An open question is written for a person - *"the map shape the guest will accept is
-    /// unknown"* - and classifying one by its words is guesswork wearing a rule's clothes. A
-    /// label is a claim somebody made deliberately: **this experiment would settle it**.
-    ///
-    /// It is what lets the dispatcher act on what the project already knows it does not know,
-    /// rather than only on what crashed this run. 277 questions were recorded and ranked, and
-    /// nothing read them (D356).
+    /// A label is a deliberate claim that this experiment would settle it, which the dispatcher can
+    /// act on; classifying the prose question would be guesswork (D356).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answerable_by: Vec<String>,
     /// How the name was arrived at - one of the labels in [`FOUND_BY_LABELS`].
     ///
-    /// # A second copy of a fact the symbol database already audits
-    ///
-    /// `symbols/generated.json` records, for every name it worked out, exactly how - and
-    /// CI re-runs each of those records rather than reading them. This field is the same
-    /// claim, hand-written, in a file nothing was checking.
-    ///
-    /// It drifted, as a second copy does. Eleven entries disagreed with the audited record:
-    /// six libc names recorded as `observed` that the published-standard list produces,
-    /// three C++ ABI names recorded as `published-standard` that no shipped list contains,
-    /// and `sceKernelWrite` recorded as **`supplied`** - the one label that says "this
-    /// project did not derive this name" - when the generator produces it (D213).
-    ///
-    /// **A gate was running the whole time.** `the_shipped_files_account_for_everything_they_claim`
-    /// asserts [`Knowledge::provenance_faults`] is empty on every `cargo test`, and it
-    /// passed on all eleven - because the function checked [`Self::known_by`] and its
-    /// citation and had never looked at this field at all. It is the same shape as the
-    /// other three: a guard reporting success on something it was not examining.
-    ///
-    /// It checks both halves now: the label must be current vocabulary, and where the symbol
-    /// database has a record for the same name, the two must agree. The duplication remains,
-    /// because a name that is *implemented* never enters the unnamed set and so gets no
-    /// record in the symbol database at all: 57 of the 95 declared functions have none. See
-    /// `docs/BACKLOG.md`.
+    /// A hand-written copy of what `symbols/generated.json` records and CI re-runs.
+    /// [`Knowledge::provenance_faults`] checks that the label is current vocabulary and, where the
+    /// symbol database has a record for the name, that the two agree (D213). Implemented functions
+    /// have no record there, since their names never enter the unnamed set.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub found_by: String,
-    /// How the *behaviour* recorded above was established.
-    ///
-    /// Deliberately separate from [`Self::found_by`], which is about the name. A function
-    /// can carry a name straight out of the C standard and a return value nobody has ever
-    /// checked, and one field could not say both.
+    /// How the behaviour recorded above was established; separate from [`Self::found_by`], since a
+    /// standard name can carry an unchecked return value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_by: Option<Oracle>,
     /// Where to look to check it - a standard clause, a source file and revision, a probe.
     ///
-    /// Required by [`Oracle::needs_citation`]. Free text, because the sources are not
-    /// uniform and a schema would only move the vagueness somewhere less visible.
+    /// Required by [`Oracle::needs_citation`]. Free text, since the sources are not uniform.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cites: String,
-    /// Claims inside this entry that [`Self::known_by`] does **not** cover.
+    /// Claims inside this entry that [`Self::known_by`] does not cover.
     ///
-    /// The mixed entry is the normal one: shape from the standard, arity measured, and the
-    /// behaviour at one specific edge a guess. A single provenance per function would have
-    /// to round that up or down, and rounding up is exactly how a guess becomes a fact.
-    ///
-    /// **This list is a worklist.** Each line is a question a conformance probe on real
-    /// hardware could answer, so everything counted here is work that can be retired
-    /// rather than debt that merely accrues.
+    /// The mixed entry is normal: shape from the standard, arity measured, one edge a guess. Each
+    /// line is a question a hardware probe could answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumptions: Vec<String>,
-    /// Which guest modules it was seen in.
-    ///
-    /// Title identifiers only, never paths: the modules themselves are never tracked,
-    /// and an identifier is enough to repeat a measurement.
+    /// Which guest modules it was seen in: title identifiers only, never paths, since modules are
+    /// never tracked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub found_in: Vec<String>,
     /// The day it was first recorded.
@@ -433,17 +297,13 @@ pub struct FunctionKnowledge {
 }
 
 impl FunctionKnowledge {
-    /// Whether anything beyond the name is known.
-    ///
-    /// A bare entry is not useless - it records that we have seen the function - but it
-    /// is worth being able to count them, because that count is the size of the job.
+    /// Whether anything beyond the name is known; the count of bare entries is the size of the job.
     pub fn is_bare(&self) -> bool {
         self.arity.is_none()
             && self.purpose.is_empty()
             && self.arguments.is_empty()
             && self.edge_cases.is_empty()
-            // A region is a behaviour: the service reserves memory and hands it back, which is a
-            // claim about what the function does and so has to carry a provenance like any other.
+            // A region is a behaviour claim, so it carries a provenance like any other.
             && self.region.is_none()
     }
 
@@ -457,9 +317,7 @@ impl FunctionKnowledge {
 
     /// What is wrong with this entry's provenance, in words, or nothing.
     ///
-    /// Returned rather than asserted so that one caller can fail a build with it and
-    /// another can show a person what is missing. A check only CI can run gets fixed only
-    /// when CI complains, which is the slowest possible moment.
+    /// Returned rather than asserted, so one caller can fail a build and another can show a person.
     pub fn provenance_faults(&self) -> Vec<String> {
         let mut faults = self.name_provenance_faults();
         let Some(known) = self.known_by else {
@@ -478,14 +336,9 @@ impl FunctionKnowledge {
                 known.label()
             ));
         }
-        // A citation naming a filesystem path is not a citation. `cites` exists so that
-        // somebody else can check a claim, and the whole value of that is defeated by a
-        // location only this machine has - one entry cited a relay file in `C:	emp`,
-        // owned by neither repository and resolvable by no reviewer and no CI job (D239).
-        //
-        // A named external document is fine and is the ordinary case: "ISO C 7.21.6.5"
-        // travels. What is refused is a path, absolute or relative, that has to exist
-        // somewhere for the claim to be checkable.
+        // A citation naming a filesystem path is not a citation: `cites` exists so somebody else can
+        // check a claim, and a path exists only on one machine. A named document ("ISO C 7.21.6.5")
+        // is the ordinary case.
         for fragment in self.cites.split_whitespace() {
             if fragment_is_a_path(fragment) {
                 faults.push(format!(
@@ -495,8 +348,7 @@ impl FunctionKnowledge {
             }
         }
         if known.is_guess() && !self.cites.is_empty() {
-            // Citing a source for something nobody has established is the precise
-            // confusion this field exists to stop - it reads as evidence at a glance.
+            // Citing a source for something nobody established reads as evidence at a glance.
             faults.push(format!(
                 "{}: known_by = assumed, so there is nothing to cite",
                 self.name
@@ -507,23 +359,9 @@ impl FunctionKnowledge {
 
     /// Every open question this entry admits, in the words a report prints.
     ///
-    /// # Why the list is the definition and the count derives from it
-    ///
-    /// There were two definitions. This one added a whole-function penalty for an
-    /// `assumed` entry **on top of** its itemised assumptions; `questions` counted the
-    /// items and added the penalty only when nothing was itemised. So `knows` printed 80
-    /// open questions and `questions` printed 70, of the same knowledge base, and neither
-    /// line said which definition it meant (D239).
-    ///
-    /// The second rule is the right one and both comments already described it: an entry
-    /// resting on a guess and listing nothing still counts as one, so a total cannot be
-    /// shrunk by leaving the detail out - and an entry that *does* itemise is already
-    /// counted by its items. Adding both charges the candid entry twice for being candid.
-    ///
-    /// Returning the list rather than a number is what stops it happening again: the
-    /// count is `.len()` of this, so the two cannot disagree. The allocation is paid once
-    /// per function in a report over ninety-five of them, which is not a path worth
-    /// optimising into a second definition.
+    /// Itemised assumptions count as themselves; an entry resting on a guess and listing nothing
+    /// counts as one, so a total cannot be shrunk by leaving detail out. The count is `.len()` of
+    /// this list, so the two cannot disagree.
     pub fn open_questions_asked(&self) -> Vec<String> {
         if !self.assumptions.is_empty() {
             return self.assumptions.clone();
@@ -540,55 +378,35 @@ impl FunctionKnowledge {
     }
 }
 
-/// What an entry admits when it rests on a guess and itemises nothing.
-///
-/// Here rather than in the reporting shim, because it is part of the definition of an open
-/// question rather than a way of printing one - and the two counters disagreed precisely
-/// because half the definition lived in the shim (D239).
+/// What an entry admits when it rests on a guess and itemises nothing; part of the definition
+/// of an open question, so it lives here.
 pub const NOTHING_ESTABLISHED: &str = "Nothing about this entry has been established.";
 
 /// What a POSIX-named delegation admits, in the one wording all of them use.
 ///
-/// # Why the target is not named in it
-///
-/// This library's names resolve to the vendor-named function beside them, and every entry
-/// used to ask whether the two behave alike **with the target's name inside the question**.
-/// One premise, written a hundred and forty-nine ways: [`shared_premises`] groups by
-/// word-for-word identity and cannot see that a sentence differing only in a symbol is the
-/// same sentence, so a fifth of the ask list read as a hundred and forty-nine separate
-/// things to establish (D539).
-///
-/// The name is not lost - it is an `edge_cases` line, which is where a fact about what this
-/// project does belongs. The question is what a console is being asked, and it is one
-/// question.
-///
-/// Shared with `orbistoun-gen`, which writes these entries, so the generator and the data
-/// cannot drift into two wordings again.
+/// These names resolve to the vendor-named function beside them (D349). The target's name is
+/// kept out of the sentence so [`shared_premises`] groups every delegation as one premise; the
+/// name is an `edge_cases` line. Shared with `orbistoun-gen`, which writes these entries.
 pub const DELEGATION_ASSUMPTION: &str = "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.";
 
 /// A question several entries ask in the same words, and every entry that rests on it.
 ///
-/// **A premise, not a category.** The grouping below is word-for-word identity, so nothing
-/// here is a judgement about what two questions have in common - see [`shared_premises`].
+/// Grouped by word-for-word identity, not by judgement; see [`shared_premises`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedPremise {
     /// The question, in the wording most of its entries use.
     pub question: String,
     /// The entries asking it, in the order they were supplied.
     pub functions: Vec<String>,
-    /// How many distinct **wordings** were collapsed into this one.
+    /// How many distinct wordings were collapsed into this one.
     ///
-    /// Above one means several entries mean the same sentence and punctuate it differently,
-    /// which is a defect in the knowledge base rather than a fact about the platform - it
-    /// makes one premise read as two. Gated by a test over the shipped data (D538).
+    /// Above one means entries punctuate one sentence differently, a defect in the knowledge base;
+    /// gated by a test over the shipped data (D538).
     pub wordings: usize,
 }
 
-/// The words of a question, lowercased, with everything else dropped.
-///
-/// The grouping key. Two questions share it exactly when they are the same sequence of
-/// words - `shape. The` and `shape; the` agree, and any difference of a single word does
-/// not.
+/// The words of a question, lowercased, with everything else dropped: the grouping key, so
+/// `shape. The` and `shape; the` agree and a single differing word does not.
 fn words_of(question: &str) -> String {
     let mut key = String::with_capacity(question.len());
     let mut between = false;
@@ -610,22 +428,9 @@ fn words_of(question: &str) -> String {
 type PremiseGroup = (Vec<String>, Vec<(String, usize)>);
 /// Group `asked` - pairs of function name and question - by the premise they share.
 ///
-/// # Why this is deduplication and not classification
-///
-/// `orbistoun-turn` refuses to decide *what a question means* from its prose, because a
-/// rule over words fails silently and reads exactly like a question nobody can act on
-/// (D356). That still holds and this does not weaken it: nothing here asks what a question
-/// is about. Two questions group only when they are **the same sequence of words**, which
-/// is not an interpretation of either.
-///
-/// So the merging is deliberately unable to do the useful-looking thing. Two entries asking
-/// closely related questions in different words stay separate, because the differing word
-/// may be where the difference is. Only punctuation, case and spacing are forgiven.
-///
-/// # What the caller gets
-///
-/// Groups in first-seen order, so the output is stable and a diff means something. Ranking
-/// is the caller's - it is the one that knows how often a guest called each function.
+/// Deduplication, not classification: questions group only when they are the same sequence of
+/// words, forgiving punctuation, case and spacing. Nothing reads what a question means. Groups
+/// come in first-seen order so output is stable; ranking is the caller's.
 #[must_use]
 pub fn shared_premises(asked: &[(String, String)]) -> Vec<SharedPremise> {
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -648,8 +453,7 @@ pub fn shared_premises(asked: &[(String, String)]) -> Vec<SharedPremise> {
     groups
         .into_iter()
         .map(|(functions, mut wordings)| {
-            // Commonest wording, then alphabetical - a total order, so two runs over the
-            // same data print the same sentence.
+            // Commonest wording, then alphabetical: a total order, so runs print the same sentence.
             wordings.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             SharedPremise {
                 question: wordings
@@ -665,17 +469,14 @@ pub fn shared_premises(asked: &[(String, String)]) -> Vec<SharedPremise> {
 
 /// Every label [`FunctionKnowledge::found_by`] may carry.
 ///
-/// The same vocabulary `symbols/generated.json` serialises, because they are the same
-/// claim about the same name. Spelling it out here rather than deriving it from
-/// `orbistoun_nid::Method` is deliberate: the serialised form is a tagged enum with
-/// per-variant fields, and this field is a bare string - a `Method` cannot be built from
-/// one, but it can be compared against one, which is what matters (D213).
+/// The vocabulary `symbols/generated.json` serialises. Spelled out rather than derived from
+/// `orbistoun_nid::Method`, a tagged enum that cannot be built from a bare string but can be
+/// compared with one (D213).
 pub const FOUND_BY_LABELS: &[&str] = &[
     "published-standard",
     "generated",
-    // Derived from a name this project already held, by a rule in the affix file. Cheaper
-    // to recheck than `generated` and recorded apart from it, because "a rule applied to
-    // `snprintf`" and "candidate 587,962,681 of a grammar" are not the same claim (D606).
+    // Derived from a held name by a rule in the affix file; recorded apart from `generated`, a
+    // different claim (D606).
     "affixed",
     "static",
     "runtime",
@@ -683,24 +484,11 @@ pub const FOUND_BY_LABELS: &[&str] = &[
 ];
 
 impl FunctionKnowledge {
-    /// What is wrong with how this entry says its **name** was arrived at.
+    /// What is wrong with how this entry says its name was arrived at.
     ///
-    /// Two checks, and the second is the one that matters.
-    ///
-    /// The label must be current vocabulary, which catches a value left behind by a change
-    /// to it - eight entries still said `observed` after that value was split in two.
-    ///
-    /// And where `symbols/generated.json` holds a record for the same name, the two must
-    /// **agree**. That file's records are re-run by CI rather than read; this field is
-    /// hand-written and was checked by nothing, so when they differed the audited one was
-    /// right every time. The direction varied, which is why both halves are reported: some
-    /// entries sold this project's own work short, and one claimed a name came from
-    /// *outside* the project that the generator produces (D213).
-    ///
-    /// Silent when the symbol database has no record. That is the normal state for an
-    /// implemented function - its name is resolved by declaration, so it never enters the
-    /// unnamed set a search records against. A gap, and named as one in `docs/BACKLOG.md`,
-    /// rather than something to guess about here.
+    /// The label must be current vocabulary, and where `symbols/generated.json` holds a record for
+    /// the name, the two must agree; that file is re-run by CI, so it wins (D213). Silent when the
+    /// database has no record, the normal state for an implemented function.
     #[must_use]
     pub fn name_provenance_faults(&self) -> Vec<String> {
         let mut faults = Vec::new();
@@ -730,11 +518,8 @@ impl FunctionKnowledge {
 
 /// Whether one whitespace-delimited piece of a citation is a filesystem path.
 ///
-/// **Exposed so a generator applies the same rule rather than a second copy of it.** A
-/// derivation that guessed at this rule got it wrong in the safe direction and threw away a
-/// perfectly good citation: it refused anything containing a slash, which rejects
-/// `ISO/IEC 9899` - the C standard's own name. The rule is per-fragment, so a slash inside a
-/// word is ordinary and a fragment that *begins* one is a path.
+/// Exposed so a generator applies the same rule. Per fragment: a slash inside a word is ordinary
+/// (`ISO/IEC 9899`), and a fragment beginning with one is a path.
 #[must_use]
 pub fn fragment_is_a_path(fragment: &str) -> bool {
     fragment.contains(":\\")
@@ -750,11 +535,7 @@ pub fn citation_is_a_path(cites: &str) -> bool {
     cites.split_whitespace().any(fragment_is_a_path)
 }
 
-/// What the audited symbol database says produced a name, if it says anything.
-///
-/// Parsed once. The database is embedded in `orbistoun-nid` and is a few hundred
-/// kilobytes; re-parsing it per entry would make a seventy-entry check quadratic in a
-/// file that never changes during a run.
+/// What the audited symbol database says produced a name, if it says anything; parsed once.
 fn audited_label(name: &str) -> Option<&'static str> {
     use std::sync::OnceLock;
     static RECORDS: OnceLock<BTreeMap<String, &'static str>> = OnceLock::new();
@@ -780,22 +561,19 @@ fn audited_label(name: &str) -> Option<&'static str> {
 
 /// What kind of value a function hands back.
 ///
-/// Coarse on purpose. The distinction that matters is whether the guest will
-/// *dereference* the answer, and three categories cover it.
+/// Coarse on purpose: what matters is whether the guest will dereference the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Returns {
     /// Zero for success, non-zero for failure. An error code is the honest stub.
     Status,
-    /// An address the guest will dereference. **Null is the honest stub** - it is what a
-    /// real allocator or symbol lookup returns when it cannot do the job, guests already
-    /// check for it, and a null dereference faults somewhere recognisable.
+    /// An address the guest will dereference. Null is the honest stub: it is what a real allocator
+    /// or lookup returns on failure, guests check for it, and a null dereference faults visibly.
     Pointer,
     /// An opaque identifier the guest passes back rather than dereferences. Zero is the
     /// conventional "no such object".
     Handle,
-    /// A count, a length, a size. Zero is the safe answer: a caller that loops over the
-    /// result then does nothing, where a large value walks off the end of a buffer.
+    /// A count, a length, a size. Zero is the safe answer: a loop over it does nothing.
     Count,
 }
 
@@ -807,8 +585,7 @@ impl Returns {
     pub const fn stub_value(self) -> Option<u64> {
         match self {
             Self::Status => None,
-            // Every other kind is read as data by the caller, so the only safe answer is
-            // the one the caller already tests for.
+            // Every other kind is read as data, so the only safe answer is the one the caller tests for.
             Self::Pointer | Self::Handle | Self::Count => Some(0),
         }
     }
@@ -827,10 +604,8 @@ pub struct KnowledgeFile {
 
 /// One finding, in the shape something records it.
 ///
-/// **Not a `FunctionKnowledge`.** That is the whole of what is known about a function; this
-/// is what one turn or one command has to say about it, and the difference is that every
-/// field here is optional in the sense that leaving it out means *"I have nothing to add"*
-/// rather than *"it is empty"* (D292).
+/// Not a `FunctionKnowledge`: every field is optional in the sense that leaving it out means
+/// "nothing to add" rather than "empty" (D292).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Record {
     /// The function this is about, bare.
@@ -856,15 +631,9 @@ pub struct Record {
 impl KnowledgeFile {
     /// Merges one record in, and says what is wrong with the result.
     ///
-    /// **Merges rather than replaces.** A session recording one edge case must not have to
-    /// restate what was established three sessions ago, and must not silently drop it either -
-    /// so a field is written only when the record carries one, and lists append without
-    /// duplicating.
-    ///
-    /// Returns the provenance faults rather than refusing: they are things to say to a
-    /// person, and only the caller knows whether it is a command rejecting input or a loop
-    /// declining to record. **An empty list means the entry is admissible**, not that nothing
-    /// happened.
+    /// A field is written only when the record carries one, and lists append without duplicating,
+    /// so nothing earlier is restated or dropped. Returns the provenance faults rather than refusing,
+    /// since only the caller knows whether to reject; an empty list means admissible.
     pub fn merge(&mut self, record: &Record, today: &str) -> Vec<String> {
         let existing = self
             .functions
@@ -923,10 +692,7 @@ impl KnowledgeFile {
         toml::from_str(text)
     }
 
-    /// Renders it back, sorted by name.
-    ///
-    /// Sorted so an appended entry produces a diff showing what was learned rather than
-    /// where it happened to land.
+    /// Renders it back, sorted by name, so an appended entry diffs as what was learned.
     pub fn render(&self) -> Result<String, toml::ser::Error> {
         let mut sorted = self.clone();
         sorted.functions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -957,10 +723,8 @@ impl Knowledge {
         out
     }
 
-    /// Merges one file in.
-    ///
-    /// A later entry for the same name wins, so a user file can correct a shipped one
-    /// without editing it.
+    /// Merges one file in. A later entry for the same name wins, so a user file corrects a shipped
+    /// one without editing it.
     pub fn absorb(&mut self, library: &str, file: &KnowledgeFile) {
         let library = if file.library.is_empty() {
             library
@@ -989,19 +753,12 @@ impl Knowledge {
         self.by_name.values()
     }
 
-    /// How many entries hold something beyond a name.
-    ///
-    /// The honest progress measure for this file: entries are cheap, understanding is
-    /// not, and a count of names would flatter both equally.
+    /// How many entries hold something beyond a name: entries are cheap, understanding is not.
     pub fn understood(&self) -> usize {
         self.by_name.values().filter(|f| !f.is_bare()).count()
     }
 
-    /// How many entries rest on a given oracle.
-    ///
-    /// The shape of what is known, rather than the size of it. Two hundred entries all
-    /// resting on [`Oracle::Assumed`] and two hundred measured on hardware are the same
-    /// number and completely different projects.
+    /// How many entries rest on a given oracle: the shape of what is known, not its size.
     pub fn resting_on(&self, oracle: Oracle) -> usize {
         self.by_name
             .values()
@@ -1009,17 +766,12 @@ impl Knowledge {
             .count()
     }
 
-    /// The regions this knowledge base ships, as a policy to fold **under** a person's.
+    /// The regions this knowledge base ships, as a policy to fold under a person's.
     ///
-    /// **The shipped, `assumed` counterpart to `learned.policy()`.** A measurement writes a
-    /// region into the per-machine `learned.toml`; a function that answers a pointer to memory
-    /// it owns but that no probe can call - an inline AGC non-export - has no measurement and so
-    /// needs a home that ships. That home is the knowledge file, and this is how its regions
-    /// reach the dispatcher, carrying each entry's own `known_by` so a run resting on one is
-    /// accounted for exactly as a learned region is (never mistaken for evidence, D557).
-    ///
-    /// `default_return` is untouched here for the same reason it is in `learned.policy()`: it
-    /// governs every function this base says nothing about, and `absorb` never takes it.
+    /// The shipped, `assumed` counterpart to `learned.policy()`: a function returning a pointer to
+    /// memory it owns that no probe can call has no measurement, so its region ships here, carrying
+    /// the entry's `known_by` so it is never mistaken for evidence (D557). `default_return` is
+    /// untouched, as in `learned.policy()`.
     #[must_use]
     pub fn region_policy(&self) -> crate::StubPolicy {
         let mut regions = BTreeMap::new();
@@ -1043,9 +795,7 @@ impl Knowledge {
 
     /// Every separate thing this project admits it is guessing at.
     ///
-    /// **The number to watch.** It is expected to go *up* as more is written down - an
-    /// assumption only appears here once someone notices it - and then down as hardware
-    /// answers them. A total that only ever falls is measuring candour, not knowledge.
+    /// Rises as assumptions are written down and falls as hardware answers them.
     pub fn open_questions(&self) -> usize {
         self.by_name
             .values()
@@ -1077,16 +827,10 @@ impl Knowledge {
 #[cfg(test)]
 mod tests {
 
-    /// **Every knowledge file in the directory is embedded**, or it is written and never read.
+    /// Every knowledge file in the directory is embedded, or it would be written and never read.
     ///
-    /// [`EMBEDDED`] is a hand-kept list and `include_str!` takes a literal path, so nothing made
-    /// the list and the directory agree - and twelve files had accumulated on disk that no build
-    /// ever loaded. That is worse than not writing them down: the accounting reports a behaviour
-    /// as recorded, `orbistoun-cli learn` writes to a file that ships in the repository, and the
-    /// emulator answers as though nothing were known.
-    ///
-    /// Read at test time from `CARGO_MANIFEST_DIR`, which is the same directory the `include_str!`
-    /// paths are relative to, so the two cannot be pointed at different places.
+    /// [`EMBEDDED`] is a hand-kept list of literal `include_str!` paths. Read from
+    /// `CARGO_MANIFEST_DIR`, the directory those paths are relative to.
     #[test]
     fn every_knowledge_file_on_disk_is_embedded() {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/knowledge");
@@ -1106,11 +850,8 @@ mod tests {
         );
     }
 
-    /// The other direction: nothing is embedded under a name its own file disagrees with.
-    ///
-    /// The list pairs a library name with a path, and the pairing is what `absorb` falls back on
-    /// when a file carries no `library =` line. A file registered under the wrong name would put
-    /// its functions in another library's namespace, which reads as a working entry.
+    /// Nothing is embedded under a library name its own file disagrees with, which would put its
+    /// functions in another library's namespace.
     #[test]
     fn every_embedded_file_names_the_library_it_is_registered_as() {
         for (library, text) in super::EMBEDDED {
@@ -1124,11 +865,7 @@ mod tests {
     }
     use super::{DELEGATION_ASSUMPTION, Knowledge, KnowledgeFile, Oracle, Record};
 
-    /// Recording one thing does not erase what was recorded before it.
-    ///
-    /// **The rule the merge exists for.** A session that notes an edge case must not have to
-    /// restate a purpose established three sessions ago, and must not silently drop it - so a
-    /// field is written only when the record carries one, and lists append (D292).
+    /// A later record adds without erasing an earlier one (D292).
     #[test]
     fn a_later_record_adds_without_erasing_an_earlier_one() {
         let mut file = KnowledgeFile {
@@ -1165,11 +902,8 @@ mod tests {
         assert_eq!(entry.known_by, Some(Oracle::GuestObserved));
     }
 
-    /// A record claiming behaviour without saying how it is known is refused.
-    ///
-    /// **The negative half, and the one the vocabulary exists for.** Every available default
-    /// would be a lie - `assumed` understates work really done, anything stronger overstates
-    /// it - so the merge reports the fault and the caller refuses (D180).
+    /// A record claiming behaviour without saying how it is known is a fault: every default would
+    /// misstate the work (D180).
     #[test]
     fn behaviour_recorded_without_a_provenance_is_a_fault() {
         let mut file = KnowledgeFile {
@@ -1210,19 +944,17 @@ mod tests {
         );
     }
 
+    /// A `found_by` that contradicts the symbol database, or is not current vocabulary, is a fault.
     #[test]
     fn a_found_by_that_contradicts_the_symbol_database_is_a_fault() {
-        // Made to fail on purpose. A guard nobody has watched fail is a guard nobody knows
-        // anything about - three in this repository reported success while checking nothing
-        // (D191, D199, D213).
+        // Made to fail on purpose, so the guard is seen rejecting something.
         let mut entry = super::FunctionKnowledge {
             name: "memcpy".to_owned(),
             found_by: "supplied".to_owned(),
             ..Default::default()
         };
-        // `memcpy` is in the shipped published-standard list, so the audited record and
-        // this claim disagree - and `supplied` is the direction that matters, because it
-        // says this project did not derive a name it demonstrably derives.
+        // `memcpy` is in the shipped published-standard list, so `supplied` contradicts the audited
+        // record in the direction that matters.
         let faults = entry.name_provenance_faults();
         assert_eq!(
             faults.len(),
@@ -1237,9 +969,7 @@ mod tests {
             "agreeing with the audited record is not a fault"
         );
 
-        // And a label left behind by a change to the vocabulary is caught even when the
-        // symbol database has nothing to compare against. Eight entries said `observed`
-        // after that value was split into `static` and `runtime`.
+        // A label outside current vocabulary is caught even with no database record to compare.
         entry.name = "sceSomethingNotInTheDatabase".to_owned();
         entry.found_by = "observed".to_owned();
         assert!(
@@ -1252,10 +982,10 @@ mod tests {
         assert!(entry.name_provenance_faults().is_empty());
     }
 
+    /// The shipped files parse and carry real content.
     #[test]
     fn the_shipped_files_parse_and_carry_real_content() {
-        // They are embedded, so a typo breaks the build for everyone and would otherwise
-        // surface as a panic at startup.
+        // They are embedded, so a typo would break every build and surface as a panic at startup.
         let k = Knowledge::builtin();
         assert!(!k.is_empty(), "something should ship");
         assert!(
@@ -1264,11 +994,11 @@ mod tests {
         );
     }
 
+    /// A declared region reaches the policy, and a `returns` kind does not become one.
     #[test]
     fn a_declared_region_reaches_the_policy_and_a_status_kind_does_not() {
-        // Made to fail on purpose against the negative half: a `returns` kind is a scalar the
-        // dispatcher answers at the call, not a block of memory to reserve, so it must not turn
-        // into a region that quietly allocates address space.
+        // A `returns` kind is a scalar answered at the call, so it must not become a region that
+        // reserves address space.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1313,12 +1043,11 @@ mod tests {
         );
     }
 
+    /// Every oracle is falsifiable.
     #[test]
     fn every_oracle_is_falsifiable() {
-        // **The property the whole field rests on.** Each value is either checkable
-        // against a named outside source or answerable by a probe on real hardware. A
-        // value meaning "the model recalled it" would satisfy neither, which is why there
-        // is no such value and why this test would fail if somebody added one.
+        // Each value is checkable against a named outside source or answerable by a probe; a value
+        // meaning "the model recalled it" would satisfy neither.
         for oracle in [
             Oracle::Published,
             Oracle::Differential,
@@ -1334,10 +1063,11 @@ mod tests {
         }
     }
 
+    /// Recording behaviour requires saying how it is known.
     #[test]
     fn recording_behaviour_requires_saying_how_it_is_known() {
-        // The entry an unattended agent produces by default: a confident arity, a return
-        // kind, and no account of where either came from.
+        // The entry an unattended agent produces by default: a confident arity, a return kind, and no
+        // source.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1356,10 +1086,10 @@ mod tests {
         assert!(faults[0].contains("confident"));
     }
 
+    /// A name alone needs no source.
     #[test]
     fn a_name_alone_needs_no_source() {
-        // Recording that a function exists is not a claim about what it does, and
-        // demanding provenance for it would make the honest act the expensive one.
+        // Recording that a function exists is not a claim about what it does.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1374,11 +1104,10 @@ mod tests {
         assert!(k.provenance_faults().is_empty());
     }
 
+    /// An outside source has to be checkable.
     #[test]
     fn an_outside_source_has_to_be_checkable() {
-        // "It is in the standard" without saying where is indistinguishable from a guess
-        // by anyone who was not there - and it *reads* as evidence, which is worse than
-        // an honest admission of not knowing.
+        // "It is in the standard" without saying where reads as evidence and cannot be checked.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1409,10 +1138,10 @@ mod tests {
         assert!(k.provenance_faults().is_empty());
     }
 
+    /// A guess cites nothing.
     #[test]
     fn a_guess_cites_nothing() {
-        // Citing a source for something nobody established is the precise confusion this
-        // field exists to remove: at a glance it looks like the entry above.
+        // Citing a source for something nobody established looks like the entry above at a glance.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1429,11 +1158,11 @@ mod tests {
         assert_eq!(k.provenance_faults().len(), 1);
     }
 
+    /// Open questions cannot be reduced by leaving the detail out.
     #[test]
     fn open_questions_cannot_be_reduced_by_leaving_the_detail_out() {
-        // An entry rating itself `assumed` and listing nothing is not better understood
-        // than one that spells its uncertainty out; it is the same guess, less usefully
-        // written. Counting only the listed lines would reward the vaguer entry.
+        // An `assumed` entry listing nothing is the same guess as one that spells it out, and must not
+        // count for less.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1452,16 +1181,13 @@ mod tests {
         let mut k = Knowledge::default();
         k.absorb("libTest", &file);
 
-        // One for the entry that admits it knows nothing and lists nothing, and two for
-        // the entry that spelled its two out. **Not three for the second**: charging it a
-        // whole-function penalty *plus* its items counts the candid entry twice for being
-        // candid, which is what made `knows` say 80 and `questions` say 70 (D239).
+        // One for the entry listing nothing, two for the entry listing two: never a penalty on top of
+        // the items.
         assert_eq!(k.get("silent_guess").expect("present").open_questions(), 1);
         assert_eq!(k.get("spelled_out").expect("present").open_questions(), 2);
         assert_eq!(k.open_questions(), 3);
 
-        // The property the test is named for still holds: leaving the detail out does not
-        // lower the count below the one it would otherwise carry.
+        // Leaving the detail out does not lower the count.
         assert!(
             k.get("silent_guess").expect("present").open_questions() >= 1,
             "a silent guess still costs one"
@@ -1469,11 +1195,6 @@ mod tests {
     }
 
     /// The count and the list are the same answer, for every shape an entry can take.
-    ///
-    /// This is the test that was missing. Two counters computed the same quantity two
-    /// ways, disagreed by ten, and both printed their number without saying which
-    /// definition it was - inside the machinery whose whole purpose is to stop a claim
-    /// being reported more confidently than it is held (D239).
     #[test]
     fn the_question_count_always_matches_the_questions_listed() {
         let file = KnowledgeFile::parse(
@@ -1524,7 +1245,7 @@ mod tests {
         );
         assert_eq!(listed, 4, "2 itemised + 1 silent guess + 1 itemised");
 
-        // And a certain entry asks nothing, so an empty queue means an empty queue.
+        // A certain entry asks nothing, so an empty queue means an empty queue.
         assert!(
             k.get("published_and_certain")
                 .expect("present")
@@ -1533,11 +1254,10 @@ mod tests {
         );
     }
 
+    /// A partly measured entry still carries its open questions.
     #[test]
     fn a_partly_measured_entry_still_carries_its_open_questions() {
-        // The normal case, and the reason provenance is not one flat field per function:
-        // the shape comes from the standard and one edge is a guess. A single value would
-        // have to round that up or down, and rounding up is how a guess becomes a fact.
+        // The normal case: the shape from the standard and one edge a guess.
         let file = KnowledgeFile::parse(
             r#"
             [[function]]
@@ -1557,18 +1277,18 @@ mod tests {
         assert_eq!(k.resting_on(Oracle::Published), 1);
     }
 
+    /// The shipped files account for everything they claim.
     #[test]
     fn the_shipped_files_account_for_everything_they_claim() {
-        // Held here rather than only in CI so it fails at the moment somebody writes the
-        // entry, not an hour later on a runner.
+        // Held here as well as in CI, so it fails when the entry is written.
         let faults = Knowledge::builtin().provenance_faults();
         assert!(faults.is_empty(), "{faults:#?}");
     }
 
+    /// What was measured about the direct-memory query is still recorded.
     #[test]
     fn what_was_measured_about_direct_memory_query_survived() {
-        // Every fact here cost an experiment (D083). If this test ever fails, the
-        // knowledge was lost and the experiments have to be repeated.
+        // Each fact here cost an experiment; if this fails, the knowledge was lost.
         let k = Knowledge::builtin();
         let f = k
             .get("sceKernelDirectMemoryQuery")
@@ -1587,10 +1307,10 @@ mod tests {
         );
     }
 
+    /// An unknown arity is distinct from zero.
     #[test]
     fn an_unknown_arity_is_distinct_from_zero() {
-        // Zero is a real answer that a trace renders very differently from "we have no
-        // idea", and collapsing them would make an unmeasured function look measured.
+        // Zero renders differently from unknown in a trace.
         let file = KnowledgeFile::parse(
             r#"
             library = "libTest"
@@ -1609,6 +1329,7 @@ mod tests {
         assert_eq!(k.get("measured").expect("present").arity, Some(0));
     }
 
+    /// A bare entry counts as recorded but not as understood.
     #[test]
     fn a_bare_entry_counts_as_recorded_but_not_as_understood() {
         let file = KnowledgeFile::parse(
@@ -1626,9 +1347,10 @@ mod tests {
         assert_eq!(k.understood(), 0, "a name alone is not understanding");
     }
 
+    /// A later file can correct an earlier one.
     #[test]
     fn a_later_file_can_correct_an_earlier_one() {
-        // So a user file overrides a shipped one without editing it.
+        // A user file overrides a shipped one without editing it.
         let mut k = Knowledge::default();
         k.absorb(
             "libTest",
@@ -1641,10 +1363,10 @@ mod tests {
         assert_eq!(k.get("f").expect("present").arity, Some(6));
     }
 
+    /// A rendered file round-trips and comes back sorted.
     #[test]
     fn a_rendered_file_round_trips_and_comes_back_sorted() {
-        // Appending is a supported operation, so what is written must read back - and
-        // sorting keeps a diff about what was learned rather than where it landed.
+        // What is written must read back, and sorting keeps a diff about what was learned.
         let file = KnowledgeFile::parse(
             r#"
             library = "libTest"
@@ -1667,11 +1389,10 @@ mod tests {
         assert_eq!(back.functions[1].arity, Some(2));
     }
 
+    /// Every open question belongs to a function that can be asked about.
     #[test]
     fn every_open_question_belongs_to_a_function_that_can_be_asked_about() {
-        // The queue a probe works from is only as good as its join key. A question whose
-        // function cannot be found in the knowledge base is one nothing can record the
-        // answer against, so it would be asked and then lost.
+        // A question whose function is not in the knowledge base has nowhere to record its answer.
         let k = Knowledge::builtin();
         for f in k.functions() {
             if !f.assumptions.is_empty() {
@@ -1689,11 +1410,10 @@ mod tests {
         }
     }
 
+    /// A question is never recorded against something already measured.
     #[test]
     fn a_question_is_never_recorded_against_something_already_measured() {
-        // `measured` means hardware answered it. An entry claiming that *and* listing an
-        // open question is contradicting itself, and the queue would send a probe to
-        // re-ask something already settled.
+        // `measured` means hardware answered; an open question on such an entry contradicts it.
         for f in Knowledge::builtin().functions() {
             if f.known_by == Some(Oracle::Measured) {
                 assert!(
@@ -1705,23 +1425,16 @@ mod tests {
         }
     }
 
+    /// The open-question count matches what the entries carry.
     #[test]
     fn the_open_question_count_matches_what_the_entries_carry() {
-        // `open_questions` is the number reported to a person and used to rank work. If it
-        // could drift from the entries, the queue and the summary would disagree about how
-        // much is unknown - and the summary is the one people believe.
-        //
-        // **This test used to re-implement the counting rule and assert the sum agreed** -
-        // a third copy of the definition, guarding the other two. It passed for as long as
-        // two of the three matched, and they did, while the number a person read was wrong
-        // by ten (D239). Summed from what each entry would print instead.
+        // `open_questions` is reported and used to rank work, so it must equal the sum of what each
+        // entry prints.
         let k = Knowledge::builtin();
         let listed: usize = k.functions().map(|f| f.open_questions_asked().len()).sum();
         assert_eq!(k.open_questions(), listed);
 
-        // The invariant that actually has teeth, checked against the real knowledge base:
-        // an entry that itemises contributes exactly its items, never its items plus a
-        // whole-function penalty for having been candid about resting on a guess.
+        // An entry that itemises contributes exactly its items.
         for f in k.functions() {
             if !f.assumptions.is_empty() {
                 assert_eq!(
@@ -1734,26 +1447,11 @@ mod tests {
         }
     }
 
-    /// **Punctuation is forgiven and a word is not.**
+    /// Punctuation is forgiven and a word is not: two entries punctuating one sentence differently
+    /// are one premise, and a single differing word makes two (D538).
     ///
-    /// # What this asserts
-    ///
-    /// Both halves of the rule, because only having both makes it a rule. Two entries that
-    /// punctuate one sentence differently are one premise; two that differ by a single word
-    /// are two, however alike they read.
-    ///
-    /// The first pair is the real one out of `libkernel.toml` - ten entries ended the first
-    /// clause with a full stop and four with a semicolon - so this test would have gone red
-    /// on the data that prompted it (D538).
-    ///
-    /// # What it cannot assert
-    ///
-    /// That two questions grouped together *mean* the same thing. Nothing here reads a
-    /// question; identical words are taken as one premise because they are the same
-    /// sentence, and that is the whole claim. Two entries asking the same thing in
-    /// different words stay separate and this test is content with that - deciding they
-    /// agree would be classifying prose, which `orbistoun-turn` refuses for good reason
-    /// (D356).
+    /// The first pair is real data from `libkernel.toml`. Whether two differently worded questions
+    /// mean the same thing is not decided here.
     #[test]
     fn one_sentence_punctuated_two_ways_is_one_premise_and_one_word_apart_is_two() {
         let full_stop = concat!(
@@ -1805,24 +1503,10 @@ mod tests {
         assert_eq!(regrouped, asked.len());
     }
 
-    /// **One premise is written one way in the shipped knowledge base.**
+    /// No premise in the shipped knowledge base is written two ways (D538).
     ///
-    /// # What this asserts, and why it is worth a test
-    ///
-    /// That no premise carries more than one wording. When it does, one thing this project
-    /// does not know reads as two, and a probe planning to answer it sees two entries to
-    /// sample instead of one. It is not a claim about the platform - it is a claim about
-    /// the ask list being countable, and the ask list is what obSCEne's backlog is
-    /// generated from.
-    ///
-    /// It went red on the data that prompted it: fourteen entries meant one sentence and
-    /// four of them used a semicolon (D538).
-    ///
-    /// # What it cannot assert
-    ///
-    /// That two *differently worded* questions are not secretly the same premise. This sees
-    /// only exact repetition, so the count it protects is a floor - the real number of
-    /// distinct things unknown here is no larger, and may be smaller.
+    /// Otherwise one unknown reads as two on the ask list obSCEne's backlog is generated from. Only
+    /// exact repetition is seen, so the count this protects is an upper bound.
     #[test]
     fn no_premise_in_the_knowledge_base_is_written_two_ways() {
         let k = Knowledge::builtin();
@@ -1851,28 +1535,11 @@ mod tests {
         }
     }
 
-    /// **Every delegation asks the one question, in the one wording.**
+    /// Every delegation asks the one question, in [`DELEGATION_ASSUMPTION`]'s wording (D349).
     ///
-    /// # What this asserts
-    ///
-    /// That no entry asks whether a POSIX spelling and its vendor twin behave alike in words
-    /// of its own. The wording used to carry the target's name, so a hundred and forty-nine
-    /// entries resting on one premise were a hundred and forty-nine premises - a fifth of the
-    /// ask list, and no way to see from the list that one measurement speaks to all of it
-    /// (D539).
-    ///
-    /// The check is deliberately blunt: any *other* sentence in the knowledge base about two
-    /// spellings behaving alike is a fault, whoever wrote it. `orbistoun-gen` emits
-    /// [`DELEGATION_ASSUMPTION`] rather than a string of its own, so a generated entry cannot
-    /// reintroduce one; a hand-written entry can, and this is what stops it.
-    ///
-    /// # What it cannot assert
-    ///
-    /// That the premise is *true*, or that grouping these 149 is right. It is one question
-    /// only because they are one situation - a name resolving to the function beside it - and
-    /// a console answering it for one entry answers it for that entry. What it does for the
-    /// other 148 is make the shared claim more or less credible, which is what the sentence
-    /// says it rests on.
+    /// Any other sentence about two spellings behaving alike is a fault, whoever wrote it.
+    /// `orbistoun-gen` emits the shared constant; a hand-written entry could drift, and this stops
+    /// it. Whether the premise is true is not asserted.
     #[test]
     fn the_delegation_question_is_asked_in_one_wording() {
         let mut strays = Vec::new();

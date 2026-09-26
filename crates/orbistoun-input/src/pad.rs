@@ -1,24 +1,10 @@
 //! What a controller is, in our own terms.
 //!
-//! # Named by position, never by glyph
-//!
-//! Principle 2. The face buttons carry vendor symbols and the two centre buttons carry
-//! vendor words, and none of those belong in this tree - so a button is *where it is*.
-//! [`Button::South`] is the lower face button on every pad ever made, which is more than
-//! can be said for any of its names.
-//!
-//! It is also the only naming that survives the thing this crate exists to do. A keyboard
-//! has no glyphs on it, so a mapping from a key to a button has to be a mapping to a
-//! position; and a host gamepad reports positions too. Naming by glyph would mean
-//! translating twice for no gain.
-//!
-//! # Why the state is host-shaped
-//!
-//! Floats in a settled range rather than whatever the vendor packs into its structure.
-//! **The guest-facing layout is unmeasured** and this type deliberately does not guess at
-//! it: it describes what a person is doing with their hands, which is knowable, and the
-//! conversion to whatever a title reads is a separate problem that begins with a
-//! measurement (D326).
+//! Buttons are named by position, never by glyph: vendor symbols stay out of this tree, a
+//! keyboard mapping can only target a position, and a host gamepad reports positions too.
+//! [`Button::South`] is the lower face button on every pad. The state is host-shaped (floats in
+//! settled ranges) and describes what a person's hands are doing; conversion to the layout a
+//! title reads is [`record`]'s job.
 
 use serde::{Deserialize, Serialize};
 
@@ -60,9 +46,8 @@ pub enum Button {
     Start,
     /// The button that belongs to the system rather than to the title.
     ///
-    /// **The only one with different rules.** Every other button is the title's when the
-    /// title has focus; this one is the shell's always, because it is how somebody reaches
-    /// the shell *from* a title. A title never sees it (D326).
+    /// Every other button is the title's while it has focus; this one is always the shell's,
+    /// because it is how a person reaches the shell from a title. A title never sees it (D326).
     Shell,
 }
 
@@ -121,9 +106,8 @@ impl Button {
 
 /// Which way a stick is pushed.
 ///
-/// Both axes in `-1.0..=1.0`, positive right and positive down - the convention every
-/// windowing system on this host already uses, so a source does not have to flip one axis
-/// and then have somebody wonder later which one was flipped.
+/// Both axes in `-1.0..=1.0`, positive right and positive down, the convention every windowing
+/// system on this host uses, so no source flips an axis.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Stick {
     /// Left to right.
@@ -141,25 +125,21 @@ pub struct PadState {
     pub sticks: [Stick; 2],
     /// Left trigger, then right, in `0.0..=1.0`.
     ///
-    /// Held apart from `L2`/`R2` rather than derived from them: a trigger at rest is not
-    /// the same as a trigger held a third of the way, and a title that reads the analogue
-    /// value would be told a lie by a bit that only says "past the threshold".
+    /// Held apart from `L2`/`R2`: a title reading the analogue value needs more than a
+    /// past-the-threshold bit.
     pub triggers: [f32; 2],
 }
 
 /// How far a trigger travels before it counts as its button being down.
 ///
-/// A guess, and a small one. Nothing here has measured what the hardware uses, and the
-/// consequence of being wrong is a button that engages slightly early or late rather than
-/// a title reading something impossible.
+/// A chosen value, not measured; being wrong makes the button engage slightly early or late.
 pub const TRIGGER_THRESHOLD: f32 = 0.5;
 
 impl PadState {
     /// Nothing pressed, sticks centred.
     ///
-    /// **What a title is handed when the shell has focus.** Not "no controller", which is a
-    /// different claim and a worse one - a title that loses its pad will often stop or put
-    /// up a prompt, where a pad with nothing pressed is an ordinary quiet frame.
+    /// What a title is handed while the shell has focus: a quiet pad, not "no controller", which
+    /// makes many titles stop or prompt.
     #[must_use]
     pub fn neutral() -> Self {
         Self::default()
@@ -182,9 +162,8 @@ impl PadState {
 
     /// Sets a trigger, and the button that follows from it.
     ///
-    /// One call rather than two, so the analogue value and the bit **cannot disagree**.
-    /// Setting them separately is how a pad ends up reporting `L2` down at a travel of
-    /// zero, which no hardware does and every title is entitled to assume cannot happen.
+    /// One call, so the analogue value and the bit cannot disagree (no pad reports `L2` down at
+    /// zero travel).
     pub fn set_trigger(&mut self, right: bool, travel: f32) {
         let travel = travel.clamp(0.0, 1.0);
         self.triggers[usize::from(right)] = travel;
@@ -200,12 +179,8 @@ impl PadState {
         self.pressed
     }
 
-    /// The same state with the shell's own button removed.
-    ///
-    /// **What a title is allowed to see.** The shell button is how somebody reaches the
-    /// shell, so a title that could observe it could also act on it - and a title that
-    /// pauses itself when the shell opens is fine, while one that reads it as its own
-    /// input is a title responding to a press meant for something else (D326).
+    /// The same state with the shell's own button removed: what a title is allowed to see, so it
+    /// never acts on a press meant for the shell (D326).
     #[must_use]
     pub fn as_title_sees_it(&self) -> Self {
         let mut seen = *self;
@@ -216,38 +191,21 @@ impl PadState {
 
 /// How many bytes a pad read writes.
 ///
-/// **Measured.** obSCEne's `100-input/read-extent` fills a buffer with a sentinel, calls
-/// `scePadReadState`, and reports how far the change reached: `extent 120`, `changed 120`.
-/// `100-input/batched-read` reports the same for `scePadRead`. So the structure is 120 bytes
-/// and the call writes all of them (D671).
+/// obSCEne's `100-input/read-extent` fills a buffer with a sentinel, calls `scePadReadState` and
+/// reports `extent 120`, `changed 120`; `100-input/batched-read` reports the same for
+/// `scePadRead`. The structure is 120 bytes and the call writes all of them.
 pub const STATE_BYTES: usize = 120;
 
-/// The 120 bytes a console wrote for a pad at rest.
+/// The 120 bytes the hardware wrote for a pad at rest (obSCEne `100-input/read-extent` and
+/// `100-input/batched-read`, title leg).
 ///
-/// # Transcribed, not modelled
-///
-/// This is not a `struct` with named fields, and deliberately. What was measured is the byte
-/// image a console produced; which offset carries the buttons and which the sticks is an
-/// *inference* from it, and a shim that laid out fields would be publishing that inference as
-/// though it were the measurement. The obvious reading - a button mask in the first four
-/// bytes, four axes at `0x80` (centre) in the next four, and `1.0f` at 24 and 32 - is written
-/// here as a comment because a comment is what it is worth.
-///
-/// Nothing needs the reading to answer the call correctly, which is the whole argument for
-/// not committing to one: a guest asking what the pad is doing when nothing is touching it
-/// gets exactly what a console gives it.
-///
-/// **Input is placed over it by [`record`]**, at the positions the collection's SDK reads on
-/// hardware (D713) - evidence from titles that navigate with a pad, not from this image. Every
-/// byte the SDK does not place keeps its measured value here. A byte-level measurement of a held
-/// button is still asked for (obscene REQ-20260910T0650Z-d1c4) and would confirm or replace them.
-///
-/// Reference: obSCEne `100-input/read-extent` and `100-input/batched-read`, title leg of
-/// sweep 20260909-110725, `title/unknown-gpu`.
+/// A byte image rather than a `struct`: which offset carries which field is an inference from
+/// it, not a measurement. [`record`] places input over it at the positions the collection's
+/// SDK reads on hardware (D713); every other byte keeps its measured value.
 pub const AT_REST: &[u8; STATE_BYTES] = &[
     // 0: 00000000 80808080 00000000 00000000
     0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 16: 00000000 00000000 0000803f 00000000   - 0x3f800000 is 1.0f little-endian
+    // 16: 00000000 00000000 0000803f 00000000 (0x3f800000 is 1.0f little-endian)
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00,
     // 32: 0000803f 00000000 00000000 00000000
     0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -261,9 +219,8 @@ pub const AT_REST: &[u8; STATE_BYTES] = &[
 
 /// Where each button's bit is in the record's button word (D713).
 ///
-/// The collection's SDK's bits (`oops-sdk/include/oops/input.h`), which titles built on it read on
-/// a console with a pad. `Select` as the touchpad is the weakest entry: nothing here has exercised
-/// it. `Shell` has no bit - a title never sees it (D326).
+/// The SDK's bits (`oops-sdk/include/oops/input.h`). `Select` as the touchpad has not been
+/// exercised. `Shell` has no bit, since a title never sees it.
 const fn record_bit(button: Button) -> u32 {
     match button {
         Button::L3 => 1 << 1,
@@ -343,9 +300,8 @@ pub fn record(state: &PadState) -> [u8; STATE_BYTES] {
 mod tests {
     use super::{Button, PadState, TRIGGER_THRESHOLD};
 
-    /// **A quiet pad is the at-rest image with only the connected flag changed; a press lands on
-    /// the SDK's bit** (D713). Cross is bit 14, the d-pad's down bit 6 - what a launcher confirms
-    /// and moves with.
+    /// A quiet pad is the at-rest image with only the connected flag changed, and a press lands on
+    /// the SDK's bit (cross is bit 14, d-pad down bit 6).
     #[test]
     fn a_record_places_the_state_where_the_sdk_reads_it() {
         let quiet = super::record(&PadState::neutral());
@@ -389,11 +345,7 @@ mod tests {
         assert!(pad.is_down(Button::North));
     }
 
-    /// **Every button has its own bit.**
-    ///
-    /// Asserted rather than assumed: the set is a shift by the discriminant, so a variant
-    /// inserted in the middle silently renumbers everything after it, and two buttons
-    /// sharing a bit would present as one of them being permanently stuck.
+    /// Every button has its own bit; a variant inserted mid-enum renumbers the rest.
     #[test]
     fn no_two_buttons_share_a_bit() {
         let mut seen = 0_u32;
@@ -404,10 +356,7 @@ mod tests {
         assert_eq!(seen.count_ones() as usize, Button::ALL.len());
     }
 
-    /// **A trigger's value and its button cannot disagree.**
-    ///
-    /// The failure this prevents is a pad reporting `L2` down at zero travel, which no
-    /// hardware does and every title may assume cannot happen.
+    /// A trigger's value and its button move together.
     #[test]
     fn a_trigger_and_its_button_move_together() {
         let mut pad = PadState::neutral();
@@ -437,12 +386,7 @@ mod tests {
         assert!((pad.triggers[1] - 0.0).abs() < f32::EPSILON);
     }
 
-    /// **A title never sees the shell button, and sees everything else.**
-    ///
-    /// The property the whole focus arrangement rests on. Asserted on both halves: hiding
-    /// the shell button is useless if it also hides the press somebody made at the same
-    /// time, and a title that lost half its input when somebody reached for the shell
-    /// would be worse off than one that saw the button.
+    /// A title sees every button except the shell's, including one pressed at the same time.
     #[test]
     fn a_title_sees_every_button_except_the_shells() {
         let mut pad = PadState::neutral();

@@ -1,67 +1,25 @@
-//! Running a compute shader and reading back what it wrote.
+//! Runs a compute shader and reads back what it wrote.
 //!
-//! # Why this exists
+//! `spirv-val` checks that a module is well-formed; a dispatch with known inputs checks that it
+//! computes the right thing. [`probe`] reports a missing device separately from a failure, so a
+//! caller surfaces a skip rather than passing a test that never ran. A software implementation is
+//! the preferred device because it is deterministic: this verifies the translator, not any
+//! hardware.
 //!
-//! `spirv-val` answers whether a module is well-formed. It cannot answer whether the
-//! module computes the right thing, and a translator that emits valid SPIR-V which
-//! renders the wrong output is the failure this project spends most of its effort
-//! avoiding.
-//!
-//! This closes that gap. Dispatch a translated shader with known inputs, read the
-//! buffer back, compare against what the source it came from was supposed to do.
-//!
-//! # A missing device is not a failure, and not a pass either
-//!
-//! [`probe`] reports whether a device exists, separately from anything going wrong.
-//! That distinction is the whole design: a test that finds no device, returns early and
-//! reports success would make the suite green on a machine where the most important
-//! test never ran. Callers are expected to surface a skip *loudly* - the same rule
-//! obSCEne's harness follows, for the same reason.
-//!
-//! # Software rendering is the better oracle here
-//!
-//! A software implementation is deterministic. Real drivers differ in floating-point
-//! behaviour, denormal handling and optimisation, so a regression test that passes on
-//! one machine and fails on another says nothing useful.
-//!
-//! The trade is worth naming: this verifies *the translator*, not compatibility with
-//! any particular hardware. A green suite here is not hardware validation and must
-//! never be read as it.
-//!
-//! # Test infrastructure, and it shows
-//!
-//! Resources are released on the successful path. An error abandons them, because the
-//! alternative is a guard type per Vulkan object for code whose process exits moments
-//! later. Stated rather than hidden: if this ever runs inside something long-lived,
-//! that has to change first.
+//! Resources are released on the successful path only. An error abandons them, because the process
+//! exits shortly after; a long-lived caller needs guard types first.
 
 use ash::vk;
 
-/// The Vulkan loader, loaded once for the life of the process.
+/// The Vulkan loader, loaded once for the life of the process and never unloaded.
 ///
-/// # Why this is a static and not a local
-///
-/// [`ash::Entry`] owns the handle to the loader library. Dropping it unloads that
-/// library **and every layer the loader pulled in** - overlays, capture tools, driver
-/// shims. Creating one per call therefore made each dispatch a load/unload cycle of a
-/// dozen DLLs, from whichever thread the test harness happened to be running on.
-///
-/// That is not merely wasteful, it faults. Layers register process-wide state and
-/// thread-local storage that does not survive being unloaded underneath another thread
-/// still inside it, and the symptom is an access violation partway through a long run
-/// with no relation to what was being dispatched - intermittent, and it moved when
-/// anything about the timing changed, which is what a threading fault looks like when
-/// mistaken for a data bug.
-///
-/// The loader is documented as a once-per-process thing. So it is one.
-///
-/// Never unloaded. There is nowhere to do it from, and a process that has finished with
-/// Vulkan is a process that is exiting.
+/// Dropping an [`ash::Entry`] unloads the loader library and every layer it pulled in. Layers keep
+/// process-wide and thread-local state that faults when unloaded under another thread, so the
+/// loader is a process-wide static.
 fn entry() -> Result<&'static ash::Entry, DispatchError> {
     static ENTRY: std::sync::OnceLock<Option<ash::Entry>> = std::sync::OnceLock::new();
-    // SAFETY: `Entry::load` requires that the loader is not concurrently unloaded, which
-    // holds because nothing ever unloads it - the `OnceLock` both serialises the load and
-    // keeps the result alive for the rest of the process.
+    // SAFETY: `Entry::load` requires that the loader is not concurrently unloaded. Nothing unloads
+    // it: the `OnceLock` serialises the load and keeps the result alive for the process.
     ENTRY
         .get_or_init(|| unsafe { ash::Entry::load() }.ok())
         .as_ref()
@@ -71,22 +29,13 @@ fn entry() -> Result<&'static ash::Entry, DispatchError> {
         ))
 }
 
-/// What a device says about itself, beyond existing.
+/// What a device reports about itself, beyond existing.
 ///
-/// # Why this is more than a name
-///
-/// It used to be a name and nothing else, which answers "can anything run here" and no
-/// other question. Two separate pieces of work then wanted the same missing thing -
-/// whether subnormals survive, and how wide a subgroup is - and whichever came second
-/// would have retrofitted whatever the first invented. So it is asked once.
-///
-/// Everything here is a *property of the device*, reported verbatim. Nothing here is a
-/// judgement about whether it is good enough; that belongs to whoever is asking.
+/// Every field is a property of the device, reported verbatim; judging whether it is good enough
+/// belongs to the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Four of these are yes-or-no facts about one device, and each is asked about on its own by
-// code that needs it. Grouping them into a sub-structure to satisfy a count would put a name
-// between a caller and the one bit it wants, and the usual reason this lint fires - a boolean
-// parameter list nobody can read at a call site - does not apply to a report nobody passes.
+// Each boolean is an independent device fact read on its own by the code that needs it; this is a
+// report, not a parameter list, so grouping them would only add indirection.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "a device report is a list of independent facts, not an argument list"
@@ -96,55 +45,36 @@ pub struct Properties {
     pub device: String,
     /// Whether 32-bit subnormal results survive rather than being flushed to zero.
     ///
-    /// A module may *require* this, through `SPV_KHR_float_controls`, and a device that
-    /// does not offer it cannot run one that does. The guest's division pre-scale
-    /// depends on the difference: two of its branches ask whether a quotient is
-    /// subnormal, and on a flushing device both answer false, which silently disables
-    /// the scaling the instruction exists to perform.
+    /// A module may require this through `SPV_KHR_float_controls`. The guest's division pre-scale
+    /// depends on it: on a flushing device its subnormal tests both answer false and the scaling is
+    /// skipped.
     pub subnormals_preserved: bool,
     /// How many invocations share a subgroup on this device.
     ///
-    /// Reported rather than assumed. The guest's wavefront is 32 or 64 lanes depending
-    /// on how a shader was compiled, the host's subgroup is whatever the hardware says,
-    /// and the ratio between them is what any lane-mapped translation is built around.
+    /// Reported rather than assumed: the guest's wavefront is 32 or 64 lanes, and the ratio to the
+    /// host subgroup is what a lane-mapped translation is built around.
     pub subgroup_size: u32,
-    /// Whether a **fragment** shader on this device may write a storage buffer.
+    /// Whether a fragment shader on this device may write a storage buffer.
     ///
-    /// Reported as what was *enabled*, not as what the hardware could do. A Vulkan
-    /// feature the device was not created with is unusable however capable the silicon
-    /// is, so the physical device's answer would be the wrong one to hand a caller
-    /// deciding whether a translated fragment module can store (D552).
-    ///
-    /// It decides the shape of the fragment path rather than merely permitting it. A
-    /// translated module keeps its registers in `Private` storage already, so the only
-    /// storage-buffer writes are the observation window the epilogue fills and a guest
-    /// memory store - and a fragment variant that omits the first and refuses the second
-    /// needs this feature not at all.
+    /// Reports what was enabled at device creation, not what the hardware offers, because a feature
+    /// the device was not created with is unusable. A translated fragment module stores only to the
+    /// observation window and to guest memory, so a fragment variant without either needs no
+    /// feature.
     pub fragment_stores: bool,
     /// Whether a mesh stage may be used.
     ///
-    /// The stage a guest's NGG primitive shader translates to (D688). A device without it can
-    /// run a frame's pixel shaders and not its geometry, which is worth saying in a report
-    /// rather than discovering at pipeline creation.
+    /// A guest's primitive shader translates to a mesh stage (D688); without it a device runs a
+    /// frame's pixel shaders but not its geometry.
     pub mesh_shading: bool,
     /// Whether a shader may write a storage image without declaring its format.
     ///
-    /// What a translated `image_store` needs. The alternative is to name a format in the
-    /// module, and the guest's format is in a descriptor nothing here decodes - so a device
-    /// without this cannot run a shader that stores to an image, and saying so is better than
-    /// picking a format and rendering something subtly wrong (D692).
+    /// A translated `image_store` needs this: the guest's format is in a descriptor nothing here
+    /// decodes, so the module declares `Unknown` rather than guessing a format (D692).
     pub storage_image_write: bool,
-    /// Whether this device can sample block-compressed images without them being decoded.
+    /// Whether this device can sample block-compressed images without decoding them.
     ///
-    /// **The half of surface layout that is not blocked on a capture** (G15). A guest's textures
-    /// are block-compressed and tiled; the tiling swizzle is hardware nothing here has measured,
-    /// so detiling cannot be written yet - but the compression is a different question, because
-    /// Vulkan consumes BC data natively. If a device offers this, the eventual upload path
-    /// undoes the tiling and hands the blocks over untouched, and a decoder is a fallback for
-    /// devices without it rather than a requirement.
-    ///
-    /// Asked now, before there is anything to upload, because it decides whether a decoder is on
-    /// the critical path - and that is a one-line question whose answer changes a plan.
+    /// Vulkan consumes BC data natively, so on a device that offers this an upload path only undoes
+    /// the tiling and a decoder is a fallback rather than a requirement.
     pub compressed_textures: bool,
 }
 
@@ -156,10 +86,10 @@ pub enum Availability {
         /// What it reports about itself.
         properties: Properties,
     },
-    /// No device. **Not an error** - a machine may legitimately have none.
+    /// No device. Not an error: a machine may legitimately have none.
     ///
-    /// Carries why, because "no Vulkan" and "a Vulkan that refused us" want different
-    /// responses and look identical from the outside.
+    /// Carries the reason, because "no Vulkan" and "a Vulkan that refused us" want different
+    /// responses.
     Unavailable {
         /// The reason, for a skip message worth reading.
         reason: String,
@@ -175,8 +105,7 @@ impl Availability {
 
 /// Why a dispatch failed.
 ///
-/// Distinct from [`Availability`]: this means a device existed and something went
-/// wrong, which is a real failure rather than an absent environment.
+/// Distinct from [`Availability`]: a device existed and something went wrong.
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
     /// A Vulkan call failed.
@@ -188,17 +117,15 @@ pub enum DispatchError {
     /// No queue family supports compute.
     #[error("no compute queue family on the selected device")]
     NoComputeQueue,
-    /// The draw asks for state this cannot build exactly - named, not approximated (worklog 829).
+    /// The draw asks for state this cannot build exactly; named rather than approximated.
     #[error("unsupported: {0}")]
     Unsupported(String),
 }
 
 /// Reports whether compute can be dispatched here.
 pub fn probe() -> Availability {
-    // Asks the shared session rather than building an instance of its own. It used to
-    // build one, use it once and destroy it - the pattern that faulted the process from
-    // `dispatch` (D142) - and a probe that opens a device is also the most direct way to
-    // find out whether opening one works.
+    // Asks the shared session rather than building its own instance, so the probe also tests that
+    // opening the shared device works.
     match session() {
         Ok(session) => {
             let session = session
@@ -214,11 +141,9 @@ pub fn probe() -> Availability {
     }
 }
 
-/// Creates a storage buffer in memory the host can read, and zeroes it.
+/// Creates a zeroed storage buffer in memory the host can read.
 ///
-/// Zeroing matters: without it, a value read back afterwards might be whatever
-/// previously occupied that memory rather than something the shader wrote, and a
-/// shader that does nothing would be indistinguishable from one that works.
+/// Zeroing ensures a value read back was written by the shader rather than left in memory.
 pub(crate) fn create_host_buffer(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
@@ -239,9 +164,7 @@ pub(crate) fn create_host_buffer(
     // SAFETY: the physical device is valid.
     let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
 
-    // Host-visible and coherent, so the result can be read without an explicit flush.
-    // A device-local buffer would need a staging copy, which is more machinery for a
-    // harness whose buffers are a few words.
+    // Host-visible and coherent, so the result is read without an explicit flush or a staging copy.
     let wanted = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
     let memory_type = (0..memory_properties.memory_type_count)
         .find(|i| {
@@ -259,16 +182,16 @@ pub(crate) fn create_host_buffer(
     // SAFETY: the allocation info is fully initialised and the device is live.
     let memory = unsafe { device.allocate_memory(&allocate, None) }
         .map_err(|e| DispatchError::Vulkan("allocate_memory", e))?;
-    // SAFETY: buffer and memory both come from this device, and the memory is large
-    // enough by construction of the allocation above.
+    // SAFETY: buffer and memory both come from this device, and the allocation above is at least
+    // the buffer's required size.
     unsafe { device.bind_buffer_memory(buffer, memory, 0) }
         .map_err(|e| DispatchError::Vulkan("bind_buffer_memory", e))?;
 
     // SAFETY: the memory is host-visible, was just allocated, and is not mapped.
     let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
         .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
-    // SAFETY: the mapping covers `size` bytes, which is `words` whole `u32`s, and this
-    // process has exclusive access to it while mapped.
+    // SAFETY: the mapping covers `size` bytes, which is `words` whole `u32`s, and this process has
+    // exclusive access to it while mapped.
     unsafe { std::ptr::write_bytes(mapped.cast::<u8>(), 0, words * 4) };
     // SAFETY: mapped immediately above and not used after unmapping.
     unsafe { device.unmap_memory(memory) };
@@ -276,11 +199,7 @@ pub(crate) fn create_host_buffer(
     Ok((buffer, memory))
 }
 
-/// A compute pipeline and the descriptor plumbing that feeds it.
-///
-/// Grouped because they are created together, used together and released together;
-/// passing six handles between functions instead would be six chances to release one
-/// twice or not at all.
+/// A compute pipeline and the descriptor objects that feed it, created, used and released together.
 struct BoundPipeline {
     shader: vk::ShaderModule,
     set_layout: vk::DescriptorSetLayout,
@@ -299,8 +218,8 @@ fn build_pipeline(
     (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
 ) -> Result<BoundPipeline, DispatchError> {
     let shader_info = vk::ShaderModuleCreateInfo::default().code(module);
-    // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an
-    // error rather than accepted, which is what makes this usable as a check.
+    // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an error, which
+    // makes this usable as a check.
     let shader = unsafe { device.create_shader_module(&shader_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module", e))?;
 
@@ -376,8 +295,7 @@ fn build_pipeline(
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .buffer_info(&memory_info),
     ];
-    // SAFETY: the write refers to a live set and a live buffer, and the slices outlive
-    // the call.
+    // SAFETY: the write refers to a live set and a live buffer, and the slices outlive the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 
     Ok(BoundPipeline {
@@ -401,16 +319,14 @@ pub struct Output {
 
 /// Copies a host-visible allocation back into a vector.
 ///
-/// Extracted because it is done once per buffer and the unsafe reasoning is identical
-/// each time - repeating it invites the two copies to drift, and a `// SAFETY:` comment
-/// that no longer describes its block is worse than none.
+/// One function so the unsafe reasoning is written once for every buffer.
 pub(crate) fn read_back(
     device: &ash::Device,
     buffer: &DispatchBuffer,
 ) -> Result<Vec<u32>, DispatchError> {
     let (memory, words) = (buffer.memory, buffer.words);
-    // SAFETY: the memory is host-visible, holds `size` bytes from `offset` - the buffer's own, or
-    // one slot of the window ring (worklog 847) - and is not currently mapped.
+    // SAFETY: the memory is host-visible, holds `size` bytes from `offset` (the buffer's own, or
+    // one slot of the window ring), and is not currently mapped.
     let mapped = unsafe {
         device.map_memory(
             memory,
@@ -421,9 +337,8 @@ pub(crate) fn read_back(
     }
     .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
     let mut out = vec![0u32; words];
-    // SAFETY: the mapping covers `words` whole `u32`s, the destination has exactly that
-    // capacity, and the two cannot overlap - one is device memory and the other a fresh
-    // allocation.
+    // SAFETY: the mapping covers `words` whole `u32`s, the destination has exactly that capacity,
+    // and the two cannot overlap: one is device memory, the other a fresh allocation.
     unsafe {
         std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), out.as_mut_ptr(), words);
     }
@@ -434,25 +349,10 @@ pub(crate) fn read_back(
 
 /// A Vulkan instance and device, created once and reused for every dispatch.
 ///
-/// # Why this is a static and not a local
-///
-/// The same reason as [`entry`], one layer up, and found the same way. `dispatch` used
-/// to build an instance and a device, use them once, and tear them down - so a run that
-/// dispatched ninety times built and destroyed ninety of each. That faulted the process
-/// intermittently, about three runs in five, always deep into a long run and never in a
-/// way that pointed at the shader being dispatched.
-///
-/// It is also where nearly all of the time went: an instance and a device cost over a
-/// second to create, and dispatching a twenty-instruction shader does not.
-///
-/// A real emulator dispatches thousands of times a frame against one device. This is
-/// what that looks like, and the harness should not have been shaped any other way.
-///
-/// # Locking
-///
-/// Queue submission and command pools need external synchronisation, and the harness
-/// runs tests on several threads. One lock around the whole dispatch is coarse and
-/// correct; the device is the bottleneck anyway, so a finer scheme would buy nothing.
+/// Creating and destroying an instance and device per dispatch faults intermittently in long runs,
+/// for the same reason as [`entry`], and costs over a second each time. Queue submission and
+/// command pools need external synchronisation and tests run on several threads, so one lock covers
+/// a whole dispatch; the device is the bottleneck, so a finer scheme gains nothing.
 pub(crate) struct Session {
     pub(crate) instance: ash::Instance,
     pub(crate) physical: vk::PhysicalDevice,
@@ -464,11 +364,8 @@ pub(crate) struct Session {
 
 /// The shared session, created on first use and never destroyed.
 ///
-/// Never destroyed for the same reason the loader is not: there is nowhere to do it
-/// from, and a process that has finished with Vulkan is one that is exiting. A failure
-/// is cached alongside, so a machine with no device does not repeat the whole setup for
-/// every call - and the stage that failed is kept, because "no device" and "a device
-/// that refused us" want different responses.
+/// A failure is cached with the stage that failed, so a machine with no device does not repeat the
+/// setup on every call, and "no device" stays distinct from "a device that refused us".
 pub(crate) fn session() -> Result<&'static std::sync::Mutex<Session>, DispatchError> {
     static SESSION: std::sync::OnceLock<
         Result<std::sync::Mutex<Session>, (&'static str, vk::Result)>,
@@ -485,11 +382,8 @@ impl Session {
         let entry =
             entry().map_err(|_| ("Entry::load", vk::Result::ERROR_INITIALIZATION_FAILED))?;
 
-        // Vulkan 1.2, because the properties below are only reportable from 1.1 onward
-        // and the float controls from 1.2. Stated as a requirement rather than probed
-        // for and worked around: this is a harness for a target whose own hardware is
-        // newer than either, and a fallback would be untested code guarding against a
-        // machine nobody is using.
+        // Vulkan 1.2 is required: the properties below need 1.1 and the float controls 1.2. The
+        // target hardware exceeds both, so there is no fallback.
         let application = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
         let instance_info = vk::InstanceCreateInfo::default().application_info(&application);
         // SAFETY: the create info outlives the call and is fully initialised.
@@ -499,7 +393,7 @@ impl Session {
         let (physical, family) = Self::compute_family(&instance)?;
         let (device, wanted_features, mesh_enabled) =
             Self::create_device(&instance, physical, family)?;
-        // SAFETY: the family index came from this device own queue properties.
+        // SAFETY: the family index came from this device's own queue properties.
         let queue = unsafe { device.get_device_queue(family, 0) };
         let properties = Self::properties(&instance, physical, &wanted_features, mesh_enabled);
 
@@ -538,8 +432,8 @@ impl Session {
         Ok((physical, family))
     }
 
-    /// Creates the logical device with the features and extensions the emitted modules
-    /// declare, returning the core features requested and whether mesh shading was enabled.
+    /// Creates the logical device with the features and extensions the emitted modules declare,
+    /// returning the core features requested and whether mesh shading was enabled.
     fn create_device(
         instance: &ash::Instance,
         physical: vk::PhysicalDevice,
@@ -550,38 +444,16 @@ impl Session {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        // **Only what the emitted modules actually declare**, and each of these was found by
-        // a validator rather than chosen.
+        // Only what emitted modules declare, and each only where the device offers it, so a device
+        // that lacks one is refused by the code that needs it rather than at creation.
+        // `shader_int16` and `shader_float16` serve modules that read a half-format buffer channel;
+        // `vertex_pipeline_stores_and_atomics` and `fragment_stores_and_atomics` serve pre-fragment
+        // (including mesh) and fragment shaders that write a storage buffer, as guest shaders do.
         //
-        // Nothing was requested here until a module translated from a shader a console ran
-        // was offered to a driver under the Khronos validation layer, which named three
-        // things the modules had been relying on and the device had never been asked for
-        // (worklog 554):
-        //
-        //   `shader_int16` and `shader_float16` - a module that reads a half-format buffer
-        //     channel declares the Int16 and Float16 capabilities. Every module used to
-        //     declare them, used or not, which is how this went unnoticed through every
-        //     compute dispatch the suite has ever run; the models now declare the types on
-        //     first use (worklog 556), so these two are needed by the few modules that read
-        //     halves and by nothing else.
-        //   `vertex_pipeline_stores_and_atomics` - the same permission for every stage before
-        //     the fragment one, which includes the mesh stage a guest's primitive shader
-        //     becomes. The GL cube's vertex program writes a canary word, so it needs this for
-        //     the same reason its pixel shader needs the next one.
-        //   `fragment_stores_and_atomics` - a fragment shader that writes a storage buffer
-        //     needs it, and the guest's pixel shaders do exactly that: the GL cube's writes a
-        //     canary word every frame. D552 recorded that the fragment path was *designed*
-        //     not to need this, which was true of the hand-written modules and is not true of
-        //     the console's.
-        //
-        // Each is requested only where the device offers it, so a device that cannot is
-        // refused by the code that needs it rather than at creation.
         // SAFETY: the handle came from enumeration on this live instance.
         let available = unsafe { instance.get_physical_device_features(physical) };
-        //   `shader_storage_image_write_without_format` - a module that writes a storage image
-        //     whose format it does not declare. A guest's `image_store` names a format in a
-        //     descriptor this project does not decode, so declaring one in the module would be
-        //     inventing it; saying `Unknown` instead needs this (D692, worklog 575).
+        // `shader_storage_image_write_without_format` lets a module store to an image whose format
+        // is `Unknown`, because the guest's format is in a descriptor nothing here decodes (D692).
         let wanted_features = vk::PhysicalDeviceFeatures::default()
             .shader_int16(available.shader_int16 == vk::TRUE)
             .fragment_stores_and_atomics(available.fragment_stores_and_atomics == vk::TRUE)
@@ -591,22 +463,21 @@ impl Session {
             .vertex_pipeline_stores_and_atomics(
                 available.vertex_pipeline_stores_and_atomics == vk::TRUE,
             )
-            //   `texture_compression_bc` - sampling block-compressed images directly. Requested
-            //     so the report can say whether an upload path would need a decoder (G15).
+            // `texture_compression_bc` lets the report say whether an upload path needs a decoder.
             .texture_compression_bc(available.texture_compression_bc == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
         let mut chained = vk::PhysicalDeviceFeatures2::default().push_next(&mut offered_float16);
-        // SAFETY: the handle came from enumeration on this live instance, and the chained
-        // structure outlives the call.
+        // SAFETY: the handle came from enumeration on this live instance, and the chained structure
+        // outlives the call.
         unsafe { instance.get_physical_device_features2(physical, &mut chained) };
         let mut wanted_float16 = vk::PhysicalDeviceVulkan12Features::default()
             .shader_float16(offered_float16.shader_float16 == vk::TRUE);
 
-        // `VK_EXT_mesh_shader`, where the device has it. A guest's NGG primitive shader is a
-        // mesh shader (D688), so without this the vertex half of a console frame has no stage
-        // to run in at all - and with it, the modules that do not use it are unaffected.
+        // `VK_EXT_mesh_shader` where the device has it: a guest's primitive shader is a mesh shader
+        // (D688), and modules that do not use it are unaffected.
+        //
         // SAFETY: the handle came from enumeration on this live instance.
         let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
             .map_err(|e| ("enumerate_device_extension_properties", e))?;
@@ -645,8 +516,8 @@ impl Session {
         let mut reported = vk::PhysicalDeviceProperties2::default()
             .push_next(&mut float_controls)
             .push_next(&mut subgroup);
-        // SAFETY: the physical device is valid, and both chained structures outlive the
-        // call - they are locals declared immediately above it.
+        // SAFETY: the physical device is valid, and both chained structures are locals declared
+        // immediately above that outlive the call.
         unsafe { instance.get_physical_device_properties2(physical, &mut reported) };
 
         Properties {
@@ -656,11 +527,9 @@ impl Session {
             ),
             subnormals_preserved: float_controls.shader_denorm_preserve_float32 == vk::TRUE,
             subgroup_size: subgroup.subgroup_size,
-            // What was asked for at device creation, which is nothing - see the field's
-            // note. Written as a comparison against the request rather than as `false` so
-            // that enabling it later updates this by construction.
+            // Derived from the creation request, so the report follows whatever was enabled.
             fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,
-            // Enabled, not merely offered - the same rule every other row here follows.
+            // Enabled, not merely offered, like every other field.
             mesh_shading: mesh_enabled == vk::TRUE,
             storage_image_write: wanted_features.shader_storage_image_write_without_format
                 == vk::TRUE,
@@ -671,27 +540,24 @@ impl Session {
 
 /// A host-visible storage buffer bound in a compute dispatch, with what read-back needs.
 ///
-/// Grouped so a dispatch can bind a buffer whether it created it (the throwaway one [`dispatch`]
-/// makes) or was handed a resident one (the backend, through [`dispatch_into`]). Copyable because
-/// it is plain handles and sizes; the backend keeps the owning copy and passes a copy to dispatch.
+/// Lets a dispatch bind either a throwaway buffer ([`dispatch`]) or a resident one
+/// ([`dispatch_bound`]). Copyable because it is plain handles and sizes; the backend keeps the
+/// owning copy.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DispatchBuffer {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: vk::DeviceSize,
     pub words: usize,
-    /// Where the `words` start within the buffer - one slot of the window ring (worklog 847); zero
-    /// for a buffer that is the words and nothing else.
+    /// Where the `words` start within the buffer: one slot of the window ring, or zero for a buffer
+    /// that holds only the words.
     pub offset: vk::DeviceSize,
 }
 
 /// Records and runs one compute dispatch against two caller-owned buffers, and reads both back.
 ///
-/// Releases everything it created **except the buffers** - the caller owns those, and whether they
-/// are throwaway or resident is the caller's business. On an error before read-back it releases
-/// nothing, which is the successful-path-only release the whole module has always had: the note at
-/// the top explains why the session survives a leak, and refusing every later dispatch would be
-/// worse.
+/// Releases everything it created except the buffers, which belong to the caller. On an error
+/// before read-back it releases nothing, per the module's successful-path-only release.
 fn dispatch_core(
     device: &ash::Device,
     queue: vk::Queue,
@@ -712,7 +578,7 @@ fn dispatch_core(
     let pipeline_layout = bound.layout;
     let sets = [bound.set];
 
-    // ---- record and submit ---------------------------------------------------
+    // Record and submit.
     let pool_create = vk::CommandPoolCreateInfo::default().queue_family_index(family);
     // SAFETY: the family index is one this device was created with.
     let command_pool = unsafe { device.create_command_pool(&pool_create, None) }
@@ -755,19 +621,21 @@ fn dispatch_core(
     // SAFETY: the command buffer has finished recording and the queue belongs to this device.
     unsafe { device.queue_submit(queue, &submits, vk::Fence::null()) }
         .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
-    // Waiting on the device rather than a fence: one submission, and a fence would be more objects
-    // to release for no extra guarantee.
+    // A device wait rather than a fence: one submission, and a fence would add an object to release
+    // for no extra guarantee.
+    //
     // SAFETY: the device is live and nothing else is using it.
     unsafe { device.device_wait_idle() }
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
 
-    // ---- read back -----------------------------------------------------------
+    // Read back.
     let observed = read_back(device, binding0)?;
     let guest_memory = read_back(device, binding1)?;
 
-    // ---- release (everything but the buffers) --------------------------------
-    // SAFETY: every handle below was created here on this device, is not in use - the queue has
-    // been waited on - and is destroyed exactly once.
+    // Release everything but the buffers.
+    //
+    // SAFETY: every handle below was created here on this device, is not in use after the queue
+    // wait, and is destroyed exactly once.
     unsafe { device.destroy_command_pool(command_pool, None) };
     // SAFETY: as above.
     unsafe { device.destroy_descriptor_pool(bound.descriptor_pool, None) };
@@ -786,22 +654,17 @@ fn dispatch_core(
 /// Runs a compute shader over two throwaway storage buffers and returns what it left in them.
 ///
 /// Binding zero is the observation window a translated shader reports registers through; binding
-/// one is guest memory. Both are created here, zeroed, and destroyed after, so a value read back
-/// was written by the shader rather than left over. They are separate bindings rather than halves
-/// of one buffer, because a guest address must not be able to reach the observation area: an
-/// out-of-range store would rewrite the registers a test is about to assert on, and the failure
-/// would present as a register bug rather than a memory one.
-///
-/// `dispatch_bound` is the variant that binds a *resident* buffer instead of a throwaway one.
+/// one is guest memory. Both are created zeroed and destroyed after. They are separate bindings so
+/// an out-of-range guest store cannot overwrite the observed registers. `dispatch_bound` binds
+/// resident buffers instead.
 pub fn dispatch(
     module: &[u32],
     words: usize,
     memory_words: usize,
     groups: [u32; 3],
 ) -> Result<Output, DispatchError> {
-    // A poisoned lock means an earlier dispatch panicked. Every handle a dispatch
-    // creates is released before it returns, so the session itself is still sound, and
-    // refusing every later dispatch would turn one failed test into all of them.
+    // A poisoned lock means an earlier dispatch panicked. Every handle a dispatch creates is
+    // released before it returns, so the session is still sound and later dispatches proceed.
     let session = session()?;
     let session = session
         .lock()
@@ -836,8 +699,7 @@ pub fn dispatch(
         offset: 0,
     };
 
-    // On an error the buffers leak with everything else - the successful-path-only release this
-    // has always had.
+    // On an error the buffers leak with everything else, per the successful-path-only release.
     let (observed, guest_memory) =
         dispatch_core(device, queue, family, module, &binding0, &binding1, groups)?;
 
@@ -850,8 +712,7 @@ pub fn dispatch(
     // SAFETY: as above.
     unsafe { device.free_memory(memory_memory, None) };
 
-    // The device and the instance are deliberately **not** destroyed. They belong to the
-    // shared session and the next dispatch will use them.
+    // The device and instance belong to the shared session and are not destroyed.
 
     Ok(Output {
         observed,
@@ -859,14 +720,11 @@ pub fn dispatch(
     })
 }
 
-/// Runs a compute dispatch binding two caller-owned buffers - an observation at binding 0 and the
-/// guest-memory window at binding 1 - and reads **both** back, destroying neither (worklog 647).
+/// Runs a compute dispatch binding two caller-owned buffers, an observation at binding 0 and the
+/// guest-memory window at binding 1, and reads both back, destroying neither.
 ///
-/// This is how a guest's dispatch is observed. A guest compute shader's result is in guest memory
-/// (binding 1), not in the observation window a *translated* shader reports registers through - so
-/// the window is bound at binding 1 and returned, where the former `dispatch_into` bound a scratch
-/// there and discarded it (worklog 635 named that gap). Both buffers are the caller's - a resident
-/// observation and the resident guest-memory window - and are left for it, reused across dispatches.
+/// This is how a guest dispatch is observed: a guest compute shader's result is in guest memory at
+/// binding 1. Both buffers are resident and reused across dispatches.
 pub(crate) fn dispatch_bound(
     observation: &DispatchBuffer,
     window: &DispatchBuffer,
@@ -887,10 +745,10 @@ pub(crate) fn dispatch_bound(
 }
 
 /// Runs a compute dispatch over a caller-owned guest-memory window at binding 1, with a throwaway
-/// observation of `observation_words` at binding 0, and reads both back (worklog 647).
+/// observation of `observation_words` at binding 0, and reads both back.
 ///
-/// The window is the caller's and is left for it; the observation is created and destroyed here,
-/// because a dispatch with no bound observation buffer still needs one for the module's binding 0.
+/// The observation exists because the module's binding 0 needs a buffer; the window is left for the
+/// caller.
 pub(crate) fn dispatch_reading_window(
     window: &DispatchBuffer,
     observation_words: usize,
@@ -923,8 +781,8 @@ pub(crate) fn dispatch_reading_window(
 
     let result = dispatch_core(device, queue, family, module, &observation, window, groups);
 
-    // The throwaway observation, destroyed whether or not the dispatch succeeded; the window is the
-    // caller's and is left alone.
+    // The throwaway observation is destroyed whether or not the dispatch succeeded.
+    //
     // SAFETY: created here on this device, no longer in use, and destroyed exactly once.
     unsafe { device.destroy_buffer(scratch, None) };
     // SAFETY: as above, and nothing is bound to the memory now.
@@ -937,20 +795,19 @@ pub(crate) fn dispatch_reading_window(
 mod tests {
     use super::{Availability, probe};
 
+    /// A probe yields either device properties or a reason there is no device.
     #[test]
     fn probing_reports_a_reason_when_there_is_no_device() {
-        // Whichever way this machine answers, the answer must be usable: a device
-        // carries what it can do, an absence carries why. An absence with no reason
-        // produces a skip message nobody can act on.
+        // Either answer must be usable: a device carries its properties, an absence carries a
+        // reason a skip message can report.
         match probe() {
             Availability::Available { properties } => {
                 assert!(
                     !properties.device.is_empty(),
                     "an available device must name itself"
                 );
-                // A subgroup is at least one invocation wide by definition, so zero
-                // means the property was never filled in - which would read as "this
-                // device has no subgroups" rather than as "nobody asked".
+                // A subgroup is at least one invocation wide, so zero means the property was never
+                // filled in.
                 assert!(
                     properties.subgroup_size >= 1,
                     "a device reporting a subgroup size of zero has not been asked"

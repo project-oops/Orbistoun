@@ -1,21 +1,7 @@
 //! Creating an event queue, and registering events against one that exists.
 //!
-//! # What sent this here
-//!
-//! `sceKernelCreateEqueue` was unimplemented, so **its out-parameter was never written** and the
-//! guest's handle kept whatever it held. Every later call against that queue was then handed a
-//! value orbistoun never issued - which is the same shape as D507's out-parameter finding and
-//! D509's, and is invisible from the call that causes it (D524).
-//!
-//! # What these assert, and what they cannot
-//!
-//! They assert the **handle round trip**: a created queue answers to the handle it wrote, and a
-//! handle nobody was given does not. That is the property that makes a registration mean
-//! something.
-//!
-//! They cannot assert that anything is ever *delivered*. Nothing delivers: PPSA02664 calls
-//! `sceKernelWaitEqueue` zero times since the flip count stopped lying (D516), so a queue has no
-//! reader and storage for one would be an abstraction ahead of its caller.
+//! These assert the handle round trip: a created queue answers to the handle it wrote, and a
+//! handle nobody was given does not (D524). Delivery of events is not covered here.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 

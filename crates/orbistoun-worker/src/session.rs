@@ -1,27 +1,12 @@
 //! The session this worker is running, as the shell sees it.
 //!
-//! # Why the worker keeps its own copy
+//! The window keeps its own session in another process (D032) and uses it to decide what to
+//! draw; this copy is the one the guest is subject to. The two can disagree, and a request this
+//! side refuses is counted and reported by [`summarise`].
 //!
-//! The window has a session too, and they are not the same object: they are in different
-//! processes (D032). The window's copy decides what to draw; **this one is the copy the
-//! guest is subject to**, and it is the one that must be right, because it decides whether
-//! a title is told it lost the machine.
-//!
-//! Two copies can disagree. That is not a flaw to design away - a shim asking for something
-//! this side refuses is a real event worth counting, and [`summarise`] says so at the end of
-//! a run rather than letting a dropped request look like a request that did nothing.
-//!
-//! # Backgrounding stops threads, and says how many
-//!
-//! [`orbistoun_shell::Execution::Suspended`] described a behaviour without causing one for a
-//! day: the state said suspended and every guest thread ran on. It now asks them to park.
-//!
-//! **Asks, not forces.** Threads park at the trampoline, where they hold no guest lock -
-//! freezing one at an arbitrary instruction risks it holding the host heap lock, which
-//! deadlocks the whole worker including whatever would have resumed it (D344).
-//!
-//! The cost is that a thread which stops calling imports never parks, so [`summarise`]
-//! reports *how many of them stopped* rather than implying all of them did.
+//! Backgrounding asks guest threads to park at the trampoline, where they hold no guest lock
+//! (D344). A thread that stops calling imports never parks, so [`summarise`] reports how many
+//! did.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -39,17 +24,15 @@ static REFUSED: AtomicU32 = AtomicU32::new(0);
 
 /// Marks a title as running and in front.
 ///
-/// Called when a run starts. Anything raised before this point has nowhere to go, which is
-/// correct: there was no title to interrupt.
+/// Called when a run starts; before it there is no title to interrupt.
 pub fn begin() {
     *lock() = Lifecycle::Foreground;
 }
 
 /// Marks the title as gone.
 ///
-/// **Releases any park on the way out**, and that is not tidiness. The flag is process-wide,
-/// so a run that ended while backgrounded would leave the next one's threads parking at their
-/// first call - a guest that hangs for a reason belonging to the guest before it.
+/// Releases any park: the flag is process-wide, and a run that ended while backgrounded would
+/// otherwise park the next run's threads at their first call.
 pub fn end() {
     *lock() = Lifecycle::Exited;
     orbistoun_core::park::release();
@@ -72,19 +55,13 @@ pub fn apply(request: Request) -> Result<Lifecycle, Refused> {
     match session.on(request) {
         Ok(taken) => {
             *session = taken.state;
-            // Dropped before raising: `raise` reaches into the system-service statics, and
-            // holding this lock across that call makes the ordering of two unrelated locks
-            // part of the design for no benefit.
+            // Dropped before raising, so this lock is never ordered against the system-service
+            // statics `raise` takes.
             let became = taken.state;
             drop(session);
 
-            // **The state is acted on, not merely recorded.** `Execution` said `Suspended`
-            // for a whole day while every guest thread kept running - a value describing a
-            // behaviour rather than causing it, which is the failure this session keeps
-            // finding in its own work (D344).
-            //
-            // Threads are *asked* to stop and park at the trampoline. How many actually did
-            // is a separate question, and `summarise` reports it rather than assuming.
+            // The state is acted on: threads are asked to park at the trampoline (D344), and
+            // `summarise` reports how many did.
             match became.execution(orbistoun_shell::WhenBackgrounded::default()) {
                 orbistoun_shell::Execution::Suspended => orbistoun_core::park::request(),
                 orbistoun_shell::Execution::Running | orbistoun_shell::Execution::Stopped => {
@@ -106,15 +83,12 @@ pub fn apply(request: Request) -> Result<Lifecycle, Refused> {
 
 /// Says what the shell did to this run, on the way out.
 ///
-/// Silent when nothing asked for anything, so an ordinary run stays as quiet as it was
-/// before this existed.
+/// Silent when nothing asked for anything.
 pub fn summarise() {
     let applied = APPLIED.load(Ordering::Relaxed);
     let refused = REFUSED.load(Ordering::Relaxed);
     let withheld = orbistoun_systemservice::console::summarise();
-    // Counted the same way events are, and for the same reason: input arriving that no
-    // guest can read is a transport waiting for a measurement, and a report that said
-    // nothing would leave it looking broken instead (D345).
+    // Input that no guest read is counted too, so a silent report never hides it.
     let input = orbistoun_input::latest::summarise();
     if applied == 0 && refused == 0 && withheld.is_none() && input.is_none() {
         return;
@@ -123,8 +97,7 @@ pub fn summarise() {
     let mut lines = vec!["shell".to_owned()];
     lines.push(format!("  {applied} request(s) carried out"));
     if refused > 0 {
-        // Worth a line of its own. It means the window believed the title was somewhere it
-        // was not, and the guest was not told something somebody intended it to be told.
+        // The window believed the title was somewhere it was not, so the guest missed an event.
         lines.push(format!(
             "  {refused} refused - the window and the worker disagreed about where the title was"
         ));
@@ -136,10 +109,8 @@ pub fn summarise() {
         lines.push(format!("  {said}"));
     }
     if matches!(state(), Lifecycle::Background) {
-        // **Counted rather than claimed.** Threads park cooperatively, so a guest thread in
-        // a loop that calls no imports never stops - and a report saying "suspended" while
-        // three of four threads ran on would be exactly the plausible output principle 3
-        // forbids. The number says how much of the guest actually stopped (D344).
+        // Counted rather than claimed: threads park cooperatively, and one that calls no
+        // imports never stops (D344).
         let parked = orbistoun_core::park::parked();
         let threads = orbistoun_kernel::thread::all()
             .iter()
@@ -160,9 +131,8 @@ pub fn summarise() {
 
 /// The guard, with a poisoned lock treated as ordinary.
 ///
-/// A panic on one guest thread must not turn every later shell request into a panic on a
-/// different one; the value behind it is a single `Copy` state with no invariant a partial
-/// write could break.
+/// A panic on one guest thread must not turn later shell requests into panics; the value is a
+/// single `Copy` state no partial write can break.
 fn lock() -> std::sync::MutexGuard<'static, Lifecycle> {
     SESSION
         .lock()
@@ -173,14 +143,8 @@ fn lock() -> std::sync::MutexGuard<'static, Lifecycle> {
 mod tests {
     use orbistoun_shell::{Lifecycle, Request};
 
-    /// **A shell request reaches the session and moves it, and a disagreement is counted.**
-    ///
-    /// The property the reader thread exists to make possible: something arriving while a
-    /// run is in flight changes where the title stands.
-    ///
-    /// One test rather than two, because these are process-wide statics - two tests
-    /// touching them run concurrently under the harness and would race on the state each
-    /// one set up.
+    /// A shell request moves the session, and a refused request is an error, not dropped. One
+    /// test, because the state is process-wide and two tests would race on it.
     #[test]
     fn a_request_moves_the_session_and_a_refusal_is_not_dropped() {
         super::begin();
@@ -190,8 +154,6 @@ mod tests {
             super::apply(Request::ToShell).expect("the shell is reachable from the foreground");
         assert_eq!(after, Lifecycle::Background);
 
-        // Asserted on the failure rather than the success: a refused request that vanished
-        // would look exactly like one that was carried out and did nothing.
         super::end();
         assert!(
             super::apply(Request::Resume).is_err(),

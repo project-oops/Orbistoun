@@ -1,28 +1,11 @@
 //! Rendering into a colour attachment and reading the pixels back.
 //!
-//! # Why this exists, and why it is first
-//!
-//! The roadmap calls framebuffer diffing *the only cheap mechanical correctness oracle this
-//! project will ever have*, and it is the one part of that sentence that was not built. Phase
-//! 6's own ordering says to build the harness **before** anything it is meant to check, for a
-//! reason worth repeating: everything else in that phase is verified against material this
-//! project generated, so it cannot be wrong in a way its own tests would notice. A harness that
-//! clears to a colour and reads that colour back is checked against *itself*, which makes it a
-//! genuine oracle rather than one more self-consistent guess (D549).
-//!
-//! # What is here and what is not
-//!
-//! The attachment path: an image, a render pass, the layout transition, the copy to a
-//! host-visible buffer, and the readback. **No draw and no shaders yet.** That is the next
-//! step and it sits on top of this one - which is the risky half done first, because a
-//! mistake in a layout transition or a copy region produces plausible pixels rather than an
-//! error, and a draw built on an unverified copy would be debugged in the wrong place.
-//!
-//! # The same caveats as the compute path
-//!
-//! A missing device is reported, never quietly passed - see [`crate::compute::probe`].
-//! Resources are released on the successful path only; an error abandons them, because this is
-//! test infrastructure in a process that is about to exit.
+//! The framebuffer oracle: a harness checked against itself (a clear read back as that colour)
+//! before it checks anything translated (D549). It covers the attachment path (image, render pass,
+//! layout transitions, copies, readback), draws through hand-written or translated modules, and
+//! resident attachments that consecutive draws land on in place. A missing device is reported,
+//! never passed; see [`crate::compute::probe`]. One-off draws release resources on the successful
+//! path only, because an error means a test process about to exit.
 
 use ash::vk;
 
@@ -54,10 +37,8 @@ impl Pixels {
 
 /// The format every attachment here uses.
 ///
-/// `R8G8B8A8_UNORM` because it is mandatory for colour attachment and blitting on every Vulkan
-/// implementation, so a machine cannot fail this harness for want of a format. Eight bits a
-/// channel also makes the expected bytes exact for the clear values used: `0.0` is `0` and
-/// `1.0` is `255`, with no rounding to argue about.
+/// `R8G8B8A8_UNORM` is mandatory for colour attachment and blitting on every Vulkan implementation,
+/// and eight bits a channel make the clear values exact: `0.0` is `0` and `1.0` is `255`.
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
 /// Creates a device-local image usable as a colour attachment and as a copy source.
@@ -80,8 +61,7 @@ fn create_attachment(
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        // TRANSFER_DST as well as SRC: a draw that starts from given pixels copies them in first
-        // (worklog 822).
+        // TRANSFER_DST as well as SRC: a draw that starts from given pixels copies them in first.
         .usage(
             vk::ImageUsageFlags::COLOR_ATTACHMENT
                 | vk::ImageUsageFlags::TRANSFER_SRC
@@ -97,9 +77,8 @@ fn create_attachment(
     let requirements = unsafe { device.get_image_memory_requirements(image) };
     // SAFETY: the physical device is valid.
     let properties = unsafe { instance.get_physical_device_memory_properties(physical) };
-    // Device-local: an optimally tiled image is not readable by the host whatever memory it
-    // sits in, so the copy below is required regardless and there is nothing to gain by
-    // asking for host-visible memory the driver may not have.
+    // Device-local: an optimally tiled image is not host-readable in any memory, so the copy is
+    // needed regardless.
     let memory_type = (0..properties.memory_type_count)
         .find(|i| {
             requirements.memory_type_bits & (1 << i) != 0
@@ -124,17 +103,11 @@ fn create_attachment(
 
 /// A render pass with one colour attachment, cleared on load and kept.
 ///
-/// The final layout is `TRANSFER_SRC_OPTIMAL`, so the render pass itself performs the
-/// transition the copy needs and no separate barrier is recorded. The external dependency is
-/// what makes that transition visible to the transfer stage - without it the copy may read the
-/// image before the store has landed, which is the kind of error that produces *plausible*
-/// pixels on one driver and correct ones on another.
-///
-/// **Or loaded, when the draw starts from given pixels** (`loads`, worklog 822): the attachment is
-/// then copied in before the pass and arrives in `TRANSFER_DST_OPTIMAL`, which the pass takes as its
-/// initial layout and loads rather than clears - so a target's earlier draws, or the guest's own
-/// contents, are what this draw lands on. A second external dependency orders that copy before the
-/// pass writes.
+/// The final layout is `TRANSFER_SRC_OPTIMAL`, so the pass performs the transition the copy needs,
+/// and the external dependency makes it visible to the transfer stage; without it the copy may read
+/// before the store lands. With `loads`, the attachment is copied in first and arrives in
+/// `TRANSFER_DST_OPTIMAL`, which the pass takes as its initial layout and loads rather than clears;
+/// a second external dependency orders that copy before the pass writes.
 fn create_render_pass(device: &ash::Device, loads: bool) -> Result<vk::RenderPass, DispatchError> {
     let (load_op, initial_layout) = if loads {
         (
@@ -191,10 +164,10 @@ fn create_render_pass(device: &ash::Device, loads: bool) -> Result<vk::RenderPas
         .map_err(|e| DispatchError::Vulkan("create_render_pass", e))
 }
 
-/// The render pass a [`ResidentAttachment`] is drawn with: loaded and stored, starting and ending in
-/// `COLOR_ATTACHMENT_OPTIMAL`, so consecutive draws land on each other with no copy between them
-/// (worklog 839). The external dependencies order each pass after whatever earlier submission last
-/// wrote the attachment (a previous draw, or the copy that seeded it) and before the readback copy.
+/// The render pass a [`ResidentAttachment`] is drawn with: loaded and stored, starting and ending
+/// in `COLOR_ATTACHMENT_OPTIMAL`, so consecutive draws land on each other with no copy between. The
+/// external dependencies order each pass after whatever last wrote the attachment and before the
+/// readback copy.
 fn create_resident_render_pass(device: &ash::Device) -> Result<vk::RenderPass, DispatchError> {
     let attachments = [vk::AttachmentDescription::default()
         .format(FORMAT)
@@ -241,15 +214,14 @@ fn create_resident_render_pass(device: &ash::Device) -> Result<vk::RenderPass, D
         .map_err(|e| DispatchError::Vulkan("create_render_pass(resident)", e))
 }
 
-/// Records one command buffer with `body`, submits it, and waits for the device - for the resident
+/// Records one command buffer with `body`, submits it, and waits for the device: for the resident
 /// attachment's seeding and readback, which run outside any draw.
 fn one_shot(
     session: &crate::compute::Session,
     body: impl FnOnce(&ash::Device, vk::CommandBuffer),
 ) -> Result<(), DispatchError> {
     let device = &session.device;
-    // **The draws recorded so far go first** (worklog 844): whatever this does - read the attachment
-    // back, seed it, set a pipeline up - comes after them in the stream the guest wrote.
+    // The draws recorded so far go first, so this follows them in the guest's stream order.
     settle(session)?;
     let pool_info = vk::CommandPoolCreateInfo::default().queue_family_index(session.family);
     // SAFETY: the device is live and the create info outlives the call.
@@ -284,9 +256,8 @@ fn one_shot(
     Ok(())
 }
 
-/// [`one_shot`]'s recording, submitted **without waiting** (worklog 850): after the draws recorded
-/// so far, in queue order, and finished whenever the device gets to it - the next [`settle`] waits
-/// for it and frees its buffer, as it does for resident draws. For work nothing reads until then.
+/// [`one_shot`]'s recording, submitted without waiting: after the draws recorded so far, in queue
+/// order. The next [`settle`] waits for it and frees its buffer. For work nothing reads until then.
 fn one_shot_unwaited(
     session: &crate::compute::Session,
     body: impl FnOnce(&ash::Device, vk::CommandBuffer),
@@ -361,11 +332,10 @@ fn transition(
     }
 }
 
-/// A colour target kept on the device across a submission's draws (worklog 839).
+/// A colour target kept on the device across a submission's draws.
 ///
-/// Every draw used to create its own attachment, copy the target's 8 MB in and copy 8 MB back out.
-/// This one is created once per target - seeded from given pixels or cleared - drawn on in place by
-/// each draw, and read back only when its pixels are asked for.
+/// Created once per target, seeded from given pixels or cleared, drawn on in place by each draw,
+/// and read back only when its pixels are asked for.
 #[derive(Debug)]
 pub(crate) struct ResidentAttachment {
     image: vk::Image,
@@ -373,8 +343,8 @@ pub(crate) struct ResidentAttachment {
     view: vk::ImageView,
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
-    /// Host-visible (cached where offered), the size of the image: the seed goes in through it and
-    /// the readback comes out through it.
+    /// Host-visible (cached where offered), the size of the image: the seed goes in and the
+    /// readback comes out through it.
     buffer: vk::Buffer,
     buffer_memory: vk::DeviceMemory,
     width: u32,
@@ -486,11 +456,10 @@ impl ResidentAttachment {
     }
 
     /// Gives it new contents in place: `pixels` (tightly packed `Rgba8`, exactly the extent) copied
-    /// in through its own buffer, after everything already recorded on the queue. In place because
-    /// recreating the attachment for every seed waits for the device twice and allocates twice.
+    /// in through its own buffer, after everything already recorded on the queue. In place, because
+    /// recreating the attachment waits for the device and allocates twice.
     ///
-    /// The buffer is written only once nothing still reads it: the device is settled first, which
-    /// finishes a previous reload's copy and any readback.
+    /// The device is settled first, so nothing still reads the buffer when it is written.
     pub(crate) fn reload(&self, pixels: &[u8]) -> Result<(), DispatchError> {
         let (width, height) = self.extent();
         let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
@@ -553,11 +522,10 @@ impl ResidentAttachment {
         })
     }
 
-    /// Gives it one `Rgba8` word everywhere, in place, on the device - what a clear the guest
-    /// filled seeds. The word goes into its buffer by `vkCmdFillBuffer`, exact bits rather
-    /// than a float clear's rounding, and is copied in from there - all recorded after what the queue
-    /// already holds, so nothing waits: the host never touches the buffer, and the device orders
-    /// the fill after the buffer's last reader.
+    /// Gives it one `Rgba8` word everywhere, in place, on the device: what a guest's fill clear
+    /// seeds. `vkCmdFillBuffer` writes the exact bits into its buffer (no float clear rounding) and
+    /// the copy follows, all recorded after what the queue holds, so the host never waits or
+    /// touches the buffer.
     pub(crate) fn reload_uniform(&self, word: u32) -> Result<(), DispatchError> {
         let (width, height) = self.extent();
         let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
@@ -666,10 +634,9 @@ impl ResidentAttachment {
         })
     }
 
-    /// **The frame as it stands now, kept on the side** (worklog 850): copied on the device into a
-    /// host-visible buffer of its own, so later draws on this attachment do not change it and nothing
-    /// is read to the host until [`FrameSnapshot::read`] asks. What a guest's copy of its colour
-    /// target sees at the point in the stream it was made.
+    /// The frame as it stands now, copied on the device into a host-visible buffer of its own, so
+    /// later draws do not change it and nothing reaches the host until [`FrameSnapshot::read`].
+    /// What a guest's copy of its colour target sees at that point in the stream.
     pub(crate) fn snapshot_into(&self, snapshot: &FrameSnapshot) -> Result<(), DispatchError> {
         if (snapshot.width, snapshot.height) != self.extent() {
             return Err(DispatchError::Unsupported(
@@ -756,11 +723,11 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let device = &session.device;
-        // Waiting idle means none of the handles below is in use - after running any draws still
-        // recorded on it, and freeing their command buffers (worklogs 843, 844).
+        // Waiting idle, after running any draws still recorded and freeing their command buffers,
+        // means none of the handles below is in use.
         let _ = settle(&session);
         // SAFETY: created on this device, idle, destroyed exactly once, dependants before what they
-        // depend on - and so for each below.
+        // depend on; the same holds for each below.
         unsafe { device.destroy_framebuffer(self.framebuffer, None) };
         // SAFETY: as above.
         unsafe { device.destroy_image_view(self.view, None) };
@@ -800,8 +767,8 @@ fn read_host_memory(
     Ok(bytes)
 }
 
-/// A resident frame as it stood when [`ResidentAttachment::snapshot`] took it, held on the device in
-/// a host-visible buffer of its own until it is read or dropped (worklog 850).
+/// A resident frame as it stood when [`ResidentAttachment::snapshot_into`] took it, held on the device
+/// in a host-visible buffer of its own until it is read or dropped.
 #[derive(Debug)]
 pub(crate) struct FrameSnapshot {
     buffer: vk::Buffer,
@@ -858,7 +825,7 @@ impl FrameSnapshot {
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A copy into it may still be in flight; waited for here, so the device no longer uses it.
+        // A copy into it may still be in flight; the settle waits for it.
         let _ = settle(&session);
         // SAFETY: created on this device; the device is idle after the settle above, so nothing
         // uses it, and it is destroyed exactly once.
@@ -918,7 +885,6 @@ fn whole_image(width: u32, height: u32) -> vk::BufferImageCopy {
         })
 }
 
-/// A host-visible buffer big enough to receive the image, and its mapped-readable memory.
 /// Reads a host-visible allocation back as words.
 fn read_words(
     device: &ash::Device,
@@ -941,8 +907,8 @@ fn read_words(
 
 /// Writes `memory` into the guest-memory window a pipeline bound.
 ///
-/// Nothing when there is nothing to write, which is every draw that does not fetch. The buffer
-/// is host-visible for exactly this - these are small and a test may want to read one back.
+/// Nothing when there is nothing to write, as in every draw that does not fetch. The buffer is
+/// host-visible for this: these are small and a test may read one back.
 fn seed_memory(
     device: &ash::Device,
     built: &Pipeline,
@@ -958,9 +924,8 @@ fn seed_memory(
     let mapped = unsafe { device.map_memory(allocation, 0, size, vk::MemoryMapFlags::empty()) }
         .map_err(|e| DispatchError::Vulkan("map_memory", e))?
         .cast::<u32>();
-    // SAFETY: `mapped` points at `size` bytes, which is `memory.len()` words, and the source
-    // and destination cannot overlap - one is host memory this process owns and the other is
-    // a fresh mapping.
+    // SAFETY: `mapped` points at `size` bytes, which is `memory.len()` words, and the two cannot
+    // overlap: one is host memory this process owns, the other a fresh mapping.
     unsafe { std::ptr::copy_nonoverlapping(memory.as_ptr(), mapped, memory.len()) };
     // SAFETY: the memory is mapped and no pointer into it is used after this.
     unsafe { device.unmap_memory(allocation) };
@@ -969,8 +934,8 @@ fn seed_memory(
 
 /// Bytes for a window measured in words, as Vulkan wants it.
 ///
-/// At least one word: a zero-sized buffer is not a legal binding, and a module that declares a
-/// window it never touches would otherwise fail to build for a reason about the harness.
+/// At least one word: a zero-sized buffer is not a legal binding, and a module may declare a window
+/// it never touches.
 fn words_to_bytes(words: usize) -> vk::DeviceSize {
     let words = u64::try_from(words.max(1)).unwrap_or(1);
     words * 4
@@ -978,20 +943,15 @@ fn words_to_bytes(words: usize) -> vk::DeviceSize {
 
 /// How wide and tall a storage image is, when the caller does not say.
 ///
-/// Small, because every pipeline gets one whether or not it writes to it, and a test that means
-/// to store somewhere says where. Eight by eight is the same frame the sampling tests draw, so
-/// a texel index and a pixel coordinate can be the same number when a test wants that.
+/// Small, because every pipeline gets one; eight by eight matches the frame the sampling tests
+/// draw, so a texel index and a pixel coordinate can coincide.
 pub const STORAGE_IMAGE_SIZE: (u32, u32) = (8, 8);
 
 /// A storage image: written by a shader, read back by the host afterwards.
 ///
-/// Created for every pipeline, like the texture and the two buffers, and for the same reason: a
-/// binding a module uses and the layout lacks is an invalid pipeline, and which of the two a
-/// translated module is is not something this harness reads.
-///
-/// **Its layout is `GENERAL` for the whole recording.** That is the only layout a storage image
-/// may be written in, and there is nothing to transition to afterwards - a transfer may read it
-/// in `GENERAL` as well.
+/// Created for every pipeline, because a binding a module uses and the layout lacks is an invalid
+/// pipeline, and the harness does not read which bindings a module uses. Its layout is `GENERAL`
+/// throughout: the only layout a storage image may be written in, and one a transfer may read.
 struct StorageImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -1005,9 +965,8 @@ struct StorageImage {
 
 /// Creates a `size` storage image, left uninitialised.
 ///
-/// The contents before a shader writes are **undefined and deliberately not cleared**: a test
-/// asserting on what a store left behind must name the texel it wrote, and a zero-filled image
-/// would let an assertion pass against a texel nothing touched.
+/// Not cleared, so a test asserting on a store must name the texel it wrote; a zero-filled image
+/// would let an assertion pass against an untouched texel.
 fn create_storage_image(
     devices: Devices<'_>,
     size: (u32, u32),
@@ -1088,9 +1047,8 @@ fn create_storage_image(
     })
 }
 
-/// Makes a storage image writable, into an open recording.
-///
-/// One barrier, discarding whatever the image held - nothing, it has never been written.
+/// Makes a storage image writable, into an open recording, with one barrier that discards its
+/// never-written contents.
 fn open_storage_image(device: &ash::Device, command: vk::CommandBuffer, storage: &StorageImage) {
     let range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1121,10 +1079,8 @@ fn open_storage_image(device: &ash::Device, command: vk::CommandBuffer, storage:
 
 /// Copies a storage image out to its readback buffer, into an open recording.
 ///
-/// Recorded after the render pass ends, because the write happens inside it. The barrier is what
-/// makes the shader's stores visible to the copy - without it the copy may read texels the
-/// shader has not finished writing, which is the kind of fault that produces a correct picture
-/// on one driver and not on another.
+/// Recorded after the render pass that writes it ends. The barrier makes the shader's stores
+/// visible to the copy.
 fn read_storage_image(device: &ash::Device, command: vk::CommandBuffer, storage: &StorageImage) {
     let range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1133,8 +1089,8 @@ fn read_storage_image(device: &ash::Device, command: vk::CommandBuffer, storage:
     let to_source = [vk::ImageMemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::SHADER_WRITE)
         .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-        // Still `GENERAL` on both sides: a storage image is written in it and a transfer may
-        // read in it, so this barrier orders rather than transitions.
+        // `GENERAL` on both sides: a storage image is written in it and a transfer may read in it,
+        // so this barrier orders rather than transitions.
         .old_layout(vk::ImageLayout::GENERAL)
         .new_layout(vk::ImageLayout::GENERAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -1182,10 +1138,8 @@ fn read_storage_image(device: &ash::Device, command: vk::CommandBuffer, storage:
 
 /// A sampled texture: the image, what it is read through, and the bytes on their way in.
 ///
-/// Created for every pipeline, whether or not the fragment module samples anything. A binding
-/// nothing uses costs one descriptor; a binding a module uses and the layout lacks is an
-/// invalid pipeline, and which of the two a translated module is is not something this harness
-/// reads - the same judgement the storage buffers already record (worklog 566).
+/// Created for every pipeline whether or not the fragment module samples: an unused binding costs
+/// one descriptor, while a used binding missing from the layout is an invalid pipeline.
 struct Texture {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -1200,10 +1154,8 @@ struct Texture {
     levels: u32,
 }
 
-/// The texture bound when a caller does not ask for one: a single opaque white texel.
-///
-/// Not "none". An image with no extent is not a legal image and a descriptor has to be filled,
-/// so the default is the smallest legal texture rather than an absent one.
+/// The texture bound when a caller does not ask for one: a single opaque white texel, the smallest
+/// legal image, since a descriptor must be filled.
 static NO_TEXTURE: [u32; 1] = [0xffff_ffff];
 
 /// A texture's upload, laid out: every level's texels in staging order, the fine level's extent, and
@@ -1217,19 +1169,13 @@ struct Staged {
 }
 
 /// Lays out `texels`, `row` to a row, for upload: the fine level padded with zeroes to whole rows,
-/// then - only when `coarse_level` asks and the image is big enough - the harness's second level.
+/// then, only when `coarse_level` asks and the image is big enough, the harness's second level.
 ///
-/// **Two levels where the harness asks and the image is big enough for a second**, so a sample naming
-/// a level can be told from one naming a different level. With a single level every level answers
-/// the same texel, and a test of `image_sample_l` would pass without the level operand reaching the
-/// instruction at all. A one-by-one image has exactly one level - halving it reaches zero, which is
-/// not an extent - so the count is derived rather than fixed.
-///
-/// **Only for the harness.** Given to a guest's texture it was an invented level: a minified sample
-/// read the sentinel colour instead of the guest's texels, and its copy - one texel of staging for a
-/// halved extent - read past the buffer, which lost the device on Neverball's first 256x256 texture
-/// (worklog 833). The coarse level is now filled across its whole halved extent, so the copy reads
-/// exactly what the buffer holds at any size.
+/// Two levels let a test tell a sample naming level one from one naming level zero; with one level
+/// every level answers the same texel. A one-by-one image has one level, since halving reaches
+/// zero, so the count is derived. Only the harness asks for it: a guest's texture has the levels it
+/// carries. The coarse level fills its whole halved extent, so the copy reads exactly what the
+/// buffer holds.
 fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged {
     let width = row.max(1);
     let cells = usize::try_from(width).unwrap_or(1);
@@ -1256,16 +1202,10 @@ fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged {
 
 /// Creates a sampled image holding `texels`, `row` of them to a row.
 ///
-/// **Optimally tiled, filled by a staging copy** rather than a linear image written through a
-/// mapping. `R8G8B8A8_UNORM` is required to support sampling with optimal tiling on every
-/// implementation and is not required to support it with linear tiling, so the guaranteed path
-/// is the one a harness takes. It also leaves the row stride to the driver instead of to this
-/// file, which is one fewer thing a wrong picture could be about.
-///
-/// A short final row is padded with zeroes, so the extent and the bytes always agree.
-///
-/// `coarse_level` asks for the harness's sentinel second level ([`staged`]); a guest's texture never
-/// has it (worklog 833).
+/// Optimally tiled and filled by a staging copy: `R8G8B8A8_UNORM` must support sampling with
+/// optimal tiling on every implementation, not with linear tiling, and the driver owns the row
+/// stride. A short final row is padded with zeroes, so extent and bytes agree. `coarse_level` asks
+/// for the harness's sentinel second level ([`staged`]); a guest's texture never has it.
 fn create_texture(
     devices: Devices<'_>,
     texels: &[u32],
@@ -1306,8 +1246,8 @@ fn create_texture(
             .instance
             .get_physical_device_memory_properties(devices.physical)
     };
-    // Device-local, for the same reason the attachment is: an optimally tiled image is not
-    // readable by the host whatever memory it sits in, so the copy is required regardless.
+    // Device-local, like the attachment: an optimally tiled image is not host-readable, so the copy
+    // is needed regardless.
     let memory_type = (0..properties.memory_type_count)
         .find(|i| {
             requirements.memory_type_bits & (1 << i) != 0
@@ -1340,9 +1280,8 @@ fn create_texture(
     let mapped = unsafe { device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) }
         .map_err(|e| DispatchError::Vulkan("map_memory(texture)", e))?
         .cast::<u32>();
-    // SAFETY: the mapping covers `padded.len()` words, the destination is exactly that long,
-    // and the two cannot overlap - one is a fresh mapping and the other is host memory this
-    // process owns.
+    // SAFETY: the mapping covers `padded.len()` words, the destination is exactly that long, and
+    // the two cannot overlap: one is a fresh mapping, the other host memory this process owns.
     unsafe { std::ptr::copy_nonoverlapping(padded.as_ptr(), mapped, padded.len()) };
     // SAFETY: mapped immediately above and no pointer into it is used after this.
     unsafe { device.unmap_memory(staging_memory) };
@@ -1361,10 +1300,7 @@ fn create_texture(
     let view = unsafe { device.create_image_view(&view_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_image_view(texture)", e))?;
 
-    // Nearest filtering and clamping, so a test that names a texel gets that texel. Any
-    // filtering mixes neighbours, and then an exact assertion fails for a reason about the
-    // sampler rather than about the shader - which is the kind of failure a harness exists to
-    // not have.
+    // Nearest filtering and clamping, so a test that names a texel gets exactly that texel.
     let sampler_info = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::NEAREST)
         .min_filter(vk::Filter::NEAREST)
@@ -1372,9 +1308,8 @@ fn create_texture(
         .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
         .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        // Without this the sampler clamps every level request to zero and a levelled sample
-        // reads the fine level whatever it asked for - which looks exactly like a translation
-        // that ignored the level operand.
+        // Without this the sampler clamps every level request to zero and a levelled sample reads
+        // the fine level, indistinguishable from a translation that ignored the level operand.
         .max_lod(f32_from(levels - 1));
     // SAFETY: the create info outlives the call and the device is live.
     let sampler = unsafe { device.create_sampler(&sampler_info, None) }
@@ -1395,20 +1330,16 @@ fn create_texture(
 
 /// The one texel of a sampled texture's coarse level.
 ///
-/// **Fixed by the harness rather than supplied**, because its whole purpose is to be *not* any
-/// texel of the fine level: a sample naming level one comes back as this, and a sample naming
-/// level zero cannot. A caller choosing it could choose one that collides, and the assertion
-/// would then pass for a translation that ignored the level.
+/// Fixed by the harness so it is never a texel of the fine level: a sample naming level one returns
+/// this, and a sample naming level zero cannot.
 pub const COARSE_TEXEL: u32 = 0xff30_70b0;
 
 /// Copies a texture in and leaves it readable, into an open recording.
 ///
-/// Recorded before the render pass opens, because a render pass cannot contain a transfer. The
-/// first barrier discards whatever the image held - nothing, it has never been written - and
-/// the second is what makes the copy visible to the sampling that follows.
+/// Recorded before the render pass opens, since a render pass cannot contain a transfer. The first
+/// barrier discards the never-written contents; the second makes the copy visible to sampling.
 fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Texture) {
-    // Every level, or the coarse one is left in an undefined layout and a sample naming it is
-    // undefined behaviour rather than an answer.
+    // Every level, or the coarse one stays in an undefined layout.
     let range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .level_count(texture.levels)
@@ -1435,8 +1366,8 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
         );
     }
 
-    // One region per level. The coarse level's single texel sits immediately after the fine
-    // level's in the staging buffer, which is what its offset says.
+    // One region per level; the coarse level's texels follow the fine level's in the staging
+    // buffer, which is what its offset says.
     let mut regions = vec![
         vk::BufferImageCopy::default()
             // Zero means tightly packed, which is what the staging buffer is.
@@ -1466,7 +1397,7 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
                         .mip_level(1)
                         .layer_count(1),
                 )
-                // Halved and floored - the extent `create_texture` filled with the sentinel.
+                // Halved and floored: the extent `create_texture` filled with the sentinel.
                 .image_extent(vk::Extent3D {
                     width: (texture.width / 2).max(1),
                     height: (texture.height / 2).max(1),
@@ -1511,8 +1442,7 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
 
 /// A host-visible storage buffer, for one of the windows a translated module declares.
 ///
-/// Host-visible rather than device-local because these are small and a test may want to read
-/// one back; nothing here is a performance path.
+/// Host-visible because these are small and a test may read one back.
 fn create_storage_buffer(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
@@ -1540,7 +1470,7 @@ fn create_readback_buffer(
         device,
         size,
         // SRC as well: the same buffer carries a draw's starting pixels in before it carries the
-        // result out (worklog 822).
+        // result out.
         vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
     )
 }
@@ -1573,11 +1503,9 @@ fn create_host_buffer(
                     .contains(flags)
         })
     };
-    // **Cached where the device offers it** (worklog 838). Every buffer here is read back by the host
-    // - a frame's 8 MB of pixels after every draw - and the first host-visible type a device lists is
-    // commonly write-combined, which the host reads at a small fraction of cached speed: reading one
-    // 1080p frame out of it took ~20 ms of a ~25 ms draw. Coherent either way, so nothing about
-    // flushing changes.
+    // Cached where the device offers it: every buffer here is read back by the host, and the first
+    // host-visible type is commonly write-combined, which the host reads far more slowly. Coherent
+    // either way, so flushing is unaffected.
     let memory_type = with(wanted | vk::MemoryPropertyFlags::HOST_CACHED)
         .or_else(|| with(wanted))
         .ok_or(DispatchError::NoHostVisibleMemory)?;
@@ -1597,8 +1525,8 @@ fn create_host_buffer(
 ///
 /// # Errors
 ///
-/// When no device is available, or any Vulkan call fails. A machine with no device is a skip
-/// for the caller to surface loudly, never a pass.
+/// When no device is available, or any Vulkan call fails. A machine with no device is a skip for
+/// the caller to report, never a pass.
 pub fn clear_to(colour: [f32; 4], width: u32, height: u32) -> Result<Pixels, DispatchError> {
     render(
         colour,
@@ -1610,14 +1538,12 @@ pub fn clear_to(colour: [f32; 4], width: u32, height: u32) -> Result<Pixels, Dis
     )
 }
 
-/// Draws a vertex+fragment pipeline over the guest's decoded vertex count into a `clear`-ed
+/// Draws a vertex and fragment pipeline over the guest's decoded vertex count into a `clear`-ed
 /// attachment, and reads the pixels back.
 ///
-/// The graphics counterpart of [`crate::compute::dispatch`]: given the two translated modules and the
-/// draw's parameters, it returns the frame they drew. The backend uses it to execute a `Draw` from a
-/// submission's bound vertex and fragment shaders, issuing the vertex count the guest asked for
-/// rather than a fixed three; the storage buffers are the default two every module declares, until a
-/// guest binds its own.
+/// The graphics counterpart of [`crate::compute::dispatch`]: given the two translated modules and
+/// the draw's parameters, it returns the frame they drew, issuing the guest's vertex count. The
+/// storage buffers are the default two every module declares.
 pub(crate) fn draw_vertices(
     start: &Start<'_>,
     size: (u32, u32),
@@ -1646,37 +1572,36 @@ pub(crate) fn draw_vertices(
     )
 }
 
-/// How a draw starts: the clear colour, the attachment's starting pixels if any (worklog 822), the
-/// user-data block its shaders read at entry (worklog 826), and the texture it samples with its row
-/// length, if a `BindTexture` gave one (worklog 828) - otherwise the default texel.
+/// How a draw starts: the clear colour, the attachment's starting pixels if any, the user-data
+/// block its shaders read at entry, and the texture it samples with its row length if a
+/// `BindTexture` gave one, otherwise the default texel.
 pub(crate) struct Start<'a> {
     /// What the attachment clears to when it has no starting pixels.
     pub(crate) clear: [f32; 4],
-    /// The attachment's starting pixels (worklog 822).
+    /// The attachment's starting pixels.
     pub(crate) initial: Option<&'a [u8]>,
-    /// The user-data block (worklog 826).
+    /// The user-data block.
     pub(crate) user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
-    /// The texture and its row length (worklog 828).
+    /// The texture and its row length.
     pub(crate) texture: Option<(&'a [u32], u32)>,
-    /// Colour target zero's blend state (`REQ-...2ea9`, worklog 829); `None` draws opaque, as
-    /// every draw did before.
+    /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
-    /// The guest's clip-to-pixel transform (worklog 837); `None` maps clip space over the whole
-    /// attachment, `+y` down, as every draw did before.
+    /// The guest's clip-to-pixel transform; `None` maps clip space over the whole attachment, `+y`
+    /// down.
     pub(crate) viewport: Option<orbistoun_gpu::ViewportTransform>,
-    /// The second texture and its row length (worklog 840).
+    /// The second texture and its row length.
     pub(crate) second_texture: Option<(&'a [u32], u32)>,
-    /// What the draw's pipeline is, as the backend hashed it (worklog 843): a resident draw with a
-    /// key reuses the pipeline built for the last draw with the same one. `None` builds afresh.
+    /// The draw's pipeline, as the backend hashed it: a resident draw with a key reuses the
+    /// pipeline built for the last draw with the same key. `None` builds afresh.
     pub(crate) pipeline_key: Option<std::num::NonZeroU64>,
 }
 
-/// The Vulkan viewport a guest's transform describes (worklog 837).
+/// The Vulkan viewport a guest's transform describes.
 ///
-/// Vulkan maps `x_fb = (width / 2) * x_ndc + (x + width / 2)`; the guest maps
-/// `x_fb = x_scale * x_ndc + x_offset`. So `width = 2 * x_scale` and `x = x_offset - x_scale`, and the
-/// same for y - where a GL guest's negative `y_scale` becomes a negative height, which Vulkan takes
-/// (core since 1.1) and which is exactly the flip the guest asked for.
+/// Vulkan maps `x_fb = (width / 2) * x_ndc + (x + width / 2)`; the guest maps `x_fb = x_scale *
+/// x_ndc + x_offset`. So `width = 2 * x_scale` and `x = x_offset - x_scale`, and likewise for y,
+/// where a negative `y_scale` becomes a negative height (core since Vulkan 1.1): the flip the guest
+/// asked for.
 pub(crate) fn guest_viewport(transform: orbistoun_gpu::ViewportTransform) -> vk::Viewport {
     vk::Viewport {
         x: transform.x_offset - transform.x_scale,
@@ -1689,11 +1614,11 @@ pub(crate) fn guest_viewport(transform: orbistoun_gpu::ViewportTransform) -> vk:
 }
 
 /// The colour-blend attachment state a guest's `CB_BLEND0_CONTROL` asks for, or the name of what it
-/// asks for that this cannot honour exactly (`REQ-...2ea9`, worklog 829).
+/// asks for that this cannot honour exactly.
 ///
 /// Factors and combine functions map one to one (`gfx103.json` `BlendOp`/`CombFunc` onto Vulkan's).
-/// Refused rather than approximated: the constant-colour factors (the blend constant registers are not
-/// decoded), the dual-source ones, the two `BOTH_*` forms and any reserved code. With
+/// Refused rather than approximated: the constant-colour factors (the blend constant registers are
+/// not decoded), the dual-source ones, the two `BOTH_*` forms and any reserved code. With
 /// `SEPARATE_ALPHA_BLEND` off, alpha is blended with the colour factors, as the hardware does.
 ///
 /// # Errors
@@ -1763,8 +1688,8 @@ pub(crate) fn blend_attachment(
 
 /// The shared body: set the attachment up, record, submit, read back, release.
 ///
-/// `shaders` decides whether anything is drawn. `None` is the clear-only path the plumbing was
-/// verified with; `Some` builds a graphics pipeline and draws three vertices through it.
+/// `shaders` decides whether anything is drawn: `None` is the clear-only path, `Some` builds a
+/// graphics pipeline and draws three vertices.
 fn render(
     colour: [f32; 4],
     width: u32,
@@ -1776,10 +1701,8 @@ fn render(
     render_over(colour, width, height, shaders, geometry, bound).map(|drawn| drawn.pixels)
 }
 
-/// The shared body, which also hands back the guest-memory window the draw left behind.
-///
-/// Reading it is how a shader that writes memory is observed at a graphics stage: the
-/// attachment shows what it drew and this shows what it stored, and a guest's shaders do both.
+/// The shared body, which also returns the guest-memory window the draw left behind: the attachment
+/// shows what a shader drew and the window what it stored.
 fn render_over(
     colour: [f32; 4],
     width: u32,
@@ -1799,15 +1722,14 @@ fn render_over(
     let queue = session.queue;
     let family = session.family;
 
-    // **A resident attachment is drawn on in place** (worklog 839): no attachment, render pass,
-    // framebuffer or buffer of this draw's own, and no pixels in or out.
+    // A resident attachment is drawn on in place: no attachment, render pass, framebuffer or buffer
+    // of this draw's own, and no pixels in or out.
     if let Some(resident) = bound.resident {
         return render_resident(&session, resident, shaders, geometry, bound);
     }
 
     let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
-    // Starting pixels only when they cover the attachment exactly; anything else clears, as a draw
-    // always did (worklog 822).
+    // Starting pixels only when they cover the attachment exactly; anything else clears.
     let initial = bound
         .initial
         .filter(|bytes| u64::try_from(bytes.len()).is_ok_and(|len| len == size));
@@ -1835,8 +1757,8 @@ fn render_over(
                 bound,
             )
             .and_then(|built| {
-                // A caller-owned resident window is uploaded once by its owner (D703), so it is not
-                // seeded here; only a window this pipeline created is filled from `bound.memory`.
+                // A caller-owned resident window is uploaded once by its owner (D703), so only a
+                // window this pipeline created is filled from `bound.memory`.
                 if built.owns_guest_memory {
                     seed_memory(device, &built, bound.memory)?;
                 }
@@ -1867,7 +1789,8 @@ fn render_over(
     // SAFETY: recording has ended and the queue belongs to this device.
     unsafe { device.queue_submit(queue, &submits, vk::Fence::null()) }
         .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
-    // One submission, so waiting on the device is as strong as a fence and one fewer object.
+    // One submission, so a device wait is as strong as a fence.
+    //
     // SAFETY: the device is live and nothing else is using it.
     unsafe { device.device_wait_idle() }
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
@@ -1903,11 +1826,10 @@ fn render_over(
     })
 }
 
-/// Everything one draw leaves behind.
+/// Everything one draw leaves behind: the attachment, the guest-memory window and the storage
+/// image.
 ///
-/// Three observations of the same run: what reached the attachment, what the guest-memory window
-/// holds, and what the storage image holds. A guest's shaders do all three, and telling them
-/// apart is what makes "it drew nothing" different from "it drew and stored nothing".
+/// Kept apart so "it drew nothing" is distinguishable from "it drew and stored nothing".
 #[derive(Debug, Clone)]
 pub struct Drawn {
     /// The attachment, pixel by pixel.
@@ -1918,10 +1840,8 @@ pub struct Drawn {
     pub stored: Pixels,
 }
 
-/// Reads what a draw left in the guest-memory window and in the storage image.
-///
-/// Empty for both when nothing drew (no pipeline). Split out of `render_over` so that function reads
-/// as one sequence rather than two match arms in the middle of it.
+/// Reads what a draw left in the guest-memory window and in the storage image; empty for both when
+/// nothing drew (no pipeline).
 fn read_outputs(
     device: &ash::Device,
     pipeline: Option<&Pipeline>,
@@ -1969,10 +1889,8 @@ fn read_image(device: &ash::Device, storage: &StorageImage) -> Result<Pixels, Di
     })
 }
 
-/// Destroys everything one render created, on the successful path only.
-///
-/// An error abandons them instead - see this module's opening note. Gathered here because the
-/// list is long enough that inlining it twice would be two chances to miss one.
+/// Destroys everything one render created, on the successful path only; an error abandons them (see
+/// the module header).
 fn release(
     device: &ash::Device,
     pool: vk::CommandPool,
@@ -1980,8 +1898,8 @@ fn release(
     view: vk::ImageView,
     pipeline: Option<&Pipeline>,
 ) {
-    // SAFETY: every handle below was created on this device, is no longer in use because the
-    // queue has been waited on, and is destroyed exactly once.
+    // SAFETY: every handle below was created on this device, is not in use after the queue wait,
+    // and is destroyed exactly once.
     unsafe { device.destroy_command_pool(pool, None) };
     if let Some(built) = pipeline {
         release_pipeline(device, built);
@@ -2003,8 +1921,8 @@ fn release(
 /// device, so none is in use.
 fn release_pipeline(device: &ash::Device, built: &Pipeline) {
     {
-        // SAFETY: every handle below was created on this device, is no longer in use because the
-        // queue has been waited on, and is destroyed exactly once.
+        // SAFETY: every handle below was created on this device, is not in use after the queue
+        // wait, and is destroyed exactly once.
         unsafe { device.destroy_pipeline(built.handle, None) };
         // SAFETY: as above.
         unsafe { device.destroy_pipeline_layout(built.layout, None) };
@@ -2017,8 +1935,7 @@ fn release_pipeline(device: &ash::Device, built: &Pipeline) {
         // SAFETY: as above.
         unsafe { device.destroy_descriptor_set_layout(built.set_layout, None) };
         // Binding 0 is always this pipeline's; binding 1 only when it created it. A caller-owned
-        // resident window (D703) is bound and read back but never destroyed here - destroying a
-        // buffer its owner still holds is the use-after-free this flag exists to prevent.
+        // resident window (D703) is bound and read back but never destroyed here.
         let owned: &[(vk::Buffer, vk::DeviceMemory)] = if built.owns_guest_memory {
             &built.buffers
         } else {
@@ -2047,8 +1964,8 @@ fn release_pipeline(device: &ash::Device, built: &Pipeline) {
 
 /// Destroys a sampled texture's objects. The caller has waited on the device.
 fn release_texture(device: &ash::Device, texture: &Texture) {
-    // SAFETY: every handle was created on this device, is not in use because the device was waited
-    // on, and is destroyed exactly once - and so for each below.
+    // SAFETY: every handle was created on this device, is not in use after the device wait, and is
+    // destroyed exactly once; the same holds for each below.
     unsafe { device.destroy_sampler(texture.sampler, None) };
     // SAFETY: as above.
     unsafe { device.destroy_image_view(texture.view, None) };
@@ -2072,8 +1989,8 @@ struct Target {
     height: u32,
 }
 
-/// Writes `bytes` into the start of a host-visible, coherent allocation at least that large - a
-/// draw's starting pixels, into the buffer that carries them to the attachment (worklog 822).
+/// Writes `bytes` into the start of a host-visible, coherent allocation at least that large: a
+/// draw's starting pixels, into the buffer that carries them to the attachment.
 fn fill_host_memory(
     device: &ash::Device,
     memory: vk::DeviceMemory,
@@ -2090,11 +2007,11 @@ fn fill_host_memory(
     Ok(())
 }
 
-/// Copies a draw's starting pixels from the target's buffer into its attachment (worklog 822).
+/// Copies a draw's starting pixels from the target's buffer into its attachment.
 ///
-/// The attachment moves from `UNDEFINED` - nothing it held matters, every texel is about to be
-/// written - to `TRANSFER_DST_OPTIMAL`, which is the loading render pass's initial layout; that
-/// pass's external dependency orders this copy before it reads the attachment.
+/// The attachment moves from `UNDEFINED` (every texel is about to be written) to
+/// `TRANSFER_DST_OPTIMAL`, the loading render pass's initial layout; that pass's external
+/// dependency orders this copy before it reads the attachment.
 fn copy_in(device: &ash::Device, command: vk::CommandBuffer, target: &Target) {
     let range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -2135,7 +2052,7 @@ fn copy_in(device: &ash::Device, command: vk::CommandBuffer, target: &Target) {
             depth: 1,
         })];
     // SAFETY: recording is open; the buffer holds `width * height * 4` tightly packed bytes and the
-    // image is in the transfer-destination layout the barrier above put it in.
+    // image is in the transfer-destination layout the barrier above set.
     unsafe {
         device.cmd_copy_buffer_to_image(
             command,
@@ -2147,14 +2064,14 @@ fn copy_in(device: &ash::Device, command: vk::CommandBuffer, target: &Target) {
     }
 }
 
-/// Words in the user-data push-constant block (worklog 826).
+/// Words in the user-data push-constant block.
 pub(crate) const USER_DATA_BLOCK_WORDS: usize = orbistoun_gpu::USER_DATA_BLOCK_WORDS;
 
 /// The block's size in bytes.
 const USER_DATA_BLOCK_BYTES: u32 = (USER_DATA_BLOCK_WORDS * 4) as u32;
 
-/// The stages that may read the user-data block: the fragment stage and whichever geometry stage the
-/// pipeline has - naming the mesh stage only where one is built, so a device without it never sees it.
+/// The stages that may read the user-data block: the fragment stage and the pipeline's geometry
+/// stage, naming the mesh stage only where one is built.
 fn user_data_stages(geometry: Geometry) -> vk::ShaderStageFlags {
     vk::ShaderStageFlags::FRAGMENT
         | match geometry {
@@ -2163,8 +2080,8 @@ fn user_data_stages(geometry: Geometry) -> vk::ShaderStageFlags {
         }
 }
 
-/// What binding a draw needs of its pipeline - plain handles, so a batch can hold them while the
-/// pipeline itself goes back to the cache (D718).
+/// What binding a draw needs of its pipeline, as plain handles, so a batch can hold them while the
+/// pipeline returns to the cache (D718).
 #[derive(Debug, Clone, Copy)]
 struct BindState {
     handle: vk::Pipeline,
@@ -2195,12 +2112,11 @@ fn bind_for_draw(device: &ash::Device, command: vk::CommandBuffer, state: &BindS
     unsafe {
         device.cmd_bind_pipeline(command, vk::PipelineBindPoint::GRAPHICS, state.handle);
     }
-    // The set the fragment module's storage buffers live in. Bound whether or not this
-    // particular module writes them: a pipeline that statically uses a set needs one
-    // bound, and which sets a translated module uses is not something this harness reads.
+    // The set the fragment module's storage buffers live in, bound whether or not this module
+    // writes them: a pipeline that statically uses a set needs one bound.
     let sets = [state.set];
-    // Which slot of the window ring this draw reads (worklog 847), and where its batch's draw data
-    // starts (D718) - in binding order.
+    // The window-ring slot this draw reads, and where its batch's draw data starts (D718), in
+    // binding order.
     let offsets = [state.window_offset, draws];
     // SAFETY: the set was allocated against this pipeline's layout and both are live; the two
     // dynamic bindings take the two offsets, each aligned as its binding requires.
@@ -2214,7 +2130,7 @@ fn bind_for_draw(device: &ash::Device, command: vk::CommandBuffer, state: &BindS
             &offsets,
         );
     }
-    // The draw's user data, where its shaders read it at entry (worklog 826).
+    // The draw's user data, where its shaders read it at entry.
     let block = zerocopy::IntoBytes::as_bytes(&state.user_data);
     // SAFETY: recording is open; the layout declares a push-constant range of exactly this many
     // bytes at offset zero for exactly these stages.
@@ -2229,9 +2145,9 @@ fn bind_for_draw(device: &ash::Device, command: vk::CommandBuffer, state: &BindS
     }
 }
 
-/// A run of guest draws that share everything but their geometry stage's user data, recorded as
-/// one mesh dispatch of one workgroup each (D718). Held open in the pass until a draw that differs,
-/// or anything else recorded into the pass, closes it - so draws stay in the order they came.
+/// A run of guest draws that share everything but their geometry stage's user data, recorded as one
+/// mesh dispatch of one workgroup each (D718). Held open until a differing draw, or anything else
+/// recorded into the pass, closes it, so draws keep their order.
 #[derive(Debug)]
 struct MeshBatch {
     key: BatchKey,
@@ -2286,16 +2202,16 @@ fn record_batch(
 enum Starts {
     /// Cleared by its render pass, then copied out.
     Cleared,
-    /// Copied in from the target's buffer, then copied out (worklog 822).
+    /// Copied in from the target's buffer, then copied out.
     Loaded,
-    /// A [`ResidentAttachment`]: loaded in place and left there (worklog 839).
+    /// A [`ResidentAttachment`]: loaded in place and left there.
     Resident,
 }
 
-/// Draws once into a [`ResidentAttachment`] (worklog 839): the pipeline and its bindings are this
-/// draw's, the attachment, its render pass and framebuffer are the resident one's and are left as
-/// they are. Returns the guest-memory window and storage image the draw left, with no pixels - the
-/// attachment keeps those until [`ResidentAttachment::read_back`].
+/// Draws once into a [`ResidentAttachment`]: the pipeline and its bindings are this draw's; the
+/// attachment, render pass and framebuffer are the resident one's. Returns the guest-memory window
+/// and storage image the draw left, with no pixels: the attachment keeps those until
+/// [`ResidentAttachment::read_back`].
 fn render_resident(
     session: &crate::compute::Session,
     resident: &ResidentAttachment,
@@ -2305,9 +2221,9 @@ fn render_resident(
 ) -> Result<Drawn, DispatchError> {
     let (instance, physical, device) = (&session.instance, session.physical, &session.device);
     orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
-    // **A pipeline built for an earlier draw with the same key is reused** (worklog 843): building
-    // and releasing one per draw was 80% of a frame. Only with a resident guest-memory buffer, which
-    // is re-bound here because the buffer is the one thing the key leaves out.
+    // A pipeline built for an earlier draw with the same key is reused, because building one per
+    // draw dominates a frame. Only with a resident guest-memory buffer, which is re-bound here
+    // because the key leaves it out.
     let cacheable = bound
         .pipeline_key
         .map(std::num::NonZeroU64::get)
@@ -2318,11 +2234,11 @@ fn render_resident(
             // A set may not be updated while a recorded draw still uses it.
             settle(session).ok()?;
             rebind_guest_memory(device, &built, guest, bound.windows[1]);
-            // And recorded as its binding 1: the buffer it was built with belonged to an earlier
-            // window and is gone.
+            // Recorded as its binding 1: the buffer it was built with belonged to an earlier
+            // window.
             built.buffers[1] = (guest.buffer, guest.memory);
         }
-        // The slot this draw's window is in - an offset at bind, not a change to the set.
+        // The slot this draw's window is in: an offset at bind, not a change to the set.
         built.window_offset = u32::try_from(guest.offset).unwrap_or(0);
         built.geometry = geometry;
         built.user_data = *bound.user_data;
@@ -2348,24 +2264,22 @@ fn render_resident(
     })
 }
 
-/// Pipelines resident draws built, by the key the backend gave them (worklog 843). Kept across
-/// draws and submissions; emptied when it passes [`PIPELINE_CACHE_LIMIT`].
+/// Pipelines resident draws built, by the key the backend gave them. Kept across draws and
+/// submissions; emptied when it passes [`PIPELINE_CACHE_LIMIT`].
 fn cached_pipelines() -> &'static std::sync::Mutex<std::collections::HashMap<u64, Pipeline>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, Pipeline>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
-/// The command buffers of resident draws submitted and not yet waited on (worklog 843), all from
-/// [`shared_pool`].
+/// The command buffers of resident draws submitted and not yet waited on, all from [`shared_pool`].
 fn in_flight() -> &'static std::sync::Mutex<Vec<vk::CommandBuffer>> {
     static BUFFERS: std::sync::Mutex<Vec<vk::CommandBuffer>> = std::sync::Mutex::new(Vec::new());
     &BUFFERS
 }
 
-/// The one command pool resident draws allocate from (worklog 844): a pool made and destroyed for
-/// every draw was a third of a draw's cost. Made on first use and kept for the process, like the
-/// session it belongs to.
+/// The one command pool resident draws allocate from, made on first use and kept for the process
+/// like its session.
 fn shared_pool(device: &ash::Device, family: u32) -> Result<vk::CommandPool, DispatchError> {
     static POOL: std::sync::Mutex<Option<vk::CommandPool>> = std::sync::Mutex::new(None);
     let mut pool = POOL
@@ -2382,14 +2296,14 @@ fn shared_pool(device: &ash::Device, family: u32) -> Result<vk::CommandPool, Dis
     Ok(made)
 }
 
-/// The render pass resident draws are being recorded into (worklog 844): one command buffer and one
-/// pass for as many draws as land on one attachment in a row, rather than a pass per draw - which
-/// loaded and stored the whole attachment around every draw, twelve thousand times a frame.
+/// The render pass resident draws are being recorded into: one command buffer and one pass for as
+/// many consecutive draws as land on one attachment, rather than loading and storing the attachment
+/// around every draw.
 struct OpenPass {
     command: vk::CommandBuffer,
     /// Which attachment it draws on.
     framebuffer: vk::Framebuffer,
-    /// The pass's first timestamp query, when the device clock stamps it (worklog 847).
+    /// The pass's first timestamp query, when the device clock stamps it.
     clock: Option<u32>,
     /// Draws waiting to be recorded as one dispatch (D718).
     batch: Option<MeshBatch>,
@@ -2400,9 +2314,8 @@ fn open_pass() -> &'static std::sync::Mutex<Option<OpenPass>> {
     &OPEN
 }
 
-/// The device's own clock around each pass of resident draws (worklog 847): how long the GPU was
-/// busy, which the host's timers cannot see - a host that waits at a flip has measured the wait, not
-/// the work. Two timestamps per pass, read when the device is idle.
+/// The device's own clock around each pass of resident draws: how long the GPU was busy, which host
+/// timers cannot see. Two timestamps per pass, read when the device is idle.
 struct GpuClock {
     pool: vk::QueryPool,
     /// Nanoseconds per timestamp tick.
@@ -2413,8 +2326,8 @@ struct GpuClock {
     pairs: Vec<u32>,
 }
 
-/// How many timestamps a clock holds between reads: a read happens at every flip, and a frame is a
-/// handful of passes, so this is never reached in practice - and when it is, passes go unstamped.
+/// How many timestamps a clock holds between reads. A read happens at every flip and a frame is a
+/// handful of passes; past the limit, passes go unstamped.
 const GPU_QUERIES: u32 = 4096;
 
 fn gpu_clock() -> &'static std::sync::Mutex<Option<GpuClock>> {
@@ -2541,12 +2454,12 @@ fn gpu_clock_read(device: &ash::Device) {
     );
 }
 
-/// How many slots the guest-memory window rotates through (worklog 847): a submission writes the
-/// next slot while the device may still be drawing from the last two.
+/// How many slots the guest-memory window rotates through: a submission writes the next slot while
+/// the device may still be drawing from the last two.
 pub(crate) const WINDOW_SLOTS: usize = 3;
 
-/// The fences of the submits made while each window slot was current, and which slot that is. A slot
-/// is written again only once its own fences have signalled - not once the whole device is idle.
+/// The fences of the submits made while each window slot was current, and which slot that is. A
+/// slot is written again once its own fences have signalled, not once the whole device is idle.
 struct SlotFences {
     current: usize,
     fences: [Vec<vk::Fence>; WINDOW_SLOTS],
@@ -2574,8 +2487,8 @@ fn submit_fence(device: &ash::Device) -> Result<vk::Fence, DispatchError> {
 }
 
 /// Makes `slot` the window slot draws read, once the device has finished every submit made while it
-/// was last current (worklog 847). What has been recorded so far is submitted first, against the
-/// slot it read. Waits only when the device is `WINDOW_SLOTS` submissions behind, which it rarely is.
+/// was last current. What has been recorded so far is submitted first, against the slot it read.
+/// Waits only when the device is `WINDOW_SLOTS` submissions behind.
 ///
 /// # Errors
 ///
@@ -2651,7 +2564,7 @@ fn close_open_pass(session: &crate::compute::Session) -> Result<(), DispatchErro
 }
 
 /// The command buffer draws on `resident` record into: the open pass when it is on this attachment,
-/// else a new one - closing any other first, so draws stay in the order they were asked for.
+/// otherwise a new one, closing any other first so draws keep their order.
 fn pass_on(
     session: &crate::compute::Session,
     resident: &ResidentAttachment,
@@ -2679,7 +2592,7 @@ fn pass_on(
     unsafe { device.begin_command_buffer(command, &begin) }
         .map_err(|e| DispatchError::Vulkan("begin_command_buffer", e))?;
     // After everything submitted before it: the attachment, the window and the storage images were
-    // all written by what came before.
+    // written by earlier work.
     let after_all = [vk::MemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
         .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)];
@@ -2767,8 +2680,8 @@ fn batch_draw(
 }
 
 /// Adds a draw to the open batch without touching the pipeline or the session, when the pass is on
-/// `key`'s attachment, the batch is `key`'s and has room (D718) - `false` when it cannot, and the draw
-/// takes the whole path instead.
+/// `key`'s attachment and the batch is `key`'s and has room (D718). `false` otherwise, and the draw
+/// takes the whole path.
 pub(crate) fn join_open_batch(key: &BatchKey, draw: DrawWords) -> bool {
     let mut open = open_pass()
         .lock()
@@ -2813,7 +2726,7 @@ pub(crate) fn settle(session: &crate::compute::Session) -> Result<(), DispatchEr
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
     forget_slot_fences(device);
     gpu_clock_read(device);
-    // Nothing recorded reads the draw data now (D718).
+    // Nothing recorded reads the draw data any more (D718).
     reset_draw_data();
     if buffers.is_empty() {
         return Ok(());
@@ -2826,8 +2739,8 @@ pub(crate) fn settle(session: &crate::compute::Session) -> Result<(), DispatchEr
     Ok(())
 }
 
-/// Submits the draws recorded so far without waiting for them (D714) - so the device works on a
-/// submission while the guest builds the next, and nothing waits until something reads the frame.
+/// Submits the draws recorded so far without waiting for them (D714), so the device works on a
+/// submission while the guest builds the next.
 ///
 /// # Errors
 ///
@@ -2853,8 +2766,8 @@ pub(crate) fn settle_session() -> Result<(), DispatchError> {
     settle(&session)
 }
 
-/// How many pipelines the cache keeps before it releases them all. A frame uses tens; a limit
-/// keeps a title whose textures change every frame from growing device memory without end.
+/// How many pipelines the cache keeps before it releases them all: a frame uses tens, and the limit
+/// bounds device memory for a guest whose textures change every frame.
 const PIPELINE_CACHE_LIMIT: usize = 512;
 
 /// Points a cached pipeline's binding 1 at this draw's guest-memory buffer.
@@ -2873,7 +2786,7 @@ fn rebind_guest_memory(
         .dst_binding(1)
         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
         .buffer_info(&memory)];
-    // SAFETY: the set is live and not in use - the caller settled every recorded draw first - and
+    // SAFETY: the set is live and not in use (the caller settled every recorded draw first), and
     // the buffer info outlives the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
@@ -2939,9 +2852,9 @@ fn render_resident_with(
     let Some(mut built) = pipeline else {
         return Ok(drawn());
     };
-    // **A pipeline's own setup happens once, outside any pass** (worklog 844): its textures copied in
-    // and its storage image made writable. A render pass may not contain a transfer, and a pipeline
-    // taken from the cache has had this done already.
+    // A pipeline's own setup happens once, outside any pass: its textures copied in and its storage
+    // image made writable. A render pass may not contain a transfer, and a cached pipeline has had
+    // this done.
     if !built.textures_uploaded {
         one_shot(session, |device, command| {
             upload_texture(device, command, &built.texture);
@@ -2950,16 +2863,15 @@ fn render_resident_with(
         })?;
         built.textures_uploaded = true;
     }
-    // **Recorded into the open pass, not submitted** (worklog 844): draws on one attachment share a
-    // command buffer and a render pass, and run when something needs what they drew - [`settle`].
-    // Nothing is read back per draw either (worklog 843): the window is read once when asked for
-    // ([`read_buffer`]), and nothing reads a resident draw's storage image.
+    // Recorded into the open pass, not submitted: draws on one attachment share a command buffer
+    // and render pass, and run when something needs their output ([`settle`]). The window is read
+    // once when asked for ([`read_buffer`]), and nothing reads a resident draw's storage image.
     orbistoun_gpu::perf::measure(orbistoun_gpu::perf::Phase::Execute, || {
         ensure_draw_room(session)?;
         let command = pass_on(session, resident)?;
         let (geometry_words, fragment) = split_user_data(&built.user_data);
-        // **A cached mesh pipeline's draw joins a batch** (D718), recorded when a draw that
-        // differs or anything else comes along.
+        // A cached mesh pipeline's draw joins a batch (D718), recorded when a differing draw or
+        // anything else arrives.
         if let (Geometry::Mesh, Some(key)) = (built.geometry, key) {
             batch_draw(
                 session,
@@ -3018,36 +2930,32 @@ fn issue_draw(
     draws: u32,
 ) {
     match geometry {
-        // The guest's decoded count: a vertex shader is called once per vertex, indexing its
-        // source by `gl_VertexIndex`, so this is how much geometry it draws. `first_instance`
-        // stays zero - nothing decodes it yet, and zero is what it means.
+        // The guest's decoded count: a vertex shader runs once per vertex, indexing its source by
+        // `gl_VertexIndex`. `first_instance` is not decoded, so it is zero.
+        //
         // SAFETY: a pipeline is bound inside an open render pass.
         Geometry::Vertex(draw) => unsafe {
             device.cmd_draw(command, draw.vertices, draw.instances, draw.first_vertex, 0);
         },
-        // **One workgroup per guest draw**: a mesh shader decides for itself how many vertices
-        // and primitives come out of it, so the count here is groups rather than vertices, and a
-        // guest's primitive shader is a single wave that announces what it will emit and then
-        // emits it. A batch of draws is that many workgroups, each reading its own draw's words
-        // (D718) - and the primitives of a lower workgroup reach the rasteriser before those of a
-        // higher one (the Vulkan specification's mesh shader primitive ordering), so the batch
-        // blends exactly as its draws one by one would.
+        // One workgroup per guest draw: a mesh shader decides its own vertex and primitive counts,
+        // as a guest's primitive shader is one wave that announces and then emits. A batch is that
+        // many workgroups, each reading its own draw's words (D718); a lower workgroup's primitives
+        // reach the rasteriser first (Vulkan's mesh shader primitive ordering), so a batch blends
+        // as its draws would one by one.
         Geometry::Mesh => {
-            // The extension's entry points, looked up once for the process's one device
-            // rather than on every draw (worklog 844).
+            // The extension's entry points, looked up once for the process's one device.
             static MESH: std::sync::OnceLock<ash::ext::mesh_shader::Device> =
                 std::sync::OnceLock::new();
             let mesh = MESH.get_or_init(|| ash::ext::mesh_shader::Device::new(instance, device));
-            // SAFETY: a mesh pipeline is bound inside an open render pass, and a mesh
-            // pipeline exists only where the device was created with the extension this
-            // loader dispatches through.
+            // SAFETY: a mesh pipeline is bound inside an open render pass, and one exists only
+            // where the device was created with the extension this loader dispatches through.
             unsafe { mesh.cmd_draw_mesh_tasks(command, draws, 1, 1) };
         }
     }
 }
 
-/// Reads a resident buffer's words back from the device - the guest-memory window after a frame's
-/// resident draws, read once rather than after each (worklog 843).
+/// Reads a resident buffer's words back from the device: the guest-memory window after a frame's
+/// resident draws, read once rather than after each.
 ///
 /// # Errors
 ///
@@ -3072,10 +2980,9 @@ struct Recorded {
 
 /// Records the clear, an optional draw, and the copy out.
 ///
-/// With no pipeline the render pass does the whole of the work: `LOAD_OP_CLEAR` writes the
-/// colour and the final layout transitions the image for the copy, so nothing is drawn and no
-/// barrier is recorded by hand. With one, three vertices are drawn between those two points -
-/// enough for a triangle, and the vertex shader is expected to produce its own positions.
+/// With no pipeline the render pass does the work: `LOAD_OP_CLEAR` writes the colour and the final
+/// layout transitions the image for the copy. With one, the draw is recorded between those two
+/// points.
 fn record(
     instance: &ash::Instance,
     device: &ash::Device,
@@ -3103,9 +3010,8 @@ fn record(
     unsafe { device.begin_command_buffer(command, &begin) }
         .map_err(|e| DispatchError::Vulkan("begin_command_buffer", e))?;
 
-    // **After everything submitted before it** (worklog 843): resident draws are no longer waited on
-    // one by one, so each orders itself after the last - its attachment, the guest-memory window and
-    // the storage image are all written by the draw before.
+    // After everything submitted before it: resident draws are not waited on one by one, so each
+    // orders itself after the last, whose attachment, window and storage image it may use.
     if starts == Starts::Resident {
         let after_all = [vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
@@ -3123,10 +3029,9 @@ fn record(
             );
         }
     }
-    // The texture, copied in and made readable, before the render pass that samples it opens -
-    // a render pass cannot contain a transfer. Recorded for every pipeline, because every
-    // pipeline has a texture whether or not its fragment module reads one - once: a pipeline reused
-    // from the cache already holds its textures (worklog 843).
+    // The texture, copied in and made readable before the render pass that samples it, since a
+    // render pass cannot contain a transfer. Every pipeline has a texture; a pipeline reused from
+    // the cache already holds its textures.
     if let Some(built) = pipeline {
         if !built.textures_uploaded {
             upload_texture(device, command, &built.texture);
@@ -3135,7 +3040,7 @@ fn record(
         open_storage_image(device, command, &built.storage_image);
     }
     // The starting pixels, copied from the readback buffer (which holds them until the copy out
-    // overwrites it) into the attachment, leaving it in the layout the loading pass expects.
+    // overwrites it) into the attachment, leaving the layout the loading pass expects.
     if starts == Starts::Loaded {
         copy_in(device, command, target);
     }
@@ -3166,10 +3071,8 @@ fn record(
     // SAFETY: a render pass is open.
     unsafe { device.cmd_end_render_pass(command) };
 
-    // The storage image, copied out now the render pass that wrote it has ended. After the pass
-    // rather than inside it, because a render pass may not contain a transfer. Not for a resident
-    // draw, whose storage image nothing reads: an attachment-sized copy after every draw was most
-    // of a resident draw's device work (worklog 844).
+    // The storage image, copied out after the render pass that wrote it, since a pass may not
+    // contain a transfer. Not for a resident draw, whose storage image nothing reads.
     if let Some(built) = pipeline
         && starts != Starts::Resident
     {
@@ -3212,51 +3115,41 @@ struct Pipeline {
     handle: vk::Pipeline,
     /// The set layout, pool and set the fragment module's storage buffers are bound through.
     ///
-    /// Every module this project's translator emits declares two of them - the observation
-    /// window and the guest-memory window - because the models declare both in their headers.
-    /// The draw path used an empty pipeline layout and bound nothing, which the Khronos
-    /// validation layer calls two separate errors: a layout that does not declare what the
-    /// shader uses, and a draw with no set bound (worklog 554). It drew anyway on this
-    /// driver, which is what made it worth measuring rather than assuming.
+    /// Every translated module declares two storage buffers, the observation window and the
+    /// guest-memory window, so the layout declares both and a set is bound.
     set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
     buffers: [(vk::Buffer, vk::DeviceMemory); 2],
-    /// The sampled image bound at binding 2, which a guest's textured pixel shader needs and
-    /// every other module ignores.
+    /// The sampled image bound at binding 2, which a guest's textured pixel shader needs and every
+    /// other module ignores.
     texture: Texture,
-    /// The sampled image bound at binding 4: a pixel shader's second texture (worklog 840).
+    /// The sampled image bound at binding 4: a pixel shader's second texture.
     second_texture: Texture,
-    /// The storage image bound at binding 3, which a guest's `image_store` writes.
-    ///
-    /// Created for every pipeline for the same reason the texture is: which bindings a
-    /// translated module declares is not something this harness reads, and a binding a module
-    /// uses and the layout lacks is an invalid pipeline.
+    /// The storage image bound at binding 3, which a guest's `image_store` writes. Created for
+    /// every pipeline, like the texture.
     storage_image: StorageImage,
-    /// Which stage feeds the fragment stage: the two are drawn by different calls, and the
-    /// pipeline is the thing that knows which it was built for.
+    /// Which stage feeds the fragment stage: the two are drawn by different calls.
     geometry: Geometry,
     /// Whether binding 1 (the guest-memory buffer, `buffers[1]`) was created here. `false` when a
     /// caller bound its own resident buffer (D703), so `release` leaves it for its owner rather than
     /// destroying a buffer this pipeline does not own.
     owns_guest_memory: bool,
-    /// The draw's user-data block, pushed before it (worklog 826).
+    /// The draw's user-data block, pushed before it.
     user_data: [u32; USER_DATA_BLOCK_WORDS],
     /// Whether [`Self::texture`] and [`Self::second_texture`] already hold their texels on the
-    /// device - true once a cached pipeline has drawn, so its reuse copies nothing (worklog 843).
+    /// device: true once a cached pipeline has drawn, so its reuse copies nothing.
     textures_uploaded: bool,
-    /// The dynamic offset of binding 1 - which slot of the window ring the draw reads (worklog
-    /// 847). Zero for a pipeline that made its own guest-memory buffer.
+    /// The dynamic offset of binding 1: which window-ring slot the draw reads. Zero for a pipeline
+    /// that made its own guest-memory buffer.
     window_offset: u32,
 }
 
 /// An attachment dimension as a float, exactly.
 ///
-/// Every value that reaches this is a pixel count bounded by the device's maximum image
-/// dimension, which is far inside the integers `f32` holds exactly - so this is a widening in
-/// practice, and saying so is cheaper than a cast nobody can check at the call site.
-// The debug assertion below is the check the lint asks for, made where the value is known
-// rather than at every call site.
+/// Every value here is a pixel count bounded by the device's maximum image dimension, far inside
+/// the integers `f32` holds exactly.
+// The debug assertion below is the check the lint asks for, made where the value is known.
 #[allow(clippy::cast_precision_loss)]
 fn f32_from(pixels: u32) -> f32 {
     debug_assert!(
@@ -3266,21 +3159,7 @@ fn f32_from(pixels: u32) -> f32 {
     pixels as f32
 }
 
-/// Builds a pipeline that draws a triangle list into the render pass's one attachment.
-///
-/// Fixed viewport and scissor rather than dynamic state: this draws once, into an attachment
-/// whose size is known when the pipeline is built, and a dynamic state is a second place the
-/// size could be wrong.
-///
-/// No vertex input. The vertex shader is expected to produce its own positions from
-/// `gl_VertexIndex` - see `orbistoun_spirv::fullscreen_triangle_vertex_module` - which keeps a
-/// vertex buffer, its memory and its binding description out of a harness whose whole job is to
-/// have as few moving parts as possible.
-/// The device handles the buffer helpers need, passed as one thing.
-///
-/// Three values that always travel together and are never chosen independently. Separately
-/// they were three of nine parameters, which is past the point where a call site tells a
-/// reader anything.
+/// The device handles the buffer helpers need, which always travel together.
 #[derive(Clone, Copy)]
 struct Devices<'a> {
     instance: &'a ash::Instance,
@@ -3370,14 +3249,10 @@ fn create_bound_resources(
 ) -> Result<BoundResources, DispatchError> {
     let device = devices.device;
     let windows = bound.windows;
-    // The two storage buffers every translated module declares, at set 0 bindings 0 and 1:
-    // the observation window and the guest-memory window. A fragment module writes neither by
-    // default - its epilogue is skipped (D553) - but a guest's pixel shader writes guest
-    // memory, so the binding is real and has to exist.
-    // Binding 0 (the observation window) is always created and owned here. Binding 1 (the guest
-    // memory) is either a caller-owned resident buffer bound directly - uploaded once (D703) - or one
-    // created and seeded here, the path every caller but the direct-bind one takes. `owns_guest_memory`
-    // records which, so `release` destroys binding 1 only when this built it.
+    // The two storage buffers every translated module declares, at set 0 bindings 0 and 1. Binding
+    // 0, the observation window, is always created here. Binding 1, guest memory, is either a
+    // caller-owned resident buffer uploaded once (D703) or one created and seeded here;
+    // `owns_guest_memory` records which, so `release` destroys binding 1 only when this built it.
     let observation = create_storage_buffer(
         devices.instance,
         devices.physical,
@@ -3403,8 +3278,8 @@ fn create_bound_resources(
         bound.texture.1,
         bound.coarse_level,
     )?;
-    // The second texture unit (worklog 840): a guest pixel shader that samples two textures reads
-    // the second here. The default white texel when nothing asked for one.
+    // The second texture unit: a pixel shader that samples two textures reads the second here. The
+    // default white texel when nothing asked for one.
     let second_texture = create_texture(
         devices,
         bound.second_texture.0,
@@ -3429,35 +3304,30 @@ fn create_bound_resources(
 
 /// Creates the descriptor set layout every draw pipeline shares.
 fn create_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, DispatchError> {
-    // Both stages, because either may use a binding: a guest's pixel shader writes its canary
-    // and so does its primitive shader. Declaring only the fragment stage made a mesh pipeline
-    // invalid, which the layer said and the picture did not (worklog 559).
+    // Both stages, because a guest's pixel shader and its primitive shader may both write memory; a
+    // fragment-only binding makes a mesh pipeline invalid.
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT),
-        // **Dynamic** (worklog 847): the guest-memory window is one slot of a ring, and which slot
-        // is a per-draw offset given at bind - so a cached pipeline's set never changes as the
-        // window moves between submissions, and nothing waits to change it.
+        // Dynamic: the guest-memory window is one slot of a ring, chosen per draw by an offset at
+        // bind, so a cached pipeline's set never changes as the window moves.
         vk::DescriptorSetLayoutBinding::default()
             .binding(1)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT),
-        // The fragment stage only. A sampled image is here because a guest's *pixel* shader
-        // reads one; a primitive shader that fetched from a texture would be a second claim,
-        // and declaring a stage nothing uses would assert it without measuring it.
+        // The fragment stage only: a guest's pixel shader samples textures, and declaring other
+        // stages would claim what nothing has shown.
         vk::DescriptorSetLayoutBinding::default()
             .binding(TEXTURE_BINDING)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-        // A storage image, which is a different binding from the sampled one because they are
-        // different things: one is read through a sampler and cannot be written, the other is
-        // written and has no sampler. A guest's `image_store` names an image descriptor exactly
-        // as its load does, and only the host cares that the two are separate.
+        // A storage image, separate from the sampled one: a sampled image is read through a sampler
+        // and cannot be written, and a storage image is written and has no sampler.
         vk::DescriptorSetLayoutBinding::default()
             .binding(STORAGE_IMAGE_BINDING)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
@@ -3468,7 +3338,7 @@ fn create_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, Di
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-        // Each draw's user data, for a mesh module that carries a batch of draws (D718): dynamic,
+        // Each draw's user data, for a mesh module carrying a batch of draws (D718); dynamic,
         // because every batch is at its own offset of the one buffer.
         vk::DescriptorSetLayoutBinding::default()
             .binding(DRAW_DATA_BINDING)
@@ -3489,9 +3359,9 @@ fn create_pipeline_layout(
     set_layouts: &[vk::DescriptorSetLayout],
     geometry: Geometry,
 ) -> Result<vk::PipelineLayout, DispatchError> {
-    // The user-data block every stage may read at entry (worklog 826): 128 bytes, the size every
-    // device takes, visible to the geometry stage this pipeline has and to the fragment stage. A
-    // module that declares no block ignores it.
+    // The user-data block every stage may read at entry: 128 bytes, the size every device takes,
+    // visible to the pipeline's geometry stage and the fragment stage. A module that declares no
+    // block ignores it.
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(user_data_stages(geometry))
         .offset(0)
@@ -3560,9 +3430,8 @@ fn write_descriptor_set(
         .buffer(buffers[1].0)
         .offset(0)
         .range(words_to_bytes(windows[1]))];
-    // The layout the barrier in `upload_texture` leaves the image in, named here because a
-    // descriptor records the layout the image will be in when it is read, not the one it is in
-    // when the descriptor is written.
+    // The layout the barrier in `upload_texture` leaves the image in: a descriptor records the
+    // layout at read time, not at write time.
     let sampled = [vk::DescriptorImageInfo::default()
         .sampler(texture.sampler)
         .image_view(texture.view)
@@ -3571,8 +3440,8 @@ fn write_descriptor_set(
         .sampler(second_texture.sampler)
         .image_view(second_texture.view)
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-    // `GENERAL`, which is the only layout a storage image may be written in - and the one the
-    // barrier before the render pass puts it in.
+    // `GENERAL`, the only layout a storage image may be written in, set by the barrier before the
+    // render pass.
     let stored = [vk::DescriptorImageInfo::default()
         .image_view(storage_image.view)
         .image_layout(vk::ImageLayout::GENERAL)];
@@ -3640,10 +3509,8 @@ fn create_graphics_pipeline(
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-    // An attachment is at most the device's maximum dimension, which is orders of magnitude
-    // inside the range `f32` represents exactly, so the conversion is lossless here.
-    // The guest's own transform when it gave one (worklog 837); otherwise clip space over the whole
-    // attachment.
+    // The guest's own transform when it gave one; otherwise clip space over the whole attachment.
+    // An attachment dimension is exact as `f32`.
     let viewports = [bound.viewport.map_or(
         vk::Viewport {
             x: 0.0,
@@ -3655,9 +3522,8 @@ fn create_graphics_pipeline(
         },
         guest_viewport,
     )];
-    // The whole attachment unless the draw set a scissor - a guest's viewport (worklog 644) - which
-    // restricts rasterisation to a rectangle, so pixels outside it keep the clear. Clamped to the
-    // attachment, because Vulkan refuses a scissor that reaches past it.
+    // The whole attachment unless the draw set a scissor, which restricts rasterisation so pixels
+    // outside keep the clear. Clamped to the attachment, because Vulkan refuses a scissor past it.
     let full = vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
         extent: vk::Extent2D { width, height },
@@ -3668,7 +3534,7 @@ fn create_graphics_pipeline(
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewports(&viewports)
         .scissors(&scissors);
-    // Culling off: a harness should not fail because a triangle was wound the other way.
+    // Culling off, so winding order cannot fail a draw.
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
@@ -3676,9 +3542,8 @@ fn create_graphics_pipeline(
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    // The guest's blend state (`REQ-...2ea9`), or opaque with every channel written when it set
-    // none. A state that does not map is refused before a draw reaches here (`VulkanBackend`), so
-    // this never builds a pipeline blending approximately.
+    // The guest's blend state, or opaque with every channel written when it set none. A state that
+    // does not map is refused before a draw reaches here (`VulkanBackend`).
     let blend_attachments = [blend_attachment(bound.blend)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
@@ -3701,20 +3566,16 @@ fn create_graphics_pipeline(
     Ok(pipelines[0])
 }
 
-/// Clears an attachment to `clear`, draws three vertices through the given shaders, and reads
-/// the pixels back.
+/// Clears an attachment to `clear`, draws three vertices through the given shaders, and reads the
+/// pixels back.
 ///
-/// # What the pair of colours buys
-///
-/// `clear` and whatever the fragment shader writes should **differ**. Then a result matching the
-/// fragment shader's colour proves the shader ran and its output reached the attachment, where a
-/// result matching the clear proves it did not - and neither can be mistaken for the other. A
-/// harness that cleared and drew the same colour would pass with no pipeline at all (D550).
+/// `clear` and the fragment shader's colour should differ, so the result shows whether the shader's
+/// output reached the attachment (D549).
 ///
 /// # Errors
 ///
 /// When no device is available, or any Vulkan call fails. A machine with no device is a skip for
-/// the caller to surface loudly, never a pass.
+/// the caller to report, never a pass.
 pub fn draw_with(
     vertex_words: &[u32],
     fragment_words: &[u32],
@@ -3732,17 +3593,16 @@ pub fn draw_with(
     )
 }
 
-/// Draws with a **mesh** stage rather than a vertex stage.
+/// Draws with a mesh stage rather than a vertex stage.
 ///
-/// One workgroup, which is what a guest's primitive shader is: a wave that declares how many
-/// vertices and primitives it will emit and then emits them (D688). The fragment module is
-/// whatever should shade them.
+/// One workgroup, as a guest's primitive shader is one wave that declares its vertex and primitive
+/// counts and then emits them (D688). The fragment module shades them.
 ///
 /// # Errors
 ///
-/// When no device is available, when the device has no mesh stage - which
-/// [`Properties::mesh_shading`](crate::compute::Properties::mesh_shading) reports before it is
-/// asked for - or when any Vulkan call fails.
+/// When no device is available, when the device has no mesh stage (reported by
+/// [`Properties::mesh_shading`](crate::compute::Properties::mesh_shading)), or when any Vulkan call
+/// fails.
 pub fn draw_mesh_with(
     mesh_words: &[u32],
     fragment_words: &[u32],
@@ -3762,9 +3622,9 @@ pub fn draw_mesh_with(
 
 /// Draws with a mesh stage over guest memory seeded with `memory`.
 ///
-/// The words are written into the guest-memory window before the draw, so a translated shader
-/// that fetches its vertices finds something there. A window is addressed by the module's own
-/// mask, so where a guest address lands in it is arithmetic the caller can do and this cannot.
+/// The words are written into the guest-memory window before the draw, so a translated shader that
+/// fetches vertices finds them. The module's mask decides where a guest address lands in the
+/// window.
 ///
 /// # Errors
 ///
@@ -3788,11 +3648,10 @@ pub fn draw_mesh_over(
     )
 }
 
-/// Draws with a mesh stage over seeded guest memory, **restricted to a scissor rectangle**.
+/// Draws with a mesh stage over seeded guest memory, restricted to a scissor rectangle.
 ///
-/// The clipped counterpart of [`draw_mesh_over`], which is this with no scissor. The backend uses it
-/// to execute a `Draw` of a guest's mesh geometry that also set a viewport (worklog 644): the
-/// rectangle restricts rasterisation, so pixels outside it keep the clear.
+/// The clipped counterpart of [`draw_mesh_over`]: the rectangle restricts rasterisation, so pixels
+/// outside keep the clear.
 ///
 /// # Errors
 ///
@@ -3822,14 +3681,13 @@ pub(crate) fn draw_mesh_over_clipped(
     .map(|drawn| (drawn.pixels, drawn.memory))
 }
 
-/// Draws with a mesh stage over a **resident** guest-memory buffer, bound directly, **into a
-/// [`ResidentAttachment`] in place** (worklog 839).
+/// Draws with a mesh stage over a resident guest-memory buffer, bound directly, into a
+/// [`ResidentAttachment`] in place.
 ///
-/// The guest buffer is one its owner uploaded once (D703, worklog 645) and is left intact; the window
-/// is read back after the draw, so a shader that wrote guest memory is still observed, and its length
-/// is the resident buffer's own - the mask a module built against it applies (worklog 641). The
-/// attachment takes no pixels in or out, so a submission's draws cost their draw and not two 8 MB
-/// copies each. Returns the guest-memory window as the draw left it.
+/// The guest buffer is uploaded once by its owner (D703) and left intact; the window is read back
+/// after the draw, and its length is the resident buffer's own, the mask a module built against it
+/// applies. The attachment takes no pixels in or out. Returns the guest-memory window as the draw
+/// left it.
 ///
 /// # Errors
 ///
@@ -3841,9 +3699,8 @@ pub(crate) fn draw_mesh_resident(
     guest_buffer: &DispatchBuffer,
     scissor: Option<vk::Rect2D>,
 ) -> Result<Option<BatchKey>, DispatchError> {
-    // **A draw the open batch already describes joins it and does nothing else** (D718): same
-    // pipeline - which is its shaders, textures, blend, viewport and scissor - same attachment,
-    // same window, same fragment words. Only its geometry stage's words are its own.
+    // A draw the open batch already describes joins it and does nothing else (D718): same pipeline
+    // (shaders, textures, blend, viewport and scissor), attachment, window and fragment words.
     let key = start.pipeline_key.map(|pipeline| {
         let (_, fragment) = split_user_data(start.user_data);
         BatchKey {
@@ -3886,12 +3743,11 @@ pub(crate) fn draw_mesh_resident(
     .map(|_| key)
 }
 
-/// Draws with a mesh stage over seeded guest memory, **and a texture bound**.
+/// Draws with a mesh stage over seeded guest memory, and a texture bound.
 ///
-/// What a textured frame needs: the geometry comes from a guest's primitive shader reading
-/// vertices out of guest memory, and its pixel shader samples a texture with a coordinate that
-/// shader exported. Every other mesh path binds the default one white texel, which is enough
-/// for a pipeline to be valid and not enough to see.
+/// The geometry comes from a primitive shader reading vertices from guest memory, and the pixel
+/// shader samples a texture at a coordinate it exported. Other mesh paths bind the default white
+/// texel.
 ///
 /// # Errors
 ///
@@ -3920,18 +3776,16 @@ pub fn draw_mesh_over_texture(
     )
 }
 
-/// Draws and hands back the storage image the fragment module wrote, with the frame.
+/// Draws and returns the storage image the fragment module wrote, with the frame.
 ///
-/// The image is [`STORAGE_IMAGE_SIZE`] and starts **uninitialised**: a test asserting on what a
-/// store left behind names the texel it wrote, and a cleared image would let an assertion pass
-/// against a texel nothing touched.
+/// The image is [`STORAGE_IMAGE_SIZE`] and starts uninitialised, so a test must name the texel it
+/// wrote.
 ///
 /// # Errors
 ///
 /// When no device is available, or any Vulkan call fails. A module that writes a format-less
-/// storage image also needs a device offering `shaderStorageImageWriteWithoutFormat`, which
-/// [`Properties::storage_image_write`](crate::compute::Properties::storage_image_write) reports
-/// before it is asked for.
+/// storage image also needs `shaderStorageImageWriteWithoutFormat`, which
+/// [`Properties::storage_image_write`](crate::compute::Properties::storage_image_write) reports.
 pub fn draw_storing(
     vertex_words: &[u32],
     fragment_words: &[u32],
@@ -3949,11 +3803,7 @@ pub fn draw_storing(
     )
 }
 
-/// What a draw binds beside its shaders.
-///
-/// Three values chosen together and never independently, so they travel together - the same
-/// judgement [`Devices`] records, and for the same reason. Separately they were three of nine
-/// parameters, which is past the point where a call site tells a reader anything.
+/// What a draw binds beside its shaders, chosen together and passed as one value, like [`Devices`].
 #[derive(Clone, Copy)]
 struct Bound<'a> {
     /// Word counts for the two storage buffers, in binding order.
@@ -3962,38 +3812,32 @@ struct Bound<'a> {
     memory: &'a [u32],
     /// The texels of the sampled image, and how many of them make one row.
     texture: (&'a [u32], u32),
-    /// The rectangle rasterisation is restricted to - a guest's viewport (worklog 644) - or [`None`]
-    /// for the whole attachment.
+    /// The rectangle rasterisation is restricted to, or [`None`] for the whole attachment.
     scissor: Option<vk::Rect2D>,
-    /// A caller-owned buffer to bind as the guest-memory window (binding 1) instead of creating and
-    /// seeding one - a resident buffer uploaded once (worklog 645, D703). [`None`] creates and seeds
-    /// its own from [`Self::memory`], the path every existing caller takes. When [`Some`], the buffer
-    /// is **not** owned here: it is bound, read back, and left for its owner, never destroyed.
+    /// A caller-owned buffer bound as the guest-memory window (binding 1): a resident buffer
+    /// uploaded once (D703). [`None`] creates and seeds one from [`Self::memory`]. When [`Some`],
+    /// the buffer is bound, read back, and left for its owner, never destroyed here.
     guest_buffer: Option<&'a DispatchBuffer>,
-    /// The attachment's contents before the draw, as tightly packed `Rgba8` rows - a target's
-    /// earlier draws, or the guest's own surface (worklog 822). [`None`], or bytes that do not cover
-    /// the attachment exactly, clears it as every draw did before.
+    /// The attachment's contents before the draw, as tightly packed `Rgba8` rows: a target's
+    /// earlier draws, or the guest's own surface. [`None`], or bytes that do not cover the
+    /// attachment exactly, clears it.
     initial: Option<&'a [u8]>,
-    /// The user-data block the draw's shaders read at entry (worklog 826); zeros when no command set
-    /// any, which a module declaring no block never reads. By reference, so `Bound` stays cheap to
-    /// pass by value.
+    /// The user-data block the draw's shaders read at entry; zeros when no command set any. By
+    /// reference, so `Bound` stays cheap to pass by value.
     user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
-    /// Colour target zero's blend state (`REQ-...2ea9`, worklog 829); `None` draws opaque.
+    /// Colour target zero's blend state; `None` draws opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
-    /// Whether the texture gets the harness's sentinel second level ([`COARSE_TEXEL`]) - only for a
-    /// test that must tell a sample naming level one from one naming level zero. A guest's texture
-    /// has the levels it carries and no invented one (worklog 833).
+    /// Whether the texture gets the harness's sentinel second level ([`COARSE_TEXEL`]), for a test
+    /// that tells level one from level zero. A guest's texture never gets it.
     coarse_level: bool,
-    /// The guest's clip-to-pixel transform (worklog 837); `None` maps clip space over the whole
-    /// attachment.
+    /// The guest's clip-to-pixel transform; `None` maps clip space over the whole attachment.
     viewport: Option<orbistoun_gpu::ViewportTransform>,
-    /// Draw into this attachment in place rather than a fresh one (worklog 839); `None` is the fresh
-    /// attachment every path used before.
+    /// Draw into this attachment in place; `None` draws into a fresh one.
     resident: Option<&'a ResidentAttachment>,
-    /// The second sampled image's texels and row length (worklog 840); the default texel otherwise.
+    /// The second sampled image's texels and row length; the default texel otherwise.
     second_texture: (&'a [u32], u32),
-    /// The key a resident draw's pipeline is cached under (worklog 843); `None` builds and releases
-    /// one per draw. Non-zero so the option costs no space beside the key.
+    /// The key a resident draw's pipeline is cached under; `None` builds and releases one per draw.
+    /// Non-zero so the option costs no space.
     pipeline_key: Option<std::num::NonZeroU64>,
 }
 
@@ -4022,11 +3866,9 @@ impl Default for Bound<'_> {
 
 /// Clamps a scissor to an attachment, since Vulkan refuses one that reaches past it.
 ///
-/// A guest names its viewport in its own target's pixels, which should already lie inside the
-/// attachment, but a decode that went wrong or a target smaller than the guest expected could put an
-/// edge outside - and a scissor Vulkan rejects would fail the draw for a reason about the harness
-/// rather than the guest. Clamping keeps the rectangle legal; where it had to move, it drew a
-/// smaller region than the guest asked, which is visible rather than a validation error.
+/// A guest's viewport should lie inside the attachment, but a bad decode or a smaller target can
+/// put an edge outside. Clamping keeps the rectangle legal, and a clamped draw covers a visibly
+/// smaller region rather than failing validation.
 fn clamp_scissor(rect: vk::Rect2D, width: u32, height: u32) -> vk::Rect2D {
     let left = rect.offset.x.clamp(0, width as i32);
     let top = rect.offset.y.clamp(0, height as i32);
@@ -4043,12 +3885,11 @@ fn clamp_scissor(rect: vk::Rect2D, width: u32, height: u32) -> vk::Rect2D {
     }
 }
 
-/// A vertex draw's parameters: how many vertices it issues, how many instances, and the first
-/// vertex, as the guest's `Draw` decoded them (`orbistoun_gpu::RenderCommand::Draw`).
+/// A vertex draw's parameters: how many vertices, how many instances, and the first vertex, as the
+/// guest's `Draw` decoded them (`orbistoun_gpu::RenderCommand::Draw`).
 ///
-/// Carried rather than fixed at three so the executor issues the guest's count - a vertex shader
-/// that fetches from guest memory is called once per vertex, so the count is what decides how much
-/// geometry is drawn, and hardcoding three drew the wrong amount of every guest's.
+/// The executor issues the guest's count, because a vertex shader that fetches from guest memory
+/// runs once per vertex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VertexDraw {
     /// Vertices to issue.
@@ -4080,18 +3921,15 @@ enum Geometry {
 
 /// Which binding a sampled image is bound at.
 ///
-/// Two, because zero and one are the storage buffers every translated module declares. The
-/// other half of this number is [`orbistoun_spirv::TEXTURE_BINDING`], which is what a module
-/// *says* it reads; a harness cannot import it - the module builder is a test dependency here,
-/// deliberately, because a backend that needed one would have the layering wrong. The two
-/// agreeing is asserted by the device test rather than left to a comment.
+/// Two, because zero and one are the storage buffers every translated module declares. It mirrors
+/// [`orbistoun_spirv::TEXTURE_BINDING`], which this crate uses only as a test dependency; the
+/// device test asserts the two agree.
 ///
 /// [`orbistoun_spirv::TEXTURE_BINDING`]: https://docs.rs/orbistoun-spirv
 pub const TEXTURE_BINDING: u32 = 2;
 
-/// Which binding a pixel shader's second sampled image is bound at (worklog 840): four, after the
-/// storage image. Mirrors `orbistoun_spirv::SECOND_TEXTURE_BINDING`, as [`TEXTURE_BINDING`] mirrors
-/// its own.
+/// Which binding a pixel shader's second sampled image is bound at: four, after the storage image.
+/// Mirrors `orbistoun_spirv::SECOND_TEXTURE_BINDING`, as [`TEXTURE_BINDING`] mirrors its own.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
 
 /// Which binding a mesh module reads its per-draw user data from, how many words each draw has
@@ -4109,7 +3947,7 @@ pub(crate) type DrawWords = [u32; DRAW_DATA_STRIDE_WORDS as usize];
 /// Bytes one dispatch's draw data may span: what the binding's range covers.
 const DRAW_DATA_RANGE: u64 = DRAW_DATA_MOST_DRAWS as u64 * DRAW_DATA_STRIDE_WORDS as u64 * 4;
 
-/// Bytes the draw-data buffer gives batches between two settles - well over a frame of draws.
+/// Bytes the draw-data buffer gives batches between two settles, well over a frame of draws.
 const DRAW_DATA_BYTES: u64 = 16 << 20;
 
 /// What a batch's offset into the buffer is aligned to: the largest storage-buffer offset alignment
@@ -4146,8 +3984,8 @@ fn ensure_draw_data(devices: Devices<'_>) -> Result<vk::Buffer, DispatchError> {
         size,
         vk::BufferUsageFlags::STORAGE_BUFFER,
     )?;
-    // SAFETY: the memory is host-visible and was just bound to the buffer; mapped once, for the
-    // process's life, and never unmapped - the buffer lives as long as the device does.
+    // SAFETY: the memory is host-visible and was just bound to the buffer; it is mapped once for
+    // the process's life and never unmapped, and the buffer lives as long as the device.
     let mapped = unsafe {
         devices
             .device
@@ -4175,7 +4013,7 @@ fn draw_data_room(draws: usize) -> bool {
         .unwrap_or(true)
 }
 
-/// Writes a batch's draws into the buffer and answers the offset its dispatch binds - `None` when
+/// Writes a batch's draws into the buffer and answers the offset its dispatch binds; `None` when
 /// the buffer is not made yet or has no room.
 fn write_draw_data(draws: &[DrawWords]) -> Option<u32> {
     let mut data = draw_data()
@@ -4220,8 +4058,7 @@ fn write_one_draw_waiting(device: &ash::Device, words: DrawWords) -> Result<u32,
     if let Some(offset) = write_draw_data(&[words]) {
         return Ok(offset);
     }
-    // SAFETY: the device is live; waiting for it idle means no recorded work still reads the
-    // buffer.
+    // SAFETY: the device is live; once it is idle no recorded work still reads the buffer.
     unsafe { device.device_wait_idle() }
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
     reset_draw_data();
@@ -4241,29 +4078,22 @@ fn reset_draw_data() {
 
 /// Which binding a storage image is bound at.
 ///
-/// Three, after the sampled image, and it is a separate binding because it is a separate thing:
-/// a sampled image is read through a sampler and cannot be written, and a storage image is
-/// written and declares no sampler. Its other half is
-/// `orbistoun_spirv::STORAGE_IMAGE_BINDING`, asserted equal by the device test for the same
-/// reason the sampled one is.
+/// Three, after the sampled image; separate because a sampled image is read through a sampler and a
+/// storage image is written. Mirrors `orbistoun_spirv::STORAGE_IMAGE_BINDING`, asserted equal by
+/// the device test.
 pub const STORAGE_IMAGE_BINDING: u32 = 3;
 
-/// The window sizes a module's two storage buffers get when the caller does not say.
+/// The window sizes a module's two storage buffers get when the caller does not say, in words.
 ///
-/// Both are counts of words. They are only ever indexed through a mask the module itself
-/// applies, so a window larger than the module uses is wasted and one smaller is a read past
-/// the end - which is why the caller can say, and why the default is the one the translator's
-/// own models declare.
+/// A module indexes them through its own mask, so a larger window is wasted and a smaller one is
+/// read past; the default is what the translator's models declare.
 pub const DEFAULT_WINDOWS: [usize; 2] = [16, 1024];
 
 /// Draws with a texture bound, for a fragment module that samples one.
 ///
-/// `texture` is the texels and how many of them make a row; they are uploaded before the draw
-/// and read through a sampler that does no filtering, so a coordinate inside a texel gives back
-/// that texel exactly and an assertion can name it.
-///
-/// Every other draw path binds a texture too - one white texel - because the binding exists
-/// whether or not the module reads it. This is the path that puts something worth reading there.
+/// `texture` is the texels and how many make a row. They are read through a sampler that does no
+/// filtering, so a coordinate inside a texel returns that texel exactly. Every other draw path
+/// binds one white texel.
 ///
 /// # Errors
 ///
@@ -4320,10 +4150,9 @@ pub fn draw_with_windows(
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
 
-    /// **A GL guest's transform becomes a flipped Vulkan viewport over the whole target** (worklog
-    /// 837): x from 0 across 1920, y starting at the bottom row with a negative height - so NDC
-    /// `+y` lands on row 0, where the guest's own transform puts it - and a positive y scale (the AGC
-    /// path's) is the unflipped viewport Vulkan draws by default.
+    /// A GL guest's transform becomes a flipped Vulkan viewport over the whole target: y starts at
+    /// the bottom row with a negative height, so NDC `+y` lands on row 0; a positive y scale gives
+    /// the unflipped viewport.
     #[test]
     fn a_negative_y_scale_is_a_negative_height() {
         let flipped = guest_viewport(orbistoun_gpu::ViewportTransform {
@@ -4348,9 +4177,8 @@ mod tests {
         );
     }
 
-    /// **A guest's texture is uploaded with the one level it carries** (worklog 833): no invented
-    /// second level, and nothing staged past its own texels - the invented level's copy read past
-    /// the staging buffer and lost the device on Neverball's first 256x256 texture.
+    /// A guest's texture is uploaded with the one level it carries: no invented second level, and
+    /// nothing staged past its own texels.
     #[test]
     fn a_guest_texture_has_one_level_and_only_its_own_texels() {
         let texels = vec![0x1234_5678; 256 * 256];
@@ -4381,9 +4209,9 @@ mod tests {
         );
     }
 
-    /// **The harness's coarse level stages every texel its copy reads**: a 256x256 image with the
-    /// sentinel level holds 128x128 sentinels after its own texels - exactly the halved extent the
-    /// level-one copy names - and a 2x2 one still holds the single sentinel the sampling tests expect.
+    /// The harness's coarse level stages every texel its copy reads: a 256x256 image holds 128x128
+    /// sentinels after its own texels, and a 2x2 one holds the single sentinel the sampling tests
+    /// expect.
     #[test]
     fn the_harness_coarse_level_stages_its_whole_extent() {
         let laid = staged(&vec![7; 256 * 256], 256, true);

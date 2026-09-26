@@ -1,51 +1,30 @@
-//! The process parameter block, which a console loader reads before the first guest
+//! The process parameter block, which a hardware loader reads before the first guest
 //! instruction runs.
 //!
-//! A launching executable carries a `PT_SCE_PROCPARAM` segment ([`crate::segment::SCE_PROCPARAM`])
-//! whose bytes are a small fixed header followed by pointers to three further blocks the
-//! title chose - libc parameters, kernel-memory parameters, and one more. The loader reads
-//! this to learn the SDK version and, through the memory-parameter block, the flexible
-//! memory budget the title asked for. A field it expects and does not find faults inside the
-//! platform library before a single guest instruction runs, so the layout is not a place to
-//! guess.
-//!
-//! # Provenance
-//!
-//! The layout below is taken from obSCEne's `crt.c`, which builds this structure to launch
-//! on real hardware and cites the OpenOrbis PS4 ELF specification for the magic, the entry
-//! count, and the fixed size. Two of its offsets are hardware-confirmed rather than merely
-//! documented: obSCEne's D219 records a console faulting on a write through a null pointer at
-//! this block's `+0x40` slot, which fixes the memory-parameter pointer at exactly that
-//! offset. See `docs/REFERENCES.md`.
-//!
-//! # What this reads and what it deliberately does not
-//!
-//! The fixed header and the three pointers are read here, because every offset is cited. The
-//! *contents* of the blocks the pointers lead to are not parsed: obSCEne supplies those blocks
-//! sized-but-empty, so its build establishes that the memory-parameter block exists and how
-//! large it is, but not where the flexible-memory field sits inside it. Reading that field
-//! from a real title would be deriving a layout from material rather than confirming one from
-//! a source, which the shared provenance rule forbids. So the pointer is followed no further
-//! than reporting where it leads (D442).
+//! A launching executable carries a `PT_SCE_PROCPARAM` segment whose bytes are a fixed
+//! header followed by pointers to three blocks: libc parameters, kernel-memory parameters,
+//! and one more. The loader reads it for the SDK version and the flexible memory budget. The
+//! layout comes from obSCEne's `crt.c` and the open-toolchain ELF specification it cites; the
+//! `+0x40` memory-parameter offset is confirmed on hardware (`docs/REFERENCES.md`). Only the
+//! fixed header and the three pointers are read: the layout inside the pointed-to blocks has
+//! no cited source, so the pointers are reported and not followed.
 
 /// The magic a loader looks for at `+0x08`, `"ORBI"` little-endian.
 ///
-/// Named in the OpenOrbis PS4 ELF specification; a loader that does not find it does not
+/// Named in the open-toolchain ELF specification; a loader that does not find it does not
 /// trust the rest of the block.
 pub const MAGIC: u32 = 0x4942_524F;
 
 /// Offset of the memory-parameter pointer within the block.
 ///
-/// Hardware-confirmed, not merely documented: obSCEne left this slot null and a console
-/// faulted writing through it, which is what pins the pointer to this offset rather than an
-/// adjacent one (obSCEne D219).
+/// Confirmed on hardware: a block with this slot null faults on a write through it at this
+/// offset (`docs/REFERENCES.md`).
 pub const MEM_PARAM_OFFSET: usize = 0x40;
 
 /// The fixed header and the three pointers a launching title's process parameters carry.
 ///
-/// Only fields with a cited offset are represented. The blocks the pointers lead to are left
-/// as addresses for a caller to resolve - see the module note on why their contents are not
-/// parsed here.
+/// Only fields with a cited offset are represented. The pointed-to blocks are left as
+/// addresses for a caller to resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcParam {
     /// The size the block states, its one mandatory field.
@@ -71,11 +50,9 @@ pub struct ProcParam {
 impl ProcParam {
     /// Reads the block from a `PT_SCE_PROCPARAM` segment's bytes.
     ///
-    /// Returns `None` only when the bytes are too short to hold even the fixed header
-    /// (`0x18`). A block long enough for the header but not for a pointer reports that
-    /// pointer as zero rather than failing, because "the loader would read zero here" is the
-    /// honest thing to say about a short block, and an absent pointer is exactly what a
-    /// module with no process parameters of its own carries.
+    /// Returns `None` only when the bytes are too short for the fixed header (`0x18`). A
+    /// pointer past the end of a shorter block reads as zero, which is what the loader reads
+    /// and what a module with no process parameters of its own carries.
     #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let word = |at: usize| -> u64 {
@@ -90,8 +67,7 @@ impl ProcParam {
                 .and_then(|s| s.try_into().ok())
                 .map_or(0, u32::from_le_bytes)
         };
-        // The header runs to +0x18 (two SDK-version halves ending there). Shorter than that
-        // is not a process-parameter block at all.
+        // The header runs to +0x18, ending with the two SDK-version halves.
         if bytes.len() < 0x18 {
             return None;
         }
@@ -118,8 +94,7 @@ impl ProcParam {
 mod tests {
     use super::{MAGIC, MEM_PARAM_OFFSET, ProcParam};
 
-    /// A block built exactly as obSCEne's `crt.c` lays it out, so the offsets under test are
-    /// the ones a hardware-confirmed builder uses.
+    /// A block laid out as obSCEne's `crt.c` builds it.
     fn crt_block() -> Vec<u8> {
         let mut b = vec![0_u8; 0x60];
         b[0x00..0x08].copy_from_slice(&0x60_u64.to_le_bytes());
@@ -133,11 +108,10 @@ mod tests {
         b
     }
 
+    /// The header and the three pointers are read at their cited offsets.
     #[test]
     fn reads_the_header_and_the_three_pointers_at_their_cited_offsets() {
-        // The property that matters: the mem_param pointer is read from +0x40, the offset a
-        // console fault pinned (obSCEne D219). A regression that shifted it by one field would
-        // still parse and still look plausible, so it is asserted by value.
+        // Asserted by value: a pointer shifted by one field would still parse plausibly.
         let p = ProcParam::parse(&crt_block()).expect("a full block");
         assert_eq!(p.size, 0x60);
         assert!(p.magic_ok());
@@ -147,20 +121,19 @@ mod tests {
         assert_eq!(p.third_param, 0x3000);
     }
 
+    /// A block without the magic is still read, and `magic_ok` reports it.
     #[test]
     fn a_block_without_the_magic_is_read_but_reports_it() {
-        // The bytes are still parsed - a caller may want the size - but magic_ok is the gate
-        // that says whether a loader would believe them.
+        // A caller may still want the size; `magic_ok` says whether a loader believes it.
         let mut b = crt_block();
         b[0x08..0x0c].copy_from_slice(&0_u32.to_le_bytes());
         let p = ProcParam::parse(&b).expect("still long enough");
         assert!(!p.magic_ok());
     }
 
+    /// A header-only block reports absent pointers as zero.
     #[test]
     fn a_header_only_block_reports_absent_pointers_as_zero() {
-        // A short block is not a parse failure: zero is what a loader would read past its end,
-        // and a module carrying no parameters of its own is the ordinary reason for it.
         let mut b = crt_block();
         b.truncate(0x20);
         let p = ProcParam::parse(&b).expect("header present");
@@ -169,6 +142,7 @@ mod tests {
         assert_eq!(p.libc_param, 0);
     }
 
+    /// Bytes too short for the header are not a block.
     #[test]
     fn bytes_too_short_for_a_header_are_not_a_block() {
         assert!(ProcParam::parse(&[0_u8; 0x10]).is_none());

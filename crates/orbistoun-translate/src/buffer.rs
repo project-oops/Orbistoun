@@ -1,15 +1,8 @@
 //! Declaring the storage buffers a translated module binds.
 //!
-//! Two of them, and both models declare both: an observation window the epilogue copies
-//! registers into, and guest memory that loads and stores reach.
-//!
-//! # Why they are separate bindings
-//!
-//! One buffer split in half would be fewer descriptors and less code. It would also let
-//! a guest address reach the observation window - and a store landing there would
-//! rewrite the registers a test is about to assert on, so the failure would present as
-//! a register bug. The addresses in these tests are chosen and would not do that today,
-//! but the first real shader's addresses are not chosen by anyone here.
+//! Both models declare two: an observation window the epilogue copies registers into, and
+//! guest memory that loads and stores reach. They are separate bindings so no guest address
+//! can reach the observation window and rewrite the registers a test asserts on (D101).
 
 use orbistoun_spirv::{Builder, Id, decoration, op, storage};
 
@@ -24,11 +17,9 @@ pub(crate) struct StorageBuffer {
 
 /// Declares a storage buffer of `count` words at `binding` in descriptor set zero.
 ///
-/// The shape is a struct containing an array, which is what a shader interface block
-/// is. That extra level matters at the point of use: reaching a word takes **two**
-/// indices - the member, always zero, then the element. Passing one index produces a
-/// module that validates and faults the driver, which cost an afternoon to find once
-/// already.
+/// The shape is a struct containing an array, as a shader interface block is, so reaching a
+/// word takes two indices: the member (always zero), then the element. One index yields a
+/// module that validates and faults the driver.
 pub(crate) fn declare(b: &mut Builder, u32_type: Id, count: Id, binding: u32) -> StorageBuffer {
     let array = b.id();
     let block = b.id();
@@ -63,10 +54,10 @@ pub(crate) fn declare(b: &mut Builder, u32_type: Id, count: Id, binding: u32) ->
     }
 }
 
-/// Declares the push-constant block of `count` words a module's user data is read from (worklog 826).
+/// Declares the push-constant block of `count` words a module's user data is read from.
 ///
-/// The same struct-of-array shape as [`declare`] and reached the same way, with two indices; a push
-/// constant has no descriptor set or binding, only its offset within the block.
+/// The same struct-of-array shape as [`declare`], reached with two indices; a push constant
+/// has no descriptor set or binding, only its offset within the block.
 pub(crate) fn declare_push_constants(b: &mut Builder, u32_type: Id, count: Id) -> StorageBuffer {
     let array = b.id();
     let block = b.id();

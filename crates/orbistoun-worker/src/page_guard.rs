@@ -1,17 +1,12 @@
 //! Guarding guest pages until something touches them (D717).
 //!
-//! A deferred copy's destination is made inaccessible, so the first read or write of it - by the
-//! guest, or by host code on the guest's behalf - faults, and the fault handler in [`crate::report`]
-//! carries the copy out and resumes the access. These are the two halves the command processor is
-//! handed ([`orbistoun_gpu::agc_driver::LazyCopies`]): make a range inaccessible, answering the
-//! protection it had, and put that protection back.
-//!
-//! A range may lie across several host regions: guest direct memory is mapped in views of its own,
-//! and an 8 MB colour target spans five 2 MB ones (D719). Protection is changed a region at a time,
-//! because the host changes it within one allocation per call.
-//!
-//! Away from Windows there is no guard, so every copy is carried out when it is made - exact, and
-//! slower.
+//! A deferred copy's destination is made inaccessible, so the first read or write of it, by the
+//! guest or by host code on its behalf, faults, and the fault handler in [`crate::report`] carries
+//! the copy out and resumes the access. The command processor is handed both halves
+//! ([`orbistoun_gpu::agc_driver::LazyCopies`]): guard a range, answering its protection, and put
+//! that protection back. A range may span several host regions (guest direct memory is mapped in
+//! views of its own), so protection is changed a region at a time. Away from Windows there is no
+//! guard, and every copy is carried out when it is made.
 
 /// One change this module made to guest pages' host protection: the range, the
 /// protection it asked for, whether the host agreed, and its place in the order of changes.
@@ -101,7 +96,7 @@ pub fn guard(base: u64, len: u64) -> Option<u32> {
     had
 }
 
-/// Makes the whole host pages `[base, base + len)` **read-only**, answering the protection they had
+/// Makes the whole host pages `[base, base + len)` read-only, answering the protection they had
 /// (D720): a write to them faults, a read does not. `None`, changing nothing, as [`guard`].
 #[cfg(windows)]
 pub fn protect_writes(base: u64, len: u64) -> Option<u32> {
@@ -211,13 +206,13 @@ mod imp {
     }
 }
 
-/// No guard away from Windows yet: every copy is carried out when it is made.
+/// No guard away from Windows: every copy is carried out when it is made.
 #[cfg(not(windows))]
 pub fn guard(_base: u64, _len: u64) -> Option<u32> {
     None
 }
 
-/// No write protection away from Windows yet: every target is compared.
+/// No write protection away from Windows: every target is compared.
 #[cfg(not(windows))]
 pub fn protect_writes(_base: u64, _len: u64) -> Option<u32> {
     None
@@ -231,9 +226,8 @@ pub fn release(_base: u64, _len: u64, _protection: u32) -> bool {
 
 #[cfg(all(test, windows))]
 mod tests {
-    /// **A range across two host allocations is guarded whole and released whole** (D719): two
-    /// separately reserved pages side by side, as guest direct memory's views lie. The negative is
-    /// the one-region guard this replaced, which refused the range.
+    /// A range across two neighbouring host allocations, as guest direct memory's views lie, is
+    /// guarded whole and released whole, and the change history records both.
     #[test]
     fn a_range_across_two_allocations_is_guarded_and_released_whole() {
         use windows_sys::Win32::System::Memory::{
@@ -275,10 +269,8 @@ mod tests {
             "{guarded:x?}"
         );
         assert!(super::release(base as u64, 2 * PAGE as u64, PAGE_READWRITE));
-        // And the history a fault report reads says so, guard then release.
         let mut changes = [super::Change::default(); 4];
-        // Asked until it answers: the history never waits for its lock (a fault handler asks it),
-        // and another test in this process may be holding it for a moment.
+        // Asked until it answers: the history never waits for its lock.
         let count = std::iter::repeat_with(|| {
             super::changes_touching(base as u64 + PAGE as u64, &mut changes)
         })

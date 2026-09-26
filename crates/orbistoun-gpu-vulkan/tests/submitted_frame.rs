@@ -1,24 +1,9 @@
-//! A frame drawn from a **captured command stream**, rather than from shaders picked out by hand.
+//! A frame drawn from a captured command stream, rather than from shaders picked out by hand.
 //!
-//! # What has and has not happened before this
-//!
-//! Both halves existed and had never met. `orbistoun-gpu`'s oracle test walks a captured stream,
-//! finds the shader addresses its register writes name, reads those shaders out of guest memory
-//! and translates them - and stops there, because that crate deliberately knows no graphics API.
-//! This crate draws translated modules, and every test that does so far reached into the payload
-//! image at a hardcoded offset for them.
-//!
-//! So nothing had ever gone from *a guest asked for this* to a frame. That is the submission
-//! pipeline's whole purpose, and it is the last join in the GPU path that nothing had exercised.
-//!
-//! # What this is not
-//!
-//! **Not the console's frame.** The stream names its shaders and its draw; it does not carry the
-//! vertex buffer or the texture, and the record's pixel hash needs both. The vertices and texels
-//! here are this file's, exactly as in `console_textured.rs`.
-//!
-//! What it does establish is that the addresses the register vocabulary extracts are the
-//! addresses of shaders that run.
+//! `orbistoun-gpu` walks a captured stream, finds the shader addresses its register writes name,
+//! reads those shaders from guest memory and translates them; this crate draws the resulting
+//! modules. The stream carries no vertex buffer or texture, so the vertices and texels are this
+//! file's, as in `console_textured.rs`, and this is not the hardware's frame.
 
 use orbistoun_gpu::pipeline::{GuestMemory, Pipeline, Queue};
 use orbistoun_gpu::{RenderCommand, ShaderStage};
@@ -49,7 +34,7 @@ fn device_or_skip(what: &str) -> bool {
     }
 }
 
-/// Where the shader payload sat on the console; the address the stream's registers name.
+/// Where the shader payload sat in guest memory: the address the stream's registers name.
 const PAYLOAD_ADDRESS: u64 = 0x2_008f_0000;
 
 /// The low half of the guest address the vertex buffer sat at.
@@ -84,10 +69,7 @@ impl GuestMemory for Payload {
     }
 }
 
-/// Reads one of the other crate's capture files as bytes.
-///
-/// Read from there rather than copied here, for the reason that crate's own test gives: a second
-/// copy of a capture is a second thing to keep true.
+/// Reads one of the other crate's capture files as bytes, from there, so the capture has one copy.
 fn capture(name: &str) -> Vec<u8> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -112,25 +94,13 @@ fn capture(name: &str) -> Vec<u8> {
     bytes
 }
 
-/// **A captured command stream produces a frame.**
-///
-/// # What it asserts
+/// A captured command stream produces a frame.
 ///
 /// The submission is walked, its register writes name two shaders, both translate, and the two
-/// modules it hands back draw the four-quadrant texture frame every other test in this crate
-/// asserts. Nothing between the stream and the pixels is chosen here: **which** module is the
-/// geometry and which is the shading comes from the stage the pipeline attributed, not from an
-/// offset this file knows.
-///
-/// That last part is the claim. The register vocabulary that extracts a shader address is the
-/// least certain table in the GPU crate, by its own comment. A frame drawn from what it found is
-/// the first evidence that what it found were shaders rather than plausible numbers.
-///
-/// # What it cannot assert
-///
-/// That the frame is the console's, for the reasons this file opens with. And it says nothing
-/// about the *draw* the stream describes - the vertex count, the topology, the render target -
-/// because this draws through the harness rather than through anything that reads those.
+/// modules draw the four-quadrant texture frame. Which module is geometry and which is shading
+/// comes from the stage the pipeline attributed, so the frame shows the extracted addresses are
+/// shaders. The stream's own vertex count, topology and render target are not used: this draws
+/// through the harness.
 #[test]
 fn a_captured_command_stream_draws_a_frame() {
     if !device_or_skip("a_captured_command_stream_draws_a_frame") {
@@ -141,9 +111,8 @@ fn a_captured_command_stream_draws_a_frame() {
         bytes: capture("agc-gl-cube-fw1240-b.payload.hex"),
     };
 
-    // One span covering the vertex buffer and the canary, given to the pipeline rather than to
-    // each translation - which is what `with_window` exists for, and what a submission could not
-    // say until worklog 571.
+    // One span covering the vertex buffer and the canary, given to the pipeline rather than to each
+    // translation, as `with_window` provides.
     let window = Window::spanning(VERTEX_BUFFER_BASE, SPANNING_WORDS).expect("a power of two");
     let mut pipeline = Pipeline::new(Strategy::Predicated {
         fidelity: Fidelity::Auto,
@@ -166,8 +135,8 @@ fn a_captured_command_stream_draws_a_frame() {
         submission.report.failures
     );
 
-    // Which module is which comes from the stage the pipeline attributed. A guest's vertex
-    // program becomes a mesh module here (D688), so the vertex stage is the geometry.
+    // Which module is which comes from the stage the pipeline attributed. A guest's vertex program
+    // becomes a mesh module (D688), so the vertex stage is the geometry.
     let mut geometry = None;
     let mut shading = None;
     for command in &submission.commands {

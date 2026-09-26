@@ -1,11 +1,8 @@
 //! The reference assembler's output formats, as parsers.
 //!
-//! Each one matches something `llvm-mc` or `llvm-objdump` prints. Where a pattern reads
-//! oddly, the reason is that the reference prints oddly - so before simplifying one, check
-//! what it is matching against rather than what it looks like it should match.
-//!
-//! `./bin/orbistoun tables` is the guard on that: it regenerates from a recording and diffs
-//! against the committed tables, so a parser that quietly changed what it accepts fails.
+//! Each matches something `llvm-mc` or `llvm-objdump` prints; where a pattern reads oddly,
+//! the reference prints oddly. `./bin/orbistoun tables` regenerates from a recording and
+//! diffs against the committed tables, so a parser that changes what it accepts fails.
 
 use std::sync::OnceLock;
 
@@ -15,8 +12,8 @@ use crate::assembler::Sample;
 
 /// Compiles once, on first use.
 ///
-/// A `Regex` is expensive to build and free to reuse, and the operand solver evaluates
-/// these inside a loop over every probe in the corpus.
+/// A `Regex` is expensive to build, and the operand solver evaluates these in a loop over
+/// every probe.
 macro_rules! pattern {
     ($name:ident, $re:literal) => {
         fn $name() -> &'static Regex {
@@ -49,10 +46,8 @@ pattern!(
 
 // `	mnemonic operands  // offset: word [word]`, from `llvm-objdump -d`.
 //
-// **Not anchored to end of line.** A branch prints a trailing symbol reference such as
-// `<control+0x2c>`, and anchoring seemed tidier while silently dropping every branch
-// instruction - which the contiguity check then caught as a gap, because a fixture missing
-// its control flow teaches the decoder that what follows starts four bytes early.
+// Not anchored to end of line, because a branch prints a trailing symbol reference such
+// as `<control+0x2c>`.
 pattern!(
     objdump_re,
     r"^\s*(?P<mnemonic>[a-z_0-9]+)(?P<operands>[^/]*)//\s*(?P<offset>[0-9A-Fa-f]+):\s*(?P<words>[0-9A-Fa-f]{8}(?:\s+[0-9A-Fa-f]{8})*)"
@@ -64,20 +59,16 @@ pattern!(
     r#"(?m)^\s*(?://\s*target\s+triple\s*:\s*(?P<comment>\S+)|target\s+triple\s*=\s*"(?P<triple>[^"]+)")"#
 );
 
-// `offset:16` - a named immediate the reference appends to the *last* operand with no
-// comma before it. Splitting on commas alone leaves `v2 offset:16` as one operand, which
-// matches no register pattern - so the opcode reports as unsolvable and the offset field,
-// which is real and which a translator must read, is never looked for.
+// `offset:16`: a named immediate the reference appends to the last operand with no comma
+// before it, so a comma split alone leaves `v2 offset:16` as one operand.
 pattern!(
     named_immediate_re,
     r"^(?P<name>[a-z_]+[0-9]*):(?P<value>-?(?:0x[0-9a-fA-F]+|\d+))$"
 );
 
-// A modifier whose value is printed as a symbolic name: `format:[BUF_FMT_32_FLOAT]` with
-// brackets, `dim:SQ_RSRC_IMG_2D` without. Both are fields of the encoding and neither value
-// is a number, which is what separates them from `offset:16` - the value there begins with a
-// digit and this deliberately will not match it, because an offset is an operand a
-// translator has to read and dropping it silently puts an access at the wrong address.
+// A modifier whose value is a symbolic name: `format:[BUF_FMT_32_FLOAT]` with brackets,
+// `dim:SQ_RSRC_IMG_2D` without. A value beginning with a digit, as in `offset:16`, does
+// not match, because an offset is an operand a translator must read.
 pattern!(
     symbolic_modifier_re,
     r"^(?P<name>[a-z_]+[0-9]*):(?:\[[A-Za-z0-9_]+\]|[A-Za-z_][A-Za-z0-9_]*)$"
@@ -119,8 +110,7 @@ pub(crate) fn assembled(line: &str) -> Option<Sample> {
 
 /// The one-based line number of an `invalid instruction encoding` warning.
 ///
-/// A *warning*, not an error - the disassembler reports an unrecognised word that way, and
-/// treating it as an error would miss it entirely.
+/// A warning, not an error: the disassembler reports an unrecognised word that way.
 pub(crate) fn invalid_instruction(line: &str) -> Option<usize> {
     invalid_re()
         .captures(line)
@@ -179,8 +169,8 @@ pub(crate) fn symbolic_modifier(token: &str) -> bool {
 
 /// `attr3.y` as its number and its channel index.
 ///
-/// `xyzw` = 0 to 3 is the only ordering they could have, and the solver *checks* it: give it
-/// the wrong one and no field explains the samples, so it refuses.
+/// `xyzw` maps to 0 to 3, which the solver checks: a wrong ordering leaves no field that
+/// explains the samples.
 pub(crate) fn attribute(token: &str) -> Option<(String, u32)> {
     let caps = attribute_re().captures(token)?;
     let channel = match caps.name("channel")?.as_str() {
@@ -234,9 +224,8 @@ pub(crate) fn encoding(line: &str) -> Option<Vec<u32>> {
 
 /// `0x01,0x03,0x00,0x7e` as little-endian 32-bit words.
 ///
-/// A trailing partial word is dropped rather than zero-extended. An instruction is a whole
-/// number of words, so a partial one means the line was not what it looked like - and
-/// padding it would invent bits the assembler never emitted.
+/// A trailing partial word is dropped rather than zero-extended, since an instruction is a
+/// whole number of words.
 fn words_of(bytes: &str) -> Vec<u32> {
     let octets: Vec<u8> = bytes
         .split(',')
@@ -252,9 +241,8 @@ fn words_of(bytes: &str) -> Vec<u32> {
 
 /// Splits one printed operand into the tokens a solver treats separately.
 ///
-/// The reference prints modifiers alongside operands and separated by spaces rather than
-/// commas, so a comma split alone leaves `v0 offset:4 glc` as one token. Splitting on
-/// whitespace recovers them.
+/// The reference separates modifiers from operands by spaces rather than commas, so a
+/// comma split alone leaves `v0 offset:4 glc` as one token.
 #[must_use]
 pub(crate) fn split_operand(piece: &str) -> Vec<String> {
     piece
@@ -294,8 +282,7 @@ mod tests {
         assert_eq!(why, "invalid instruction");
     }
 
-    /// A warning is not a rejection. The assembler emits both, and treating a warning as a
-    /// refusal would drop a probe that assembled perfectly well.
+    /// A warning is not a rejection, so a probe that assembled is not dropped.
     #[test]
     fn a_warning_is_not_a_rejection() {
         assert!(rejection("<stdin>:3:1: warning: invalid instruction").is_none());
@@ -305,7 +292,7 @@ mod tests {
     fn a_printed_buffer_format_is_recovered() {
         let line = "\ttbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_UINT] idxen";
         assert_eq!(buffer_format(line), Some("BUF_FMT_32_UINT"));
-        // A code with no name prints back numerically, which is a different fact.
+        // A code with no name prints numerically and is not a format name.
         assert_eq!(buffer_format("... format:78 idxen"), None);
     }
 

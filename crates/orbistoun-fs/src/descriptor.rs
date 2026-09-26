@@ -1,23 +1,9 @@
 //! File descriptors, and the standard streams.
 //!
-//! # Descriptors are not the same handles stdio uses
-//!
-//! `fopen` answers an address, because the guest dereferences it (D165). A descriptor is a
-//! small integer the guest passes back and compares against zero and negative values, and
-//! nothing reads through it - so it is a small integer here. Matching what the guest does
-//! with a value is the rule; "always use an address" is not (D169).
-//!
-//! # Why a guest's standard output does not go to standard output
-//!
-//! The worker speaks its protocol over **stdout**, as newline-delimited JSON. A guest
-//! writing bytes there would interleave with that stream, and a half-finished line breaks
-//! the reader for good - the same reasoning that already sends fault reports to the error
-//! stream.
-//!
-//! So a guest writing to descriptor 1 or 2 lands on the host's **stderr**, where a
-//! truncated line costs nothing. This matters more than it looks: a conformance probe that
-//! cannot write to standard output cannot report at all, and one loader examined refuses
-//! descriptor 1 outright for exactly that reason (D170).
+//! A descriptor is a small integer the guest compares against zero and never reads through,
+//! so it is a small integer here, where a `FILE *` is an address. A guest writing to
+//! descriptor 1 or 2 lands on the host's stderr, because the worker speaks newline-delimited
+//! JSON over stdout and interleaved guest bytes would break the reader (D170).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
@@ -31,22 +17,20 @@ pub const STDERR: u64 = 2;
 
 /// Most descriptors a guest may hold at once.
 ///
-/// Bounded deliberately. A guest that leaks descriptors should hit a wall that says so
-/// rather than climbing forever - and an unbounded search for a free number is a loop with
-/// no stated end, which is the same defect wearing a different hat.
+/// Bounded, so a guest that leaks descriptors hits a refusal, and the search for a free
+/// number has a stated end.
 pub const MAX_DESCRIPTORS: u64 = 4096;
 
 /// The first descriptor handed out for a real file.
 ///
-/// Three, because zero through two are the standard streams and a guest expects them to
-/// be. Handing a file descriptor 1 would make its writes appear as program output.
+/// Zero through two are the standard streams; a file on descriptor 1 would write program
+/// output.
 pub const FIRST_FILE: u64 = 3;
 
 /// What a descriptor refers to.
 ///
-/// **One table for files and sockets, because a guest has one.** `close`, `read` and `write`
-/// take either without being told which, and two tables would mean two numbering spaces and
-/// a descriptor that means different things to different calls (D371).
+/// One table for files and sockets, because a guest has one: `close`, `read` and `write`
+/// take either without being told which (D371).
 #[derive(Debug)]
 enum Target {
     /// A file on the host.
@@ -55,9 +39,7 @@ enum Target {
     Socket(crate::socket::Socket),
     /// An event queue, and what a guest has asked it to watch.
     ///
-    /// **In the descriptor table rather than beside it**, because that is what it is: a
-    /// guest closes a queue with `close`, and it must not have to know which kind of thing
-    /// it is closing.
+    /// In the descriptor table, since a guest closes a queue with `close`.
     Queue(crate::kqueue::Registrations),
     /// A device: a stream with no host file behind it (D389).
     Device(crate::device::Device),
@@ -71,10 +53,9 @@ fn table() -> &'static Mutex<BTreeMap<u64, Target>> {
 
 /// Empties the descriptor table so one test's open files cannot leak into the next.
 ///
-/// The table is a process-wide static, and [`crate::exclusively`] serialises the tests but did not
-/// reset between them - so a descriptor one test left open shifted the descriptor numbers the next
-/// test was handed, which is how a `sendfile` that passed alone failed in the suite (dropping each
-/// `Target` closes the host file it holds).
+/// The table is a process-wide static; [`crate::exclusively`] resets it so descriptor numbers
+/// one test left behind cannot shift the next test's. Dropping each `Target` closes its host
+/// file.
 #[cfg(test)]
 pub(crate) fn clear() {
     if let Ok(mut table) = table().lock() {
@@ -89,17 +70,16 @@ pub const fn is_standard(fd: u64) -> bool {
 
 /// Opens a guest path for reading, answering a descriptor.
 ///
-/// Read-only through `/app0`, which is the user's own title directory and the material
-/// being measured. See [`create`] for the writable half.
+/// Read-only through `/app0`, the title directory being run; see [`create`] for the writable
+/// half.
 pub fn open(guest_path: &str) -> Option<u64> {
-    // **Devices before the mount table**, because a device has no host path to resolve to
-    // and asking the table about one would answer "not there" for something that is (D389).
+    // Devices before the mount table: a device has no host path to resolve (D389).
     if let Some(device) = crate::device::named(guest_path) {
         crate::opened::note(guest_path);
         return insert(Target::Device(device));
     }
     let Some(host) = crate::mount::resolve_existing(guest_path) else {
-        // A path nothing here holds, recorded as the work item it is (D387).
+        // A path nothing here holds, recorded (D387).
         crate::wanted::note(guest_path);
         return None;
     };
@@ -110,30 +90,23 @@ pub fn open(guest_path: &str) -> Option<u64> {
     crate::opened::note(guest_path);
     let is_directory = host.is_dir();
     let fd = insert_file(file)?;
-    // A directory's listing, for a guest that reads it through the descriptor (worklog 842).
+    // A directory's listing, for a guest that reads it through the descriptor.
     if is_directory {
         crate::dirent::note_directory(fd, guest_path);
     }
     Some(fd)
 }
 
-/// Opens `host` for reading, whether it is a file **or a directory**.
+/// Opens `host` for reading, whether it is a file or a directory.
 ///
-/// The directory half is a host-platform note, not a guest one: a guest opens its own `/app0` mount
-/// to check it is there and gets a descriptor on the console, so it must here too. `std::fs::File::open`
-/// gives one on Unix - a read-only handle a caller can `fstat` but not read - and **fails on Windows**
-/// without `FILE_FLAG_BACKUP_SEMANTICS`, so an `open("/app0/")` answered `ENOENT` there where the
-/// console answers a descriptor. PPSA04263 aborts on that `ENOENT` (`int 0x41`, the fatal trap of
-/// worklog 611): its last call before the trap is `sceKernelOpen("/app0/") -> 0x80020002`, the
-/// upstream wrong value the reclassified finding points at (worklog 615).
-///
-/// A file opens the same way on both platforms; only the directory needs the flag, and only on
-/// Windows.
+/// A guest opens its own `/app0` mount to check it is there and gets a descriptor on the
+/// hardware. `std::fs::File::open` opens a directory read-only on Unix but fails on Windows
+/// without `FILE_FLAG_BACKUP_SEMANTICS`, so only the directory case on Windows needs the flag.
 #[cfg(windows)]
 fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
-    /// `FILE_FLAG_BACKUP_SEMANTICS` from `winbase.h` - the documented Win32 flag that lets
-    /// `CreateFile` return a handle to a directory. A host-API constant, not a guest or vendor one.
+    /// `FILE_FLAG_BACKUP_SEMANTICS` from `winbase.h`: the documented Win32 flag that lets
+    /// `CreateFile` return a handle to a directory. A host-API constant.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -143,7 +116,7 @@ fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
     options.open(host)
 }
 
-/// The non-Windows half: `File::open` already opens a directory read-only, so there is nothing to add.
+/// The non-Windows half: `File::open` already opens a directory read-only.
 #[cfg(not(windows))]
 fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(host)
@@ -151,8 +124,8 @@ fn open_readable(host: &std::path::Path) -> std::io::Result<std::fs::File> {
 
 /// Opens a guest path for writing, creating it, answering a descriptor.
 ///
-/// Refused outside `/data`. The separation is the whole decision: storage the installation
-/// owns is a guest's to write, and the title directory is not (D250).
+/// Refused outside a writable mount such as `/data`: storage the installation owns is a
+/// guest's to write, and the title directory is not (D250).
 pub fn create(guest_path: &str) -> Option<u64> {
     let host = crate::mount::resolve_for_create(guest_path)?;
     if let Some(parent) = host.parent() {
@@ -186,11 +159,9 @@ pub(crate) fn insert_queue() -> Option<u64> {
 
 /// Does something with the registrations a descriptor holds, if it holds any.
 ///
-/// Answers [`None`] when the descriptor is not a queue, which is what `kevent` reports as a
-/// failure - passing a file to it is a guest's mistake and should be said so.
-///
-/// **The lock is held across the call**, which is why the caller must not ask about
-/// readiness from inside one: that takes this same lock (D385).
+/// Answers [`None`] when the descriptor is not a queue, which `kevent` reports as a failure.
+/// The lock is held across the call, so the caller must not ask about readiness inside it:
+/// that takes the same lock.
 pub(crate) fn with_queue<T>(
     fd: u64,
     act: impl FnOnce(&mut crate::kqueue::Registrations) -> T,
@@ -205,8 +176,7 @@ pub(crate) fn with_queue<T>(
 /// Puts anything in the table at the lowest free descriptor.
 fn insert(target: Target) -> Option<u64> {
     let mut table = table().lock().ok()?;
-    // Lowest free descriptor, which is what a caller expects and what makes a leak
-    // visible as a number that climbs.
+    // Lowest free descriptor, as a caller expects; a leak shows as a number that climbs.
     let fd = (FIRST_FILE..FIRST_FILE + MAX_DESCRIPTORS).find(|n| !table.contains_key(n))?;
     table.insert(fd, target);
     Some(fd)
@@ -215,13 +185,9 @@ fn insert(target: Target) -> Option<u64> {
 /// Does something with the socket a descriptor holds, if it holds one.
 ///
 /// Answers [`None`] when the descriptor is not a socket, which a caller turns into the
-/// failure the interface documents - a file descriptor passed to `listen` is a guest's
-/// mistake and should be reported as one rather than acted on.
-///
-/// **The lock is held across the call**, which is what makes a two-step change - read the
-/// bound address, replace with a listener - atomic against another guest thread. It also
-/// means a blocking operation inside here blocks the table; `accept` is the one that does,
-/// and it is documented there.
+/// documented failure. The lock is held across the call, so a two-step change (read the
+/// bound address, replace with a listener) is atomic against another guest thread; a
+/// blocking operation inside blocks the table, which `accept` documents.
 pub(crate) fn with_socket<T>(
     fd: u64,
     act: impl FnOnce(&mut crate::socket::Socket) -> T,
@@ -235,9 +201,8 @@ pub(crate) fn with_socket<T>(
 
 /// Reads into `into`, answering how many bytes arrived.
 ///
-/// Reading from a standard stream answers zero rather than blocking on the host's own
-/// input: a guest that reads stdin here would otherwise hang the worker on a terminal
-/// nobody is typing into.
+/// Reading from a standard stream answers zero rather than blocking the worker on the host's
+/// own input.
 pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
     use std::io::Read as _;
     if is_standard(fd) {
@@ -246,25 +211,24 @@ pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
     let mut table = table().lock().ok()?;
     if let Some(target) = table.get_mut(&fd) {
         return match target {
-            // Nothing is read from a queue: `kevent` is how its events are taken, and a
-            // `read` on one fails on the platform too.
+            // Nothing is read from a queue: `kevent` takes its events, and `read` on one fails
+            // on the platform too.
             Target::Queue(_) => None,
             Target::Device(device) => Some(device.read(into)),
             Target::File(file) => Some(file.read(into).unwrap_or(0)),
-            // A socket reads exactly as a file does, which is the point of one table: a server
-            // that reads a request with `read` and one that reads it with `recv` are the same
-            // program to everything below this line.
+            // A socket reads as a file does, so `read` and `recv` are the same to everything
+            // below.
             Target::Socket(socket) => match socket {
                 crate::socket::Socket::Stream { stream, .. } => {
                     Some(stream.read(into).unwrap_or(0))
                 }
-                // Reading a listener is a guest's mistake, reported rather than answered with
-                // an empty read that looks like a closed connection.
+                // Reading a listener is a guest's mistake, reported rather than answered with an
+                // empty read that looks like a closed connection.
                 _ => None,
             },
         };
     }
-    // If fd is 3 and not an opened file/socket in the table, it is the payload's kernel R/W escape pipe.
+    // Descriptor 3 outside the table is the read end of the kernel pipe while it is set.
     if fd == 3 && crate::escape::get_kernel_read_address() != 0 {
         return Some(crate::escape::read_kernel_pipe(into));
     }
@@ -273,13 +237,9 @@ pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
 
 /// Whether a socket call is allowed to wait for what it asked for.
 ///
-/// # Why the flag is not just passed through
-///
-/// `MSG_DONTWAIT` is a property of **one call**, not of the socket, and honouring it means
-/// making the host socket non-blocking for the length of that call and then putting it back.
-/// Getting the second half wrong is invisible where it happens and turns a guest's later
-/// blocking `recv` into a busy loop somewhere else - so the two halves are one type rather
-/// than two statements a reader has to notice are paired (D667).
+/// `MSG_DONTWAIT` is a property of one call, not of the socket: honouring it makes the host
+/// socket non-blocking for that call and then restores it. The two halves are one type so
+/// the restore cannot be forgotten (D667).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wait {
     /// The socket's own mode decides, which is the ordinary case.
@@ -315,16 +275,10 @@ impl Restore {
 
 /// Reads into `into` for a socket call, naming the errno when it could not.
 ///
-/// # Why this is not [`read`]
-///
-/// [`read`] answers `Option<usize>`, and both of the conditions obSCEne measured collapse
-/// inside it: a would-block became `Some(0)`, which a guest reads as the peer hanging up, and
-/// a read of a listener became `None`, which says nothing about why. Hardware answers those
-/// two differently - `0x8041_0123` and `0x8041_0139`, `EAGAIN` and `ENOTCONN` - so the vendor
-/// spelling needs the number and not just the failure (D667).
-///
-/// **Anything that is not a socket is still [`read`]**, unchanged: a guest calling `recv` on a
-/// file is unusual, and this is not the place to start refusing it.
+/// [`read`] collapses the two conditions a socket call must name: a would-block becomes
+/// `Some(0)`, which reads as the peer hanging up, and a read of a listener becomes `None`.
+/// The hardware answers `0x8041_0123` (`EAGAIN`) and `0x8041_0139` (`ENOTCONN`), so the
+/// vendor spelling needs the number (D667). Anything that is not a socket goes to [`read`].
 pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
     use std::io::Read as _;
     let mut table = table().lock().map_err(|_| crate::socket::UNNAMED)?;
@@ -344,8 +298,8 @@ pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
             restore.put_back(stream, *nonblocking);
             answered
         }
-        // A listener has no peer to read from, which is the condition the console answered
-        // `ENOTCONN` (obSCEne `102-net/recv-would-block`).
+        // A listener has no peer to read from: `ENOTCONN` on the hardware (obSCEne
+        // `102-net/recv-would-block`).
         Some(Target::Socket(_)) => Err(orbistoun_core::errno::NOT_CONNECTED),
         _ => {
             drop(table);
@@ -356,10 +310,9 @@ pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
 
 /// Writes `bytes` for a socket call, naming the errno when it could not.
 ///
-/// The counterpart to [`socket_read`], and it exists for one of the same two conditions: a
-/// send on a saturated socket is a would-block, which hardware answers `0x8041_0123`
-/// (obSCEne `102-net/accept-inherits`), and [`write()`] reports it as `None` alongside every
-/// other reason a write can fail.
+/// The counterpart to [`socket_read`]: a send on a saturated socket is a would-block, which
+/// the hardware answers `0x8041_0123` (obSCEne `102-net/accept-inherits`), where [`write()`]
+/// reports only `None`.
 pub fn socket_write(fd: u64, bytes: &[u8], wait: Wait) -> Result<usize, u32> {
     use std::io::Write as _;
     let mut table = table().lock().map_err(|_| crate::socket::UNNAMED)?;
@@ -389,25 +342,24 @@ pub fn socket_write(fd: u64, bytes: &[u8], wait: Wait) -> Result<usize, u32> {
 
 /// Writes `bytes`, answering how many were taken.
 ///
-/// **Standard output and standard error both go to the host's error stream**, never its
-/// output stream, which carries the worker's protocol. Anything else is refused: files are
-/// opened read-only, so a write to one would be a write into the user's own title.
+/// Standard output and standard error both go to the host's error stream, since its output
+/// stream carries the worker's protocol. Anything else is refused unless opened through
+/// `create`.
 pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
     use std::io::Write as _;
     if fd == STDOUT || fd == STDERR {
-        // The third channel a guest can speak through, kept beside the other two so the run
-        // report does not depend on which one a title happened to pick (D658).
+        // Kept for the run report beside the other output channels (D658).
         orbistoun_core::said::note(bytes);
         // Guest output, not a log: the guest's own write, so it stays a direct write.
         let mut stderr = std::io::stderr();
         let _ = stderr.write_all(bytes);
-        // Flushed per write, because a probe's output is only useful if it survives the
-        // guest faulting immediately afterwards - which is the ordinary case here.
+        // Flushed per write, so a probe's output survives the guest faulting immediately
+        // afterwards.
         let _ = stderr.flush();
         return Some(bytes.len());
     }
-    // A file, which is writable only if it was opened through `create` - anything opened
-    // for reading refuses here, and the error is the guest's answer rather than a panic.
+    // A file is writable only if it was opened through `create`; anything opened for reading
+    // refuses, and the error is the guest's answer.
     let mut table = table().lock().ok()?;
     match table.get_mut(&fd) {
         // A device that refuses writes says so rather than discarding them.
@@ -416,10 +368,9 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
         Some(Target::Socket(crate::socket::Socket::Stream { stream, .. })) => {
             stream.write(bytes).ok()
         }
-        // Not an open descriptor. FD 4 is the kernel R/W escape pipe write end (`rwpipe[1]`) when the
-        // escape address is set, and its writes are swallowed as the pipe would. Checked *after* the
-        // table, not before, so a real file that happens to land at descriptor 4 is written rather
-        // than silently discarded - the collision that swallowed a `sendfile` and hung a socket test.
+        // Not an open descriptor. Descriptor 4 is the kernel pipe's write end while its
+        // address is set, and its writes are swallowed as the pipe would. Checked after the
+        // table, so a real file at descriptor 4 is still written.
         None if fd == 4 && crate::escape::get_kernel_read_address() != 0 => Some(bytes.len()),
         // A queue, a datagram socket, or a descriptor that names nothing: not writable here.
         _ => None,
@@ -433,7 +384,7 @@ pub fn seek(fd: u64, from: crate::open::From, offset: i64) -> Option<u64> {
         return None;
     }
     let mut table = table().lock().ok()?;
-    // Seeking a socket is meaningless and is refused rather than answered with a position.
+    // Seeking a socket is meaningless and is refused.
     let Target::File(file) = table.get_mut(&fd)? else {
         return None;
     };
@@ -447,10 +398,8 @@ pub fn seek(fd: u64, from: crate::open::From, offset: i64) -> Option<u64> {
 
 /// Flushes an open file's contents to the storage behind it. Answers whether it could.
 ///
-/// **A real flush, not a reported one.** `fsync` exists so a caller can know its bytes have
-/// landed, and a version answering success without asking the operating system gives exactly
-/// the assurance the caller wanted and none of the substance. A standard stream has nothing to
-/// flush and is answered as success, since its bytes have already left this process.
+/// A real flush: a caller relies on its bytes having landed. A standard stream has nothing to
+/// flush and answers success, since its bytes have already left this process.
 pub fn sync(fd: u64) -> bool {
     if is_standard(fd) {
         return true;
@@ -466,8 +415,7 @@ pub fn sync(fd: u64) -> bool {
 
 /// Sets an open file's length. Answers whether it could.
 ///
-/// A standard stream has no length, so it is refused rather than being given one - and a
-/// descriptor nobody opened is refused for the same reason `read` and `write` refuse it.
+/// A standard stream has no length, so it is refused, as is a descriptor nobody opened.
 pub fn set_length(fd: u64, length: u64) -> bool {
     if is_standard(fd) {
         return false;
@@ -483,17 +431,10 @@ pub fn set_length(fd: u64, length: u64) -> bool {
 
 /// Reads at an offset without moving the descriptor's own position.
 ///
-/// # The position is the whole point, and one host moves it anyway
-///
-/// `pread` exists so two threads can read one file at once without agreeing about where the
-/// position is. Both hosts this builds for have a positioned read - and **Windows' updates
-/// the file pointer**, which is exactly what `pread` promises not to do. It was found by the
-/// test below reading three bytes from the wrong place.
-///
-/// So on that host the position is put back afterwards. That is a seek-read-seek, which is
-/// the thing this was meant to avoid - except that every call here happens **while the
-/// descriptor table is locked**, so no other guest call can observe the position in between.
-/// The lock provides the atomicity the syscall does not.
+/// `pread` lets two threads read one file without agreeing about the position. Windows'
+/// positioned read updates the file pointer, so on that host the position is put back
+/// afterwards. That is a seek-read-seek, but every call happens while the descriptor table is
+/// locked, so no other guest call can observe the position in between.
 pub fn read_at(fd: u64, into: &mut [u8], offset: u64) -> Option<usize> {
     if is_standard(fd) {
         // A stream has no positions, and answering zero would look like an end of file.
@@ -531,8 +472,7 @@ fn positioned_read(file: &mut std::fs::File, into: &mut [u8], offset: u64) -> Op
 
     let was = file.stream_position().ok()?;
     let read = file.seek_read(into, offset).ok();
-    // Put it back whether the read worked or not: a failed positioned read that moved the
-    // position is worse than one that failed cleanly.
+    // Put it back whether the read worked or not.
     let _ = file.seek(std::io::SeekFrom::Start(was));
     read
 }
@@ -556,19 +496,13 @@ fn positioned_write(file: &mut std::fs::File, bytes: &[u8], offset: u64) -> Opti
 
 /// Makes `to` refer to whatever `from` refers to, closing whatever `to` was.
 ///
-/// # What a duplicate shares, and what it does not
-///
-/// On the platform this imitates, two descriptors from `dup2` share one file position: a
-/// read through either moves both. **Here they do not** - each holds its own handle, so each
-/// has its own position. That difference is stated rather than hidden, because it is the one
-/// thing a program could notice, and it costs nothing until a program reads through both.
-///
-/// What `dup2` is overwhelmingly used *for* - putting a file on descriptor 0, 1 or 2 before
-/// handing them to a child - does not depend on the shared position at all.
+/// On the platform, two descriptors from `dup2` share one file position. Here each holds its
+/// own handle and position; a program notices only if it reads through both. The common use,
+/// putting a file on descriptor 0, 1 or 2, does not depend on the shared position.
 pub fn duplicate_into(from: u64, to: u64) -> bool {
     if from == to {
-        // Documented: duplicating a descriptor onto itself succeeds and does nothing, not
-        // even the close.
+        // Duplicating a descriptor onto itself succeeds and does nothing, not even the close,
+        // as documented.
         return exists(from);
     }
     let Ok(mut table) = table().lock() else {
@@ -578,19 +512,16 @@ pub fn duplicate_into(from: u64, to: u64) -> bool {
         Some(Target::File(file)) => file.try_clone().ok().map(Target::File),
         Some(Target::Socket(socket)) => duplicate_socket(socket),
         // A queue is not duplicated: two descriptors onto one registration set is a sharing
-        // model nothing here has, and inventing one would be worse than refusing. Same answer
-        // as no descriptor at all, which is what the caller does with it.
-        // A device is not duplicated: two descriptors draining one log would each get
-        // half of it, which is worse than refusing.
+        // model nothing here has. A device is not duplicated: two descriptors draining one log
+        // would each get half of it.
         Some(Target::Queue(_) | Target::Device(_)) | None => None,
     };
     let Some(copy) = copy else {
         return false;
     };
     if is_standard(to) {
-        // Refused rather than performed. The standard streams here are the host's, and
-        // replacing one would send a guest's output somewhere this process still needs -
-        // the worker's protocol lives on the other side of them (D170).
+        // Refused: the standard streams are the host's, and the worker's protocol is on the
+        // other side of them (D170).
         return false;
     }
     table.insert(to, copy);
@@ -613,15 +544,13 @@ fn duplicate_socket(socket: &crate::socket::Socket) -> Option<Target> {
             ..
         } => crate::socket::Socket::Listener {
             listener: listener.try_clone().ok()?,
-            // A connection `select` left on the original stays there: it is one connection
-            // and only one descriptor can be given it.
+            // A connection `select` left on the original stays there: only one descriptor can
+            // be given it.
             pending: None,
-            // The mode travels with the copy, because a duplicated descriptor is the same
-            // socket and `accept` reads this rather than the host.
+            // The mode travels with the copy: `accept` reads this rather than the host.
             nonblocking: *nonblocking,
         },
-        // Nothing to duplicate yet, and inventing a second pending socket would give the
-        // guest two descriptors that would later bind the same address.
+        // Nothing to duplicate yet; a second pending socket would later bind the same address.
         crate::socket::Socket::Pending { .. } => return None,
     };
     Some(Target::Socket(copy))
@@ -629,8 +558,8 @@ fn duplicate_socket(socket: &crate::socket::Socket) -> Option<Target> {
 
 /// What the host says about the file behind a descriptor.
 ///
-/// Answers nothing for a socket and for a standard stream: neither has a size or a
-/// modification time, and reporting one would be inventing both.
+/// Answers nothing for a socket or a standard stream: neither has a size or a modification
+/// time.
 pub fn facts(fd: u64) -> Option<std::fs::Metadata> {
     if is_standard(fd) {
         return None;
@@ -649,18 +578,10 @@ pub fn exists(fd: u64) -> bool {
 
 /// Whether a read on this descriptor would return without waiting.
 ///
-/// # Asking must not take
-///
-/// The only way to find out whether a listener has a connection is to accept one, so it is
-/// accepted and **kept on the listener** for the guest's own `accept` to take. A `select`
-/// that consumed connections would lose every one of them to the call that only asked
-/// (D373).
-///
-/// A stream is asked by peeking, which is a read that does not advance. Nothing is
-/// consumed there either.
-///
-/// A file is always ready: a read from one does not wait. That is true rather than
-/// convenient - the wait a `select` exists to avoid is a network wait.
+/// Asking must not take (D373): whether a listener has a connection is found by accepting
+/// one, which is kept on the listener for the guest's own `accept`. A stream is asked by
+/// peeking, which does not advance. A file is always ready, since a read from one does not
+/// wait.
 pub fn readable(fd: u64) -> bool {
     let Ok(mut table) = table().lock() else {
         return false;
@@ -674,8 +595,8 @@ pub fn readable(fd: u64) -> bool {
                 if pending.is_some() {
                     return true;
                 }
-                // Non-blocking for the question, and left that way: `accept` sets it back
-                // before it waits, which is where the guest asked to block.
+                // Non-blocking for the question, and left that way: `accept` sets it back before
+                // it waits.
                 if listener.set_nonblocking(true).is_err() {
                     return false;
                 }
@@ -695,37 +616,31 @@ pub fn readable(fd: u64) -> bool {
                     return false;
                 }
                 let mut byte = [0_u8; 1];
-                // A peek rather than a read, so the byte stays for the guest. Zero bytes
-                // is an end-of-file, which is *also* ready - a read there returns at once.
+                // A peek, so the byte stays for the guest. Zero bytes is end-of-file, which is
+                // also ready.
                 let ready = match stream.peek(&mut byte) {
                     Ok(_) => true,
                     Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
                 };
-                // **Back to what the guest asked for, not to blocking.** This restored `false`
-                // unconditionally, so a `select` on a socket the guest had made non-blocking
-                // handed it back blocking - the same defect `MSG_DONTWAIT` has, found while
-                // fixing that one (D667).
+                // Back to the mode the guest set, not to blocking (D667).
                 let _ = stream.set_nonblocking(*nonblocking);
                 ready
             }
-            // A socket with nothing behind it yet cannot be read from at all.
+            // A socket with nothing behind it yet cannot be read from.
             crate::socket::Socket::Pending { .. } => false,
         },
-        // A device is ready when it has something waiting - which for a log is the whole
-        // question a server's event loop asks about it.
+        // A device is ready when it has something waiting.
         Some(Target::Device(device)) => device.readable(),
-        // **A queue is never reported ready here**, and that is a stated limit rather than
-        // an answer: a kqueue registered inside another kqueue is ready when it has events,
-        // and nothing here nests them. Saying yes would wake a guest for nothing, forever.
+        // A queue is never reported ready: nothing here nests one kqueue inside another, and
+        // saying yes would wake a guest for nothing.
         Some(Target::Queue(_)) | None => false,
     }
 }
 
 /// Whether a write on this descriptor would return without waiting.
 ///
-/// Yes for anything connected. Writes here go straight to the host and do not buffer, so a
-/// write will not block - and saying otherwise would park a guest waiting for a readiness
-/// that had already arrived.
+/// Yes for anything connected: writes go straight to the host without buffering, so a write
+/// does not block.
 pub fn writable(fd: u64) -> bool {
     let Ok(table) = table().lock() else {
         return false;
@@ -743,12 +658,11 @@ pub fn writable(fd: u64) -> bool {
 
 /// Closes a descriptor. Answers whether there was one.
 ///
-/// Closing a standard stream answers success and does nothing: a guest tidying up on exit
-/// should not be told it failed, and actually closing the host's error stream would take
-/// the fault reporter with it.
+/// Closing a standard stream answers success and does nothing: closing the host's error
+/// stream would take the fault reporter with it.
 pub fn close(fd: u64) -> bool {
-    // What was set on this number, forgotten with it - a descriptor that comes back around
-    // must not inherit the last one's flags (D385).
+    // Flags set on this number are forgotten with it, so a reused number does not inherit
+    // them.
     crate::fcntl::forget(fd);
     crate::dirent::forget(fd);
     if is_standard(fd) {
@@ -759,9 +673,8 @@ pub fn close(fd: u64) -> bool {
 
 /// Puts a descriptor into or out of non-blocking mode, answering whether it could.
 ///
-/// **Only a socket has the distinction.** A file read here does not wait, and a standard
-/// stream answers immediately either way - so setting it on one is accepted and changes
-/// nothing, which is what the host would also do.
+/// Only a socket has the distinction. A file read here does not wait and a standard stream
+/// answers immediately, so setting it on one is accepted and changes nothing.
 pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
     if is_standard(fd) {
         return true;
@@ -776,8 +689,8 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
                 nonblocking,
                 ..
             } => {
-                // Remembered as well as applied, because `accept` needs the answer and the
-                // host listener has a setter with no getter.
+                // Remembered as well as applied: `accept` needs it, and the host listener has a
+                // setter with no getter.
                 *nonblocking = wanted;
                 listener.set_nonblocking(wanted).is_ok()
             }
@@ -789,17 +702,15 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
                 *nonblocking = wanted;
                 stream.set_nonblocking(wanted).is_ok()
             }
-            // Nothing exists behind it yet, so the flag is **kept** until `listen` or
-            // `connect` makes something to put it on. Accepting it and forgetting it is what
-            // left a guest believing a socket was non-blocking when it was not (D667).
+            // Nothing exists behind it yet, so the flag is kept until `listen` or `connect`
+            // makes something to put it on (D667).
             crate::socket::Socket::Pending { nonblocking, .. } => {
                 *nonblocking = wanted;
                 true
             }
         },
-        // A device answers immediately or not at all; there is no blocking read to turn
-        // off, so the setting is accepted and changes nothing - which is true rather than
-        // convenient.
+        // A device answers immediately or not at all, so the setting is accepted and changes
+        // nothing.
         Some(Target::File(_) | Target::Queue(_) | Target::Device(_)) => true,
         None => false,
     }
@@ -807,16 +718,15 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
 
 /// Copies a descriptor to the lowest free number at or above `floor`.
 ///
-/// What `F_DUPFD` documents, and the one place a descriptor number is chosen by anything
-/// other than "the lowest free one".
+/// What `F_DUPFD` documents: the one place a descriptor number is not simply the lowest free
+/// one.
 pub fn duplicate_above(from: u64, floor: u64) -> Option<u64> {
     let copy = {
         let table = table().lock().ok()?;
         match table.get(&from)? {
             Target::File(file) => file.try_clone().ok().map(Target::File),
             Target::Socket(socket) => duplicate_socket(socket),
-            // As with `dup2`: two descriptors onto one registration set is a sharing model
-            // nothing here has, and two draining one log would each get half of it.
+            // As with `dup2`: no shared registration sets, and no log drained by two.
             Target::Queue(_) | Target::Device(_) => None,
         }?
     };
@@ -833,10 +743,7 @@ mod tests {
 
     /// Serialises the tests that touch the descriptor table.
     ///
-    /// Descriptors and mounts are process-global - they describe one guest - and the test
-    /// harness runs in parallel. Without this the assertions about *which* descriptor
-    /// comes back depend on what another test had open at the time, which is a flaky test
-    /// about a diagnostic and worse than no test.
+    /// Descriptors and mounts are process-global and the harness runs tests in parallel.
     use crate::exclusively;
 
     fn a_title_with(name: &str, contents: &[u8]) {
@@ -848,19 +755,17 @@ mod tests {
         crate::mount::mount(crate::mount::APP_MOUNT, root);
     }
 
+    /// A guest can write to standard output (D170).
     #[test]
     fn a_guest_can_write_to_standard_output() {
-        // The point of the whole module. A conformance probe that cannot write to
-        // standard output cannot report at all, and a loader that refuses descriptor one
-        // is a loader nothing can talk to (D170).
         assert_eq!(write(STDOUT, b"hello"), Some(5));
         assert_eq!(write(STDERR, b"there"), Some(5));
     }
 
+    /// A file never gets a standard stream's descriptor.
     #[test]
     fn a_file_never_gets_a_standard_descriptor() {
         let _guard = exclusively();
-        // Handing a file descriptor one would make its writes appear as program output.
         a_title_with("first", b"x");
         let fd = open("/app0/game.bin").expect("opens");
         assert!(fd >= FIRST_FILE);
@@ -868,15 +773,13 @@ mod tests {
         assert!(close(fd));
     }
 
+    /// A wrong-case path is not found, as on the case-sensitive platform filesystem.
     #[test]
     fn a_wrong_case_path_is_not_found_because_the_console_is_case_sensitive() {
         let _guard = exclusively();
         a_title_with("case", b"x"); // creates game.bin
-        // The console's filesystem is FreeBSD-derived and **case-sensitive**: `GAME.BIN` is a
-        // different name from `game.bin` and simply does not exist. On a Windows host `.exists()`
-        // and `File::open` are case-insensitive, so a wrong-case name would open the file anyway -
-        // a host-semantic leak, the same class as PPSA04263's `/app0` directory bug (worklog 615).
-        // On Unix this already passes (the host is case-sensitive too); this pins it on Windows.
+        // `GAME.BIN` is a different name from `game.bin`. A Windows host's `File::open` is
+        // case-insensitive; on Unix this already holds.
         assert!(
             open("/app0/game.bin").is_some(),
             "the exact-case name opens"
@@ -888,15 +791,14 @@ mod tests {
         );
     }
 
+    /// A directory opens to a descriptor, not `ENOENT`.
     #[test]
     fn a_directory_opens_to_a_descriptor_not_enoent() {
         let _guard = exclusively();
         a_title_with("dir-open", b"x");
-        // A guest opens "/app0/" - its own mount root - to check its directory is there, and the
-        // console answers a descriptor. On Windows `File::open` fails on a directory without
-        // FILE_FLAG_BACKUP_SEMANTICS, and that surfaced as ENOENT: PPSA04263 opened `/app0/`, got
-        // ENOENT, and aborted (int 0x41, worklog 615). On Unix `File::open` already opens a
-        // directory. Either way it must be a descriptor here, not the None that reads as "not there".
+        // A guest opens its own mount root `/app0/` to check it is there, and the hardware
+        // answers a descriptor. On Windows `File::open` needs FILE_FLAG_BACKUP_SEMANTICS for a
+        // directory.
         let fd = open("/app0/").expect("a directory opens to a descriptor, not ENOENT");
         assert!(
             fd >= FIRST_FILE,
@@ -906,37 +808,34 @@ mod tests {
         assert!(close(fd));
     }
 
+    /// Writing to a file opened for reading is refused.
     #[test]
     fn writing_to_a_file_is_refused_rather_than_performed() {
         let _guard = exclusively();
-        // Files are opened read-only: a write here would be a write into the user's own
-        // title directory.
         a_title_with("readonly", b"x");
         let fd = open("/app0/game.bin").expect("opens");
         assert_eq!(write(fd, b"nope"), None);
         close(fd);
     }
 
+    /// Reading a standard stream answers zero rather than blocking.
     #[test]
     fn reading_a_standard_stream_answers_nothing_rather_than_blocking() {
-        // A guest reading stdin would otherwise hang the worker on a terminal nobody is
-        // typing into, and a hang costs the whole trace.
         let mut buf = [0_u8; 4];
         assert_eq!(read(super::STDIN, &mut buf), Some(0));
     }
 
+    /// Closing a standard stream succeeds without closing it.
     #[test]
     fn closing_a_standard_stream_succeeds_without_closing_it() {
-        // A guest tidying up on exit should not be told it failed - and actually closing
-        // the host's error stream would take the fault reporter with it.
         assert!(close(STDOUT));
         assert_eq!(write(STDOUT, b"still here"), Some(10));
     }
 
+    /// Descriptors are reused lowest first.
     #[test]
     fn descriptors_are_reused_lowest_first() {
         let _guard = exclusively();
-        // What a caller expects, and it makes a leak visible as a number that climbs.
         a_title_with("reuse", b"x");
         let first = open("/app0/game.bin").expect("opens");
         let second = open("/app0/game.bin").expect("opens");
@@ -948,10 +847,9 @@ mod tests {
         close(third);
     }
 
+    /// Running out of descriptors is a refusal, not an endless search.
     #[test]
     fn running_out_of_descriptors_is_refused_rather_than_searched_forever() {
-        // A guest that leaks should hit a wall that says so. An unbounded search for a
-        // free number is a loop with no stated end.
         let _guard = exclusively();
         a_title_with("exhaust", b"x");
         let mut held = Vec::new();
@@ -961,13 +859,9 @@ mod tests {
                 break;
             }
         }
-        // Bounded, and *which* bound bites is not the point: the host runs out of open
-        // files first on this machine, at around three hundred. What matters is that
-        // exhaustion is a refusal rather than a search that never ends.
-        //
-        // Deliberately **not** asserting that any open succeeded. The host's limit is
-        // process-wide, so a test in another module holding handles can legitimately
-        // leave none - and a flaky test about a diagnostic is worse than no test.
+        // Which bound bites is not the point: the host's open-file limit may come first, and
+        // it is process-wide, so no open is asserted to have succeeded. Exhaustion must be a
+        // refusal.
         assert!(
             held.len() <= super::MAX_DESCRIPTORS as usize,
             "never more than the stated ceiling"
@@ -977,6 +871,7 @@ mod tests {
         }
     }
 
+    /// Reading a file gives back its contents.
     #[test]
     fn reading_a_file_gives_back_its_contents() {
         let _guard = exclusively();

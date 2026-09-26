@@ -1,9 +1,8 @@
-//! The shim's end of the frame crossing (D695): reads the bytes of the region an [`Event::Frame`]
-//! names and turns them into an image ready to upload as a texture.
+//! The shim's end of the frame crossing (D695): reads the region an [`Event::Frame`] names
+//! and turns it into an image ready to upload as a texture.
 //!
-//! The read itself lives with the writer, in `orbistoun_worker::frame_region`, so the two sides
-//! cannot disagree about the region's layout (D084). This module is only the shim-side
-//! interpretation of those bytes as an `egui` image - the last step before `ctx.load_texture`.
+//! The read lives with the writer, in `orbistoun_worker::frame_region`, so the two sides
+//! share one layout; this module only interprets the bytes as an `egui` image.
 
 use orbistoun_proto::{Event, FrameFormat};
 use std::path::Path;
@@ -13,10 +12,9 @@ use std::path::Path;
 ///
 /// # Errors
 ///
-/// If the descriptor is not a frame, if the region cannot be read (a missing file, or a `region`
-/// that is not a bare name - see `orbistoun_worker::frame_region::read_frame`), or if its bytes are
-/// not the size the dimensions and format require. A short or long region is a corrupt frame, not one
-/// to upload the wrong half of, so it is refused rather than reshaped.
+/// If the descriptor is not a frame, if the region cannot be read (a missing file, or a
+/// `region` that is not a bare name, see `orbistoun_worker::frame_region::read_frame`), or if
+/// its size does not match the dimensions and format; a mismatched region is corrupt.
 pub(crate) fn frame_image(dir: &Path, event: &Event) -> Result<egui::ColorImage, String> {
     let &Event::Frame {
         width,
@@ -50,10 +48,7 @@ mod tests {
     use orbistoun_proto::FrameFormat;
     use orbistoun_worker::frame_region::write_frame;
 
-    /// **A frame the worker wrote reads into an image of the right size and pixels.**
-    ///
-    /// The shim end of the D695 round trip: bytes the worker put in a region come back as an
-    /// `egui::ColorImage` a texture upload can take, with the pixels intact and in order.
+    /// A frame the worker wrote reads into an image of the right size, pixels in order.
     #[test]
     fn a_frame_the_worker_wrote_reads_into_an_image_of_the_right_size_and_pixels() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -73,9 +68,7 @@ mod tests {
         );
     }
 
-    /// **A region of the wrong size is refused, not uploaded half.** Three bytes for a 1x1 RGBA
-    /// frame that needs four: the mismatch is a corrupt frame, and `from_rgba_unmultiplied` would
-    /// panic on it, so it is caught here first (principle 3, watched failing).
+    /// A region of the wrong size is refused before `from_rgba_unmultiplied` can panic on it.
     #[test]
     fn a_region_of_the_wrong_size_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,31 +1,12 @@
 //! The file calls that change a directory, under their POSIX names.
 //!
-//! # Why these, and why now
-//!
-//! Measured against the open-toolchain payload set: `mkdir` is imported by seventeen of the
-//! twenty-five, `unlink` by fifteen, `rmdir` and `rename` by eleven each. They are Stage 3 of
-//! `docs/PAYLOADS.md` - the half of a file server that is not reading - and they are the part
-//! `pros backup` would exercise, because copying a save directory out means making
-//! directories on the way in.
-//!
-//! # None of this widens what a guest may touch
-//!
-//! Every one of these goes through the same two gates `create` already goes through:
-//! [`mount::resolve`], which refuses a path under no mount and refuses one that climbs out of
-//! its mount, and [`mount::is_writable`], which refuses anything outside the storage the
-//! installation owns. **A guest cannot delete its own title** - `/app0` is the user's own
-//! files and is not writable, and that separation is the whole decision (D250).
-//!
-//! So a refusal here has two quite different causes and one answer, deliberately: a path that
-//! does not exist and a path the guest may not have both report failure, because that is what
-//! the interface a guest thinks it is calling would tell it, and distinguishing them would
-//! tell a guest about files outside its own storage.
-//!
-//! # There is no oracle problem
-//!
-//! POSIX says what each of these does and what it answers. The one judgement is what to do
-//! about `errno`, and the answer is the same as everywhere else here: the return value is
-//! what a caller branches on, and this does not invent a number to put beside it.
+//! These are the half of a file server that is not reading (`docs/PAYLOADS.md`). Each goes
+//! through the same two gates as `create`: [`mount::resolve`], which refuses a path under no
+//! mount or climbing out of one, and [`mount::is_writable`], which refuses anything outside
+//! the storage the installation owns, so a guest cannot delete its own title (D250). A
+//! missing path and a forbidden one both answer failure, as the interface would, without
+//! telling a guest about files outside its storage. POSIX defines each call and its return
+//! value; no `errno` is invented beside it.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -36,18 +17,15 @@ const OK: u64 = 0;
 
 /// What it answers when it did not.
 ///
-/// Negative one, which is what every one of these documents. Deliberately not one of this
-/// project's placeholder codes: a caller tests `< 0`, and a large positive placeholder would
-/// read as success.
+/// Negative one, as each of these documents. A caller tests `< 0`, and a large positive
+/// placeholder would read as success.
 const FAILED: u64 = -1_i64 as u64;
 
 /// The host path a guest path names, if the guest may write to it.
 ///
-/// Both gates in one place, because they are one question - *may this call touch this path* -
-/// and splitting them is how one caller comes to check only the first.
-///
-/// The top layer's copy, copied up from a lower layer first when that is the only one, so a write
-/// never lands in the base tree or a staged title's library files (D722).
+/// Both gates in one place, since they are one question: may this call touch this path. The
+/// top layer's copy, copied up from a lower layer first when that is the only one, so a
+/// write never lands in the base tree or a staged title's library files (D722).
 ///
 /// # Safety
 ///
@@ -58,8 +36,8 @@ unsafe fn writable_host_path(address: u64) -> Option<std::path::PathBuf> {
     mount::resolve_for_write(&guest)
 }
 
-/// The host path a guest may create, remove or rename a name at: the top layer's, and only while no
-/// lower layer also holds the name, because removing it there would need a whiteout (D722).
+/// The host path a guest may create, remove or rename a name at: the top layer's, and only
+/// while no lower layer also holds the name, since removing it there needs a whiteout (D722).
 ///
 /// # Safety
 ///
@@ -72,10 +50,8 @@ unsafe fn removable_host_path(address: u64) -> Option<std::path::PathBuf> {
 
 /// Asking whether a path may be written, as a guest spells it.
 ///
-/// **The one number here that came from somewhere else**, so it is named rather than written
-/// inline, and `orbistoun-libc` holds a test comparing it against the harvested table - which
-/// is where the header's own value lives. This crate cannot read that table itself, and a
-/// constant nobody checks is exactly the kind that turns out to be a different platform's.
+/// Named because `orbistoun-libc` has a test comparing it against the harvested table, which
+/// this crate cannot read.
 pub const W_OK: u64 = 0x2;
 
 /// Turns a host result into what the guest is told.
@@ -83,16 +59,11 @@ fn answered(worked: bool) -> u64 {
     if worked { OK } else { FAILED }
 }
 
-/// `mkdir(path, mode)` - creates one directory.
+/// `mkdir(path, mode)`: creates one directory.
 ///
-/// **The mode is not applied**, and that is stated rather than hidden. The host this runs on
-/// need not have POSIX permission bits at all, and writing a plausible permission somewhere
-/// would be a fact about nothing. What the mode is *for* - keeping a directory private - is
-/// not something a guest can check from inside this emulator.
-///
-/// One directory, not a path of them: `mkdir` creates the last component and fails if a
-/// parent is missing, and creating the parents silently would turn a guest's own mistake into
-/// a directory tree nobody asked for.
+/// The mode is not applied: the host need not have POSIX permission bits, and a guest cannot
+/// observe them from inside the emulator. One directory, not a path: a missing parent fails,
+/// as the interface says.
 ///
 /// Reference: POSIX.1-2008 `mkdir(2)`.
 fn mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -103,11 +74,9 @@ fn mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(std::fs::create_dir(host).is_ok())
 }
 
-/// `rmdir(path)` - removes one empty directory.
+/// `rmdir(path)`: removes one empty directory.
 ///
-/// Empty only, which is the interface: `rmdir` on a directory with anything in it fails, and
-/// removing the contents instead would destroy a guest's data on a call that was documented
-/// to refuse.
+/// Empty only, as the interface says: a directory with anything in it fails.
 ///
 /// Reference: POSIX.1-2008 `rmdir(2)`.
 fn rmdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -118,11 +87,9 @@ fn rmdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(std::fs::remove_dir(host).is_ok())
 }
 
-/// `unlink(path)` - removes one file.
+/// `unlink(path)`: removes one file.
 ///
-/// Refuses a directory rather than removing it. `unlink` on a directory is an error in the
-/// interface, and the host call underneath would not agree about that on every platform - so
-/// it is checked here rather than left to differ by operating system.
+/// Refuses a directory, checked here because host platforms disagree about it.
 ///
 /// Reference: POSIX.1-2008 `unlink(2)`.
 fn unlink(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -136,11 +103,9 @@ fn unlink(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(std::fs::remove_file(host).is_ok())
 }
 
-/// `remove(path)` - the C spelling, which takes either.
+/// `remove(path)`: the C spelling, which takes either.
 ///
-/// **Not an alias for `unlink`.** C's `remove` removes a file *or* an empty directory, and
-/// binding it to `unlink` would make a guest tidying up a directory fail on a call that was
-/// documented to work.
+/// Not an alias for `unlink`: C's `remove` removes a file or an empty directory.
 ///
 /// Reference: ISO C `remove`; POSIX.1-2008 `remove(3)`.
 fn remove(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -156,11 +121,9 @@ fn remove(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(worked)
 }
 
-/// `rename(from, to)` - moves a file within the guest's own storage.
+/// `rename(from, to)`: moves a file within the guest's own storage.
 ///
-/// **Both ends are checked.** A rename whose source is writable and whose destination is not
-/// would be a way to write outside the writable mount using a call that only looks like it
-/// reads - so the destination goes through the same two gates.
+/// Both ends go through the same gates, so a rename cannot write outside the writable mount.
 ///
 /// Reference: POSIX.1-2008 `rename(2)`.
 fn rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -175,15 +138,11 @@ fn rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(std::fs::rename(from, to).is_ok())
 }
 
-/// `access(path, mode)` - whether a path is there, and whether it may be written.
+/// `access(path, mode)`: whether a path is there, and whether it may be written.
 ///
-/// # What the mode is compared against
-///
-/// The read and execute bits are answered by existence, because everything a guest can reach
-/// through a mount it can read. The **write** bit is answered by the writable mount rather
-/// than by the host's permissions: that is the rule this emulator actually enforces, so it is
-/// the rule that should be reported. A guest told it may write to `/app0` and then refused
-/// would take its error path somewhere less useful.
+/// Read and execute are answered by existence, since everything reachable through a mount is
+/// readable. Write is answered by the writable mount rather than host permissions, since
+/// that is the rule this emulator enforces.
 ///
 /// Reference: POSIX.1-2008 `access(2)`; `W_OK` from `sys/sys/unistd.h`.
 fn access(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -203,7 +162,7 @@ fn access(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `truncate(path, length)` - sets a file's size.
+/// `truncate(path, length)`: sets a file's size.
 ///
 /// Reference: POSIX.1-2008 `truncate(2)`.
 fn truncate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -217,7 +176,7 @@ fn truncate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(file.set_len(args[1]).is_ok())
 }
 
-/// `ftruncate(fd, length)` - the same, by descriptor.
+/// `ftruncate(fd, length)`: the same, by descriptor.
 ///
 /// Reference: POSIX.1-2008 `ftruncate(2)`.
 fn ftruncate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -226,7 +185,7 @@ fn ftruncate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// How wide one `struct iovec` is, and where its two fields sit.
 ///
-/// `{ void *iov_base; size_t iov_len; }` - two machine words on this target. Reference:
+/// `{ void *iov_base; size_t iov_len; }`: two machine words on this target. Reference:
 /// POSIX.1-2008 `<sys/uio.h>`.
 const IOVEC_BYTES: u64 = 16;
 
@@ -237,8 +196,8 @@ fn iovec(vector: u64, index: u64) -> Option<(u64, u64)> {
     }
     let at = vector.checked_add(index.checked_mul(IOVEC_BYTES)?)?;
     let base = usize::try_from(at).ok()?;
-    // SAFETY: a guest-supplied `iovec` array under the identity mapping (D014), indexed
-    // within the count the guest itself passed - the same contract the real call has.
+    // SAFETY: a guest-supplied `iovec` array under the identity mapping, indexed within the
+    // count the guest passed, the same contract the real call has.
     let iov_base = unsafe { std::ptr::read_unaligned(base as *const u64) };
     // SAFETY: the second word of the same entry, eight bytes after the first.
     let iov_len = unsafe { std::ptr::read_unaligned((base + 8) as *const u64) };
@@ -247,9 +206,8 @@ fn iovec(vector: u64, index: u64) -> Option<(u64, u64)> {
 
 /// The shared body of the scatter/gather calls.
 ///
-/// **Stops at the first short transfer**, as the specification requires: `readv` and `writev`
-/// answer the number of bytes actually moved, and continuing past a partial buffer would
-/// report a total the file never delivered.
+/// Stops at the first short transfer, as the specification requires: `readv` and `writev`
+/// answer the bytes actually moved.
 fn gather(args: &[u64; GUEST_ARG_REGISTERS], offset: Option<u64>, writing: bool) -> u64 {
     let (fd, vector, count) = (args[0], args[1], args[2]);
     let mut moved = 0_u64;
@@ -289,21 +247,21 @@ fn gather(args: &[u64; GUEST_ARG_REGISTERS], offset: Option<u64>, writing: bool)
     moved
 }
 
-/// `readv(fd, iov, iovcnt)` - a read scattered across several buffers.
+/// `readv(fd, iov, iovcnt)`: a read scattered across several buffers.
 ///
 /// Reference: POSIX.1-2008 `readv(2)`.
 fn readv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     gather(args, None, false)
 }
 
-/// `writev(fd, iov, iovcnt)` - a write gathered from several buffers.
+/// `writev(fd, iov, iovcnt)`: a write gathered from several buffers.
 ///
 /// Reference: POSIX.1-2008 `writev(2)`.
 fn writev(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     gather(args, None, true)
 }
 
-/// `preadv(fd, iov, iovcnt, offset)` - [`readv`] at an explicit offset, leaving the file
+/// `preadv(fd, iov, iovcnt, offset)`: [`readv`] at an explicit offset, leaving the file
 /// position alone.
 ///
 /// Reference: POSIX.1-2008 `preadv(2)`.
@@ -311,19 +269,18 @@ fn preadv(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     gather(args, Some(args[3]), false)
 }
 
-/// `pwritev(fd, iov, iovcnt, offset)` - [`writev`] at an explicit offset.
+/// `pwritev(fd, iov, iovcnt, offset)`: [`writev`] at an explicit offset.
 ///
 /// Reference: POSIX.1-2008 `pwritev(2)`.
 fn pwritev(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     gather(args, Some(args[3]), true)
 }
 
-/// `creat(path, mode)` - create a file for writing, truncating an existing one.
+/// `creat(path, mode)`: create a file for writing, truncating an existing one.
 ///
 /// Reference: POSIX.1-2008 `creat(2)`, which defines it as exactly
-/// `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)`. The mode is not honoured for the same
-/// reason `open`'s is not here: this layer has no permission model to apply it to, and
-/// pretending otherwise would report an access control that does not exist.
+/// `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)`. The mode is not honoured: this layer has
+/// no permission model to apply it to.
 fn creat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
     let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
@@ -332,38 +289,35 @@ fn creat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::descriptor::create(&path).unwrap_or(FAILED)
 }
 
-/// `fsync(fd)` - flush a file's contents to the storage behind it.
+/// `fsync(fd)`: flush a file's contents to the storage behind it.
 ///
-/// Reference: POSIX.1-2008 `fsync(2)`. A **real** flush: the whole point of the call is that a
-/// caller learns its bytes have landed, so answering success without asking the operating
-/// system gives the assurance and none of the substance.
+/// Reference: POSIX.1-2008 `fsync(2)`. A real flush, since the caller relies on its bytes
+/// having landed.
 fn fsync(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(crate::descriptor::sync(args[0]))
 }
 
-/// `fdatasync(fd)` - as [`fsync`], without promising to flush metadata.
+/// `fdatasync(fd)`: as [`fsync`], without promising to flush metadata.
 ///
-/// Reference: POSIX.1-2008 `fdatasync(2)`. Flushing metadata as well is **more** than the call
-/// promises and is therefore conforming; the reverse would not be.
+/// Reference: POSIX.1-2008 `fdatasync(2)`. Flushing metadata as well is more than the call
+/// promises, and so conforming.
 fn fdatasync(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(crate::descriptor::sync(args[0]))
 }
 
-/// `getpagesize()` - the size of a page, in bytes.
+/// `getpagesize()`: the size of a page, in bytes.
 ///
-/// Reference: POSIX.1-2001 `getpagesize(2)`. Answered from `GUEST_PAGE_SIZE`, the size this
-/// emulator's own address space is built on, rather than from the host's - a guest that rounds
-/// an allocation to what this answers must get the number the mapper will actually use.
+/// Reference: POSIX.1-2001 `getpagesize(2)`. Answered from `GUEST_PAGE_SIZE`, the page size
+/// the guest address space is built on, so a guest rounding an allocation gets the mapper's
+/// number.
 fn getpagesize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     orbistoun_core::GUEST_PAGE_SIZE
 }
 
-/// `madvise(addr, len, advice)` - tell the system how a range will be used.
+/// `madvise(addr, len, advice)`: tell the system how a range will be used.
 ///
-/// Reference: POSIX.1-2008 `posix_madvise(2)`: *"the advice is not binding"* and an
-/// implementation may ignore it. Ignoring it is therefore a conforming implementation rather
-/// than a stub - which is why this one answers success without acting, and is the rare case
-/// where doing nothing is the specification rather than a shortcut.
+/// Reference: POSIX.1-2008 `posix_madvise(2)`: the advice is not binding and an
+/// implementation may ignore it, so answering success without acting conforms.
 fn madvise(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
@@ -375,8 +329,8 @@ fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     }
     let at = usize::try_from(address).ok()?;
     let len = usize::try_from(length).ok()?;
-    // SAFETY: a guest-supplied buffer under the identity mapping (D014), with the length the
-    // guest itself passed - the same contract the real call has.
+    // SAFETY: a guest-supplied buffer under the identity mapping, with the length the guest
+    // passed, the same contract the real call has.
     Some(unsafe {
         std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(at), len)
     })
@@ -393,11 +347,10 @@ fn guest_bytes<'a>(address: u64, length: u64) -> Option<&'a [u8]> {
     Some(unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), len) })
 }
 
-/// `pread(fd, buffer, count, offset)` - a read at an offset, leaving the position alone.
+/// `pread(fd, buffer, count, offset)`: a read at an offset, leaving the position alone.
 ///
-/// **The position is the whole point.** `pread` exists so two threads can read one file at
-/// once, and an implementation that seeks, reads and seeks back is not that - it is a race
-/// with extra steps.
+/// The position is the point: `pread` lets two threads read one file at once, which a seek,
+/// read and seek back cannot do race-free.
 ///
 /// Reference: POSIX.1-2008 `pread(2)`.
 fn pread(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -407,7 +360,7 @@ fn pread(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::descriptor::read_at(args[0], into, args[3]).map_or(FAILED, |n| n as u64)
 }
 
-/// `pwrite(fd, buffer, count, offset)` - the same, writing.
+/// `pwrite(fd, buffer, count, offset)`: the same, writing.
 ///
 /// Reference: POSIX.1-2008 `pwrite(2)`.
 fn pwrite(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -417,10 +370,9 @@ fn pwrite(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::descriptor::write_at(args[0], bytes, args[3]).map_or(FAILED, |n| n as u64)
 }
 
-/// `dup2(from, to)` - makes one descriptor refer to what another refers to.
+/// `dup2(from, to)`: makes one descriptor refer to what another refers to.
 ///
-/// Answers the new descriptor, which is `to`, as the interface does - not zero, and a caller
-/// that checks for a negative answer would be misled by either mistake.
+/// Answers the new descriptor, `to`, as the interface does.
 ///
 /// Reference: POSIX.1-2008 `dup2(2)`.
 fn dup2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -431,18 +383,12 @@ fn dup2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `chmod(path, mode)` - accepted, and applied to nothing.
+/// `chmod(path, mode)`: accepted, and applied to nothing.
 ///
-/// # Why accepting is right here and refusing is right for the title directory
-///
-/// A file server sets a mode on a file it has just created, and **failing that stops the
-/// transfer**. But the mode itself cannot be honoured: the host need not have POSIX
-/// permission bits, and there is nothing a guest can check from inside this emulator that
-/// would depend on them.
-///
-/// So the path is still checked - a `chmod` on the user's own title is refused exactly as a
-/// write to it would be - and a mode on a file the guest owns succeeds without doing
-/// anything. That keeps the one guarantee that matters and drops the one that cannot be kept.
+/// A file server sets a mode on a file it has created, and a failure stops the transfer, but
+/// the host need not have POSIX permission bits. So the path is still checked (a `chmod` on
+/// the title directory is refused as a write would be) and a mode on a file the guest owns
+/// succeeds without effect.
 ///
 /// Reference: POSIX.1-2008 `chmod(2)`.
 fn chmod(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -450,45 +396,38 @@ fn chmod(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(host) = (unsafe { writable_host_path(args[0]) }) else {
         return FAILED;
     };
-    // Existence still decides, because `chmod` on a path that is not there fails.
+    // Existence still decides: `chmod` on a missing path fails.
     answered(host.exists())
 }
 
-/// `fchmod(fd, mode)` - the same, by descriptor.
+/// `fchmod(fd, mode)`: the same, by descriptor.
 ///
 /// Reference: POSIX.1-2008 `fchmod(2)`.
 fn fchmod(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answered(crate::descriptor::exists(args[0]))
 }
 
-/// `mlock(address, length)` - accepted, and pins nothing.
+/// `mlock(address, length)`: accepted, and pins nothing.
 ///
-/// A guest locks memory so it is not paged out. Nothing here pages anything out: guest memory
-/// is host memory this process reserved and holds for the life of the run, so the guarantee
-/// the call asks for is one this already keeps by construction.
-///
-/// Refusing would stop a payload that locks a buffer before using it, over a call whose
-/// promise is already true.
+/// Guest memory is host memory this process reserved and holds for the whole run, so the
+/// guarantee the call asks for already holds.
 ///
 /// Reference: POSIX.1-2008 `mlock(2)`.
 fn mlock(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `munlock(address, length)` - the same, unpinning nothing.
+/// `munlock(address, length)`: the same, unpinning nothing.
 ///
 /// Reference: POSIX.1-2008 `munlock(2)`.
 fn munlock(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `fdopen(fd, mode)` - a stream over a descriptor that is already open.
+/// `fdopen(fd, mode)`: a stream over a descriptor that is already open.
 ///
-/// **What an FTP server writes its replies through.** It accepts a connection, wraps the
-/// descriptor, and uses `fprintf` from then on.
-///
-/// The mode is not honoured: the descriptor decides what it can do, and a stream that claimed
-/// to be writable over a read-only file would fail at the first write instead of here.
+/// An FTP server accepts a connection, wraps the descriptor, and writes replies with
+/// `fprintf`. The mode is not honoured: the descriptor decides what it can do.
 ///
 /// Reference: POSIX.1-2008 `fdopen(3)`.
 fn fdopen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -499,43 +438,33 @@ fn fdopen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::open::wrap_descriptor(args[0]).unwrap_or(0)
 }
 
-/// `fileno(stream)` - the descriptor behind a stream.
+/// `fileno(stream)`: the descriptor behind a stream.
 ///
-/// Answers one only for a stream that **is** a descriptor. A stream from `fopen` owns a host
-/// file rather than a descriptor, so it has no number to give - and inventing one would hand
-/// a guest a descriptor that names something else entirely.
+/// Answers only for a stream that is a descriptor. A stream from `fopen` owns a host file,
+/// so it has no number to give.
 ///
 /// Reference: POSIX.1-2008 `fileno(3)`.
 fn fileno(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     crate::open::wrapped_descriptor(args[0]).unwrap_or(FAILED)
 }
 
-/// `sendfile(fd, s, offset, nbytes, hdtr, sbytes, flags)` - a file straight into a socket.
+/// `sendfile(fd, s, offset, nbytes, hdtr, sbytes, flags)`: a file straight into a socket.
 ///
-/// # Why implementing it properly matters
-///
-/// This is how a file server sends a file. Refusing it does not make a server fall back to
-/// `read` and `write` - it makes the transfer fail - and answering success without moving any
-/// bytes is worse still: the client gets an empty file and no error.
-///
-/// The copy is done in bounded chunks rather than in one allocation the size of the file,
-/// because a guest may hand this a file larger than this process should hold at once.
-///
-/// **The header and trailer are not honoured.** `hdtr` points at a vendor structure of
-/// scatter-gather buffers whose layout is not derivable here; a guest passing one is passing
-/// something this cannot read, so it is refused rather than half-performed. Every payload
-/// measured passes null.
+/// How a file server sends a file; refusing it fails the transfer rather than falling back to
+/// `read` and `write`. Copied in bounded chunks, since a file may be larger than this
+/// process should hold at once. The header and trailer are not honoured: `hdtr` points at a
+/// vendor structure whose layout is not derivable here, so a non-null one is refused.
 ///
 /// Reference: FreeBSD `sendfile(2)`.
 fn sendfile(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    /// Bytes moved per round. Large enough to be a real copy, small enough to bound this.
+    /// Bytes moved per round.
     const CHUNK: usize = 64 * 1024;
 
     let (from, to, offset, count, headers) = (args[0], args[1], args[2], args[3], args[4]);
     if headers != 0 {
         return FAILED;
     }
-    // Zero means "to the end of the file", which is the interface.
+    // Zero means "to the end of the file", as the interface says.
     let wanted = if count == 0 { u64::MAX } else { count };
 
     let mut buffer = vec![0_u8; CHUNK];
@@ -555,19 +484,18 @@ fn sendfile(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         sent += written as u64;
         at += written as u64;
         if written < read {
-            // A short write is the socket refusing more, and reporting it is the interface:
-            // the caller reads how much went and sends the rest itself.
+            // A short write is the socket refusing more: the caller reads how much went and
+            // sends the rest.
             break;
         }
     }
 
-    // How many bytes went, written where the caller asked for it. A caller that passes null
-    // is not asking, which is allowed.
+    // How many bytes went, written where the caller asked; a null destination is allowed.
     if let Ok(destination) = usize::try_from(args[5])
         && destination != 0
     {
-        // SAFETY: a guest-supplied `off_t *` under the identity mapping (D014), written
-        // unaligned because nothing promises the guest aligned it.
+        // SAFETY: a guest-supplied `off_t *` under the identity mapping, written unaligned
+        // because nothing promises the guest aligned it.
         unsafe {
             std::ptr::write_unaligned(
                 std::ptr::with_exposed_provenance_mut::<u64>(destination),
@@ -580,9 +508,8 @@ fn sendfile(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// Implementations this module provides, by symbol name.
 ///
-/// **Declared in `libc`**, where FreeBSD puts them, and implemented here, where the mount
-/// model that decides whether a guest may touch a path lives. Where a symbol is declared is a
-/// claim about the target; where its code lives is a claim about this repository (D367).
+/// Declared in `libc`, where FreeBSD puts them, and implemented here beside the mount model
+/// that decides whether a guest may touch a path (D367).
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("creat", creat),
@@ -631,8 +558,7 @@ mod tests {
         crate::mount::clear();
         crate::mount::mount(crate::mount::APP_MOUNT, root.join("app0"));
         crate::mount::mount_data(root.join("data"));
-        // Writability is set from the filesystem manifest rather than by mounting, so a
-        // test that only mounts gets a `/data` nothing may write to (D251).
+        // Writability comes from the filesystem manifest, not from mounting (D251).
         crate::mount::allow_writes(crate::mount::DATA_MOUNT);
         root
     }
@@ -664,6 +590,7 @@ mod tests {
         function(&args)
     }
 
+    /// A directory can be made and removed under the writable mount.
     #[test]
     fn a_directory_can_be_made_and_removed_under_the_writable_mount() {
         let _guard = exclusively();
@@ -674,7 +601,7 @@ mod tests {
         assert!(!root.join("data/saves").exists());
     }
 
-    /// **The separation D250 exists for.** A guest cannot delete the user's own title.
+    /// Nothing here can touch the title directory (D250).
     #[test]
     fn nothing_here_can_touch_the_title_directory() {
         let _guard = exclusively();
@@ -697,6 +624,7 @@ mod tests {
         assert_ne!(call("unlink", &["/data/../../secret"], 0), 0);
     }
 
+    /// `unlink` removes a file; a directory needs `rmdir`.
     #[test]
     fn a_file_can_be_removed_but_a_directory_needs_the_call_that_takes_one() {
         let _guard = exclusively();
@@ -718,6 +646,7 @@ mod tests {
         assert!(!root.join("data/save.bin").exists());
     }
 
+    /// Renaming moves a file, and both ends are checked.
     #[test]
     fn renaming_moves_a_file_and_both_ends_are_checked() {
         let _guard = exclusively();
@@ -753,6 +682,7 @@ mod tests {
         assert_ne!(call("access", &["/data/missing"], F_OK), 0);
     }
 
+    /// A positioned read does not move the descriptor's own position.
     #[test]
     fn a_positioned_read_does_not_move_the_descriptors_own_position() {
         let _guard = exclusively();
@@ -764,7 +694,7 @@ mod tests {
         assert_eq!(crate::descriptor::read(fd, &mut first), Some(4));
         assert_eq!(&first, b"0123");
 
-        // A positioned read from the start, which must not disturb the position above.
+        // A positioned read from the start, which leaves the position above alone.
         let mut middle = [0_u8; 3];
         assert_eq!(
             crate::descriptor::read_at(fd, &mut middle, 0),
@@ -779,6 +709,7 @@ mod tests {
         assert!(crate::descriptor::close(fd));
     }
 
+    /// A descriptor can be duplicated onto a number the guest chooses.
     #[test]
     fn a_descriptor_can_be_duplicated_onto_a_number_the_guest_chooses() {
         let _guard = exclusively();
@@ -792,14 +723,15 @@ mod tests {
         assert_eq!(crate::descriptor::read(chosen, &mut buffer), Some(4));
         assert_eq!(&buffer, b"abcd");
 
-        // **The standard streams are refused.** They are the host's here, and the worker's
-        // protocol lives on the other side of them (D170).
+        // The standard streams are refused: they are the host's, and the worker's protocol is
+        // on the other side of them (D170).
         assert!(!crate::descriptor::duplicate_into(fd, 1));
 
         assert!(crate::descriptor::close(chosen));
         assert!(crate::descriptor::close(fd));
     }
 
+    /// Duplicating a descriptor onto itself succeeds and closes nothing.
     #[test]
     fn duplicating_a_descriptor_onto_itself_succeeds_and_closes_nothing() {
         let _guard = exclusively();
@@ -812,7 +744,7 @@ mod tests {
         assert!(crate::descriptor::close(fd));
     }
 
-    /// **What an FTP server is built on**: a connection, wrapped, written through.
+    /// A stream over a descriptor writes to that descriptor.
     #[test]
     fn a_stream_over_a_descriptor_writes_to_that_descriptor() {
         let _guard = exclusively();
@@ -883,6 +815,7 @@ mod tests {
         assert_ne!(call_raw("sendfile", [3, 4, 0, 0, 0x1000, 0]), 0);
     }
 
+    /// A file can be truncated to a length.
     #[test]
     fn a_file_can_be_truncated_to_a_length() {
         let _guard = exclusively();
@@ -933,8 +866,7 @@ mod scatter_gather {
         f(&regs)
     }
 
-    /// **The whole point of the vector form**: several buffers become one transfer, and the
-    /// answer is the total moved rather than the count of buffers.
+    /// Several buffers become one transfer, and the answer is the total bytes moved.
     #[test]
     fn writev_gathers_every_buffer_and_answers_the_total() {
         let _guard = exclusively();
@@ -963,8 +895,7 @@ mod scatter_gather {
         crate::descriptor::close(fd);
     }
 
-    /// `getpagesize` answers **this emulator's** page size, not the host's - a guest rounding
-    /// an allocation must get the number the mapper will actually use.
+    /// `getpagesize` answers the guest page size, not the host's.
     #[test]
     fn getpagesize_answers_the_guest_page_size() {
         let regs = [0_u64; GUEST_ARG_REGISTERS];

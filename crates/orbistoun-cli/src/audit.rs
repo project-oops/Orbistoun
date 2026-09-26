@@ -3,16 +3,13 @@
 use crate::common::how_it_was_found;
 use anyhow::{Context, Result};
 
-/// Collects every `Symbol.map` beneath a directory.
+/// Collects every version script (`.map`) beneath a directory.
 ///
-/// Hand-rolled rather than pulling in a directory-walking crate: the whole job is
-/// "recurse and match one filename", and a dependency that does it would be more code
-/// to audit than the code it replaces.
+/// Hand-rolled: recursing and matching one file kind is less code than a directory-walking
+/// dependency.
 fn find_symbol_maps(root: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
-        // An unreadable directory costs its own symbols, not the run. A harvest that
-        // fails wholesale because one path is inaccessible is worse than a partial one
-        // that says how many it read.
+        // An unreadable directory costs its own symbols, not the run.
         return;
     };
     for entry in entries.flatten() {
@@ -24,13 +21,8 @@ fn find_symbol_maps(root: &std::path::Path, found: &mut Vec<std::path::PathBuf>)
             .and_then(|n| n.to_str())
             .is_some_and(orbistoun_names::harvest::is_version_script)
         {
-            // **Asked rather than re-decided.** This tested the file name against
-            // `"Symbol.map"` while `is_version_script` - written to fix exactly that, after
-            // it cost every `pthread_*` name (D127) - sat unused in the crate below.
-            //
-            // Two implementations of one rule, one of them fixed. `lib/libthr` calls its
-            // file `pthread.map` and `lib/libsys` calls its `Symbol.sys.map`, so this
-            // walker silently skipped both and reported success either way (D191).
+            // The rule is asked of `is_version_script` rather than re-decided here: `lib/libthr`
+            // names its script `pthread.map` and `lib/libsys` names its `Symbol.sys.map` (D126).
             found.push(path);
         }
     }
@@ -54,8 +46,8 @@ pub(crate) fn cmd_harvest(
         if path.is_dir() {
             find_symbol_maps(&path, &mut maps);
         } else {
-            // Named rather than silently skipped: a sparse checkout missing one library
-            // yields a smaller list, and the reader should know which.
+            // Named rather than silently skipped: a sparse checkout missing one library yields a
+            // smaller list, and the reader knows which.
             eprintln!("note: {} is not present, skipping", path.display());
         }
     }
@@ -75,9 +67,8 @@ pub(crate) fn cmd_harvest(
         }
     }
 
-    // A revision is a citation; a local path is not. When both exist the revision leads
-    // and the path is dropped entirely - nobody re-deriving this has the same directory,
-    // and a temporary one actively misleads.
+    // A revision is a citation; a local path is not. When both exist the revision is recorded and
+    // the path is dropped, since nobody re-deriving this has the same directory.
     let described = match revision {
         Some(revision) => revision.to_owned(),
         None => format!("{} (no revision given)", source.display()),
@@ -93,8 +84,7 @@ pub(crate) fn cmd_harvest(
         out.display()
     );
     if revision.is_none() {
-        // The point of harvesting is citability, and a path with no revision is only
-        // half a citation.
+        // A path with no revision is only half a citation.
         eprintln!("note: pass --revision to record which revision this came from");
     }
     Ok(())
@@ -102,31 +92,12 @@ pub(crate) fn cmd_harvest(
 
 /// Re-derives generated records that the current grammar no longer confirms.
 ///
-/// # The record shape that fights the loop it belongs to
-///
-/// A generated record is `pattern` plus `index`, and that is what makes checking it a
-/// microsecond rather than a full sweep. It is also what makes it fragile: an index is a
-/// position in a mixed-radix enumeration over the vocabularies, so **adding one word to a
-/// vocabulary renumbers every candidate built from it**.
-///
-/// Which is a problem, because adding words is the loop. Every confirmed name is split
-/// into parts and fed back into the grammar so the next search reaches further (D195) - and
-/// each time that happens, some already-recorded name stops being at the index its record
-/// names. Nothing was wrong with the name and nothing was wrong with the claim; the
-/// coordinates moved underneath it.
-///
-/// Before this, those names fell off the verified count onto the unaccounted ceiling - a
-/// file whose whole rule is that it may only shrink. One learning pass of thirty-seven
-/// words moved twenty names onto it. Left alone the ceiling would have grown on every
-/// successful search, which is the exact opposite of what it is for (D213).
-///
-/// **A repair knows the name, so it never searches.** `Pattern::index_of` inverts the
-/// mixed-radix encoding that produced it, so new coordinates are arithmetic per name. This
-/// used to hand the hashes to the generative sweep and hunt for names it already had - five
-/// hours on thirty-three records, unfinished; the same work is now fourteen seconds (D304).
-///
-/// The date is never touched. A record says when a name was *first* worked out, and that
-/// did not change; only where the current grammar produces it did.
+/// A generated record is `pattern` plus `index`, a position in a mixed-radix enumeration over the
+/// vocabularies, so adding a word renumbers every candidate built from that vocabulary. Confirmed
+/// names widen the grammar (D195), so recorded coordinates move under names that are still right;
+/// without repair they would fall onto the unaccounted ceiling, which may only shrink.
+/// `Pattern::index_of` inverts the encoding, so a repair is arithmetic per name, not a search. The
+/// date is never touched: it records when a name was first worked out.
 fn repair_generated_records(
     file: &mut orbistoun_nid::SymbolDbFile,
     patterns: &[orbistoun_names::Pattern],
@@ -143,8 +114,8 @@ fn repair_generated_records(
                         d,
                         patterns,
                         standard,
-                        // This filter has already narrowed to `Generated`, so no affix
-                        // rule can be consulted and none is offered.
+                        // This filter has already narrowed to `Generated`, so no affix rule
+                        // applies.
                         &orbistoun_names::affix::Affixes::default(),
                     )
             })
@@ -164,18 +135,9 @@ fn repair_generated_records(
         stale.len()
     );
 
-    // **Derived from the name, not searched for by hash.** This ran `solve_patterns` - the
-    // full generative sweep, hashing every candidate across a space measured in trillions,
-    // looking for NIDs it already had names for. Five hours on thirty-three names, and it did
-    // not finish.
-    //
-    // A repair knows the name. `Pattern::index_of` inverts the mixed-radix encoding that
-    // produced it, so the new coordinates are arithmetic rather than a search (D304).
-    //
-    // It also removes a hazard the hash route had and had to guard against by hand: a target
-    // set holds hashes, the first candidate hashing to one is not necessarily the name being
-    // repaired, and rewriting a record from a collision would forge coordinates using the tool
-    // meant to prevent forged records. Searching for the name cannot collide.
+    // Derived from the name with `Pattern::index_of`, not searched for by hash. A hash search could
+    // also land on a colliding candidate first and forge coordinates; inverting the known name
+    // cannot collide.
     let mut repaired = 0;
     for name in &stale {
         let Some(derivation) = orbistoun_names::solve::derive(name, patterns, standard) else {
@@ -188,9 +150,8 @@ fn repair_generated_records(
     }
     let missed = stale.len() - repaired;
     if missed > 0 {
-        // Not an error. A name the grammar genuinely cannot reach any more belongs on the
-        // ceiling, which is what the ceiling is for - and saying so beats a silent partial
-        // repair that leaves somebody wondering why the count still does not add up.
+        // Not an error: a name the grammar can no longer reach belongs on the ceiling, and the
+        // count says how many.
         println!("  {repaired} re-derived, {missed} the current grammar cannot produce at all");
     } else {
         println!("  {repaired} re-derived");
@@ -200,25 +161,13 @@ fn repair_generated_records(
 
 /// Re-runs every static harvest against the module its record names.
 ///
-/// # Why this is the point of splitting `observed` in two
-///
-/// A static record says a name was read out of one named file, at rest. That is not a
-/// claim anybody has to take on trust - the file either contains the string or it does
-/// not, and re-reading it settles the question exactly as an array lookup settles a
-/// generated one. The only difference is that the file is not in this repository, so CI
-/// cannot do it and a person holding the title can (D213).
-///
-/// The old vocabulary made this impossible to even ask. `observed` covered both "read out
-/// of a file" and "worked out by watching a guest run", and there is no single check that
-/// applies to both, so neither got one.
-///
-/// Absent modules are counted and named, never passed. A check that reports success for
-/// material it could not read is worse than no check.
+/// A static record says a name was read out of one named file, which re-reading the file settles
+/// exactly. The file is not in this repository, so CI cannot run this and a person holding the
+/// title can (D213). Absent modules are counted and named, never passed.
 fn verify_static_records(file: &orbistoun_nid::SymbolDbFile) -> Result<()> {
     use std::collections::BTreeMap;
 
-    // Grouped by module so each is read and scanned once. A record-at-a-time loop would
-    // re-scan a thirty-megabyte executable for every one of the hundred names it carries.
+    // Grouped by module so each file is read and scanned once, not once per name it carries.
     let mut by_module: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
     for name in &file.names {
         if let Some(orbistoun_nid::Method::Static { from, .. }) =
@@ -275,8 +224,7 @@ fn verify_static_records(file: &orbistoun_nid::SymbolDbFile) -> Result<()> {
     if failed.is_empty() {
         return Ok(());
     }
-    // A record naming a module that does not contain the string is a false provenance
-    // claim, which is precisely what this whole mechanism exists to make impossible.
+    // A record naming a module that does not contain the string is a false provenance claim.
     println!();
     println!(
         "{} record(s) claim a string the named module does not contain:",
@@ -290,14 +238,8 @@ fn verify_static_records(file: &orbistoun_nid::SymbolDbFile) -> Result<()> {
 
 /// One line saying what kind of material the database was built out of.
 ///
-/// **The headline the split was for.** The tier listing below answers "what would it take
-/// to check this?", which is the audit's own question; this answers the one a person asks
-/// first - how much of what we know came from running things, and how much from reading
-/// them. Under the old vocabulary the answer was unobtainable, because the value that
-/// would have carried it covered both (D213).
-///
-/// Zero classes are printed too. "0 external" is the most reassuring number in the line
-/// and would be the most conspicuous one to omit.
+/// How much of what is known came from running things and how much from reading them (D213). Zero
+/// classes are printed too, so "0 external" is asserted rather than implied.
 fn print_by_evidence(file: &orbistoun_nid::SymbolDbFile) {
     use orbistoun_nid::Evidence;
 
@@ -333,19 +275,16 @@ fn print_by_evidence(file: &orbistoun_nid::SymbolDbFile) {
     }
 }
 
-/// Names this project worked out but this repository cannot re-derive on its own, grouped
-/// by what somebody else would need in order to arrive at them.
+/// Names this project worked out but this repository cannot re-derive on its own, grouped by what
+/// somebody else would need in order to arrive at them.
 ///
-/// **This is the half of the audit that used to be a shrug.** One bucket labelled
-/// "documented, not verified" held a string read deterministically out of a file next to a
-/// conclusion a person drew from a trace, and it described both as unverifiable. Neither
-/// is: one needs the module, one needs a run of it, and saying which is both truer and a
-/// stronger claim than declining to classify them (D213).
+/// A string read from a module needs the module; a conclusion drawn from a trace needs a run
+/// (D213).
 fn print_by_tier(entries: &[(&String, &orbistoun_nid::Derivation)]) {
     use orbistoun_nid::Reproducible;
 
-    // Tier order is the enum's own order, cheapest to check first, so the listing cannot
-    // disagree with the type about which claim is stronger.
+    // Tier order is the enum's own order, cheapest to check first, so the listing cannot disagree
+    // with the type about which claim is stronger.
     for tier in [
         Reproducible::FromModule,
         Reproducible::FromRun,
@@ -396,17 +335,14 @@ pub(crate) fn cmd_audit(
     };
     let patterns = grammar.patterns()?;
     let standard = orbistoun_names::standard_names();
-    // The rules an affixed record is rechecked against. Shipped data, like the grammar, so
-    // a record that verified when it was written still verifies unless somebody removed the
-    // rule that made it - which is exactly the staleness this audit exists to surface.
+    // The rules an affixed record is rechecked against. Shipped data, like the grammar, so a record
+    // stops verifying only when the rule that made it is removed.
     let affixes = orbistoun_names::affix::Affixes::builtin()?;
 
-    // Before anything is classified, so a repaired record is reported as what it now is
-    // rather than as a failure that was quietly fixed on the way past.
+    // Before anything is classified, so a repaired record is reported as what it is now.
     if repair {
-        // No thread count: a repair is arithmetic per name now rather than a sweep, so there
-        // is nothing to spread across cores (D304). `--threads` still governs `--deep`, which
-        // genuinely searches because it has no pattern to invert against.
+        // No thread count: a repair is arithmetic per name. `--threads` governs `--deep`, which
+        // searches because it has no pattern to invert.
         if repair_generated_records(&mut file, &patterns, &standard) > 0 {
             let text =
                 serde_json::to_string_pretty(&file).context("serialising the symbol database")?;
@@ -417,10 +353,8 @@ pub(crate) fn cmd_audit(
     let file = file;
 
     let mut verified = 0_usize;
-    // Everything that is ours but needs something this repository does not hold, kept in
-    // tier order so the report reads from cheapest to check to most expensive. Sorting
-    // into one "documented, not verified" bucket was the thing that let a static harvest
-    // and a runtime observation look like the same claim (D213).
+    // Everything that is ours but needs something this repository does not hold, in tier order from
+    // cheapest to check to most expensive (D213).
     let mut elsewhere: Vec<(&String, &orbistoun_nid::Derivation)> = Vec::new();
     let mut imported: Vec<(&String, &orbistoun_nid::Derivation)> = Vec::new();
     let mut unaccounted: Vec<&String> = Vec::new();
@@ -430,9 +364,8 @@ pub(crate) fn cmd_audit(
             Some(d) if orbistoun_names::solve::verify(name, d, &patterns, &standard, &affixes) => {
                 verified += 1;
             }
-            // Recorded, but not from material this repository holds. Split by whether
-            // this project worked it out or took it from elsewhere - the whole question
-            // this file exists to answer.
+            // Recorded, but not from material this repository holds; split by whether this project
+            // worked it out or took it from elsewhere.
             Some(d) if !d.method.is_mechanically_checkable() => {
                 if d.method.is_our_own_work() {
                     elsewhere.push((name, d));
@@ -460,18 +393,15 @@ pub(crate) fn cmd_audit(
         print_by_tier(&elsewhere);
     }
 
-    // Before the unaccounted list, because a false static record is a different and worse
-    // finding than an unaccounted name, and it should not be read after two hundred lines
-    // of known ceiling.
+    // Before the unaccounted list: a false static record is a worse finding than an unaccounted
+    // name.
     if verify_harvest {
         verify_static_records(&file)?;
     }
 
     if !imported.is_empty() {
-        // Listed loudly and separately. Not an error - taking a name from a public
-        // database is lawful and sometimes sensible - but it is the one category that
-        // changes the answer to "did you derive all of this yourselves?", so it must
-        // never be quiet.
+        // Listed separately and loudly. Taking a name from a public database is lawful, but it
+        // changes the answer to "was all of this derived here?".
         println!();
         println!("{} came from outside this project:", imported.len());
         for (name, d) in &imported {
@@ -488,11 +418,8 @@ pub(crate) fn cmd_audit(
             "
 every name is accounted for"
         );
-        // **The ceiling is still checked.** Returning here skipped it whenever nothing was
-        // unaccounted, which is exactly the state in which the ceiling has gone stale - so
-        // the half of its rule that says "an entry that stopped applying must leave" was
-        // unenforceable in the only case that could trigger it. A guard that passes because
-        // it stopped looking is worse than no guard (D199).
+        // The ceiling is checked even when nothing is unaccounted, the one state in which an entry
+        // that stopped applying must leave it (D213).
         if let Some(path) = ceiling {
             return against_ceiling(path, &unaccounted);
         }
@@ -516,18 +443,15 @@ every name is accounted for"
         return against_ceiling(path, &unaccounted);
     }
 
-    // A non-zero status so this can gate a commit. An unaccounted name is not
-    // necessarily wrong - a vocabulary shrinks, a name is added by hand - but it is
-    // always something a person should have decided about deliberately, and recorded.
+    // A non-zero status so this can gate a commit. An unaccounted name is not necessarily wrong,
+    // but a person decides about it and records the decision.
     anyhow::bail!("{} {plural} unaccounted for", unaccounted.len())
 }
 
 /// Judges the unaccounted set against a written-down ceiling.
 ///
-/// Two failure directions, both load-bearing. A name unaccounted and **unlisted** is the
-/// thing worth stopping for - somebody added a name nobody can explain. A name listed that
-/// is **no longer** unaccounted has to leave the file, or the ceiling stops describing
-/// anything and becomes a list nobody prunes (D208).
+/// Two failure directions: a name unaccounted and unlisted is unexplained, and a listed name that
+/// is no longer unaccounted must leave the file so the ceiling keeps describing something.
 fn against_ceiling(path: &std::path::Path, unaccounted: &[&String]) -> Result<()> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading the ceiling at {}", path.display()))?;
@@ -547,11 +471,8 @@ fn against_ceiling(path: &std::path::Path, unaccounted: &[&String]) -> Result<()
         for name in &added {
             println!("  {name}");
         }
-        // **Try `--repair` before reaching for the ceiling.** Most arrivals here are not
-        // names the grammar cannot spell; they are names whose recorded index a learned
-        // word renumbered, and the ceiling reached 202 entries before anybody checked
-        // which (D213). Adding one without trying the repair records a fact that is not
-        // true, in a file that is supposed to be evidence.
+        // Most arrivals here are records a learned word renumbered, not names the grammar cannot
+        // spell, so `--repair` comes before adding to the ceiling.
         println!("  most of these are records the grammar moved underneath, not names it");
         println!("  cannot produce. Try `audit --repair` first; it re-derives them in one");
         println!("  sweep. What survives that is a real gap - add it to");

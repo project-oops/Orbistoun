@@ -1,50 +1,22 @@
 //! Entering the guest: the host-to-guest direction of the same boundary.
 //!
-//! The rest of this crate proves a guest can call *us*. This is the other way round,
-//! and it is the last mechanical step before guest code executes.
-//!
-//! # Why the stack has to be switched, not borrowed
-//!
-//! Running guest code on the host thread's stack works right up until the guest
-//! overruns it, at which point it corrupts the host frames sitting below - and the
-//! crash surfaces inside the emulator rather than in the guest. Switching means an
-//! overrun hits a guard page instead, which says what actually happened.
-//!
-//! # Register discipline, which is where this gets subtle on Windows
-//!
-//! The guest follows System V, so it may destroy `rax`, `rcx`, `rdx`, `rsi`, `rdi`,
-//! `r8`-`r11` and every `xmm` register. Windows host code expects `rsi`, `rdi` and
-//! `xmm6`-`xmm15` to survive a call. Those sets disagree, so **every** System V
-//! caller-saved register is declared clobbered here - letting the compiler save what it
-//! needs. Omitting them would corrupt host state on Windows only, silently, and long
-//! after this returns.
-//!
-//! `r12` holds the host stack pointer across the call because it is callee-saved under
-//! System V: the guest is obliged to give it back.
-//!
-//! # Where the process image lives, and why not here
-//!
-//! A real process entry point expects a **process stack image** - argument count,
-//! argument and environment pointers, and an auxiliary vector - not a return address.
-//! That image is built, and it is built in `orbistoun-loader::process`, not here: this
-//! crate transfers control and knows nothing about what the stack should contain.
-//!
-//! The split is deliberate. This was a spike that answered whether the call boundary
-//! works at all, and it kept that scope; deferring the image was later shown to be wrong
-//! on its own terms - giving the entry point a *defined* first argument made two
-//! unrelated titles fault at the identical offset, having been reading through a stray
-//! host pointer and getting plausible garbage (D152).
+//! Guest code runs on its own stack, so an overrun hits a guard page instead of corrupting host
+//! frames (D063). The guest follows System V and may destroy registers Windows expects to survive
+//! (`rsi`, `rdi`, `xmm6`-`xmm15`), so every System V caller-saved register is declared clobbered
+//! and the compiler saves what it needs. `r12`, callee-saved under System V, holds the host stack
+//! pointer across the call. The process stack image is built in `orbistoun-loader::process`;
+//! this crate only transfers control. It also holds the diagnostic argument blocks and gadget
+//! stubs that make a guest's reads and calls legible.
 
 /// Transfers control to guest code on a dedicated stack.
 ///
-/// Returns whatever the guest leaves in `rax`, should it return at all. Most guests
-/// will not: they fault, or they call an unimplemented import and take a path that
-/// never comes back. That is expected, and it is why this runs in a worker process.
+/// Returns whatever the guest leaves in `rax`, if it returns at all; most fault or take a path
+/// that never comes back, which is why this runs in a worker process.
 ///
 /// # Safety
 ///
-/// This executes arbitrary guest machine code, so nothing about it can be checked by
-/// the compiler. The caller must ensure:
+/// Executes arbitrary guest machine code, which the compiler cannot check. The caller must
+/// ensure:
 ///
 /// - `entry` points at mapped, executable, fully relocated guest code.
 /// - `stack_pointer` is the top of a mapped, writable, guest-owned stack, aligned to
@@ -52,51 +24,25 @@
 /// - No host state that must survive is reachable only through registers the guest may
 ///   destroy.
 pub unsafe fn enter_guest(entry: u64, stack_pointer: u64) -> u64 {
-    // SAFETY: the caller's guarantees are exactly the ones the general form needs, and
-    // the argument is a block this crate owns for as long as the process runs.
+    // SAFETY: the caller's guarantees are exactly the ones the general form needs, and the
+    // argument is a block this crate owns for as long as the process runs.
     unsafe { enter_guest_with_argument(entry, stack_pointer, process_argument_block()) }
 }
 
-/// The float environment a title runs under on the console, as configuration bits.
+/// The float environment a title runs under on the hardware, as configuration bits.
 ///
-/// # What was measured, and why this is not that number
-///
-/// A conformance run read `MXCSR` as **`0x9fe0`** on entry to a native title. Decomposed:
-///
-/// | bits | meaning | value |
-/// |---|---|---|
-/// | 15 | flush-to-zero | set |
-/// | 13-14 | rounding mode | to nearest |
-/// | 7-12 | exception masks | all six masked |
-/// | 6 | denormals-are-zero | set |
-/// | 0-5 | **status flags** | `0x20` - the precision flag |
-///
-/// The first four are configuration. **The last is not**: bits 0-5 are sticky *status*, set by
-/// float work that has already happened, and the console had done some before the title got
-/// control. Writing `0x9fe0` would tell the guest an inexact result had occurred before it
-/// executed a single instruction - a fact about the console's startup reported as a fact about
-/// the guest's own arithmetic.
-///
-/// So this is `0x9fc0`: the same configuration, with the status flags clear.
-///
-/// # Why it has to be set at all
-///
-/// Guest code runs natively, so it uses whatever `MXCSR` the host thread carries - which has
-/// DAZ and FTZ **clear**, because that is the ordinary host default. A denormal argument reads
-/// as itself here and as zero on the console, and a denormal result is kept here and flushed
-/// there. Nothing about that shows up as a failed call; it shows up as arithmetic that is
-/// quietly different, which is the hardest kind of divergence to find later.
+/// A conformance run read `MXCSR` as `0x9fe0` on entry to a native title: flush-to-zero,
+/// round-to-nearest, all exceptions masked, denormals-are-zero, and the precision status flag.
+/// Status bits record float work already done before the title started, so this is `0x9fc0`,
+/// the same configuration with status clear. The host default has DAZ and FTZ clear, which
+/// would make denormal arithmetic quietly differ from the hardware.
 pub const GUEST_MXCSR: u32 = 0x9fc0;
 
 /// Puts this thread into the float environment a title runs under.
 ///
-/// **Per thread, so every path that enters guest code has to call it** - the process entry and
-/// each guest thread alike. A thread that skipped it would do the same arithmetic differently
-/// from its siblings, which is worse than all of them being wrong the same way.
-///
-/// Also applies to orbistoun's own implementations answering on that thread, and that is
-/// correct rather than a side effect: they stand in for the console's C library, which runs
-/// under exactly this environment.
+/// Per thread, so every path into guest code calls it: the process entry and each guest thread.
+/// It also covers orbistoun's own implementations on that thread, which stand in for the
+/// platform's C library running under the same environment.
 #[cfg(target_arch = "x86_64")]
 pub fn adopt_guest_float_environment() {
     let value = GUEST_MXCSR;
@@ -115,10 +61,7 @@ pub fn adopt_guest_float_environment() {
 #[cfg(not(target_arch = "x86_64"))]
 pub fn adopt_guest_float_environment() {}
 
-/// This thread's current `MXCSR`.
-///
-/// Exists so the setting above can be checked rather than assumed - a write nobody reads back
-/// is a write nobody knows happened.
+/// This thread's current `MXCSR`, so the setting above can be read back.
 #[cfg(target_arch = "x86_64")]
 #[must_use]
 pub fn float_environment() -> u32 {
@@ -142,27 +85,13 @@ pub fn float_environment() -> u32 {
     0
 }
 
-/// Transfers control to a **process** entry point, and never comes back.
+/// Transfers control to a process entry point, and never comes back.
 ///
-/// # Why this cannot be a call
-///
-/// The System V ABI puts `rsp` sixteen-byte aligned at the entry point and has it point
-/// at the argument count. A `call` pushes a return address, which lands at exactly the
-/// address the count must occupy and leaves the stack eight past alignment. The two
-/// conventions are not reconcilable by adjusting an offset - a process is *jumped* to.
-///
-/// So there is nothing to return to. A program leaves by calling exit. An entry point
-/// that executes `ret` pops the argument count and jumps to it, faulting on a very small
-/// address - which the fault reporter names, and which is a true description of what
-/// happened rather than a mystery.
-///
-/// Losing the return value costs nothing here: the fault handler and the time limit each
-/// persist the call trace from inside the guest's own thread, because those are the paths
-/// that actually fire (D066).
-///
-/// `rbp` is zeroed, which is the standard's way of marking the end of the frame chain -
-/// a debugger walking back from guest code stops there instead of following whatever the
-/// host left in that register.
+/// System V puts `rsp` sixteen-byte aligned at the entry point, pointing at the argument count;
+/// a `call` would push a return address there and misalign the stack, so a process is jumped
+/// to. A program leaves by calling exit; an entry point executing `ret` jumps to its argument
+/// count and faults on a small address. The fault handler and the time limit persist the trace
+/// from the guest's thread (D238). `rbp` is zeroed to end the frame chain.
 ///
 /// # Safety
 ///
@@ -172,12 +101,10 @@ pub fn float_environment() -> u32 {
 /// is passed unexamined, so if the guest dereferences it, it must be valid.
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn enter_process(entry: u64, stack_pointer: u64, argument: u64) -> ! {
-    // SAFETY: the caller guarantees the entry, the stack and the argument. Nothing after
-    // this executes on this thread, so no host state needs to survive and no clobber list
-    // is required - which is why `noreturn` is correct rather than convenient.
-    //
-    // The entry and the argument are pinned to explicit registers so the compiler cannot
-    // place one of them in `rdi` and have the argument move destroy it before the jump.
+    // SAFETY: the caller guarantees the entry, the stack and the argument. Nothing after this runs
+    // on this thread, so no host state survives and no clobber list is needed; `noreturn` is
+    // correct. The entry and argument are pinned to explicit registers so the argument move into
+    // `rdi` cannot destroy the entry before the jump.
     unsafe {
         core::arch::asm!(
             "mov rsp, {stack}",
@@ -204,95 +131,50 @@ pub unsafe fn enter_process(_entry: u64, _stack_pointer: u64, _argument: u64) ->
 
 /// Whether this build can execute guest code at all.
 ///
-/// **Not a capability check - an architecture one.** Guest code is x86-64 and runs
-/// natively, which is the whole architecture (principle 12 rules out an execution-backend
-/// abstraction on purpose). A build for any other architecture can parse containers, name
-/// imports, read traces and answer every analysis question, and can never run a guest.
-///
-/// This exists so that limit can be *reported* rather than hit: `enter_process` on a
-/// non-x86-64 target is `unimplemented!()`, and a panic is not an honest failure, it is a
-/// crash (principle 3). One `aarch64-apple-darwin` artifact is published, so this is a
-/// real user reaching a real dead end, not a hypothetical (D208).
+/// An architecture check: guest code is x86-64 and runs natively, with no execution backend
+/// (D031). A build for another architecture analyses containers and traces but cannot run a
+/// guest, and this lets that limit be reported rather than hit as a panic.
 #[must_use]
 pub const fn can_execute_guests() -> bool {
     cfg!(target_arch = "x86_64")
 }
 
-/// How much zeroed memory the process argument block holds.
-///
-/// A page. Generous, because the point is that any offset the entry point reads at is
-/// inside it, and nothing here knows which offsets those are.
+/// How much zeroed memory the process argument block holds: a page, so any offset the entry
+/// point reads is inside it.
 pub const ARGUMENT_BLOCK_SIZE: usize = 4096;
 
 /// A zeroed block for the entry point to read its process arguments out of.
 ///
-/// # Why this exists, and how it was found
-///
-/// A process entry point is not an ordinary function. It expects a **process argument
-/// block** - argument count, argument and environment pointers, an auxiliary vector -
-/// and it reads through the pointer it is given in the first argument register.
-///
-/// That was known and deliberately not built. What was not known is that the entry point
-/// **dereferences that register immediately**, and it was only found by accident: adding
-/// an argument to this call changed `rdi` from an undefined clobber to an explicit zero,
-/// and two unrelated titles went from reaching thousands of bytes into their own code to
-/// faulting with `read of 0x0` at the identical offset, `image+0x7a`.
-///
-/// So the previous behaviour was not "no argument". It was **whatever the compiler left
-/// in `rdi`** - a stray host pointer the guest dereferenced and got plausible-looking
-/// garbage from. That is precisely the failure mode principle 3 exists to prevent, and it
-/// had been passing as progress (D152).
-///
-/// Zeroed and never written, for the same reason a thread handle's block is: the real
-/// layout is not known from any lawful source, so every field reads as zero rather than
-/// as something invented. A guest reading a count gets none; a guest reading a pointer
-/// gets null and can check it.
+/// A process entry point dereferences the pointer in its first argument register immediately,
+/// so it is given a defined block rather than whatever the host left in `rdi`. Zeroed and never
+/// written, because the real layout is not known from any lawful source: a count reads as none,
+/// a pointer as null.
 pub fn process_argument_block() -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
-    // **Still a host heap address, and still a determinism leak.** Every other guest-visible
-    // block comes from `orbistoun_mem::blocks` now (D601); this crate has *no* orbistoun
-    // dependencies at all - `orbistoun-mem` appears only under `[dev-dependencies]` - and
-    // adding one to reach the allocator is a structural change to a deliberately leaf crate,
-    // not a two-line fix. Recorded rather than made.
+    // A host heap address, so not deterministic across runs: this leaf crate has no orbistoun
+    // dependency through which to reach `orbistoun_mem::blocks`.
     *BLOCK.get_or_init(|| {
         let block: Box<[u64; ARGUMENT_BLOCK_SIZE / 8]> = Box::new([0; ARGUMENT_BLOCK_SIZE / 8]);
         std::ptr::from_mut(Box::leak(block)) as usize as u64
     })
 }
 
-/// Where a sentinel block's markers start.
-///
-/// Chosen to be canonical, certainly unmapped, and **recognisable on sight** in a fault
-/// report - an address that could plausibly be a real pointer would leave a reader unsure
-/// whether they were looking at a marker or at something the guest computed.
+/// Where a sentinel block's markers start: canonical, unmapped, and recognisable on sight in a
+/// fault report.
 pub const SENTINEL_BASE: u64 = 0x0000_5E27_0000_0000;
 
 /// How far apart consecutive markers sit.
 ///
-/// Wide on purpose. The guest may add a small displacement to whatever it takes out of the
-/// block before using it - `call [rax+8]`, a field within a sub-structure - and a wide
-/// stride means the arithmetic still lands inside the slot it came from, so the fault names
-/// both **which** marker was used and **what was added to it**.
+/// Wide, so a small displacement the guest adds (`call [rax+8]`) stays inside the slot, and the
+/// fault names both the marker and what was added.
 pub const SENTINEL_STRIDE: u64 = 0x1000;
 
-/// A block whose every slot holds a distinct, identifiable marker.
+/// A block whose every slot holds a distinct, identifiable unmapped marker.
 ///
-/// # What this is for
-///
-/// [`process_argument_block`] is zeroed, which is the honest answer when nothing is known
-/// about a layout - but it answers nothing either. A guest that reads a pointer out of it
-/// gets null, and null tells you the guest wanted *a* pointer, not **which field** it
-/// wanted.
-///
-/// This fills every slot with a different unmapped address instead. The guest reads one,
-/// uses it, and faults - and the faulting address says exactly which slot it came from.
-/// One boot identifies a field precisely, rather than one boot per candidate offset, which
-/// is the same planted-value trick the argument sweeps already use (D283, D286, D308).
-///
-/// It is a **diagnostic**: nothing about it is a claim as to what the layout is, and a run
-/// under it is not an ordinary run. `orbistoun-env` records that, so a verdict taken here
-/// is never compared against one that was not (D181, D224).
+/// The zeroed block says the guest wanted a pointer; this says which field, because the faulting
+/// address names the slot, identifying a field in one boot (D286). A diagnostic, not a claim
+/// about the layout, and `orbistoun-env` records that a run used it.
 pub fn sentinel_argument_block() -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
@@ -307,48 +189,25 @@ pub fn sentinel_argument_block() -> u64 {
 
 /// A block whose every slot points at a function that returns zero.
 ///
-/// # The question this asks that markers cannot
-///
-/// [`sentinel_argument_block`] answers *which* field the entry point uses, by faulting on
-/// it. That is one field per boot, and it stops the guest dead every time.
-///
-/// This answers a different question: **if every field it asks for answers harmlessly, how
-/// far does it get?** Every slot holds the address of the same `xor eax, eax; ret`, so any
-/// field the guest calls returns zero and control comes back. A guest that then goes on to
-/// call its imports has told us the structure is a table of functions and nothing more; one
-/// that faults somewhere new has told us which field needed to be data rather than code
-/// (D308).
-///
-/// **Neither is a claim about the layout.** Both are diagnostics, and a run under either is
-/// not an ordinary run.
+/// Asks how far the guest gets if every field it calls answers harmlessly: a guest that goes on
+/// to its imports treats the structure as a table of functions, and one that faults somewhere
+/// new names a field that needed to be data. A diagnostic, not a claim about the layout.
 pub fn answering_argument_block() -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
     *BLOCK.get_or_init(|| {
-        // **A whole page of `ret`, not a three-byte stub.** The first attempt was exactly
-        // three bytes in a page of zeros, and the guest entered it at `+0xa` - so it ran off
-        // the end into `00 00`, which decodes as `add [rax], al` and faulted on a write. The
-        // diagnostic reported the guest doing something wrong when the wrong thing was the
-        // diagnostic. Filling the page means any entry point into it returns, and only then
-        // does a fault afterwards say something about the guest (D308).
+        // A whole page of `ret`, so any entry point into it returns; a short stub in a zeroed page
+        // would run off its end into `00 00`, an `add [rax], al`.
         let mut code = vec![0xC3_u8; ARGUMENT_BLOCK_SIZE];
         // And at the front, answer zero rather than whatever was left in `rax`.
         code[..3].copy_from_slice(&[0x31, 0xC0, 0xC3]);
-        // Leaked deliberately: the guest holds these addresses for as long as it runs, and a
-        // buffer freed underneath it would turn a diagnostic into a use-after-free.
+        // Leaked: the guest holds these addresses for as long as it runs.
         let stub = Box::leak(Box::new(
             crate::exec::ExecutableBuffer::new(&code).expect("a page of stub must be mappable"),
         ));
-        // **Two kinds of field, so two kinds of answer.** Handing every slot the same
-        // executable address could not tell a field that is *called* from one that is
-        // *written through*: the guest called slot zero, returned, and then wrote through
-        // something - into read-execute memory, which faulted and said nothing about which
-        // slot it was.
-        //
-        // So slot zero, which every payload measured calls first, gets the returning page;
-        // every other slot gets its own writable page. A write now succeeds and the guest
-        // carries on, while a *call* to one of them faults on an instruction fetch at an
-        // address that names the slot (D308).
+        // Two kinds of field, two answers. Slot zero, which every measured payload calls first, gets the
+        // returning page; every other slot gets its own writable page, so a write succeeds while a call
+        // faults on an instruction fetch at an address that names the slot.
         let slots = ARGUMENT_BLOCK_SIZE / 8;
         let arena: Box<[[u8; ARGUMENT_BLOCK_SIZE]]> =
             vec![[0_u8; ARGUMENT_BLOCK_SIZE]; slots].into_boxed_slice();
@@ -369,9 +228,8 @@ pub fn answering_argument_block() -> u64 {
 
 /// What a reporting stub says when the guest calls one.
 ///
-/// Printed rather than accumulated, and flushed per line: the guest's very next act is
-/// usually the fault this was installed to explain, so a line held in a buffer is a line
-/// nobody reads.
+/// Printed and flushed per line, because the guest's next act is usually the fault this
+/// explains.
 extern "sysv64" fn report_call(slot: u64, first: u64, second: u64, third: u64) -> u64 {
     use std::io::Write as _;
 
@@ -386,47 +244,17 @@ extern "sysv64" fn report_call(slot: u64, first: u64, second: u64, third: u64) -
 
 /// A block whose every slot points at a function that says how it was called.
 ///
-/// # The question the other two blocks cannot ask
-///
-/// [`sentinel_argument_block`] answers *which* field the guest uses, by faulting on it -
-/// one field per run, and the run ends there. [`answering_argument_block`] answers *how far
-/// it gets* when every field answers harmlessly - but it answers zero to everything and so
-/// says nothing about what was asked.
-///
-/// This one answers harmlessly **and** says what was asked: the slot, and the three
-/// arguments the guest passed. That is the difference between knowing the entry point calls
-/// field zero and knowing it calls field zero with a pointer - which, if the pointer turns
-/// out to name a string, says the field is a resolver and says what it is resolving (D365).
-///
-/// # How a stub knows which slot it is
-///
-/// One emitted stub per slot, each shifting the guest's arguments along by one register and
-/// putting its own index in the first. Reading the slot out of a register the reporter could
-/// not name would have needed assembly on the other side; shifting needs nine bytes.
-///
-/// ```text
-/// mov rcx, rdx     the guest's third argument moves to the fourth
-/// mov rdx, rsi     its second to the third
-/// mov rsi, rdi     its first to the second
-/// mov rdi, imm64   the slot index takes the first
-/// mov r11, imm64   the reporter's address
-/// jmp r11
-/// ```
-///
-/// The guest's fourth argument and beyond are dropped, which is stated rather than hidden:
-/// this reports the shape of a call, not its every operand.
-///
-/// A diagnostic, exactly as the other two are. Nothing here is a claim about the layout, and
-/// a run under it is not an ordinary run.
+/// Answers harmlessly and reports the slot and the first three arguments, so a field called with
+/// a string pointer names itself as a resolver (D365). One emitted stub per slot shifts the
+/// guest's arguments one register along and puts its slot index first; arguments beyond the
+/// third are dropped. A diagnostic, not a claim about the layout.
 pub fn reporting_argument_block() -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
     *BLOCK.get_or_init(|| {
         let mut block: Box<[u64; ARGUMENT_BLOCK_SIZE / 8]> = Box::new([0; ARGUMENT_BLOCK_SIZE / 8]);
         for (slot, cell) in block.iter_mut().enumerate() {
-            // Leaked deliberately, like every other stub here: the guest holds the address
-            // for as long as it runs, and freeing one underneath it would turn a diagnostic
-            // into a use-after-free.
+            // Leaked: the guest holds the address for as long as it runs.
             let stub = Box::leak(Box::new(
                 crate::exec::ExecutableBuffer::new(&reporting_stub(slot as u64))
                     .expect("a reporting stub must be mappable"),
@@ -439,30 +267,11 @@ pub fn reporting_argument_block() -> u64 {
 
 /// The structure a payload's runtime is handed, as far as it is known.
 ///
-/// # What is known, and what is still a marker
-///
-/// Field zero is a function pointer, and the guest calls it with a module number, a string,
-/// and somewhere to put an answer. Measured, not assumed: the string it passed was
-/// `sceKernelDlsym`, read out of the payload's own read-only data (D365). So field zero is
-/// given the resolver, and everything after it keeps the markers - because nothing has
-/// established what any of it holds, and a marker is what makes the *next* field the guest
-/// wants name itself.
-///
-/// This is the one block here that is not purely a diagnostic. Half of it is knowledge and
-/// half of it is a question, which is exactly the state of the thing it describes.
-///
-/// # Why the unknown fields want to be *mapped* markers
-///
-/// [`sentinel_argument_block`]'s markers are unmapped, so any use of one stops the run.
-/// That is right when the question is "which field", and wrong here: a runtime that reads
-/// six fields would need six runs to get past them, and each run says only what the last
-/// one already implied.
-///
-/// So `unknown_base` may name a region the caller has **mapped and zeroed**. A field read
-/// as a pointer then yields zero - which a correct program checks - and the runtime carries
-/// on to whatever it needs next, while the address it read from still says which field it
-/// was. Passing [`SENTINEL_BASE`] with nothing mapped there is the older, stricter
-/// behaviour and stays available.
+/// Field zero is a function the guest calls with a module number, a string and an out pointer;
+/// the string is `sceKernelDlsym`, so field zero is the resolver (D365). The rest hold
+/// [`UnknownFields`]. `unknown_base` may name a region the caller mapped and zeroed, so a field
+/// read as a pointer yields zero and the runtime carries on while its address still names the
+/// field; [`SENTINEL_BASE`] with nothing mapped stops at the first use.
 pub fn handoff_argument_block(resolver: u64, unknown: UnknownFields, named: &[[u64; 2]]) -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
@@ -480,9 +289,7 @@ pub fn handoff_argument_block(resolver: u64, unknown: UnknownFields, named: &[[u
                 0
             };
         }
-        // **Last, so a named field wins.** A sweep names one field and leaves the rest to the
-        // markers; naming field zero deliberately replaces the resolver, which is a thing
-        // somebody may want to try and should not have to edit code to try (D375).
+        // Last, so a named field wins, including over the resolver in field zero.
         for [field, value] in named {
             if let Ok(slot) = usize::try_from(*field)
                 && let Some(cell) = block.get_mut(slot)
@@ -496,11 +303,9 @@ pub fn handoff_argument_block(resolver: u64, unknown: UnknownFields, named: &[[u
 
 /// What the handoff structure's unestablished fields hold.
 ///
-/// **Two answers, and neither is a claim about the layout.** A marker says which field the
-/// guest used, by faulting on it or by turning up in an argument; a zero says nothing about
-/// which, and is the value a correct program can *check* - so a runtime that reads a field
-/// it does not strictly need carries on rather than corrupting itself with a marker it
-/// mistook for a handle (D368).
+/// A marker names the field the guest used; zero names nothing but is a value a correct program
+/// checks, so a runtime reading a field it does not need carries on. Neither is a claim about
+/// the layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownFields {
     /// Each field names itself, from a base the caller may have mapped.
@@ -512,13 +317,13 @@ pub enum UnknownFields {
     Zero,
 }
 
-/// The bytes of one reporting stub. Split out so the encoding is testable without mapping.
+/// The bytes of one reporting stub, split out so the encoding is testable without mapping.
 fn reporting_stub(slot: u64) -> Vec<u8> {
     let reporter: extern "sysv64" fn(u64, u64, u64, u64) -> u64 = report_call;
     naming_stub(slot, reporter as *const () as usize as u64)
 }
 
-/// Bytes of one stub, which is exactly what the six instructions below need.
+/// Bytes of one stub: what the six instructions below need.
 pub const STUB_LEN: usize = 32;
 
 /// A stub that shifts the guest's arguments along and puts `names` in the first.
@@ -532,9 +337,8 @@ pub const STUB_LEN: usize = 32;
 /// jmp r11
 /// ```
 ///
-/// `r11` is caller-saved and not an argument register, so loading it clobbers nothing the
-/// reporter is about to read. The jump is a tail call, so the reporter returns straight to
-/// the guest.
+/// `r11` is caller-saved and carries no argument. The jump is a tail call, so the reporter
+/// returns straight to the guest.
 fn naming_stub(names: u64, reporter: u64) -> Vec<u8> {
     let mut code = Vec::with_capacity(STUB_LEN);
     code.extend_from_slice(&[0x48, 0x89, 0xD1]);
@@ -548,30 +352,17 @@ fn naming_stub(names: u64, reporter: u64) -> Vec<u8> {
     code
 }
 
-/// Fields whose contents get stubs rather than markers.
-///
-/// Sixteen. A runtime that reads past the sixteenth field of a structure it was handed is
-/// doing something this has no reason to anticipate, and every field past this still names
-/// itself as a marker.
+/// Fields whose contents get stubs rather than markers; fields past these still name themselves
+/// as markers.
 pub const STUBBED_FIELDS: u64 = 16;
 
-/// Members per field that get one.
-///
-/// Sixty-four eight-byte members - half a kilobyte into each structure, which is past the
-/// end of anything a handoff structure plausibly is.
+/// Members per field that get one: sixty-four eight-byte members, half a kilobyte per structure.
 pub const STUBBED_MEMBERS: u64 = 64;
 
 /// What a member stub says when the guest calls one.
 ///
-/// # The question this answers that a marker cannot
-///
-/// A marker behind a field says *the guest read this member*. It cannot say what the guest
-/// then **did** with it, because the moment the value is used as a function pointer the run
-/// ends on an unmapped address and the arguments are gone.
-///
-/// A stub there answers harmlessly and says what it was called with - so a runtime that
-/// takes a function pointer out of a structure it was handed, and calls it with a string, is
-/// as legible as the entry point was when it called field zero with `sceKernelDlsym` (D375).
+/// A marker says the guest read a member; a stub there also says what the guest called it with,
+/// where a marker used as a function pointer would end the run (D375).
 extern "sysv64" fn report_member_call(names: u64, first: u64, second: u64, third: u64) -> u64 {
     use std::io::Write as _;
 
@@ -586,11 +377,8 @@ extern "sysv64" fn report_member_call(names: u64, first: u64, second: u64, third
     0
 }
 
-/// One table of stubs, mapped once, for every member of every stubbed field.
-///
-/// **One buffer rather than one page per stub.** A page each would be four megabytes of
-/// mapping for a thousand stubs, and every one of them is the same thirty-two bytes with two
-/// immediates changed.
+/// One table of stubs, mapped once, for every member of every stubbed field: one buffer rather
+/// than a page per stub.
 fn member_stubs() -> u64 {
     use std::sync::OnceLock;
     static STUBS: OnceLock<u64> = OnceLock::new();
@@ -602,8 +390,7 @@ fn member_stubs() -> u64 {
         for names in 0..count {
             code.extend_from_slice(&naming_stub(names, reporter));
         }
-        // Leaked deliberately, like every other stub here: the guest holds these addresses
-        // for as long as it runs.
+        // Leaked: the guest holds these addresses for as long as it runs.
         let buffer = Box::leak(Box::new(
             crate::exec::ExecutableBuffer::new(&code).expect("the member stubs must be mappable"),
         ));
@@ -613,9 +400,8 @@ fn member_stubs() -> u64 {
 
 /// Fills a mapped marker region so every word is a stub that names where it was read from.
 ///
-/// The second level of [`fill_with_content_markers`]: that one makes a *read* legible, this
-/// makes a **call** legible. A guest that reads a member and uses it as a pointer to data
-/// still faults on an address inside this table, which the fault reporter names.
+/// Where [`fill_with_content_markers`] makes a read legible, this makes a call legible. A member
+/// used as a data pointer still faults inside this table, which the fault reporter names.
 ///
 /// # Safety
 ///
@@ -631,8 +417,7 @@ pub unsafe fn fill_with_member_stubs(base: u64, len: u64) {
         let value = if field < STUBBED_FIELDS && member < STUBBED_MEMBERS {
             stubs + (field * STUBBED_MEMBERS + member) * STUB_LEN as u64
         } else {
-            // Past what is stubbed, a marker still names itself - which is the older, weaker
-            // answer and better than nothing.
+            // Past what is stubbed, a marker still names itself.
             CONTENT_BASE + field * CONTENT_STRIDE + (offset % SENTINEL_STRIDE)
         };
         let Ok(at) = usize::try_from(base + offset) else {
@@ -646,10 +431,8 @@ pub unsafe fn fill_with_member_stubs(base: u64, len: u64) {
     }
 }
 
-/// Names for the globals a run pointed at a gadget stub, by index.
-///
-/// Published rather than passed, for the same reason the data symbols are: a stub arrives on
-/// a bare frame with no room for a context.
+/// Names for the globals a run pointed at a gadget stub, by index, published because a stub
+/// arrives on a bare frame with no room for a context.
 static GLOBAL_NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 /// Publishes the names a gadget stub reports itself by.
@@ -662,15 +445,9 @@ pub const SAVED_GADGET_REGISTERS: usize = 8;
 
 /// What a gadget stub says when the guest calls one.
 ///
-/// # Why `rax` is the point
-///
-/// Every other diagnostic here reports the *arguments*, because everything else it watches is
-/// a function. A syscall gadget is not a function: the number it is being asked to perform
-/// arrives in `rax` on this architecture, which no argument-shaped report can see.
-///
-/// So this saves `rax` first and `r10` last - the register a `syscall` uses where an ordinary
-/// call would use `rcx` - and prints all eight. Between them they say which convention the
-/// caller used, which is the whole question (D377).
+/// A syscall gadget takes its number in `rax` and its fourth argument in `r10`, which no
+/// argument-shaped report sees. This saves `rax` first and `r10` last and prints all eight,
+/// which together say which convention the caller used (D377).
 extern "sysv64" fn report_gadget_call(index: u64, saved: *const u64) -> u64 {
     use std::io::Write as _;
 
@@ -678,8 +455,8 @@ extern "sysv64" fn report_gadget_call(index: u64, saved: *const u64) -> u64 {
         .get()
         .and_then(|names| names.get(index as usize).cloned())
         .unwrap_or_else(|| format!("global #{index}"));
-    // SAFETY: the stub that tail-called this wrote exactly `SAVED_GADGET_REGISTERS` words
-    // into a buffer this crate leaked and owns for the life of the process.
+    // SAFETY: the stub that called this wrote exactly `SAVED_GADGET_REGISTERS` words into a buffer
+    // this crate leaked and owns for the life of the process.
     let saved = unsafe { std::slice::from_raw_parts(saved, SAVED_GADGET_REGISTERS) };
 
     let mut err = std::io::stderr();
@@ -700,51 +477,12 @@ const SYSCALL_FRAME_BYTES: u8 = 64;
 
 /// The bytes of a syscall gadget: the registers a syscall reads, and the ones it keeps.
 ///
-/// # The convention, which is not a function's
-///
-/// A guest reaches this by calling a pointer it keeps where a real system would keep
-/// `syscall; ret`. So it arrives with the **number in `rax`** and its arguments in the
-/// registers a `syscall` instruction reads: `rdi`, `rsi`, `rdx`, **`r10`**, `r8`, `r9`. The
-/// fourth is `r10` rather than `rcx` because the instruction destroys `rcx`, and that one
-/// difference is why a gadget cannot be watched by any argument-shaped stub (D377).
-///
-/// # What it must *not* destroy, which is the part that bites
-///
-/// `syscall` clobbers `rax`, `rcx` and `r11`, and **preserves everything else**. A Rust
-/// function does not: the System V convention lets a callee destroy all six argument
-/// registers. So a gadget that simply tail-called a dispatcher would hand the guest back its
-/// own arguments as rubble - and the guest, having called what it believes is one instruction,
-/// carries straight on using them.
-///
-/// That is not hypothetical. The first version tail-called, and `klog_printf` went on to pass
-/// a destroyed register to `vsnprintf` as a `va_list` and read address `-1` (D378).
-///
-/// # The alignment, which is the guest's and cannot be assumed
-///
-/// Everything else here reaches this project through a call site a compiler wrote, so the
-/// stack arrives sixteen-byte aligned and the run reports as much - *all on a conforming
-/// stack*. **A gadget is not reached that way.** The guest holds a pointer where a real
-/// system holds `syscall; ret` and goes through it however its own code happens to, and
-/// `ftpsrv` arrives here eight off.
-///
-/// That is not a fault until the dispatcher's frame is built on it, and then it is a
-/// spectacular one: the optimiser copies the six saved arguments with `movaps`, an aligned
-/// SSE store, which raises a general-protection fault on a misaligned address. Windows
-/// reports that as an access violation at **`0xffffffffffffffff`** - an address no program
-/// computed, which read as a wild pointer and survived a dozen eliminations as one (D384).
-///
-/// So the gadget aligns the stack itself, keeps the old one in `rbp` - callee-saved in both
-/// conventions, so the dispatcher gives it back - and restores it before returning.
-///
-/// # The save area, which is the calling thread's own
-///
-/// The registers are saved into a frame carved out of **the calling thread's stack**, below the
-/// aligned `rsp`, and the dispatcher is handed its address. They used to go to one fixed buffer
-/// shared by every thread - a stated limit, "nothing measured does it" - until Neverball's audio
-/// thread and its main thread both issued syscalls at once: one thread's `mmap` read the other's
-/// registers, asked for a length that was a stack address, was refused, and `malloc` handed
-/// libvorbis a null table it then wrote through. It happened on some runs and not others, which is
-/// the signature of exactly this race (worklog 817).
+/// The guest calls a pointer where a real system keeps `syscall; ret`, with the number in `rax`
+/// and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. `syscall` preserves all but
+/// `rax`, `rcx` and `r11`, so the argument registers are saved and restored around the Rust
+/// dispatcher. The guest may arrive misaligned, and the dispatcher's `movaps` stores would fault,
+/// so the gadget aligns `rsp`, keeping the old one in `rbp` (D384). Registers are saved into a
+/// frame on the calling thread's own stack, so concurrent threads never share a save area.
 ///
 /// ```text
 /// push rdi rsi rdx r8 r9 r10     what a syscall would have preserved
@@ -772,13 +510,12 @@ fn syscall_gadget_code(dispatch: u64) -> Vec<u8> {
     // push rdi / rsi / rdx / r8 / r9 / r10
     code.extend_from_slice(&[0x57, 0x56, 0x52]);
     code.extend_from_slice(&[0x41, 0x50, 0x41, 0x51, 0x41, 0x52]);
-    // push rbp / mov rbp, rsp / and rsp, -16 - the guest's alignment is whatever it was, and
-    // `and` makes this one right whichever it was. `rbp` is callee-saved in both conventions,
-    // so the dispatcher hands it back and the guest's own value is restored below.
+    // push rbp / mov rbp, rsp / and rsp, -16: aligned whatever the guest's alignment was. `rbp` is
+    // callee-saved in both conventions, so the dispatcher hands it back.
     code.extend_from_slice(&[0x55]);
     code.extend_from_slice(&[0x48, 0x89, 0xE5]);
     code.extend_from_slice(&[0x48, 0x83, 0xE4, 0xF0]);
-    // sub rsp, FRAME - a multiple of sixteen, so the alignment just made survives it
+    // sub rsp, FRAME: a multiple of sixteen, so the alignment survives it
     code.extend_from_slice(&[0x48, 0x83, 0xEC, SYSCALL_FRAME_BYTES]);
     // mov [rsp+disp8], reg - ModRM mod=01 rm=100 (a SIB byte follows), SIB 0x24 (base rsp)
     for (rex, modrm, disp) in [
@@ -808,13 +545,10 @@ fn syscall_gadget_code(dispatch: u64) -> Vec<u8> {
 
 /// The address of this run's syscall gadget, built once.
 ///
-/// `dispatch` is what performs the call - passed in rather than named here, because the table
-/// it dispatches through belongs to a crate this one does not depend on.
-///
-/// **Each call saves into its own thread's stack**, so two guest threads issuing syscalls at the
-/// same instant no longer overwrite each other's registers (worklog 817). `saved_registers` is how
-/// many words the dispatcher reads; the frame holds [`SYSCALL_SAVED_WORDS`], and a dispatcher that
-/// wants more is refused here rather than handed a frame too small for it.
+/// `dispatch` performs the call; it is passed in because its table belongs to a crate this one
+/// does not depend on. Each call saves into its own thread's stack. `saved_registers` is how
+/// many words the dispatcher reads; the frame holds [`SYSCALL_SAVED_WORDS`], and a dispatcher
+/// wanting more is refused.
 pub fn syscall_gadget(dispatch: u64, saved_registers: usize) -> Option<u64> {
     use std::sync::OnceLock;
     static GADGET: OnceLock<Option<u64>> = OnceLock::new();
@@ -829,8 +563,6 @@ pub fn syscall_gadget(dispatch: u64, saved_registers: usize) -> Option<u64> {
 }
 
 /// One stub per global, each saving every register and naming itself.
-///
-/// # The encoding, which is written out because it has to be exact
 ///
 /// ```text
 /// mov r11, imm64      the save buffer for this stub
@@ -854,13 +586,8 @@ pub fn syscall_gadget(dispatch: u64, saved_registers: usize) -> Option<u64> {
 /// ret
 /// ```
 ///
-/// The buffer is per stub rather than shared, so two guest threads calling two gadgets cannot
-/// overwrite each other's report.
-///
-/// **Aligned rather than tail-jumped, for the reason the syscall gadget is** (D384): a guest
-/// reaches a gadget through a pointer it keeps rather than a call site a compiler wrote, so
-/// the stack it arrives on is whatever the guest was using - and a reporter whose frame the
-/// optimiser fills with `movaps` faults on the store, not on anything it was watching.
+/// The buffer is per stub, so two threads calling two gadgets keep separate reports. The stack
+/// is aligned rather than tail-jumped, as for the syscall gadget (D384).
 fn gadget_stub(index: u64, buffer: u64, reporter: u64) -> Vec<u8> {
     let mut code = Vec::with_capacity(96);
     code.extend_from_slice(&[0x49, 0xBB]);
@@ -879,8 +606,8 @@ fn gadget_stub(index: u64, buffer: u64, reporter: u64) -> Vec<u8> {
     ] {
         code.extend_from_slice(&[rex, 0x89, modrm, disp]);
     }
-    // push rbp / mov rbp, rsp / and rsp, -16 - the guest's alignment is not this project's
-    // to assume, and `rbp` is callee-saved in both conventions, so the reporter hands it back.
+    // push rbp / mov rbp, rsp / and rsp, -16: the guest's alignment is not assumed, and `rbp` is
+    // callee-saved in both conventions, so the reporter hands it back.
     code.extend_from_slice(&[0x55]);
     code.extend_from_slice(&[0x48, 0x89, 0xE5]);
     code.extend_from_slice(&[0x48, 0x83, 0xE4, 0xF0]);
@@ -894,8 +621,7 @@ fn gadget_stub(index: u64, buffer: u64, reporter: u64) -> Vec<u8> {
     code.extend_from_slice(&[0x49, 0xBB]);
     code.extend_from_slice(&reporter.to_le_bytes());
     code.extend_from_slice(&[0x41, 0xFF, 0xD3]);
-    // mov rsp, rbp / pop rbp / ret - the reporter's answer is already in rax, which is what
-    // the guest reads.
+    // mov rsp, rbp / pop rbp / ret: the reporter's answer is already in rax.
     code.extend_from_slice(&[0x48, 0x89, 0xEC]);
     code.extend_from_slice(&[0x5D]);
     code.push(0xC3);
@@ -905,10 +631,8 @@ fn gadget_stub(index: u64, buffer: u64, reporter: u64) -> Vec<u8> {
 /// Bytes one gadget stub occupies, rounded so each starts on a sixteen-byte boundary.
 const GADGET_STUB_LEN: usize = 96;
 
-/// Addresses of `count` gadget stubs, mapped once.
-///
-/// Leaked deliberately: the guest holds these for as long as it runs, and a buffer freed
-/// underneath it would turn a diagnostic into a use-after-free.
+/// Addresses of `count` gadget stubs, mapped once and leaked, since the guest holds them for as
+/// long as it runs.
 pub fn gadget_stubs(count: usize) -> Vec<u64> {
     let saves: &'static mut [u64] = Box::leak(vec![0_u64; count * SAVED_GADGET_REGISTERS].into());
     let saves_at = saves.as_ptr() as u64;
@@ -931,30 +655,18 @@ pub fn gadget_stubs(count: usize) -> Vec<u64> {
         .collect()
 }
 
-/// Where the markers *behind* a field start.
+/// Where the markers behind a field start.
 ///
-/// # The second depth, and why one was not enough
-///
-/// A field marker says the guest used field `n`. It cannot say anything more, because the
-/// moment the guest reads *through* the field the marker has done its job and what comes back
-/// is whatever is in the page - and a zeroed page answers zero, which names nothing.
-///
-/// So the page behind each field can hold markers of its own, one per word, each naming the
-/// field it belongs to **and the offset it was read from**. A guest that reads a pointer out
-/// of a structure it was handed then faults on a value that says which structure and which
-/// member (D369).
-///
-/// A separate base from [`SENTINEL_BASE`] so the two depths can never be confused for one
-/// another, and adjacent to it so both are recognisable on sight as ours.
+/// A field marker says the guest used field `n`; once the guest reads through it, a zeroed page
+/// names nothing. The page behind each field can hold its own markers, one per word, naming the
+/// field and the offset read (D365). A separate base from [`SENTINEL_BASE`], adjacent so both
+/// are recognisable.
 pub const CONTENT_BASE: u64 = 0x0000_5E28_0000_0000;
 
 /// How far apart consecutive fields' content markers sit.
 ///
-/// **Deliberately not [`SENTINEL_STRIDE`], and the difference is the whole point.** A guest
-/// that truncates a marker to thirty-two bits - which they do, because a structure member is
-/// often an `int` - keeps only the low half, and with one stride the two depths produce the
-/// *same* low half. The question they exist to tell apart, "did that number come from the
-/// field or from what the field points at", would then have the same answer either way.
+/// Not [`SENTINEL_STRIDE`]: a guest may truncate a marker to 32 bits, and with one stride the
+/// two depths would share a low half and become indistinguishable.
 pub const CONTENT_STRIDE: u64 = 0x0010_0000;
 
 /// Fills a mapped marker region so every word names where it was read from.
@@ -977,20 +689,18 @@ pub unsafe fn fill_with_content_markers(base: u64, len: u64) {
         let Ok(at) = usize::try_from(base + offset) else {
             return;
         };
-        // SAFETY: the caller guarantees the whole region is mapped writable, and `offset`
-        // is inside it by construction. Written unaligned because nothing here promises the
-        // caller's base is eight-byte aligned.
+        // SAFETY: the caller guarantees the whole region is mapped writable, and `offset` is inside it
+        // by construction. Unaligned, since the caller's base need not be eight-byte aligned.
         unsafe {
             std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(at), value);
         }
     }
 }
 
-/// Reads a faulting address back as the field whose *contents* it came from.
+/// Reads a faulting address back as the field whose contents it came from, and the offset.
 ///
-/// The companion to [`sentinel_slot`], one level deeper: that one says the guest used a
-/// field, this one says the guest read through a field and then used what it found, and says
-/// from which offset.
+/// One level deeper than [`sentinel_slot`]: the guest read through a field and used what it
+/// found.
 #[must_use]
 pub const fn content_slot(address: u64) -> Option<(usize, u64)> {
     let top = CONTENT_BASE + (ARGUMENT_BLOCK_SIZE as u64 / 8) * CONTENT_STRIDE;
@@ -1003,8 +713,8 @@ pub const fn content_slot(address: u64) -> Option<(usize, u64)> {
 
 /// Reads a faulting address back as the slot it came from, and what was added to it.
 ///
-/// [`None`] for any address outside the marker range, which is most of them: a fault that
-/// has nothing to do with the block must not be reported as though it named a field.
+/// [`None`] outside the marker range, so an unrelated fault is never reported as naming a
+/// field.
 #[must_use]
 pub const fn sentinel_slot(address: u64) -> Option<(usize, u64)> {
     let top = SENTINEL_BASE + (ARGUMENT_BLOCK_SIZE as u64 / 8) * SENTINEL_STRIDE;
@@ -1020,31 +730,23 @@ pub const fn sentinel_slot(address: u64) -> Option<(usize, u64)> {
 
 /// Transfers control to guest code on a dedicated stack, with one argument.
 ///
-/// The form a *thread* entry point needs. A guest thread body is called as
-/// `void *start(void *arg)`, so the argument the guest handed to the create call has to
-/// arrive in the first System V argument register rather than as whatever was left there.
+/// The form a thread entry point `void *start(void *arg)` needs: the argument arrives in the
+/// first System V argument register.
 ///
 /// # Safety
 ///
 /// As [`enter_guest`], and additionally: `argument` is passed to guest code unexamined,
 /// so if the guest dereferences it, it must be a valid guest address.
 pub unsafe fn enter_guest_with_argument(entry: u64, stack_pointer: u64, argument: u64) -> u64 {
-    // SAFETY: the caller's contract, unchanged - a second argument of zero is what `rsi`
-    // already held for a one-argument callee, now stated rather than left to the clobber
-    // list.
+    // SAFETY: the caller's contract, unchanged; a second argument of zero states what `rsi` holds
+    // for a one-argument callee.
     unsafe { enter_guest_with_arguments(entry, stack_pointer, argument, 0) }
 }
 
 /// Transfers control to guest code on a dedicated stack, with two arguments.
 ///
-/// The form `main(int argc, char **argv)` needs. Separate from the one-argument version
-/// only in that `rsi` is stated as an input rather than a clobber - it was always being
-/// set, to nothing in particular.
-///
-/// **Why this exists.** Entering a payload at its `main` rather than its declared entry
-/// (D343) means the callee is an ordinary C function with the ordinary C signature, and
-/// handing it a process-argument block as `argc` gives it a wild count to iterate. The
-/// first thing both payloads measured do is parse their options.
+/// The form `main(int argc, char **argv)` needs when a payload is entered at `main` (D343);
+/// `rsi` is an input rather than a clobber.
 ///
 /// # Safety
 ///
@@ -1057,11 +759,10 @@ pub unsafe fn enter_guest_with_arguments(
     second: u64,
 ) -> u64 {
     let returned: u64;
-    // SAFETY: the block saves the host stack pointer in `r12` - callee-saved under
-    // System V, so the guest must restore it - switches to the guest stack, calls the
-    // guest, and switches back before any compiler-generated code runs. Every register
-    // the guest may destroy is declared clobbered, so the compiler preserves whatever
-    // it needs across the call. The caller guarantees `entry` and `stack_pointer`.
+    // SAFETY: the block saves the host stack pointer in `r12` (callee-saved under System V, so the
+    // guest restores it), switches to the guest stack, calls the guest, and switches back before
+    // any compiler-generated code runs. Every register the guest may destroy is declared clobbered.
+    // The caller guarantees `entry` and `stack_pointer`.
     unsafe {
         core::arch::asm!(
             "mov r12, rsp",
@@ -1071,8 +772,8 @@ pub unsafe fn enter_guest_with_arguments(
             stack = in(reg) stack_pointer,
             entry = in(reg) entry,
             out("rax") returned,
-            // System V caller-saved integer registers. `rsi` and `rdi` are callee-saved
-            // on Windows, which is exactly why they must be listed.
+            // System V caller-saved integer registers. `rsi` and `rdi` are callee-saved on Windows, which
+            // is why they are listed.
             out("rcx") _,
             out("rdx") _,
             inout("rsi") second => _,
@@ -1083,8 +784,8 @@ pub unsafe fn enter_guest_with_arguments(
             out("r11") _,
             // Used to hold the host stack pointer across the call.
             out("r12") _,
-            // Every vector register. `xmm6`-`xmm15` are callee-saved on Windows and
-            // caller-saved under System V - the disagreement this list settles.
+            // Every vector register: `xmm6`-`xmm15` are callee-saved on Windows and caller-saved under
+            // System V.
             out("xmm0") _,
             out("xmm1") _,
             out("xmm2") _,
@@ -1108,9 +809,8 @@ pub unsafe fn enter_guest_with_arguments(
 
 /// Transfers control to guest code on a dedicated stack, with three arguments.
 ///
-/// The form a callback with an `InitOnce`-shaped signature needs - `(handle, parameter, context)`
-/// in `rdi`, `rsi`, `rdx`. Separate from the two-argument version only in that `rdx` is stated as an
-/// input rather than a clobber; it was always being set, to nothing in particular.
+/// The form an `InitOnce`-shaped callback needs, `(handle, parameter, context)` in `rdi`, `rsi`,
+/// `rdx`; `rdx` is an input rather than a clobber.
 ///
 /// # Safety
 ///
@@ -1125,9 +825,9 @@ pub unsafe fn enter_guest_with_three_arguments(
     third: u64,
 ) -> u64 {
     let returned: u64;
-    // SAFETY: as `enter_guest_with_arguments`, with `rdx` additionally supplied as the third
-    // argument rather than clobbered. The stack save/switch/restore and the full clobber list are
-    // unchanged, and the caller guarantees `entry` and `stack_pointer`.
+    // SAFETY: as `enter_guest_with_arguments`, with `rdx` supplied as the third argument. The stack
+    // switch and the clobber list are unchanged, and the caller guarantees `entry` and
+    // `stack_pointer`.
     unsafe {
         core::arch::asm!(
             "mov r12, rsp",
@@ -1169,11 +869,7 @@ pub unsafe fn enter_guest_with_three_arguments(
 
 #[cfg(test)]
 mod tests {
-    /// **A marker decodes back to the slot it came from, and nothing else does.**
-    ///
-    /// The whole technique rests on this being exact: a fault address is read as a field
-    /// number, and a decoder that accepted addresses outside the range would turn an
-    /// unrelated crash into a confident statement about a structure nobody has seen.
+    /// A marker decodes back to the slot it came from, and a stray address decodes to nothing.
     #[test]
     fn a_marker_address_names_its_slot_and_a_stray_one_names_nothing() {
         use super::{ARGUMENT_BLOCK_SIZE, SENTINEL_BASE, SENTINEL_STRIDE, sentinel_slot};
@@ -1231,58 +927,50 @@ mod tests {
     /// Far from anything a normal process maps.
     const TEST_STACK_BASE: u64 = 0x0000_6500_0000_0000;
 
+    /// Control transfers to generated code on a guest stack and comes back with its value.
     #[test]
     fn control_transfers_to_generated_code_on_a_guest_stack_and_comes_back() {
-        // The whole mechanism end to end: real machine code, a real stack switch, and
-        // a value carried back in `rax`. Nothing short of executing it proves the
-        // register discipline above is right.
+        // Real machine code, a real stack switch, and a value carried back in `rax`: only execution
+        // proves the register discipline.
         let code = emit_return_constant(0x0BAD_C0DE);
         let buffer = ExecutableBuffer::new(&code).expect("map executable memory");
         let stack = GuestStack::reserve(TEST_STACK_BASE, 64 * 1024).expect("reserve a stack");
 
-        // SAFETY: `buffer` holds mapped executable code that returns immediately, and
-        // `stack` is a mapped, writable, sixteen-byte-aligned guest stack with a guard
-        // page beneath it. Both outlive the call.
+        // SAFETY: `buffer` holds mapped executable code that returns immediately, and `stack` is a
+        // mapped, writable, sixteen-byte-aligned guest stack with a guard page beneath it. Both outlive
+        // the call.
         let got = unsafe { enter_guest(buffer.address(), stack.initial_pointer()) };
         assert_eq!(got, 0x0BAD_C0DE, "the guest return value must survive");
     }
 
+    /// An argument reaches the guest in the first register.
     #[test]
     fn an_argument_reaches_the_guest_in_the_first_register() {
-        // A thread body is `void *start(void *arg)`, so this is the difference between
-        // a guest thread getting its context and getting whatever was left in `rdi`.
-        // Nothing short of executing it proves the register is right.
-        //
-        // `48 89 F8` is `mov rax, rdi`; `C3` is `ret`. Hand-encoded because this is the
-        // only place that needs it and a two-instruction emitter would hide it.
+        // A thread body gets its context in `rdi`. `48 89 F8` is `mov rax, rdi`; `C3` is `ret`.
         let code = [0x48, 0x89, 0xF8, 0xC3];
         let buffer = ExecutableBuffer::new(&code).expect("map executable memory");
         let stack =
             GuestStack::reserve(TEST_STACK_BASE + 0x200_0000, 64 * 1024).expect("reserve a stack");
 
-        // SAFETY: mapped executable code that reads one register and returns, on a
-        // mapped, aligned guest stack. The argument is never dereferenced.
+        // SAFETY: mapped executable code that reads one register and returns, on a mapped, aligned
+        // guest stack. The argument is never dereferenced.
         let got = unsafe {
             super::enter_guest_with_argument(buffer.address(), stack.initial_pointer(), 0xFEED)
         };
         assert_eq!(got, 0xFEED, "the argument must arrive in rdi");
     }
 
-    /// **Three arguments reach guest code and their result comes back** - the basis for calling a
-    /// callback like `call_once`'s initialiser, which arrives as `(handle, parameter, context)`. If
-    /// the stack switch or any of the three argument registers were wrong, the sum would not be the
-    /// sum.
+    /// Three arguments reach guest code and their sum comes back, as for a `call_once` initialiser.
     ///
-    /// `48 89 F8` mov rax, rdi; `48 01 F0` add rax, rsi; `48 01 D0` add rax, rdx; `C3` ret. Three
-    /// arguments in, their total out.
+    /// `48 89 F8` mov rax, rdi; `48 01 F0` add rax, rsi; `48 01 D0` add rax, rdx; `C3` ret.
     #[test]
     fn three_arguments_reach_the_guest_and_their_result_returns() {
         let code = [0x48, 0x89, 0xF8, 0x48, 0x01, 0xF0, 0x48, 0x01, 0xD0, 0xC3];
         let buffer = ExecutableBuffer::new(&code).expect("map executable memory");
         let stack =
             GuestStack::reserve(TEST_STACK_BASE + 0x400_0000, 64 * 1024).expect("reserve a stack");
-        // SAFETY: mapped executable code that reads three registers and returns their sum, on a
-        // mapped, aligned guest stack; it dereferences none of the arguments.
+        // SAFETY: mapped executable code that reads three registers and returns their sum, on a mapped,
+        // aligned guest stack; it dereferences none of the arguments.
         let got = unsafe {
             super::enter_guest_with_three_arguments(
                 buffer.address(),
@@ -1295,11 +983,7 @@ mod tests {
         assert_eq!(got, 12, "rdi + rsi + rdx must come back in rax");
     }
 
-    /// A reporting stub is what the shift-and-tail-call comment says it is.
-    ///
-    /// Asserted byte by byte, because an encoding that is wrong by one bit is a different
-    /// valid instruction rather than an error - the same reason the thunk encoder is
-    /// tested this way.
+    /// A reporting stub shifts the arguments and tail-calls, asserted byte by byte.
     #[test]
     fn a_reporting_stub_shifts_the_arguments_and_tail_calls() {
         let code = super::reporting_stub(9);
@@ -1316,7 +1000,7 @@ mod tests {
         assert_eq!(&code[29..], &[0x41, 0xFF, 0xE3], "jmp r11");
     }
 
-    /// Each stub carries its own slot, which is the whole reason there is one per slot.
+    /// Two reporting stubs differ only in the slot they name.
     #[test]
     fn two_reporting_stubs_differ_only_in_the_slot_they_name() {
         let (first, second) = (super::reporting_stub(0), super::reporting_stub(1));
@@ -1325,7 +1009,7 @@ mod tests {
         assert_eq!(first[19..], second[19..], "the same reporter");
     }
 
-    /// The known half of the handoff structure is in field zero and nowhere else.
+    /// The handoff block holds the resolver in field zero and markers after it.
     #[test]
     fn the_handoff_block_holds_the_resolver_first_and_markers_after() {
         let at = super::handoff_argument_block(
@@ -1356,12 +1040,8 @@ mod tests {
         assert_eq!(slots[7], 0, "word 7 is zero in the measured D208 layout");
     }
 
-    /// **The gadget reads what a syscall reads and keeps what it keeps** (D378).
-    ///
-    /// Asserted byte for byte. Two things here are the difference between working and
-    /// silently corrupting a guest: the fourth argument comes from `r10` rather than `rcx`,
-    /// and the six argument registers are pushed and popped, because `syscall` preserves them
-    /// and a Rust call does not.
+    /// The gadget reads `r10` for the fourth argument and preserves what a syscall preserves
+    /// (D377).
     #[test]
     fn a_syscall_gadget_reads_r10_and_preserves_what_a_syscall_preserves() {
         let code = super::syscall_gadget_code(0x2000);
@@ -1370,10 +1050,8 @@ mod tests {
             &[0x57, 0x56, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52],
             "push rdi rsi rdx r8 r9 r10 - what a syscall would have preserved"
         );
-        // **The alignment, which is the whole of D384.** The guest reaches a gadget through a
-        // pointer it keeps rather than a call site a compiler wrote, so the stack it arrives
-        // on is whatever the guest was using - `ftpsrv` arrives eight off, and the
-        // dispatcher's `movaps` then faults on its own frame.
+        // The alignment (D384): the guest may arrive misaligned, and the dispatcher's `movaps` would
+        // fault on its own frame.
         assert_eq!(code[9], 0x55, "push rbp - the guest's, and the old rsp");
         assert_eq!(&code[10..13], &[0x48, 0x89, 0xE5], "mov rbp, rsp");
         assert_eq!(
@@ -1418,11 +1096,8 @@ mod tests {
         );
     }
 
-    /// **No two threads share a save area** (worklog 817).
-    ///
-    /// The race that nulled libvorbis's table needed a fixed address both threads wrote to. The
-    /// gadget now names exactly one absolute address - the dispatcher - and every store goes
-    /// through `rsp`, the calling thread's own stack.
+    /// No two threads share a save area: the gadget names only the dispatcher's address and stores
+    /// through the calling thread's `rsp`.
     #[test]
     fn the_gadget_saves_through_the_callers_stack_and_names_no_buffer() {
         let code = super::syscall_gadget_code(0x2000);
@@ -1446,12 +1121,7 @@ mod tests {
         );
     }
 
-    /// **The stack the dispatcher is entered on is aligned however the guest arrived.**
-    ///
-    /// The property, rather than the bytes: whatever `rsp` was at the gadget's first
-    /// instruction, `and rsp, -16` makes it sixteen-byte aligned before the `call` puts a
-    /// return address on it - which is what the convention requires and what the optimiser's
-    /// `movaps` stores depend on (D384).
+    /// The dispatcher is entered on an aligned stack however the guest arrived (D384).
     #[test]
     fn the_gadget_aligns_whatever_stack_it_was_entered_on() {
         let code = super::syscall_gadget_code(0x2000);
@@ -1477,7 +1147,7 @@ mod tests {
         );
     }
 
-    /// The pushes and the pops must match, or the guest returns to rubble.
+    /// The pushes and the pops match.
     #[test]
     fn the_gadget_restores_exactly_what_it_saved() {
         let code = super::syscall_gadget_code(0x2000);
@@ -1498,11 +1168,7 @@ mod tests {
         );
     }
 
-    /// **The saves are what a syscall gadget needs and a call report cannot give** (D377).
-    ///
-    /// Asserted byte for byte, because an encoding wrong by one bit is a plausible different
-    /// instruction rather than an error - and here the difference between saving `rax` and
-    /// saving something else is the difference between seeing a syscall number and not.
+    /// A gadget stub saves every register a syscall uses (D377).
     #[test]
     fn a_gadget_stub_saves_every_register_a_syscall_uses() {
         let code = super::gadget_stub(3, 0x1000, 0x2000);
@@ -1519,8 +1185,7 @@ mod tests {
             "mov [r11+56], r10"
         );
 
-        // Aligned first, for the reason the syscall gadget is (D384): a guest reaches this
-        // through a pointer it keeps, so the stack it arrives on is its own.
+        // Aligned first, as for the syscall gadget.
         assert_eq!(code[42], 0x55, "push rbp");
         assert_eq!(&code[43..46], &[0x48, 0x89, 0xE5], "mov rbp, rsp");
         assert_eq!(&code[46..50], &[0x48, 0x83, 0xE4, 0xF0], "and rsp, -16");
@@ -1553,20 +1218,11 @@ mod tests {
         assert_eq!(first[70..], second[70..], "the same reporter");
     }
 
-    /// **The two depths must not collide in the low half** (D369).
-    ///
-    /// A guest truncating a marker to thirty-two bits - which they do, because a structure
-    /// member is often an `int` - keeps only the low half. If both depths produced the same
-    /// low half, the question they exist to tell apart would have the same answer either way.
-    /// **A named field wins over whatever the block would have put there** (D375).
-    ///
-    /// The sweep this exists for names one field and leaves the rest to the markers, so a
-    /// named value that lost to the default would make every run of the sweep identical.
+    /// A named field replaces what the block would have held (D375).
     #[test]
     fn a_named_field_replaces_what_the_block_would_have_held() {
-        // A separate block from the one the other test builds, because the real one is
-        // built once per process - so this asserts the composition rule on the same call
-        // the worker makes, with the field values it would pass.
+        // A separate block from the real one, which is built once per process; this asserts the
+        // composition rule with the values the worker would pass.
         let composed = |named: &[[u64; 2]]| {
             let mut block = [0_u64; 8];
             for (slot, cell) in block.iter_mut().enumerate() {
@@ -1599,6 +1255,8 @@ mod tests {
         );
     }
 
+    /// A field marker and a content marker differ in their low half, so a value truncated to 32
+    /// bits still says which depth it came from.
     #[test]
     fn a_field_marker_and_a_content_marker_differ_in_their_low_half() {
         let field = super::SENTINEL_BASE + 2 * super::SENTINEL_STRIDE;
@@ -1623,17 +1281,17 @@ mod tests {
         );
     }
 
-    /// An address that is neither names nothing, which is most of them.
+    /// An address belonging to neither depth names nothing.
     #[test]
     fn an_address_belonging_to_neither_depth_names_nothing() {
         assert_eq!(super::content_slot(0x4000_0000_0000), None);
         assert_eq!(super::sentinel_slot(0x4000_0000_0000), None);
     }
 
-    /// Filling writes a word per slot, each naming the field and the offset it sits at.
+    /// Filling makes every word name the field and offset it sits at.
     #[test]
     fn filling_makes_every_word_name_where_it_came_from() {
-        // Two fields' worth, which is enough to show the stride and the offset apart.
+        // Two fields' worth, enough to show the stride and the offset apart.
         let mut region = vec![0_u64; 2 * (super::SENTINEL_STRIDE as usize / 8)];
         let base = region.as_mut_ptr() as usize as u64;
         // SAFETY: `region` is a live, writable allocation of exactly this length, and it
@@ -1650,11 +1308,11 @@ mod tests {
         );
     }
 
+    /// The host stack is intact after a guest call.
     #[test]
     fn the_host_stack_is_intact_afterwards() {
-        // If `r12` were not restored, or the guest stack leaked into host frames, this
-        // would corrupt locals rather than fail cleanly - so it is worth asserting that
-        // ordinary code still works either side of the transfer.
+        // If `r12` were not restored or the guest stack leaked into host frames, host locals would be
+        // corrupted.
         let before = vec![1_u64, 2, 3];
         let code = emit_return_constant(7);
         let buffer = ExecutableBuffer::new(&code).expect("map executable memory");

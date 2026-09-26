@@ -1,26 +1,8 @@
-//! Turning a frame into a file on disk.
+//! Writes a capture of the emulator window to a PNG file.
 //!
-//! # What this captures, and what it does not
-//!
-//! **The emulator window.** Not a guest frame - there is not one yet. No title in the
-//! corpus reaches its own main loop, nothing has been submitted to a command buffer, and
-//! `orbistoun-video` has no output surface (`docs/PROJECT_STATUS.md`).
-//!
-//! That is worth saying plainly rather than shipping a button labelled *screenshot* and
-//! letting somebody assume it means what it means in every other emulator. What it does
-//! capture is genuinely worth having: this window is a dense diagnostic surface - a call
-//! tail, a register dump, a ranked finding list - and "paste the panel that says this"
-//! currently means reaching for an operating-system screen grab.
-//!
-//! When phase 6 lands and there *is* a guest frame, this is the seam it arrives at: the
-//! composition changes, the encoding and the naming do not.
-//!
-//! # Why the request and the reply are separate
-//!
-//! A window's pixels are not available to the code drawing it. Asking egui for them is a
-//! viewport command, and the answer comes back as an input event on a **later frame** -
-//! so a capture is two halves that cannot be collapsed into one function call, however
-//! much a button handler would like it to be.
+//! This captures the window, a diagnostic surface, not a guest frame. A window's pixels are
+//! requested with a viewport command and arrive as an input event on a later frame, so a
+//! capture is a request and a separate reply.
 
 use std::io::Write as _;
 
@@ -28,16 +10,13 @@ use image::ImageEncoder as _;
 
 /// Where a capture went, or why it did not.
 ///
-/// Reported rather than logged. A file written somewhere the user cannot see is the same
-/// to them as no file at all, and a failure that only reaches a log is worse - the button
-/// looked like it worked.
+/// Reported in the window rather than logged, so the user sees where it went or why not.
 pub(crate) type Outcome = Result<std::path::PathBuf, String>;
 
 /// Writes one frame out as a PNG, and says where it went.
 ///
-/// The name carries the title it was taken against, so a directory of captures can be read
-/// without opening any of them, and a millisecond timestamp so they sort in the order they
-/// were taken. Same shape as a run id (`orbistoun-report`), for the same reason.
+/// The name carries the title and a millisecond timestamp, so captures are identifiable
+/// and sort in order, like a run id (`orbistoun-report`).
 pub(crate) fn save(
     dir: &std::path::Path,
     label: Option<&str>,
@@ -46,16 +25,14 @@ pub(crate) fn save(
 ) -> Outcome {
     let [width, height] = image.size;
     if width == 0 || height == 0 {
-        // A zero-sized frame writes a file no viewer will open. Refusing says so at the
-        // moment it happened rather than when somebody double-clicks it (principle 3).
+        // A zero-sized frame would write a file no viewer opens.
         return Err("the window reported a frame with no pixels".to_owned());
     }
 
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join(format!("{}-{unix_ms:013}.png", stem(label)));
 
-    // `Color32` is premultiplied RGBA in memory and that is exactly what a PNG wants, so
-    // this is a copy rather than a conversion.
+    // `Color32` is already RGBA in memory, so this is a copy rather than a conversion.
     let mut rgba = Vec::with_capacity(width * height * 4);
     for pixel in &image.pixels {
         rgba.extend_from_slice(&pixel.to_array());
@@ -64,8 +41,8 @@ pub(crate) fn save(
     let file =
         std::fs::File::create(&path).map_err(|e| format!("creating {}: {e}", path.display()))?;
     let mut writer = std::io::BufWriter::new(file);
-    // The encoder is named rather than inferred from the extension: format guessing needs
-    // the whole codec zoo compiled in, and this crate deliberately carries PNG only.
+    // The encoder is named rather than inferred from the extension, because this crate
+    // carries only the PNG codec.
     image::codecs::png::PngEncoder::new(&mut writer)
         .write_image(
             &rgba,
@@ -74,9 +51,7 @@ pub(crate) fn save(
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|e| format!("encoding {}: {e}", path.display()))?;
-    // Flushed explicitly. A `BufWriter` dropped on the way out of a function reports
-    // nothing when the final write fails, and a truncated PNG is the one outcome that
-    // looks like success from here.
+    // Flushed explicitly: a dropped `BufWriter` does not report a failed final write.
     writer
         .flush()
         .map_err(|e| format!("writing {}: {e}", path.display()))?;
@@ -85,10 +60,8 @@ pub(crate) fn save(
 
 /// A filename stem that is safe on every platform this runs on.
 ///
-/// A title's name comes out of its own metadata, so it can hold anything - a colon, a
-/// slash, a character Windows refuses outright. Anything that is not plainly a filename
-/// character becomes `-`, and a name that survives nothing falls back rather than
-/// producing a file called `.png`.
+/// A title's name comes from its metadata and can hold any character. Anything that is not
+/// plainly a filename character becomes `-`, and an empty result falls back to a fixed stem.
 fn stem(label: Option<&str>) -> String {
     let Some(label) = label else {
         return "orbistoun".to_owned();
@@ -107,7 +80,7 @@ fn stem(label: Option<&str>) -> String {
     if trimmed.is_empty() {
         "orbistoun".to_owned()
     } else {
-        // Bounded, because a metadata title can be a sentence and a path has a limit.
+        // Bounded, because a path has a length limit.
         trimmed.chars().take(64).collect()
     }
 }
@@ -147,15 +120,14 @@ mod tests {
             Some("PPSA02664-app0-1700000000123.png"),
             "the name carries the title and sorts by when it was taken"
         );
-        // Enough to prove a real PNG rather than an empty file: the eight-byte signature.
+        // The eight-byte signature proves a real PNG rather than an empty file.
         let bytes = std::fs::read(&path).expect("reading it back");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
     }
 
     #[test]
     fn a_frame_with_no_pixels_is_refused_rather_than_written() {
-        // A zero-byte file that no viewer opens is the failure mode that looks like
-        // success from the toolbar, which is the one worth refusing (principle 3).
+        // A zero-sized frame is refused rather than written as an unreadable file.
         let dir = tempfile::tempdir().expect("a temp dir");
         let err = save(dir.path(), None, &frame(0, 0), 1).expect_err("must refuse");
         assert!(err.contains("no pixels"), "{err}");
@@ -170,8 +142,7 @@ mod tests {
 
     #[test]
     fn a_title_that_is_not_a_filename_still_produces_one() {
-        // Titles come out of a guest's own metadata and are not filenames. This one is
-        // three separate ways to fail on Windows in a single string.
+        // A colon, a slash and a question mark, each invalid in a Windows filename.
         assert_eq!(stem(Some("Game: The/Sequel?")), "Game--The-Sequel");
         assert_eq!(
             stem(Some("///")),

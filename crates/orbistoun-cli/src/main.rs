@@ -1,15 +1,8 @@
-//! `orbistoun-cli` - an interaction shim.
+//! `orbistoun-cli` - the command-line interaction shim.
 //!
-//! This binary holds **no logic** (D034). It parses arguments, calls
-//! `orbistoun-service`, and formats what comes back. Anything resembling behaviour
-//! belongs one layer down, where the GUI and worker mode can reach it too.
-//!
-//! Commands, ordered by how much of the emulator has to exist for them to work:
-//!
-//! - `symbols` - everything orbistoun declares. Works today.
-//! - `policy` - emit a default stub-policy file to edit. Works today.
-//! - `imports` - what a guest module needs. Requires the container parser, and says so
-//!   rather than printing an empty list.
+//! Parses arguments, calls `orbistoun-service` and the other crates, and prints what comes back. It
+//! holds no logic (D034): behaviour lives one layer down, where the GUI and worker mode reach it
+//! too. Each command's implementation is in the module named after it.
 
 mod audit;
 mod common;
@@ -68,8 +61,8 @@ struct Cli {
 
     /// Path to a symbol database (JSON: `suffix_hex` plus `names`).
     ///
-    /// Supplies human-readable names for import hashes. Independent of the count of
-    /// unresolved imports, which is about what orbistoun implements.
+    /// Supplies readable names for import hashes. Independent of the unresolved-import count, which
+    /// is about what orbistoun implements. The shipped database is used when omitted.
     #[arg(long, global = true)]
     symbols_db: Option<std::path::PathBuf>,
 
@@ -79,15 +72,14 @@ struct Cli {
 
 /// Where a supplied word list came from.
 ///
-/// The distinction the provenance record turns on: work this project did, versus work it
-/// took from elsewhere. Defaults to `supplied`, because assuming the more generous label
-/// is exactly the mistake an audit exists to prevent.
+/// Separates work this project did from work taken from elsewhere. Defaults to `supplied`, the less
+/// generous label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum WordSource {
-    /// Names this project's own conformance probe reported, running on real hardware.
+    /// Names this project's own conformance probe reported, running on the hardware.
     ///
-    /// Ours, and the audit says so - but it is the one tier of our own work that neither
-    /// this machine nor CI can reproduce, because it took a console to produce it (D213).
+    /// Ours, but not reproducible by this machine or CI, because producing it took the hardware
+    /// (D213).
     Probe,
     /// Came from outside this project.
     Supplied,
@@ -95,17 +87,14 @@ enum WordSource {
 
 /// Seconds of guest execution allowed before a run is stopped and reported.
 ///
-/// Long enough for a guest to get well past its startup path, short enough that an
-/// unattended sweep over a directory of titles finishes. Overridable per run.
+/// Long enough for a guest to get past its startup path, short enough for an unattended sweep over
+/// a directory of titles. Overridable per run.
 const DEFAULT_GUEST_LIMIT_SECONDS: u64 = 20;
 
-/// Imports a guest may call before it is stopped.
+/// Imports a guest may call before it is stopped (D238).
 ///
-/// **Chosen so it cannot truncate a legitimate run.** The busiest title that is doing real
-/// work makes 1,735 calls; the one this bounds spins on a single import and made 149
-/// million. Twenty million is four orders of magnitude above the first and well below the
-/// second, so it stops a runaway at a fixed number and leaves every other title untouched
-/// (D238).
+/// Orders of magnitude above what a title doing real work makes, and far below what a guest
+/// spinning on one import reaches, so it stops a runaway without truncating a real run.
 const DEFAULT_GUEST_CALL_BUDGET: u64 = 20_000_000;
 
 #[derive(Subcommand, Debug)]
@@ -129,8 +118,7 @@ enum Command {
         path: std::path::PathBuf,
         /// Base address to place the module at, decimal or `0x`-prefixed hex.
         ///
-        /// Modules link at zero and need one; executables carry absolute addresses
-        /// and want zero.
+        /// Modules link at zero and need one; executables carry absolute addresses and want zero.
         #[arg(long, default_value = "0", value_parser = parse_address)]
         base: u64,
     },
@@ -140,44 +128,38 @@ enum Command {
         path: std::path::PathBuf,
         /// Seconds of guest execution to allow before stopping and reporting.
         ///
-        /// A guest whose imports are all unimplemented can settle into a loop waiting
-        /// for something that will never happen. Zero removes the limit.
+        /// A guest can settle into waiting on something that never happens. Zero removes the limit.
         #[arg(long, default_value_t = DEFAULT_GUEST_LIMIT_SECONDS)]
         limit: u64,
         /// Imports the guest may call before stopping and reporting.
         ///
-        /// The deterministic limit: two runs of one build stop at the same call, so a
-        /// verdict between them measures the change rather than the machine. The clock
-        /// above stays as a backstop for a guest that stops calling imports. Zero removes
-        /// the budget.
+        /// The deterministic limit: two runs of one build stop at the same call, so a verdict
+        /// between them measures the change rather than the machine. The clock is a backstop for a
+        /// guest that stops calling imports. Zero removes the budget.
         #[arg(long, default_value_t = DEFAULT_GUEST_CALL_BUDGET)]
         calls: u64,
-        /// Present a named console profile for this run instead of the configured machine -
-        /// e.g. `prospero-cex-12.40`, the measured reference target. Omit to use `shell.toml`.
+        /// Present a named machine profile instead of the configured machine, e.g.
+        /// `prospero-cex-12.40`. Omit to use `shell.toml`.
         #[arg(long)]
         profile: Option<String>,
-        /// Play this pad script on player 1 instead of any the configuration names (D721) - a
-        /// test's own input, or a recording of an earlier run replayed.
+        /// Play this pad script on player 1 instead of any the configuration names.
+        ///
+        /// A test's own input, or a recording of an earlier run replayed (D721).
         #[arg(long)]
         input: Option<std::path::PathBuf>,
         /// Run a loose build as a staged title, as though it lay under the library's
-        /// `data/homebrew` tree: its `/app0` is writable through the title's overlay (D722). A
-        /// module that does lie there is staged without asking.
+        /// `data/homebrew`.
+        ///
+        /// Its `/app0` is then writable through the title's overlay (D722). A module that does lie
+        /// there is staged without asking.
         #[arg(long, alias = "homebrew")]
         staged: bool,
     },
-    /// Find out which handoff fields a guest's runtime actually uses.
+    /// Find out which handoff fields a guest's runtime uses.
     ///
-    /// # Why this is a command rather than a session of experiments
-    ///
-    /// The structure a payload's runtime is handed is not published, and the only thing that
-    /// knows its shape is a guest running against it. Asking takes one run per field - poison
-    /// the field with an address nothing maps, and see whether the guest faults on it - and
-    /// doing that by hand means twelve edits of a settings file and reading twelve faults.
-    ///
-    /// **It works with no symbols and no source**, which is the point: the payloads happen to
-    /// be open and to carry symbol tables, and nothing else this project will ever load is
-    /// going to be (D390).
+    /// The structure a payload's runtime is handed is not published, so each field is poisoned with
+    /// an address nothing maps, one run per field, and a fault on it shows the field is used
+    /// (D390). Needs no symbols and no source.
     Handoff {
         /// Path to a guest executable.
         path: std::path::PathBuf,
@@ -190,32 +172,28 @@ enum Command {
     },
     /// Turn the loop once against a title, with nobody reading the findings.
     ///
-    /// Runs the guest, ranks what went wrong, and takes every step that is mechanical -
-    /// sweeping a call's arguments, asking the other diagnostics, arming a watchpoint, and
-    /// giving the guest a region when a sweep says it was missing one. Stops at the steps
-    /// that are a person's, each with a sentence saying why.
+    /// Runs the guest, ranks what went wrong, and takes every mechanical step - sweeping a call's
+    /// arguments, asking the other diagnostics, arming a watchpoint, giving the guest a region when
+    /// a sweep says it lacked one. Stops at the steps that are a person's, each with a reason.
     Turn {
         /// Path to a guest executable.
         path: std::path::PathBuf,
-        /// Print what the turn established as a `learn` command, rather than only the steps.
+        /// Print what the turn established as a `learn` command, not only the steps.
         ///
-        /// **Printed rather than written.** What a sweep measures is admissible; deciding to
-        /// change a *tracked* file stays a deliberate act with a diff (D291).
+        /// Printed rather than written: changing a tracked file stays a deliberate act with a diff
+        /// (D291).
         #[arg(long)]
         record: bool,
         /// Write what the turn measured into the learned policy, so the next run carries it.
         ///
-        /// **Not a tracked file, and not one a person edits.** `learned.toml` sits beside
-        /// `config.toml`, is folded in underneath it, and loses to every entry a person
-        /// wrote. Deleting it is a complete undo, and nothing here can override a
-        /// deliberate choice (D296).
+        /// `learned.toml` is untracked, sits beside `config.toml`, is folded in underneath it and
+        /// loses to every entry a person wrote. Deleting it is a complete undo (D296).
         #[arg(long)]
         apply: bool,
         /// Check a submitted learned file against what this machine measures.
         ///
-        /// **How a contribution is received.** A measurement is checked by measuring again
-        /// rather than by trusting it, which is what makes a policy entry a better thing to
-        /// accept than a diff: the claim is falsifiable by a command (D297).
+        /// A measurement is checked by measuring again, not trusted: the claim is falsifiable by a
+        /// command (D297).
         #[arg(long, value_name = "FILE")]
         verify: Option<std::path::PathBuf>,
     },
@@ -226,24 +204,22 @@ enum Command {
     },
     /// Measure how much of a module's import list a symbol database can name.
     ///
-    /// The self-verifying loop: a name list and suffix are correct exactly to the
-    /// extent they explain hashes a real module imports. A collision is the proof.
+    /// A name list and suffix are correct exactly to the extent they explain hashes a real module
+    /// imports; a hash match is the proof.
     Verify {
         /// Path to a guest executable or module.
         path: std::path::PathBuf,
     },
     /// Search generated names for ones that hash to a module's unnamed imports.
     ///
-    /// Fully clean-room: nothing is consulted. Names are proposed and the hash confirms
-    /// or rejects each one, so a reported name is proved rather than guessed. A miss
-    /// proves only that the name was not among those tried - extending the vocabulary
+    /// Clean-room: names are proposed and the hash confirms or rejects each, so a reported name is
+    /// proved. A miss proves only that the name was not among those tried; extending the vocabulary
     /// is the method.
     Names {
         /// A guest executable or module, or a directory to search every module beneath.
         ///
-        /// A directory is one search, not many: the unnamed imports of every module are
-        /// unioned first, so the expensive sweep runs once and every module's strings are
-        /// tried against every module's imports (D213).
+        /// A directory is one search: the unnamed imports of every module are unioned first, so the
+        /// sweep runs once and every module's strings are tried against every module's imports.
         path: std::path::PathBuf,
         /// Threads to search with. Zero uses one per available core.
         #[arg(long, default_value_t = 0)]
@@ -256,11 +232,8 @@ enum Command {
         words: Option<std::path::PathBuf>,
         /// Where the `--words` list came from, for the provenance record.
         ///
-        /// Names our own conformance probe reported are `probe`: this project working
-        /// something out, just not on a machine anyone here can re-run. Anything from
-        /// outside is `supplied`, never verifies, and is listed separately by an audit.
-        /// Without this every supplied name was recorded as though it came from the
-        /// repository's own published-standard list, which was untrue (D119).
+        /// `probe` for names this project's conformance probe reported; `supplied` for anything
+        /// from outside, which never verifies and is listed separately by an audit (D213).
         #[arg(long, value_enum, default_value_t = WordSource::Supplied)]
         words_from: WordSource,
         /// Write the names found to a symbol database at this path.
@@ -271,54 +244,41 @@ enum Command {
         wanted: Option<std::path::PathBuf>,
         /// Also read candidates out of what a previous run captured from guest memory.
         ///
-        /// The one source here that needed the guest to actually execute. Off by default
-        /// because it depends on a run having happened and on dumps having been forced,
-        /// and a source that silently contributes nothing is worse than one you asked for.
+        /// Needs a previous run with forced argument dumps, so it is off unless asked for.
         #[arg(long)]
         from_trace: bool,
         /// Also look for names for hashes a conformance probe reported the platform exports.
         ///
-        /// A hash from an import table is one a title asked for. A hash from a console's own
-        /// export table is one the platform *offers*, whether or not anything has ever
-        /// imported it - a census a collision search cannot reach by any other route (D245).
-        ///
-        /// **Grading does not enter into it.** These hashes are targets, not facts: the name
-        /// that comes back is proved by the hash agreeing, and would be equally proved if the
-        /// report were fabricated. What a report cannot do here is put a name in.
+        /// An export table lists what the platform offers, whether or not anything imported it.
+        /// These hashes are targets, not facts: a name that comes back is proved by the hash, so a
+        /// report cannot put a name in.
         #[arg(long, value_name = "REPORT")]
         from_report: Vec<std::path::PathBuf>,
     },
     /// Record something learned about a guest function.
     ///
-    /// The loop produces facts - what a function is for, what its arguments are, what it
-    /// does at its edges - and until they are written down they exist only in a
-    /// terminal. This appends them to the knowledge file so a session records a finding
-    /// with a command rather than by hand-formatting TOML (D122).
+    /// Appends to the knowledge file, so a finding is recorded with a command rather than
+    /// hand-formatted TOML (D122).
     Learn(Learned),
     /// Read and update the per-title compatibility record.
     ///
-    /// The half of a title file that says what happened, as opposed to what is
-    /// configured. Written from a trace rather than by hand, so an entry is a
-    /// transcription of a measurement rather than an opinion about one (D182).
+    /// The measured half of a title file, written from a trace rather than by hand (D182).
     Compat {
         #[command(subcommand)]
         action: CompatAction,
     },
     /// The test corpus: fetch pinned guests from configured sources, run them, record results.
     ///
-    /// A manifest of sources (`corpus/sources.toml`) names where guests come from; `sync`
-    /// downloads them into gitignored `titles/` and pins each by hash; `run` turns the loop over
-    /// every one, recording to `compat/` exactly as a hand `run` does. This is D042 made a verb:
-    /// the breadth signal - does anything real get further this week - regenerated on demand.
+    /// `corpus/sources.toml` names where guests come from (D042); `sync` downloads them into the
+    /// title library and pins each by hash; `run` runs every one and records to `compat/` exactly
+    /// as a hand `run` does.
     Corpus {
         #[command(subcommand)]
         action: CorpusAction,
     },
     /// Gather what this machine has to contribute, or check what somebody sent.
     ///
-    /// **The loop does not need this repository**, and this is what makes that true in
-    /// practice. Somebody running a binary against a title nobody here owns turns the same
-    /// oracle; without a way to collect what they found, it stays on their machine.
+    /// Lets someone running a binary against their own titles send back what they found.
     Submit {
         #[command(subcommand)]
         action: SubmitAction,
@@ -330,33 +290,20 @@ enum Command {
     },
     /// Answer the conformance probe's command protocol, so one driver can drive either.
     ///
-    /// **The point is comparison.** obSCEne speaks a command protocol and orbistoun now
-    /// answers the same commands, so a driver can be pointed at a probe or at this and
-    /// diff the records live - rather than running both separately and reconciling files
-    /// afterwards (`docs/BACKLOG.md`, D056).
-    ///
-    /// **Off unless asked for, and never in an automated path.** This opens a socket,
-    /// which is exactly what the emulator should not do unprompted, and a check that
-    /// listens on a port behaves differently depending on what else is on the machine.
-    ///
-    /// Only `report` is served today. A `call` needs a guest that is loaded and running,
-    /// and this holds a service rather than a run - so the capability is not announced,
-    /// because announcing one and then refusing it misleads a driver that has already
-    /// planned around the reply.
+    /// A driver can point at a probe or at this and compare the records live. Opens a socket, so it
+    /// runs only when asked and never in an automated path. Only `report` is served: a `call` needs
+    /// a running guest, so that capability is not announced.
     Serve {
-        /// Address to listen on. Loopback by default, deliberately.
+        /// Address to listen on. Loopback by default.
         ///
-        /// A responder reachable from a network is one anything on that network can
-        /// drive. Widening this is a decision worth typing out.
+        /// A responder reachable from a network can be driven by anything on it.
         #[arg(long, default_value = "127.0.0.1:9599")]
         bind: String,
 
         /// Serve without requiring a session secret.
         ///
-        /// Sound on loopback, where the peer is something the same person started.
-        /// Refused when `--bind` is not a loopback address, because "I did not want a
-        /// password" and "anything on this network may invoke this" are different
-        /// decisions and only one of them was made here.
+        /// Sound on loopback. Refused when `--bind` is not a loopback address: "no password" and
+        /// "reachable from the network" are separate choices.
         #[arg(long)]
         no_key: bool,
 
@@ -366,10 +313,7 @@ enum Command {
     },
     /// Emit the generated numbers block for the documentation, or check it for drift.
     ///
-    /// `docs/PROJECT_STATUS.md` says its numbers are printed by the tool rather than
-    /// counted by hand, and that a number no command produces will be wrong within a week.
-    /// Both were true and the numbers drifted anyway - two files disagreed with the tool
-    /// and with each other (D240).
+    /// The numbers are printed by the tool rather than counted by hand.
     Status {
         /// Rewrite the block in every file that carries the markers.
         #[arg(long)]
@@ -380,64 +324,50 @@ enum Command {
     },
     /// Show where orbistoun reads and writes, and whether it is in portable mode.
     ///
-    /// The first question anyone asks when an artifact is not where they expected, and
-    /// portable mode moves all of them at once - so guessing is expensive and printing
-    /// is free.
+    /// Portable mode moves every location at once.
     Paths,
     /// List every environment variable orbistoun reads, and what is set right now.
     ///
-    /// **Because a variable typed wrongly is an absence, not an error.** A flag spelled
-    /// wrongly is refused; `ORBISTOUN_STACK_FIL=5a` runs an ordinary experiment and reports
-    /// an ordinary result. This is where you check what the names actually are, rather than
-    /// finding a table in a document that somebody copied by hand (D221).
+    /// A misspelled variable is an absence, not an error: the run behaves normally. This prints the
+    /// registry (D221).
     Env,
     /// Emit every open question, ranked by how often a guest calls the function.
     ///
-    /// **The handoff to a hardware probe.** Every `assumptions` line in the knowledge base
-    /// is a thing this project has written down that it does not know, and each is
-    /// answerable by measurement. Scattered across per-function files they are a candour
-    /// exercise; gathered and ranked they are a work queue (D196).
+    /// Every `assumptions` line in the knowledge base is something unknown and measurable; ranked,
+    /// they are a work queue for a hardware probe.
     Questions {
         /// How many to show. Omit for all of them.
         #[arg(long)]
         top: Option<usize>,
-        /// Emit JSON, for a probe or an agent to consume rather than a person to read.
+        /// Emit JSON, for a probe or an agent to consume.
         #[arg(long)]
         json: bool,
         /// Group by the premise entries share, rather than one line per function.
         ///
-        /// **Because the list is shorter than its own length.** Most of these questions are
-        /// one sentence repeated across every entry resting on it, so a reader is shown
-        /// hundreds of asks where there are fewer things to establish - and a probe planning
-        /// a sweep cannot see that one sample would speak for a whole group (D538).
+        /// Many questions are one sentence repeated across the entries resting on it; grouped, one
+        /// sample can speak for the group (D538).
         #[arg(long)]
         premises: bool,
     },
     /// Rank what to implement next, across every guest run so far.
     ///
-    /// Reads the call traces every run persists and totals them. A static import dump
-    /// says what a module *might* call; this says what it actually did, and how often -
-    /// which is the only thing that says where to spend the next hour.
+    /// Totals the call traces every run persists: what guests actually called, and how often.
     Worklist {
         /// How many entries to show.
         #[arg(long, default_value_t = 25)]
         top: usize,
-        /// Rank the *static* import lists instead of the call traces.
+        /// Rank the static import lists instead of the call traces.
         ///
-        /// What a guest might call, grouped by where an answer can come from. The trace
-        /// ranking answers "what is this guest leaning on"; this answers "what should
-        /// somebody write next", which for published interfaces needs no run at all.
+        /// What a guest might call, grouped by where an answer can come from. For a published
+        /// interface that needs no run at all.
         #[arg(long)]
         static_gap: bool,
     },
     /// Rebuild the standard-library word list from a FreeBSD source tree.
     ///
-    /// The target C library is FreeBSD-derived, and FreeBSD publishes exactly what its
-    /// libraries export. Harvesting those beats a hand-written list on every count:
-    /// bigger, current, and citable to a named source at a named revision rather than
-    /// to somebody's memory of the standards.
-    ///
-    /// Only the `Symbol.map` files are read, so a sparse checkout is plenty:
+    /// The target C library is FreeBSD-derived, and FreeBSD publishes what its libraries export,
+    /// citable at a named revision. Only the version scripts are read, so a sparse checkout is
+    /// enough:
     ///
     ///     git clone --filter=blob:none --sparse https://github.com/freebsd/freebsd-src
     ///     cd freebsd-src && git sparse-checkout set lib/libc lib/libthr lib/msun lib/libutil
@@ -453,63 +383,44 @@ enum Command {
     },
     /// Re-derive every name in a symbol database from this repository's own inputs.
     ///
-    /// The provenance check. A name this repository can produce is self-evidently
-    /// derivable; one it cannot is the one that needs explaining. Cheap enough to run
-    /// on every commit, which is what makes it evidence rather than a claim.
+    /// The provenance check: a name this repository cannot produce is the one that needs
+    /// explaining. Cheap enough to run on every commit.
     Audit {
         /// Path to a symbol database.
         database: std::path::PathBuf,
         /// Grammar file to check against instead of the built-in vocabulary.
         #[arg(long)]
         grammar: Option<std::path::PathBuf>,
-        /// Compare the unaccounted set against a written-down ceiling instead of failing
-        /// on any at all.
+        /// Compare the unaccounted set against a written-down ceiling instead of failing on any.
         ///
-        /// **Because a gate that is red on every run is a gate nobody reads.** Two hundred
-        /// vendor names cannot be regenerated by the current grammar, and that is a known,
-        /// recorded, slowly-shrinking fact rather than a regression. Failing the build on
-        /// it every time trains people to ignore the job - and then the *new* unaccounted
-        /// name, the one that arrived without anybody deciding, goes past unread.
-        ///
-        /// The file may only shrink: a name unaccounted and unlisted fails, and a name
-        /// listed that has since been accounted for also fails, so the ceiling cannot
-        /// quietly become permission. Same mechanism as the duplicate decision numbers and
-        /// the line-continuation backlog (D208).
+        /// Names the current grammar cannot regenerate are a recorded, shrinking set; the ceiling
+        /// keeps the gate green for them while a new unaccounted name still fails. The file may
+        /// only shrink: a listed name that has since been accounted for also fails.
         #[arg(long)]
         ceiling: Option<std::path::PathBuf>,
         /// Search the whole space for names carrying no derivation record.
         ///
-        /// Slow - it walks every candidate per unaccounted name - but it is the only
-        /// way to answer "could this have been generated?" for a name that arrived
-        /// without a record.
+        /// Slow - it walks every candidate per unaccounted name - but the only way to ask whether a
+        /// name without a record could have been generated.
         #[arg(long)]
         deep: bool,
         /// Re-read every module a static record names, and confirm it contains the string.
         ///
-        /// The tier of claim CI structurally cannot check, because it needs the guest
-        /// material - so it is checked here, by whoever has it. Off by default: it reads
-        /// and scans every module in the corpus, which is far too slow for the gate that
-        /// runs on every commit, and reporting "unchecked" for a corpus that is simply
-        /// absent would be noise in the place the gate is read (D213).
+        /// Needs the guest material, so CI cannot run it (D213). Off by default: it scans every
+        /// module in the corpus, too slow for the per-commit gate.
         #[arg(long)]
         verify_harvest: bool,
-        /// Re-derive generated records the current grammar no longer confirms, and write
-        /// them back.
+        /// Re-derive generated records the current grammar no longer confirms, and write them back.
         ///
-        /// **Because the loop invalidates its own records.** An index is a position in an
-        /// enumeration over the vocabularies, so every word learned from a confirmed name
-        /// (D195) renumbers the candidates built from it - and names that were verified
-        /// last run fall onto the unaccounted ceiling, a file whose whole rule is that it
-        /// may only shrink. One sweep repairs every stale record at once (D213).
+        /// A learned word renumbers the candidates built from its vocabulary (D195), so verified
+        /// records drift onto the unaccounted ceiling. One pass repairs every stale record.
         #[arg(long)]
         repair: bool,
     },
     /// Compute the import hash for one or more names.
     ///
-    /// The other half of `exports`: that lists a module's symbols as hashes, and a vendor
-    /// module's are **all** encoded, so asking "does this module export `module_start`" means
-    /// hashing the name and looking for the number. Doing that by hand needs the suffix, which
-    /// is a run input rather than a constant (principle 5).
+    /// The counterpart of `exports`, which lists a module's symbols as hashes: finding a name there
+    /// means hashing it with the run's suffix and looking for the number.
     Nid {
         /// Names to hash.
         #[arg(required = true)]
@@ -525,22 +436,20 @@ enum Command {
         /// With `--own`, place them and report which imports would bind into them.
         #[arg(long)]
         placed: bool,
-        /// With `--own`, place **and relocate** them against one shared stub table.
+        /// With `--own`, place and relocate them against one shared stub table.
         #[arg(long)]
         linked: bool,
         /// Show the vendor library and module tables instead of the imports.
         ///
-        /// These are what an encoded import name's ids index, and neither is `DT_NEEDED`.
-        /// Whether their strings are bare names or paths is what decides how a loader finds
-        /// a module an executable imports from.
+        /// These are what an encoded import name's ids index, and neither is `DT_NEEDED`. Whether
+        /// their strings are bare names or paths decides how a loader finds an imported module.
         #[arg(long)]
         libraries: bool,
     },
-    /// Report what a guest module **provides**, without executing it.
+    /// Report what a guest module provides, without executing it.
     ///
-    /// The other half of `imports`. A title ships its own modules and the executable imports
-    /// from them by NID, so what those modules export is what decides whether those imports
-    /// can ever bind.
+    /// The counterpart of `imports`: a title's executable imports from its own modules by NID, so
+    /// their exports decide whether those imports can bind.
     Exports {
         /// Path to a guest module.
         path: std::path::PathBuf,
@@ -550,11 +459,8 @@ enum Command {
     },
     /// Ask a live probe one question and print what it answers.
     ///
-    /// The triage loop, in its smallest form: when this emulator cannot say what a function
-    /// does, the console can be asked directly rather than guessed at.
-    ///
-    /// Prints the answer honestly - `returned 0x2`, `died`, `refused unauthorised` - because
-    /// a command that did not answer must never read as one that did.
+    /// Asks the hardware what a function does instead of guessing. Prints the answer as it is -
+    /// `returned 0x2`, `died`, `refused unauthorised` - so a non-answer never reads as an answer.
     Ask {
         /// `host:port` of the listening probe.
         address: String,
@@ -569,9 +475,8 @@ enum Command {
         budget: u64,
         /// Render the answer as the knowledge entry it would become.
         ///
-        /// Shows the grade, the caveat, and - for a handle or pointer - that the value was
-        /// recorded rather than handed to a guest. Printed, never written: a corpus is
-        /// evidence, and evidence being read is not evidence being believed.
+        /// Shows the grade, the caveat and, for a handle or pointer, that the value was recorded
+        /// rather than handed to a guest. Printed, never written.
         #[arg(long)]
         as_knowledge: bool,
         /// What the operator says this ran on. Only a label; the connection ignores it.
@@ -583,18 +488,14 @@ enum Command {
     },
     /// Drive a live session against a listening probe and record what it says.
     ///
-    /// The probe listens and this connects: a console has no DNS and no configuration
-    /// file, but it has an address a person can read off a screen.
-    ///
-    /// The transcript is written out, and that file is the product - a session is
-    /// transient, a corpus is not.
+    /// The probe listens and this connects, since the hardware has an address a person can read off
+    /// a screen. The transcript file is the product.
     Session {
         /// `host:port` of the listening probe.
         address: String,
         /// Session secret, shown by the probe when it starts listening.
         ///
-        /// Generated per startup and replaced by a restart, so a key that worked yesterday
-        /// is a stale key today rather than a wrong one.
+        /// Generated per start, so a restart invalidates the old one.
         #[arg(long)]
         key: Option<String>,
         /// Where to write the transcript.
@@ -608,8 +509,8 @@ enum Command {
         firmware: Option<String>,
         /// Assert that the device named is the target platform itself.
         ///
-        /// Usually unnecessary - `--device` carries it. Not "is it real hardware": a Deck
-        /// is real and is not the target.
+        /// Usually unnecessary: `--device` carries it. This asks whether the device is the emulated
+        /// platform, not whether it is real hardware.
         #[arg(long)]
         is_target: bool,
         /// Seconds to wait for any one command before calling it a timeout.
@@ -618,17 +519,16 @@ enum Command {
     },
     /// Read a probe transcript or corpus and report what it establishes.
     ///
-    /// Answers the question worth asking before trusting any of it: how many of these
-    /// results are facts about the target, rather than somebody's reasoning or a
-    /// measurement taken on a different device. Needs no hardware - it reads files.
+    /// Says how many results are facts about the target rather than reasoning or measurements on a
+    /// different device. Needs no hardware.
     Probe {
         /// A transcript or corpus file.
         path: std::path::PathBuf,
-        /// What the operator asserts this ran on - a console, or a named emulator.
+        /// What the operator asserts this ran on: the hardware, or a named emulator.
         ///
-        /// Asked for rather than read off the records, because a probe cannot certify its
-        /// own machine: inside an emulator it reports the emulator's version as the
-        /// platform's, so a `target` arriving on the wire is a claim and not evidence.
+        /// Asked for rather than read off the records: inside an emulator a probe reports the
+        /// emulator's version as the platform's, so a `target` on the wire is a claim, not
+        /// evidence.
         #[arg(long)]
         device: Option<String>,
         /// Firmware or version, where the operator knows it.
@@ -636,40 +536,30 @@ enum Command {
         firmware: Option<String>,
         /// Assert that the device named is the target platform itself.
         ///
-        /// Usually unnecessary: `--device` carries the answer, and a name this project
-        /// knows to be a stand-in - a Deck, a host build, a named emulator - is treated as
-        /// one without being told twice.
-        ///
-        /// **Not "is it real hardware".** A Steam Deck is real hardware and is not the
-        /// target; measurements taken on it describe a Deck. The question grading turns on
-        /// is whether the silicon was the thing being emulated.
+        /// Usually unnecessary: `--device` carries it, and a known stand-in (a host build, a named
+        /// emulator, other x86-64 hardware) is treated as one without being told. Grading turns on
+        /// whether the device was the platform being emulated, not on whether it was real hardware.
         #[arg(long)]
         is_target: bool,
         /// Render what was established as knowledge entries, to standard output.
         ///
-        /// Printed rather than written. Merging into the knowledge base is a separate,
-        /// deliberate act - a corpus is evidence, and evidence being read is not the same
-        /// as evidence being believed.
+        /// Printed rather than written: merging into the knowledge base is a separate, deliberate
+        /// act.
         #[arg(long)]
         as_knowledge: bool,
         /// Compare against another transcript and report the checks that disagree.
         ///
-        /// **The strongest tool this project has, and it needed one command.** The conformance
-        /// probe is the only guest whose source is available, it passes on a console, and it
-        /// runs under orbistoun - so the same binary runs in both places and its own verdicts
-        /// can be compared. A check that passes in the reference and fails here is a named,
-        /// sourced defect with the probe's own sentence attached (D622).
-        ///
-        /// Give the **hardware** transcript here and the local one as `path`: the reference is
-        /// what a console did, the subject is what orbistoun did.
+        /// The conformance probe runs both on the hardware and under orbistoun, so its own verdicts
+        /// can be compared: a check that passes in the reference and fails here is a defect with
+        /// the probe's sentence attached. Give the hardware transcript here and the local one as
+        /// `path`.
         #[arg(long, value_name = "REFERENCE")]
         against: Option<std::path::PathBuf>,
     },
     /// Analyse a directory of shader binaries and rank what blocks translation.
     ///
-    /// Answers the only question the shader work has: which single instruction, if
-    /// supported, would unblock the most shaders. Needs no GPU, no driver and no
-    /// running guest - it reads bytes.
+    /// Ranks which instruction, if supported, would unblock the most shaders. Needs no GPU, driver
+    /// or running guest.
     Shaders {
         /// Directory of shader binaries, one per file.
         path: std::path::PathBuf,
@@ -677,9 +567,10 @@ enum Command {
         #[arg(long)]
         top: Option<usize>,
     },
-    /// Show how the firmware skeleton lays libkernel out: what stub each export vaddr gets,
-    /// which are unimplemented, and where a stub overruns its neighbour. The collision that
-    /// corrupted getpid was invisible until it broke something; this makes the layout legible.
+    /// Show how the firmware skeleton lays out libkernel.
+    ///
+    /// Prints the stub each export address gets, which exports are unimplemented, and where a stub
+    /// overruns its neighbour.
     Firmware {
         /// Show every export, not just collisions and unimplemented ones a payload might reach.
         #[arg(long)]
@@ -689,9 +580,7 @@ enum Command {
 
 /// Everything `learn` records about one function.
 ///
-/// A named struct rather than fields on the variant so the command takes one argument
-/// instead of ten, and so the field list lives in exactly one place - it was previously
-/// declared, destructured and re-passed, which is three chances to forget the new one.
+/// A struct rather than variant fields, so the field list lives in one place.
 #[derive(clap::Args, Debug)]
 struct Learned {
     /// The function this is about.
@@ -713,19 +602,17 @@ struct Learned {
     seen_in: Vec<String>,
     /// How the behaviour recorded here was established.
     ///
-    /// Required whenever anything beyond a name is recorded, and there is deliberately
-    /// no value meaning "I already knew it": every option names something that could
-    /// contradict it. See `Oracle`.
+    /// Required whenever anything beyond a name is recorded. No value means "already known": every
+    /// option names something that could contradict it. See `Oracle`.
     #[arg(long, value_enum)]
     known: Option<KnownBy>,
-    /// Where to look to check it - a standard clause, a source file and revision, a
-    /// probe identifier. Required by `--known published` and `--known measured`.
+    /// Where to check it: a standard clause, a source file and revision, a probe identifier.
+    /// Required by `--known published` and `--known measured`.
     #[arg(long)]
     cites: Option<String>,
     /// A specific claim in this entry that `--known` does not cover. Repeatable.
     ///
-    /// Each one is a question real hardware could settle, so this is a worklist rather
-    /// than an apology.
+    /// Each is a question the hardware could settle.
     #[arg(long = "assumes")]
     assumptions: Vec<String>,
     /// Anything else worth keeping.
@@ -748,8 +635,7 @@ enum SubmitAction {
     /// Compare a received bundle against what this machine found.
     ///
     /// Re-derives rather than trusts. A claim this machine never measured is reported as
-    /// unmeasured rather than as a contradiction - "we did not look" and "it is wrong" are
-    /// different facts, which is what the `known_by` ladder exists to hold.
+    /// unmeasured, not as a contradiction.
     Check {
         /// The bundle directory somebody sent.
         dir: std::path::PathBuf,
@@ -768,10 +654,10 @@ enum CompatAction {
         #[arg(long, default_value = "compat")]
         dir: std::path::PathBuf,
     },
-    /// Render every record as a markdown table, ranked furthest first, into a tracked file.
+    /// Render every record as a ranked markdown table into a tracked file.
     ///
-    /// The same ranking `list` prints, as a document a person can read in the repository. A
-    /// guest with a screenshot beside its record gets the image embedded.
+    /// The ranking `list` prints, as a document in the repository, with a per-title page each. A
+    /// title with a screenshot beside its record gets the image embedded.
     Markdown {
         /// Where the records live.
         #[arg(long, default_value = "compat")]
@@ -779,14 +665,12 @@ enum CompatAction {
         /// Where to write the table.
         #[arg(long, default_value = "COMPATIBILITY.md")]
         out: std::path::PathBuf,
-        /// Directory of `<title>.png` screenshots, relative to the repo root.
+        /// Directory of `<title>.png` screenshots, relative to the repository root.
         #[arg(long, default_value = "compat/screenshots")]
         shots: std::path::PathBuf,
         /// Instead of writing, fail if what is on disk is not what the records render to.
         ///
-        /// The guard `status --check` is for `docs/PROJECT_STATUS.md`; this is the
-        /// same guard over the two things it does not cover - `COMPATIBILITY.md` and `docs/titles/`.
-        /// The `docs` step runs it.
+        /// Checks `COMPATIBILITY.md` and `docs/titles/`, the files `status --check` does not cover.
         #[arg(long)]
         check: bool,
     },
@@ -802,9 +686,8 @@ enum CompatAction {
         note: Option<String>,
         /// Record even when the previous entry was better.
         ///
-        /// For a deliberate correction - a previous entry measured wrongly, or a
-        /// regression worth recording as the new truth. Never the default, because an
-        /// automatic best-ever that quietly moves backwards is not a record of anything.
+        /// For a deliberate correction: an entry measured wrongly, or a regression recorded as the
+        /// new truth. Never the default.
         #[arg(long)]
         force: bool,
     },
@@ -813,13 +696,13 @@ enum CompatAction {
 /// What to do with the test corpus.
 #[derive(clap::Subcommand, Debug)]
 enum CorpusAction {
-    /// Show the manifest: every source, its assets, and whether each is pinned yet.
+    /// Show the manifest: every source, its assets, and whether each is pinned.
     List {
         /// The manifest to read.
         #[arg(long, default_value = "corpus/sources.toml")]
         manifest: std::path::PathBuf,
     },
-    /// Fetch every source's assets into `titles/`, pinning or verifying each by hash.
+    /// Fetch every source's assets into the title library, pinning or verifying each by hash.
     Sync {
         /// Only this source, by name. Omit for all.
         #[arg(long)]
@@ -848,7 +731,7 @@ enum CorpusAction {
         /// Imports each guest may call before it is stopped and reported.
         #[arg(long, default_value_t = DEFAULT_GUEST_CALL_BUDGET)]
         calls: u64,
-        /// Present a named console profile for the runs, e.g. `prospero-cex-12.40`.
+        /// Present a named machine profile for the runs, e.g. `prospero-cex-12.40`.
         #[arg(long)]
         profile: Option<String>,
     },
@@ -856,14 +739,13 @@ enum CorpusAction {
 
 /// How a behavioural claim was established, as the command line spells it.
 ///
-/// A mirror of [`orbistoun_hle::knowledge::Oracle`] rather than a re-export because clap's
-/// derive needs its own trait on the type, and the knowledge crate should not grow a
-/// command-line dependency to satisfy it. The test below holds the two in step.
+/// A mirror of [`orbistoun_hle::knowledge::Oracle`], because clap's derive needs its own trait on
+/// the type and the knowledge crate takes no command-line dependency. A test holds the two in step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum KnownBy {
     /// A published standard or published source that specifies this function.
     Published,
-    /// Measured on real hardware by a conformance probe.
+    /// Measured on the hardware by a conformance probe.
     Measured,
     /// The guest proceeded when answered this way, and stopped otherwise.
     GuestObserved,
@@ -883,9 +765,6 @@ impl From<KnownBy> for orbistoun_hle::knowledge::Oracle {
 }
 
 /// Parses an address in decimal or `0x`-prefixed hex.
-///
-/// Addresses are overwhelmingly written in hex in this domain, so accepting only
-/// decimal would be a papercut on every single use.
 fn parse_address(text: &str) -> Result<u64, String> {
     let t = text.trim();
     let parsed = t.strip_prefix("0x").map_or_else(
@@ -895,11 +774,7 @@ fn parse_address(text: &str) -> Result<u64, String> {
     parsed.map_err(|e| format!("{t:?} is not an address: {e}"))
 }
 
-/// The suffix to hash with: whatever was asked for, else the one orbistoun ships.
-///
-/// A user should never have to supply this. Resolving imports is the central act of
-/// high-level emulation, so the value is not optional equipment - it is the tool
-/// working at all (D071).
+/// The suffix to hash with: whatever was asked for, else the one orbistoun ships (D071).
 fn suffix_for(cli: &Cli) -> Result<Vec<u8>> {
     if cli.suffix_hex.is_empty() {
         return Ok(orbistoun_nid::default_suffix());
@@ -908,20 +783,16 @@ fn suffix_for(cli: &Cli) -> Result<Vec<u8>> {
         .context("--suffix-hex must be an even number of hexadecimal digits")
 }
 
-/// Enters worker mode: host the crates, speak the protocol over stdio, hold no logic.
+/// Enters worker mode: host the crates and speak the protocol over stdio.
 ///
-/// Not a clap subcommand on purpose. It is an implementation detail of how the shims
-/// execute guests, not a user-facing verb, and putting it in `--help` would invite
-/// people to drive it by hand.
+/// Not a clap subcommand: it is how the shims execute guests, not a user-facing verb (D033).
 fn run_as_worker() -> Result<()> {
     orbistoun_worker::serve_as_worker_process().map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Runs whichever command was asked for.
 ///
-/// Split from `main` so the two jobs stay separate: `main` decides how the process is
-/// configured, this decides what it does. A single function doing both grows a branch
-/// every time a verb is added and is the first thing to become unreadable.
+/// Split from `main`, which configures the process; this decides what it does.
 fn dispatch(cli: Cli, service: &Service) -> Result<()> {
     match cli.command {
         Command::Symbols { .. }
@@ -1177,12 +1048,8 @@ fn dispatch_reports(command: &Command, service: &Service) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    // Was five lines of `tracing_subscriber` here, reading `RUST_LOG` only. The shared version
-    // answers `OOPS_LOG` as well, can write a file and can export, and - the reason it is worth
-    // replacing rather than leaving - the other two binaries in this workspace had no logging
-    // at all, because each would have had to repeat those five lines to get any.
-    //
-    // The guard is held for the whole of `main`; `let _` would drop it here.
+    // The shared logging setup; the guard is held for the whole of `main`, and `let _` would drop
+    // it here.
     let _logging = oops_log::Logging::new("orbistoun")
         .build(orbistoun_env::build::line_static())
         .init();
@@ -1194,11 +1061,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let symbol_db = match cli.symbols_db.as_ref() {
-        // **Loaded unless told otherwise.** It used to be `None`, so every run reported
-        // hashes the shipped database could already name and then told the reader to go
-        // and extend the vocabulary - work already done, in a file already committed, that
-        // nothing loaded. The findings are what this project is for, and they were
-        // confidently recommending the wrong next action (D188).
+        // The shipped database loads unless a path is given (D188).
         None => Some(orbistoun_service::SymbolDbFile::builtin()),
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -1210,8 +1073,8 @@ fn main() -> Result<()> {
         }
     };
 
-    // Portable-first resolution decides where reports land, and purging old artifacts
-    // on startup is what keeps a long agent run from filling a disk (D047).
+    // Portable-first resolution decides where reports land; expired artifacts are purged at startup
+    // so long runs do not fill a disk.
     let paths = orbistoun_paths::Paths::resolve();
     paths.ensure_dirs().ok();
     if let Ok(purged) = orbistoun_report::retention::purge(
@@ -1249,11 +1112,7 @@ fn main() -> Result<()> {
     dispatch(cli, &service)
 }
 
-/// The commands that talk to a live probe.
-///
-/// Split out because `dispatch` outgrew its line limit, and this is the natural seam: every
-/// other command reads a file or a title, and these two open a socket. Keeping them
-/// together makes the one part of this tool that touches hardware findable.
+/// The commands that talk to a live probe: the ones that open a socket.
 fn dispatch_probe(command: Command) -> Result<()> {
     match command {
         Command::Ask {
@@ -1306,6 +1165,7 @@ fn dispatch_probe(command: Command) -> Result<()> {
 mod tests {
     use super::{parse_address, suffix_for};
 
+    /// Addresses parse in hex and decimal, trimmed; anything else is refused.
     #[test]
     fn addresses_parse_in_hex_and_decimal() {
         assert_eq!(parse_address("0x1000").expect("hex"), 0x1000);
@@ -1324,25 +1184,24 @@ mod tests {
         super::Cli::parse_from(["orbistoun-cli", "--suffix-hex", suffix_hex, "symbols"])
     }
 
+    /// With no suffix given, the one orbistoun ships with is used (D071).
     #[test]
     fn no_suffix_given_means_the_one_orbistoun_ships_with() {
-        // A user should never have to supply this. Resolving imports is the central act
-        // of high-level emulation, so the value is not optional equipment (D071).
         let shipped = suffix_for(&cli_with("")).expect("the shipped suffix must load");
         assert_eq!(shipped, orbistoun_nid::default_suffix());
         assert!(!shipped.is_empty());
     }
 
+    /// An explicit suffix overrides the shipped one.
     #[test]
     fn an_explicit_suffix_overrides_the_shipped_one() {
         let given = suffix_for(&cli_with("00ff10")).expect("valid hex");
         assert_eq!(given, vec![0x00, 0xff, 0x10]);
     }
 
+    /// A malformed suffix is refused rather than falling back to the shipped one.
     #[test]
     fn a_malformed_suffix_is_refused_rather_than_falling_back() {
-        // Falling back would silently ignore what the user asked for and produce hashes
-        // they did not request, which is worse than stopping.
         assert!(suffix_for(&cli_with("abc")).is_err(), "odd length");
         assert!(suffix_for(&cli_with("zz")).is_err(), "not hex");
     }

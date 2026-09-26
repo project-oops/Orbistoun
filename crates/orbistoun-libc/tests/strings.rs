@@ -1,22 +1,9 @@
 //! The memory and string functions, called the way a guest calls them.
 //!
-//! # Guest memory is host memory
-//!
-//! The mapping is identity (D014), so a `Vec<u8>` this test owns *is* a guest buffer. That
-//! makes the whole family testable without an address space, which is the pattern principle
-//! 8 asks for: a pure decision plus a thin effectful wrapper, exercised at the wrapper.
-//!
-//! `Buf` takes its address from a mutable pointer at construction and hands out the same
-//! integer thereafter, so a function writing through it is writing to the allocation this
-//! test still owns and can read back.
-//!
-//! # What these are for
-//!
-//! Every one of these functions has a contract a plausible implementation gets *nearly*
-//! right, and the near-misses are the tests worth having: `strncpy` that does not pad,
+//! Under the identity mapping a `Vec<u8>` this test owns is a guest buffer. Each function has
+//! a contract a plausible implementation gets nearly right: `strncpy` that does not pad,
 //! `strchr` that cannot find the terminator, `strcmp` that stops before it, `strncat` whose
-//! limit bounds the wrong string. Each is a one-character edit away from correct and none
-//! of them fails loudly.
+//! limit bounds the wrong string.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -47,9 +34,7 @@ impl Buf {
         Self::new(v)
     }
 
-    /// The address is taken from a **mutable** pointer, so writing through it later is
-    /// sound rather than merely working: a pointer derived from a shared reference would
-    /// carry no permission to write.
+    /// The address is taken from a mutable pointer, so writing through it later is sound.
     fn new(mut storage: Vec<u8>) -> Self {
         let at = storage.as_mut_ptr().expose_provenance() as u64;
         Self { storage, at }
@@ -95,12 +80,9 @@ fn call(name: &str, args: &[u64]) -> u64 {
     implementation(name)(&regs)
 }
 
-// --- memory ------------------------------------------------------------------------------
+// Memory.
 
 /// `memset` fills exactly the range asked for and returns its destination.
-///
-/// The return value is not decoration: callers chain on it, so a function that filled
-/// correctly and answered zero would break code that never looked at the buffer.
 #[test]
 fn memset_fills_exactly_its_range_and_returns_the_destination() {
     let buf = Buf::zeroed(8);
@@ -139,11 +121,8 @@ fn memcpy_copies_and_returns_the_destination() {
     assert_eq!(&dest.bytes()[4..], &[0, 0, 0, 0]);
 }
 
-/// Overlapping ranges are handled rather than corrupted.
-///
-/// A guest that overlaps here has technically broken `memcpy`'s contract, but the stricter
-/// primitive would give it silent corruption and being permissive costs nothing. `memmove`
-/// makes the same guarantee explicitly, and the two must agree.
+/// Overlapping ranges are handled rather than corrupted, and `memcpy` agrees with
+/// `memmove`.
 #[test]
 fn an_overlapping_copy_is_not_corrupted() {
     for name in ["memcpy", "memmove"] {
@@ -165,11 +144,7 @@ fn a_copy_of_nothing_copies_nothing() {
     assert_eq!(dest.bytes(), &[0, 0, 0, 0], "a null source copies nothing");
 }
 
-/// `memcmp` reports a sign, and it is the sign of the first differing byte.
-///
-/// Compared as **unsigned** bytes, which is the trap: a signed comparison makes `0x80`
-/// sort below `0x01` and reverses the answer for exactly the inputs a text-based test
-/// never uses.
+/// `memcmp` reports the sign of the first differing byte, compared as unsigned.
 #[test]
 fn memcmp_compares_bytes_as_unsigned() {
     let low = Buf::raw(&[0x01]);
@@ -211,7 +186,7 @@ fn memchr_returns_the_address_of_the_byte() {
     assert_eq!(call("memchr", &[0, u64::from(b'a'), 4]), 0);
 }
 
-// --- length and comparison ------------------------------------------------------------------
+// Length and comparison.
 
 /// `strlen` counts up to the terminator and does not include it.
 #[test]
@@ -225,9 +200,6 @@ fn strlen_stops_at_the_terminator() {
 }
 
 /// `strnlen` is the smaller of the real length and the limit.
-///
-/// The point of the function is that it does not read past the limit, so the limit winning
-/// is the case that matters - not the one where the string is shorter anyway.
 #[test]
 fn strnlen_never_exceeds_its_limit() {
     let buf = Buf::text("alpha", 16);
@@ -237,11 +209,7 @@ fn strnlen_never_exceeds_its_limit() {
     assert_eq!(call("strnlen", &[buf.at(), 0]), 0);
 }
 
-/// `strcmp` compares the terminator too, which is what makes a prefix sort first.
-///
-/// Comparing only the shorter length would make `"al"` and `"alpha"` equal. Comparing the
-/// terminator as well is the one extra byte that gets it right, and it is the byte an
-/// optimisation drops.
+/// `strcmp` compares the terminator too, so a prefix sorts first.
 #[test]
 fn strcmp_compares_the_terminator_as_well() {
     let short = Buf::text("al", 16);
@@ -254,9 +222,6 @@ fn strcmp_compares_the_terminator_as_well() {
 }
 
 /// Two strings differing only after their terminators are equal.
-///
-/// The other half of the same property, and the one a length-based comparison gets right by
-/// accident while a buffer-based one gets wrong.
 #[test]
 fn what_lies_past_a_terminator_is_not_compared() {
     let mut a = Buf::text("alpha", 16);
@@ -277,13 +242,13 @@ fn strncmp_stops_at_its_limit() {
     assert_ne!(call("strncmp", &[a.at(), b.at(), 6]), 0);
     assert_eq!(call("strncmp", &[a.at(), b.at(), 0]), 0);
 
-    // A limit past both strings still finds them different, because the terminator is
-    // reached before the limit is.
+    // A limit past both strings still finds them different, because the terminator comes
+    // first.
     let short = Buf::text("al", 16);
     assert_ne!(call("strncmp", &[short.at(), a.at(), 99]), 0);
 }
 
-// --- copying -------------------------------------------------------------------------------
+// Copying.
 
 /// `strcpy` copies the terminator, which is what makes the result a string.
 #[test]
@@ -297,9 +262,6 @@ fn strcpy_copies_the_terminator_too() {
 }
 
 /// `strncpy` pads the remainder with terminators.
-///
-/// **A partial copy left unpadded is an unterminated string**, and callers rely on the
-/// padding. The standard specifies it and it is the part an obvious implementation omits.
 #[test]
 fn strncpy_pads_the_remainder_with_terminators() {
     let src = Buf::text("ab", 8);
@@ -310,10 +272,7 @@ fn strncpy_pads_the_remainder_with_terminators() {
     assert_eq!(dest.bytes()[5], 0xFF, "padding stops at the limit");
 }
 
-/// A source longer than the limit is truncated, and **not** terminated.
-///
-/// The famous sharp edge, and matching it is the job: a `strncpy` that always terminated
-/// would be safer and would disagree with the guest's own expectations about the buffer.
+/// A source longer than the limit is truncated, and not terminated.
 #[test]
 fn strncpy_truncates_without_terminating() {
     let src = Buf::text("alphabet", 16);
@@ -345,11 +304,7 @@ fn strcat_appends_at_the_existing_terminator() {
     assert_eq!(dest.bytes()[8], 0, "and terminates the result");
 }
 
-/// `strncat`'s limit bounds the **source**, not the result.
-///
-/// A caller passing the size of the destination writes past the end of it. The standard
-/// defines it this way, so matching the standard is the job even though the safer reading
-/// is the one a reader expects.
+/// `strncat`'s limit bounds the source, not the result.
 #[test]
 fn the_limit_on_strncat_bounds_the_source() {
     let dest = Buf::text("alpha", 16);
@@ -374,13 +329,9 @@ fn appending_nothing_still_terminates() {
     assert_eq!(dest.bytes()[5], 0);
 }
 
-// --- searching -------------------------------------------------------------------------------
+// Searching.
 
-/// `strchr` can find the terminator, which the standard requires.
-///
-/// `strchr(s, 0)` returns the **end of the string**, not null - a caller uses it to find
-/// where a string ends without a second scan. Searching only up to the terminator, which is
-/// the obvious loop, returns null instead.
+/// `strchr(s, 0)` finds the terminator, as the standard requires.
 #[test]
 fn strchr_can_find_the_terminator() {
     let buf = Buf::text("alpha", 16);
@@ -391,9 +342,6 @@ fn strchr_can_find_the_terminator() {
 }
 
 /// `strchr` finds the first occurrence and `strrchr` the last.
-///
-/// Asserted on the same input, because a pair where one is wired to the other agrees on
-/// every string whose target appears once.
 #[test]
 fn strchr_takes_the_first_and_strrchr_the_last() {
     let buf = Buf::text("banana", 16);
@@ -404,13 +352,9 @@ fn strchr_takes_the_first_and_strrchr_the_last() {
     assert_eq!(call("strrchr", &[0, u64::from(b'a')]), 0);
 }
 
-// --- duplication ---------------------------------------------------------------------------
+// Duplication.
 
 /// `strdup` returns memory the guest's own `free` can release.
-///
-/// It has to come from the same allocator, which is why this goes through the heap rather
-/// than anything simpler: a caller frees what it is given, and a block `free` does not
-/// recognise is either a leak or a corruption.
 #[test]
 fn a_duplicated_string_comes_from_the_heap_that_frees_it() {
     let src = Buf::text("alpha", 16);
@@ -458,14 +402,12 @@ fn duplicating_an_empty_string_still_returns_a_string() {
     call("free", &[copy]);
 }
 
-// --- tokenising ------------------------------------------------------------------------------
+// Tokenising.
 
-/// The whole `strtok` walk, in one test.
+/// The whole `strtok` walk, in one test, beside `strtok_r` on the same input.
 ///
-/// **One test on purpose.** `strtok` keeps its place in a process-wide static - which is
-/// what the interface specifies and the reason `strtok_r` exists - so two tests walking at
-/// once would race on it and fail for reasons neither is about. The reentrant version is
-/// exercised beside it here so the two can be compared on the same input.
+/// `strtok` keeps its place in a process-wide static, so two tests walking at once would
+/// race.
 #[test]
 fn tokenising_walks_a_string_and_writes_into_it() {
     let text = Buf::text("alpha,,beta,gamma", 32);
@@ -489,9 +431,8 @@ fn tokenising_walks_a_string_and_writes_into_it() {
     assert_eq!(call("strtok", &[0, delims.at()]), 0);
     assert_eq!(call("strtok", &[0, delims.at()]), 0);
 
-    // on a literal. **One terminator per token, at the delimiter that ended it** - the
-    // second comma was skipped as leading separator for the next token and is still
-    // sitting there, so the buffer is not the input with every delimiter replaced.
+    // One terminator per token, at the delimiter that ended it: the second comma was skipped as
+    // a leading separator and is still there.
     assert_eq!(&text.bytes()[..17], b"alpha\0,beta\0gamma");
 
     // The reentrant walk, over its own copy, with the caller holding the place.
@@ -523,9 +464,6 @@ fn a_string_of_only_delimiters_yields_nothing() {
 }
 
 /// A token running to the end of the string is still returned.
-///
-/// The branch where no closing delimiter is found, which is the one an implementation that
-/// searches for a delimiter pair misses.
 #[test]
 fn a_token_running_to_the_end_is_still_a_token() {
     let text = Buf::text("tail", 8);

@@ -1,12 +1,7 @@
-//! `libSceAudioOut2` - the second-generation audio output interface, beside the `libSceAudioOut` this crate already declares.
+//! `libSceAudioOut2` - the second-generation audio output interface, beside `libSceAudioOut`.
 //!
-//! **13 names, declared and not implemented.** They come from PPSA02664's own import table (13).
-//!
-//! Names confirmed, arities not: every arity here is `6`, the trampoline's full
-//! capture, which is not a claim about how many arguments these take. The reasoning is
-//! `orbistoun-gpu`'s `agc` module in full (D504); the short form is that a wrong arity
-//! only degrades a trace while a wrong name is a shim nothing can reach.
-//!
+//! Declared and not implemented. The names come from real import tables (D504); every
+//! arity is `6`, the trampoline's full capture, not a claim about the argument count.
 //! Listed in `SERVES_NOTHING` because nothing here is implemented.
 
 use orbistoun_hle::guest_module;

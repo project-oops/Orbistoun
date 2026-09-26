@@ -1,25 +1,10 @@
 //! Translating guest instructions and running the result.
 //!
-//! The tests that drive the translator. Each states what a guest instruction should
-//! *do*, and the only way to satisfy one is to translate it correctly and have a real
-//! device agree - `spirv-val` accepting the module is necessary and nowhere near
-//! sufficient.
-//!
-//! # How a register is observed
-//!
-//! The guest's registers live in a private array inside the shader, and the translated
-//! module copies the low registers into the storage buffer before returning. So
-//! `buffer[n]` is vector register `n` at the end of the shader.
-//!
-//! That copy exists for observation and nothing else. It is what makes an otherwise
-//! invisible register file assertable, and therefore what makes translation testable
-//! at all before anything renders.
-//!
-//! # A missing device skips loudly
-//!
-//! Same rule as the dispatch tests: a harness captures a passing test's output, so a
-//! silent skip would make this file appear to pass on a machine where it never ran.
-//! `bin/orbistoun check` surfaces it.
+//! Each test states what a guest instruction does, and passes only if a real device agrees;
+//! `spirv-val` accepting the module is necessary, not sufficient. The translated module
+//! copies the low registers into the storage buffer before returning, so `buffer[n]` is
+//! vector register `n` at the end of the shader. A missing device skips loudly, since a
+//! harness hides a passing test's output; `bin/orbistoun check` surfaces it.
 
 use orbistoun_gpu_vulkan::{Availability, dispatch, probe};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
@@ -35,7 +20,6 @@ const PER_FILE: usize = 8;
 /// The buffer holds the vector file then the scalar file.
 const OBSERVED: usize = PER_FILE * 2;
 
-/// Vector register `n`, from a returned buffer.
 /// The loaded encoding table, read once for the whole file.
 fn encodings() -> &'static EncodingTable {
     static TABLE: std::sync::OnceLock<EncodingTable> = std::sync::OnceLock::new();
@@ -44,12 +28,8 @@ fn encodings() -> &'static EncodingTable {
 
 /// The first word of an instruction, from its name: family bits plus opcode in place.
 ///
-/// **Every instruction in this file is built through here.** It used to write encodings
-/// down - `0xBE80_0000 | (dst << 16)` and fifty more like it - and when the target
-/// architecture generation changed, sixty tests failed at once, every one of them
-/// blaming the translator for a number the test itself had wrong.
-///
-/// A test that hard-codes what it is testing stops testing it exactly when it matters.
+/// Every instruction in this file is built through here, so the tests follow the target
+/// generation's encodings rather than hard-coding numbers.
 fn head(name: &str) -> u32 {
     let table = encodings();
     let (family, opcode) = table
@@ -73,6 +53,7 @@ fn s_waitcnt() -> u32 {
     head("s_waitcnt")
 }
 
+/// Vector register `n`, from a returned buffer.
 fn vector(registers: &[u32], n: usize) -> u32 {
     registers[n]
 }
@@ -116,20 +97,15 @@ fn run(words: &[u32]) -> Vec<u32> {
 
 /// `v_mov_b32_e32 vN, <inline constant>`.
 ///
-/// Built here rather than assembled, so the test states the encoding it means and does
-/// not depend on a toolchain being present.
+/// Built here rather than assembled, so no toolchain is needed.
 fn v_mov_inline(dst: u32, constant: u32) -> u32 {
-    // VOP1, opcode 1. The source code for a small non-negative integer is 128 + value.
+    // The source code for a small non-negative integer is 128 + value.
     head("v_mov_b32_e32") | (dst << 17) | (128 + constant)
 }
 
-/// `s_endpgm`.
-
+/// A move of an inline constant reaches the named vector register.
 #[test]
 fn a_move_of_an_inline_constant_reaches_the_register() {
-    // The first thing translation has to get right, and the smallest: one instruction
-    // that writes a known value somewhere observable. Everything else builds on the
-    // register file existing and being written to the right slot.
     if !device_or_skip("a_move_of_an_inline_constant_reaches_the_register") {
         return;
     }
@@ -142,10 +118,9 @@ fn a_move_of_an_inline_constant_reaches_the_register() {
     );
 }
 
+/// A move writes only the register its destination field names.
 #[test]
 fn a_move_writes_only_the_register_it_names() {
-    // A translator that wrote every register, or the wrong one, would pass the test
-    // above. This is what makes the destination field load-bearing.
     if !device_or_skip("a_move_writes_only_the_register_it_names") {
         return;
     }
@@ -168,11 +143,9 @@ fn a_move_writes_only_the_register_it_names() {
     );
 }
 
+/// Instructions run in order, and the last write to a register wins.
 #[test]
 fn later_moves_overwrite_earlier_ones() {
-    // Instructions run in order, and a register holds what was last put in it. Obvious,
-    // and not free: a translator emitting stores in an arbitrary order would satisfy
-    // both tests above.
     if !device_or_skip("later_moves_overwrite_earlier_ones") {
         return;
     }
@@ -198,17 +171,13 @@ fn s_mov_code(dst: u32, code: u32) -> u32 {
 
 /// `s_mov_b32 sN, <inline constant>`.
 fn s_mov_inline(dst: u32, constant: u32) -> u32 {
-    // SOP1, opcode 0. sdst at bit 16, ssrc0 in the low byte.
+    // sdst at bit 16, ssrc0 in the low byte.
     head("s_mov_b32") | (dst << 16) | (128 + constant)
 }
 
-/// `s_waitcnt` with no counters to wait on.
-
+/// A scalar move reaches the scalar file.
 #[test]
 fn a_scalar_move_reaches_a_scalar_register() {
-    // Scalar registers are a separate file from vector ones, and the guest addresses
-    // them separately. A translator with only one file would put s2 where v2 lives and
-    // corrupt whichever was written second.
     if !device_or_skip("a_scalar_move_reaches_a_scalar_register") {
         return;
     }
@@ -221,10 +190,9 @@ fn a_scalar_move_reaches_a_scalar_register() {
     );
 }
 
+/// Writing s3 leaves v3 alone and the other way round: the files are separate.
 #[test]
 fn the_scalar_and_vector_files_are_separate() {
-    // The property that makes two files necessary rather than tidy: writing s3 must
-    // leave v3 alone, and the other way round.
     if !device_or_skip("the_scalar_and_vector_files_are_separate") {
         return;
     }
@@ -237,12 +205,12 @@ fn the_scalar_and_vector_files_are_separate() {
 /// The operand code the table names `m0`: past the last scalar register.
 const M0_CODE: u32 = 124;
 
+/// A value moved through m0 round-trips without touching the scalar file, in both models.
 #[test]
 fn a_move_through_m0_round_trips_and_leaves_the_scalar_file_alone() {
-    // m0 is one word of scalar state outside the register file, and both shaders the GL
-    // cube ran on the console write it before their first interpolation. A model that
-    // aliased it onto a scalar register would corrupt that register; one that dropped
-    // the write would read back zero here. Both models hold it, so both are run.
+    // m0 is scalar state outside the register file, written before the first
+    // interpolation by compiled pixel shaders. Aliasing it onto a scalar register would
+    // corrupt that register; dropping the write would read back zero.
     if !device_or_skip("a_move_through_m0_round_trips_and_leaves_the_scalar_file_alone") {
         return;
     }
@@ -271,11 +239,11 @@ fn a_move_through_m0_round_trips_and_leaves_the_scalar_file_alone() {
     }
 }
 
+/// `s_waitcnt` translates and changes no register.
 #[test]
 fn a_wait_instruction_translates_and_changes_nothing() {
-    // It orders memory operations rather than computing anything, so the observable
-    // effect is none - but it must translate, because refusing it blocks eight of the
-    // nine shaders in the fixture corpus.
+    // It orders memory operations and computes nothing, but most compiled shaders contain
+    // it.
     if !device_or_skip("a_wait_instruction_translates_and_changes_nothing") {
         return;
     }
@@ -284,13 +252,11 @@ fn a_wait_instruction_translates_and_changes_nothing() {
     assert_eq!(vector(&registers, 1), 7, "got {registers:?}");
 }
 
+/// The supported list and the translator agree on every instruction the table names.
 #[test]
 fn the_supported_list_and_the_translator_agree() {
-    // Two things can drift: a list saying an instruction is supported, and a translator
-    // that refuses it. A worklist built on the first would then rank work that is
-    // already done, or hide work that is not.
-    //
-    // Needs no device - it never runs a shader.
+    // A worklist built on a list that drifted from the translator would rank finished work
+    // or hide unfinished work. Needs no device.
 
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
@@ -306,30 +272,22 @@ fn the_supported_list_and_the_translator_agree() {
         let decoded = decode(&bytes, &table, &operands);
         let translated = translate(&decoded, &table, Strategy::default());
 
-        // Asked through the loaded table, because the supported list names
-        // instructions and the encodings decide where those live on this target.
+        // Asked through the loaded table: the list names instructions, and the encodings
+        // decide where they live on this target.
         let listed = orbistoun_translate::model::supports_named(&table, family, opcode);
 
-        // Whether it was refused *for not being supported*, which is the only refusal
-        // this test is about. A supported instruction can still be refused for its
-        // operands: these encodings carry zeroes in every operand field, and for the
-        // carry arithmetic that names an ordinary register pair where only the condition
-        // mask is handled. That is a true answer about a synthetic encoding and not
-        // drift between the list and the dispatch.
+        // Whether it was refused for not being supported. A supported instruction can
+        // still be refused for its operands: these encodings carry zero in every operand
+        // field, which for carry arithmetic names an ordinary register pair where only the
+        // condition mask is handled.
         let unsupported = matches!(
             &translated,
             Err(orbistoun_translate::TranslateError::Unsupported { detail, .. })
                 if *detail == orbistoun_translate::model::NO_TRANSLATION
                     || orbistoun_translate::model::blocked(name) == Some(*detail)
         );
-        // Two claims, not one claim reversed.
-        //
-        // A listed instruction must not be rejected *for being unsupported*; it may
-        // still be refused for what these synthetic operands say. An absent one must be
-        // refused *somehow*, and the reason is allowed to be more specific than the
-        // list - an export is refused for having no operand layout, which is a better
-        // answer than "not supported" and would be discarded by demanding one exact
-        // reason.
+        // A listed instruction must not be refused as unsupported. An absent one must be
+        // refused somehow; a more specific reason (an export has no operand layout) counts.
         if listed {
             assert!(
                 !unsupported,
@@ -357,24 +315,15 @@ fn the_supported_list_and_the_translator_agree() {
 
 /// Every instruction this target has a name for, as bytes that decode back to it.
 ///
-/// **Derived, not written down.** The hand-written version of this list carried its own
-/// epitaph in a comment: *this entry was missing while the branches were missing from
-/// `SUPPORTED`, which is exactly the drift this test exists to catch - and it did not,
-/// because the list of encodings it checks is also written by hand.* A checker written
-/// from the same understanding as the thing it checks agrees with it by construction.
-///
-/// So it asks the table. Every name the table knows appears, whether the translator
-/// supports it or not, which is what makes the *absent* direction meaningful - a list of
-/// supported instructions can only ever confirm that supported instructions work.
-///
-/// Operand fields are left zero. That is a valid encoding for every family here: zero
-/// names scalar register zero, not an absent operand.
+/// Derived from the table rather than written by hand, so a checker does not share the
+/// understanding it checks. Every name the table knows appears, supported or not, which
+/// makes the absent direction meaningful. Operand fields are zero, a valid encoding for
+/// every family here (scalar register zero).
 fn known_encodings() -> Vec<(String, u32, String, Vec<u32>)> {
     let table = encodings();
     let mut out = Vec::new();
     for (family, opcode, name) in table.names() {
-        // Padding is excluded because the decoder stops at it: it marks the end of the
-        // code, so it never reaches the translator and there is nothing to assert.
+        // Padding is excluded: the decoder stops at it, so it never reaches the translator.
         if name == "s_code_end" {
             continue;
         }
@@ -382,8 +331,8 @@ fn known_encodings() -> Vec<(String, u32, String, Vec<u32>)> {
             continue;
         };
         let mut words = vec![encoding.value | (opcode << encoding.opcode.shift)];
-        // A wide encoding needs its second word present, or the terminator appended
-        // below would be read as one and the program would have no terminator at all.
+        // A wide encoding needs its second word, or the appended terminator would be read
+        // as it.
         words.resize((encoding.width_bytes / 4) as usize, 0);
         out.push((family.to_owned(), opcode, name.to_owned(), words));
     }
@@ -433,14 +382,11 @@ fn agreement_cases() -> Vec<(&'static str, Vec<u32>)> {
     ]
 }
 
+/// The wavefront and lane models leave identical registers on the agreement programs.
 #[test]
 fn the_wavefront_and_lane_models_agree() {
-    // The payoff of having more than one level, and the reason the slow one is worth
-    // building: two independent models of the same machine, checked against each other
-    // with no reference hardware, no console and no title.
-    //
-    // A disagreement means the faster model has a bug, localised to one program - which
-    // is a far better starting point than a wrong pixel somewhere in a frame.
+    // Two independent models of the same machine, checked against each other with no
+    // reference hardware (D100).
     if !device_or_skip("the_wavefront_and_lane_models_agree") {
         return;
     }
@@ -455,11 +401,10 @@ fn the_wavefront_and_lane_models_agree() {
     }
 }
 
+/// The wavefront model starts with every lane active.
 #[test]
 fn the_wavefront_model_starts_with_every_lane_active() {
-    // At entry the guest has all sixty-four lanes running - the mask is all ones. A
-    // model that started it at zero would execute nothing at all while still producing
-    // a valid module and a plausible buffer of zeros.
+    // A mask starting at zero would execute nothing and still produce a buffer of zeros.
     if !device_or_skip("the_wavefront_model_starts_with_every_lane_active") {
         return;
     }
@@ -494,12 +439,10 @@ const INLINE_ONE: u32 = 242;
 const INLINE_TWO: u32 = 244;
 const INLINE_HALF: u32 = 240;
 
+/// Float addition bitcasts register contents rather than converting them.
 #[test]
 fn float_addition_produces_the_right_bits() {
-    // Registers hold bit patterns, not typed values - the instruction decides how to
-    // read them. So this is really asserting that the translator *bitcasts* rather than
-    // converts: converting would turn the bit pattern for 1.0 into the float
-    // 1065353216.0 and produce a number that is wrong by nine orders of magnitude.
+    // Converting would turn the bit pattern for 1.0 into the float 1065353216.0.
     if !device_or_skip("float_addition_produces_the_right_bits") {
         return;
     }
@@ -510,9 +453,7 @@ fn float_addition_produces_the_right_bits() {
         vop2_vv("v_add_f32_e32", 2, 0, 1),
         s_endpgm(),
     ]);
-    // Compared as bits rather than as floats. These values are exactly representable,
-    // so an approximate comparison would only invite a tolerance that does not apply -
-    // and the claim being made is about the bit pattern a register holds.
+    // Compared as bits: the values are exact and the claim is about the register's bits.
     assert_eq!(
         vector(&registers, 2),
         3.0_f32.to_bits(),
@@ -521,11 +462,10 @@ fn float_addition_produces_the_right_bits() {
     );
 }
 
-/// **Two floats pack into one register as halves, the first source low** (worklog 820).
+/// Two floats pack into one register as halves, the first source low.
 ///
-/// The pixel shader's export packs `(r, g)` and `(b, a)` this way. 1.0 is `0x3c00` and 2.0 is
-/// `0x4000` as halves, both exact, so the packed word is `0x4000_3c00` whatever the rounding -
-/// and swapping the halves, or converting instead of narrowing, gives a different word.
+/// 1.0 is `0x3c00` and 2.0 is `0x4000` as halves, both exact, so the packed word is
+/// `0x4000_3c00` whatever the rounding; swapped halves or conversion give a different word.
 #[test]
 fn two_floats_pack_into_one_register_as_halves() {
     if !device_or_skip("two_floats_pack_into_one_register_as_halves") {
@@ -545,6 +485,7 @@ fn two_floats_pack_into_one_register_as_halves() {
     );
 }
 
+/// Float multiplication produces the right bits.
 #[test]
 fn float_multiplication_produces_the_right_bits() {
     if !device_or_skip("float_multiplication_produces_the_right_bits") {
@@ -565,14 +506,11 @@ fn float_multiplication_produces_the_right_bits() {
     );
 }
 
+/// `v_max_f32`/`v_min_f32` reach the GLSL.std.450 `FMax`/`FMin` extended instructions.
 #[test]
 fn float_min_and_max_produce_the_right_bits() {
-    // v_max_f32/v_min_f32 have no core SPIR-V opcode - they translate to the GLSL.std.450
-    // extended instructions FMax/FMin, reached through an OpExtInst into an imported set.
-    // This exercises that whole path end to end: the max of 1.0 and 2.0 is 2.0 and the min
-    // is 1.0. A translator that dropped the set import, named the wrong instruction number,
-    // or converted instead of bitcasting around the ext-inst would fail here rather than
-    // silently forty thousand frames later.
+    // No core SPIR-V opcode exists for these, so this covers the set import, the extended
+    // instruction number and the bitcasts around `OpExtInst`.
     if !device_or_skip("float_min_and_max_produce_the_right_bits") {
         return;
     }
@@ -598,6 +536,7 @@ fn float_min_and_max_produce_the_right_bits() {
     );
 }
 
+/// `v_sqrt_f32` and `v_rsq_f32` produce the right bits.
 #[test]
 fn float_unary_sqrt_and_rsq_produce_the_right_bits() {
     if !device_or_skip("float_unary_sqrt_and_rsq_produce_the_right_bits") {
@@ -628,6 +567,7 @@ fn float_unary_sqrt_and_rsq_produce_the_right_bits() {
     );
 }
 
+/// `v_exp_f32` and `v_log_f32` are base two.
 #[test]
 fn float_unary_transcendentals_produce_the_right_bits() {
     if !device_or_skip("float_unary_transcendentals_produce_the_right_bits") {
@@ -659,19 +599,16 @@ fn float_unary_transcendentals_produce_the_right_bits() {
     );
 }
 
+/// `v_sin_f32` and `v_cos_f32` take their angle in revolutions.
 #[test]
 fn float_unary_trig_produces_the_right_bits() {
     if !device_or_skip("float_unary_trig_produces_the_right_bits") {
         return;
     }
 
-    // The angle is in *revolutions*: v_sin_f32/v_cos_f32 compute sin/cos of 2*pi*x. A
-    // quarter turn is a right angle - sin(2*pi*0.25) = sin(pi/2) = 1.0, cos(pi/2) = 0.0.
-    // Chosen deliberately over 0.0: a translator that dropped the revolutions-to-radians
-    // scale would compute sin(0.25 rad) = 0.247 and cos(0.25 rad) = 0.969, which this
-    // separates from the truth, where sin(0)/cos(0) agree under both conventions and prove
-    // nothing. Compared approximately because 2*pi is not exactly representable and the
-    // extended sin/cos are not required to be correctly rounded.
+    // sin/cos of 2*pi*x: a quarter turn gives 1.0 and 0.0, where dropping the scale would
+    // give 0.247 and 0.969 (at zero both conventions agree). Compared approximately:
+    // 2*pi is inexact and the extended sin/cos are not correctly rounded.
     let mut words = Vec::new();
     words.extend_from_slice(&v_mov_literal(0, 0.25_f32.to_bits()));
     words.push(vop1_vv("v_sin_f32_e32", 1, 0));
@@ -693,11 +630,11 @@ fn float_unary_trig_produces_the_right_bits() {
     );
 }
 
+/// An inline float constant reaches a register as its bit pattern.
 #[test]
 fn an_inline_float_constant_reaches_a_register_unconverted() {
-    // The constant 1.0 has to arrive as its bit pattern. A translator treating the
-    // operand code as a number would store 242, and a translator converting rather than
-    // bitcasting would store something enormous - both plausible-looking failures.
+    // Treating the operand code as a number would store 242; converting would store
+    // something enormous.
     if !device_or_skip("an_inline_float_constant_reaches_a_register_unconverted") {
         return;
     }
@@ -711,10 +648,9 @@ fn an_inline_float_constant_reaches_a_register_unconverted() {
     );
 }
 
+/// The models agree on float arithmetic, computed once or per lane.
 #[test]
 fn the_models_agree_on_float_arithmetic() {
-    // Arithmetic is where the two models could most easily drift: one computes it once,
-    // the other sixty-four times through a different register layout.
     if !device_or_skip("the_models_agree_on_float_arithmetic") {
         return;
     }
@@ -755,7 +691,7 @@ fn run_memory(fidelity: Fidelity, words: &[u32]) -> (Vec<u32>, Vec<u32>) {
 
 /// `global_store_dword vAddr, vData, off`.
 ///
-/// The base field is all ones, which is how the encoding says "no scalar base".
+/// The base field holds the code for "no scalar base".
 fn global_store(vaddr: u32, vdata: u32) -> [u32; 2] {
     [
         head("global_store_dword"),
@@ -773,21 +709,16 @@ fn global_load(vdst: u32, vaddr: u32) -> [u32; 2] {
 
 /// `s_load_dwordxN sDst, s[base:base+1], offset`, from the solved layout.
 ///
-/// Destination at bit 6, base halved at bit 0, byte offset in the second word. The
-/// opcode selects the width: 0 is one word, 1 is two, 2 is four, 3 is eight.
+/// Destination at bit 6, base halved at bit 0, byte offset in the second word.
 fn s_load(name: &str, dst: u32, base: u32, offset: u32) -> [u32; 2] {
     [head(name) | (dst << 6) | (base / 2), offset]
 }
 
+/// A wide scalar load running past the register file is refused, not truncated.
 #[test]
 fn a_wide_scalar_load_past_the_register_file_is_refused() {
-    // `s_load_dwordx8` into s100 would write four registers and then four *specials* -
-    // the shared operand numbering runs straight on past the last register, so nothing
-    // downstream would see anything wrong. Refused at translation, and refused rather
-    // than truncated: a load that quietly filled half its destinations would be a
-    // shader computing the wrong thing while appearing to work.
-    //
-    // Needs no device.
+    // `s_load_dwordx8` into s100 would write four registers and then four special
+    // registers, since the operand numbering runs on past the file. Needs no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
 
@@ -807,12 +738,9 @@ fn a_wide_scalar_load_past_the_register_file_is_refused() {
     );
 }
 
+/// `s_load_dwordx4` fills four consecutive registers from one byte address.
 #[test]
 fn a_wide_scalar_load_fills_consecutive_registers() {
-    // What separates `s_load_dwordx4` from four `s_load_dword`s: one address, four
-    // destinations, and they must land in order. A translation that wrote the same
-    // register four times, or counted the offset in words rather than bytes, passes
-    // every single-word test and fails here.
     if !device_or_skip("a_wide_scalar_load_fills_consecutive_registers") {
         return;
     }
@@ -841,11 +769,9 @@ fn a_wide_scalar_load_fills_consecutive_registers() {
     }
 }
 
+/// `s_load_dwordx2` writes no register beyond its width.
 #[test]
 fn a_wide_scalar_load_writes_no_register_beyond_its_width() {
-    // The other half of the same property. `s_load_dwordx2` fills two registers and
-    // must leave the third alone - a loop bound taken from the wrong opcode would be
-    // invisible in the test above, which only asserts on registers it expects written.
     if !device_or_skip("a_wide_scalar_load_writes_no_register_beyond_its_width") {
         return;
     }
@@ -870,11 +796,9 @@ fn a_wide_scalar_load_writes_no_register_beyond_its_width() {
     );
 }
 
+/// The models agree about a wide scalar load, written by different routes.
 #[test]
 fn the_models_agree_about_a_wide_scalar_load() {
-    // The differential oracle applied to the newest instruction. The two models write
-    // scalars by entirely different routes - one to a private array, the other through
-    // a masked select - so agreement here is evidence rather than tautology.
     if !device_or_skip("the_models_agree_about_a_wide_scalar_load") {
         return;
     }
@@ -899,10 +823,10 @@ fn the_models_agree_about_a_wide_scalar_load() {
     );
 }
 
+/// A store reaches guest memory at its address and nowhere else.
 #[test]
 fn a_store_reaches_guest_memory() {
-    // The first instruction that leaves the shader's own registers. Address eight is
-    // word two, and nothing else in the buffer may move.
+    // Address eight is word two.
     if !device_or_skip("a_store_reaches_guest_memory") {
         return;
     }
@@ -917,11 +841,9 @@ fn a_store_reaches_guest_memory() {
     assert_eq!(memory[3], 0, "nothing else should have moved");
 }
 
+/// A value stored can be loaded back through the same address.
 #[test]
 fn a_value_stored_can_be_loaded_back() {
-    // Store then load through the same address. Self-contained, and it fails if either
-    // half computes its address differently from the other - which is the mistake most
-    // likely to survive a test that only did one of them.
     if !device_or_skip("a_value_stored_can_be_loaded_back") {
         return;
     }
@@ -940,10 +862,9 @@ fn a_value_stored_can_be_loaded_back() {
     );
 }
 
+/// The models agree about memory: one store, or sixty-four under a mask.
 #[test]
 fn the_models_agree_about_memory() {
-    // Memory is where the two models differ most: one stores once, the other stores
-    // sixty-four times under a mask into the same location. They must still agree.
     if !device_or_skip("the_models_agree_about_memory") {
         return;
     }
@@ -966,12 +887,9 @@ fn s_mov_b64(dst: u32, source_code: u32) -> u32 {
     head("s_mov_b64") | (dst << 16) | source_code
 }
 
+/// A 64-bit move sign-extends a constant: 1 zeroes the high half, -1 fills it.
 #[test]
 fn a_sixty_four_bit_move_extends_a_constant_rather_than_repeating_it() {
-    // The distinction that makes this not two 32-bit moves. `1` fills the low register
-    // and zeroes the high one; `-1` fills both. Copying the low word into both halves
-    // is right for -1 and wrong for 1, so a test using only -1 would pass on a wrong
-    // translation - which is why both are here.
     if !device_or_skip("a_sixty_four_bit_move_extends_a_constant_rather_than_repeating_it") {
         return;
     }
@@ -997,14 +915,14 @@ fn a_sixty_four_bit_move_extends_a_constant_rather_than_repeating_it() {
     );
 }
 
+/// A 64-bit move copies both halves of a register pair.
 #[test]
 fn a_sixty_four_bit_move_copies_both_halves_of_a_register_pair() {
     if !device_or_skip("a_sixty_four_bit_move_copies_both_halves_of_a_register_pair") {
         return;
     }
 
-    // Set s4 and s5 apart, then move the pair to s[0:1]. Distinct values, so a
-    // translation copying the low half twice is visible.
+    // Distinct values, so copying the low half twice is visible.
     let registers = run(&[
         s_mov_inline(4, 9),
         s_mov_inline(5, 23),
@@ -1016,6 +934,7 @@ fn a_sixty_four_bit_move_copies_both_halves_of_a_register_pair() {
     assert_eq!(scalar(&registers, 1), 23, "registers were {registers:?}");
 }
 
+/// The models agree about a 64-bit move.
 #[test]
 fn the_models_agree_about_a_sixty_four_bit_move() {
     if !device_or_skip("the_models_agree_about_a_sixty_four_bit_move") {
@@ -1035,13 +954,12 @@ fn the_models_agree_about_a_sixty_four_bit_move() {
     assert_eq!(lane, wave, "the models disagree about a 64-bit move");
 }
 
+/// A blocked instruction's refusal carries its reason, and every entry names a real
+/// instruction.
 #[test]
 fn a_blocked_instruction_says_what_it_is_blocked_on() {
-    // The point of BLOCKED is that the worklist can rank "needs a subsystem" apart from
-    // "nobody has written it yet". If the reason does not reach the error, the two are
-    // indistinguishable again and the list is decoration.
-    //
-    // Needs no device.
+    // The reason separates "needs a subsystem" from unwritten work in the worklist. Needs
+    // no device.
     use orbistoun_translate::model::{BLOCKED, blocked, supports};
 
     let table = encodings();
@@ -1053,9 +971,7 @@ fn a_blocked_instruction_says_what_it_is_blocked_on() {
         );
         assert_eq!(blocked(name), Some(*reason));
 
-        // A reason for an instruction this target does not have is a reason nobody will
-        // ever read. The list is a worklist, and an entry that cannot be reached is an
-        // entry that quietly stopped being work.
+        // An entry for an instruction this target lacks can never be reached.
         assert!(
             table.find_by_name(name).is_some(),
             "{name} is blocked, but this target has no instruction by that name"
@@ -1076,13 +992,9 @@ fn s_mov_exec(source_code: u32) -> u32 {
     s_mov_b64(126, source_code)
 }
 
+/// A cleared execution mask suppresses a vector write.
 #[test]
 fn a_cleared_execution_mask_suppresses_a_vector_write() {
-    // The first test that makes the wavefront model's masking mean anything. Until an
-    // instruction could write the mask, every lane was active in every shader that
-    // translated, so the select on every vector write was choosing the new value every
-    // time - correct, and never exercised.
-    //
     // Inline integer 0 is code 128; -1 is code 193.
     if !device_or_skip("a_cleared_execution_mask_suppresses_a_vector_write") {
         return;
@@ -1109,12 +1021,11 @@ fn a_cleared_execution_mask_suppresses_a_vector_write() {
     );
 }
 
+/// The execution mask is read bit by bit, not tested against zero.
 #[test]
 fn the_execution_mask_is_per_lane_not_all_or_nothing() {
-    // A mask of 1 leaves lane 0 active; a mask of 2 leaves lane 1 active and lane 0 not.
-    // Both are observed through lane 0, which is the only lane the observation window
-    // reports - so the second case is the one that proves the mask is read bit by bit
-    // rather than tested against zero.
+    // Mask 1 leaves lane 0 active; mask 2 leaves lane 1 active and lane 0 not. Both are
+    // observed through lane 0, the lane the observation window reports.
     //
     // Inline integer 1 is code 129, 2 is code 130.
     if !device_or_skip("the_execution_mask_is_per_lane_not_all_or_nothing") {
@@ -1146,11 +1057,11 @@ fn the_execution_mask_is_per_lane_not_all_or_nothing() {
     );
 }
 
+/// A store from an inactive lane leaves guest memory alone.
 #[test]
 fn a_masked_store_does_not_reach_guest_memory() {
-    // The same property one layer down. A store from an inactive lane must leave memory
-    // alone, because another lane will read what it would otherwise have written - which
-    // is why `write_memory` is a required trait method rather than a provided one.
+    // Another lane would read what it wrote, which is why `write_memory` is a required
+    // trait method.
     if !device_or_skip("a_masked_store_does_not_reach_guest_memory") {
         return;
     }
@@ -1166,15 +1077,11 @@ fn a_masked_store_does_not_reach_guest_memory() {
     );
 }
 
+/// The lane model refuses a mask write, and the wavefront model accepts it.
 #[test]
 fn the_lane_model_refuses_a_shader_that_writes_the_execution_mask() {
-    // Not a fallback and not a no-op. This model has one invocation per lane and no way
-    // to represent an inactive one, so a shader that disables lanes would run every lane
-    // regardless - plausible output, wrong answer, nothing in it to indicate the
-    // problem. Refusing is what makes choosing this level safe by decision rather than
-    // by the accident of no such instruction being translatable (D098).
-    //
-    // Needs no device.
+    // The lane model cannot represent an inactive lane, so it would run every lane the
+    // guest disabled (D098). Needs no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let program = [s_mov_exec(128), s_endpgm()];
@@ -1195,8 +1102,7 @@ fn the_lane_model_refuses_a_shader_that_writes_the_execution_mask() {
         "the error should name what is missing, got: {error}"
     );
 
-    // And the wavefront model must accept the same shader, or the refusal above is just
-    // the instruction being unimplemented everywhere.
+    // The wavefront model accepts the same shader, so the refusal is the model's.
     translate(
         &decoded,
         &table,
@@ -1208,13 +1114,10 @@ fn the_lane_model_refuses_a_shader_that_writes_the_execution_mask() {
     .expect("the wavefront model has a mask and must accept this");
 }
 
+/// Automatic fidelity picks the lane model for a shader that leaves the mask alone and
+/// the wavefront model for one that writes it.
 #[test]
 fn auto_fidelity_picks_the_model_the_shader_needs() {
-    // A shader that leaves the mask alone gets the cheap model; one that writes it gets
-    // the model that has a mask. The alternative was Auto always meaning Lane, which
-    // was correct only while no instruction touching the mask could be translated -
-    // safety that expired the moment one could.
-    //
     // Needs no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
@@ -1244,14 +1147,11 @@ fn s_logic_b64(name: &str, dst: u32, first: u32, second: u32) -> u32 {
     head(name) | (dst << 16) | (second << 8) | first
 }
 
+/// Anding the execution mask narrows which lanes write.
 #[test]
 fn narrowing_the_mask_narrows_which_lanes_write() {
-    // What a guest actually does on entering a conditional region: and the mask with
-    // whichever lanes passed the test. Here the second operand is a constant standing in
-    // for a comparison result, because comparison instructions do not translate yet -
-    // the arithmetic on the mask is the part under test.
-    //
-    // Mask starts all ones; anding with 2 leaves lane 1 and not lane 0.
+    // Entering a conditional region: and the mask with the lanes that passed, here a
+    // constant. The mask starts all ones; anding with 2 leaves lane 1 and not lane 0.
     if !device_or_skip("narrowing_the_mask_narrows_which_lanes_write") {
         return;
     }
@@ -1284,11 +1184,10 @@ fn narrowing_the_mask_narrows_which_lanes_write() {
     );
 }
 
+/// `s_andn2_b64` keeps the active lanes that were not taken.
 #[test]
 fn andn2_takes_the_lanes_the_first_branch_did_not() {
-    // The else-branch. `s_andn2_b64 exec, exec, taken` leaves exactly the lanes that
-    // were active and not taken - so translating it as a plain and would invert the
-    // sense of every else in every shader, silently.
+    // The else-branch: translated as a plain and, it would invert every else.
     if !device_or_skip("andn2_takes_the_lanes_the_first_branch_did_not") {
         return;
     }
@@ -1307,8 +1206,8 @@ fn andn2_takes_the_lanes_the_first_branch_did_not() {
         "lane 0 was removed from the mask; registers were {registers:?}"
     );
 
-    // Remove lane 1 instead: lane 0 still writes. This is the case a plain `and` gets
-    // wrong, and the previous one is the case it gets right - so both are needed.
+    // Remove lane 1 instead: lane 0 still writes. A plain `and` gets this case wrong and
+    // the previous one right.
     let kept = [
         s_mov_exec(193),
         s_logic_b64("s_andn2_b64", 126, 126, 130),
@@ -1323,11 +1222,11 @@ fn andn2_takes_the_lanes_the_first_branch_did_not() {
     );
 }
 
+/// 64-bit logic computes both halves.
 #[test]
 fn sixty_four_bit_logic_operates_on_both_halves() {
-    // Into an ordinary register pair rather than the mask, so both halves are directly
-    // observable. A translation that did the low half only would pass every mask test
-    // above, because none of them uses a lane above thirty-one.
+    // Into an ordinary register pair so both halves are observable; the mask tests above
+    // use no lane above thirty-one.
     if !device_or_skip("sixty_four_bit_logic_operates_on_both_halves") {
         return;
     }
@@ -1366,15 +1265,11 @@ fn vgpr_code(register: u32) -> u32 {
     256 + register
 }
 
+/// A comparison produces a mask that, anded into `exec`, narrows which lanes write.
 #[test]
 fn a_comparison_produces_a_mask_that_narrows_who_writes() {
-    // The whole point of comparisons here: they are where a mask comes from. Compare,
-    // and the answer into `exec`, and the following write lands only in lanes that
-    // passed - which is an if-branch with no branch in it.
-    //
-    // Every lane compares the same two registers, so the answer is all-ones or all-zero.
-    // That is enough to show the mask is produced and honoured; per-lane values need a
-    // lane-id source, which does not translate yet.
+    // Every lane compares the same two registers, so the mask is all-ones or all-zero;
+    // a later test gives lanes different values.
     if !device_or_skip("a_comparison_produces_a_mask_that_narrows_who_writes") {
         return;
     }
@@ -1395,8 +1290,7 @@ fn a_comparison_produces_a_mask_that_narrows_who_writes() {
         "1.0 < 2.0, so every lane stays active; registers were {registers:?}"
     );
 
-    // The same shader with the comparison reversed: no lane survives, so the write is
-    // suppressed. Without this case a comparison that always answered true would pass.
+    // Reversed, no lane survives, so a comparison that always answered true fails here.
     let not_taken = [
         v_mov_code(0, 242),
         v_mov_code(1, 244),
@@ -1413,12 +1307,10 @@ fn a_comparison_produces_a_mask_that_narrows_who_writes() {
     );
 }
 
+/// A float comparison compares floats, not their bits.
 #[test]
 fn a_comparison_compares_floats_not_the_bits() {
-    // A register holds thirty-two bits and this instruction is what decides they are a
-    // float. Comparing the integers instead agrees on every non-negative pair and orders
-    // negatives backwards - so -1.0 < 1.0 is the case that separates them, and a test
-    // using positive values only would pass either way.
+    // An integer comparison orders negatives backwards, so -1.0 < 1.0 separates the two.
     //
     // Inline float -1.0 is code 243, 1.0 is 242.
     if !device_or_skip("a_comparison_compares_floats_not_the_bits") {
@@ -1445,11 +1337,11 @@ fn a_comparison_compares_floats_not_the_bits() {
     );
 }
 
+/// A comparison writes `vcc`, not `exec`.
 #[test]
 fn a_comparison_writes_the_condition_mask_not_the_execution_mask() {
-    // `vcc` and `exec` are different registers, and a translation that wrote the
-    // comparison straight into `exec` would pass every test above - the shaders there
-    // all and the result into `exec` immediately afterwards anyway.
+    // The shaders above and the result into `exec` straight after, so writing `exec`
+    // directly would pass them.
     if !device_or_skip("a_comparison_writes_the_condition_mask_not_the_execution_mask") {
         return;
     }
@@ -1475,13 +1367,11 @@ fn a_comparison_writes_the_condition_mask_not_the_execution_mask() {
     );
 }
 
+/// The lane model refuses a comparison, and `Auto` routes it to the wavefront model.
 #[test]
 fn the_lane_model_refuses_a_comparison() {
-    // Same reasoning as the mask write. A comparison produces one bit per lane, and this
-    // model has no place to put sixty-four of them - answering with the one lane it has
-    // would be a mask that claims the other sixty-three all agree.
-    //
-    // Needs no device.
+    // A comparison produces one bit per lane, which this model has nowhere to put. Needs
+    // no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let program = [v_cmp_f32("v_cmp_lt_f32_e32", vgpr_code(0), 1), s_endpgm()];
@@ -1502,7 +1392,7 @@ fn the_lane_model_refuses_a_comparison() {
         "the error should name what is missing, got: {error}"
     );
 
-    // And Auto must route it to the model that can, rather than refusing.
+    // `Auto` routes it to the model that can.
     let translated = translate(&decoded, &table, Strategy::default()).expect("auto");
     assert_eq!(translated.fidelity, Fidelity::Wavefront);
 }
@@ -1526,8 +1416,7 @@ fn v_int_op(name: &str, dst: u32, first_code: u32, second_vgpr: u32) -> u32 {
 /// The pair that leaves a lane's own index in `dst`.
 ///
 /// `lo` counts the all-ones low half below this lane, `hi` counts the high half and adds
-/// the first result. There is no single instruction for this - a lane is not told which
-/// lane it is, it counts.
+/// the first result.
 fn lane_index_into(dst: u32) -> [u32; 4] {
     // Inline -1 is code 193 (an all-ones mask); inline 0 is code 128.
     let lo = v_mbcnt("v_mbcnt_lo_u32_b32", dst, 193, 128);
@@ -1535,14 +1424,11 @@ fn lane_index_into(dst: u32) -> [u32; 4] {
     [lo[0], lo[1], hi[0], hi[1]]
 }
 
+/// Each lane learns its own index through the `v_mbcnt` pair.
 #[test]
 fn a_lane_can_learn_its_own_index() {
-    // Asserted through guest memory rather than the register window, because the window
-    // only reports lane 0 - and lane 0's index is zero, which is also what an untouched
-    // register reads. Each lane stores its index at its own address, so the whole
-    // wavefront is visible at once.
-    //
-    // This is the first test in the file where the lanes do different things.
+    // Asserted through guest memory, since the register window reports only lane 0,
+    // whose index is zero. Each lane stores its index at its own address.
     if !device_or_skip("a_lane_can_learn_its_own_index") {
         return;
     }
@@ -1553,10 +1439,8 @@ fn a_lane_can_learn_its_own_index() {
     program.extend(global_store(1, 0));
     program.push(s_endpgm());
 
-    // Every word, not a sample. Asserting the whole window is what pins the shift:
-    // `v_lshlrev_b32` takes its amount first and its value second, and the reversed
-    // reading gives `2 << index` rather than `index << 2`. Those agree for lane 2 and
-    // for no other lane, so one lane proves nothing and sixteen prove it outright.
+    // Every word, not a sample: `v_lshlrev_b32` takes its amount first, and the reversed
+    // reading (`2 << index`) agrees with `index << 2` only at lane 2.
     let (_, memory) = run_memory(Fidelity::Wavefront, &program);
     for word in 0..16usize {
         assert_eq!(
@@ -1566,15 +1450,11 @@ fn a_lane_can_learn_its_own_index() {
     }
 }
 
+/// A per-lane comparison leaves some lanes active and others not.
 #[test]
 fn a_comparison_can_leave_some_lanes_active_and_others_not() {
-    // What no mask test so far could show. Until a lane could learn its index, every
-    // lane compared the same registers and every mask was all-ones or all-zero - so a
-    // translation testing the mask against zero rather than bit by bit would have passed
-    // every one of them.
-    //
-    // Here lane n compares its own index against four, so the mask is a genuine mixture
-    // and each lane's store is kept or dropped on its own.
+    // Lane n compares its own index against four, so the mask is a genuine mixture and a
+    // translation testing the mask against zero fails.
     if !device_or_skip("a_comparison_can_leave_some_lanes_active_and_others_not") {
         return;
     }
@@ -1634,13 +1514,13 @@ fn module_words(words: &[u32]) -> usize {
         .len()
 }
 
+/// A mask known at translation emits only the lanes it runs, and they are right.
 #[test]
 fn a_mask_known_at_translation_emits_only_the_lanes_it_runs() {
-    // Worklog 848. `s_mov_b32 exec_lo, <constant>` leaves the mask known until the block ends, so
-    // a lane whose bit is clear emits no write at all and one whose bit is set writes without a
-    // select. The device run pins that both are still right: lanes 0 and 2 store, no other lane
-    // does. The length pins that the known path is the one that ran - the same stores with the
-    // mask arriving through a register would pass the device check too.
+    // `s_mov_b32 exec_lo, <constant>` leaves the mask known until the block ends, so a lane
+    // whose bit is clear emits no write and one whose bit is set writes without a select.
+    // The module length shows the known path ran; the device run shows lanes 0 and 2 store
+    // and no other.
     let known = stores_under_mask(&[s_mov_exec(128 + 5)]);
     let via_register = stores_under_mask(&[s_mov_b64(0, 128 + 5), s_mov_exec(0)]);
     let (known_words, register_words) = (module_words(&known), module_words(&via_register));
@@ -1670,12 +1550,11 @@ fn branch(name: &str, offset: i16) -> u32 {
     head(name) | u32::from(offset as u16)
 }
 
+/// A taken forward branch skips the block between.
 #[test]
 fn a_forward_branch_skips_the_block_it_jumps_over() {
-    // Predication alone gets this right by accident for *vector* work - falling through
-    // with no lane active suppresses every write anyway. It does not for scalar work,
-    // which runs regardless of the mask. So the block skipped here writes a scalar
-    // register, and the assertion is that it did not.
+    // Predication alone suppresses skipped vector writes; scalar work runs regardless of
+    // the mask, so the skipped block writes a scalar register.
     if !device_or_skip("a_forward_branch_skips_the_block_it_jumps_over") {
         return;
     }
@@ -1709,8 +1588,8 @@ fn a_forward_branch_skips_the_block_it_jumps_over() {
         "the branch target must have run; registers were {registers:?}"
     );
 
-    // The same shader with every lane enabled: the branch is not taken and both blocks
-    // run. Without this the test would pass on a translation that never branches at all.
+    // With every lane enabled the branch is not taken and both blocks run, so a
+    // translation that never branches fails.
     let not_taken = [
         s_mov_exec(193),
         branch("s_cbranch_execz", 1),
@@ -1731,10 +1610,10 @@ fn a_forward_branch_skips_the_block_it_jumps_over() {
     assert_eq!(scalar(&registers, 1), 7, "registers were {registers:?}");
 }
 
+/// A backward branch loops until its condition fails.
 #[test]
 fn a_backward_branch_loops() {
-    // The case predication cannot express at all, and the reason the dispatch loop
-    // exists. A shader that counts, and stops on its own:
+    // A shader that counts, and stops on its own:
     //
     //   0x0  v_mov_b32 v0, 0          ; the counter
     //   0x4  v_mov_b32 v1, 1          ; the step
@@ -1745,10 +1624,8 @@ fn a_backward_branch_loops() {
     //   0x18 s_cbranch_execnz -4      -> 0xc
     //   0x1c s_endpgm
     //
-    // Five passes: the counter reaches five, the comparison fails, the mask empties and
-    // the branch is not taken. Asserting on five rather than on "more than one" is what
-    // makes this a loop test - a translation that ran the body once would leave one, and
-    // one that never terminated would not return at all.
+    // Five passes: the counter reaches five, the comparison fails, the mask empties and the
+    // branch falls through. A body run once would leave one.
     if !device_or_skip("a_backward_branch_loops") {
         return;
     }
@@ -1778,23 +1655,20 @@ fn a_backward_branch_loops() {
 
 /// `s_cmp_<op>_i32 src0, src1`.
 ///
-/// SOPC: opcode at bit 16, second source at bit 8, first in the low byte. No
-/// destination - the answer goes to the condition code, which is not an operand.
+/// SOPC: opcode at bit 16, second source at bit 8, first in the low byte. The answer goes
+/// to the condition code, which is not an operand.
 fn s_cmp_i32(name: &str, first_code: u32, second_code: u32) -> u32 {
     head(name) | (second_code << 8) | first_code
 }
 
+/// A scalar compare sets the condition code a branch reads.
 #[test]
 fn a_scalar_compare_drives_a_branch() {
-    // The pairing that makes the `control` fixture translatable: a scalar compare sets
-    // the condition code and a branch reads it. Neither is any use without the other,
-    // which is why the branch was refused until the compare existed.
     if !device_or_skip("a_scalar_compare_drives_a_branch") {
         return;
     }
 
-    // s0 = 5. Compare against 1: 5 < 1 is false, so scc is clear and s_cbranch_scc1 is
-    // not taken - the skipped block runs.
+    // s0 = 5. 5 < 1 is false, so scc is clear and s_cbranch_scc1 falls through.
     //   0x0  s_mov_b32 s0, 5
     //   0x4  s_cmp_lt_i32 s0, 1
     //   0x8  s_cbranch_scc1 +1   -> 0x10
@@ -1814,8 +1688,8 @@ fn a_scalar_compare_drives_a_branch() {
         "5 < 1 is false, so the branch is not taken; registers were {registers:?}"
     );
 
-    // Compare against 64 instead: 5 < 64 is true, the branch is taken, the block is
-    // skipped. Without this case a compare that always answered false would pass.
+    // 5 < 64 is true, so the branch is taken and the block skipped; a compare that always
+    // answered false fails here.
     let taken = [
         s_mov_inline(0, 5),
         s_cmp_i32("s_cmp_lt_i32", 0, 128 + 64),
@@ -1831,12 +1705,10 @@ fn a_scalar_compare_drives_a_branch() {
     );
 }
 
+/// A scalar compare is signed.
 #[test]
 fn a_scalar_compare_is_signed() {
-    // These compare signed integers, and reading the same bits as unsigned agrees on
-    // every pair of non-negative values. -1 is the case that separates them: as a signed
-    // integer it is less than zero, and as an unsigned one it is the largest value there
-    // is. A test using positive numbers passes either way.
+    // Signed and unsigned agree on non-negative values; -1 separates them.
     if !device_or_skip("a_scalar_compare_is_signed") {
         return;
     }
@@ -1861,14 +1733,11 @@ fn a_scalar_compare_is_signed() {
     );
 }
 
+/// A shader using only the condition code keeps the lane model.
 #[test]
 fn the_condition_code_is_not_a_lane_mask() {
-    // The condition code is one bit for the whole wavefront, not one per lane, so the
-    // per-lane model can represent it perfectly well and a shader using it must not be
-    // pushed onto the slow model. Routing it there would be correct and sixty-four times
-    // slower for nothing.
-    //
-    // Needs no device.
+    // The condition code is one bit for the whole wavefront, which the per-lane model
+    // represents. Needs no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let program = [
@@ -1889,16 +1758,10 @@ fn the_condition_code_is_not_a_lane_mask() {
     );
 }
 
+/// The compiled `control` fixture, with scalar, mask and backward branches, translates.
 #[test]
 fn a_compiled_shader_with_control_flow_translates() {
-    // The first fixture that is *compiler output* rather than an instruction stream
-    // written here, and it contains real control flow: a scalar compare, a branch on the
-    // condition code, a branch on the condition mask, and a backward branch on the
-    // execution mask. Everything before this was a shader chosen to exercise what had
-    // just been built.
-    //
-    // Needs no device - what is being asserted is that it translates at all, which is
-    // the thing that was untrue an hour ago.
+    // Compiler output rather than a hand-written stream. Needs no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
 
@@ -1910,9 +1773,8 @@ fn a_compiled_shader_with_control_flow_translates() {
         .join("control.gcn");
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 
-    // The whole buffer. The decoder stops itself at the padding that follows a
-    // compiled shader, and this shader ends its wave twice - so asking it to stop at the
-    // first terminator would cut it in half.
+    // The whole buffer: the decoder stops at the padding after a compiled shader, and this
+    // shader ends its wave twice, so stopping at the first terminator would halve it.
     let decoded = decode(&bytes, &table, &operands);
     assert!(decoded.is_trustworthy(), "the fixture must decode cleanly");
     assert!(
@@ -1923,8 +1785,7 @@ fn a_compiled_shader_with_control_flow_translates() {
     let translated = translate(&decoded, &table, Strategy::default())
         .expect("a compiled shader with control flow should translate");
 
-    // It reads and writes the execution mask, so Auto must have chosen the model that
-    // has one. Getting Lane here would mean the shader translated by ignoring the mask.
+    // It reads and writes the execution mask, so `Auto` must choose the model that has one.
     assert_eq!(translated.fidelity, Fidelity::Wavefront);
     assert!(
         translated.instructions >= 8,
@@ -1969,12 +1830,10 @@ const BITS_3: u32 = 0x4040_0000;
 /// The bit pattern of 9.0f.
 const BITS_9: u32 = 0x4110_0000;
 
+/// `v_subrev_f32` reverses its operands.
 #[test]
 fn subtract_and_reverse_subtract_are_not_the_same() {
-    // `v_subrev_f32` reverses its operands - the name says so and the encoding does not.
-    // Read in written order it computes b - a where a - b was meant, and the two agree
-    // exactly when the operands are equal. So both are asserted, with operands that are
-    // not equal.
+    // The name says so and the encoding does not; the two agree only on equal operands.
     if !device_or_skip("subtract_and_reverse_subtract_are_not_the_same") {
         return;
     }
@@ -2006,16 +1865,12 @@ fn subtract_and_reverse_subtract_are_not_the_same() {
     );
 }
 
+/// Source negate and absolute apply, absolute before negate.
 #[test]
 fn source_modifiers_apply_and_apply_in_order() {
-    // The single most likely way this crate could be quietly wrong at scale. A negate
-    // flag is one bit that neither the operand layout nor the encoding table describes,
-    // and every subtraction a compiler expressed as an addition of a negated operand
-    // depends on it.
-    //
-    // Three assertions, because each isolates something the others cannot: negate alone
-    // on a positive source, absolute alone on a negative source, and both together where
-    // the order decides the answer.
+    // A negate flag is one bit neither the operand layout nor the encoding table
+    // describes. Three cases: negate alone, absolute alone, and both, where the order
+    // decides the answer.
     if !device_or_skip("source_modifiers_apply_and_apply_in_order") {
         return;
     }
@@ -2046,10 +1901,8 @@ fn source_modifiers_apply_and_apply_in_order() {
 
     // v0 = -2.0; v_add_f32_e64 v1, -|v0|, 1.0.
     //
-    // Absolute first, then negate: the absolute of -2.0 is 2.0, negated is -2.0, plus
-    // 1.0 is -1.0. The other order: -2.0 negated is 2.0, absolute is 2.0, plus 1.0 is
-    // 3.0. Both flags are known to work individually from the two cases above, so this
-    // one pins the order and nothing else.
+    // Absolute first, then negate: |-2.0| = 2.0, negated -2.0, plus 1.0 is -1.0. The other
+    // order gives 3.0.
     let mut program = vec![v_mov_code(0, F_MINUS_2)];
     program.extend(vop3(
         "v_add_f32_e64",
@@ -2071,13 +1924,11 @@ fn source_modifiers_apply_and_apply_in_order() {
     );
 }
 
+/// The clamp flag and the output multiplier are refused by name at compute defaults.
 #[test]
 fn a_modifier_that_is_not_translated_is_refused() {
-    // The clamp flag and the output multiplier both change the result. Ignoring one
-    // produces a shader computing something close to right, which is harder to find than
-    // one that refuses - so both are errors naming what they are.
-    //
-    // Needs no device.
+    // Both change the result; ignoring either computes something close to right. Needs no
+    // device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
 
@@ -2102,7 +1953,7 @@ fn a_modifier_that_is_not_translated_is_refused() {
 }
 
 /// Runs a program through the wavefront model with a `DX10_CLAMP` mode given, as a stage's
-/// `RSRC1` gives it (worklog 834).
+/// `RSRC1` gives it.
 fn run_with_dx10_clamp(dx10_clamp: bool, words: &[u32]) -> Vec<u32> {
     use orbistoun_translate::wavefront::{MeshPrimitive, Stage, UserData, Window};
     let table = EncodingTable::builtin().expect("encodings");
@@ -2129,11 +1980,11 @@ fn run_with_dx10_clamp(dx10_clamp: bool, words: &[u32]) -> Vec<u32> {
         .observed
 }
 
+/// The output clamp holds a float result to `[0, 1]`, with NaN handling set by `DX10_CLAMP`.
 #[test]
 fn the_output_clamp_holds_a_float_result_to_the_unit_range() {
-    // `clamp(x, 0.0, 1.0)` folded into the instruction producing `x` - Neverball's pixel shaders
-    // carry it (worklog 834). Above one comes back one, below zero comes back zero, inside is
-    // untouched; and a NaN is zero under DX10_CLAMP and passes through without it.
+    // `clamp(x, 0.0, 1.0)` folded into the instruction producing `x`. A NaN becomes zero
+    // under DX10_CLAMP and passes through without it.
     const CLAMP: u32 = 1 << 15;
     if !device_or_skip("the_output_clamp_holds_a_float_result_to_the_unit_range") {
         return;
@@ -2171,10 +2022,11 @@ fn the_output_clamp_holds_a_float_result_to_the_unit_range() {
     );
 }
 
+/// A clamp on a result it does not clamp, such as a select, is refused.
 #[test]
 fn a_clamp_on_a_result_it_does_not_clamp_is_refused() {
-    // The clamp is applied only to a 32-bit float arithmetic result. On a per-lane select (and on an
-    // integer, where the bit saturates) it is refused by name, even with the stage's mode known.
+    // The clamp applies only to a 32-bit float arithmetic result; elsewhere it is refused
+    // by name even with the stage's mode known.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     // v_cndmask_b32_e64 v1, v0, 1.0, vcc - vcc is scalar code 106.
@@ -2206,6 +2058,7 @@ fn a_clamp_on_a_result_it_does_not_clamp_is_refused() {
     assert!(error.to_string().contains("does not clamp"), "got: {error}");
 }
 
+/// `v_fma_f32` computes the product plus the addend.
 #[test]
 fn a_fused_multiply_add_computes_the_product_plus_the_addend() {
     if !device_or_skip("a_fused_multiply_add_computes_the_product_plus_the_addend") {
@@ -2231,6 +2084,7 @@ fn a_fused_multiply_add_computes_the_product_plus_the_addend() {
     );
 }
 
+/// `v_rcp_f32` divides into one.
 #[test]
 fn a_reciprocal_divides_into_one() {
     if !device_or_skip("a_reciprocal_divides_into_one") {
@@ -2246,11 +2100,10 @@ fn a_reciprocal_divides_into_one() {
     );
 }
 
+/// A conditional move picks the second source when the bit is set.
 #[test]
 fn a_conditional_move_picks_the_second_source_when_the_bit_is_set() {
-    // A set bit picks the *second* source. The other way round takes the wrong branch of
-    // every ternary a compiler wrote, and the shader runs either way - so both
-    // directions are asserted rather than one.
+    // Both directions are asserted: the reverse takes the wrong side of every ternary.
     if !device_or_skip("a_conditional_move_picks_the_second_source_when_the_bit_is_set") {
         return;
     }
@@ -2290,20 +2143,17 @@ fn sop2(name: &str, dst: u32, first_code: u32, second_code: u32) -> u32 {
     head(name) | (dst << 16) | (second_code << 8) | first_code
 }
 
+/// 64-bit logic writes the condition code: whether its result is non-zero.
 #[test]
 fn sixty_four_bit_logic_writes_the_condition_code() {
-    // The gap this unit was written to close. These instructions set the code to whether
-    // their result is non-zero, and translating only the destination left a shader
-    // branching on whatever the *previous* compare had put there.
-    //
-    // `s_and_b64 exec, exec, vcc` then a branch on the code is how a compiler skips a
-    // block once no lane survives, so this is not an obscure corner.
+    // `s_and_b64 exec, exec, vcc` then a branch on the code is how a compiler skips a block
+    // once no lane survives.
     if !device_or_skip("sixty_four_bit_logic_writes_the_condition_code") {
         return;
     }
 
-    // Set the code with a compare that is true, then and two masks to zero. If the and
-    // does not write the code, it stays set from the compare and the branch is taken.
+    // Set the code with a true compare, then and two zero masks; if the and does not write
+    // the code the branch is taken.
     //
     //   s_mov_b32 s0, 5
     //   s_cmp_lt_i32 s0, 64      ; true, so the code is set
@@ -2334,11 +2184,11 @@ fn sixty_four_bit_logic_writes_the_condition_code() {
     );
 }
 
+/// `s_movk_i32` sign-extends its immediate.
 #[test]
 fn a_compact_move_sign_extends_its_immediate() {
-    // The immediate is signed and the reference prints it unsigned, so the decoder
-    // reports the field as encoded and the sign extension happens in translation. A
-    // shader loading -2 would otherwise get 65534, which is a plausible number.
+    // The decoder reports the field as encoded (the reference prints it unsigned), so the
+    // sign extension happens in translation; -2 would otherwise be 65534.
     if !device_or_skip("a_compact_move_sign_extends_its_immediate") {
         return;
     }
@@ -2361,11 +2211,9 @@ fn a_compact_move_sign_extends_its_immediate() {
     );
 }
 
+/// `s_addk_i32` and `s_mulk_i32` accumulate into their destination.
 #[test]
 fn the_accumulating_compact_forms_read_their_destination() {
-    // `s_addk_i32` and `s_mulk_i32` accumulate rather than assign. Treating either as a
-    // plain move gives a shader computing from whatever happened to be in the register,
-    // and the answer looks like a number either way.
     if !device_or_skip("the_accumulating_compact_forms_read_their_destination") {
         return;
     }
@@ -2390,11 +2238,10 @@ fn the_accumulating_compact_forms_read_their_destination() {
     );
 }
 
+/// 32-bit scalar logic sets the condition code to whether its result is non-zero.
 #[test]
 fn scalar_logic_sets_the_condition_code_from_its_result() {
-    // The 32-bit logical operations set the code to whether the result is non-zero. Two
-    // cases, because a translation that always set it or always cleared it would pass
-    // one of them.
+    // Two cases, so always-set and always-clear translations each fail one.
     if !device_or_skip("scalar_logic_sets_the_condition_code_from_its_result") {
         return;
     }
@@ -2420,12 +2267,9 @@ fn scalar_logic_sets_the_condition_code_from_its_result() {
     }
 }
 
+/// Scalar addition sets the condition code on signed overflow, not on a non-zero result.
 #[test]
 fn scalar_addition_sets_the_condition_code_on_signed_overflow() {
-    // The arithmetic forms set the code on *signed* overflow, not on whether the result
-    // is non-zero - the one place this family is not uniform. A translation that used
-    // the non-zero rule here would agree whenever the sum happened to be zero and at no
-    // other time.
     if !device_or_skip("scalar_addition_sets_the_condition_code_on_signed_overflow") {
         return;
     }
@@ -2456,8 +2300,8 @@ fn scalar_addition_sets_the_condition_code_on_signed_overflow() {
 
 /// A long-form instruction of the sub-encoding with a scalar destination.
 ///
-/// The scalar destination sits at bits 8 to 14 of the first word - the same bits the
-/// other sub-encoding uses for absolute-value flags.
+/// The scalar destination sits at bits 8 to 14 of the first word, the bits the other
+/// sub-encoding uses for absolute-value flags.
 fn vop3b(name: &str, vdst: u32, sdst: u32, sources: [u32; 3]) -> [u32; 2] {
     [
         head(name) | (sdst << 8) | vdst,
@@ -2468,11 +2312,11 @@ fn vop3b(name: &str, vdst: u32, sdst: u32, sources: [u32; 3]) -> [u32; 2] {
 /// The operand code for the condition mask.
 const VCC_CODE: u32 = 106;
 
+/// A carry out reaches the condition mask, set and clear.
 #[test]
 fn carry_out_reaches_the_condition_mask() {
-    // Sixty-four-bit address arithmetic is built out of these, so a dropped carry gives
-    // addresses that are right below four gigabytes and wrong above. Two cases, because
-    // a translation that always set the carry or never set it would pass one of them.
+    // 64-bit address arithmetic is built from these; a dropped carry breaks addresses
+    // above four gigabytes.
     if !device_or_skip("carry_out_reaches_the_condition_mask") {
         return;
     }
@@ -2525,24 +2369,17 @@ fn carry_out_reaches_the_condition_mask() {
     );
 }
 
+/// A scalar destination in bits 8 to 14 is not read as absolute-value flags.
 #[test]
 fn a_scalar_destination_is_not_read_as_absolute_value_flags() {
-    // The trap this unit was written around. The two long-form sub-encodings put
-    // different things in bits 8 to 14 of the first word: one has per-source
-    // absolute-value flags there, the other a second destination. Reading them without
-    // knowing which is which turns a carry-out register into a set of modifiers.
-    //
-    // `vcc` is 106, or 1101010 - so its low three bits claim "the second source is an
-    // absolute value". Here the second source is negative, and an absolute value applied
-    // to it would change the answer, so a translation that misread the encoding produces
-    // a different number rather than the same one.
+    // `vcc` is 106 (1101010), whose low bits would claim "the second source is absolute".
+    // The second source here is negative, so a misread changes the answer.
     if !device_or_skip("a_scalar_destination_is_not_read_as_absolute_value_flags") {
         return;
     }
 
-    // v0 = 2, v1 = 0xFFFFFFFF. 2 + 0xFFFFFFFF wraps to 1 and carries. If bit 9 of the
-    // first word were read as "absolute value on the second source", the second source
-    // would become 0x7FFFFFFF and the sum would be 0x80000001 with no carry.
+    // v0 = 2, v1 = 0xFFFFFFFF: the sum wraps to 1 and carries. Misread as an absolute flag,
+    // the second source would be 0x7FFFFFFF and the sum 0x80000001 with no carry.
     let mut program = vec![v_mov_inline(0, 2), v_mov_code(1, 193)];
     program.extend(vop3b(
         "v_add_co_u32",
@@ -2564,6 +2401,7 @@ fn a_scalar_destination_is_not_read_as_absolute_value_flags() {
     );
 }
 
+/// `v_sub_co_u32` reports a borrow.
 #[test]
 fn subtraction_reports_a_borrow() {
     if !device_or_skip("subtraction_reports_a_borrow") {
@@ -2594,24 +2432,21 @@ fn subtraction_reports_a_borrow() {
     );
 }
 
+/// The carry-in form adds the incoming carry.
 #[test]
 fn the_carry_in_form_adds_the_carry() {
-    // Two additions and two carry tests. A single test would miss the case where the
-    // first add did not carry and adding the carry-in did - which is exactly what this
-    // asserts.
+    // The carry must come from adding the carry-in, not from the first addition.
     if !device_or_skip("the_carry_in_form_adds_the_carry") {
         return;
     }
 
-    // Set the mask to all ones so every lane has a carry in, then add 0xFFFFFFFE + 1
-    // with that carry: 0xFFFFFFFE + 1 = 0xFFFFFFFF (no carry), + 1 = 0 (carry).
+    // Every lane has a carry in: 0xFFFFFFFF + 0 + 1 wraps to zero and carries.
     let mut program = vec![
         s_mov_exec(193),
         s_mov_b64(VCC_CODE, 193),
         v_mov_code(0, 193),
         v_mov_inline(1, 1),
     ];
-    // v0 = 0xFFFFFFFF, so use 0xFFFFFFFF + 0 + carry to reach the wrap.
     program.extend(vop3b(
         "v_add_co_ci_u32_e64",
         2,
@@ -2638,19 +2473,12 @@ fn the_carry_in_form_adds_the_carry() {
     );
 }
 
+/// All three steps of the division sequence are supported and none is blocked.
 #[test]
 fn the_division_sequence_is_translated_in_full() {
-    // All three steps are translated now. The reference for this generation states each
-    // in full, and what it leaves undefined - `Quiet`, `underflow`, `overflow`, and the
-    // NaN the pre-scale emits - is IEEE-754 or unobservable downstream.
-    //
-    // The pre-scale was blocked longest, and not for the reason anyone expected: two of
-    // its branches ask whether a quotient is subnormal, which looked like it needed the
-    // host to preserve subnormals. The device this runs on does not support preserving
-    // them at all. It turned out not to matter - see `exponent_is_zero` - and this test
-    // exists so nothing quietly re-blocks it on the old reasoning.
-    //
-    // Needs no device.
+    // The reference states each step in full; what it leaves undefined is IEEE-754 or
+    // unobservable. The pre-scale's subnormal tests need no subnormal support on the host
+    // (see `exponent_is_zero`). Needs no device.
     use orbistoun_translate::model::{blocked, supports};
 
     for step in ["v_div_scale_f32", "v_div_fixup_f32", "v_div_fmas_f32"] {
@@ -2665,10 +2493,7 @@ fn the_division_sequence_is_translated_in_full() {
 
 /// The condition mask's low half with every lane set.
 ///
-/// These programs give every lane the same operands, so every lane reaches the same
-/// branch and sets its own bit - the mask comes back as all ones rather than as one.
-/// Asserting on `1` would have been asserting that the other sixty-three lanes did not
-/// run, which is a different claim entirely and a false one.
+/// Every lane has the same operands and sets its own bit, so the mask is all ones.
 const ALL_LANES: u32 = u32::MAX;
 
 /// Exponent field `e`, mantissa zero: the float two to the power `e - 127`.
@@ -2678,10 +2503,8 @@ const fn power_of_two(exponent: u32) -> u32 {
 
 /// `v_div_scale_f32 vDst, vcc, vS0, vDenominator, vNumerator`, run on lane zero.
 ///
-/// Returns the scaled value and the condition mask, because the instruction produces
-/// both and a test that checked only the value would miss a flag that never gets set -
-/// which would leave `v_div_fmas_f32` never scaling and the division quietly wrong only
-/// for the operands that needed scaling.
+/// Returns the scaled value and the condition mask: an unset flag would leave
+/// `v_div_fmas_f32` never scaling.
 fn run_scale(scaled: u32, denominator: u32, numerator: u32) -> (u32, u32) {
     let mut program = [
         v_mov_literal(1, scaled),
@@ -2702,11 +2525,9 @@ fn run_scale(scaled: u32, denominator: u32, numerator: u32) -> (u32, u32) {
     (vector(&registers, 0), scalar(&registers, 0))
 }
 
+/// The division pre-scale leaves an ordinary division alone and unflagged.
 #[test]
 fn the_division_pre_scale_leaves_an_ordinary_division_alone() {
-    // The branch every ordinary division takes: none of them. One over two needs no
-    // scaling, so the operand passes through and the flag stays clear - and if it did
-    // not, every division in a shader would be scaled and then unscaled for nothing.
     if !device_or_skip("the_division_pre_scale_leaves_an_ordinary_division_alone") {
         return;
     }
@@ -2723,29 +2544,18 @@ fn the_division_pre_scale_leaves_an_ordinary_division_alone() {
     );
 }
 
-/// **A flag written to `null` is not written, and the value still is.**
+/// A flag written to `null` is not written, and the value still is.
 ///
-/// # What this is about
-///
-/// A shader that needs the scaled operand and not the flag says so: it names `null` where the
-/// flag destination goes. That is the architecture's "nothing here" - the same name a flat
-/// access uses to say it has no base register - and it is a shader asking for *less*, not for
-/// something unsupported.
-///
-/// It was refused, which is how the `arith` fixture came to be one of three shaders translating
-/// at no stage while every instruction in the corpus was supported (worklog 579).
-///
-/// The two halves both matter. Translating it is the fix; the value still arriving is what says
-/// the fix dropped only the write and not the arithmetic that feeds it.
+/// `null` in the flag destination is the architecture's "nothing here", a shader asking
+/// for less. The value arriving shows only the write was dropped, not the arithmetic.
 #[test]
 fn a_pre_scale_flag_written_nowhere_is_dropped_and_the_value_is_not() {
     if !device_or_skip("a_pre_scale_flag_written_nowhere_is_dropped_and_the_value_is_not") {
         return;
     }
 
-    // The wide-spread branch, which is one of the two that sets the flag - so a translation
-    // that dropped the whole instruction rather than just the write would show up here as an
-    // unscaled value rather than as a missing flag nobody looks at.
+    // The wide-spread branch sets the flag, so dropping the whole instruction would show as
+    // an unscaled value.
     let wide = power_of_two(250);
     let mut program = [
         v_mov_literal(1, wide),
@@ -2759,8 +2569,7 @@ fn a_pre_scale_flag_written_nowhere_is_dropped_and_the_value_is_not() {
         FLAT_NO_BASE_CODE,
         [vgpr_code(1), vgpr_code(2), vgpr_code(3)],
     ));
-    // The condition mask, read back untouched: the instruction named no flag destination, so
-    // whatever was there before must still be there.
+    // The condition mask, read back untouched: the instruction named no flag destination.
     program.push(s_mov_b64(0, VCC_CODE));
     program.push(s_endpgm());
 
@@ -2782,11 +2591,11 @@ fn a_pre_scale_flag_written_nowhere_is_dropped_and_the_value_is_not() {
     );
 }
 
+/// The division pre-scale lifts a tiny numerator, with no flag.
 #[test]
 fn the_division_pre_scale_lifts_a_tiny_numerator() {
-    // The last branch: a numerator whose exponent is 23 or below is scaled up, with no
-    // flag - the reciprocal is what would have lost precision, and it is not the thing
-    // being scaled here.
+    // A numerator with exponent 23 or below is scaled up; the reciprocal is not what is
+    // scaled here, so nothing needs undoing.
     if !device_or_skip("the_division_pre_scale_lifts_a_tiny_numerator") {
         return;
     }
@@ -2801,12 +2610,10 @@ fn the_division_pre_scale_lifts_a_tiny_numerator() {
     assert_eq!(flag, 0, "scaling the numerator alone needs no undoing");
 }
 
+/// The division pre-scale flags a wide spread and scales only the operand handed in.
 #[test]
 fn the_division_pre_scale_flags_a_wide_spread_and_scales_only_its_own_operand() {
-    // The first branch that sets the flag, and the one that shows why the instruction
-    // takes the operand to scale separately from the two it inspects: the same condition
-    // scales the denominator and leaves the numerator alone, so which one moves depends
-    // on which was handed in.
+    // The same condition scales the denominator and leaves the numerator alone.
     if !device_or_skip("the_division_pre_scale_flags_a_wide_spread_and_scales_only_its_own_operand")
     {
         return;
@@ -2834,10 +2641,10 @@ fn the_division_pre_scale_flags_a_wide_spread_and_scales_only_its_own_operand() 
     assert_eq!(flag, ALL_LANES, "while still flagging the quotient");
 }
 
+/// The division pre-scale answers a zero operand with a NaN and no flag.
 #[test]
 fn the_division_pre_scale_answers_a_zero_operand_with_a_nan() {
-    // The first branch of all. A zero on either side has no quotient worth scaling, so
-    // the result is a NaN and the flag stays clear - the fixup replaces it afterwards.
+    // The fixup replaces the NaN afterwards.
     if !device_or_skip("the_division_pre_scale_answers_a_zero_operand_with_a_nan") {
         return;
     }
@@ -2850,12 +2657,8 @@ fn the_division_pre_scale_answers_a_zero_operand_with_a_nan() {
     assert_eq!(value, 0x7FC0_0000, "so does a zero numerator");
 }
 
-// ---- the division sequence -------------------------------------------------------
-//
-// Two of the three steps are translated, and both are pure numerics, so they are worth
-// executing rather than merely translating. A special-case table that emits valid SPIR-V
-// and produces the wrong bits for a division by zero is exactly the failure this layer
-// exists to catch.
+// The division sequence: pure numerics, executed rather than only translated, since a
+// special-case table can emit valid SPIR-V and wrong bits.
 
 /// Bit patterns the fixup is specified in terms of.
 const BITS_QUIET_NAN: u32 = 0xFFC0_0000;
@@ -2866,8 +2669,7 @@ const BITS_SIGNALLING_NAN: u32 = 0x7F80_0001;
 
 /// `v_div_fixup_f32 vDst, vQuotient, vDenominator, vNumerator`, run on lane zero.
 ///
-/// Loads the three operands into vector registers as raw bit patterns, so a test can
-/// name an infinity or a NaN directly rather than hoping an inline constant produces one.
+/// Loads the operands as raw bit patterns, so a test can name an infinity or a NaN.
 fn run_fixup(quotient: u32, denominator: u32, numerator: u32) -> u32 {
     let mut program = [
         v_mov_literal(1, quotient),
@@ -2894,12 +2696,11 @@ fn v_mov_literal(dst: u32, value: u32) -> [u32; 2] {
 /// The source code that means "a literal follows".
 const LITERAL_CODE: u32 = 255;
 
+/// The division fixup replaces 0/0 and inf/inf with the specified negative quiet NaN.
 #[test]
 fn the_division_fixup_replaces_the_indeterminate_forms() {
-    // Zero over zero and infinity over infinity are the two the reference gives a
-    // literal bit pattern for, and it is a *negative* quiet NaN - the sign is part of
-    // what it specifies, so asserting on the whole word rather than "is a NaN" is the
-    // point.
+    // The reference gives a literal bit pattern, sign included, so the whole word is
+    // asserted.
     if !device_or_skip("the_division_fixup_replaces_the_indeterminate_forms") {
         return;
     }
@@ -2917,12 +2718,9 @@ fn the_division_fixup_replaces_the_indeterminate_forms() {
     );
 }
 
+/// The division fixup gives zero and infinity the operands' signs.
 #[test]
 fn the_division_fixup_gives_zero_and_infinity_their_signs() {
-    // A division by zero is an infinity and a division of zero is a zero, and both carry
-    // the sign of the operands rather than the sign of whatever the reciprocal sequence
-    // computed. Getting this wrong renders a shader that is correct except for being
-    // inside out.
     if !device_or_skip("the_division_fixup_gives_zero_and_infinity_their_signs") {
         return;
     }
@@ -2947,11 +2745,9 @@ fn the_division_fixup_gives_zero_and_infinity_their_signs() {
     );
 }
 
+/// The division fixup quietens a NaN, and the numerator's wins over the denominator's.
 #[test]
 fn the_division_fixup_propagates_a_nan_quietly() {
-    // A signalling NaN in either operand comes out quiet, and the *numerator* wins when
-    // both are NaNs - which is the order the reference gives and the opposite of the
-    // order the conditions are written in here.
     if !device_or_skip("the_division_fixup_propagates_a_nan_quietly") {
         return;
     }
@@ -2976,10 +2772,10 @@ fn the_division_fixup_propagates_a_nan_quietly() {
     );
 }
 
+/// The division fixup keeps an ordinary quotient's magnitude and gives it the operands'
+/// sign.
 #[test]
 fn the_division_fixup_leaves_an_ordinary_quotient_alone() {
-    // The default branch, and the one that runs for every division that is not a special
-    // case at all. The magnitude is the quotient's; the sign is the operands'.
     if !device_or_skip("the_division_fixup_leaves_an_ordinary_quotient_alone") {
         return;
     }
@@ -3001,25 +2797,17 @@ fn the_division_fixup_leaves_an_ordinary_quotient_alone() {
     );
 }
 
+/// `v_div_fmas_f32` scales by two to the thirty-second only where the condition mask is set.
 #[test]
 fn the_division_multiply_add_scales_only_when_the_mask_says_so() {
-    // `v_div_fmas_f32` reads the condition mask *implicitly* - it is not one of its
-    // operands - and multiplies its result by two to the thirty-second where the mask
-    // is set. That is how the pre-scale earlier in the sequence gets undone.
-    //
-    // Both halves are checked in one program: lane zero has the mask bit set and lane
-    // one does not, so a translation that ignored the mask entirely would have to be
-    // wrong about one of them.
+    // It reads `vcc` implicitly; the scale undoes the pre-scale earlier in the sequence.
     if !device_or_skip("the_division_multiply_add_scales_only_when_the_mask_says_so") {
         return;
     }
 
-    // 2 * 1 + 1 = 3, which is exact, so the scaled result is exactly 3 * 2^32 and both
-    // answers can be asserted to the bit.
-    //
-    // The mask is written with `s_mov_b64`, because that is the instruction that writes
-    // a lane mask - `vcc` decodes as a named operand rather than a scalar register, so
-    // `s_mov_b32 vcc, ...` is refused, correctly.
+    // 2 * 1 + 1 = 3 is exact, so both answers are asserted to the bit. The mask is written
+    // with `s_mov_b64`: `vcc` decodes as a named operand, and `s_mov_b32 vcc, ...` is
+    // refused.
     let with_mask = |code: u32| {
         let mut program = vec![s_mov_b64(VCC_CODE, code)];
         program.extend(vop3("v_div_fmas_f32", 0, [F_2, F_1, F_1], 0, 0));
@@ -3044,20 +2832,13 @@ const INLINE_0: u32 = 128;
 const INLINE_1: u32 = 129;
 
 /// Three times two to the thirty-second: 1.5 * 2^33, so exponent 160 and the mantissa of
-/// 1.5. Written out rather than computed, so the test states its own expectation.
+/// 1.5. Written out, so the test states its own expectation.
 const BITS_3_SCALED: u32 = 0x5040_0000;
 
-// ---- thirty-two-lane shaders -----------------------------------------------------
-//
-// This generation runs a shader at either width, chosen when it is compiled, and the
-// encodings are identical either way. What differs is which mask instructions a shader
-// uses: a 32-lane shader's mask fits in one register, so it manipulates it with the
-// 32-bit scalar forms rather than the 64-bit ones.
-//
-// No capture contains one yet, so these are built the way the reference says a compiler
-// would build them. That is stated rather than hidden: what is verified here is that the
-// translator does the right thing *given* such a shader, not that this is what one looks
-// like in the wild.
+// Thirty-two-lane shaders. The width is chosen at compile time with identical encodings; a
+// 32-lane shader's mask fits in one register, so it uses the 32-bit scalar forms. These
+// programs are built as the reference describes, verifying the translator given such a
+// shader.
 
 /// Runs a program as a shader compiled for the given width.
 fn run_at_width(width: Width, words: &[u32]) -> Vec<u32> {
@@ -3079,20 +2860,13 @@ fn run_at_width(width: Width, words: &[u32]) -> Vec<u32> {
         .observed
 }
 
-/// A scalar register's own number is its operand code - the numbering starts there.
-///
 /// The operand code for `exec_lo`, the low half of the execution mask.
 const EXEC_LO_CODE: u32 = 126;
 
+/// A 32-lane shader clears its mask with `s_mov_b32 exec_lo, 0`, and the write after is
+/// suppressed.
 #[test]
 fn a_thirty_two_lane_shader_masks_with_the_thirty_two_bit_forms() {
-    // The whole of what makes a narrow shader different: it clears its execution mask
-    // with `s_mov_b32 exec_lo, 0` rather than `s_mov_b64 exec, 0`.
-    //
-    // Translated as an ordinary scalar move that lands in the register file, this shader
-    // would run with every lane active and the vector write would happen - so the
-    // assertion below fails loudly rather than subtly if the 32-bit form is not
-    // recognised as touching the mask.
     if !device_or_skip("a_thirty_two_lane_shader_masks_with_the_thirty_two_bit_forms") {
         return;
     }
@@ -3112,12 +2886,10 @@ fn a_thirty_two_lane_shader_masks_with_the_thirty_two_bit_forms() {
     );
 }
 
+/// A 32-lane shader narrows its mask with `s_and_b32 exec_lo`.
 #[test]
 fn a_thirty_two_lane_shader_narrows_its_mask_with_scalar_logic() {
-    // `s_and_b32 exec_lo, exec_lo, sN` is how a narrow shader keeps some lanes and drops
-    // the rest, and it is the form real control flow is built from. Keeping only lane
-    // zero means the observed register - which reads lane zero - still updates, while a
-    // mask of zero would stop it.
+    // Keeping only lane zero lets the observed register update; an empty mask stops it.
     if !device_or_skip("a_thirty_two_lane_shader_narrows_its_mask_with_scalar_logic") {
         return;
     }
@@ -3151,14 +2923,10 @@ fn a_thirty_two_lane_shader_narrows_its_mask_with_scalar_logic() {
     );
 }
 
+/// A shader with no mask traffic computes the same registers at either width.
 #[test]
 fn the_two_widths_are_the_same_shader_with_different_lane_counts() {
-    // A shader that touches no mask must produce the same observed registers at either
-    // width - the observation window reads lane zero, and lane zero does the same work
-    // whichever wavefront it is part of.
-    //
-    // The point is that width changes *how many lanes run*, not what any one of them
-    // computes. A translator that got that backwards would show up here.
+    // Width changes how many lanes run, not what lane zero computes.
     if !device_or_skip("the_two_widths_are_the_same_shader_with_different_lane_counts") {
         return;
     }
@@ -3176,13 +2944,12 @@ fn the_two_widths_are_the_same_shader_with_different_lane_counts() {
     );
 }
 
-// ---- subgroup fidelity -----------------------------------------------------------
+// Subgroup fidelity.
 
 /// Runs a program with the invocations of a subgroup as its lanes.
 ///
-/// Returns `None` when the device's subgroup is not as wide as the guest's wavefront,
-/// because the module the translator produced says which width it needs and running it on
-/// a device that does not match would be measuring the wrong thing.
+/// Returns `None` when the device's subgroup is not as wide as the guest wavefront, which
+/// the module states it needs.
 fn run_subgroup(width: Width, words: &[u32]) -> Option<Vec<u32>> {
     let table = encodings();
     let operands = OperandTable::builtin().expect("operands");
@@ -3219,13 +2986,11 @@ fn run_subgroup(width: Width, words: &[u32]) -> Option<Vec<u32>> {
     )
 }
 
+/// A subgroup-fidelity module loads and runs an unmasked write.
 #[test]
 fn subgroup_fidelity_produces_a_module_a_driver_accepts() {
-    // The first thing worth knowing about a new fidelity level: does the module load at
-    // all. It declares two capabilities, an input built-in and a group operation, any of
-    // which the driver will reject outright if they are malformed - which is a better
-    // failure than a wrong answer and the reason this test is separate from the one
-    // below.
+    // Its capabilities, built-in input and group operation are rejected outright by a
+    // driver if malformed.
     if !device_or_skip("subgroup_fidelity_produces_a_module_a_driver_accepts") {
         return;
     }
@@ -3237,15 +3002,10 @@ fn subgroup_fidelity_produces_a_module_a_driver_accepts() {
     assert_eq!(vector(&registers, 0), 5, "an unmasked write should land");
 }
 
+/// Subgroup fidelity honours a cleared mask through a ballot.
 #[test]
 fn subgroup_fidelity_masks_with_a_ballot() {
-    // What the level is *for*. The per-lane model refuses masks outright; this one
-    // materialises them from the subgroup, so a shader that clears its execution mask has
-    // to suppress the write that follows.
-    //
-    // A translation that ignored the mask would return 9 here, and one that read lane
-    // zero's bit for every invocation would still return 7 - so this distinguishes the
-    // level working from it merely not crashing.
+    // Ignoring the mask would return 9.
     if !device_or_skip("subgroup_fidelity_masks_with_a_ballot") {
         return;
     }
@@ -3266,13 +3026,10 @@ fn subgroup_fidelity_masks_with_a_ballot() {
     );
 }
 
+/// `v_fmac_f32` accumulates into its destination.
 #[test]
 fn the_accumulating_multiply_add_reads_its_own_destination() {
-    // `v_fmac_f32` is the short form of a fused multiply-add whose third operand is the
-    // destination: `D = S0 * S1 + D`. It is the only short-form instruction that reads
-    // the register it writes, so a translation that treated it like the others would
-    // compute `S0 * S1` and drop the accumulation - correct for a destination that
-    // happened to be zero, and wrong everywhere else.
+    // `D = S0 * S1 + D`: the one short-form instruction that reads the register it writes.
     if !device_or_skip("the_accumulating_multiply_add_reads_its_own_destination") {
         return;
     }
@@ -3294,20 +3051,15 @@ fn the_accumulating_multiply_add_reads_its_own_destination() {
     );
 }
 
-// ---- untyped buffer access -------------------------------------------------------
-//
-// A buffer access addresses memory through a resource constant held in four scalar
-// registers, so the descriptor has to be built in the shader before the access runs.
-// These build it with literal moves, which is exactly how the reference says a shader may
-// do it: "these constants are fetched from memory using scalar memory reads prior to
+// Untyped buffer access. A buffer access addresses memory through a resource constant in
+// four scalar registers, built here with literal moves; the reference allows constants
+// "generated within the shader".
 // executing VM instructions, but these constants also can be generated within the shader."
 
 /// `buffer_load_dword` / `buffer_store_dword` with the address modifiers in bits 12-13.
 ///
-/// `vaddr` is a **plain vector register number**, not a code in the shared source
-/// numbering. Passing `vgpr_code(0)` here puts 256 into an eight-bit field, whose spare
-/// bit lands in the data field next door - which quietly moved a load's destination from
-/// v2 to v3 and looked like the load returning zero.
+/// `vaddr` is a plain vector register number, not a code in the shared source numbering:
+/// 256 in the eight-bit field spills into the data field next door.
 fn mubuf(
     name: &str,
     data: u32,
@@ -3383,39 +3135,24 @@ fn mtbuf(
     ]
 }
 
-/// `BUF_FMT_32_FLOAT`, measured rather than looked up - see D203.
+/// `BUF_FMT_32_FLOAT`, measured from the reference assembler (D097).
 const FMT_32_FLOAT: u32 = 22;
 /// `BUF_FMT_32_32_32_32_FLOAT`.
 const FMT_32X4_FLOAT: u32 = 77;
-/// `BUF_FMT_10_11_11_FLOAT`: three packed floats that are **not IEEE halves**, so widening one
-/// is a conversion nothing here has measured.
-///
-/// Refused for a reason no amount of plumbing retires - the decode is unknown, not merely
-/// unwritten - and **it had no test until a three-channel typed load became decodable**, which
-/// needed the mnemonic measured (worklog 588). Three components cannot be asked for through a
-/// one-, two- or four-channel instruction, so until then the refusal was unreachable.
+/// `BUF_FMT_10_11_11_FLOAT`: three packed floats that are not IEEE halves.
 const FMT_10_11_11_FLOAT: u32 = 36;
 
-/// `BUF_FMT_8_8_8_8_UNORM`: four normalised bytes in one word, which **loads** now translate.
-///
-/// Used by the store-side refusal, where packed formats are still refused entirely.
+/// `BUF_FMT_8_8_8_8_UNORM`: four normalised bytes in one word. Loads translate; the store
+/// is refused.
 const FMT_8X4_UNORM_PACKED: u32 = 56;
 
+/// A typed store to a packed format with unmeasured store rules is refused by name.
 #[test]
 fn a_typed_buffer_format_needing_conversion_is_refused_by_name() {
-    // The gate that matters more than the feature: **packing a value back down is not
-    // unpacking it backwards.** A store has to choose a rounding, saturate what will not fit,
-    // and decide what happens to bits the components do not cover.
-    //
-    // For the packed 10/11-bit floats those rules are now measured (obSCEne `REQ-...2f7a`,
-    // `REQ-...9f1c`) and their store is translated. For every *other* packed format - the
-    // integers, the normalised bytes here - the store rules are still unmeasured, so the store
-    // stays refused, and this holds that refusal on an `8_8_8_8_UNORM`. It needs no device: the
-    // refusal happens during translation, before anything is submitted.
-    //
-    // **This test has moved off each format as the store or load path grew to translate it**,
-    // which is the point - a refusal test naming something no longer refused passes while
-    // guarding nothing.
+    // Packing a value down is not unpacking it backwards: a store chooses a rounding,
+    // saturates, and decides the uncovered bits. The 10/11-bit float stores are measured
+    // and translated; the other packed formats, such as `8_8_8_8_UNORM`, are refused. Needs
+    // no device.
     let mut program = describe_buffer(4, 256);
     program.extend(mtbuf(
         "tbuffer_store_format_xyzw",
@@ -3441,14 +3178,11 @@ fn a_typed_buffer_format_needing_conversion_is_refused_by_name() {
     );
 }
 
-/// The six words obSCEne loaded through `BUF_FMT_10_11_11_FLOAT`, and the three floats each
-/// produced, as raw bit patterns.
+/// The six words obSCEne loaded through `BUF_FMT_10_11_11_FLOAT` on hardware, and the three
+/// floats each produced, as raw bit patterns (obSCEne's `typed-buffer-formats` check).
 ///
-/// Measured on the device, not derived: `REQ-...b3d4`, sweep `20260916-223136`,
-/// `166-agc/typed-buffer-formats`, with `rc-submit 0x0` and `fence-hit 0x1` on the submission
-/// that produced them. The words were chosen to hit the edges - all zero, all ones, the lowest
-/// bit of each field, the highest, a midpoint, and one arbitrary - because the two edges are
-/// where a packed float stops resembling an IEEE one.
+/// The words hit the edges (all zero, all ones, each field's lowest and highest bit, a
+/// midpoint) where a packed float stops resembling an IEEE one.
 const MEASURED_10_11_11: [(u32, [u32; 3]); 6] = [
     (0x0000_0000, [0x0000_0000, 0x0000_0000, 0x0000_0000]),
     (0xffff_ffff, [0x7ffe_0000, 0x7ffe_0000, 0x7ffc_0000]),
@@ -3460,10 +3194,8 @@ const MEASURED_10_11_11: [(u32, [u32; 3]); 6] = [
 
 /// The same six words through `BUF_FMT_11_11_10_FLOAT`, from the same submission.
 ///
-/// Worth having both rather than one: here `x` is the **ten**-bit channel where in
-/// `10_11_11` it is an eleven-bit one. So the two tables pin the width order from opposite
-/// directions, and a translator that walked `widths` the wrong way round could not satisfy both
-/// - which is the bug these measurements caught.
+/// Here `x` is the ten-bit channel where in `10_11_11` it is an eleven-bit one, so the two
+/// tables pin the width order from opposite directions.
 const MEASURED_11_11_10: [(u32, [u32; 3]); 6] = [
     (0x0000_0000, [0x0000_0000, 0x0000_0000, 0x0000_0000]),
     (0xffff_ffff, [0x7ffc_0000, 0x7ffe_0000, 0x7ffe_0000]),
@@ -3482,23 +3214,13 @@ const FMT_10_10_10_2_UINT: u32 = 48;
 /// `BUF_FMT_2_10_10_10_UINT`, measured (code 54).
 const FMT_2_10_10_10_UINT: u32 = 54;
 
+/// `2_10_10_10` and `10_10_10_2` unpack the same word from opposite ends.
 #[test]
 fn the_two_ten_bit_families_unpack_from_opposite_ends() {
-    // **The width-order bug reached twenty-six formats and the float pair is only two of them.**
-    //
-    // `widths` is listed highest bits first, so the *last* entry is the component at bit 0. The
-    // translator walked it forwards until 2026-09-16, which mirrors the packing - invisible on
-    // the many formats whose widths are equal, wrong on the twenty-six that are not: seven each
-    // of `[11, 11, 10]` and `[10, 11, 11]`, six each of `[2, 10, 10, 10]` and `[10, 10, 10, 2]`.
-    // Worklog 650 caught it through the floats and fixed it for all of them. This covers the
-    // other half, which nothing else touches.
-    //
-    // `UINT` is the right kind to do it with: it is exact bit extraction with no conversion
-    // rule, so the expected values follow from the field positions alone and are not a claim
-    // about hardware behaviour that would need measuring. The two formats are the same four
-    // widths in opposite orders, so **one word decodes differently through each** - `x` is the
-    // two-bit channel in one and a ten-bit channel in the other. A mirrored walk swaps the two
-    // answers, so it cannot satisfy both.
+    // `widths` is listed highest bits first, so the last entry is the component at bit 0.
+    // `UINT` is exact bit extraction, so the expected values follow from field positions.
+    // The two formats are the same widths in opposite orders, so a mirrored walk swaps
+    // their answers.
     const PACKED: u32 = 0xB55A_A923;
 
     if !device_or_skip("the_two_ten_bit_families_unpack_from_opposite_ends") {
@@ -3542,18 +3264,12 @@ fn the_two_ten_bit_families_unpack_from_opposite_ends() {
     }
 }
 
+/// The packed 10/11-bit floats decode to the bits hardware produced.
 #[test]
 fn a_packed_float_narrower_than_a_half_decodes_to_its_measured_bits() {
-    // `BUF_FMT_10_11_11_FLOAT` is three floats of eleven, eleven and ten bits, and they are
-    // **not IEEE halves**: no sign bit at all, a five-bit exponent biased by 15, the rest
-    // mantissa. This was refused until it was measured, because a wrong conversion here renders
-    // a plausible colour and fails nowhere.
-    //
-    // Asserted on **bits**, not on floats within an epsilon, for two reasons. The all-ones word
-    // produces NaN in every channel and NaN compares equal to nothing, so a float comparison
-    // would silently skip the row that pins the most surprising behaviour. And the two edges the
-    // measurement bought are exact bit placements - the Inf/NaN mantissa landing at the *top* of
-    // the single's field, and the subnormal scale - which an epsilon would hide.
+    // Three floats with no sign bit and a five-bit exponent biased by 15. Asserted on bits:
+    // the all-ones word gives NaN, and the Inf/NaN mantissa placement and subnormal scale
+    // are exact bit facts an epsilon would hide.
     if !device_or_skip("a_packed_float_narrower_than_a_half_decodes_to_its_measured_bits") {
         return;
     }
@@ -3586,18 +3302,9 @@ fn a_packed_float_narrower_than_a_half_decodes_to_its_measured_bits() {
         let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
         for (component, want) in expected.into_iter().enumerate() {
             let got = vector(&registers, 2 + component);
-            // **NaN payloads are compared structurally, everything else bit for bit.**
-            //
-            // Vulkan does not require a NaN's payload to survive arithmetic, so the exact
-            // mantissa the target produced is not something a host device is obliged to
-            // reproduce - and this one does not: it returns `0x7fde0000` where the target
-            // returned `0x7ffe0000`, one payload bit apart. Asserting the payload here would
-            // fail on a difference that is permitted and is not a translation bug.
-            //
-            // What is still asserted is everything that carries meaning: that it is a NaN at
-            // all rather than an infinity, a zero, or a finite number. The payload placement
-            // stays pinned where it matters - in the measured table above, which is what a
-            // target-side check would compare against.
+            // A NaN is compared structurally, everything else bit for bit. Vulkan does not
+            // require a NaN payload to survive, and a host device may return `0x7fde0000`
+            // where hardware gave `0x7ffe0000`; the measured table keeps the payload.
             let is_nan = |bits: u32| bits & 0x7f80_0000 == 0x7f80_0000 && bits & 0x007f_ffff != 0;
             if is_nan(want) {
                 assert!(
@@ -3627,27 +3334,22 @@ fn a_packed_float_narrower_than_a_half_decodes_to_its_measured_bits() {
 
 /// Five floats stored through `BUF_FMT_10_11_11_FLOAT` and the packed word each produced.
 ///
-/// Measured on the device (obSCEne `REQ-...2f7a` and `REQ-...9f1c`, sweeps `20260917-001421` and
-/// `20260917-043235`, `166-agc/typed-buffer-formats`). They pin the three rules a store must get
-/// right: `(1, 2, 4)` is exact, `100000` saturates to the largest *finite* value (not infinity), and
-/// `1.009375` - 0.6 of a mantissa step above 1.0 - truncates to `1.0` where round-to-nearest would
-/// have carried to the next step. The f32 bit patterns are the values obSCEne stored.
+/// Measured on hardware by obSCEne's `typed-buffer-formats` check. They pin the three rules a
+/// store must get right: `(1, 2, 4)` is exact, `100000` saturates to the largest finite value
+/// (not infinity), and `1.009375` (0.6 of a mantissa step above 1.0) truncates to `1.0` where
+/// round-to-nearest would carry. The f32 bit patterns are the values obSCEne stored.
 const MEASURED_10_11_11_STORE: [([u32; 3], u32); 3] = [
     ([0x3f80_0000, 0x4000_0000, 0x4080_0000], 0x8820_03c0), // (1.0, 2.0, 4.0), exact
     ([0x47c3_5000, 0x47c3_5000, 0x47c3_5000], 0xf7fd_ffbf), // (1e5 x3), saturate to max finite
     ([0x3f81_3333, 0x3f81_3333, 0x3f81_3333], 0x781e_03c0), // (1.009375 x3), truncate to 1.0
 ];
 
+/// A packed 10/11-bit float store clamps to `[0, max finite]` and truncates, matching
+/// hardware.
 #[test]
 fn a_packed_float_store_clamps_and_truncates_to_its_measured_bits() {
-    // The inverse of the load: pack a single-precision float into an eleven- or ten-bit packed
-    // float, which the hardware does by **clamp to [0, max finite], then truncate** (measured, not
-    // guessed). A wrong rounding or saturation here renders a plausible colour and fails nowhere,
-    // which is why the store was refused until `1.009375` settled the rounding as toward-zero.
-    //
-    // Each case stores three channels, then reads the packed word straight back with an untyped
-    // load and asserts its bits - so the whole path, pack and memory alike, is checked against what
-    // the device produced.
+    // Each case stores three channels, then reads the packed word back with an untyped load,
+    // so packing and memory are checked together.
     if !device_or_skip("a_packed_float_store_clamps_and_truncates_to_its_measured_bits") {
         return;
     }
@@ -3679,12 +3381,11 @@ fn a_packed_float_store_clamps_and_truncates_to_its_measured_bits() {
     }
 }
 
+/// A packed 10/11-bit float store translates to well-formed SPIR-V.
 #[test]
 fn a_packed_float_store_translates_to_well_formed_spirv() {
-    // No device: this checks the half of correctness a device is not needed for - that the packed
-    // float store now translates rather than being refused, and that what it emits is well formed
-    // (the SPIR-V module validates its own identifiers as it builds). The measured *values* are the
-    // device test above.
+    // Needs no device; the builder validates its own identifiers. The values are checked
+    // by the device test above.
     let mut program = describe_buffer(4, 256);
     program.push(v_mov_inline(0, 0));
     program.extend(v_mov_literal(2, 0x3f80_0000));
@@ -3705,11 +3406,10 @@ fn a_packed_float_store_translates_to_well_formed_spirv() {
         .expect("a packed 10/11-bit float store now translates");
 }
 
+/// A typed access whose format's component count disagrees with its channels is refused.
 #[test]
 fn a_typed_buffer_access_whose_format_disagrees_with_its_channels_is_refused() {
-    // The hardware allows this and what it does then - padding the missing channels, or
-    // discarding the extra - was never measured here. Guessing costs the ability to trust
-    // every shader that used one, so it is refused until somebody measures it.
+    // What the hardware does then (padding or discarding channels) is unmeasured.
     let mut program = describe_buffer(4, 256);
     program.extend(mtbuf(
         "tbuffer_load_format_x",
@@ -3727,11 +3427,10 @@ fn a_typed_buffer_access_whose_format_disagrees_with_its_channels_is_refused() {
     assert!(error.to_string().contains("disagree"), "{error}");
 }
 
+/// A reserved format code is refused rather than approximated.
 #[test]
 fn a_reserved_format_code_is_refused_rather_than_approximated() {
-    // Code 90 has no meaning: the reference has no name for it and prints it back as a
-    // bare number. A shader carrying one is wrong, and the nearest real format would
-    // render.
+    // Code 90 has no name in the reference; the nearest real format would render.
     let mut program = describe_buffer(4, 256);
     program.extend(mtbuf("tbuffer_load_format_x", 2, 0, 4, INLINE_0, 90, OFFEN));
     program.push(s_endpgm());
@@ -3741,10 +3440,10 @@ fn a_reserved_format_code_is_refused_rather_than_approximated() {
     assert!(error.to_string().contains("no meaning"), "{error}");
 }
 
+/// A four-channel typed access moves four consecutive words into consecutive registers.
 #[test]
 fn a_four_channel_typed_access_moves_four_consecutive_words() {
-    // What a multi-channel access actually adds: consecutive dwords at consecutive
-    // addresses, in consecutive registers. Stored from v1..v4 and read back into v5..v8.
+    // Stored from v1..v4 and read back into v5..v8.
     if !device_or_skip("a_four_channel_typed_access_moves_four_consecutive_words") {
         return;
     }
@@ -3774,12 +3473,9 @@ fn a_four_channel_typed_access_moves_four_consecutive_words() {
     ));
     program.push(s_endpgm());
 
-    // The load's destination overlaps the store's last source, which is deliberate: only
-    // v0 to v7 are copied out, so four sources and four destinations do not both fit
-    // below that line. The store runs first, so memory holds what was stored, and the
-    // comparison is against *memory* rather than against the source registers - which is
-    // the stronger check anyway. A translation that wrote every channel to the same
-    // address would pass a register-to-register comparison and fail this.
+    // The load's destination overlaps the store's last source, since only v0 to v7 are
+    // copied out. The store runs first, and the comparison is against memory, which a
+    // translation writing every channel to one address fails.
     let (registers, memory) = run_memory(Fidelity::Wavefront, &program);
     let stored: Vec<u32> = memory[..4].to_vec();
     assert_eq!(
@@ -3799,14 +3495,9 @@ fn a_four_channel_typed_access_moves_four_consecutive_words() {
     }
 }
 
+/// `buffer_store_dwordx4` and `buffer_load_dwordx4` move four distinct consecutive words.
 #[test]
 fn a_four_word_untyped_access_moves_four_consecutive_words() {
-    // The untyped twin of the test above: `buffer_store_dwordx4` / `buffer_load_dwordx4` move
-    // four consecutive dwords with no format at all, which is what the multi-word untyped forms
-    // add over `buffer_store_dword` (worklog 614). The census proves they decode; this proves
-    // the translation moves four different words to four consecutive addresses and back into
-    // four consecutive registers, rather than the same word four times - the failure a
-    // per-name count of 1 would produce.
     if !device_or_skip("a_four_word_untyped_access_moves_four_consecutive_words") {
         return;
     }
@@ -3820,9 +3511,8 @@ fn a_four_word_untyped_access_moves_four_consecutive_words() {
     program.extend(mubuf("buffer_load_dwordx4", 4, 0, 4, INLINE_0, OFFEN));
     program.push(s_endpgm());
 
-    // As with the typed test, the load's destinations overlap the store's last source and the
-    // comparison is against memory, so a translation that collapsed the four words onto one
-    // address fails here rather than passing a register-to-register check.
+    // As with the typed test, the comparison is against memory, so collapsing the four
+    // words onto one address fails.
     let (registers, memory) = run_memory(Fidelity::Wavefront, &program);
     let stored: Vec<u32> = memory[..4].to_vec();
     assert_eq!(
@@ -3842,13 +3532,11 @@ fn a_four_word_untyped_access_moves_four_consecutive_words() {
     }
 }
 
+/// `BUF_FMT_8_8_8_8_UINT` extracts each byte into its own register, first component low.
 #[test]
 fn a_packed_uint_load_extracts_each_component_from_one_word() {
-    // The first narrow-component format translated: BUF_FMT_8_8_8_8_UINT, four eight-bit
-    // unsigned components packed into a single word. It needs no conversion - each component
-    // is an exact bit field - so a shift and a mask per component is the whole of it, and
-    // this checks each byte comes out in its own register, the first component in the low
-    // byte. A raw word is stored untyped (that path already works), then read back typed.
+    // An exact bit field per component: a shift and a mask. A raw word is stored untyped,
+    // then read back typed.
     /// Distinct bytes so a wrong shift or mask cannot pass: `x=1, y=2, z=3, w=4`.
     const PACKED: u32 = 0x0403_0201;
     /// `BUF_FMT_8_8_8_8_UINT`, measured (code 60).
@@ -3883,13 +3571,11 @@ fn a_packed_uint_load_extracts_each_component_from_one_word() {
     }
 }
 
+/// `BUF_FMT_8_8_8_8_SINT` sign-extends each component.
 #[test]
 fn a_packed_sint_load_sign_extends_each_component() {
-    // SINT adds sign extension to the packed integer load: a component whose high bit is set
-    // is negative and must fill the register's high bits with ones, not zeroes. The bytes
-    // 0x80, 0x01, 0x7f, 0x81 are -128, 1, 127, -127; each must read back as its full
-    // sign-extended word. A logical shift (the UINT path) would give 0x80/0x81 unchanged and
-    // fail.
+    // The bytes 0x80, 0x01, 0x7f, 0x81 are -128, 1, 127, -127; a logical shift would leave
+    // 0x80 and 0x81 unextended.
     /// Distinct signed bytes, mixing both signs: `x=-128, y=1, z=127, w=-127`.
     const PACKED: u32 = 0x817F_0180;
     /// `BUF_FMT_8_8_8_8_SINT`, measured (code 61).
@@ -3925,14 +3611,12 @@ fn a_packed_sint_load_sign_extends_each_component() {
     }
 }
 
+/// `BUF_FMT_8_8_8_8_UNORM` normalises each byte to `byte / 255`.
 #[test]
 fn a_packed_unorm_load_normalises_each_component() {
-    // UNORM is the first converting kind: each unsigned byte becomes its value divided by 255,
-    // the byte's maximum, landing in 0.0..=1.0. Only 0 and 255 are exactly representable results
-    // for an 8-bit field (255 is odd, so k/255 is dyadic only at the ends), so the bytes are
-    // 0x00, 0xff, 0xff, 0x00 -> 0.0, 1.0, 1.0, 0.0, asserted against the float bits with no
-    // epsilon. This still exercises the whole mechanism: a bitcast in place of the integer->float
-    // convert, or a missing divide, would land nowhere near 1.0.
+    // Only 0 and 255 give exactly representable results, so the bytes are 0x00, 0xff,
+    // 0xff, 0x00, asserted as float bits. A bitcast or a missing divide lands nowhere near
+    // 1.0.
     /// Bytes `x=0, y=255, z=255, w=0`, low byte first.
     const PACKED: u32 = 0x00FF_FF00;
     /// `BUF_FMT_8_8_8_8_UNORM`, measured (code 56).
@@ -3968,14 +3652,11 @@ fn a_packed_unorm_load_normalises_each_component() {
     }
 }
 
+/// `BUF_FMT_8_8_8_8_SNORM` normalises to `byte / 127`, clamped at -1.0.
 #[test]
 fn a_packed_snorm_load_normalises_each_component() {
-    // SNORM is UNORM's signed twin, and the first kind that clamps: each signed byte becomes its
-    // value over 127 (the signed maximum, 2^7 - 1), spanning -1.0..=1.0. The most-negative byte
-    // -128 gives -128/127 = -1.0079, a hair past -1.0, which the reference pins at -1.0 - so it
-    // is clamped. The bytes 127, 0, -128, -127 give exactly 1.0, 0.0, -1.0 (by the clamp), -1.0
-    // (already, since -127/127 is exactly -1.0), asserted against the float bits with no epsilon.
-    // A missing clamp reads -128 as -1.0079 and fails on the third component.
+    // -128/127 is a hair past -1.0, which the reference clamps. The bytes 127, 0, -128, -127
+    // give exactly 1.0, 0.0, -1.0, -1.0; a missing clamp fails the third.
     const PACKED: u32 = 0x8180_007F;
     /// `BUF_FMT_8_8_8_8_SNORM`, measured (code 57).
     const FMT_8X4_SNORM: u32 = 57;
@@ -4010,14 +3691,10 @@ fn a_packed_snorm_load_normalises_each_component() {
     }
 }
 
+/// `BUF_FMT_16_16_FLOAT` widens each half to a single-precision float.
 #[test]
 fn a_packed_float16_load_widens_each_half() {
-    // FLOAT16 is the first kind that is a float in the buffer, not an integer normalised into
-    // one: each 16-bit half is widened to a single-precision float. Two halves share one word -
-    // 0x3C00 is 1.0 and 0xC000 is -2.0, both exact in both widths - packed low half first, so the
-    // word is 0xC0003C00 and the two registers must read back the float bits of 1.0 and -2.0. The
-    // widening is the driver's own (UConvert to u16, bitcast to half, FConvert to float), so this
-    // is a check that the plumbing carries an exact value through, no epsilon.
+    // 0x3C00 is 1.0 and 0xC000 is -2.0, exact in both widths, packed low half first.
     const PACKED: u32 = 0xC000_3C00;
     /// `BUF_FMT_16_16_FLOAT`, measured (code 29).
     const FMT_16X2_FLOAT: u32 = 29;
@@ -4052,12 +3729,10 @@ fn a_packed_float16_load_widens_each_half() {
     }
 }
 
+/// `BUF_FMT_8_8_8_8_USCALED` converts each byte to a float without dividing.
 #[test]
 fn a_packed_uscaled_load_converts_without_scaling() {
-    // USCALED is UNORM with the division removed: the byte's value as a float, not its value
-    // over 255. The bytes 0, 1, 128, 255 give 0.0, 1.0, 128.0, 255.0, all exact in a float, and
-    // every one of them is a value UNORM could not produce - so a conversion that kept the
-    // divide would fail on the second component rather than passing within an epsilon.
+    // 0, 1, 128, 255 give 0.0, 1.0, 128.0, 255.0; a kept divide fails the second.
     /// Bytes `x=0, y=1, z=128, w=255`, low byte first.
     const PACKED: u32 = 0xFF80_0100;
     /// `BUF_FMT_8_8_8_8_USCALED`, measured (code 58).
@@ -4093,15 +3768,11 @@ fn a_packed_uscaled_load_converts_without_scaling() {
     }
 }
 
+/// `BUF_FMT_8_8_8_8_SSCALED` keeps sign and magnitude, with no clamp.
 #[test]
 fn a_packed_sscaled_load_keeps_the_sign_and_the_magnitude() {
-    // SSCALED is SNORM with the division removed, and it is the pair where the two mistakes
-    // available are opposite: without the sign extension -128 reads as 128.0, and with the
-    // SNORM divide still in place it reads as -1.0. The bytes -128, -1, 1, 127 give
-    // -128.0, -1.0, 1.0, 127.0, so each component rules out one of them.
-    //
-    // There is also no clamp here, and there should not be: SNORM clamps because -128/127 falls
-    // a hair outside the range the format promises, and an unscaled value promises no range.
+    // Without sign extension -128 reads as 128.0; with the SNORM divide it reads as -1.0.
+    // An unscaled value promises no range, so nothing clamps.
     /// Bytes `x=-128, y=-1, z=1, w=127`, low byte first.
     const PACKED: u32 = 0x7F01_FF80;
     /// `BUF_FMT_8_8_8_8_SSCALED`, measured (code 59).
@@ -4137,16 +3808,12 @@ fn a_packed_sscaled_load_keeps_the_sign_and_the_magnitude() {
     }
 }
 
+/// A packed element spanning two words takes each component from the right word.
 #[test]
 fn a_packed_load_spanning_two_words_takes_each_component_from_the_right_one() {
-    // The first packed element wider than a word: `BUF_FMT_16_16_16_16_UINT`, four halves
-    // across two dwords. Components 0 and 1 come from the low word and 2 and 3 from the high
-    // one, because an element is a little-endian byte sequence and bit 32 of it *is* word one's
-    // bit zero.
-    //
-    // The four values are distinct and none is a rotation of another, so the two mistakes with
-    // any chance of passing both fail: reading both halves from word zero gives 1, 2, 1, 2, and
-    // swapping the words gives 3, 4, 1, 2.
+    // `BUF_FMT_16_16_16_16_UINT`: components 0 and 1 come from the low word and 2 and 3
+    // from the high one, since the element is a little-endian byte sequence. Reading both
+    // from word zero gives 1, 2, 1, 2; swapping words gives 3, 4, 1, 2.
     /// `x=1, y=2` packed low half first.
     const LOW: u32 = 0x0002_0001;
     /// `z=3, w=4`.
@@ -4162,8 +3829,7 @@ fn a_packed_load_spanning_two_words_takes_each_component_from_the_right_one() {
     program.push(v_mov_inline(0, 0));
     program.extend(v_mov_literal(1, LOW));
     program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
-    // The second word goes four bytes along, written by moving the address rather than the
-    // literal offset so the store reads exactly as the first one does.
+    // The second word goes four bytes along, by moving the address.
     program.push(v_mov_inline(0, 4));
     program.extend(v_mov_literal(1, HIGH));
     program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
@@ -4191,8 +3857,8 @@ fn a_packed_load_spanning_two_words_takes_each_component_from_the_right_one() {
 
 /// Whether a module's header declares a capability, by scanning its words.
 ///
-/// `OpCapability` is opcode 17 with one operand and a word count of two, and it can only
-/// appear in the header - so a linear scan for that pair is exact rather than a heuristic.
+/// `OpCapability` is opcode 17 with a word count of two and appears only in the header, so
+/// the scan is exact.
 fn declares_capability(module: &[u32], capability: u32) -> bool {
     let mut index = 5; // past the five-word module header
     while index + 1 < module.len() {
@@ -4209,20 +3875,10 @@ fn declares_capability(module: &[u32], capability: u32) -> bool {
     false
 }
 
-/// **A module declares the sixteen-bit capabilities only if it uses them.**
+/// A module declares the sixteen-bit capabilities only if it uses them.
 ///
-/// # Why this is worth a test rather than a comment
-///
-/// Both were declared by every module for months, which asks every device for two features and
-/// makes every module invalid on a device that does not offer them. Nothing noticed, because
-/// the driver in front of the tests supports both and the tests never asked a validator
-/// (worklog 556).
-///
-/// The positive half matters as much: a module that *needs* a half and omits the capability is
-/// invalid in the other direction, and lazily declaring it is exactly the change that could get
-/// that wrong. So both are asserted, from the same corpus, in one place.
-///
-/// Needs no device - it reads the words.
+/// Declaring them unconditionally asks every device for two features; omitting them where
+/// a half is read makes the module invalid. Both directions are asserted. Needs no device.
 #[test]
 fn the_sixteen_bit_capabilities_are_declared_only_where_used() {
     /// `Float16` and `Int16`, from the SPIR-V capability enumeration.
@@ -4245,7 +3901,7 @@ fn the_sixteen_bit_capabilities_are_declared_only_where_used() {
             .module
     };
 
-    // Nothing sixteen-bit in sight.
+    // Nothing sixteen-bit.
     let plain = translate_words(&[v_mov_inline(1, 7), s_endpgm()]);
     assert!(
         !declares_capability(&plain, FLOAT16),
@@ -4254,7 +3910,7 @@ fn the_sixteen_bit_capabilities_are_declared_only_where_used() {
     );
     assert!(!declares_capability(&plain, INT16), "likewise Int16");
 
-    // A typed load of a half-format channel, which is the one path that needs both.
+    // A typed load of a half-format channel, the one path that needs both.
     let mut program = describe_buffer(4, 256);
     program.extend(mtbuf(
         "tbuffer_load_format_xy",
@@ -4277,11 +3933,10 @@ fn the_sixteen_bit_capabilities_are_declared_only_where_used() {
     );
 }
 
+/// A one-channel typed access with a plain word format matches the untyped access.
 #[test]
 fn a_single_channel_typed_access_is_an_untyped_one_with_a_format() {
-    // The claim that justifies sharing the body: with a plain word format and one
-    // channel, a typed access must do exactly what the untyped one does. If these ever
-    // disagree, the addressing has been duplicated somewhere it should not have been.
+    // Divergence would mean the addressing is duplicated.
     if !device_or_skip("a_single_channel_typed_access_is_an_untyped_one_with_a_format") {
         return;
     }
@@ -4314,10 +3969,10 @@ fn a_single_channel_typed_access_is_an_untyped_one_with_a_format() {
     );
 }
 
+/// A buffer store and load round-trip through guest memory via the `voffset` term.
 #[test]
 fn a_buffer_store_and_load_round_trip_through_guest_memory() {
-    // The whole path: build a descriptor, store through it, read it back. Addressing is
-    // base + soffset + inst_offset + voffset, and this exercises the voffset term.
+    // Addressing is base + soffset + inst_offset + voffset.
     if !device_or_skip("a_buffer_store_and_load_round_trip_through_guest_memory") {
         return;
     }
@@ -4340,12 +3995,11 @@ fn a_buffer_store_and_load_round_trip_through_guest_memory() {
     );
 }
 
+/// A buffer access past the record count reads zero and drops its write.
 #[test]
 fn a_buffer_access_past_the_record_count_reads_zero_and_drops_its_write() {
-    // The reference is explicit: out of range, "writes are ignored (dropped) and reads
-    // return zero". Both halves are checked, because a bounds check that only suppresses
-    // one of them is worse than none - a dropped write with a live read still returns
-    // whatever was there before, which looks like data.
+    // The reference: out of range, "writes are ignored (dropped) and reads return zero".
+    // Both halves are checked; a live read after a dropped write returns stale data.
     if !device_or_skip("a_buffer_access_past_the_record_count_reads_zero_and_drops_its_write") {
         return;
     }
@@ -4366,11 +4020,11 @@ fn a_buffer_access_past_the_record_count_reads_zero_and_drops_its_write() {
     assert_eq!(memory[4], 0, "and the write that went with it never landed");
 }
 
+/// The last buffer access inside the record count is not suppressed.
 #[test]
 fn a_buffer_access_inside_the_record_count_is_not_suppressed() {
-    // The other side of the same check, and the one that would pass by accident if the
-    // bounds test were inverted or always true. Eight bytes, accessed at byte four: the
-    // last four-byte access that fits.
+    // Eight bytes accessed at byte four, which an inverted or always-true bounds test
+    // would suppress.
     if !device_or_skip("a_buffer_access_inside_the_record_count_is_not_suppressed") {
         return;
     }
@@ -4387,12 +4041,11 @@ fn a_buffer_access_inside_the_record_count_is_not_suppressed() {
     );
 }
 
+/// A swizzled descriptor reads zero and drops its write.
 #[test]
 fn a_swizzled_descriptor_is_refused_by_reading_zero() {
-    // A translated shader cannot refuse at run time, so a descriptor asking for
-    // addressing this does not do is forced out of bounds instead. That makes a swizzled
-    // buffer read zero - visibly and consistently wrong - rather than read real-looking
-    // data from the wrong offset.
+    // A translated shader cannot refuse at run time, so unsupported addressing is forced
+    // out of bounds, reading zero rather than data from the wrong offset.
     if !device_or_skip("a_swizzled_descriptor_is_refused_by_reading_zero") {
         return;
     }
@@ -4410,18 +4063,17 @@ fn a_swizzled_descriptor_is_refused_by_reading_zero() {
     assert_eq!(memory[2], 0, "and a swizzled write does not land");
 }
 
+/// An indexed buffer access multiplies the index by the descriptor's stride.
 #[test]
 fn an_indexed_buffer_access_multiplies_the_index_by_the_stride() {
-    // The other half of the addressing equation: `Stride * Vindex`. A structured buffer
-    // addresses by record, and the stride comes from the descriptor rather than the
-    // instruction - so a translation that ignored it would put every record at offset
-    // zero and every write would land on the first one.
+    // `Stride * Vindex`, with the stride from the descriptor; ignoring it would put every
+    // record at offset zero.
     if !device_or_skip("an_indexed_buffer_access_multiplies_the_index_by_the_stride") {
         return;
     }
 
-    // Sixteen-byte records, four of them, bounds mode one - the raw check, `index >=
-    // records`. Record two therefore starts at byte 32, which is word eight.
+    // Sixteen-byte records, four of them, bounds mode one (`index >= records`). Record two
+    // starts at byte 32, word eight.
     let mut program = [
         s_mov_b32_literal(4, 0),
         s_mov_b32_literal(5, 16 << 16),
@@ -4441,16 +4093,11 @@ fn an_indexed_buffer_access_multiplies_the_index_by_the_stride() {
     assert_eq!(memory[0], 0, "and not at the start of the buffer");
 }
 
+/// A store past the memory window lands nowhere, rather than wrapping onto the start.
 #[test]
 fn a_store_past_the_memory_window_does_not_wrap_onto_the_start() {
-    // The window is masked to keep the buffer index legal, and masking is not clamping:
-    // before this, the word after the last one landed on the *first*, and everything
-    // about it looked fine - the shader ran, memory changed, and the change was somewhere
-    // the guest never asked for.
-    //
-    // A guest that overruns a buffer is an ordinary bug. A translator that turns the
-    // overrun into a corrupted, plausible-looking start of memory is a much worse one,
-    // because it makes the guest's bug unrecognisable.
+    // The window index is masked to stay legal, and masking is not clamping; an overrun
+    // wrapped onto the start would make the guest's bug unrecognisable (D101).
     if !device_or_skip("a_store_past_the_memory_window_does_not_wrap_onto_the_start") {
         return;
     }
@@ -4476,11 +4123,9 @@ fn a_store_past_the_memory_window_does_not_wrap_onto_the_start() {
     );
 }
 
+/// A load past the memory window reads zero rather than aliasing onto the start.
 #[test]
 fn a_load_past_the_memory_window_reads_zero() {
-    // The other half. Reading past the end used to alias onto the start, so a shader that
-    // overran would read its own earlier writes back as though they were the data it
-    // asked for.
     if !device_or_skip("a_load_past_the_memory_window_reads_zero") {
         return;
     }
@@ -4503,21 +4148,13 @@ fn a_load_past_the_memory_window_reads_zero() {
     );
 }
 
+/// The long-form sub-encoding is derived from the solved operand layouts.
 #[test]
 fn the_sub_encoding_is_derived_from_the_solved_operands_not_a_list() {
-    // The two long-form sub-encodings differ in what bits 8-14 of the first word hold: a
-    // second scalar destination, or per-source absolute-value flags. Read the wrong way,
-    // `vcc` as a carry destination presents as "the second source is an absolute value",
-    // and an integer addition silently loses the sign of an operand.
-    //
-    // This used to be a hand-written list, and nothing enforced the pairing - an opcode
-    // added to SUPPORTED without also being added there read its modifiers from the wrong
-    // bits. It is derived from the probe data now, so what this pins is that the *data*
-    // still distinguishes them. If the solver ever stopped recording that operand, the
-    // classification would collapse to "none of them have one" and every carry
-    // instruction would quietly start reading modifiers from its own destination.
-    //
-    // Needs no device.
+    // Bits 8-14 of the first word hold a second scalar destination in one sub-encoding and
+    // per-source absolute flags in the other. The classification comes from the probe
+    // data, so this pins that the data still records the scalar destination. Needs no
+    // device.
     let table = encodings();
     let field = |name: &str| {
         let (family, opcode) = table
@@ -4544,22 +4181,13 @@ fn the_sub_encoding_is_derived_from_the_solved_operands_not_a_list() {
     }
 }
 
+/// Instructions compilers place between a condition-code write and its read do not write
+/// the condition code here either.
 #[test]
 fn the_corpus_agrees_about_hidden_side_effects() {
-    // D129's difficulty: whether an instruction writes the condition code is invisible in
-    // the encoding, in the operand layout, and in every test that checks destinations. It
-    // has to be read out of the published instruction set, and nothing here could confirm
-    // what was read.
-    //
-    // Something can. A compiler emitting a shader places instructions *between* one that
-    // sets the condition code and one that branches on it - and every instruction it puts
-    // there is one it believes does not write it, or the shader it produced would be
-    // wrong. That is an observation about real compiled output rather than a restatement
-    // of the document.
-    //
-    // So the fixtures are mined for those windows. Each is a claim about a real
-    // instruction, checked against what this translator believes.
-    //
+    // Whether an instruction writes the condition code is invisible in the encoding and
+    // operand layout. A compiler only places instructions it believes do not write it
+    // between a setter and a branch on it, so the fixtures are mined for those windows.
     // Needs no device.
     use orbistoun_translate::model::{reads_condition_code, writes_condition_code};
 
@@ -4588,7 +4216,7 @@ fn the_corpus_agrees_about_hidden_side_effects() {
             if !reads_condition_code(name) {
                 continue;
             }
-            // Walk back to whatever last set it. Everything in between is evidence.
+            // Walk back to whatever last set it; everything in between is evidence.
             let Some(setter) = names[..at].iter().rposition(|n| writes_condition_code(n)) else {
                 continue;
             };
@@ -4611,9 +4239,7 @@ fn the_corpus_agrees_about_hidden_side_effects() {
         }
     }
 
-    // The corpus is small and this is thin evidence; it grows with the corpus. Asserting
-    // that at least one window exists keeps the test honest - a fixture set that stopped
-    // containing any would make this pass by examining nothing.
+    // At least one window must exist, or the test examines nothing.
     assert!(
         windows > 0,
         concat!(
@@ -4630,22 +4256,12 @@ fn the_corpus_agrees_about_hidden_side_effects() {
     );
 }
 
+/// The dispatch loop's cost on a single-block shader is bounded and structural.
 #[test]
 fn the_dispatch_loop_costs_a_measurable_amount_on_a_single_block_shader() {
-    // D110 emits the dispatch loop for every shader, including ones with a single block
-    // where it is pure overhead, and defers collapsing that "until there is something to
-    // measure". Nothing measured it, which is how a deferral becomes permanent.
-    //
-    // This is the measurement. It does not argue for collapsing the loop - the reason not
-    // to is that a second emission path is a second thing to keep correct, and a retarget
-    // has already shown what that costs. It puts a number on what is being traded, so the
-    // question can be settled by arithmetic rather than by whoever feels strongly.
-    //
-    // Asserted loosely on purpose: that the overhead exists and is bounded. A tight
-    // assertion would fail on every unrelated change to emission and teach people to
-    // update it without reading it.
-    //
-    // Needs no device.
+    // Every shader goes through the dispatch loop (D098), including single-block ones.
+    // This records the trade: the fixed preamble dwarfs the loop and the body. Asserted
+    // loosely, so unrelated emission changes do not break it. Needs no device.
     let table = encodings();
     let operands = OperandTable::builtin().expect("operands");
 
@@ -4661,8 +4277,8 @@ fn the_dispatch_loop_costs_a_measurable_amount_on_a_single_block_shader() {
     // One block: a move and a terminator, no branches anywhere.
     let single = translate_words(&[v_mov_inline(0, 7), s_endpgm()]);
 
-    // The same work with nothing at all in it, to separate the module's fixed cost - the
-    // types, the register file, the buffers - from what the body adds.
+    // An empty program separates the module's fixed cost (types, register file, buffers)
+    // from the body's.
     let empty = translate_words(&[s_endpgm()]);
 
     let body = single.saturating_sub(empty);
@@ -4673,10 +4289,8 @@ fn the_dispatch_loop_costs_a_measurable_amount_on_a_single_block_shader() {
         "a shader with a move in it should emit more than one with nothing"
     );
 
-    // What the numbers say, and it is not what the decision expected: the loop is not
-    // where the cost is. A module's fixed preamble - the types, two register files, two
-    // storage buffers - dwarfs both the loop's scaffolding and the body. Collapsing the
-    // loop would buy a fraction of one percent and cost a second emission path.
+    // The fixed preamble (types, two register files, two storage buffers) dwarfs the loop
+    // scaffolding and the body, so collapsing the loop would save little.
     assert!(
         empty > body * 10,
         concat!(
@@ -4688,9 +4302,8 @@ fn the_dispatch_loop_costs_a_measurable_amount_on_a_single_block_shader() {
         body,
     );
 
-    // Structural rather than by size, because size is the wrong instrument: a collapsed
-    // loop would barely move the total, so a size assertion would not notice. This
-    // notices, and it is what should fail if anyone takes D110's second path.
+    // Structural rather than by size, since collapsing the loop would barely move the
+    // total.
     let bytes: Vec<u8> = [s_endpgm()].iter().flat_map(|w| w.to_le_bytes()).collect();
     let decoded = decode(&bytes, table, &operands);
     let module = translate(&decoded, table, Strategy::default())
@@ -4706,22 +4319,15 @@ fn the_dispatch_loop_costs_a_measurable_amount_on_a_single_block_shader() {
     );
 }
 
+/// The condition code behaves identically in both models.
 #[test]
 fn the_condition_code_behaves_the_same_in_both_models() {
-    // D115 says the condition code is "state both models hold" - one bit for the whole
-    // wavefront, so the per-lane model represents it exactly. The half that was tested was
-    // that a shader using it is not pushed onto the slow model. The half that was not is
-    // the claim itself: that when a shader *is* on the slow model, for some other reason,
-    // the condition code still behaves identically.
-    //
-    // Both models running the same program and disagreeing is the only way that claim
-    // fails, and nothing was asking.
+    // It is one bit for the whole wavefront, so the per-lane model represents it exactly.
     if !device_or_skip("the_condition_code_behaves_the_same_in_both_models") {
         return;
     }
 
-    // s0 = 5; if (s0 < 1) skip; s1 = 42. The compare is false, so the branch is not
-    // taken and s1 is written - and a model that got the condition code wrong would skip.
+    // s0 = 5; if (s0 < 1) skip; s1 = 42. The compare is false, so s1 is written.
     let program = [
         s_mov_inline(0, 5),
         s_cmp_i32("s_cmp_lt_i32", 0, 128 + 1),
@@ -4746,19 +4352,12 @@ fn the_condition_code_behaves_the_same_in_both_models() {
     );
 }
 
+/// The compiled `control` fixture, mixing condition-code and mask branches, takes the
+/// wavefront model.
 #[test]
 fn a_shader_mixing_condition_code_and_mask_branches_takes_the_model_with_a_mask() {
-    // The case D115 said to re-check "once a real shader mixes condition-code and mask
-    // branches in one block". One has, and it is a compiled fixture rather than something
-    // written to make the point: `control` contains one condition-code branch and two mask
-    // branches.
-    //
-    // The mask branches decide it, and that is right - a mask cannot be represented
-    // without one, while the condition code can be represented in either. Mixing does not
-    // weaken the rule that a condition-code-only shader stays on the fast model; it just
-    // means something else in the same shader outvoted it.
-    //
-    // Needs no device.
+    // The mask branches decide it: a mask needs the model that has one, while the
+    // condition code works in either. Needs no device.
     let table = encodings();
     let operands = OperandTable::builtin().expect("operands");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4783,25 +4382,19 @@ fn a_shader_mixing_condition_code_and_mask_branches_takes_the_model_with_a_mask(
 
 /// The scalar-base field's value for "there is no base; the address is the register pair".
 ///
-/// `0x7d`, because that is what the reference assembler emits for `off` and what the console's
-/// own shaders carry - not the top of the field, which is what these helpers used to write and
-/// what the translator used to accept. The two agreed with each other and with nothing that
-/// runs; a real captured stream was refused for two phases on the strength of it (worklog 552).
+/// `0x7d`, as the reference assembler emits for `off` and compiled shaders carry, not the
+/// top of the field.
 const FLAT_NO_BASE_CODE: u32 = 0x7d;
 
-/// A flat **store** of any width: address at bit 0, data at bit 8.
+/// A flat store of any width: address at bit 0, data at bit 8.
 fn flat_store(name: &str, vaddr: u32, data: u32) -> [u32; 2] {
     [head(name), vaddr | (data << 8) | (FLAT_NO_BASE_CODE << 16)]
 }
 
-/// A flat **load** of any width: address at bit 0, destination at bit 24.
+/// A flat load of any width: address at bit 0, destination at bit 24.
 ///
-/// A load and a store do not share an operand layout - the destination of one is at bit
-/// 24 and the data of the other at bit 8 - which is the whole reason operand layouts are
-/// per opcode rather than per family (D096). Writing one helper for both put the
-/// destination where nothing reads it, and the test that noticed was the one asserting a
-/// *refusal*: it translated happily because the register it was meant to overflow was
-/// never decoded.
+/// A load and a store do not share an operand layout (destination at bit 24, data at bit 8),
+/// which is why operand layouts are per opcode rather than per family (D097).
 fn flat_load(name: &str, vaddr: u32, destination: u32) -> [u32; 2] {
     [
         head(name),
@@ -4814,12 +4407,11 @@ fn s_wqm(dst: u32, source_code: u32) -> u32 {
     head("s_wqm_b64") | (dst << 16) | source_code
 }
 
+/// `global_store_dwordx4` writes four consecutive words from one address.
 #[test]
 fn a_wide_flat_store_writes_consecutive_words() {
-    // What separates `global_store_dwordx4` from four single stores: one address, four
-    // source registers, landing in order. A translation that stored the same register
-    // four times, or stepped the address by one instead of by a word, passes every
-    // single-word test and fails here.
+    // A translation storing one register four times, or stepping the address by one
+    // instead of a word, fails here.
     if !device_or_skip("a_wide_flat_store_writes_consecutive_words") {
         return;
     }
@@ -4847,6 +4439,7 @@ fn a_wide_flat_store_writes_consecutive_words() {
     assert_eq!(memory[8], 0, "and nothing past it; memory was {memory:?}");
 }
 
+/// `global_load_dwordx4` fills four consecutive registers.
 #[test]
 fn a_wide_flat_load_fills_consecutive_registers() {
     if !device_or_skip("a_wide_flat_load_fills_consecutive_registers") {
@@ -4865,9 +4458,8 @@ fn a_wide_flat_load_fills_consecutive_registers() {
     program.extend(flat_load("global_load_dwordx4", 0, 0));
     program.push(s_endpgm());
 
-    // The load's destination is the first operand and its address the second, so this
-    // reads word 4 onwards into v0..v3 - which also overwrites the address register,
-    // deliberately, since the address is consumed before the first write lands.
+    // The load reads word 4 onwards into v0..v3, overwriting the address register; the
+    // address is consumed before the first write lands.
     let (registers, _) = run_memory(Fidelity::Lane, &program);
     for (offset, expected) in [11u32, 22, 33, 44].iter().enumerate() {
         assert_eq!(
@@ -4878,14 +4470,11 @@ fn a_wide_flat_load_fills_consecutive_registers() {
     }
 }
 
+/// A wide flat load running past the vector register file is refused, not truncated.
 #[test]
 fn a_wide_access_past_the_register_file_is_refused() {
-    // `global_load_dwordx4` into v253 would write four registers where three exist. The
-    // file is an array with nothing past it, so this would be a write off the end -
-    // refused rather than truncated, because a load quietly filling half its
-    // destinations is a shader computing the wrong thing while appearing to work.
-    //
-    // Needs no device.
+    // `global_load_dwordx4` into v253 would write four registers where three exist. Needs
+    // no device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
 
@@ -4905,11 +4494,10 @@ fn a_wide_access_past_the_register_file_is_refused() {
     );
 }
 
+/// `s_wqm_b64` sets every bit of a quad that had any, and no other quad.
 #[test]
 fn whole_quad_mode_sets_every_bit_of_a_group_that_had_any() {
-    // A fragment shader uses this so a derivative computed across a quad has all four
-    // pixels live even where only one is covered. Getting it wrong is invisible until
-    // something samples a texture with a gradient.
+    // A fragment shader uses this so a derivative across a quad has all four pixels live.
     if !device_or_skip("whole_quad_mode_sets_every_bit_of_a_group_that_had_any") {
         return;
     }
@@ -4928,8 +4516,8 @@ fn whole_quad_mode_sets_every_bit_of_a_group_that_had_any() {
         "and the high half is untouched; registers were {registers:?}"
     );
 
-    // A bit in the second group, and nothing in the first: 0b1_0000 becomes 0b1111_0000.
-    // This is the case that catches a fold spilling across a group boundary.
+    // A bit in the second group and nothing in the first: 0b1_0000 becomes 0b1111_0000,
+    // which catches a fold spilling across a group boundary.
     let program = [s_mov_b64(0, 128 + 16), s_wqm(2, 0), s_endpgm()];
     let (registers, _) = run_memory(Fidelity::Wavefront, &program);
     assert_eq!(
@@ -4939,10 +4527,10 @@ fn whole_quad_mode_sets_every_bit_of_a_group_that_had_any() {
     );
 }
 
+/// `s_wqm_b64` leaves an empty mask empty and a full mask full.
 #[test]
 fn whole_quad_mode_leaves_an_empty_mask_empty() {
-    // The other direction. A fold that ored in a constant, or a spread that ignored its
-    // input, would light every quad here.
+    // A fold that ored in a constant, or a spread ignoring its input, lights every quad.
     if !device_or_skip("whole_quad_mode_leaves_an_empty_mask_empty") {
         return;
     }
@@ -4972,12 +4560,11 @@ fn s_wqm32(dst: u32, source_code: u32) -> u32 {
     head("s_wqm_b32") | (dst << 16) | source_code
 }
 
-/// **The 32-lane form lights whole quads in one register** (worklog 819).
+/// The 32-lane form lights whole quads in one register.
 ///
-/// The GL context's textured pixel shader enters whole-quad mode with `s_wqm_b32 exec_lo,
-/// exec_lo`, and Neverball's first frame could not translate it. Same three cases as the 64-bit
-/// form: one bit lights its quad, a bit in the second quad lights that quad and not the first,
-/// and nothing stays nothing.
+/// Textured pixel shaders enter whole-quad mode with `s_wqm_b32 exec_lo, exec_lo`. Same three
+/// cases as the 64-bit form: one bit lights its quad, a bit in the second quad lights only
+/// that quad, and nothing stays nothing.
 #[test]
 fn whole_quad_mode_32_lights_the_quad_of_every_set_bit_and_nothing_else() {
     if !device_or_skip("whole_quad_mode_32_lights_the_quad_of_every_set_bit_and_nothing_else") {
@@ -4996,26 +4583,24 @@ fn whole_quad_mode_32_lights_the_quad_of_every_set_bit_and_nothing_else() {
 
 /// `ds_write_b32 vAddr, vData offset:N`.
 ///
-/// The opcode sits at bit 17, not 18 - the shift differs from the flat families and
-/// getting it wrong produces a word that decodes as a different local-share instruction
-/// entirely, which reports as a missing operand layout rather than as a wrong opcode.
+/// The opcode sits at bit 17, not 18 as in the flat families; the wrong shift decodes as a
+/// different local-share instruction.
 fn ds_write(vaddr: u32, data: u32, offset: u32) -> [u32; 2] {
     [head("ds_write_b32") | offset, vaddr | (data << 8)]
 }
 
 /// `ds_read_b32 vDst, vAddr offset:N`.
 ///
-/// The destination is at bit 24 and the address at bit 0 - a read and a write do not
-/// share a layout, which is the mistake this file has now made twice with flat memory.
+/// The destination is at bit 24 and the address at bit 0; a read and a write do not share
+/// a layout.
 fn ds_read(dst: u32, vaddr: u32, offset: u32) -> [u32; 2] {
     [head("ds_read_b32") | offset, vaddr | (dst << 24)]
 }
 
+/// A value written to the local share reads back through the same address.
 #[test]
 fn a_value_written_to_the_local_share_can_be_read_back() {
-    // Storage the lanes of a wavefront exchange values in. Write then read through the
-    // same address, so it fails if either half computes its address differently - the
-    // mistake most likely to survive a test that only did one of them.
+    // Storage the lanes of a wavefront exchange values in.
     if !device_or_skip("a_value_written_to_the_local_share_can_be_read_back") {
         return;
     }
@@ -5033,16 +4618,11 @@ fn a_value_written_to_the_local_share_can_be_read_back() {
     );
 }
 
+/// The local-share instruction offset is applied.
 #[test]
 fn the_local_share_offset_is_not_ignored() {
-    // The offset was invisible until it was probed for: the reference omits it when it
-    // is zero, and every earlier probe used the zero form, so the solved layout had no
-    // slot for it at all. A translator built on that would ignore every offset a
-    // compiler emitted and read the wrong word - silently, because the address register
-    // is still valid.
-    //
-    // Two values at addresses eight bytes apart, read back with an offset that must
-    // reach the second.
+    // The reference omits a zero offset. Two values eight bytes apart, read back with an
+    // offset that must reach the second.
     if !device_or_skip("the_local_share_offset_is_not_ignored") {
         return;
     }
@@ -5062,11 +4642,10 @@ fn the_local_share_offset_is_not_ignored() {
     );
 }
 
+/// A masked write does not reach the local share.
 #[test]
 fn a_masked_write_does_not_reach_the_local_share() {
-    // Sharper than the same rule for guest memory: another lane of this same wavefront
-    // will read this word, so a suppressed write that lands anyway corrupts a value a
-    // different lane is about to use.
+    // Another lane of the same wavefront reads this word.
     if !device_or_skip("a_masked_write_does_not_reach_the_local_share") {
         return;
     }
@@ -5091,12 +4670,11 @@ fn a_masked_write_does_not_reach_the_local_share() {
     );
 }
 
+/// The lane model refuses the local share, and `Auto` routes it to the wavefront model.
 #[test]
 fn the_lane_model_refuses_the_local_share() {
-    // One lane per invocation means no lanes to share between: each would get its own
-    // copy and read back only what it wrote itself. That runs, and is wrong.
-    //
-    // Needs no device.
+    // Each invocation would get its own copy and read back only what it wrote. Needs no
+    // device.
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let mut program: Vec<u32> = Vec::new();
@@ -5119,21 +4697,15 @@ fn the_lane_model_refuses_the_local_share() {
         "the error should name what is missing, got: {error}"
     );
 
-    // And Auto must route it to the model that has one.
+    // `Auto` routes it to the model that has one.
     let translated = translate(&decoded, &table, Strategy::default()).expect("auto");
     assert_eq!(translated.fidelity, Fidelity::Wavefront);
 }
 
+/// The long-form subtract and reverse-subtract compute `a - b` and `b - a`.
 #[test]
 fn the_long_form_subtract_and_reverse_subtract_are_not_swapped() {
-    // These are opcodes 258 and 259. The supported list said 259 and 260, taken from the
-    // short form's ordering rather than read off the solved operand table - so every
-    // long-form reverse-subtract computed `a - b` where the guest means `b - a`, and the
-    // instruction one further along was translated as something it is not.
-    //
-    // Nothing caught it: the short-form test uses the short form, and the long form had
-    // no test of its own. The generated-program comparison found it indirectly, by
-    // producing an opcode with no operand layout.
+    // Opcodes 258 and 259 on this generation; the short-form test does not cover them.
     if !device_or_skip("the_long_form_subtract_and_reverse_subtract_are_not_swapped") {
         return;
     }
@@ -5180,21 +4752,11 @@ fn the_long_form_subtract_and_reverse_subtract_are_not_swapped() {
     );
 }
 
+/// Every instruction name the translator supports exists on this target.
 #[test]
 fn every_supported_name_exists_on_this_target() {
-    // The test a retarget runs into first, and the reason the supported list names
-    // instructions rather than numbering them.
-    //
-    // Opcode numbers are a property of one architecture generation and most of them move
-    // between generations - the same arithmetic at a different number, in a family whose
-    // identifying bits also changed. A list of numbers pointed at another generation does
-    // not fail. It binds silently to whichever instructions happen to occupy those
-    // numbers, and the first sign is a wrong pixel.
-    //
-    // Names mostly survive. The ones that do not - one generation's `v_add_u32` is
-    // another's `v_add_nc_u32` - arrive here as a list of exactly what needs attention.
-    //
-    // Needs no device.
+    // Opcode numbers move between generations and names mostly do not (D139); a renamed
+    // instruction (`v_add_u32` to `v_add_nc_u32`) arrives here by name. Needs no device.
     use orbistoun_translate::model::unresolved;
 
     let table = EncodingTable::builtin().expect("encodings");

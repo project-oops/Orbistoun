@@ -1,35 +1,11 @@
 //! Waiting for a descriptor to be ready.
 //!
-//! # Why a server needs this before it needs anything else
-//!
-//! A network server's loop is *wait, accept, serve*. `klogsrv` calls `select` between its
-//! `listen` and its `accept`, so without it the loop never turns - the guest is told the call
-//! failed and takes its error path having never served anything.
-//!
-//! # What an `fd_set` is here
-//!
-//! A bitmap, and its shape is in the checkout:
-//!
-//! ```text
-//! sys/sys/select.h
-//!     typedef unsigned long __fd_mask;             64 bits on this data model
-//!     #define FD_SETSIZE 1024
-//!     struct fd_set { __fd_mask __fds_bits[FD_SETSIZE / 64]; };
-//! ```
-//!
-//! So sixteen words, and descriptor `n` is bit `n % 64` of word `n / 64`. Nothing about that
-//! is guessed.
-//!
-//! # Readiness is asked by polling, and that is stated
-//!
-//! The standard library has no readiness primitive, so this asks each descriptor in turn and
-//! sleeps a millisecond between rounds. That costs latency a real `select` would not, and it
-//! is honest about what it can and cannot promise: a guest that measures its own wakeup
-//! latency would see the difference.
-//!
-//! What it must not do is **consume** anything while asking. Finding out whether a listener
-//! has a connection means accepting one, so the connection is kept on the listener and the
-//! guest's own `accept` takes it (D373).
+//! A network server's loop is wait, accept, serve, and `klogsrv` calls `select` between
+//! `listen` and `accept`. An `fd_set` is sixteen 64-bit words (`sys/sys/select.h`:
+//! `FD_SETSIZE` 1024, `__fd_mask` an `unsigned long`), and descriptor `n` is bit `n % 64` of
+//! word `n / 64`. The standard library has no readiness primitive, so readiness is polled
+//! with a millisecond between rounds. Asking consumes nothing: a connection found on a
+//! listener stays there for the guest's own `accept` (D373).
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -44,9 +20,8 @@ const WORDS: usize = (FD_SETSIZE / BITS_PER_WORD) as usize;
 
 /// How long to wait between asking every descriptor again.
 ///
-/// A millisecond. Short enough that a server's accept loop is not visibly slower than it
-/// would be, long enough that a guest blocked for a second does not spend that second
-/// spinning this process at full speed.
+/// Short enough that a server's accept loop is not visibly slower, long enough that a
+/// blocked guest does not spin this process.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// One `fd_set`, read out of guest memory.
@@ -59,13 +34,12 @@ pub struct FdSet {
 impl FdSet {
     /// Reads the set at `address`, or an empty one for a null pointer.
     ///
-    /// A null set is not an error: it is how a caller says *nothing in this direction*, and
-    /// every one of the three sets is separately optional.
+    /// A null set means nothing in this direction; each of the three sets is optional.
     ///
     /// # Safety
     ///
-    /// `address`, when non-null, must point at an `fd_set` in guest memory - the same
-    /// contract the real call has under the identity mapping (D014).
+    /// `address`, when non-null, must point at an `fd_set` in guest memory, the same
+    /// contract the real call has under the identity mapping.
     pub unsafe fn read(address: u64) -> Self {
         let mut set = Self::default();
         let Ok(at) = usize::try_from(address) else {
@@ -79,8 +53,8 @@ impl FdSet {
             // SAFETY: the caller guarantees an `fd_set` here, which is exactly `WORDS`
             // words, so every index below is inside it.
             let slot = unsafe { base.add(index) };
-            // SAFETY: `slot` is in bounds by the line above. Read unaligned because
-            // nothing promises the guest aligned it.
+            // SAFETY: `slot` is in bounds by the line above. Read unaligned because nothing
+            // promises the guest aligned it.
             *word = unsafe { std::ptr::read_unaligned(slot) };
         }
         set
@@ -100,7 +74,7 @@ impl FdSet {
         }
         let base = std::ptr::with_exposed_provenance_mut::<u64>(at);
         for (index, word) in self.words.iter().enumerate() {
-            // SAFETY: as in `read` - an `fd_set` the caller supplied, so every index is
+            // SAFETY: as in `read`: an `fd_set` the caller supplied, so every index is
             // inside it.
             let slot = unsafe { base.add(index) };
             // SAFETY: `slot` is in bounds by the line above.
@@ -155,8 +129,7 @@ enum Wait {
 
 /// Reads the `timeval` a caller passed, or [`Wait::Forever`] for a null one.
 ///
-/// A null timeout means block; a zeroed one means ask once and answer. Both are ordinary and
-/// a caller means quite different things by them.
+/// A null timeout means block; a zeroed one means ask once and answer.
 ///
 /// # Safety
 ///
@@ -169,8 +142,8 @@ unsafe fn read_timeout(address: u64) -> Wait {
         return Wait::Forever;
     }
     let base = std::ptr::with_exposed_provenance::<u64>(at);
-    // SAFETY: the caller guarantees a `timeval` here - two machine words, from
-    // `sys/sys/_timeval.h`, as `orbistoun-libc`'s clock module records.
+    // SAFETY: the caller guarantees a `timeval` here, two machine words from
+    // `sys/sys/_timeval.h`.
     let seconds = unsafe { std::ptr::read_unaligned(base) };
     // SAFETY: the second field of the same structure.
     let micros_at = unsafe { base.add(1) };
@@ -181,30 +154,20 @@ unsafe fn read_timeout(address: u64) -> Wait {
 
 /// `select(nfds, readfds, writefds, exceptfds, timeout)`.
 ///
-/// # What each direction answers
-///
-/// **Read** is asked of the descriptor: a listener with a connection waiting, a stream with
-/// bytes or an end-of-file, a file (always - a read from one does not block), and a standard
-/// stream (also always, because reading one here answers zero immediately rather than waiting
-/// on a terminal nobody is typing into).
-///
-/// **Write** is answered yes for anything connected. Writes here go straight to the host and
-/// do not buffer, so a write will not block - and saying otherwise would park a guest waiting
-/// for a readiness that had already arrived.
-///
-/// **Exceptional** is always empty. Nothing here generates out-of-band data or the other
-/// conditions that set it, so reporting one would be inventing an event.
-///
-/// Answers the number of descriptors left set, as the interface does, and rewrites the sets
-/// in place - which is why a caller rebuilds them every time round its loop.
+/// Read is asked of the descriptor: a listener with a connection waiting, a stream with
+/// bytes or end-of-file, a file (always), and a standard stream (always, since a read from
+/// one answers zero immediately). Write is yes for anything connected, since writes go
+/// straight to the host without buffering. Exceptional is always empty: nothing here
+/// generates out-of-band data. Answers the number of descriptors left set and rewrites the
+/// sets in place, as the interface does.
 ///
 /// Reference: POSIX.1-2008 `select(2)`; `fd_set` from `sys/sys/select.h`.
 fn select(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (nfds, read_at, write_at, except_at, timeout_at) =
         (args[0], args[1], args[2], args[3], args[4]);
 
-    // SAFETY: a guest-supplied `fd_set` under the identity mapping (D014); a null one reads
-    // as empty without being dereferenced.
+    // SAFETY: a guest-supplied `fd_set` under the identity mapping; a null one reads as empty
+    // without being dereferenced.
     let wanted_read = unsafe { FdSet::read(read_at) };
     // SAFETY: as above, for the other direction.
     let wanted_write = unsafe { FdSet::read(write_at) };
@@ -235,8 +198,7 @@ fn select(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             unsafe { ready_read.write(read_at) };
             // SAFETY: as above, for the other direction.
             unsafe { ready_write.write(write_at) };
-            // Exceptional conditions: none, ever, and said so by clearing rather than by
-            // leaving whatever the caller had there.
+            // Exceptional conditions: none, cleared rather than left as the caller had them.
             //
             // SAFETY: a guest-supplied set, or null, which writes nothing.
             unsafe { FdSet::default().write(except_at) };
@@ -249,8 +211,8 @@ fn select(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Whether a read on this descriptor would return without waiting.
 fn readable(fd: u64) -> bool {
     if crate::descriptor::is_standard(fd) {
-        // Reading one answers zero immediately rather than waiting on a terminal nobody is
-        // typing into, so it is always ready - which is true, if not useful.
+        // Reading one answers zero immediately rather than waiting on a terminal, so it is
+        // always ready.
         return true;
     }
     crate::descriptor::readable(fd)
@@ -273,7 +235,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 mod tests {
     use super::{BITS_PER_WORD, FD_SETSIZE, FdSet, WORDS};
 
-    /// **Descriptor `n` is bit `n % 64` of word `n / 64`**, which is the whole layout.
+    /// Descriptor `n` is bit `n % 64` of word `n / 64`.
     #[test]
     fn a_descriptor_lives_in_the_bit_the_header_says_it_does() {
         let mut set = FdSet::default();
@@ -350,7 +312,7 @@ mod tests {
         );
     }
 
-    /// A standard stream is always ready, which is true here and worth asserting.
+    /// A standard stream is always reported ready.
     #[test]
     fn a_standard_stream_is_reported_ready() {
         let timeout = [0_u64; 2];

@@ -1,13 +1,9 @@
 //! Reports the device's subgroup size.
 //!
-//! The subgroup fidelity level materialises the guest's execution mask with a subgroup
-//! ballot, and that is only correct when the hardware's subgroup is as wide as the
-//! guest's wavefront - sixty-four lanes. Some hardware is thirty-two.
-//!
-//! This exists because that number decides whether the level can be *verified* here at
-//! all, not merely whether it can run: the differential oracle compares it against the
-//! wavefront model on the same shader, and a device that refuses the level cannot supply
-//! one half of the comparison. Worth knowing before building it rather than after.
+//! The subgroup fidelity level materialises the guest's execution mask with a subgroup ballot,
+//! which is correct only when the device's subgroup is as wide as the guest's 64-lane wavefront;
+//! some devices have 32. A device that refuses the level cannot supply one half of the differential
+//! comparison against the wavefront model.
 
 fn main() {
     // SAFETY: loading the Vulkan loader touches no state of ours and reports failure

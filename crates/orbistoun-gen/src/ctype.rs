@@ -1,26 +1,10 @@
 //! The character-classification tables, read from an obSCEne hardware capture.
 //!
-//! # Why these are measured rather than transcribed
-//!
-//! `_Getpctype` answers a pointer to the table `isalpha`, `isdigit` and the rest index. A
-//! guest that calls it dereferences what it gets back, so a placeholder is not a stub
-//! returning the wrong answer - it is an address the guest reads through (D459).
-//!
-//! The table's *shape* is documented: FreeBSD's `ctype.h` names the bits, and D448 recorded
-//! that as the lawful oracle available at the time. But the bit values are a property of the
-//! platform's own C library, not of the standard, and nothing lawful says what this one
-//! chose. A capture reads them off the hardware, which is the difference between a table
-//! that classifies characters correctly and one that merely classifies them plausibly.
-//!
-//! # What is read, and why it is within the boundary
-//!
-//! Bytes of a data table, from a probe this project wrote, running on a console somebody
-//! owns. Not disassembly, not vendor source, not a derived constant: the same category as
-//! any other `measured` fact, and recorded as one. The capture also carries its own
-//! spot-checks - the classification of a dozen named characters, read through the *running*
-//! library rather than out of the table - and [`run`] refuses to emit a table that disagrees
-//! with them. A parse that silently shifted by one entry would otherwise produce a file that
-//! looks entirely reasonable.
+//! `_Getpctype` returns a pointer to the table `isalpha`, `isdigit` and the rest index, and
+//! the guest reads through it. FreeBSD's `ctype.h` names the bits, but the values are the
+//! platform C library's own, so they are measured: bytes of a data table read by a probe
+//! this project wrote, recorded as `measured`. The capture also carries spot-checks read
+//! through the running library, and [`run`] refuses a table that disagrees with them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -33,16 +17,11 @@ const PROBE: &str = "035-libc/getpctype";
 /// Bytes per entry. Each is a `u16`, little-endian.
 const ENTRY_BYTES: usize = 2;
 
-/// How far below the returned pointer the capture starts, **in bytes**.
+/// How far below the returned pointer the capture starts, in bytes.
 ///
-/// C indexes these tables with a character *or* `EOF`, so a conforming table has entries
-/// below zero, and the pointer the guest receives cannot be the start of the allocation.
-///
-/// **The record is named `table_raw_neg16` and that sixteen is bytes, not entries.** Read as
-/// entries it puts index 0 half a table away, and every classification comes out wrong while
-/// the file still looks entirely reasonable - which is precisely what the spot-checks caught
-/// the first time this was run against real hardware. Eight entries, confirmed by solving the
-/// alignment that satisfies all twelve of them at once.
+/// C indexes these tables with a character or `EOF`, so a conforming table has entries
+/// below zero. The sixteen in the record name `table_raw_neg16` is bytes, not entries: eight
+/// entries, the only alignment that satisfies every spot-check.
 const NEGATIVE_MARGIN_BYTES: usize = 16;
 
 /// The same margin counted in entries, which is how the tables are indexed.
@@ -91,9 +70,8 @@ struct SpotCheck {
 
 /// Reassembles one table's bytes from the capture's fixed-width rows.
 ///
-/// The rows carry their own offset, so a missing or duplicated one is caught here rather
-/// than shifting every entry after it - the failure that would otherwise produce a plausible
-/// table.
+/// The rows carry their own offset, so a missing or duplicated one is caught rather than
+/// shifting every entry after it.
 fn bytes_of(text: &str, symbol: &str) -> Result<Vec<u8>> {
     let mut rows: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for line in text.lines() {
@@ -157,8 +135,8 @@ fn entries_of(bytes: &[u8]) -> Vec<u16> {
 
 /// The spot-checks the capture recorded for one table.
 ///
-/// Keys are `<what>_<label>_<index>`, with `neg1` for `EOF`. The label is there for a human
-/// reading the log and is deliberately ignored here: the index is what addresses the table.
+/// Keys are `<what>_<label>_<index>`, with `neg1` for `EOF`. The label is for a person
+/// reading the log and is ignored; the index addresses the table.
 fn spot_checks(text: &str, symbol: &str) -> Result<Vec<SpotCheck>> {
     let mut found = Vec::new();
     for line in text.lines() {
@@ -174,8 +152,7 @@ fn spot_checks(text: &str, symbol: &str) -> Result<Vec<SpotCheck>> {
         };
         let index: i32 = match index.strip_prefix("neg") {
             Some(magnitude) => -magnitude.parse::<i32>()?,
-            // The pointer is the table's address on the console, which says nothing about
-            // what is in it and carries no trailing index.
+            // The pointer is the table's address on the target and carries no index.
             None => match index.parse() {
                 Ok(index) => index,
                 Err(_) => continue,
@@ -196,11 +173,9 @@ fn spot_checks(text: &str, symbol: &str) -> Result<Vec<SpotCheck>> {
 
 /// Checks a parsed table against the spot-checks the same capture recorded.
 ///
-/// The point of the exercise. The rows are bytes at offsets; the spot-checks are answers the
-/// *running* library gave for named characters. They were produced by different paths, so
-/// agreeing means the parse landed on the right entries - and an off-by-one, a wrong
-/// endianness or a missed negative margin makes them disagree loudly instead of producing a
-/// table that reads perfectly and classifies wrongly.
+/// The rows and the spot-checks come from different paths (table bytes, and answers from
+/// the running library), so agreement means the parse landed on the right entries, and an
+/// off-by-one, wrong endianness or missed margin fails loudly.
 fn verify(symbol: &str, entries: &[u16], checks: &[SpotCheck]) -> Result<()> {
     anyhow::ensure!(
         !checks.is_empty(),
@@ -315,9 +290,7 @@ mod tests {
         assert_eq!(entries, vec![0x0001, 0x0002]);
     }
 
-    /// The guard, made to fail: a spot-check that disagrees with the bytes must stop the
-    /// table being written. Without this the parse could shift by an entry and produce a
-    /// file that reads perfectly and classifies wrongly.
+    /// A spot-check that disagrees with the bytes stops the table being written.
     #[test]
     fn a_table_disagreeing_with_its_spot_check_is_refused() {
         let text =
@@ -332,8 +305,7 @@ mod tests {
         );
     }
 
-    /// The agreeing case, so the guard above is known to be discriminating rather than
-    /// always failing.
+    /// Agreeing spot-checks pass, so the guard above discriminates.
     #[test]
     fn a_table_agreeing_with_its_spot_check_is_accepted() {
         let text =
@@ -352,8 +324,7 @@ mod tests {
         assert!(error.to_string().contains("nothing confirms"), "{error}");
     }
 
-    /// A missing row would shift every entry after it, so the gap is an error rather than a
-    /// silently shorter table.
+    /// A missing row is an error rather than a silently shorter table.
     #[test]
     fn a_gap_in_the_rows_is_refused() {
         let text = concat!(

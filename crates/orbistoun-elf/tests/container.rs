@@ -1,24 +1,9 @@
 //! Parsing a whole module: headers, the dynamic table, and the import walk.
 //!
-//! # Why a synthetic module rather than a real one
-//!
-//! No title can be in this repository, and the conformance probe's module is not built by
-//! this test suite either. So the fixtures here are assembled byte by byte, which has an
-//! advantage a real file does not: **each one is wrong in exactly one way**. A truncated
-//! program header table, a hash table past the end of the file, a symbol count that could
-//! not be true - each is one edit from the module beside it, so a test that fails names the
-//! thing that broke rather than "the file did not parse".
-//!
-//! Real material still decides the questions synthetic bytes cannot. Where a shape here was
-//! chosen to match something observed, it says so.
-//!
-//! # The two tag dialects
-//!
-//! A standard dynamic tag holds a **virtual address**; a vendor tag holds an **offset into
-//! the vendor data segment**. Resolving one the way the other is meant lands at a plausible
-//! file position holding the wrong bytes, which is how a module with two ordinary
-//! relocations came to report two of an unsupported type (D247). Both dialects are built
-//! below, from the same layout, so the difference between them is the only variable.
+//! No title is in this repository, so the fixtures are assembled byte by byte, each one edit
+//! from its neighbour, so a failing test names the one thing that broke. Both tag dialects
+//! are built from the same layout: a standard tag holds a virtual address, a vendor tag an
+//! offset into the vendor data segment (D247), and the dialect is the only variable.
 
 use orbistoun_elf::segment::SCE_DYNLIBDATA as PT_SCE_DYNLIBDATA;
 use orbistoun_elf::{Container, ElfError, dynamic};
@@ -32,9 +17,9 @@ const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
 
-// The layout every fixture shares. Virtual address equals file offset throughout, because
-// one `PT_LOAD` covers the whole image from zero - so an address that resolves wrongly
-// resolves to a *different* place rather than to nothing, and the test can tell.
+// The layout every fixture shares. Virtual address equals file offset throughout, because one
+// `PT_LOAD` covers the whole image from zero, so an address that resolves wrongly resolves to a
+// different place rather than to nothing.
 const DYN_AT: usize = 0x200;
 const DATA_AT: usize = 0x400;
 const HASH_OFF: usize = 0x000;
@@ -64,8 +49,7 @@ impl Strings {
 
 /// One dynamic symbol table entry.
 ///
-/// `shndx` of zero is `SHN_UNDEF` - the module needs this and does not provide it, which
-/// is what makes a symbol an import rather than an export.
+/// `shndx` of zero is `SHN_UNDEF`: the module needs the symbol rather than providing it.
 #[derive(Clone, Copy)]
 struct Symbol {
     name_off: u32,
@@ -75,10 +59,9 @@ struct Symbol {
 
 /// The symbol table every fixture carries.
 ///
-/// Seven entries, four of which are imports. The other three are each a different reason
-/// *not* to be one, and all three have to be excluded for the count to come out right:
-/// index 0 is the mandatory null entry, index 4 is defined by this module, and index 6 has
-/// no name.
+/// Seven entries, four of them imports. Each of the other three is excluded for a different
+/// reason: index 0 is the mandatory null entry, index 4 is defined by this module, and index 6
+/// has no name.
 fn symbols(strings: &mut Strings) -> ([Symbol; 7], Names) {
     let encoded = strings.add("H2e8t5ScQGc#B#C");
     let plain = strings.add("memcpy");
@@ -107,8 +90,7 @@ fn symbols(strings: &mut Strings) -> ([Symbol; 7], Names) {
                 info: 0x12,
                 shndx: 0,
             },
-            // OBJECT. A thunk address is not an answer for this one, so the kind has to
-            // survive the walk (D307).
+            // OBJECT: the kind survives the walk (D307).
             Symbol {
                 name_off: object,
                 info: 0x11,
@@ -120,7 +102,7 @@ fn symbols(strings: &mut Strings) -> ([Symbol; 7], Names) {
                 info: 0x12,
                 shndx: 1,
             },
-            // TLS: neither code nor data as far as a thunk table is concerned.
+            // TLS: neither code nor data to a thunk table.
             Symbol {
                 name_off: other,
                 info: 0x16,
@@ -219,8 +201,8 @@ fn module(dialect: Dialect) -> Vec<u8> {
         bytes[at + 8..at + 16].copy_from_slice(&value.to_le_bytes());
     }
 
-    // `DT_HASH` is `[nbucket][nchain]`, and `nchain` is the symbol count outright. There is
-    // no `DT_SYMSZ`, so this is the only thing that states how far the table runs.
+    // `DT_HASH` is `[nbucket][nchain]`, and `nchain` is the symbol count; there is no
+    // `DT_SYMSZ`.
     let hash_at = DATA_AT + HASH_OFF;
     bytes[hash_at..hash_at + 4].copy_from_slice(&1_u32.to_le_bytes());
     bytes[hash_at + 4..hash_at + 8].copy_from_slice(&(syms.len() as u32).to_le_bytes());
@@ -273,8 +255,7 @@ fn hasher() -> orbistoun_nid::NidHasher {
 
 /// Anything that is not an ELF is refused as such, and the refusal says which check failed.
 ///
-/// Three different rejections rather than one, because a caller trying to work out whether
-/// it handed over the wrong file or the right file truncated needs them apart.
+/// Three different rejections, so a caller can tell the wrong file from a truncated one.
 #[test]
 fn the_header_checks_are_distinguishable_from_each_other() {
     assert!(matches!(
@@ -303,8 +284,8 @@ fn the_header_checks_are_distinguishable_from_each_other() {
 
 /// A file exactly one byte short of a header is truncated, not "not an ELF".
 ///
-/// The boundary matters because the magic is read *after* the size check, so an off-by-one
-/// there turns every short file into a confusing `NotElf`.
+/// The magic is read after the size check, so an off-by-one there would turn every short file
+/// into `NotElf`.
 #[test]
 fn a_file_one_byte_short_of_a_header_is_truncated() {
     let bytes = module(Dialect::Standard);
@@ -327,8 +308,8 @@ fn a_bare_module_reports_its_entry_and_no_wrapper() {
 
 /// A program header table reaching past the end of the file is refused, not walked.
 ///
-/// The count comes from arbitrary bytes, so it is an allocation and a read sized by the
-/// input. Both have to be bounded before either happens.
+/// The count comes from arbitrary bytes, so the allocation and the read it sizes are bounded
+/// first.
 #[test]
 fn a_program_header_table_past_the_end_of_the_file_is_refused() {
     let mut bytes = module(Dialect::Standard);
@@ -373,7 +354,7 @@ fn the_vendor_data_segment_is_picked_out_from_its_neighbours() {
         Some(DATA_AT)
     );
 
-    // The standard-tag fixture has the GNU header and no vendor one, so it is the negative.
+    // The standard-tag fixture has the GNU header and no vendor one: the negative case.
     let plain = module(Dialect::Standard);
     let plain_container = Container::parse(&plain).expect("parses");
     assert!(plain_container.vendor_segments().expect("walks").is_empty());
@@ -385,8 +366,7 @@ fn the_vendor_data_segment_is_picked_out_from_its_neighbours() {
 
 /// A vendor data segment whose offset is past the end of the file locates nothing.
 ///
-/// Bounds-checked once here rather than at each use, so a nonsense offset is one clear
-/// answer instead of three confusing failures downstream.
+/// Bounds-checked once, so a nonsense offset is one clear answer downstream.
 #[test]
 fn a_vendor_segment_past_the_end_of_the_file_locates_nothing() {
     let mut bytes = module(Dialect::Vendor);
@@ -418,8 +398,7 @@ fn segment_data_comes_from_the_headers_own_offset_when_unwrapped() {
 /// Nothing is wrapper-mapped in a bare container, which is not the same as nothing being
 /// mapped.
 ///
-/// An empty list here means "the program headers address the file directly", and a caller
-/// that read it as "this module has no segments" would be wrong about a working module.
+/// An empty list means the program headers address the file directly.
 #[test]
 fn a_bare_container_maps_no_segments_through_a_wrapper() {
     let bytes = module(Dialect::Standard);
@@ -463,13 +442,9 @@ fn a_module_with_no_dynamic_segment_reports_none() {
 
 /// A dynamic segment describing more than the file holds cannot be located.
 ///
-/// Bounds-checked against the file rather than trusted, so a truncated container reads as
-/// "cannot locate that" rather than as a panic.
-///
-/// Note which header does the locating. A segment outside every `PT_LOAD` is still found
-/// through **its own** header, since in an unwrapped module those offsets are the only
-/// thing there is - so making this unlocatable takes an offset past end-of-file, not merely
-/// an address no load covers.
+/// Bounds-checked against the file, so a truncated container reads as "cannot locate" rather
+/// than as a panic. A segment outside every `PT_LOAD` is still found through its own header,
+/// so this takes an offset past end-of-file.
 #[test]
 fn a_dynamic_segment_describing_more_than_the_file_holds_locates_nothing() {
     let bytes = elf_with(
@@ -483,9 +458,7 @@ fn a_dynamic_segment_describing_more_than_the_file_holds_locates_nothing() {
 
 /// A segment outside every `PT_LOAD` is still located through its own header.
 ///
-/// The other half of the pair above, and the behaviour that was missing entirely: this
-/// returned [`None`] for every address of every bare module, so a container parsed, the
-/// loader mapped its segments, and nothing downstream could find a byte (D237).
+/// In an unwrapped module the program headers' file offsets are authoritative.
 #[test]
 fn a_segment_outside_every_load_is_found_through_its_own_header() {
     let bytes = elf_with(
@@ -501,10 +474,9 @@ fn a_segment_outside_every_load_is_found_through_its_own_header() {
 
 /// The two tag dialects describe the same tables and must produce the same answer.
 ///
-/// **This is D247 as a test.** The vendor fixture's offsets are small numbers - `0x20`,
-/// `0x100` - which are also perfectly good virtual addresses in this image, so resolving
-/// them the standard way succeeds and lands on the ELF header. The bug it protects against
-/// does not fail loudly; it reads the wrong bytes and carries on.
+/// The vendor fixture's offsets (`0x20`, `0x100`) are also valid virtual addresses in this
+/// image, so resolving them the standard way succeeds and lands on the ELF header: the wrong
+/// bytes, with no error (D247).
 #[test]
 fn both_tag_dialects_describe_the_same_module() {
     let standard = module(Dialect::Standard);
@@ -534,9 +506,8 @@ fn both_tag_dialects_describe_the_same_module() {
 
 /// A vendor table offset of zero is a real offset, not an absent tag.
 ///
-/// The hash table in these fixtures sits at offset zero into the data segment, which is
-/// where a real module puts one. Testing the value for zero would refuse a module whose
-/// tables are all present and correctly described.
+/// The hash table in these fixtures sits at offset zero into the data segment, where a real
+/// module puts one.
 #[test]
 fn a_vendor_offset_of_zero_is_the_first_byte_and_not_an_absence() {
     let bytes = module(Dialect::Vendor);
@@ -593,9 +564,8 @@ fn table_offset_resolves_each_dialect_its_own_way() {
 
 /// The import walk finds exactly the undefined, named symbols.
 ///
-/// Three of the seven entries are excluded for three different reasons, and all three
-/// exclusions have to work: the null entry, the symbol this module defines, and the one
-/// with no name. A walk that got any of them wrong would still return a plausible list.
+/// The null entry, the defined symbol and the unnamed one are each excluded; a walk that got
+/// any of them wrong would still return a plausible list.
 #[test]
 fn only_undefined_named_symbols_are_imports() {
     let bytes = module(Dialect::Standard);
@@ -608,17 +578,15 @@ fn only_undefined_named_symbols_are_imports() {
         ["H2e8t5ScQGc#B#C", "memcpy", "__stderrp", "a_thread_local"]
     );
 
-    // The index is the link between a name and everything that refers to it numerically,
-    // so it has to be the position in the table rather than the position in this list.
+    // The index is the position in the symbol table, since relocations refer to that.
     let indices: Vec<u32> = imports.iter().map(|i| i.symbol_index).collect();
     assert_eq!(indices, [1, 2, 3, 5]);
 }
 
 /// A vendor-encoded name carries its own attribution; a plain one carries none.
 ///
-/// **Not two optional ids that happen to be absent.** A plain name has no answer to give -
-/// the format leaves which library exports a symbol to a search - and a `0` there would
-/// attribute every homebrew import to whichever library came first (D305).
+/// A plain name has no attribution in the format, and a `0` would attribute every
+/// open-toolchain import to whichever library came first (D305).
 #[test]
 fn an_encoded_name_carries_attribution_and_a_plain_one_does_not() {
     let bytes = module(Dialect::Standard);
@@ -646,9 +614,7 @@ fn an_encoded_name_carries_attribution_and_a_plain_one_does_not() {
 
 /// A plain name's hash is the hash of that name, so everything downstream resolves one way.
 ///
-/// A plain name is not a second kind of import needing a second resolver - it is a NID
-/// nobody has hashed yet, because the exporting library's NID *is* the hash of the same
-/// name (D305).
+/// The exporting library's NID is the hash of the same name (D305).
 #[test]
 fn a_plain_name_hashes_to_the_nid_its_exporter_would_publish() {
     let bytes = module(Dialect::Standard);
@@ -662,8 +628,7 @@ fn a_plain_name_hashes_to_the_nid_its_exporter_would_publish() {
         .expect("present");
     assert_eq!(memcpy.nid, hasher.hash("memcpy").as_raw());
 
-    // And the encoded one is decoded rather than hashed: its name is not what gets hashed,
-    // so the two must differ.
+    // The encoded one is decoded rather than hashed, so the two differ.
     let encoded = &imports[0];
     assert_ne!(encoded.nid, hasher.hash(&encoded.name).as_raw());
     assert_ne!(encoded.nid, 0);
@@ -671,10 +636,8 @@ fn a_plain_name_hashes_to_the_nid_its_exporter_would_publish() {
 
 /// The kind is read from the symbol table rather than inferred from the name.
 ///
-/// For data, a thunk address is not a wrong answer but no answer at all: the guest loads
-/// the slot and dereferences what it finds, reading the first bytes of x86 instructions as
-/// a pointer. That is indistinguishable from working until something unrelated breaks
-/// (D307).
+/// For data a thunk address is no answer: the guest dereferences the slot and reads
+/// instruction bytes as a pointer (D307).
 #[test]
 fn the_kind_of_each_import_comes_from_the_symbol_table() {
     let bytes = module(Dialect::Standard);
@@ -690,14 +653,13 @@ fn the_kind_of_each_import_comes_from_the_symbol_table() {
     };
     assert_eq!(kind("memcpy"), dynamic::Kind::Function);
     assert_eq!(kind("__stderrp"), dynamic::Kind::Object);
-    // TLS is neither, and saying so is a fact rather than a default.
+    // TLS is neither, and that is a fact rather than a default.
     assert_eq!(kind("a_thread_local"), dynamic::Kind::Unspecified);
 }
 
 /// A module with no dynamic table refuses to report imports rather than reporting none.
 ///
-/// An empty list reads as "needs nothing", which is never true of a real module - the exact
-/// claim principle 3 forbids an import list from making.
+/// An empty list would read as "needs nothing", which is never true of a real module.
 #[test]
 fn a_module_that_cannot_be_walked_refuses_rather_than_reporting_nothing() {
     let bytes = elf_with(&[(PT_LOAD, 0, 0, 0x100)], 0x100);
@@ -740,7 +702,7 @@ fn an_absurd_symbol_count_is_refused() {
         container.raw_imports(&bytes, &hasher()),
         Err(ElfError::AbsurdSymbolCount { .. })
     ));
-    // The count itself is still reported: the limit belongs to the walk, not to the read.
+    // The count is still reported: the limit belongs to the walk, not the read.
     assert_eq!(
         container.symbol_count(&bytes).expect("reads"),
         u64::from(u32::MAX)
@@ -749,8 +711,8 @@ fn an_absurd_symbol_count_is_refused() {
 
 /// A symbol count beyond the end of the table stops at the bytes that exist.
 ///
-/// The count comes from the hash table and the table it describes comes from somewhere
-/// else, so the two can disagree without the file being obviously malformed.
+/// The count comes from the hash table and the symbol table from elsewhere, so the two can
+/// disagree in a file that is not obviously malformed.
 #[test]
 fn a_count_larger_than_the_table_stops_at_what_is_there() {
     let mut bytes = module(Dialect::Standard);
@@ -795,9 +757,8 @@ fn a_truncated_hash_table_is_reported_rather_than_read_as_empty() {
 
 /// The library and module tables are the ones an encoded name's ids actually index.
 ///
-/// **Not `DT_NEEDED`**, which is a different list of a different length: indexing that
-/// instead produced attributions that fit and meant nothing, like a graphics driver
-/// exporting a socket function (D117).
+/// Not `DT_NEEDED`, which is a different list of a different length and gives attributions
+/// that fit and mean nothing.
 #[test]
 fn the_import_tables_are_keyed_by_the_ids_an_encoded_name_carries() {
     let bytes = module(Dialect::Standard);
@@ -811,7 +772,7 @@ fn the_import_tables_are_keyed_by_the_ids_an_encoded_name_carries() {
     );
     assert_eq!(modules.get(&2).map(String::as_str), Some("libc"));
 
-    // The encoded import's own ids reach them, which is the whole point of the pair.
+    // The encoded import's own ids reach them.
     let imports = container.raw_imports(&bytes, &hasher()).expect("walks");
     let encoded = &imports[0];
     assert_eq!(

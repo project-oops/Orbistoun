@@ -1,27 +1,16 @@
 //! Which machine orbistoun is presenting itself as.
 //!
-//! Here rather than with the rest of what the console is *set to*, because two layers that
-//! cannot see each other both need it: the shell stores it, and the kernel answers a guest
-//! from it. A domain type shared by every layer is exactly what this crate is for.
+//! A domain type here because layers that cannot see each other both need it: the shell stores
+//! it, and the kernel answers a guest from it.
 
 use serde::{Deserialize, Serialize};
 
 /// Which machine orbistoun presents itself as.
 ///
-/// # Why this is one setting and not five answers
-///
-/// A guest asks several separate questions - is this retail, is this a devkit, is this the
-/// faster revision - and they are not independent: exactly one kind can be true, and a
-/// machine that answered yes to two of them is not a machine. They were five hardcoded
-/// constants in five functions, which is five places to be inconsistent and no place to say
-/// what was intended.
-///
-/// So the *machine* is the setting and the answers are derived from it. A guest that takes a
-/// devkit path takes it because somebody chose a devkit, and the run says which (D394).
-///
-/// It lives with the rest of what the console is **set to** rather than with the installation's
-/// own configuration, because it travels: a title's behaviour on a retail PS5 is a fact about
-/// that pairing, not about whose computer it ran on (D326).
+/// A guest asks separate questions (retail, devkit, faster revision) whose answers are not
+/// independent, so the machine is the one setting and the answers are derived from it (D394).
+/// It lives with what the hardware is set to rather than the installation's configuration,
+/// because a title's behaviour belongs to the title and machine pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Machine {
@@ -33,79 +22,43 @@ pub struct Machine {
     pub revision: Revision,
     /// What the kernel calls its own release, as `kern.osrelease` answers it.
     ///
-    /// # Why this is empty by default rather than a plausible version
-    ///
-    /// A guest asks the kernel its version and **branches on the answer**: `zftpd` reports
-    /// `Firmware detection failed` and disables a feature. Answering something plausible
-    /// would send it down a path chosen by a number nobody measured, and the run would look
-    /// like it worked.
-    ///
-    /// Nothing in this repository knows what a console's kernel calls itself - it is not in
-    /// the FreeBSD checkout, because the console's kernel is not that kernel. So it is empty
-    /// until somebody who has measured one fills it in, and empty means the question is
-    /// refused rather than answered wrongly (D397).
+    /// A guest branches on it (`zftpd` reports `Firmware detection failed` and disables a
+    /// feature), and the value is not in the FreeBSD checkout. Empty by default, and empty refuses
+    /// the question rather than answering a guess (D397).
     #[serde(default)]
     pub kernel_release: String,
     /// What the system calls its own version, in the packed form a guest compares against.
     ///
-    /// # Why a guest cannot start without this
-    ///
-    /// Four open-toolchain payloads ask the kernel for it before they will bring up their own
-    /// runtime linker, and give up when they get nothing - `Unable to initialize rtld`, then
-    /// exit. Each then **branches on the value**, against 7.00, 8.50, 9.30 and 10.30, because
-    /// what a payload does next depends on which system it is running on.
-    ///
-    /// So this is not a label. It selects a code path, and the wrong one is a guest doing
-    /// something built for a different platform with nothing in a trace saying so.
-    ///
-    /// # Zero, and why that refuses rather than guesses
-    ///
-    /// The form is the one the guest reads: the major and minor in a sixteen-bit field, so
-    /// 12.40 is `0x1240`. This is the *system software* version - what syscall 649 answers and
-    /// what `kern.version` names. It is **not** what [`Self::software_version`] carries:
-    /// `sceKernelGetSystemSwVersion` reports a different number on the same console (D420), which
-    /// is why the two are separate settings.
-    ///
-    /// Zero means unset, and unset refuses the call. A plausible default would pick one of
-    /// those branches for the guest and the run would look like it worked (D397, D403).
+    /// Open-toolchain payloads ask for it before bringing up their runtime linker, give up without
+    /// it, and branch on it (against 7.00, 8.50, 9.30, 10.30). Packed major and minor in sixteen
+    /// bits, so 12.40 is `0x1240`: what syscall 649 answers and `kern.version` names, distinct from
+    /// [`Self::software_version`]. Zero means unset, and unset refuses the call (D403).
     #[serde(default)]
     pub firmware: u16,
-    /// What `sceKernelGetSystemSwVersion` fills in - a *different* number from [`Self::firmware`].
+    /// What `sceKernelGetSystemSwVersion` fills in - a different number from [`Self::firmware`].
     ///
-    /// # Two versions, one console
-    ///
-    /// The reference machine runs system software 12.40 ([`Self::firmware`] = `0x1240`), yet this
-    /// call answers `13.090.001` / `0x1309_0001` - measured across three obSCEne module runs, and
-    /// deliberately not derived from the firmware, because on hardware the two simply differ
-    /// (D420). Configurable for the same reason the firmware is: a different console presents a
-    /// different value, and neither belongs compiled in (principle 5).
-    ///
-    /// `None` means unset, and unset refuses the call - the same honest default `firmware` and
-    /// `kernel_release` keep, rather than inventing a version a guest would read back.
+    /// The reference machine runs system software 12.40, yet this call answers `13.090.001` /
+    /// `0x1309_0001`, measured across three obSCEne module runs; the two are never derived from
+    /// each other. `None` means unset, and unset refuses the call (D421).
     #[serde(default)]
     pub software_version: Option<SoftwareVersion>,
-    /// What `kern.version` answers: the kernel's build banner, as the console wrote it.
+    /// What `kern.version` answers: the kernel's build banner, verbatim.
     ///
-    /// **One machine's string, carried verbatim.** A console measured
-    /// `r226974/releases/12.40 Nov 27 2025 02:23:38` - a revision, a release and a build date,
-    /// and only the release could be composed from [`Self::firmware`]; the other two would be
-    /// invented. So a profile states it whole, and empty means unset, which refuses the knob
-    /// rather than answering a banner nobody read (D675).
+    /// One machine's string (`r226974/releases/12.40 Nov 27 2025 02:23:38`); only the release
+    /// could be composed from [`Self::firmware`], so a profile states it whole. Empty is unset and
+    /// refuses the knob (D675).
     #[serde(default)]
     pub kernel_version: String,
-    /// What `kern.sdk_version` answers, as the integer the console wrote.
+    /// What `kern.sdk_version` answers, as the integer the hardware wrote (`0x1240_0009`).
     ///
-    /// A console measured `0x1240_0009` - `12.400.009`, the same system software its run header
-    /// names. Kept apart from [`Self::firmware`] for the reason [`Self::software_version`] is:
-    /// the packing relating them is not documented, so neither is derived from the other. Zero
-    /// is unset, and unset refuses (D675).
+    /// Not derived from [`Self::firmware`], since the packing relating them is not documented.
+    /// Zero is unset, and unset refuses (D675).
     #[serde(default)]
     pub kernel_sdk_version: u32,
-    /// What `hw.model` answers: the processor's part name, space-padded as the console wrote it.
+    /// What `hw.model` answers: the processor's part name, space-padded as the hardware wrote it.
     ///
-    /// A console measured `100-000000189` followed by 34 spaces - 47 bytes. The padding is part
-    /// of the answer: a caller comparing the whole string sees a different value if it has been
-    /// trimmed. Empty is unset, and unset refuses (D675).
+    /// Measured as `100-000000189` and 34 spaces, 47 bytes; the padding is part of the answer.
+    /// Empty is unset, and unset refuses (D675).
     #[serde(default)]
     pub hardware_model: String,
 }
@@ -113,10 +66,9 @@ pub struct Machine {
 /// The version `sceKernelGetSystemSwVersion` reports: the display string the guest reads and the
 /// packed integer beside it.
 ///
-/// **Both measured, neither derived from the other.** The structure holds a `char[0x1c]` string at
-/// offset 8 and a `uint32` at offset 0x24, and the rule relating the two is not documented - one
-/// sample is not a rule (principle 3). So a profile states both, and a profile that gives one
-/// without the other is refused by deserialisation rather than half-answering.
+/// A `char[0x1c]` string at offset 8 and a `uint32` at `0x24`, both measured; the rule relating
+/// them is not documented, so a profile states both and one without the other fails to
+/// deserialise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SoftwareVersion {
@@ -131,7 +83,7 @@ pub struct SoftwareVersion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Generation {
-    /// The earlier generation.
+    /// The later one, and the default: it is what this project is for.
     Orbis,
     /// The later one, and the default - it is what this project is for.
     #[default]
@@ -140,8 +92,7 @@ pub enum Generation {
 
 /// Retail, development or test hardware.
 ///
-/// **Exactly one is true**, which is the whole reason these are an enum rather than three
-/// booleans: a guest asks each separately, and answering yes to two describes nothing.
+/// An enum because exactly one is true, though a guest asks about each separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
@@ -156,29 +107,23 @@ pub enum Kind {
 
 /// Which hardware revision within a generation.
 ///
-/// The faster revision has more of everything and a title may branch on it. Separate from
-/// [`Kind`] because they are independent: a devkit is a devkit whichever revision it is.
+/// The faster revision has more of everything and a title may branch on it. Independent of
+/// [`Kind`]: a devkit is a devkit whichever revision it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Revision {
     /// The base machine, and the default.
     #[default]
     Base,
-    /// The faster revision - a PS4 Pro, or a PS5 Pro.
+    /// The faster mid-generation revision.
     Pro,
 }
 
 /// Which machine a generation and a revision together name.
 ///
-/// # Why this is derived rather than a third field
-///
-/// The two axes already carry the information: a generation and a revision pick exactly one of
-/// four machines. A third field would let a `Machine` say it is a base Prospero *and* a Trinity,
-/// which describes nothing - the same reasoning [`Kind`] is an enum rather than three booleans.
-///
-/// The codenames are this project's vocabulary because they are **not trademarks**, which is what
-/// §2 of the build principles asks for. `describe` used to answer `ps5/cex/base`; a codename says
-/// the same thing without putting a vendor's mark in orbistoun's own output (D663).
+/// Derived rather than stored, so a `Machine` cannot claim two platforms at once. The
+/// codenames are this project's vocabulary for the four machines and keep trademarks out of
+/// orbistoun's own output (D663).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Platform {
     /// The earlier generation's base machine.
@@ -231,9 +176,8 @@ impl Machine {
 
     /// Whether anything other than retail software is expected to run.
     ///
-    /// True on both development and test hardware, which is what separates it from
-    /// [`Self::is_development_kit`] - a guest asking this is asking about the *mode*, not
-    /// about the box.
+    /// True on development and test hardware: a guest asking this asks about the mode, not the
+    /// box.
     #[must_use]
     pub const fn is_development_mode(&self) -> bool {
         !self.is_retail()
@@ -272,24 +216,19 @@ impl Machine {
 
 /// Which machine this process is presenting.
 ///
-/// **Published here rather than in whichever crate answers a guest**, because several answer:
-/// the kernel reports what kind of box it is, the C library reports what the kernel calls
-/// itself, and neither of those crates can see the other. Told once, by the layer that reads
-/// the settings file, and read wherever it is needed (D394, D397).
+/// Published here because several crates answer from it without seeing each other: told once
+/// by the layer that reads the settings file (D394).
 static PRESENTED: std::sync::OnceLock<Machine> = std::sync::OnceLock::new();
 
 /// Records which machine this process presents.
 ///
-/// A second call is ignored, as with every other process-wide table here: two machines in one
-/// process is not something this supports.
+/// A second call is ignored, as for every process-wide table here.
 pub fn present(machine: Machine) {
     let _ = PRESENTED.set(machine);
 }
 
-/// What this process presents itself as.
-///
-/// A retail base PS5 when nothing configured it, which is what every measurement so far was
-/// taken against.
+/// What this process presents itself as: a retail base Prospero machine when nothing configured
+/// it.
 #[must_use]
 pub fn presented() -> &'static Machine {
     static DEFAULT: std::sync::OnceLock<Machine> = std::sync::OnceLock::new();
@@ -301,12 +240,7 @@ pub fn presented() -> &'static Machine {
 #[cfg(test)]
 mod tests {
 
-    /// **Every generation-and-revision pair names a platform**, and each names a different one.
-    ///
-    /// Written first, and exhaustively: the four combinations already existed as two enums, and
-    /// the failure this guards against is two of them collapsing onto one name - which would
-    /// make a report say `prospero` for a machine that is not one, and nothing would catch it
-    /// (D663).
+    /// Every generation and revision pair names its own platform (D663).
     #[test]
     fn each_generation_and_revision_names_its_own_platform() {
         let cases = [
@@ -330,11 +264,7 @@ mod tests {
         assert_eq!(seen.len(), 4, "four machines, four names, none shared");
     }
 
-    /// The codenames are what a report says, and the trademarks are gone from it.
-    ///
-    /// The negative half is the point: `describe` said `ps5/cex/base`, and §2 keeps vendor
-    /// trademarks out of this project's own prose and API. A codename is not a trademark, which
-    /// is why it satisfies the rule the previous wording strained (D663).
+    /// A machine describes itself by codename, not by trademark.
     #[test]
     fn a_machine_describes_itself_by_codename() {
         let base = Machine::default();
@@ -352,11 +282,7 @@ mod tests {
     }
     use super::{Generation, Kind, Machine, Platform, Revision};
 
-    /// **Exactly one kind is true**, which is the property three booleans could not hold.
-    ///
-    /// The failure this protects against has happened: a platform that answered yes to
-    /// retail *and* devkit, because each was a separate constant and one of them was a
-    /// placeholder (D271, D393).
+    /// Exactly one kind is true (D393).
     #[test]
     fn exactly_one_kind_is_ever_true() {
         for kind in [Kind::Cex, Kind::Dex, Kind::Tex] {
@@ -405,10 +331,7 @@ mod tests {
         assert_eq!(pro_devkit.describe(), "prospero/dex/pro");
     }
 
-    /// **The kernel release is empty until somebody measures one.**
-    ///
-    /// A guest branches on it, so a plausible default would send it down a path chosen by a
-    /// number nobody has ever seen - and the run would look like it worked (D397).
+    /// The firmware version is unset until somebody measures one (D397).
     #[test]
     fn nothing_pretends_to_know_the_firmware_version() {
         assert_eq!(
@@ -427,7 +350,7 @@ mod tests {
         );
     }
 
-    /// And the same rule for the software version `sceKernelGetSystemSwVersion` answers.
+    /// The same rule for the software version `sceKernelGetSystemSwVersion` answers.
     #[test]
     fn nothing_pretends_to_know_the_software_version() {
         assert!(
@@ -436,9 +359,8 @@ mod tests {
         );
     }
 
-    /// And for the three knobs a console fills that nothing here can derive: the kernel's build
-    /// banner, its SDK number and the hardware model. Each is one machine's value, so each stays
-    /// unset until a profile that measured it says otherwise (D675).
+    /// The same rule for the kernel's build banner, SDK number and hardware model, each one
+    /// machine's value (D675).
     #[test]
     fn nothing_pretends_to_know_the_kernel_banner_sdk_or_model() {
         let machine = Machine::default();
@@ -456,7 +378,7 @@ mod tests {
         );
     }
 
-    /// The default is a retail base PS5, which is what every recorded measurement assumed.
+    /// The default is a retail base Prospero machine.
     #[test]
     fn the_default_is_what_every_measurement_was_taken_against() {
         assert_eq!(Machine::default().describe(), "prospero/cex/base");

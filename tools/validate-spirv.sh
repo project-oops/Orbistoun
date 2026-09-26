@@ -6,12 +6,11 @@
 # proves nothing. `spirv-val` is the oracle here, the same way `llvm-objdump` is for
 # the shader decoder.
 #
-# Emitting and validating are split across two machines on purpose: the Rust toolchain
-# lives on the host, the SPIR-V tools in the build VM, and neither needs the other
-# installed. Emit first, then:
+# Emitting runs on the host and validating in the build VM, where the SPIR-V tools live.
+# Emit first, then:
 #
 #   cargo run -q --example emit-minimal -p orbistoun-spirv -- target/spirv/minimal.spv
-#   multipass exec obscene-build -- sh /home/ubuntu/orbistoun/tools/validate-spirv.sh
+#   sh tools/toolchain/run.sh sh tools/validate-spirv.sh
 set -e
 cd "$(dirname "$0")/.."
 DIR=${DIR:-target/spirv}

@@ -1,20 +1,10 @@
 //! The C11 atomic operations the platform's C runtime calls out to.
 //!
-//! # Why a guest calls a function to do one instruction
-//!
-//! `<stdatomic.h>` is mostly compiler intrinsics, but a runtime that has to work on compilers
-//! without them ships out-of-line versions and calls those instead. The Dinkumware runtime this
-//! platform carries (D468) names them `_Atomic_<operation>_<width>`, and a guest built against
-//! it imports the ones it uses. They are ordinary C11 semantics with the object passed by
-//! address.
-//!
-//! # The memory order is deliberately ignored, upward
-//!
-//! Each takes a memory-order argument. **The strongest order is a conforming implementation of
-//! every weaker one** - `SeqCst` never permits a reordering that `Relaxed` forbids - so these
-//! use `SeqCst` throughout rather than mapping an enumeration whose numbering is the runtime's
-//! own and is not established here. That is a deliberate strengthening, which costs a little
-//! speed and cannot produce a wrong answer; guessing the enumeration could (principle 3).
+//! The platform's C runtime ships out-of-line versions of `<stdatomic.h>` operations, named
+//! `_Atomic_<operation>_<width>`, with ordinary C11 semantics and the object passed by
+//! address. Each takes a memory-order argument; these use `SeqCst` throughout, which conforms
+//! to every weaker order, rather than decoding an enumeration whose numbering is not
+//! established here.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -25,17 +15,15 @@ const WIDTH: u64 = 4;
 
 /// The atomic object at a guest address, if the guest gave a usable one.
 ///
-/// C11 requires an atomic object to be suitably aligned (6.2.8), so a misaligned address is a
-/// guest that has already done something undefined. It answers [`None`] rather than forming a
-/// misaligned reference, which would be undefined here too - and unlike the guest's mistake,
-/// ours would be silent.
+/// C11 requires an atomic object to be suitably aligned (6.2.8). A misaligned address answers
+/// [`None`] rather than forming a misaligned reference, which would be undefined here too.
 fn object(address: u64) -> Option<&'static AtomicU32> {
     if address == 0 || address % WIDTH != 0 {
         return None;
     }
-    // SAFETY: a guest-supplied atomic object under the identity mapping (D014), just checked
-    // for the alignment C11 requires of it. `AtomicU32` has the same layout as `u32`, and the
-    // reference is used only within the call that made it.
+    // SAFETY: a guest-supplied atomic object under the identity mapping, just checked for the
+    // alignment C11 requires. `AtomicU32` has the layout of `u32`, and the reference does not
+    // outlive the call.
     Some(unsafe { &*(address as *const AtomicU32) })
 }
 
@@ -46,10 +34,9 @@ fn atomic_load_4(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     object(args[0]).map_or(0, |cell| u64::from(cell.load(Ordering::SeqCst)))
 }
 
-/// `_Atomic_fetch_add_4(object, operand, order)` - adds, and answers the **previous** value.
+/// `_Atomic_fetch_add_4(object, operand, order)` - adds, and answers the previous value.
 ///
-/// Reference: ISO/IEC 9899:2011 7.17.7.5. Answering the new value is the classic mistake, and
-/// it is invisible until two threads use the answer as a ticket.
+/// Reference: ISO/IEC 9899:2011 7.17.7.5.
 fn atomic_fetch_add_4(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let operand = args[1] as u32;
     object(args[0]).map_or(0, |cell| {
@@ -69,13 +56,9 @@ fn atomic_fetch_sub_4(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `_Atomic_compare_exchange_weak_4(object, expected, desired, success, failure)`.
 ///
-/// Reference: ISO/IEC 9899:2011 7.17.7.4. **On failure the object's actual value is written
-/// back through `expected`**, which is what lets the caller's retry loop terminate; a version
-/// that only answered false would spin forever on an unchanged expectation.
-///
-/// The *weak* form is permitted to fail spuriously, so `compare_exchange_weak` is used rather
-/// than the strong one - a caller of the weak form already has the loop that tolerates it, and
-/// the strong form would merely be slower on the architectures where they differ.
+/// Reference: ISO/IEC 9899:2011 7.17.7.4. On failure the object's actual value is written back
+/// through `expected`, which lets the caller's retry loop terminate. The weak form may fail
+/// spuriously, and its callers already loop.
 fn atomic_compare_exchange_weak_4(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (expected_at, desired) = (args[1], args[2] as u32);
     let Some(cell) = object(args[0]) else {
@@ -129,8 +112,7 @@ mod tests {
         assert_eq!(call(atomic_load_4, [at, 0, 0]), 7);
     }
 
-    /// **The previous value, not the new one.** A version answering the sum passes every
-    /// single-threaded eyeball test and breaks every ticket lock.
+    /// Fetch-add answers the previous value, not the new one, or every ticket lock breaks.
     #[test]
     fn fetch_add_answers_the_previous_value() {
         let it = cell(10);
@@ -147,8 +129,7 @@ mod tests {
         assert_eq!(it.load(Ordering::SeqCst), 6);
     }
 
-    /// **The guard made to fail**: a failed exchange must write the actual value back through
-    /// `expected`, or the caller's retry loop never terminates.
+    /// A failed exchange writes the actual value back through `expected`.
     #[test]
     fn a_failed_exchange_reports_the_actual_value_back() {
         let it = cell(3);
@@ -195,9 +176,8 @@ mod tests {
         assert_eq!(it.load(Ordering::SeqCst), 42);
     }
 
-    /// A misaligned object is undefined in C11, and this must not make it undefined *here* by
-    /// forming a misaligned reference. Answering zero without touching memory is the honest
-    /// version of a guest that has already gone wrong.
+    /// A misaligned object answers zero without touching memory or forming a misaligned
+    /// reference.
     #[test]
     fn a_misaligned_object_is_refused_rather_than_dereferenced() {
         let backing = cell(0);

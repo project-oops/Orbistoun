@@ -1,28 +1,11 @@
 //! Fixed-address reservation, per platform.
 //!
-//! Only two primitives are needed, and both must **fail rather than relocate**. A
-//! guest that asked for an address and silently got a different one corrupts itself in
-//! ways that look like anything except a mapping bug.
-//!
-//! # Windows
-//!
-//! `VirtualAlloc` at an explicit base already has exactly the semantics wanted: it
-//! never overwrites an existing reservation and returns null if the range is taken.
-//!
-//! `VirtualAlloc2` with placeholders, which earlier planning assumed would be needed,
-//! solves a different problem: reserving a large region and later splitting it. Worth
-//! reaching for when sub-dividing reservations becomes necessary, and unnecessary
-//! complexity before then.
-//!
-//! # Unix
-//!
-//! Linux has `MAP_FIXED_NOREPLACE`, which fails instead of evicting. Plain `MAP_FIXED`
-//! is never correct here - it would unmap whatever was already there, and the failure
-//! would surface as guest corruption rather than as a mapping error.
-//!
-//! Other Unixes lack that flag, so the fallback passes the address as a *hint* and
-//! then checks what came back, unmapping and failing if the kernel chose elsewhere.
-//! Slightly racy, but it never evicts, which is the property that matters.
+//! Both primitives fail rather than relocate: a guest given a different address than it asked
+//! for corrupts itself in ways that do not look like a mapping fault. On Windows,
+//! `VirtualAlloc` at an explicit base never overwrites an existing reservation and returns
+//! null if the range is taken. On Linux, `MAP_FIXED_NOREPLACE` fails instead of evicting;
+//! other Unixes pass the address as a hint and unmap and fail if the kernel chose elsewhere,
+//! which is slightly racy but never evicts. Plain `MAP_FIXED` is never used.
 
 use crate::{MemError, Protection};
 
@@ -59,22 +42,16 @@ mod imp {
         PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualProtect,
     };
 
-    /// `MEM_WRITE_WATCH`, `0x200000` - `windows-sys` declares it under `Win32_System_SystemServices`
-    /// (`SystemServices/mod.rs:2702` in 0.61.2), a feature this crate does not otherwise need.
+    /// `MEM_WRITE_WATCH`, `0x200000` - `windows-sys` declares it under
+    /// `Win32_System_SystemServices` (`SystemServices/mod.rs:2702` in 0.61.2), a feature this crate
+    /// does not otherwise need.
     const MEM_WRITE_WATCH: u32 = 0x0020_0000;
 
     /// Maps our protection model onto the platform's.
     ///
-    /// **Execute is never dropped, and never implies "no access".** Real guest text
-    /// segments here carry `p_flags` of `0x1` - execute with the read bit clear - and an
-    /// earlier version of this match sent that to `PAGE_NOACCESS`, because it tested
-    /// `read` before `execute`. The image then linked perfectly and faulted on its very
-    /// first instruction fetch, which looked like a bad entry point rather than a
-    /// protection bug (D065).
-    ///
-    /// Granting read alongside execute is accurate rather than lax: classic x86-64
-    /// paging has no execute-without-read, so `PAGE_EXECUTE` and `PAGE_EXECUTE_READ`
-    /// behave identically at the hardware level.
+    /// Execute is never dropped: guest text segments carry `p_flags` of `0x1` (execute, read
+    /// clear), and mapping that to `PAGE_NOACCESS` faults on the first instruction fetch. Granting
+    /// read with execute is accurate, since x86-64 paging has no execute-without-read.
     const fn protection_flags(p: Protection) -> u32 {
         match (p.read, p.write, p.execute) {
             (_, true, true) => PAGE_EXECUTE_READWRITE,
@@ -92,13 +69,11 @@ mod imp {
         let size = usize::try_from(len)
             .map_err(|_| MemError::HostRefused("length does not fit in a pointer".to_owned()))?;
 
-        // SAFETY: `VirtualAlloc` is safe to call with any address and size; it
-        // validates them itself and returns null on failure. It never overwrites an
-        // existing reservation, which is the property this whole function depends on -
-        // so a conflict surfaces as null rather than as evicted memory.
+        // SAFETY: `VirtualAlloc` validates any address and size itself and returns null on
+        // failure; it never overwrites an existing reservation, so a conflict surfaces as null.
         let got = unsafe {
-            // Write-watched, so what has been written since a point can be asked of the host
-            // rather than found by comparing every byte (`crate::watch`, worklog 851).
+            // Write-watched, so what has been written since a point can be asked of the host rather
+            // than found by comparing every byte (`crate::watch`).
             VirtualAlloc(
                 addr as *const core::ffi::c_void,
                 size,
@@ -111,11 +86,9 @@ mod imp {
             // SAFETY: reads this thread's last-error code, set by the `VirtualAlloc` that
             // just failed; it takes no arguments and cannot fault.
             let code = unsafe { GetLastError() };
-            // `ERROR_INVALID_ADDRESS` is what `VirtualAlloc` reports when the base is already
-            // reserved - a genuine conflict. Anything else (a commitment limit, not-enough-
-            // memory) is the host refusing, and reporting that as "range taken" sends a reader
-            // hunting a phantom occupant instead of at the real cause - the same D010 rule the
-            // Unix path already follows, unmet here until now.
+            // `ERROR_INVALID_ADDRESS` means the base is already reserved, a genuine conflict.
+            // Anything else is the host refusing, and is reported as that rather than as a taken
+            // range (D010).
             return Err(if code == ERROR_INVALID_ADDRESS {
                 MemError::Conflict { base, len }
             } else {
@@ -125,9 +98,8 @@ mod imp {
             });
         }
         if got as usize != addr {
-            // Documented not to happen when a base is given, but assert it rather than
-            // trust it: silently accepting a different address is the exact failure
-            // this design exists to prevent.
+            // Documented not to happen when a base is given; checked anyway, since accepting a
+            // different address is the failure this design prevents.
             // SAFETY: `got` was returned by VirtualAlloc and has not been freed.
             unsafe { VirtualFree(got, 0, MEM_RELEASE) };
             return Err(MemError::HostRefused(format!(
@@ -144,9 +116,8 @@ mod imp {
         let size = usize::try_from(len)
             .map_err(|_| MemError::HostRefused("length does not fit in a pointer".to_owned()))?;
         let mut old: u32 = 0;
-        // SAFETY: the range lies inside a reservation this process owns, `old` is a
-        // live local, and `VirtualProtect` validates its arguments and reports failure
-        // through its return value rather than by faulting.
+        // SAFETY: the range lies inside a reservation this process owns, `old` is a live local,
+        // and `VirtualProtect` reports failure through its return value.
         let ok = unsafe {
             VirtualProtect(
                 addr as *mut core::ffi::c_void,
@@ -166,9 +137,8 @@ mod imp {
 
     pub(super) fn allocation_granularity() -> u64 {
         use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
-        // SAFETY: `SYSTEM_INFO` is a plain C struct of integers and unions with no
-        // validity requirements, so an all-zero value is a legal instance. It is
-        // overwritten entirely by the call below.
+        // SAFETY: `SYSTEM_INFO` is a plain C struct of integers and unions, so all-zero is a legal
+        // value; the call below overwrites it.
         let mut info: SYSTEM_INFO = unsafe { core::mem::zeroed() };
         // SAFETY: `GetSystemInfo` fills the struct it is given and cannot fail; the
         // pointer refers to a live, correctly sized local.
@@ -213,13 +183,9 @@ mod imp {
         let size = usize::try_from(len)
             .map_err(|_| MemError::HostRefused("length does not fit in a pointer".to_owned()))?;
 
-        // MAP_PRIVATE is mandatory: an mmap with neither PRIVATE nor SHARED is
-        // EINVAL. Omitting it made every reservation fail on Linux while Windows
-        // passed, which is precisely the kind of gap only running it finds.
-        //
-        // MAP_FIXED_NOREPLACE then fails instead of evicting. Where it does not exist
-        // the address is a hint and the result is checked below - never MAP_FIXED,
-        // which would unmap whatever was already there.
+        // MAP_PRIVATE is mandatory: an mmap with neither PRIVATE nor SHARED is EINVAL.
+        // MAP_FIXED_NOREPLACE fails instead of evicting; where it does not exist the address is a
+        // hint and the result is checked below. Never MAP_FIXED, which unmaps what was there.
         #[cfg(target_os = "linux")]
         let flags = MapFlags::PRIVATE.union(MapFlags::FIXED_NOREPLACE);
         #[cfg(not(target_os = "linux"))]
@@ -237,9 +203,8 @@ mod imp {
             )
         }
         .map_err(|e| {
-            // Not every mmap failure is a conflict. Reporting EINVAL as "range taken"
-            // sends a reader looking for a phantom occupant instead of at the wrong
-            // argument that actually caused it (D010).
+            // Not every mmap failure is a conflict: EINVAL is a bad argument, not a taken range
+            // (D010).
             match e {
                 rustix::io::Errno::EXIST | rustix::io::Errno::NOMEM => {
                     MemError::Conflict { base, len }
@@ -299,13 +264,8 @@ mod imp {
 
 /// The coarsest alignment a reservation base must satisfy on this host.
 ///
-/// **Not the guest page size, and conflating them is a real bug.** Windows rounds a
-/// reservation base *down* to 64 KiB, so a page-aligned-but-not-granularity-aligned
-/// request comes back at a different address - which this crate then correctly
-/// refuses, since silently accepting relocation is exactly what it exists to prevent.
-///
-/// Unix has no coarser unit than the page for `mmap`, so the two coincide there. Code
-/// that only ever ran on Unix would never notice the difference.
+/// Not the guest page size. Windows rounds a reservation base down to 64 KiB, so a request
+/// aligned only to the page comes back elsewhere and is refused. On Unix the two coincide.
 pub fn allocation_granularity() -> u64 {
     imp::allocation_granularity()
 }
@@ -317,9 +277,8 @@ pub fn reserve(base: u64, len: u64, protection: Protection) -> Result<Reservatio
 
 /// Changes the protection of an already-reserved range.
 ///
-/// Separate from [`reserve`] because population and execution want different
-/// permissions: an image is written as read-write and only then made executable.
-/// Doing it in one step would mean mapping text writable and leaving it that way.
+/// Separate from [`reserve`] because an image is written read-write and only then made
+/// executable, so text is never left writable.
 pub fn protect(base: u64, len: u64, protection: Protection) -> Result<(), MemError> {
     imp::protect(base, len, protection)
 }
@@ -336,15 +295,13 @@ mod tests {
     use crate::Protection;
     use orbistoun_core::GUEST_PAGE_SIZE;
 
-    /// An address far from anything a normal process maps, so the test is about the
-    /// mechanism rather than about luck.
+    /// An address far from anything a normal process maps.
     const TEST_BASE: u64 = 0x0000_4000_0000_0000;
 
     #[test]
     fn the_allocation_granularity_is_reported_and_is_a_power_of_two() {
-        // Windows reports 64 KiB here while the guest page is 4 KiB. Anything that
-        // rounds a base to the page size alone will be refused on Windows and pass on
-        // Unix, which is the worst kind of platform difference.
+        // Windows reports 64 KiB here while the guest page is 4 KiB; rounding a base to the page
+        // alone is refused on Windows and passes on Unix.
         let g = super::allocation_granularity();
         assert!(g >= GUEST_PAGE_SIZE, "granularity {g} below a page");
         assert!(g.is_power_of_two(), "granularity {g} is not a power of two");
@@ -379,8 +336,7 @@ mod tests {
 
     #[test]
     fn a_second_reservation_of_the_same_range_is_refused_not_silently_moved() {
-        // The property the whole design rests on: conflicts fail loudly. Silent
-        // relocation would corrupt a guest in ways that look like anything else.
+        // Conflicts fail loudly rather than relocating.
         let base = TEST_BASE + 0x2_0000_0000;
         let _held = reserve(base, GUEST_PAGE_SIZE, Protection::READ_WRITE).expect("first");
         let second = reserve(base, GUEST_PAGE_SIZE, Protection::READ_WRITE);
@@ -393,7 +349,7 @@ mod tests {
         {
             let _r = reserve(base, GUEST_PAGE_SIZE, Protection::READ_WRITE).expect("first");
         }
-        // Without a working Drop this fails, which is what makes the test meaningful.
+        // Fails unless Drop released the first reservation.
         let again = reserve(base, GUEST_PAGE_SIZE, Protection::READ_WRITE);
         assert!(again.is_ok(), "the range should be free again after drop");
     }

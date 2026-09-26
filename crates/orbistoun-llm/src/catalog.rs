@@ -1,16 +1,10 @@
 //! The model catalogue, read from data.
 //!
-//! Everything anybody has to know to *choose* a model lives here, and nothing about
-//! how to run one does. That split is what makes [`crate::select`] testable with no
-//! network, no accelerator and no model on disk: sizing is arithmetic over this table.
-//!
-//! # The one field that is not free-form
-//!
-//! [`Offline::arch`] names a loader. A value with no loader behind it is refused by
-//! name at load time rather than substituted for something close, because the failure
-//! it prevents is silent: a Qwen3 GGUF read through a Qwen2 loader does not error, it
-//! produces a model that generates plausible-looking rubbish. Principle 3 - an
-//! explicit "not handled" beats a wrong answer, and both cost the same to write.
+//! Everything needed to choose a model lives here and nothing about running one, so
+//! [`crate::select`] is testable with no network, accelerator or model on disk. The one
+//! constrained field is [`Offline::arch`], which names a loader: a value with no loader is
+//! refused by name at load time, because weights read through the wrong family's loader
+//! produce plausible output rather than an error.
 
 use serde::Deserialize;
 
@@ -18,16 +12,13 @@ use crate::Error;
 
 /// The catalogue shipped with this crate.
 ///
-/// `include_str!` rather than a runtime read, matching `orbistoun-nid`'s hash suffix
-/// and `orbistoun-names`' grammar: the default travels with the binary so a fresh
-/// machine needs no files, and a caller who wants a different one passes it to
-/// [`Catalog::parse`].
+/// Embedded with `include_str!` so a fresh machine needs no files; a caller wanting another
+/// passes it to [`Catalog::parse`].
 pub const DEFAULT_CATALOG: &str = include_str!("../data/models.toml");
 
 /// Which in-process loader reads a model's weights.
 ///
-/// Not a string, because the set of values is exactly the set of loaders that exist,
-/// and that is a fact about this crate's code rather than about its data.
+/// An enum, because the valid values are exactly the loaders this crate's code has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Arch {
@@ -39,10 +30,7 @@ pub enum Arch {
 
 /// How an endpoint expects to be spoken to.
 ///
-/// The protocol, deliberately not the vendor. Three of the four hosted entries in the
-/// shipped catalogue speak the same OpenAI-shaped request and one does not, and the
-/// distinction that matters when writing bytes onto a socket is that one, not whose
-/// logo is on it.
+/// Named by protocol, since the protocol is what decides the bytes written to the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Wire {
@@ -100,8 +88,8 @@ pub struct Online {
     pub endpoint: String,
     /// The model string used when a config entry names none.
     pub default_model: String,
-    /// Environment variable holding the key. Empty means no key is needed at all,
-    /// which is the local-model-server case and not an oversight.
+    /// Environment variable holding the key. Empty means no key is needed, as for a local model
+    /// server.
     #[serde(default)]
     pub key_env: String,
     /// Where a person gets a key. Shown, never fetched.
@@ -122,8 +110,7 @@ pub struct Catalog {
 
 impl Default for Catalog {
     fn default() -> Self {
-        // The shipped catalogue is a test-covered constant, so a parse failure here is
-        // a broken build rather than a runtime condition a caller could handle.
+        // The shipped catalogue is a test-covered constant, so a parse failure is a broken build.
         Self::parse(DEFAULT_CATALOG).expect("the shipped catalogue parses")
     }
 }
@@ -133,10 +120,8 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// If the text is not valid TOML in this shape, or if it declares no models at
-    /// all - an empty catalogue would present as "this machine can run nothing",
-    /// which is indistinguishable from a machine that genuinely can and is the wrong
-    /// thing to be quiet about.
+    /// If the text is not valid TOML in this shape, or declares no models at all: an empty
+    /// catalogue would read as "this machine can run nothing".
     pub fn parse(text: &str) -> Result<Self, Error> {
         let catalog: Self = toml::from_str(text).map_err(|e| Error::Catalog(e.to_string()))?;
         if catalog.offline.is_empty() && catalog.online.is_empty() {
@@ -159,8 +144,8 @@ impl Catalog {
 
     /// The smallest model the selector is allowed to choose: what runs anywhere.
     ///
-    /// Falls back to the first entry if nothing is marked `auto`, which keeps a
-    /// hand-written catalogue usable rather than empty.
+    /// Falls back to the first entry if nothing is marked `auto`, so a hand-written catalogue
+    /// stays usable.
     pub fn smallest_auto(&self) -> Option<&Offline> {
         self.offline
             .iter()
@@ -171,9 +156,8 @@ impl Catalog {
 
     /// The entry to use when the host reports nothing measurable.
     ///
-    /// Deliberately the `default` entry rather than the largest: an over-sized pick
-    /// fails at load, which is minutes into a multi-gigabyte download and the worst
-    /// possible place to discover it.
+    /// The `default` entry rather than the largest: an over-sized pick fails at load, after a
+    /// multi-gigabyte download.
     pub fn balanced_default(&self) -> Option<&Offline> {
         self.offline
             .iter()
@@ -186,10 +170,7 @@ impl Catalog {
 mod tests {
     use super::{Arch, Catalog, DEFAULT_CATALOG, Wire};
 
-    /// The shipped catalogue parses.
-    ///
-    /// `Catalog::default` panics on a malformed one, so without this the first person
-    /// to learn about a typo is whoever runs the binary.
+    /// The shipped catalogue parses, so `Catalog::default` cannot panic.
     #[test]
     fn the_shipped_catalogue_parses() {
         let catalog = Catalog::parse(DEFAULT_CATALOG).expect("parses");
@@ -199,9 +180,8 @@ mod tests {
 
     /// Exactly one offline model is the unmeasured-host default.
     ///
-    /// Two would make the choice depend on file order, and none would push every
-    /// unmeasurable machine onto the smallest model - a silent quality floor that
-    /// nothing would ever report.
+    /// Two would make the choice depend on file order; none would put every unmeasurable machine
+    /// on the smallest model.
     #[test]
     fn exactly_one_model_is_the_default() {
         let catalog = Catalog::default();
@@ -209,10 +189,8 @@ mod tests {
         assert_eq!(defaults.len(), 1, "{defaults:?}");
     }
 
-    /// Every id is unique, in both tables.
-    ///
-    /// A duplicate id is not an error anywhere - lookup takes the first - so it would
-    /// present as an entry that cannot be selected however it is configured.
+    /// Every id is unique in both tables; lookup takes the first, so a duplicate could never be
+    /// selected.
     #[test]
     fn ids_are_unique() {
         let catalog = Catalog::default();
@@ -227,11 +205,8 @@ mod tests {
         }
     }
 
-    /// Sizing is monotonic with download size.
-    ///
-    /// The selector picks the largest model that fits, using `min_vram_mb`. If a
-    /// bigger download declared a smaller footprint it would win on a machine that
-    /// cannot actually load it, and the symptom would arrive after the download.
+    /// A bigger download never declares a smaller footprint, or it would win on a machine that
+    /// cannot load it.
     #[test]
     fn a_bigger_model_never_claims_a_smaller_footprint() {
         let catalog = Catalog::default();
@@ -253,12 +228,8 @@ mod tests {
         }
     }
 
-    /// The hosted vendor whose API is not OpenAI-shaped is not described as though it
-    /// were.
-    ///
-    /// This is the specific mistake two sibling projects both made - listing
-    /// `api.anthropic.com/v1/chat/completions`, which is not a real endpoint - and it
-    /// is cheap to pin so a future edit cannot quietly reintroduce it.
+    /// The Messages API is not described with an OpenAI-shaped endpoint such as
+    /// `api.anthropic.com/v1/chat/completions`, which does not exist.
     #[test]
     fn the_messages_api_is_not_described_as_openai_shaped() {
         let catalog = Catalog::default();
@@ -278,9 +249,6 @@ mod tests {
     }
 
     /// An architecture with no loader behind it fails at parse.
-    ///
-    /// The failure it prevents is silent: reading one model family's weights with
-    /// another's loader produces output rather than an error.
     #[test]
     fn an_unknown_architecture_is_refused() {
         let text = r#"
@@ -298,8 +266,7 @@ min_vram_mb = 1
         assert!(Catalog::parse(text).is_err());
     }
 
-    /// A known architecture parses, so the test above is testing the value and not
-    /// the shape of the row around it.
+    /// A known architecture parses, so the test above tests the value and not the row's shape.
     #[test]
     fn a_known_architecture_parses() {
         let text = r#"

@@ -1,19 +1,10 @@
 //! The shim-to-worker protocol: messages as data.
 //!
-//! Guest code executes in a child process (D032), so the shims and the worker talk.
-//! **This crate defines what they say, not how it travels.** Messages are plain serde
-//! types with no handles, no references into loaded modules, and no lifetimes - the
-//! constraint D035 places on the service layer, made structural here.
-//!
-//! [`codec`] holds one transport - newline-delimited JSON over a pipe - and is
-//! deliberately separable. Changing the channel should not move the protocol.
-//!
-//! # Versioning
-//!
-//! Worker mode is self-reinvocation of the same executable (D033), so version skew is
-//! close to impossible by construction. [`PROTOCOL_VERSION`] is cheap insurance
-//! anyway: a mismatch produces a clear refusal rather than a subtle misparse, and it
-//! documents that the wire format is a contract rather than an implementation detail.
+//! Guest code executes in a child process, so the shims and the worker exchange messages.
+//! This crate defines what they say, not how it travels: plain serde types with no handles, no
+//! references into loaded modules and no lifetimes (D035). [`codec`] holds one separable transport.
+//! Worker mode reinvokes the same executable, so version skew is unlikely;
+//! [`PROTOCOL_VERSION`] still turns a mismatch into a clear refusal.
 
 use std::path::PathBuf;
 
@@ -21,16 +12,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod codec;
 
-/// Wire format version. Bump on any incompatible change to [`Request`] or [`Event`].
-///
-/// 4: added [`Event::Frame`] (the frame crossing, D695) - a peer without the variant would reject
-/// the message, which is the incompatibility this counter exists to catch.
+/// Wire format version. Bump on any incompatible change to [`Request`] or [`Event`], such as a new
+/// variant a peer would reject.
 pub const PROTOCOL_VERSION: u32 = 4;
 
-/// How far a run got. Ordered, so "furthest point reached" is a comparison.
-///
-/// This is the coarse progress axis a run report leads with - a phase regression
-/// between runs is the clearest signal that a change made things worse.
+/// How far a run got. Ordered, so "furthest point reached" is a comparison, and a phase regression
+/// between runs is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -52,9 +39,7 @@ pub enum Phase {
 
 /// What a shim asks the worker to do.
 ///
-/// `PartialEq` but **not `Eq`**, which [`Event`] already was: a stick position is a real
-/// number and there is no total ordering on those. Comparing requests in a test is what the
-/// derive is for, and that needs only the partial one.
+/// `PartialEq` but not `Eq`: a stick position is a floating-point number.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
@@ -74,83 +59,59 @@ pub enum Request {
         path: PathBuf,
         /// Symbol database to name imports with, if any.
         ///
-        /// Passed explicitly rather than resolved by the worker from a convention.
-        /// The worker is a separate process, so it inherits nothing from the shim that
-        /// spawned it - and a call trace that reports hashes because a default path
-        /// happened not to exist is the kind of quiet degradation that wastes an
-        /// afternoon.
+        /// Passed explicitly because the worker is a separate process and inherits nothing from the
+        /// shim, so a default path resolved there could silently differ.
         symbols_db: Option<PathBuf>,
-        /// Seconds of guest execution to allow, or `None` for no limit.
-        ///
-        /// A guest with every import unimplemented can settle into a loop waiting for
-        /// something that will never happen - one commercial executable here ran for ten
-        /// minutes without faulting. A limit turns that from a hang into a report.
+        /// Seconds of guest execution to allow, or `None` for no limit. A guest waiting on
+        /// unimplemented imports can loop without faulting, and a limit turns that into a report.
         limit_seconds: Option<u64>,
         /// Imports the guest may call before it is stopped, or `None` for no budget.
         ///
-        /// The deterministic counterpart to `limit_seconds`. That one fixes the duration
-        /// and lets the call count vary by 13% between identical runs; this fixes the
-        /// count. Both travel, because a guest that stops calling imports never reaches a
-        /// budget and a guest in a tight import loop wastes most of a clock (D238).
+        /// The deterministic counterpart to `limit_seconds`, which fixes the duration and lets the
+        /// call count vary. Both travel, because a guest that stops calling imports never reaches a
+        /// budget (D238).
         call_budget: Option<u64>,
-        /// A pad script this run plays, taking precedence over one named in `config.toml`
-        /// (D721) - so a test names its input in its own command, and a recording is replayed
-        /// by naming it here. `None` plays what the configuration says.
+        /// A pad script this run plays, taking precedence over one named in `config.toml` (D721),
+        /// so a test names its input in its own command. `None` plays what the configuration says.
         #[serde(default)]
         input_script: Option<PathBuf>,
-        /// Capture what the title reads from its pad into this script file from its entry
-        /// (D721) - "capture input" pressed before the launch. `None` captures nothing.
+        /// Capture what the title reads from its pad into this script file from its entry (D721).
+        /// `None` captures nothing.
         #[serde(default)]
         capture_input: Option<PathBuf>,
-        /// Run the module as a **staged** title, as if it lay under the library's
-        /// `data/homebrew` tree: its `/app0` is writable through an overlay (D722). A module that
-        /// does lie there is staged whatever this says; this is for a loose developer build.
+        /// Run the module as a staged title, as if it lay under the library's `data/homebrew` tree:
+        /// its `/app0` is writable through an overlay (D722). A module that lies there is staged
+        /// regardless; this is for a loose developer build.
         #[serde(default)]
         staged: bool,
     },
     /// Carry a shell action into a running session.
     ///
-    /// **The one request that has to be honoured while a run is in flight.** Everything
-    /// else here is answered between runs, because the worker is inside the guest for the
-    /// whole of one - which is precisely the moment somebody presses the shell button.
-    ///
-    /// So it is answered on the reading thread rather than the main loop, and it produces
-    /// no event in reply, which is what keeps a second writer off the output stream.
-    ///
-    /// The payload is `orbistoun-shell`'s own type rather than a copy of it: two enums
-    /// meaning the same thing drift, and the drift shows up as a button doing the wrong
-    /// thing.
+    /// The worker is inside the guest for the whole of a run, so this is answered on the reading
+    /// thread rather than the main loop, and produces no reply, which keeps a second writer off the
+    /// output stream. The payload is `orbistoun-shell`'s own type.
     Shell {
         /// What was asked for.
         action: orbistoun_shell::Request,
     },
-    /// What the pads are doing, as **a title is allowed to see them**.
+    /// What the pads are doing, as a title is allowed to see them.
     ///
-    /// The window owns input, because the system's own button has to be seen by something
-    /// that is not the title (D326). So the arbitration happens before this is sent: the
-    /// shell's button is stripped and a neutral pad travels while the shell has focus. What
-    /// arrives here is already what the guest may know about.
-    ///
-    /// Answered on the reading thread like [`Self::Shell`], and for the same reason - the
-    /// handling loop is inside the guest for the whole of a run, which is exactly when
-    /// somebody is pressing something.
-    ///
-    /// **Sent only when it changes.** Input is a level rather than a stream, so an unchanged
-    /// pad needs no message and a backlog of stale ones would be worse than none (D345).
+    /// The window owns input (D326), so the shell's button is already stripped, and a neutral pad
+    /// travels while the shell has focus. Answered on the reading thread like [`Self::Shell`]. Sent
+    /// only when it changes, because input is a level.
     Input {
         /// One state per configured port, in port order.
         pads: Vec<orbistoun_input::PadState>,
     },
-    /// Starts capturing what the title reads from its pad into `to`, or stops with `None`
-    /// (D721). Only when somebody asks - the toolbar's "capture input" - never on its own.
+    /// Starts capturing what the title reads from its pad into `to`, or stops with `None` (D721).
+    /// Sent only when somebody asks.
     ///
     /// Answered on the reading thread like [`Self::Input`], with no reply.
     CaptureInput {
         /// The script file to write, or `None` to stop.
         to: Option<PathBuf>,
     },
-    /// Starts playing the pad script `script` from now, or stops playing with `None` (D721) -
-    /// the toolbar's "playback input" while a title runs.
+    /// Starts playing the pad script `script` from now, or stops playing with `None` (D721).
     ///
     /// Answered on the reading thread like [`Self::Input`], with no reply.
     PlayInput {
@@ -163,8 +124,7 @@ pub enum Request {
 
 /// What the worker says back.
 ///
-/// A stream, not a reply: one request produces zero or more events, ending in a
-/// terminal one.
+/// A stream, not a reply: one request produces zero or more events, ending in a terminal one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -196,10 +156,9 @@ pub enum Event {
     },
     /// A rendered frame is ready, its bytes in a shared region this names.
     ///
-    /// **The descriptor, never the pixels (D035, D695).** The bytes cross as bulk in the region the
-    /// worker wrote; this message carries only how to find and read them - dimensions, format, a
-    /// sequence number, and the region's name. No pointer and no handle: `region` is a bare name the
-    /// shim resolves against the same frames directory, exactly as a trace file's name is.
+    /// The descriptor, never the pixels (D695): the bytes cross in the region the worker wrote, and
+    /// this carries dimensions, format, a sequence number and the region's name. `region` is a bare
+    /// name the shim resolves against the frames directory, like a trace file's name.
     Frame {
         /// Width in pixels.
         width: u32,
@@ -212,32 +171,29 @@ pub enum Event {
         /// The name of the region holding the bytes, resolved against the frames directory.
         region: String,
     },
-    /// The guest asked the system to start another title (a launcher did).
+    /// The guest asked the system to start another title, as a launcher does.
     ///
-    /// The worker runs one guest, so starting the title is the front end's: it ends this run and
-    /// launches the id from its library, as the console suspends the caller and brings the title
-    /// up (worklog 842).
+    /// The worker runs one guest, so the front end ends this run and launches the id from its
+    /// library.
     LaunchApp {
         /// The title id asked for, as the guest passed it.
         title_id: String,
     },
-    /// Where the last stretch of a running title's time went - streamed about once a second, for a
-    /// front end to show over the picture (worklog 844).
+    /// Where the last stretch of a running title's time went, streamed about once a second for a
+    /// front end to show over the picture.
     Perf(PerfReport),
 }
 
-/// The [`PerfReport::phases`] entry that **contains** the others up to the write-back: a whole
-/// graphics submit. Reported beside them, never summed with them - what it holds beyond them is the
-/// submit's own unmeasured work (worklog 844).
+/// The [`PerfReport::phases`] entry that contains the others up to the write-back: a whole graphics
+/// submit. Reported beside them, never summed with them.
 pub const SUBMIT_TOTAL_PHASE: &str = "submit (total)";
 
-/// The [`PerfReport::phases`] entry that is the **device's** busy time by its own clock, running
-/// alongside the host's phases rather than inside them - reported as its own share, never summed
-/// (worklog 847).
+/// The [`PerfReport::phases`] entry for the device's busy time by its own clock. It runs alongside
+/// the host's phases, so it is reported as its own share and never summed.
 pub const GPU_BUSY_PHASE: &str = "gpu busy";
 
 /// One stretch of a running title's time: how long, what happened in it, and which parts of
-/// presenting a frame took how much of it (worklog 844).
+/// presenting a frame took how much of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerfReport {
     /// How long the stretch was, in milliseconds.
@@ -255,10 +211,8 @@ pub struct PerfReport {
 
 /// How a frame's bytes are laid out in its region.
 ///
-/// One variant today: the detile path produces 32-bpp RGBA (`orbistoun-gpu`'s `tiling.rs`), which is
-/// what the worker writes and the shim uploads. An enum rather than a bare assumption so a second
-/// layout, when one is measured, is a variant the shim is made to handle rather than a silent
-/// reinterpretation of the same bytes (principle 3).
+/// The detile path produces 32-bpp RGBA (`orbistoun-gpu`'s `tiling.rs`). An enum so a second layout
+/// is a variant the shim must handle rather than a reinterpretation of the same bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameFormat {
@@ -289,10 +243,8 @@ pub enum Outcome {
     Cancelled,
 }
 
-/// Structural facts about a container, without executing or fully parsing it.
-///
-/// The first genuinely useful output of the container layer: enough to tell whether a
-/// file is the shape we expect, and to say precisely how it differs when it is not.
+/// Structural facts about a container, without executing or fully parsing it: enough to say whether
+/// a file has the expected shape and how it differs when it does not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerInfo {
     /// Whether a wrapper was found, and which generation.
@@ -313,8 +265,8 @@ pub struct ContainerInfo {
     pub vendor_segments: usize,
     /// Program-header indices whose bytes the wrapper's descriptor table locates.
     ///
-    /// Headers absent from this list are not missing - several describe regions
-    /// *inside* another header's data rather than having their own descriptor.
+    /// A header absent from this list is not missing: several describe regions inside another
+    /// header's data.
     pub mapped_segments: Vec<usize>,
     /// The process parameter block, if the container carries one.
     ///
@@ -325,11 +277,10 @@ pub struct ContainerInfo {
 
 /// The process parameter block a launching title carries, read as far as cited offsets allow.
 ///
-/// A console loader reads this before the first guest instruction to learn the SDK version and,
-/// through the memory-parameter block, the flexible-memory budget the title asked for. Only
-/// fields at cited offsets are reported; the memory-parameter block's *contents* are surfaced
-/// raw rather than interpreted, because the layout inside it is not established from a citable
-/// source (D442).
+/// A platform loader reads it before the first guest instruction for the SDK version and, through
+/// the memory-parameter block, the flexible-memory budget. Only fields at cited offsets are
+/// reported; the memory-parameter block's contents are surfaced raw because their layout has no
+/// citable source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcParamInfo {
     /// The size the block states, its one mandatory field.
@@ -342,10 +293,9 @@ pub struct ProcParamInfo {
     pub sdk_version: u32,
     /// The libc-parameter pointer at `+0x38`, as a guest virtual address (`0` = absent).
     ///
-    /// Reported alongside the memory-parameter pointer because the two disambiguate each other:
-    /// obSCEne's hardware fault (D219) says a launching title's loader writes through this
-    /// pointer, so a non-null value here confirms the pointer offsets are read correctly even
-    /// when the memory-parameter slot beside it is null.
+    /// Reported beside the memory-parameter pointer: a launching title's loader writes through this
+    /// pointer, so a non-null value confirms the pointer offsets are read correctly even when the
+    /// memory-parameter slot is null.
     pub libc_param_vaddr: u64,
     /// The memory-parameter pointer at `+0x40`, as a guest virtual address (`0` = absent).
     pub mem_param_vaddr: u64,
@@ -355,8 +305,7 @@ pub struct ProcParamInfo {
     /// bytes in the file.
     pub mem_param_size: Option<u64>,
     /// The non-zero 64-bit words the memory-parameter block carries past its size field, as
-    /// `(offset, value)`. Reported, not interpreted: this is the oracle a future flexible-memory
-    /// implementation confirms a cited layout against, not a layout in itself.
+    /// `(offset, value)`. Reported, not interpreted: an oracle for a cited layout, not a layout.
     pub mem_param_nonzero: Vec<(u64, u64)>,
 }
 
@@ -368,12 +317,10 @@ pub enum WrapperInfo {
     None,
     /// A vendor container.
     ///
-    /// **Both generations, told apart rather than flattened.** They parse identically -
-    /// same header layout, same segment descriptors - but a title built for the previous
-    /// console is a different emulation problem, and a report that cannot say which it
-    /// read is hiding the most useful fact about it (D176).
+    /// Both generations parse identically, but a title built for the previous generation is a
+    /// different emulation problem, so the report says which it read.
     Wrapped {
-        /// Whether this is the previous console's container.
+        /// Whether this is the previous generation's container.
         #[serde(default)]
         previous_generation: bool,
         /// Number of segment descriptors, which is what the ELF offset derives from.
@@ -398,8 +345,7 @@ pub struct SegmentPlacement {
     pub write: bool,
     /// Executable.
     pub execute: bool,
-    /// Reserved for per-segment placement detail once segments are populated
-    /// individually. The span reservation is what currently succeeds or fails.
+    /// Reserved for per-segment placement detail. The span reservation is what succeeds or fails.
     pub failure: Option<String>,
 }
 
@@ -414,11 +360,8 @@ pub struct LoadLayout {
     pub span_len: u64,
     /// Every loadable segment, in program-header order.
     pub segments: Vec<SegmentPlacement>,
-    /// `None` if the span was reserved, otherwise why it could not be.
-    ///
-    /// This is the interesting failure: it means the address a module was linked for
-    /// is unavailable in this process - exactly the class of problem that motivated
-    /// executing in a child process (D032).
+    /// `None` if the span was reserved, otherwise why it could not be: the address the module was
+    /// linked for is unavailable in this process, the case a child process exists for (D032).
     pub reservation_failure: Option<String>,
 }
 
@@ -434,19 +377,12 @@ impl LoadLayout {
     }
 }
 
-/// Whether an import names code or data.
+/// Whether an import names code or data (D307).
 ///
-/// # Why a report has to say
-///
-/// Interception writes an address into a relocation slot, and for code that address is a
-/// thunk. **For data the same answer is wrong in a way that looks right**: a guest
-/// importing `__stderrp` loads the slot and dereferences what it found, so a thunk becomes
-/// x86 instruction bytes read as a pointer, and the guest carries on. Nothing reports a
-/// problem until something unrelated breaks much later.
-///
-/// Declared here rather than borrowed from `orbistoun-elf` because this crate takes serde
-/// and nothing else, deliberately, and a wire type reaching into a parser for its
-/// vocabulary is how that stays true only until someone is in a hurry (D307).
+/// For code, interception writes a thunk address into the relocation slot. For data that answer is
+/// wrong silently: a guest importing `__stderrp` dereferences the slot, reads instruction bytes as
+/// a pointer and carries on. Declared here rather than borrowed from `orbistoun-elf` because this
+/// crate depends on serde and nothing else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImportKind {
@@ -461,8 +397,7 @@ pub enum ImportKind {
 
 /// One import a guest module asks for, and whether orbistoun can answer it.
 ///
-/// Lives here rather than in the service layer because it is wire data: the service
-/// returns it, the worker sends it, and a run report embeds it. One shape, not three.
+/// Wire data: the service returns it, the worker sends it, and a run report embeds it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ImportRecord {
     /// The hash the module imports by.
@@ -478,22 +413,19 @@ pub struct ImportRecord {
     pub kind: ImportKind,
 }
 
-/// One symbol a module **provides**.
+/// One symbol a module provides.
 ///
-/// Here beside [`ImportRecord`] and for the same reason: it is wire data. An import is a NID
-/// somebody needs; an export is that NID plus where in the module it lives, which is the field
-/// that makes loading a second module worth anything.
+/// Wire data, like [`ImportRecord`]. An export is a NID plus where in the module it lives.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ExportRecord {
     /// The hash an importer asks for it by.
     pub nid: u64,
     /// The name, where the module spelled one or a symbol database knows it.
     pub symbol: Option<String>,
-    /// Where it lives, **as an offset from the module's own base** - not an address. Nothing
-    /// has been placed when this is read.
+    /// Where it lives, as an offset from the module's own base, not an address: nothing has been
+    /// placed when this is read.
     pub offset: u64,
-    /// Code or data. Binding data as though it were a function hands the guest a thunk where
-    /// it expects a value (D125).
+    /// Code or data. Binding data as a function hands the guest a thunk where it expects a value.
     #[serde(default)]
     pub kind: ImportKind,
 }
@@ -513,16 +445,13 @@ impl SurveySummary {
         self.imports.len()
     }
 
-    /// How many orbistoun cannot answer - the number to drive down, and the honest
-    /// headline for a compatibility report.
+    /// How many orbistoun cannot answer: the headline for a compatibility report.
     pub fn unresolved(&self) -> usize {
         self.imports.iter().filter(|i| !i.known).count()
     }
 
-    /// Unresolved imports only, in first-touch order.
-    ///
-    /// First-touch matters as much as frequency: the *first* unmet need is usually the
-    /// cause, and everything after it is cascade.
+    /// Unresolved imports only, in first-touch order. The first unmet need is usually the cause and
+    /// the rest are cascade.
     pub fn unresolved_imports(&self) -> impl Iterator<Item = &ImportRecord> {
         self.imports.iter().filter(|i| !i.known)
     }
@@ -551,8 +480,7 @@ impl std::error::Error for VersionMismatch {}
 
 /// Checks a peer's version against this build's.
 ///
-/// Refuses loudly rather than attempting a best-effort parse: a subtly misread
-/// message stream is far harder to diagnose than an outright refusal.
+/// Refuses rather than attempting a best-effort parse of a stream it may misread.
 pub const fn check_version(theirs: u32) -> Result<(), VersionMismatch> {
     if theirs == PROTOCOL_VERSION {
         Ok(())
@@ -569,6 +497,7 @@ mod tests {
     use super::{Event, FrameFormat, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
     use std::path::PathBuf;
 
+    /// Every request survives a serialise and parse.
     #[test]
     fn requests_round_trip() {
         for r in [
@@ -586,6 +515,7 @@ mod tests {
         }
     }
 
+    /// Every event survives a serialise and parse.
     #[test]
     fn events_round_trip() {
         let e = Event::Terminated {
@@ -601,6 +531,7 @@ mod tests {
         );
     }
 
+    /// Messages are tagged, so the variant survives an unknown peer.
     #[test]
     fn messages_are_tagged_so_the_variant_survives_an_unknown_peer() {
         let json = serde_json::to_string(&Request::Shutdown).expect("serialise");
@@ -612,6 +543,7 @@ mod tests {
         assert!(json.contains("\"event\""), "got {json}");
     }
 
+    /// A frame event names its region and carries no pointer.
     #[test]
     fn a_frame_event_names_its_region_and_carries_no_pointer() {
         let json = serde_json::to_string(&Event::Frame {
@@ -627,16 +559,16 @@ mod tests {
             "tagged like every event: {json}"
         );
         assert!(json.contains("frame-7.bin"), "names its region: {json}");
-        // D035: a protocol message carries the bulk's *name*, never a pointer or a handle to it.
+        // A protocol message carries the bulk's name, never a pointer or a handle to it (D035).
         for forbidden in ["0x", "ptr", "handle", "addr"] {
             assert!(!json.contains(forbidden), "{forbidden} leaked into {json}");
         }
     }
 
+    /// Phases are ordered, so furthest reached is a comparison.
     #[test]
     fn phases_are_ordered_so_furthest_reached_is_a_comparison() {
-        // A phase regression between runs is the clearest "that change made it worse"
-        // signal the report can carry, and it only works if this ordering holds.
+        // A phase regression between runs is only visible if this ordering holds.
         assert!(Phase::Start < Phase::ContainerParsed);
         assert!(Phase::ContainerParsed < Phase::ImportsResolved);
         assert!(Phase::ImportsResolved < Phase::Mapped);
@@ -645,6 +577,7 @@ mod tests {
         assert!(Phase::Entered < Phase::Presented);
     }
 
+    /// A version mismatch is refused.
     #[test]
     fn version_check_refuses_rather_than_guessing() {
         assert!(check_version(PROTOCOL_VERSION).is_ok());
@@ -653,10 +586,11 @@ mod tests {
         assert!(err.to_string().contains("mismatch"));
     }
 
+    /// No message carries a borrowed value.
     #[test]
     fn no_message_carries_a_borrowed_value() {
-        // Compile-time assertion of D035: everything crossing the boundary must own
-        // its data, or it cannot cross a process boundary at all.
+        // Everything crossing the boundary owns its data, or it cannot cross a process boundary
+        // (D035).
         const fn assert_owned<T: 'static>() {}
         assert_owned::<Request>();
         assert_owned::<Event>();

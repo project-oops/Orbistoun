@@ -1,8 +1,8 @@
-//! What one guest call costs, round trip - measured, not asserted (worklog 851).
+//! What one guest call costs, round trip - measured, not asserted.
 //!
-//! A timing is not a behaviour to pin: it depends on the machine and on what else runs. So this
-//! is `#[ignore]`d and prints; run it by name with `--ignored --nocapture` when the number is the
-//! question. Its own binary, because every table it installs is process-global.
+//! A timing depends on the machine and on what else runs, so this test is `#[ignore]`d and
+//! prints; run it by name with `--ignored --nocapture`. It is its own binary because every
+//! table it installs is process-global.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GUEST_PAGE_SIZE, GuestFn};
 use orbistoun_thunk::{ThunkTable, dispatch};
@@ -24,6 +24,7 @@ fn answer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     args[0].wrapping_add(1)
 }
 
+/// Prints the round-trip cost of one implemented guest call.
 #[test]
 #[ignore = "a measurement, printed rather than asserted"]
 fn one_implemented_call_round_trip() {

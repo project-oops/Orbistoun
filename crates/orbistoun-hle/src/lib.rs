@@ -1,25 +1,11 @@
 //! The HLE boundary: module descriptions, the import registry, and stub policy.
 //!
-//! Every `orbistoun-<subsystem>` crate declares what it implements with the
-//! [`guest_module!`] macro and nothing else. This crate turns those declarations
-//! into the thing the loader needs: a NID-keyed table of everything orbistoun can
-//! answer, plus a per-function policy for what to return when it cannot.
-//!
-//! # Interception is linking, not hooking
-//!
-//! There is no instrumentation step here. A guest module imports by NID; the
-//! loader resolves each NID against this registry and writes the result into the
-//! guest's relocation slots. Being the linker *is* the interception, which is why
-//! the complete list of what a title needs is available statically, before a
-//! single guest instruction executes.
-//!
-//! # Stub policy is data
-//!
-//! The return value of an unimplemented function changes guest behaviour
-//! enormously - zero means "carried on", a negative code means "bailed out" - and
-//! which one is right is usually unknown. So it is a runtime-editable TOML file
-//! ([`StubPolicy`]), keyed by human-readable symbol name, not a recompile. That
-//! makes bisecting a function's semantics a file edit and a relaunch.
+//! Every `orbistoun-<subsystem>` crate declares what it implements with [`guest_module!`], and
+//! this crate turns those declarations into a NID-keyed table of everything orbistoun can answer.
+//! The loader resolves each guest import against it and writes the result into the relocation
+//! slots, so linking is the interception and a title's needs are known before it runs (D005).
+//! What an unimplemented function returns is a runtime-editable TOML file ([`StubPolicy`]),
+//! keyed by symbol name, so bisecting a function's semantics is a file edit and a relaunch.
 //!
 //! ```
 //! use orbistoun_hle::{ModuleDesc, guest_module};
@@ -77,17 +63,16 @@ pub enum HleError {
 
 /// One function a subsystem crate declares.
 ///
-/// The NID is deliberately absent: it is derived from `name` at registration
-/// time, because the hash suffix is runtime data (see `orbistoun-nid`). That also
-/// means a declaration can never carry a NID that disagrees with its own name.
+/// No NID: it is derived from `name` at registration with the runtime hash suffix, so a
+/// declaration cannot carry a NID that disagrees with its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportDesc {
     /// The symbol name, exactly as the firmware exports it.
     pub name: &'static str,
     /// How many integer arguments the function takes.
     ///
-    /// Used to decide how many argument registers are worth recording in a
-    /// trace. Wrong arity degrades trace quality; it does not break the call.
+    /// Decides how many argument registers a trace records; a wrong arity degrades the trace, not
+    /// the call.
     pub arity: u8,
 }
 
@@ -102,18 +87,15 @@ pub struct ModuleDesc {
 
 /// Declares a system library and the functions orbistoun knows about.
 ///
-/// Expands to a `pub const MODULE: ModuleDesc`. One per subsystem crate, named in
-/// `modules()` in `orbistoun-service`, which is the single list that hands them all to
-/// the [`Registry`]. A crate that registered itself as well was a second copy of that
-/// list, and the copies disagreed (D123).
+/// Expands to a `pub const MODULE: ModuleDesc`, one per subsystem crate. `modules()` in
+/// `orbistoun-service` is the single list that hands them to the [`Registry`].
 #[macro_export]
 macro_rules! guest_module {
     ($lib:literal { $($name:literal => $arity:literal),* $(,)? }) => {
         /// This crate's module description, consumed by the HLE registry.
         ///
-        // `unreachable_pub` is allowed because the macro is also used inside
-        // private modules (tests, and any subsystem that groups its libraries into
-        // submodules). At a crate root - the normal case - the `pub` is real.
+        // `unreachable_pub` is allowed because the macro is also used inside private modules (tests,
+        // and subsystems that group libraries into submodules).
         #[allow(unreachable_pub)]
         pub const MODULE: $crate::ModuleDesc = $crate::ModuleDesc {
             name: $lib,
@@ -158,39 +140,26 @@ pub struct StubPolicy {
     /// Overrides, by symbol name.
     #[serde(default)]
     pub overrides: HashMap<String, StubReturn>,
-    /// What a stub **writes**, by symbol name.
+    /// What a stub writes, by symbol name.
     ///
-    /// **The half a policy could not express.** An entry above says what a function answers;
-    /// this says what it does, which for every wall this project has hit was the part that
-    /// mattered - *"both current walls turned out to be a side effect nobody performed"*.
-    ///
-    /// The shape is the shape a sweep produces, so a measured `OutParameter` becomes an entry
-    /// with no judgement in between and the loop can write one itself. Writing data is a thing
-    /// it may do; writing code is not (D295).
+    /// An override says what a function answers; this says what it does, often the part a guest
+    /// needs. The shape is what a sweep produces, so a measured `OutParameter` becomes an entry with
+    /// no judgement in between; the loop may write data, never code (D296).
     #[serde(default)]
     pub regions: HashMap<String, StubRegion>,
     /// How each entry above was established, by symbol name.
     ///
-    /// # Why beside the answers rather than inside them
-    ///
-    /// The answer is what the **guest** observes; this is what a **report** observes, and they
-    /// arrive separately - an answer comes from a policy file, a provenance comes from the
-    /// measurement that produced it. Folding them into one map would put a field in the
-    /// guest's path that nothing in the guest's path reads.
-    ///
-    /// **A name missing from here reads as [`Oracle::Assumed`]**, which is the safe direction:
-    /// an unlabelled answer somebody typed into a file is a guess, and treating it as one can
-    /// only ever call a run *less* honest than it was (D557).
+    /// Beside the answers rather than inside them: the answer is what the guest observes and this is
+    /// what a report observes. A missing name reads as [`Oracle::Assumed`], so an unlabelled answer
+    /// can only make a run look less honest (D557).
     #[serde(default)]
     pub known: HashMap<String, Oracle>,
 }
 
 /// How a region reaches the guest.
 ///
-/// **The two ways a function hands memory over**, and the only difference between them. A
-/// contract that writes a base into an argument and one that returns it are the same
-/// behaviour delivered differently, so they are one type with a field rather than two types
-/// that cannot be compared (D300).
+/// Writing a base into an argument and returning it are the same behaviour delivered
+/// differently, so they are one type with a field (D300).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Delivery {
@@ -202,27 +171,23 @@ pub enum Delivery {
 
 /// What an unimplemented function stores before it answers.
 ///
-/// One write, of one base, into one argument - the shape a sweep can measure and nothing
-/// wider. A policy that could express arbitrary side effects would be a program, and a
-/// program in a data file is what principle 5 is trying to avoid rather than achieve.
+/// One write, of one base, into one argument: the shape a sweep can measure. Arbitrary side
+/// effects would make the policy file a program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StubRegion {
     /// How the base reaches the guest.
     pub via: Delivery,
     /// How much space to reserve behind it.
     ///
-    /// **Assumed, and deliberately a number in a file.** Nothing measured says how much the
-    /// guest intends to use - a sweep sees where it faulted, not what it asked for. A value
-    /// here can be changed and re-run without a rebuild, which is the entire reason policy is
-    /// data (D291, D295).
+    /// Assumed: a sweep sees where the guest faulted, not how much it meant to use. A number in a
+    /// file, so it can be changed and re-run without a rebuild (D291).
     pub bytes: u64,
 }
 
 impl Default for StubPolicy {
     fn default() -> Self {
-        // Unimplemented by default, not Ok: a silent success is how a wrong stub
-        // becomes a hang forty thousand frames later. Make it loud, then relax
-        // individual functions deliberately.
+        // Unimplemented by default, not Ok: a silent success turns a wrong stub into a hang long
+        // afterwards. Individual functions are relaxed deliberately.
         Self {
             default_return: StubReturn::Unimplemented,
             overrides: HashMap::new(),
@@ -235,13 +200,9 @@ impl Default for StubPolicy {
 impl StubPolicy {
     /// Folds policy the loop worked out into policy a person wrote.
     ///
-    /// **A person's entry always wins**, and that is the whole safety property: nothing the
-    /// loop writes can quietly override a deliberate choice, so letting it run unattended
-    /// cannot cost a decision somebody made on purpose (D296).
-    ///
-    /// `default_return` is never taken from the learned side. It applies to every function
-    /// with no entry of its own, so a loop that set it would be changing the behaviour of
-    /// everything it had *not* measured - the opposite of what it earned.
+    /// A person's entry always wins, so the loop running unattended can never override a deliberate
+    /// choice (D296). `default_return` is never taken from the learned side, since it governs every
+    /// function the loop did not measure.
     pub fn absorb(&mut self, learned: Self) {
         for (name, answer) in learned.overrides {
             self.overrides.entry(name).or_insert(answer);
@@ -249,20 +210,16 @@ impl StubPolicy {
         for (name, region) in learned.regions {
             self.regions.entry(name).or_insert(region);
         }
-        // Provenance follows the same rule as the answer it describes, and for the same
-        // reason: a person's entry wins, and a person's entry that said nothing about where it
-        // came from is a guess. `or_insert` leaves such a name absent, which reads as
-        // `Assumed` - so absorbing a measured fact can never relabel a hand-written answer as
-        // evidence (D557).
+        // Provenance follows the same rule as the answer it describes: `or_insert` leaves a person's
+        // unlabelled entry absent, which reads as `Assumed`, so a measured fact never relabels a
+        // hand-written answer as evidence.
         for (name, known) in learned.known {
             self.known.entry(name).or_insert(known);
         }
     }
 
-    /// How `name`'s answer was established.
-    ///
-    /// [`Oracle::Assumed`] when nothing says - see [`StubPolicy::known`] for why that is the
-    /// safe default rather than a gap.
+    /// How `name`'s answer was established; [`Oracle::Assumed`] when nothing says (see
+    /// [`StubPolicy::known`]).
     #[must_use]
     pub fn provenance(&self, name: &str) -> Oracle {
         self.known.get(name).copied().unwrap_or(Oracle::Assumed)
@@ -270,9 +227,8 @@ impl StubPolicy {
 
     /// Every symbol this policy says anything specific about, once each.
     ///
-    /// Answers and regions together: both are this machine deciding what a function does, and
-    /// counting only the first is how a policy that wrote guest memory and answered nothing
-    /// read as an honest run (D557).
+    /// Answers and regions together, so a policy that only writes guest memory still counts
+    /// (D557).
     pub fn named(&self) -> impl Iterator<Item = &str> {
         let mut names: Vec<&str> = self
             .overrides
@@ -293,8 +249,8 @@ impl StubPolicy {
 
     /// Of those, how many hold the run up rather than describing it.
     ///
-    /// An entry whose provenance [`Oracle::is_evidence`] is the emulator being right; the rest
-    /// are props, and a run resting on one is an experiment rather than a measurement.
+    /// An entry whose provenance [`Oracle::is_evidence`] is the emulator being right; the rest are
+    /// props, and a run resting on one is an experiment rather than a measurement.
     #[must_use]
     pub fn propping(&self) -> usize {
         self.named()
@@ -320,14 +276,14 @@ pub struct Resolved {
     pub name: &'static str,
     /// Argument count, for trace fidelity.
     pub arity: u8,
-    /// What a call will return until a real implementation lands.
+    /// What a call returns while it has no implementation.
     pub stub: StubReturn,
 }
 
 /// Everything orbistoun can answer, keyed by NID.
 ///
-/// Built once at startup from every subsystem crate's `MODULE`, then queried by
-/// the loader for each import a guest module names.
+/// Built once at startup from every subsystem crate's `MODULE`, then queried by the loader for
+/// each import a guest module names.
 #[derive(Debug)]
 pub struct Registry {
     hasher: NidHasher,
@@ -347,10 +303,8 @@ impl Registry {
 
     /// The hasher this registry resolves with.
     ///
-    /// **Exposed so a reader hashes names the same way.** A plain-name import is turned
-    /// into a NID by hashing it, and hashing it with a different suffix from the one the
-    /// registry resolves against produces a NID that matches nothing - silently, as an
-    /// unresolved import rather than as an error (D305).
+    /// Exposed so readers hash plain-name imports with the same suffix; a different one yields NIDs
+    /// that silently match nothing (D305).
     #[must_use]
     pub const fn hasher(&self) -> &NidHasher {
         &self.hasher
@@ -358,8 +312,8 @@ impl Registry {
 
     /// Registers every import in `module`.
     ///
-    /// Later registrations win on collision, which is what makes a real
-    /// implementation able to displace a stub without unregistering it first.
+    /// Later registrations win on collision, so a real implementation displaces a stub without
+    /// unregistering it.
     pub fn register(&mut self, module: ModuleDesc) {
         for import in module.imports {
             let nid = if let Some(hex) = import.name.strip_prefix("0x") {
@@ -385,8 +339,7 @@ impl Registry {
 
     /// Looks up what orbistoun knows about `nid`.
     ///
-    /// `None` means the guest imported something never declared anywhere - the
-    /// normal early-days case, and exactly what an import dump should report.
+    /// `None` means the guest imported something declared nowhere, which an import dump reports.
     pub fn resolve(&self, nid: Nid) -> Option<&Resolved> {
         self.by_nid.get(&nid)
     }
@@ -408,11 +361,7 @@ mod tests {
     use orbistoun_nid::NidHasher;
     use std::collections::HashMap;
 
-    /// A person's entry always wins over one the loop worked out.
-    ///
-    /// **The safety property that makes unattended running acceptable.** Nothing a tier-one
-    /// patcher writes can quietly override a deliberate choice, so the worst a wrong guess
-    /// costs is a run - never a decision somebody made on purpose (D296).
+    /// A person's entry always wins over one the loop worked out (D296).
     #[test]
     fn a_deliberate_entry_is_never_overridden_by_a_learned_one() {
         let mut mine = StubPolicy {
@@ -424,8 +373,7 @@ mod tests {
             known: HashMap::new(),
         };
         let learned = StubPolicy {
-            // Never taken: it applies to every function the loop did *not* measure, which is
-            // the opposite of what it earned.
+            // Never taken: it governs every function the loop did not measure.
             default_return: StubReturn::Ok,
             overrides: [
                 ("sceFoo".to_owned(), StubReturn::Ok),
@@ -442,8 +390,8 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            // The loop's own entries say where they came from: a sweep watches the guest
-            // proceed, which is `GuestObserved` and never stronger.
+            // The loop's entries say where they came from: a sweep watches the guest proceed, which is
+            // `GuestObserved` and never stronger.
             known: [
                 ("sceFoo".to_owned(), Oracle::GuestObserved),
                 ("sceBar".to_owned(), Oracle::GuestObserved),
@@ -484,6 +432,7 @@ mod tests {
         r
     }
 
+    /// Declared symbols resolve by NID.
     #[test]
     fn declared_symbols_resolve_by_nid() {
         let hasher = NidHasher::new(*b"test-suffix");
@@ -495,6 +444,7 @@ mod tests {
         assert_eq!(r.len(), 2);
     }
 
+    /// Undeclared symbols resolve to nothing.
     #[test]
     fn undeclared_symbols_resolve_to_nothing() {
         let hasher = NidHasher::new(*b"test-suffix");
@@ -502,16 +452,17 @@ mod tests {
         assert!(r.resolve(hasher.hash("testNotDeclared")).is_none());
     }
 
+    /// The default policy answers the unimplemented marker, not silent success.
     #[test]
     fn default_policy_is_loud_not_silent_success() {
-        // The whole argument for this default: a stub that reports success is
-        // indistinguishable from working code until much later.
+        // A stub that reports success is indistinguishable from working code until much later.
         let r = registry(StubPolicy::default());
         let hasher = NidHasher::new(*b"test-suffix");
         let found = r.resolve(hasher.hash("testInit")).expect("declared");
         assert_eq!(found.stub, StubReturn::Unimplemented);
     }
 
+    /// A policy override applies to its own symbol only.
     #[test]
     fn policy_overrides_apply_per_symbol() {
         let mut policy = StubPolicy::default();
@@ -525,14 +476,14 @@ mod tests {
             r.resolve(hasher.hash("testInit")).expect("declared").stub,
             StubReturn::Ok
         );
-        // The override must not leak to its neighbours - this is the bisection
-        // workflow's core requirement.
+        // The override must not leak to its neighbours, or bisection breaks.
         assert_eq!(
             r.resolve(hasher.hash("testOpen")).expect("declared").stub,
             StubReturn::Unimplemented
         );
     }
 
+    /// A raw-hex NID symbol resolves by that NID.
     #[test]
     fn raw_hex_nid_symbols_resolve_by_raw_nid() {
         guest_module! {

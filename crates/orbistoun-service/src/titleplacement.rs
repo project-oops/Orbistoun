@@ -1,38 +1,11 @@
-//! Placing the modules a title ships, and indexing what they export.
+//! Placing the modules a title ships, and indexing what they export (D640).
 //!
-//! # Why this exists
-//!
-//! An executable's imports are answered by stubs, one per symbol, because for a platform
-//! library that is the only honest answer available - the emulator either implements the
-//! function or reports that it does not. **A module the title ships with itself is not that
-//! case.** The code is right there in the title's own data, so the correct address is a real
-//! one inside a placed image, and a stub in its place is a wrong answer that reports itself
-//! as an unimplemented platform call.
-//!
-//! [`crate::titlemodules`] finds those files (D482). This places them and works out which of
-//! the executable's imports they answer.
-//!
-//! # Attribution is part of the match
-//!
-//! An encoded import carries a library id, and **that is half of what identifies it** (D483).
-//! Matching on the hash alone lets an import that names one library bind into a different
-//! module that happens to export the same name - which is not a hypothetical: it bound one
-//! extra symbol into `Il2CppUserAssemblies` on the first title it was pointed at.
-//!
-//! A plain name carries no attribution, so for those the hash is all there is. That case is
-//! matched across every module and **reported as ambiguous when more than one answers**,
-//! rather than resolved quietly.
-//!
-//! # What this deliberately does not do
-//!
-//! **It does not relocate them, and nothing here may be fed to a running guest.** A placed
-//! module has had its bytes copied and nothing else: its own `RELATIVE` relocations are
-//! unapplied, so every internal pointer in it still reads as a link-time offset. Handing a
-//! guest a real address into that is *worse* than handing it a stub - the stub says
-//! "unimplemented" and stops, whereas unrelocated code runs and fails somewhere unrelated,
-//! which is the exact failure principle 3 exists to forbid.
-//!
-//! So this reports what would bind, and the binding itself waits for relocation.
+//! A module the title ships has real code, so the answer for an import it provides is an address
+//! inside the placed image, not a stub. [`crate::titlemodules`] finds the files; this places them
+//! and works out which imports they answer. An encoded import's library id is half its identity, so
+//! matching is by library and hash; a plain name is matched across every module and reported as
+//! ambiguous when more than one answers. Placement copies bytes only: the caller relocates and
+//! protects the images before anything binds, because unrelocated code fails somewhere unrelated.
 
 use std::collections::BTreeMap;
 
@@ -58,12 +31,9 @@ pub struct TitleExport {
 
 /// One module exporting one hash twice.
 ///
-/// **Recorded rather than resolved quietly.** A NID hashes the symbol name alone, so a
-/// module that declares one name in two places collides with itself by construction. The
-/// first wins - because something has to - and the fact that a choice was made is reported.
-///
-/// Two *different* modules exporting one hash is not this: that is ordinary, since a name
-/// like `memcpy` belongs to whichever library the importer said it did.
+/// A NID hashes the symbol name alone, so a module declaring one name in two places collides with
+/// itself. The first wins and the choice is reported. Two different modules exporting one hash is
+/// ordinary: the importer names the library.
 #[derive(Debug, Clone)]
 pub struct ExportCollision {
     /// The contested hash.
@@ -78,10 +48,8 @@ pub struct ExportCollision {
 
 /// An import whose hash a module answers, with a kind that disagrees.
 ///
-/// **Not bound.** Binding a data export as though it were a function hands the guest a
-/// thunk where it expects a value, and the reverse hands it a value where it expects code
-/// (D125). Both are silent for as long as the guest does not touch the slot, so the
-/// mismatch is reported and the import is left to its stub.
+/// Not bound: binding a data export as a function hands the guest a thunk where it expects a value,
+/// and the reverse hands it a value where it expects code (D307). The import stays on its stub.
 #[derive(Debug, Clone)]
 pub struct KindMismatch {
     /// The name the executable imports by.
@@ -96,10 +64,8 @@ pub struct KindMismatch {
 
 /// An unattributed import that more than one of the title's modules answers.
 ///
-/// A plain name carries no library id, so the hash is the only thing to match on, and two
-/// modules answering it is a genuine ambiguity rather than a collision. **Left unbound**:
-/// picking one would be a guess, and a guess that lands in the wrong module is a call into
-/// unrelated code.
+/// A plain name carries no library id, so the hash is all there is to match. Left unbound, since a
+/// guess that lands in the wrong module is a call into unrelated code.
 #[derive(Debug, Clone)]
 pub struct Ambiguous {
     /// The name, as the executable spells it.
@@ -110,8 +76,8 @@ pub struct Ambiguous {
 
 /// The title's own modules, placed, with an index of everything they export.
 ///
-/// Holds the images, because dropping one unmaps it - an address in the index is live for
-/// exactly as long as this value is.
+/// Holds the images, because dropping one unmaps it: an address in the index is live exactly as
+/// long as this value.
 #[derive(Debug)]
 pub struct PlacedTitleModules {
     images: Vec<(String, Image)>,
@@ -128,10 +94,8 @@ impl PlacedTitleModules {
 
     /// The same images, mutably, so they can be re-protected once relocation has finished.
     ///
-    /// **Placement leaves every page writable and none executable**, because relocation writes
-    /// into text. So a module is not runnable until its protection is applied - and until it
-    /// is, an executable bound to a function inside one faults on the instruction fetch rather
-    /// than calling it (D489).
+    /// Placement leaves every page writable and none executable, because relocation writes into
+    /// text, so a module is not runnable until its protection is applied (D489).
     pub fn images_mut(&mut self) -> &mut [(String, Image)] {
         &mut self.images
     }
@@ -156,16 +120,11 @@ impl PlacedTitleModules {
 
     /// Which of `imports` these modules answer, by dynamic symbol index.
     ///
-    /// `libraries` is the executable's own library table, which is what an encoded import's
-    /// `library_id` indexes - so it is what turns an id into the name a module was found by.
-    ///
-    /// The address map is keyed the way a relocation is - by symbol index - so a resolver
-    /// consulting it needs no lookup logic of its own (principle 13).
-    ///
-    /// An import whose hash is matched but whose kind disagrees is **left out and reported**
-    /// rather than bound (D125), and so is an unattributed one that two modules both answer.
-    /// One with no match at all is simply absent, which is the ordinary case: almost
-    /// everything an executable imports is the platform's.
+    /// `libraries` is the executable's own library table, which an encoded import's `library_id`
+    /// indexes. The address map is keyed by symbol index, as a relocation is, so a resolver needs
+    /// no lookup logic of its own. A kind mismatch (D307) and an unattributed name two modules
+    /// answer are left out and reported; an import with no match is absent, the ordinary case for
+    /// platform imports.
     #[must_use]
     pub fn resolve(&self, imports: &[RawImport], libraries: &BTreeMap<u16, String>) -> Resolution {
         let mut out = Resolution::default();
@@ -221,10 +180,8 @@ impl PlacedTitleModules {
 
 /// One import answered by one of the title's own modules.
 ///
-/// **Carried alongside the address map rather than folded into it.** A resolver wants a
-/// bare index-to-address lookup and nothing else; a report wants to say *which module*
-/// answered, because a count of bindings that does not name what they bound into says
-/// nothing about whether the answer is the right one.
+/// Carried beside the address map: a resolver wants a bare index-to-address lookup, and a report
+/// wants to name which module answered.
 #[derive(Debug, Clone)]
 pub struct BoundImport {
     /// The name the executable imports by.
@@ -264,9 +221,8 @@ impl Resolution {
 
 /// Whether an import's kind and an export's kind are known to be different things.
 ///
-/// [`Kind::Unspecified`] is **not** a disagreement: the table did not say, which is its own
-/// fact rather than a claim that the symbol is the other thing. Refusing on it would leave
-/// every unannotated symbol on a stub for no reason anybody measured.
+/// [`Kind::Unspecified`] is not a disagreement: the table did not say, which is not a claim that
+/// the symbol is the other thing.
 const fn kinds_disagree(wanted: Kind, found: Kind) -> bool {
     matches!(
         (wanted, found),
@@ -276,10 +232,8 @@ const fn kinds_disagree(wanted: Kind, found: Kind) -> bool {
 
 /// Reads each module's exports and folds them into one index, per library.
 ///
-/// Separated from placement so the index is built from *every* module before anything is
-/// bound against it (D482): a module may export a name another of the title's own imports,
-/// and folding as each is placed would make that depend on which the filesystem offered
-/// first.
+/// Built from every module before anything binds (D482), so a result does not depend on the order
+/// the filesystem offered the modules.
 fn index_exports(
     placed: &[(String, Image)],
     read: &[(String, Vec<RawExport>)],
@@ -319,10 +273,8 @@ fn index_exports(
 
 /// Where the next module goes, given where the last one ended.
 ///
-/// **A whole granule of guard between them**, for the reason the run's other bases are far
-/// apart (`DEFAULT_MODULE_BASE`, `THUNK_TABLE_BASE`): a stray offset off the end of one
-/// module then lands in unmapped space and faults immediately, rather than reaching into
-/// the next module and producing a plausible wrong answer.
+/// A whole granule of guard between modules, so a stray offset off the end of one lands in unmapped
+/// space and faults rather than reaching into the next.
 fn next_base(image: &Image, granularity: u64) -> u64 {
     let (start, len) = image.span();
     let end = start.saturating_add(len);
@@ -332,8 +284,8 @@ fn next_base(image: &Image, granularity: u64) -> u64 {
 
 /// Places each module in turn and returns them with everything they export.
 ///
-/// The caller supplies `base`, exactly as it does for the main executable: where a run puts
-/// things is the run's layout decision and not this layer's.
+/// The caller supplies `base`, as for the main executable: where a run puts things is the run's
+/// layout decision.
 pub(crate) fn place_all(
     modules: &[TitleModule],
     base: u64,
@@ -370,10 +322,7 @@ mod tests {
 
     use super::{PlacedTitleModules, TitleExport, kinds_disagree};
 
-    /// **A kind the table did not state is not a claim about the other kind.**
-    ///
-    /// Treating `Unspecified` as a disagreement would leave every unannotated symbol on a
-    /// stub, which is a refusal nobody decided on and nobody measured.
+    /// A kind the table did not state is not a claim about the other kind.
     #[test]
     fn an_unstated_kind_is_not_a_disagreement() {
         assert!(!kinds_disagree(Kind::Unspecified, Kind::Function));
@@ -381,7 +330,7 @@ mod tests {
         assert!(!kinds_disagree(Kind::Unspecified, Kind::Unspecified));
     }
 
-    /// Code and data are a disagreement in both directions (D125).
+    /// Code and data are a disagreement in both directions (D307).
     #[test]
     fn code_and_data_disagree_whichever_way_round() {
         assert!(kinds_disagree(Kind::Function, Kind::Object));
@@ -442,11 +391,7 @@ mod tests {
         }
     }
 
-    /// **An import binds into the library it names, and not into another that shares a hash.**
-    ///
-    /// This is the bug the first run found: matched on the hash alone, an import attributed
-    /// to one module bound into a different one that exported the same name, and the count
-    /// for that module read one higher than the executable's own table says it imports.
+    /// An import binds into the library it names, and not into another that shares a hash (D483).
     #[test]
     fn an_attributed_import_binds_only_into_the_library_it_names() {
         let modules = indexed(&[
@@ -459,9 +404,8 @@ mod tests {
         assert_eq!(resolved.bound[0].library, "Helper");
     }
 
-    /// A library the executable's table does not list cannot be matched against.
-    ///
-    /// Falling back to a hash-only search would be the very thing the test above forbids.
+    /// A library the executable's table does not list cannot be matched against; a hash-only
+    /// fallback is what the test above forbids.
     #[test]
     fn an_import_naming_an_unknown_library_binds_to_nothing() {
         let modules = indexed(&[("Gameplay", 0xAAAA, Kind::Function, 0x1000)]);
@@ -474,10 +418,7 @@ mod tests {
         );
     }
 
-    /// **An unattributed name two modules answer is reported, not guessed at.**
-    ///
-    /// A plain name carries no library id, so there is nothing to narrow it with. Picking
-    /// one would be a call into whichever module happened to sort first.
+    /// An unattributed name two modules answer is reported, not guessed at.
     #[test]
     fn an_unattributed_name_two_modules_answer_is_left_unbound() {
         let modules = indexed(&[
@@ -498,7 +439,7 @@ mod tests {
         assert_eq!(resolved.addresses.get(&3), Some(&0x1000));
     }
 
-    /// A hash that matches with a kind that does not is reported and left on its stub (D125).
+    /// A hash that matches with a kind that does not is reported and left on its stub (D307).
     #[test]
     fn a_kind_mismatch_is_reported_rather_than_bound() {
         let modules = indexed(&[("Gameplay", 0xDDDD, Kind::Object, 0x1000)]);
@@ -510,13 +451,10 @@ mod tests {
     }
 }
 
-/// Why one import did not bind to a module the title ships.
+/// Why one import did not bind to a module the title ships (D640).
 ///
-/// **A count of failures is not a reason for any of them.** Six imports of PPSA25872 are answered
-/// by modules it ships, all six landed on placeholders, and the run said nothing at all - not how
-/// many resolved, not how many were kept, not which step declined. Working it out took reading
-/// four functions across three crates, and the answer was in none of them until somebody ran it
-/// (D640).
+/// A count of failures is not a reason for any of them, so each unbound import carries the step
+/// that declined it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unbound {
     /// The import names a library id the module's own table does not list.
@@ -527,11 +465,10 @@ pub enum Unbound {
     NotExported,
     /// More than one module answered a name that carries no attribution.
     Ambiguous,
-    /// The hash matched and the kind did not - a function wanted where an object is exported,
-    /// or the reverse. Binding it anyway would hand the guest data where it will call, or a
-    /// function where it will read.
+    /// The hash matched and the kind did not: a function wanted where an object is exported, or the
+    /// reverse.
     KindMismatch,
-    /// It resolved, and orbistoun implements it - so this project answers instead.
+    /// It resolved, and orbistoun implements it, so this project answers instead.
     KeptByOrbistoun,
 }
 
@@ -563,19 +500,13 @@ pub struct BindingAccount {
     pub bound: usize,
     /// The rest, by reason, with an example for each.
     pub unbound: Vec<(Unbound, String, usize)>,
-    /// Which of the title's modules answered, and how many each.
-    ///
-    /// **The half a count cannot give.** "Sixty-four bound" and "sixty-four bound, none of them
-    /// from the module whose function is called nineteen million times" are different
-    /// statements, and only the second is a diagnosis (D640).
+    /// Which of the title's modules answered, and how many each. A total cannot say whether the
+    /// module that matters answered.
     pub by_library: Vec<(String, usize)>,
 }
 
 impl BindingAccount {
-    /// The lines a run prints about it.
-    ///
-    /// **Printed even when everything bound**, because "six of six bound" and silence are
-    /// different statements and only one of them is evidence.
+    /// The lines a run prints about it, printed even when everything bound.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![format!(

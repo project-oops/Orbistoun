@@ -1,47 +1,36 @@
 //! A title's sandbox, established as one thing.
 //!
-//! # What this centralises, and why it is not just `filesystem::install`
-//!
-//! The overlay *engine* lives in [`crate::mount`] and [`crate::filesystem`]: a base tree
-//! materialised from a knowledge file, and a per-title writable overlay stacked over it (D250,
-//! D251). But assembling that for a *running title* is three steps that must happen in one order -
-//! empty the overlay if this run is not to inherit the last one's files, install the base tree with
-//! its writable device overlays, then layer the title's own files over `/app0` - and that order is
-//! exactly what gets remembered wrong when it is spread across whoever happens to set a run up (the
-//! textures-lost regression, D269).
-//!
-//! So it is one function, [`establish`], and every consumer calls it. A consumer supplies *where*
-//! the bytes live and *how long* they last; nothing here reads the environment, so the fs crate
-//! stays a mechanism its callers configure rather than one that configures itself (principle 5).
+//! The overlay mechanism is in [`crate::mount`] and [`crate::filesystem`] (D251). Assembling
+//! it for a running title is three steps in a fixed order: empty the overlay if this run does
+//! not keep the last one's files, install the base tree with its writable device overlays,
+//! then layer the title's own files over `/app0`. [`establish`] does all three, and every
+//! consumer calls it. A consumer supplies where the bytes live and how long they last;
+//! nothing here reads the environment.
 
 use std::path::Path;
 
 /// Whether a title's sandbox keeps what it wrote between runs.
 ///
-/// The console's own answer is presumably [`Ephemeral`](Self::Ephemeral); the default here is the
-/// opposite on purpose, because a proof of concept wants the saves and the reports a run produced
-/// to survive it. The choice is the consumer's, passed in - a run reads it from
-/// `ORBISTOUN_SANDBOX`, a test states it outright - so the policy has one meaning and many callers.
+/// The default keeps them, so saves and reports a run produced survive it; the hardware's
+/// sandbox is presumably [`Ephemeral`](Self::Ephemeral). The consumer chooses: a run reads
+/// `ORBISTOUN_SANDBOX`, a test states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Retention {
     /// Keep it: saves and a probe's reports persist past the run that wrote them.
     #[default]
     Retain,
-    /// Empty it at the start of each run, closer to a console sandbox that carries no state.
+    /// Empty it at the start of each run, closer to a hardware sandbox that carries no state.
     Ephemeral,
 }
 
 /// Establishes a title's sandboxed filesystem: the accountable base tree, its writable device
-/// overlays, and the title's own files over `/app0` - the whole guest-visible namespace.
+/// overlays, and the title's own files over `/app0`.
 ///
-/// - `base` is where the console's base tree is materialised (read-only to the guest).
-/// - `overlay` is the per-title directory a guest's writes land in.
-/// - `title_module` is the guest that was loaded; its directory becomes `/app0`.
-/// - `retention` decides whether `overlay` is emptied first.
-///
-/// The order is the one [`crate::mount`] requires and is not the caller's to get right: the base is
-/// installed first, each writable entry's overlay is stacked over it, and the title is layered over
-/// `/app0` last so its own files answer before anything the console provides.
+/// `base` is where the base tree is materialised (read-only to the guest); `overlay` is the
+/// per-title directory a guest's writes land in; `title_module` is the loaded guest, whose
+/// directory becomes `/app0`; `retention` decides whether `overlay` is emptied first. The base
+/// is installed first, each writable entry's overlay stacked over it, and the title layered
+/// over `/app0` last so its own files answer first.
 pub fn establish(
     base: &Path,
     overlay: &Path,
@@ -50,9 +39,8 @@ pub fn establish(
     retention: Retention,
 ) {
     if retention == Retention::Ephemeral {
-        // **At the start of a run, not at a teardown.** A process guest is jumped to and leaves by
-        // calling exit, so nothing after the entry point reliably runs; "empty at the start" is the
-        // only point that always executes, and it is the observable property anyway (D422).
+        // At the start of a run, not at teardown: a guest leaves by calling exit, so nothing
+        // after the entry point reliably runs (D422).
         let _ = std::fs::remove_dir_all(overlay);
     }
     crate::filesystem::install(base, overlay);
@@ -64,7 +52,7 @@ pub fn establish(
 
 /// Where a title's files are stored, which is what decides whether its `/app0` is writable (D722).
 ///
-/// Never anything the title ships: the console decides by the mount, not the package.
+/// Never anything the title ships: the platform decides by the mount, not the package.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Origin {
     /// A library image, installed from a package: `/app0` is read-only (D250).
@@ -82,14 +70,12 @@ pub enum Origin {
 /// holding what that title shipped (`eboot.bin`, `sce_sys/param.json`, `sce_sys/icon0.png`).
 pub const LIBRARY_MOUNT: &str = "/user/app";
 
-/// Shows installed titles to the guest under [`LIBRARY_MOUNT`], one directory per **title id**,
+/// Shows installed titles to the guest under [`LIBRARY_MOUNT`], one directory per title id,
 /// read-only - the system view a launcher has, where a sandboxed title sees only its own `/app0`.
 ///
-/// By id rather than by the library's folder names: a console names `/user/app/<id>` by the id
-/// the title declares, and a library folder is whatever it was unpacked as (`PPSA02664-app0`).
-/// Mounting the library folder whole showed a launcher those names, and it skipped every one that
-/// was not an id (worklog 842). Read-only because nothing in the manifest marks the prefix
-/// writable.
+/// By id rather than by the library's folder names: the platform names `/user/app/<id>` by
+/// the id the title declares, and a launcher skips names that are not ids. Read-only because
+/// nothing in the manifest marks the prefix writable.
 ///
 /// `base` is the materialised base tree [`establish`] was given: `/user/app` itself is an empty
 /// directory there, so a guest that opens it to walk it by descriptor gets a descriptor, and the
@@ -115,11 +101,9 @@ mod tests {
         dir
     }
 
-    /// **Retain keeps what a previous run wrote; ephemeral does not.**
+    /// Retain keeps what a previous run wrote; ephemeral does not.
     ///
-    /// This is the whole reason the policy is a setting: a save must survive the run that made it,
-    /// and a run that must start clean must be able to say so. Asserted on a file placed in the
-    /// overlay, because that is what a guest's write becomes.
+    /// Asserted on a file placed in the overlay, which is what a guest's write becomes.
     #[test]
     fn retention_keeps_or_empties_the_overlay_as_asked() {
         let _guard = crate::exclusively();
@@ -162,11 +146,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **After establishing, a console device path is mounted and writable.**
-    ///
-    /// The point of the manifest entries: `/mnt/usb0` is not a special case in code, it is a
-    /// writable overlay like `/data`, so a guest's `mkdir` and write land there rather than
-    /// faulting. If this regresses, obSCEne's report sink is back to crashing (D422).
+    /// After establishing, a device path such as `/mnt/usb0` is a writable overlay like
+    /// `/data` (D422).
     #[test]
     fn a_device_path_is_writable_after_establishing() {
         let _guard = crate::exclusively();
@@ -205,8 +186,7 @@ mod tests {
         (root, title)
     }
 
-    /// A library image's `/app0` refuses writes; a staged title's accepts them (D722). The same
-    /// directory, established with each origin, answers each way.
+    /// A library image's `/app0` refuses writes; a staged title's accepts them (D722).
     #[test]
     fn only_a_staged_title_may_write_its_app0() {
         let _guard = crate::exclusively();
@@ -241,7 +221,7 @@ mod tests {
             .join("data/homebrew/NVRB00001/Replays/Last.nbr");
         assert!(landed.exists(), "the write lands in the title's overlay");
         assert!(!title.join("Replays").exists(), "and never in the library");
-        // One directory under two names, as on the console.
+        // One directory under two names, as on the hardware.
         assert!(crate::metadata::listing("/data/homebrew/NVRB00001/Replays").is_some());
         assert!(crate::metadata::listing("/data/homebrew/NVRB00001/data").is_some());
 
@@ -249,10 +229,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **Writing a shipped file copies it up; the library keeps its bytes.**
-    ///
-    /// Without the copy-up a write to an existing file resolved to the first layer holding it -
-    /// the library - and a staged title rewrote its own shipped files on the host.
+    /// Writing a shipped file copies it up, and the library keeps its bytes.
     #[test]
     fn a_staged_write_to_a_shipped_file_never_reaches_the_library() {
         let _guard = crate::exclusively();
@@ -285,7 +262,7 @@ mod tests {
             b"changed",
             "the guest sees its own copy"
         );
-        // Removing a name the library also holds would need a whiteout: refused, not faked.
+        // Removing a name the library also holds would need a whiteout: refused.
         assert!(crate::mount::resolve_for_removal("/app0/data/shipped.txt").is_none());
         assert!(crate::mount::resolve_for_removal("/app0/data/new.txt").is_some());
 
@@ -293,10 +270,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **The system view lists the library at `/user/app`, and refuses writes into it.**
-    ///
-    /// What a launcher scans for installed titles; a sandboxed run, which never calls
-    /// `expose_library`, has no such directory.
+    /// The system view lists the library at `/user/app` and refuses writes into it.
     #[test]
     fn the_system_view_lists_the_library_read_only() {
         let _guard = crate::exclusively();
@@ -305,7 +279,7 @@ mod tests {
         let root = scratch("library");
         let library = root.join("titles");
         let launcher = library.join("SCSH00001");
-        // Unpacked under a folder name that is not its id, as retail dumps are.
+        // Unpacked under a folder name that is not its id.
         let cube = library.join("GLCB00001-app0");
         std::fs::create_dir_all(cube.join("sce_sys")).unwrap();
         std::fs::create_dir_all(&launcher).unwrap();

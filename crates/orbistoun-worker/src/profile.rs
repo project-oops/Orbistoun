@@ -1,19 +1,12 @@
-//! Where a thread actually is, sampled (worklog 852).
+//! Where a thread is, sampled.
 //!
-//! The perf phases measure orbistoun's own work, and everything they do not measure has been
-//! reported as the guest's. That is a remainder, not a measurement. This asks the threads directly:
-//! about once a millisecond each watched thread is suspended, its instruction pointer and the top
-//! of its stack read, and it is resumed.
-//!
-//! - A sample in the guest's image is counted by offset, which a disassembly or link map names.
-//! - A sample in host code is counted by module and offset.
-//! - A sample in a system library, most often a wait, is named by the first return address into
-//!   this executable on its stack, so a wait says whose it is.
-//!
-//! `ORBISTOUN_PROFILE=1` turns it on: the thread entering the guest and the device thread are
-//! watched, and the counts are printed every few seconds, per thread. The sampler never allocates
-//! or takes a lock while a thread is suspended - that thread may hold the heap's lock, and waiting
-//! on it from here would hang both.
+//! About once a millisecond each watched thread is suspended, its instruction pointer and the top
+//! of its stack read, and it is resumed. A sample in the guest's image is counted by offset, one in
+//! host code by module and offset, and one in a system library (most often a wait) by the first
+//! return address into this executable on its stack. `ORBISTOUN_PROFILE=1` watches the thread
+//! entering the guest and the device thread, and prints the counts every few seconds. The sampler
+//! never allocates or locks while a thread is suspended, since that thread may hold the heap's
+//! lock.
 
 use std::sync::Mutex;
 
@@ -253,7 +246,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    /// No sampler away from Windows yet.
+    /// The sampler exists on Windows only.
     pub(super) fn watch(_name: &'static str) {
         tracing::warn!("the profiler samples on Windows only");
     }

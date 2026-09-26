@@ -6,34 +6,27 @@ use serde::{Deserialize, Serialize};
 
 /// One function orbistoun declares, with the hash it would be imported by.
 ///
-/// `Ord` so output can be sorted deterministically - reports are diffed between runs,
-/// and ordering churn would read as change.
+/// `Ord` so output sorts deterministically: reports are diffed between runs, and ordering churn
+/// would read as change.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DeclaredSymbol {
     /// Library the symbol belongs to.
     pub library: String,
-    /// Symbol name, exactly as the firmware exports it.
+    /// Symbol name, exactly as the platform exports it.
     pub symbol: String,
     /// Hash a guest module would import it by.
     pub nid: u64,
-    /// Integer argument count. Provisional across the subsystem crates - affects
-    /// trace fidelity, not whether a call works.
+    /// Integer argument count. Affects trace fidelity, not whether a call works.
     pub arity: u8,
-    /// Whether a real handler is attached, as opposed to a stub answering the policy.
-    ///
-    /// **Counted here so nobody counts it by hand.** The implemented total was quoted in
-    /// three documents and derived each time by reading the `implementations()` lists,
-    /// which is how it came to be wrong by one for a while - a multi-line entry does not
-    /// look like the others (D199).
+    /// Whether a real handler is attached, as opposed to a stub answering the policy. Counted here
+    /// so nobody derives the total by reading `implementations()` lists by hand.
     pub implemented: bool,
 }
 
 /// Every module the service registers.
 ///
-/// **The single list, and it has to stay that way.** A second copy existed - the service
-/// hand-called `register` per crate - and adding `libc` to only one of them produced a
-/// function that `orbistoun-cli symbols` listed, that a trace named correctly, and that
-/// resolved to nothing. Every layer agreed except the one that mattered (D123).
+/// The single list (D123): a second, hand-maintained registration path lets a function be listed,
+/// named in traces, and resolve to nothing.
 pub(crate) fn modules() -> [ModuleDesc; 42] {
     [
         orbistoun_kernel::MODULE,
@@ -81,22 +74,12 @@ pub(crate) fn modules() -> [ModuleDesc; 42] {
     ]
 }
 
-/// Every implementation the subsystem crates provide, by symbol name.
-///
-/// The counterpart to `modules`, and kept beside it for the same reason: a function
-/// declared in one place and implemented in another drifts apart silently, and the
-/// failure mode is code that looks written and never runs.
 /// The implementation a guest would reach by importing `name`.
 ///
-/// **Exposed so something can call one without a guest.** Every other route into these
-/// functions goes through a loaded image, a thunk table and a relocation, which is a great
-/// deal of machinery to stand up in order to ask what one function answers. A harness
-/// checking orbistoun against a measured console value needs exactly this, and so does a
-/// differential run against another implementation of the same interface.
-///
-/// The arguments are plain words and guest memory is the host's under an identity mapping, so
-/// a caller passes the address of its own storage and the implementation writes through it -
-/// which is what a guest does.
+/// Exposed so a harness or a differential run can call one function without a loaded image, a thunk
+/// table and a relocation. Arguments are plain words, and guest memory is the host's, so a caller
+/// passes the address of its own storage and the implementation writes through it, as a guest's
+/// would be.
 #[must_use]
 pub fn implementation_named(name: &str) -> Option<orbistoun_core::GuestFn> {
     implementations()
@@ -107,10 +90,8 @@ pub fn implementation_named(name: &str) -> Option<orbistoun_core::GuestFn> {
 
 /// The implementation of `name` that answers in a floating-point register.
 ///
-/// **A separate door because they are a separate table.** A function answers in `rax` or in
-/// `xmm0` and never both (D268), so a harness looking one up by name has to know which it
-/// wants - and `strtod` reading an integer argument while answering a float is exactly the
-/// case that makes the distinction visible rather than academic.
+/// A separate table: a function answers in `rax` or in `xmm0` and never both (D268), so a harness
+/// looking one up by name has to say which it wants.
 #[must_use]
 pub fn float_implementation_named(name: &str) -> Option<orbistoun_core::GuestFloatFn> {
     float_implementations()
@@ -119,52 +100,52 @@ pub fn float_implementation_named(name: &str) -> Option<orbistoun_core::GuestFlo
         .map(|(_, f)| f)
 }
 
+/// Every implementation the subsystem crates provide, by symbol name. Kept beside `modules` so
+/// declaration and implementation cannot drift apart silently.
 pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> {
     let mut all = orbistoun_kernel::implementations().to_vec();
     all.extend(orbistoun_libc::implementations());
     all.extend(orbistoun_posix::implementations());
     all.extend_from_slice(orbistoun_video::implementations());
     all.extend_from_slice(orbistoun_gpu::implementations());
-    // libSceAgc's own implementations, declared beside the Gnm builders rather than folded in:
-    // `sceAgcCreateShader` fills a guest-adjacent shader object from the measured 3c5e model (D556),
-    // and the shader-linkage calls (interpolant mapping, prim state, link shaders) from 9a41.
+    // libSceAgc's own implementations, declared beside the command-buffer builders:
+    // `sceAgcCreateShader` fills a guest-adjacent shader object, and the shader-linkage calls
+    // (interpolant mapping, prim state, link shaders).
     all.extend_from_slice(orbistoun_gpu::agc::implementations());
-    // libSceAgcDriver: `sceAgcDriverCreateQueue` accepts the Type 0/3 queue and returns success (9a41).
+    // libSceAgcDriver: `sceAgcDriverCreateQueue` accepts the Type 0/3 queue and returns success.
     all.extend_from_slice(orbistoun_gpu::agc_driver::implementations());
     all.extend_from_slice(orbistoun_fs::implementations());
-    // Reading a directory through its descriptor, by the system-call names (worklog 842).
+    // Reading a directory through its descriptor, by the system-call names.
     all.extend_from_slice(orbistoun_fs::dirent::implementations());
     // The socket calls in their vendor spelling. The bodies are `orbistoun-fs`'s; this crate
     // declares `libSceNet` and encodes a failure the way that library numbers one (D667).
     all.extend_from_slice(orbistoun_net::implementations());
     all.extend_from_slice(orbistoun_input::implementations());
-    // The mouse, registered beside the pad rather than folded into it: the crate root answers a
-    // `&'static` slice, so gathering two modules there would mean allocating, and one explicit
-    // line is cheaper than that and easier to notice when a third arrives (D673).
+    // The mouse, registered beside the pad: the crate root answers a `&'static` slice, so gathering
+    // two modules there would allocate.
     all.extend_from_slice(orbistoun_input::mouse::implementations());
     all.extend_from_slice(orbistoun_audio::implementations());
     all.extend_from_slice(orbistoun_systemservice::implementations());
-    // A launcher's request to start another title, handed to whoever owns the run (worklog 842).
+    // A launcher's request to start another title, handed to whoever owns the run.
     all.extend_from_slice(orbistoun_systemservice::launch::implementations());
-    // libSceCommonDialog: `sceCommonDialogInitialize` answers 0, the guest-observed init the three
-    // retail Unity titles need to get past their first wall (D678); registered here beside its
-    // declaration rather than folded into the crate root's slice, as the Agc modules are.
+    // libSceCommonDialog: `sceCommonDialogInitialize` answers 0, as the guest observes on hardware.
+    // Registered beside its declaration, as the Agc modules are.
     all.extend_from_slice(orbistoun_systemservice::common_dialog::implementations());
-    // libSceAppContent: the app-content init sequence a Unity IL2CPP title runs at startup -
-    // `sceAppContentInitialize` (guest-observed 0) and `sceAppContentAppParamGetInt` (placeholder
-    // int, as sceSystemServiceParamGetInt), which PPSA25872's libil2cpp fails on otherwise (D680).
+    // libSceAppContent: the app-content init sequence an IL2CPP title runs at startup,
+    // `sceAppContentInitialize` (0) and `sceAppContentAppParamGetInt` (a placeholder integer, as
+    // `sceSystemServiceParamGetInt`).
     all.extend_from_slice(orbistoun_systemservice::app_content::implementations());
-    // libSceCoredump: a title's crash-handler registration, accepted with 0 - orbistoun catches
-    // guest faults itself and never coredumps, so the handler is never invoked, but the registration
-    // succeeds rather than answering the placeholder a caller reads as a failure (worklog 798).
+    // libSceCoredump: a crash-handler registration, accepted with 0. Orbistoun catches guest faults
+    // itself and never invokes the handler, but the registration succeeds rather than answering the
+    // placeholder a caller reads as failure.
     all.extend_from_slice(orbistoun_systemservice::coredump::implementations());
     all
 }
 
 /// Every implementation that speaks in floating-point registers.
 ///
-/// Only libc has any: the maths library is defined by IEEE 754 rather than by the
-/// platform, and nothing else declared here takes or returns a `double` (D268).
+/// Only libc has any: the maths library is defined by IEEE 754, and nothing else declared here
+/// takes or returns a `double` (D268).
 pub(crate) fn float_implementations() -> Vec<(&'static str, orbistoun_core::GuestFloatFn)> {
     orbistoun_libc::math::implementations().to_vec()
 }
@@ -180,10 +161,8 @@ pub(crate) enum Resolvable {
 
 /// Every implementation, in the order the by-name stubs are laid out in.
 ///
-/// **One list, so two places cannot disagree about which slot is which.** The stub table
-/// binds a handler to slot `imports + n`, and the call trace labels that same slot with a
-/// name; if either walked its own list, a resolved call would be attributed to a different
-/// function than the one that ran - which is worse than no label at all (D366).
+/// One list, so the stub table binding slot `imports + n` and the call trace labelling that slot
+/// agree; otherwise a resolved call would be attributed to a different function (D366).
 pub(crate) fn resolvable() -> Vec<(&'static str, Resolvable)> {
     let mut all: Vec<(&'static str, Resolvable)> = implementations()
         .into_iter()
@@ -197,53 +176,39 @@ pub(crate) fn resolvable() -> Vec<(&'static str, Resolvable)> {
     all
 }
 
-/// Names a syscall goes by that are not simply the number's name without its prefix.
+/// Names a syscall goes by that are not the number's name without its `SYS_` prefix.
 ///
-/// **A table rather than a rule with exceptions.** The rule - `SYS_write` is `write` - covers
-/// almost all of them, and "almost" is the problem: a rule applied by code to the ones it does
-/// not cover binds a number to the wrong function silently, which is the worst failure this
-/// boundary has (D378).
+/// A table rather than a rule with exceptions, because a rule applied to a name it does not cover
+/// binds a number to the wrong function silently (D378).
 const SPELT_DIFFERENTLY: &[(&str, &str)] = &[
     // FreeBSD's own underscored spelling for the call `sysctl(3)` wraps.
     ("SYS___sysctl", "sysctl"),
-    // The vendor kernel-log write (601), served by the same function the named
-    // `sceKernelDebugOutText` is. Both write the string at the second argument to the operator
-    // log and ignore the first argument - the log call ignores its channel, and this ignores its
-    // operation selector, which is `7` (write) in every use observed. A guest that logs by the
-    // raw number instead of the name - as our homebrew payloads do through the obSCEne runtime -
-    // is then served rather than answered ENOSYS, the same one-function-two-answers binding D641
-    // gave `sceKernelVirtualQuery`.
+    // The vendor kernel-log write (601), served by the same function as `sceKernelDebugOutText`.
+    // Both write the string at the second argument to the operator log and ignore the first (the
+    // channel, or the operation selector, `7` in every observed use). A guest that logs by raw
+    // number, as the obSCEne runtime does, is served rather than answered `ENOSYS`.
     ("SYS_vendor_klog", "sceKernelDebugOutText"),
-    // The FreeBSD 11 directory reads, served by the vendor names that write the same records
-    // (worklog 842): a launcher lists `/user/app` by the raw numbers, 196 then 272.
+    // The FreeBSD 11 directory reads, served by the vendor names that write the same records: a
+    // launcher lists `/user/app` by the raw numbers 196 and 272.
     ("SYS_freebsd11_getdirentries", "sceKernelGetdirentries"),
     ("SYS_freebsd11_getdents", "sceKernelGetdents"),
-    // **The two exits, and neither needs an entry here.** The process one is spelt `SYS__exit`
-    // in FreeBSD's table - entry 1 is the raw `_exit`, not the `exit(3)` wrapper - so stripping
-    // `SYS_` already yields the name `orbistoun-libc` answers to. An entry reading `SYS_exit`
-    // stood here and matched nothing, because no harvested constant is called that: the mapping
-    // was dead, and with it syscall 1, which a guest asks for at the end of every clean run.
-    // The thread one, `SYS_thr_exit` (431), has no implementation and is deliberately absent
-    // rather than bound to the process exit.
+    // The process exit is `SYS__exit` in FreeBSD's table (entry 1 is the raw `_exit`), so stripping
+    // `SYS_` already yields the name `orbistoun-libc` answers to. The thread exit, `SYS_thr_exit`
+    // (431), has no implementation and is not bound to the process exit.
 ];
 
 /// Numbers this must not bind even though the name matches.
 ///
-/// `SYS_syscall` and `SYS___syscall` are the indirect forms: the number they carry is *another*
-/// number, in the first argument. Binding them to anything called `syscall` would perform the
-/// wrong call with the arguments shifted by one.
+/// `SYS_syscall` and `SYS___syscall` are the indirect forms: the number they carry is another
+/// number, in the first argument. Binding them to anything called `syscall` would perform the wrong
+/// call with the arguments shifted by one.
 const NOT_A_CALL: &[&str] = &["SYS_syscall", "SYS___syscall"];
 
 /// What each syscall number performs, for the numbers something here implements.
 ///
-/// # A number is a name the guest did not spell
-///
-/// `SYS_write` is four and `write` has been implemented for a while. The mapping between them
-/// is harvested from `sys/sys/syscall.h` rather than written out, so the numbers stay traceable
-/// to the header the way every other constant here is (D378).
-///
-/// A number whose name nothing implements is simply absent, and the dispatcher answers those
-/// the way a kernel does.
+/// The number-to-name mapping is harvested from `sys/sys/syscall.h`, so the numbers stay traceable
+/// to the header (D378). A number whose name nothing implements is absent, and the dispatcher
+/// answers it as a kernel does.
 pub(crate) fn syscalls() -> std::collections::BTreeMap<u64, (&'static str, orbistoun_core::GuestFn)>
 {
     let implemented: std::collections::BTreeMap<&'static str, orbistoun_core::GuestFn> =
@@ -252,8 +217,8 @@ pub(crate) fn syscalls() -> std::collections::BTreeMap<u64, (&'static str, orbis
         SPELT_DIFFERENTLY.iter().copied().collect();
 
     let mut out = std::collections::BTreeMap::new();
-    // The target's own numbers first, then FreeBSD's. Kept in separate files because one is
-    // generated from headers and the other is a record of what guests asked for (D403).
+    // The target's own numbers first, then FreeBSD's. Separate files because one is generated from
+    // headers and the other records what guests asked for (D403).
     let declared = orbistoun_hle::constants::vendor_constants_in("syscall")
         .into_iter()
         .chain(orbistoun_hle::constants::abi_constants_in("syscall"));
@@ -278,9 +243,8 @@ pub(crate) fn syscalls() -> std::collections::BTreeMap<u64, (&'static str, orbis
 
 /// What the dispatcher answers for a number nothing implements.
 ///
-/// `ENOSYS` negated, which is how a FreeBSD syscall reports failure to the stub that called
-/// it. Harvested, so it stays traceable - and a fallback that is still a detectable failure
-/// when the table cannot be read at all.
+/// `ENOSYS` negated, as a FreeBSD syscall reports failure to its calling stub. Harvested, with a
+/// fallback that is still a detectable failure if the table cannot be read.
 pub(crate) fn syscall_refusal() -> u64 {
     let enosys = orbistoun_hle::constants::abi_constant("errno", "ENOSYS").unwrap_or(1);
     (-enosys) as u64
@@ -288,9 +252,8 @@ pub(crate) fn syscall_refusal() -> u64 {
 
 /// Every declared symbol, sorted.
 pub(crate) fn all(hasher: &NidHasher) -> Vec<DeclaredSymbol> {
-    // Both tables. A function that answers in `xmm0` is as implemented as one that answers
-    // in `rax`, and counting only the first would report the maths library as missing while
-    // it worked (D268).
+    // Both tables: a function answering in `xmm0` is as implemented as one answering in `rax`
+    // (D268).
     let attached: std::collections::BTreeSet<&str> = implementations()
         .into_iter()
         .map(|(name, _)| name)
@@ -322,12 +285,7 @@ mod tests {
     use super::{all, modules};
     use orbistoun_nid::NidHasher;
 
-    /// **The list the stub table and the call trace both walk, walked twice** (D366).
-    ///
-    /// The binding says "slot `imports + n` is `resolvable()[n]`" and the label says the
-    /// same thing, in a different function. If the order were not stable, a call resolved
-    /// at run time would be attributed to a different function than the one that ran -
-    /// which is worse than no label, because it reads as evidence.
+    /// The list the stub table and the call trace both walk is stable across calls (D366).
     #[test]
     fn the_resolvable_list_is_the_same_list_every_time_it_is_asked_for() {
         let first: Vec<&str> = super::resolvable().into_iter().map(|(n, _)| n).collect();
@@ -339,11 +297,9 @@ mod tests {
         );
     }
 
-    /// Everything implemented is reachable by name, not only by import.
-    ///
-    /// The payloads resolve most of their C library at run time rather than importing it,
-    /// so a function that exists but cannot be *found* by name is a function they cannot
-    /// call (D365).
+    /// Everything implemented is reachable by name, not only by import. Payloads resolve most of
+    /// their C library at run time, so a function that cannot be found by name cannot be called
+    /// (D365).
     #[test]
     fn every_implementation_can_be_resolved_by_name() {
         let reachable: std::collections::BTreeSet<&str> =
@@ -362,11 +318,7 @@ mod tests {
         }
     }
 
-    /// The resolver a payload asks for first is one of the things it can resolve.
-    ///
-    /// A runtime's opening move is to look up the resolver itself through the structure it
-    /// was handed (D365); an emulator that answers the call but cannot answer that name has
-    /// stopped it at the first step.
+    /// The resolver a payload asks for first is one of the names it can resolve (D365).
     #[test]
     fn the_resolver_can_resolve_itself() {
         let reachable: std::collections::BTreeSet<&str> =
@@ -374,11 +326,7 @@ mod tests {
         assert!(reachable.contains("sceKernelDlsym"));
     }
 
-    /// **The mapping is harvested, and it really binds things** (D378).
-    ///
-    /// A rule that produced an empty table would pass every other check here in silence, so
-    /// this asserts both that the well-known numbers are bound and that they are bound to the
-    /// right names - `write` is four on this platform and nothing else may claim four.
+    /// The syscall mapping is harvested and binds the well-known numbers to the right names (D378).
     #[test]
     fn the_syscall_table_binds_the_numbers_the_header_gives() {
         let table = super::syscalls();
@@ -392,8 +340,7 @@ mod tests {
             ("write", 4),
             ("open", 5),
             ("close", 6),
-            // Entry 1 is the raw `_exit`, not the `exit(3)` wrapper. It bound to nothing at all
-            // until worklog 543, which is why it is pinned here beside the others.
+            // Entry 1 is the raw `_exit`, not the `exit(3)` wrapper.
             ("_exit", 1),
         ] {
             let bound = table
@@ -403,14 +350,10 @@ mod tests {
         }
     }
 
-    /// **The vendor kernel-log write (601) binds, through the vendor table and a rename.**
+    /// The vendor kernel-log write (601) binds, through the vendor table and a rename.
     ///
-    /// Unlike the header-derived numbers above, 601 comes from `vendor-syscalls.toml` and reaches
-    /// its function through a `SPELT_DIFFERENTLY` rename to `sceKernelDebugOutText`. Both steps are
-    /// silent when they fail - a missing constant or a dead rename just leaves the number answering
-    /// `ENOSYS` forever, which is the state this replaced. So the binding is pinned here: a guest
-    /// that logs by raw syscall (our homebrew payloads do, through the obSCEne runtime) is served,
-    /// not dropped.
+    /// 601 comes from `vendor-syscalls.toml` and reaches its function through a `SPELT_DIFFERENTLY`
+    /// rename. Both steps fail silently, leaving the number answering `ENOSYS`.
     #[test]
     fn the_vendor_klog_syscall_binds_to_the_log_write() {
         let table = super::syscalls();
@@ -423,17 +366,10 @@ mod tests {
         );
     }
 
-    /// **Every rename names a constant that exists.**
+    /// Every rename names a constant that exists.
     ///
-    /// `SPELT_DIFFERENTLY` maps a harvested constant to the name something answers to, and a key
-    /// that matches no constant is silently inert - the entry looks like a binding, reads like one
-    /// in review, and does nothing. One stood here for a long time: `SYS_exit`, which no harvested
-    /// constant is called, because FreeBSD's entry 1 is the raw `_exit`. The result was that
-    /// syscall 1 - what a guest calls at the end of every clean run - reached no implementation,
-    /// while an implementation for it existed the whole time.
-    ///
-    /// This asserts the shape rather than that one case, because the failure is invisible by
-    /// construction: nothing breaks, a number just quietly answers `ENOSYS` forever.
+    /// A `SPELT_DIFFERENTLY` key that matches no harvested constant looks like a binding and does
+    /// nothing, so the shape is asserted for every entry.
     #[test]
     fn every_rename_names_a_constant_that_exists() {
         let declared: std::collections::BTreeSet<String> =
@@ -456,9 +392,6 @@ mod tests {
     }
 
     /// The indirect forms are refused rather than bound to something plausible.
-    ///
-    /// `SYS_syscall` carries *another* number in its first argument. Binding it to anything
-    /// would perform the wrong call with every argument shifted by one.
     #[test]
     fn the_indirect_syscall_forms_are_not_bound() {
         let table = super::syscalls();
@@ -476,10 +409,11 @@ mod tests {
         assert!((super::syscall_refusal() as i64) < 0, "and it is a failure");
     }
 
+    /// No symbol is declared twice.
     #[test]
     fn no_symbol_is_declared_twice() {
-        // A duplicate would mean two subsystems claim the same function, and the
-        // registry's last-wins rule would silently pick one.
+        // A duplicate would mean two subsystems claim one function, and the registry's last-wins
+        // rule would pick one silently.
         let symbols = all(&NidHasher::new(*b"x"));
         let mut seen = std::collections::BTreeSet::new();
         for s in &symbols {
@@ -491,19 +425,11 @@ mod tests {
         }
     }
 
-    /// Everything implemented is reachable through the registry a **run** builds.
+    /// Everything implemented, integer and floating-point, is reachable through the registry a run
+    /// builds.
     ///
-    /// # Why here, and not in the crate that implements it
-    ///
-    /// A subsystem crate can only test the registry it builds itself, and no run builds
-    /// that one - `modules()` is the single list (D123), and the per-crate `register`
-    /// functions left over from the design D123 replaced are called by nothing. A test
-    /// there passes or fails against a registry that never runs, which is the same shape as
-    /// the bug: agreeing at every layer except the one that matters (D281).
-    ///
-    /// **Both tables.** A function answering in `xmm0` is as implemented as one answering
-    /// in `rax`, and checking only the integer one would report the maths library as
-    /// unreachable while it worked, or the reverse (D268).
+    /// Tested here because a subsystem crate can only test a registry it builds itself, and no run
+    /// builds that one: `modules()` is the single list.
     #[test]
     fn every_implementation_resolves_through_the_registry_a_run_builds() {
         use orbistoun_hle::{Registry, StubPolicy};
@@ -532,6 +458,7 @@ mod tests {
         }
     }
 
+    /// Every module contributes at least one symbol.
     #[test]
     fn every_module_contributes_at_least_one_symbol() {
         for m in modules() {
@@ -539,10 +466,10 @@ mod tests {
         }
     }
 
+    /// Distinct symbols hash to distinct NIDs.
     #[test]
     fn nids_differ_per_symbol() {
-        // A collision here would make two functions indistinguishable at resolution
-        // time, which is a silent wrong-function-called bug.
+        // A collision would make two functions indistinguishable at resolution time.
         let symbols = all(&NidHasher::new(*b"x"));
         let mut seen = std::collections::BTreeSet::new();
         for s in &symbols {
@@ -555,22 +482,12 @@ mod tests {
 mod knowledge_tests {
     use orbistoun_hle::knowledge::Knowledge;
 
-    /// Libraries that declare functions and serve none, **exactly** - each with its reason.
+    /// Libraries that declare functions and serve none, exactly, each with its reason.
     ///
-    /// Not "some libraries are unimplemented", which drifts into meaninglessness. The exact
-    /// set, so that a library gaining an implementation fails until its entry is deleted,
-    /// and one **losing its registration fails until an entry is added and justified**. Both
-    /// directions are load-bearing (`docs/TESTING.md`).
-    // Twenty-one libraries serve nothing today, each with its reason below - the README's generated
-    // block reports the same, `147 across 21 libraries`. Four entries have retired *from* here -
-    // `libSceGnmDriver` once translated its command streams entirely
-    // below the shim, but the dispatch builders (D427) answer calls here now; `libSceAudioOut` once
-    // implemented nothing rather than fake sound, and still implements no *output*, but its init now
-    // succeeds honestly (setting a subsystem up is not claiming a sound was made);
-    // `libSceErrorDialog`'s `sceErrorDialogInitialize` now answers that same honest init `OK`, on the
-    // same reasoning (worklog 756); and `libSceCoredump` accepts a crash-handler registration with `0`
-    // (worklog 798). A module that genuinely serves nothing goes back here with its
-    // reason.
+    /// The exact set, so a library gaining an implementation fails until its entry is deleted, and
+    /// one losing its registration fails until an entry is added and justified.
+    // Each entry's reason opens with the count of names the library declares, which a test checks.
+    // A module that serves nothing goes here with its reason.
     const SERVES_NOTHING: &[(&str, &str)] = &[
         (
             "libSceAjm",
@@ -658,13 +575,9 @@ mod knowledge_tests {
         ),
     ];
 
-    /// **A declared library that serves nothing is either listed above or a bug.**
-    ///
-    /// The guard that would have caught `orbistoun-input`: its module was registered in
-    /// `modules()` and its `implementations()` were never added to the list below it, so six
-    /// functions were declared, resolvable, and answered by nobody. Nothing failed, because
-    /// the test that checks implementations iterates over *the list they were missing from* -
-    /// the vacuous-loop failure `docs/TESTING.md` describes, arriving somewhere new.
+    /// A declared library that serves nothing is either listed above or a bug: a module registered
+    /// in `modules()` whose `implementations()` were never gathered declares functions nobody
+    /// answers.
     #[test]
     fn every_declared_library_either_serves_something_or_says_why_not() {
         let attached: std::collections::BTreeSet<&str> = super::implementations()
@@ -693,8 +606,8 @@ mod knowledge_tests {
             );
             assert!(
                 !(serves > 0 && excused),
-                // Named, because `concat!` is a macro call rather than a literal and implicit
-                // capture only works on a literal (D362).
+                // Named arguments, because `concat!` is not a literal and implicit capture needs
+                // one.
                 concat!(
                     "{} serves {serves} function(s) but is still listed as serving nothing - ",
                     "delete its entry from SERVES_NOTHING"
@@ -705,24 +618,11 @@ mod knowledge_tests {
         }
     }
 
-    /// **An excuse that counts the names must count them right.**
+    /// An excuse that counts the names counts them right.
     ///
-    /// Every reason above opens `declared as N name(s)`, and nothing checked N. It had
-    /// already rotted: `libSceVideoRecording` said ten while its module declares four,
-    /// because six names were taken out of that module for having no provenance - they came
-    /// from a probe check that was read as measuring that they *resolve* and in fact records
-    /// the branch where the lookup returned null. The removal was right and the excuse was
-    /// not updated with it.
-    ///
-    /// Two other numbers describe this same set and **neither one was wrong**, which is why
-    /// the drift was invisible: the guard above checks membership rather than size, and
-    /// README's `147 across 21 libraries` is counted from the declarations themselves in
-    /// `orbistoun-cli`, so it never read this string at all. A transcribed number with two
-    /// correct derived neighbours is the easiest kind to leave rotting (D085's rule, one
-    /// level down: if it can be derived, do not also write it down unchecked).
-    ///
-    /// Tolerant on purpose: a reason that does not open with that phrase is a bespoke one -
-    /// the retired entries had them - and has nothing to check.
+    /// Every reason opens `declared as N name(s)`, and N is checked against the module's
+    /// declarations. A reason that does not open with that phrase is bespoke and has nothing to
+    /// check.
     #[test]
     fn an_excuse_that_states_a_name_count_states_the_right_one() {
         let declared: std::collections::BTreeMap<&str, usize> = super::modules()
@@ -759,10 +659,7 @@ mod knowledge_tests {
             checked += 1;
         }
 
-        // **The count of what was checked, asserted.** Every entry uses the counted form
-        // today, so a loop that silently checked none of them - a `strip_prefix` that stopped
-        // matching after a rewording, say - would pass exactly as loudly as one that checked
-        // all of them. That is the vacuous-loop failure `docs/TESTING.md` names.
+        // The count of entries checked is asserted, so a loop that silently checked none fails.
         assert_eq!(
             checked,
             SERVES_NOTHING.len(),
@@ -770,10 +667,8 @@ mod knowledge_tests {
         );
     }
 
-    /// Every excuse names a library that is actually declared.
-    ///
-    /// The other direction: a renamed or deleted module would leave an entry excusing
-    /// something that no longer exists, and a list nobody prunes stops being a statement.
+    /// Every excuse names a library that is actually declared, so a renamed or deleted module does
+    /// not leave a stale entry.
     #[test]
     fn every_excuse_belongs_to_a_library_that_exists() {
         let declared: std::collections::BTreeSet<&str> =
@@ -787,13 +682,11 @@ mod knowledge_tests {
         }
     }
 
+    /// The declared arity and the recorded arity never disagree.
     #[test]
     fn declared_arity_and_recorded_arity_never_disagree() {
-        // Two places hold an arity: the `guest_module!` declaration the code compiles
-        // against, and the knowledge file a person reads. They are allowed to be
-        // incomplete - a function can be declared without being understood - but they
-        // must never *contradict*, because a reader has no way to tell which is stale
-        // and a trace would render arguments the implementation does not take (D122).
+        // The `guest_module!` declaration and the knowledge file may each be incomplete, but must
+        // never contradict each other on arity (D122).
         let knowledge = Knowledge::builtin();
         for module in super::modules() {
             for import in module.imports {
@@ -812,11 +705,10 @@ mod knowledge_tests {
         }
     }
 
+    /// Every implemented function is written down in the knowledge file.
     #[test]
     fn every_implemented_function_is_written_down() {
-        // Implementing something without recording what was learned is how the knowledge
-        // ends up existing only in a conversation, which is the failure this file exists
-        // to prevent.
+        // Every implemented function has a knowledge entry, so what was learned is recorded.
         let knowledge = Knowledge::builtin();
         for (name, _) in super::implementations() {
             assert!(
@@ -826,10 +718,10 @@ mod knowledge_tests {
         }
     }
 
+    /// A recorded argument list matches the recorded arity.
     #[test]
     fn a_recorded_argument_list_matches_the_recorded_arity() {
-        // Listing three arguments for a four-argument function is the kind of internal
-        // contradiction that makes a reader distrust the whole file.
+        // A recorded argument list agrees with the recorded arity.
         for f in Knowledge::builtin().functions() {
             let (Some(arity), false) = (f.arity, f.arguments.is_empty()) else {
                 continue;

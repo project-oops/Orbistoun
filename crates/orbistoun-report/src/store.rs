@@ -1,13 +1,7 @@
-//! Persisting reports, and finding the one to compare against.
+//! Persisting reports, and finding the previous run of a title to compare against.
 //!
-//! The store exists for a single question: **what did the previous run of this title
-//! do?** Everything else here serves that. A [`crate::RunDiff`] needs a previous
-//! report, and locating it must not require an index, a database, or parsing every
-//! file on disk.
-//!
-//! Layout is one file per run, named by [`crate::RunId`], which sorts chronologically
-//! as a string. So "most recent" is a directory listing sorted descending, and the
-//! only files that need parsing are candidates, not the whole history.
+//! One file per run, named by [`crate::RunId`], which sorts chronologically as a string,
+//! so the most recent run is a sorted directory listing and needs no index.
 
 use std::fs;
 use std::io;
@@ -97,8 +91,7 @@ impl ReportStore {
 
     /// Every run id present, newest last.
     ///
-    /// A missing directory lists as empty rather than failing - the first run has no
-    /// history and that is not an error.
+    /// A missing directory lists as empty: the first run has no history.
     pub fn ids(&self) -> Result<Vec<RunId>, StoreError> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(e) => e,
@@ -121,9 +114,8 @@ impl ReportStore {
 
     /// The most recent report for the same title as `current`, excluding `current`.
     ///
-    /// Walks newest-first and stops at the first match, so a long history costs one
-    /// parse rather than all of them. Title identity is the content hash (D048), not
-    /// the path - a title moved on disk is still the same title.
+    /// Walks newest-first and stops at the first match. Title identity is the content hash
+    /// (D048), not the path, so a title moved on disk is still the same title.
     pub fn previous_for_title(&self, current: &RunReport) -> Result<Option<RunReport>, StoreError> {
         for id in self.ids()?.into_iter().rev() {
             if id == current.run_id {
@@ -157,7 +149,7 @@ mod tests {
 
     #[test]
     fn an_empty_store_lists_nothing_rather_than_failing() {
-        // A first run has no history; that is not an error condition.
+        // A first run has no history, which is not an error.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ReportStore::new(tmp.path().join("never-created"));
         assert!(store.ids().expect("empty is fine").is_empty());

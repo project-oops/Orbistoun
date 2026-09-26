@@ -1,38 +1,11 @@
 //! A scripted pad: what the pad is doing, and when.
 //!
-//! # Why a title needs one
-//!
-//! Titles gate on input - a licence page, a language list, a press-to-start. A guest stopped at
-//! one of those and a conformance probe that ran clean both end the same way, on the clock, and
-//! the compatibility table cannot tell them apart (`REQ-20260915T0929Z-02a0`). Nothing in the
-//! tree could press a button, so no run had ever got past a prompt.
-//!
-//! This is the deterministic half of the answer: a file that says what the pad does and when,
-//! so a run is repeatable. The same script and the same guest give the same run, which is what
-//! makes a compatibility result mean anything.
-//!
-//! # A level, not a stream
-//!
-//! A step **sets** the pad and it stays set until the next step. That follows
-//! [`crate::latest`], which keeps the most recent state per port rather than a queue, for the
-//! reason recorded there: a title asks what the pad is doing *now*, and replaying a backlog of
-//! finished presses is worse than nothing.
-//!
-//! So a press and its release are two steps, and the gap between them is how long it was held.
-//! Writing only the press means holding it for the rest of the run, which is a real thing to
-//! want and so is not an error.
-//!
-//! # What this deliberately does not decide
-//!
-//! **Which bytes a title reads to see any of this is not settled here and cannot be.** The
-//! 120-byte extent and its at-rest contents are measured; which offset inside carries the
-//! buttons is an inference from one at-rest image (`crate::latest`, D345), and the measurement
-//! that would settle it needs somebody holding a button on real hardware
-//! (obSCEne `REQ-20260910T0650Z-d1c4`, open since 2026-09-10 and pending on exactly that).
-//!
-//! That separation is the point rather than a limitation. This module carries [`PadState`] -
-//! typed buttons, sticks and triggers - and never bytes. When the encoding is measured, what
-//! changes is `pad.rs`, and every script written before it keeps working unaltered.
+//! Titles gate on input (a licence page, a language list, press-to-start), and a run stopped at
+//! one ends on the clock like a clean run. A script says what the pad does and when, so the same
+//! script and guest give the same run. A step sets the pad and it stays set until the next, as
+//! in [`crate::latest`]: a press and its release are two steps, and a press with no release is
+//! held for the rest of the run. This module carries typed [`PadState`] and never bytes; the
+//! byte layout a title reads belongs to `pad.rs` (D345).
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -43,10 +16,10 @@ use crate::pad::{Button, PadState, Stick};
 
 /// One moment in a script: the pad's state, and when it takes effect.
 ///
-/// **When is one of two clocks** (D721): `at_ms`, milliseconds of host time from the start of the
-/// run, or `at_flip`, the guest's own flips since then. A script keyed to flips presses at the same
-/// point in the title however fast the host runs it; one keyed to milliseconds does not. A step
-/// names exactly one, and a script uses one throughout.
+/// When is one of two clocks (D721): `at_ms`, host milliseconds since the run started, or
+/// `at_flip`, the guest's own flips since then. A flip-keyed script presses at the same point in
+/// the title however fast the host runs. A step names exactly one, and a script uses one
+/// throughout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     /// Milliseconds from the start of the run.
@@ -55,7 +28,7 @@ pub struct Step {
     /// Flips the guest has made since the start of the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_flip: Option<u64>,
-    /// Buttons held from this moment. Absent means none - the pad's buttons released.
+    /// Buttons held from this moment. Absent means none: the pad's buttons released.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buttons: Vec<Button>,
     /// Left stick, as `[x, y]` in `-1.0..=1.0`. Absent means centred.
@@ -70,10 +43,10 @@ pub struct Step {
 }
 
 impl Step {
-    /// The step that sets the pad to `state` at `at_flip` - what a recording writes (D721).
+    /// The step that sets the pad to `state` at `at_flip`, as a recording writes it (D721).
     ///
-    /// Every button but the system's own, which a title never sees (D326); an axis only when it
-    /// is off its rest position, so a recorded step reads as what was being done.
+    /// Every button but the system's own, which a title never sees; an axis only when it is off
+    /// its rest position.
     #[must_use]
     pub fn at_flip(at_flip: u64, state: &PadState) -> Self {
         let off = |value: f32| value != 0.0;
@@ -91,7 +64,7 @@ impl Step {
         }
     }
 
-    /// When it takes effect, on whichever clock it names - `None` when it names neither or both.
+    /// When it takes effect, on whichever clock it names; `None` when it names neither or both.
     fn when(&self) -> Option<(Clock, u64)> {
         match (self.at_ms, self.at_flip) {
             (Some(ms), None) => Some((Clock::Millis, ms)),
@@ -132,10 +105,8 @@ pub struct Script {
 pub enum ScriptError {
     /// Two steps share a time, or a later one comes first.
     ///
-    /// Refused rather than sorted. A script whose steps are out of order is a mistake somebody
-    /// made, and sorting it silently would run something other than what the file says while
-    /// looking like it worked - which is the failure this whole subsystem exists to make
-    /// visible rather than commit.
+    /// Refused rather than sorted: sorting would silently run something other than what the file
+    /// says.
     OutOfOrder {
         /// The index of the offending step.
         step: usize,
@@ -152,7 +123,7 @@ pub enum ScriptError {
         step: usize,
     },
     /// A step counts a different clock from the steps before it (D721). Refused rather than
-    /// merged: "the fifth flip or two seconds, whichever comes first" is not an order.
+    /// merged, since "the fifth flip or two seconds, whichever comes first" is not an order.
     MixedClocks {
         /// The index of the offending step.
         step: usize,
@@ -178,9 +149,9 @@ impl std::fmt::Display for ScriptError {
                 clock,
             } => write!(
                 f,
-                // `concat!` of one-line literals rather than a `\`-continued one, which `cargo
-                // fmt` would collapse with the source indentation baked into the message
-                // (D184, D199). It defeats implicit capture, so the arguments are positional.
+                // `concat!` of one-line literals rather than a `\`-continued literal, which `cargo fmt` would
+                // collapse with the source indentation baked in. It defeats implicit capture, so the arguments
+                // are positional.
                 concat!(
                     "step {} is at {}{}, which is not after the {}{} before it - ",
                     "order the steps as they run"
@@ -211,11 +182,9 @@ impl std::error::Error for ScriptError {}
 impl Script {
     /// Refuses a script that does not describe a run that could happen.
     ///
-    /// **Deserialising is the caller's job, not this crate's.** `mapping.rs` settled that
-    /// shape already: the types here derive `Deserialize` and whoever owns the file format
-    /// reads it, so this crate needs no format dependency and a script could arrive as TOML,
-    /// as a settings field, or over the shim-to-worker protocol without this module caring.
-    /// What cannot be delegated is whether the steps make sense, so that is here.
+    /// Deserialising is the caller's job, as in `mapping.rs`: the types derive `Deserialize` and
+    /// the owner of the file format reads it, so this crate has no format dependency. Whether the
+    /// steps make sense is checked here.
     ///
     /// # Errors
     ///
@@ -282,16 +251,14 @@ impl Script {
         self.steps.is_empty()
     }
 
-    /// When the last step is, on the script's clock, or `None` for an empty script.
-    ///
-    /// What a caller needs to know how long the script has left to say anything - after this
-    /// the pad holds its final state, so a run going on longer is not waiting for the script.
+    /// When the last step is, on the script's clock, or `None` for an empty script. After it the
+    /// pad holds its final state.
     #[must_use]
     pub fn last_at(&self) -> Option<u64> {
         self.steps.last().and_then(Step::when).map(|(_, at)| at)
     }
 
-    /// What its times count - milliseconds for an empty script, which has none.
+    /// What its times count: milliseconds for an empty script, which has none.
     #[must_use]
     pub fn clock(&self) -> Clock {
         self.steps
@@ -302,13 +269,11 @@ impl Script {
 
     /// The pad's state at `elapsed` on the script's clock: the most recent step at or before it.
     ///
-    /// Before the first step the pad is at rest, which is what a title sees while it starts up
-    /// and is the same thing an absent script gives.
+    /// Before the first step the pad is at rest, the same as with no script.
     #[must_use]
     pub fn at(&self, elapsed: u64) -> PadState {
         let mut state = PadState::default();
-        // The steps are in order - `validate` refuses a script where they are not - so the one
-        // in force is the last at or before now, found by bisection rather than a scan.
+        // `validate` guarantees order, so the step in force is found by bisection.
         let past = self
             .steps
             .partition_point(|step| step.when().is_some_and(|(_, at)| at <= elapsed));
@@ -335,9 +300,8 @@ impl Script {
 
 /// The script this run is playing, and when it started.
 ///
-/// A static for the same reason [`crate::latest`]'s ports are one: the guest calls the pad shim
-/// from its own threads with no context to carry, so what the run decided has to be reachable
-/// from there.
+/// A static, like [`crate::latest`]'s ports: the guest calls the pad shim from its own threads
+/// with no context to carry.
 static ACTIVE: Mutex<Option<Playing>> = Mutex::new(None);
 
 /// A script playing, and where both of its possible clocks stood when it started.
@@ -351,8 +315,8 @@ struct Playing {
 /// The guest's flip count, handed in by whoever can see the video shim (D721).
 static FLIPS: OnceLock<fn() -> u64> = OnceLock::new();
 
-/// Installs where the guest's flip count is read from - `orbistoun_video::flips_accepted` in the
-/// worker. Handed in as a function so neither crate depends on the other. First install wins.
+/// Installs where the guest's flip count is read from (`orbistoun_video::flips_accepted` in the
+/// worker), as a function so neither crate depends on the other. The first install wins.
 pub fn install_flip_clock(flips: fn() -> u64) {
     let _ = FLIPS.set(flips);
 }
@@ -363,9 +327,7 @@ fn flips() -> u64 {
     FLIPS.get().map_or(0, |flips| flips())
 }
 
-/// Starts a script playing from now.
-///
-/// Replaces any script already installed, which is what a second run in one process means.
+/// Starts a script playing from now, replacing any script already installed.
 pub fn install(script: Script) {
     *lock() = Some(Playing {
         script,
@@ -381,10 +343,8 @@ pub fn clear() {
 
 /// What the installed script says the pad is doing now, or `None` when none is installed.
 ///
-/// **Sampled on demand rather than pushed by a timer**, which is what makes a run repeatable:
-/// the state is a pure function of how far the run has got - in milliseconds, or in the guest's
-/// own flips (D721) - so there is no thread to race with and no tick rate to drift against the
-/// guest's own polling.
+/// Sampled on demand, not pushed by a timer: the state is a pure function of run progress in
+/// milliseconds or flips (D721), so no thread races the guest's polling.
 #[must_use]
 pub fn poll() -> Option<PadState> {
     let held = lock();
@@ -396,8 +356,8 @@ pub fn poll() -> Option<PadState> {
     Some(playing.script.at(elapsed))
 }
 
-/// The guard, with a poisoned lock treated as ordinary - as [`crate::latest`] does, and for the
-/// same reason: what is behind it has no invariant a partial write could break.
+/// The guard, with a poisoned lock treated as ordinary, as in [`crate::latest`]: what is behind
+/// it has no invariant a partial write could break.
 fn lock() -> std::sync::MutexGuard<'static, Option<Playing>> {
     ACTIVE
         .lock()
@@ -416,12 +376,11 @@ struct Recording {
 
 static RECORDING: Mutex<Option<Recording>> = Mutex::new(None);
 
-/// **Records what the guest reads from now on**, a step to `sink` each time it differs from what
-/// it read before (D721). The steps are a script: timed in the guest's flips, so replaying one
-/// presses at the same point in the title however fast the host is.
+/// Records what the guest reads from now on, a step to `sink` each time it differs from the
+/// last (D721).
 ///
-/// `sink` is called as each step happens, so a recording written as it goes survives the run
-/// ending in a fault - the case it is most for.
+/// The steps are a flip-timed script. `sink` is called as each step happens, so a recording
+/// survives a run that ends in a fault.
 pub fn record(sink: fn(&Step)) {
     *RECORDING
         .lock()
@@ -440,7 +399,7 @@ pub fn stop_recording() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
-/// The pad state the guest was just handed - recorded as a step when it differs from the last.
+/// The pad state the guest was just handed, recorded as a step when it differs from the last.
 pub fn delivered(state: &PadState) {
     let mut held = RECORDING
         .lock()
@@ -452,9 +411,8 @@ pub fn delivered(state: &PadState) {
         return;
     }
     recording.last = Some(*state);
-    // **Two changes inside one flip** - a title reads its pad several times a frame - cannot both
-    // be at that flip in a script. The later goes to the next flip rather than being dropped:
-    // every state the guest saw is kept, and a press shorter than a frame replays a frame long.
+    // A title reads its pad several times a frame, so two changes can fall in one flip. The later
+    // goes to the next flip rather than being dropped, so every state the guest saw is kept.
     let now = flips().saturating_sub(recording.started_flip);
     let at = recording.last_at.map_or(now, |last| now.max(last + 1));
     recording.last_at = Some(at);
@@ -473,12 +431,9 @@ mod tests {
         Ok(script)
     }
 
-    /// **A step holds until the next one**, which is what makes a press have a duration.
+    /// A step takes effect at its own time and holds until the next.
     ///
-    /// Checked at the boundaries rather than in the middle of each span: the moment a step
-    /// names is the moment it takes effect, and the millisecond before it still belongs to the
-    /// step before. An implementation using `<` instead of `<=` passes a mid-span check and
-    /// fails here.
+    /// Checked at the boundaries, where `<` and `<=` differ.
     #[test]
     fn a_step_takes_effect_at_its_own_time_and_holds_until_the_next() {
         let script = script(
@@ -501,7 +456,7 @@ mod tests {
         );
     }
 
-    /// A press with no release is held for the rest of the run, deliberately.
+    /// A press with no release is held for the rest of the run.
     #[test]
     fn a_press_never_released_is_held_to_the_end() {
         let script = script("[[step]]\nat_ms = 50\nbuttons = [\"start\"]\n")
@@ -534,9 +489,8 @@ mod tests {
         ))
         .expect("an analogue step is well formed");
 
-        // Compared as bits rather than as floats, and not within an epsilon: these values are
-        // carried through unchanged, so **exactly unchanged** is the property, and an epsilon
-        // would also pass for an implementation that quietly rescaled them.
+        // Compared as bits: the values pass through unchanged, and an epsilon would also accept a
+        // rescaling.
         let state = script.at(0);
         let same = |got: f32, want: f32| got.to_bits() == want.to_bits();
         assert!(same(state.sticks[0].x, -1.0), "left stick x");
@@ -547,11 +501,7 @@ mod tests {
         assert!(same(state.triggers[1], 1.0), "right trigger");
     }
 
-    /// **Steps out of order are refused, not sorted.**
-    ///
-    /// Sorting would run something other than what the file says while looking like it worked.
-    /// Both shapes are checked - a step that goes backwards, and two at the same instant, which
-    /// is ambiguous rather than merely out of order.
+    /// Steps out of order, or at the same instant, are refused rather than sorted.
     #[test]
     fn steps_out_of_order_are_refused_rather_than_sorted() {
         let backwards =
@@ -574,8 +524,8 @@ mod tests {
         ));
     }
 
-    /// **A step keyed to flips takes effect at its flip** (D721), and a step must name exactly
-    /// one clock, the same one as the steps before it.
+    /// A flip-keyed step takes effect at its flip, and a step names exactly one clock, the same
+    /// as the steps before it (D721).
     #[test]
     fn flip_steps_take_effect_at_their_flip_and_one_clock_is_used_throughout() {
         let flips = script(
@@ -601,9 +551,8 @@ mod tests {
         );
     }
 
-    /// **A recorded step replays as the state it was recorded from** (D721): written as TOML the
-    /// way a recording is, read back as a script, and sampled at its flip. The system button is
-    /// never recorded, since a title never sees it.
+    /// A recorded step replays as the state it was recorded from, without the system button
+    /// (D721).
     #[test]
     fn a_recorded_step_replays_as_the_state_it_was_recorded_from() {
         let mut state = crate::pad::PadState::default();
@@ -623,11 +572,8 @@ mod tests {
         assert_eq!(replayed.at(6), crate::pad::PadState::default());
     }
 
-    /// An axis outside its range is refused, and the two ranges are different.
-    ///
-    /// A stick is bipolar and a trigger is not, so `-0.5` is ordinary for one and impossible
-    /// for the other. A check that used one range for both would pass the stick case here and
-    /// fail the trigger one.
+    /// An axis outside its own range is refused: `-0.5` is valid for a stick and not for a
+    /// trigger.
     #[test]
     fn an_axis_outside_its_own_range_is_refused() {
         assert!(script("[[step]]\nat_ms = 0\nleft_stick = [-0.5, 0.5]\n").is_ok());
@@ -654,11 +600,8 @@ mod active_tests {
 
     /// Serialises the tests that share the process-wide `ACTIVE` script.
     ///
-    /// `ACTIVE` is a static, so two of these running at once install over each other - one test's
-    /// `clear` landing between another's `install` and `poll` - and fail for a reason that has
-    /// nothing to do with what they check, which reddened the gate once. Each holds this from its
-    /// first `clear` through its last assertion, so no other interleaves; poisoning is recovered
-    /// from so one test's panic does not strand the rest.
+    /// Each holds this from its first `clear` through its last assertion so no other test installs
+    /// in between; poisoning is recovered from so one panic does not strand the rest.
     static SERIAL: Mutex<()> = Mutex::new(());
 
     /// Reads and checks a script the way a caller would.
@@ -668,6 +611,7 @@ mod active_tests {
         script
     }
 
+    /// An installed script is sampled, a second install replaces it, and a cleared one is not.
     #[test]
     fn an_installed_script_is_sampled_and_a_cleared_one_is_not() {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -677,8 +621,7 @@ mod active_tests {
             "with nothing installed there is nothing to sample"
         );
 
-        // A step at zero is in force immediately, so this needs no sleep and no clock control:
-        // whatever the elapsed time is, it is at least zero.
+        // A step at zero is in force immediately, so no sleep or clock control is needed.
         install(script("[[step]]\nat_ms = 0\nbuttons = [\"south\"]\n"));
         let sampled = poll().expect("an installed script samples");
         assert!(
@@ -686,7 +629,7 @@ mod active_tests {
             "the step in force at the start is the one at zero"
         );
 
-        // Installing again replaces rather than merges, which is what a second run means.
+        // Installing again replaces rather than merges.
         install(script("[[step]]\nat_ms = 0\nbuttons = [\"north\"]\n"));
         let replaced = poll().expect("the replacement samples");
         assert!(
@@ -702,8 +645,8 @@ mod active_tests {
         assert!(poll().is_none(), "clearing stops a later run inheriting it");
     }
 
-    /// **A recording writes a step when what the guest reads changes, stamped with the flip, and
-    /// only then** (D721); and a flip script installed now plays against the same clock.
+    /// A recording writes a step when what the guest reads changes, stamped with the flip, and only
+    /// then; a flip script installed afterwards plays against the same clock (D721).
     #[test]
     fn a_recording_writes_a_step_per_change_at_its_flip() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -723,8 +666,8 @@ mod active_tests {
         super::delivered(&pressed);
         FLIP.store(13, Ordering::SeqCst);
         super::delivered(&pressed);
-        // Released and pressed again inside flip 13: both kept, the second a flip later, so the
-        // script stays in order.
+        // Released and pressed again inside flip 13: both kept, the second a flip later, so the script
+        // stays in order.
         super::delivered(&crate::pad::PadState::default());
         super::delivered(&pressed);
         super::stop_recording();
@@ -753,10 +696,8 @@ mod active_tests {
         clear();
     }
 
-    /// A step in the future is not in force at the start of a run.
-    ///
-    /// The other half of the boundary, checked through the installed path rather than through
-    /// `Script::at` directly, so an `install` that lost the start instant would fail here.
+    /// A step in the future is not in force at the start of a run, checked through the installed
+    /// path so a lost start instant fails here.
     #[test]
     fn a_step_in_the_future_has_not_happened_yet() {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);

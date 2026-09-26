@@ -1,36 +1,13 @@
 //! Guest threads.
 //!
-//! A guest thread is a **real host thread**, always. Principle 6 states it and the
-//! reasons are not negotiable: guest code reads thread-local storage through the segment
-//! base directly, and blocks inside its own synchronisation primitives. A green-threaded
-//! or pooled implementation cannot present either of those honestly, and the failures
-//! would appear as data corruption rather than as a scheduling bug.
+//! A guest thread is always a real host thread: guest code reads thread-local storage through
+//! the segment base directly and blocks inside its own synchronisation primitives, which a
+//! pooled implementation cannot present. The guest decides how many threads exist; the host's
+//! core count only decides how many run at once, so there is no core minimum to enforce.
 //!
-//! # Threads are the guest's decision, not the machine's
-//!
-//! Worth stating because it is easy to get backwards: the *guest* decides how many
-//! threads exist, by asking for them. The host's core count decides how many run at one
-//! instant. A title asking for thirty threads gets thirty host threads on a four-core
-//! machine and on a thirty-two-core one; the second is faster, not more parallel in any
-//! sense the guest can observe.
-//!
-//! So there is no minimum core count to enforce and nothing to refuse. A slower machine
-//! runs the same program more slowly, which is the correct behaviour.
-//!
-//! # What the host's shape does change
-//!
-//! Two things, and both are handled deliberately rather than by accident.
-//!
-//! **What a guest is told about the machine.** A title asking how many cores it has
-//! wants the number its designers assumed. Answering with the host's is how a program
-//! built for a known machine ends up sizing a thread pool for a machine nobody tested it
-//! on - so [`CpuTopology`] reports the target's shape by default, and the host's only if
-//! somebody asks for that deliberately.
-//!
-//! **Affinity.** The guest can pin a thread to particular cores. Honouring a mask
-//! literally breaks the moment the host has fewer cores than it names; ignoring it
-//! silently discards something the guest thought it was told. Neither is acceptable, so
-//! a request is *mapped* and the original is *kept* - see [`AffinityPolicy`] (D150).
+//! The host's shape changes two things. [`CpuTopology`] tells the guest the target's core
+//! counts by default, not the host's. An affinity request is mapped onto the host and the
+//! original is kept (see [`AffinityPolicy`], D150).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -38,14 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// How the guest sees a thread.
 ///
-/// **An address, because the guest dereferences it.** The first version of this was a
-/// small opaque integer, on the reasoning that a handle is passed back rather than read
-/// through - and the knowledge file already contained the evidence against that: an
-/// unimplemented `scePthreadSelf` returned the error code `0x7FFF0001` and a title
-/// faulted with `read of 0x5`, which is that code being dereferenced with an offset.
-///
-/// A handle of `1` would have reproduced the same fault at a lower address. So each
-/// handle is the address of a real, zeroed block this crate owns (D151).
+/// The address of a real, zeroed block this crate owns, because the guest dereferences it
+/// (D151).
 pub type ThreadHandle = u64;
 
 /// Handle given out when a thread could not be created.
@@ -55,28 +26,21 @@ pub const NO_THREAD: ThreadHandle = 0;
 
 /// The shape of the machine a guest believes it is running on.
 ///
-/// Configurable rather than fixed, because both answers are right for different
-/// questions and neither is right for both.
+/// Configurable, because the target's shape and the host's answer different questions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CpuTopology {
     /// Cores the guest is told exist.
     pub cores: u32,
     /// Cores the guest is told it may actually use.
     ///
-    /// Lower than `cores` on the target: the system keeps some for itself, and a title
-    /// that spreads work across every core it can see would be competing with the
-    /// operating system for the ones it cannot have.
+    /// Lower than `cores` on the target, which keeps some for the system.
     pub usable: u32,
 }
 
 impl Default for CpuTopology {
     fn default() -> Self {
-        // The target's shape, not the host's. A guest asking this question is asking
-        // about the machine it was written for, and answering with a thirty-two-core
-        // host is how a program sizes a pool nobody ever tested.
-        //
-        // A stated assumption: nothing here has measured the real figures, and a title
-        // that behaves differently when they change will do so silently.
+        // The target's shape, not the host's: a guest asking is asking about the machine it was
+        // written for. These figures are an assumption, not a measurement.
         Self {
             cores: 8,
             usable: 7,
@@ -85,10 +49,7 @@ impl Default for CpuTopology {
 }
 
 impl CpuTopology {
-    /// What the machine orbistoun is running on actually has.
-    ///
-    /// Offered so it can be chosen deliberately - a developer measuring throughput wants
-    /// the truth, and a guest almost never does.
+    /// What the machine orbistoun is running on has, for a developer measuring throughput.
     pub fn host() -> Self {
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let cores = u32::try_from(cores).unwrap_or(1);
@@ -101,30 +62,25 @@ impl CpuTopology {
 
 /// What to do with an affinity request.
 ///
-/// **The request is never silently discarded.** Whichever policy applies, the mask the
-/// guest asked for is recorded on the thread, so a title that turns out to depend on
-/// affinity can be found rather than guessed at.
+/// Under every policy the requested mask is recorded on the thread, so a title that depends on
+/// affinity can be found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AffinityPolicy {
     /// Record the request and let the host scheduler place the thread.
     ///
-    /// The default, and deliberately not because it is easiest. No title examined has
-    /// been shown to depend on placement, and a mapping invented before there is
-    /// evidence is a guess that later looks like a measurement. Requests are recorded
-    /// precisely so that evidence can appear.
+    /// The default: no title examined depends on placement, and the recorded requests are the
+    /// evidence that would show one does.
     #[default]
     Observe,
     /// Fold the guest's mask onto the host's cores.
     ///
-    /// For when a title is shown to care. Guest core `n` becomes host core `n % host`,
-    /// which preserves *distinctness* - two guest threads pinned apart stay apart - and
-    /// gives up exact placement, which is not reproducible across machines anyway.
+    /// Guest core `n` becomes host core `n % host`, which keeps threads pinned apart apart and
+    /// gives up exact placement.
     Map,
     /// Apply the mask as given, and fail if the host cannot satisfy it.
     ///
-    /// Never a default. It is here because "did this title need exactly what it asked
-    /// for?" is a question worth being able to answer.
+    /// Never a default; it answers whether a title needs exactly what it asked for.
     Strict,
 }
 
@@ -145,8 +101,8 @@ impl Affinity {
 
     /// The mask this becomes on a host with `host_cores` cores, under `policy`.
     ///
-    /// `None` means the request cannot be honoured and the caller should refuse - only
-    /// ever under [`AffinityPolicy::Strict`].
+    /// `None` means the request cannot be honoured and the caller should refuse, which happens
+    /// only under [`AffinityPolicy::Strict`].
     pub fn mapped(self, policy: AffinityPolicy, host_cores: u32) -> Option<Self> {
         if self.is_unset() || host_cores == 0 {
             return Some(Self(0));
@@ -154,9 +110,8 @@ impl Affinity {
         match policy {
             AffinityPolicy::Observe => Some(Self(0)),
             AffinityPolicy::Map => {
-                // Fold rather than clamp. Clamping collapses every out-of-range core onto
-                // the highest one, which silently puts threads the guest deliberately
-                // separated back together.
+                // Fold rather than clamp: clamping collapses every out-of-range core onto the highest one and
+                // puts threads the guest separated back together.
                 let folded = self
                     .cores()
                     .map(|c| 1_u64 << (c % host_cores))
@@ -173,10 +128,8 @@ impl Affinity {
 
 /// Everything about threading that is a choice rather than a fact.
 ///
-/// In one struct, serialisable, because principle 5 says rules live in data: answering
-/// "how many cores does the guest think it has?" must be a file edit and a relaunch, not
-/// a rebuild. The bisection loop is the only oracle most of this project has, and
-/// anything requiring a recompile to try is effectively untriable.
+/// Serialisable, so changing what the guest is told is a file edit and a relaunch, not a
+/// rebuild.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Settings {
@@ -186,9 +139,8 @@ pub struct Settings {
     pub affinity: AffinityPolicy,
     /// Whether the guest's priority requests are applied to host threads.
     ///
-    /// Off by default and not yet implemented either way: raising a host thread's
-    /// priority on the strength of a guest's opinion can starve the emulator's own
-    /// threads, and no title has been shown to need it.
+    /// Off by default: raising a host thread's priority on a guest's request can starve the
+    /// emulator's own threads.
     pub apply_priority: bool,
 }
 
@@ -200,16 +152,14 @@ fn settings() -> &'static Mutex<Settings> {
 
 /// Replaces the threading settings.
 ///
-/// Called once during setup. Later threads see the new settings; threads already running
-/// keep whatever they were placed under, because moving a running thread would change
-/// the program mid-flight and make a trace impossible to read.
+/// Called once during setup. Threads already running keep the placement they were given.
 pub fn configure(new: Settings) {
     if let Ok(mut current) = settings().lock() {
         *current = new;
     }
 }
 
-/// The settings in force right now.
+/// The settings in force.
 pub fn configured() -> Settings {
     settings().lock().map(|s| *s).unwrap_or_default()
 }
@@ -221,37 +171,32 @@ pub struct ThreadRecord {
     pub handle: ThreadHandle,
     /// The host thread this one is running on, or zero before it has run.
     ///
-    /// **The join between two tables that could not be read against each other.** The recorded
-    /// calls carry a host thread; this table carries names and handles. Without the join a report
-    /// can say "eleven threads exist, main is not finished" or "the last forty-eight calls were
-    /// all one thread" and never that they are different threads (D651).
+    /// Joins this table to the recorded calls, which carry a host thread, so a report can tell
+    /// threads apart by name.
     pub host: u64,
-    /// The name the guest gave it, if any. Traces are far more readable with it.
+    /// The name the guest gave it, if any.
     pub name: String,
     /// Where the guest wanted it to run. Kept whether or not it was honoured.
     pub requested_affinity: Affinity,
     /// What that became after the policy applied.
     pub effective_affinity: Affinity,
-    /// The priority the guest asked for, recorded and not yet acted on.
+    /// The priority the guest asked for, recorded and not acted on.
     pub requested_priority: i32,
-    /// The scheduling policy the guest asked for, stored verbatim and **not interpreted**.
+    /// The scheduling policy the guest asked for, stored verbatim and not interpreted.
     ///
-    /// PPSA02664 passes `0x4000`, which is no POSIX policy constant - those are small integers -
-    /// so this is a vendor value and nothing here knows what it selects. Storing it uninterpreted
-    /// is what lets `scePthreadGetschedparam` hand back what was set, which is the whole of what
-    /// the setter's contract promises (D561).
+    /// Titles pass vendor values that are not POSIX policy constants; storing them lets
+    /// `scePthreadGetschedparam` hand back what was set.
     pub requested_policy: i32,
     /// Whether the guest has asked for cancellation to be disabled on this thread.
     ///
-    /// Stored so `pthread_setcancelstate` can hand back the previous value, which is the whole
-    /// of what that call promises. **Not acted on**: orbistoun cancels no threads, so there is
-    /// nothing for the state to gate (D561).
+    /// Stored so `pthread_setcancelstate` can hand back the previous value; orbistoun cancels no
+    /// threads, so it gates nothing.
     pub cancel_state: i32,
-    /// The guest stack it runs on - the lowest usable address and the length - once it has
-    /// reserved one. [`None`] for the thread the guest was entered on, whose span the crate root
-    /// holds, and for a thread that has not started yet. Recorded so `scePthreadAttrGet` can
-    /// answer about a thread by handle, which is a different question from the one
-    /// [`this_stack`] answers about the caller (D575).
+    /// The guest stack it runs on, as the lowest usable address and the length.
+    ///
+    /// [`None`] for the thread the guest was entered on, whose span the crate root holds, and for a
+    /// thread that has not started. Lets `scePthreadAttrGet` answer about a thread by handle, where
+    /// [`this_stack`] answers about the caller.
     pub stack: Option<(u64, u64)>,
     /// Whether it has finished.
     pub finished: bool,
@@ -259,8 +204,7 @@ pub struct ThreadRecord {
 
 /// Every guest thread this process has made.
 ///
-/// Global because the guest's own model is: a handle created on one thread is joined
-/// from another, and both must see the same table.
+/// Global because a handle created on one thread is joined from another.
 fn table() -> &'static Mutex<BTreeMap<ThreadHandle, ThreadRecord>> {
     static TABLE: OnceLock<Mutex<BTreeMap<ThreadHandle, ThreadRecord>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -268,23 +212,16 @@ fn table() -> &'static Mutex<BTreeMap<ThreadHandle, ThreadRecord>> {
 
 /// How much zeroed memory sits behind a handle.
 ///
-/// Larger than any plausible field the guest reads at a small offset, and cheap. The
-/// real structure's layout is not known from any lawful source, so nothing is written
-/// into it - **every field the guest reads is zero**, which for a pointer field means
-/// null, and a guest that checks for null takes its own error path rather than
-/// dereferencing garbage.
+/// Larger than any field the guest reads at a small offset. The real layout is not known, so
+/// every field reads zero, and a guest checking a pointer field for null takes its own error
+/// path.
 pub const CONTROL_BLOCK_WORDS: usize = 32;
 
 /// Hands out handles: the address of a fresh zeroed block.
 ///
-/// **From the one region every guest-visible handle comes from**, so handle *n* is the same
-/// address in every run. This kept a region of its own for a day, which was the same mistake
-/// one level down: the fix belonged where the bug lives - eight sites handing out host heap
-/// addresses - rather than at the one site where it was noticed (`blocks`, D584).
-///
-/// The blocks are deliberately **never freed**. A guest keeping a handle past the thread's
-/// life is then a read of zeroes rather than a use-after-free, and the count is bounded by
-/// how many threads a title makes.
+/// Taken from the one region every guest-visible handle comes from, so handle n is the same
+/// address in every run (D584). Never freed: a guest keeping a handle past the thread's life
+/// reads zeroes rather than freed memory, and the count is bounded by the threads a title makes.
 fn next_handle() -> ThreadHandle {
     let address = orbistoun_mem::blocks::block(CONTROL_BLOCK_WORDS);
     debug_assert_ne!(
@@ -296,24 +233,22 @@ fn next_handle() -> ThreadHandle {
 
 /// Whether the handles this run issued are the ones it would issue again.
 ///
-/// **A run that fell back to the host heap has not got them**, and a reader comparing two runs
-/// needs to be told rather than to infer it from addresses that look plausible either way.
+/// False for a run that fell back to the host heap, whose addresses look plausible either way.
 #[must_use]
 pub fn handles_repeat() -> bool {
     orbistoun_mem::blocks::repeat()
 }
 
-/// Handles this crate has issued, so a guest-supplied value can be checked before it is
-/// believed.
+/// Handles this crate has issued, so a guest-supplied value can be checked before it is used.
 fn issued() -> &'static Mutex<std::collections::BTreeSet<ThreadHandle>> {
     static ISSUED: OnceLock<Mutex<std::collections::BTreeSet<ThreadHandle>>> = OnceLock::new();
     ISSUED.get_or_init(|| Mutex::new(std::collections::BTreeSet::new()))
 }
 
-/// Whether a value is a handle this crate actually handed out.
+/// Whether a value is a handle this crate handed out.
 ///
-/// Necessary now that handles are addresses: an arbitrary guest value must never be
-/// treated as one, or a bad pointer from the guest becomes a write through it here.
+/// Handles are addresses, so an arbitrary guest value treated as one would be a write through a
+/// bad pointer.
 pub fn is_issued(handle: ThreadHandle) -> bool {
     issued().lock().is_ok_and(|i| i.contains(&handle))
 }
@@ -355,16 +290,9 @@ pub fn record(handle: ThreadHandle) -> Option<ThreadRecord> {
 
 /// Records the scheduling a guest asked for, answering whether the thread is known.
 ///
-/// # Why this exists now and did not before
-///
-/// D523 accepted `scePthreadSetaffinity` and dropped it, saying so plainly: *"orbistoun keeps no
-/// per-thread scheduling record ... the moment something does, this needs the per-thread record
-/// rather than a wider `Ok`"*. Something does - PPSA02664 calls `scePthreadGetschedparam` **34
-/// times**, which is a read-back, and a setter that dropped what it was given would answer it
-/// with a value the guest never set (D561).
-///
-/// `policy` is [`None`] where the caller set only a priority, so `scePthreadSetprio` cannot
-/// silently reset a policy nobody mentioned.
+/// Titles read it back with `scePthreadGetschedparam`, so the setter keeps what it was given.
+/// `policy` is [`None`] where the caller set only a priority, so `scePthreadSetprio` does not
+/// reset the policy.
 pub fn set_scheduling(handle: ThreadHandle, policy: Option<i32>, priority: i32) -> bool {
     let Ok(mut table) = table().lock() else {
         return false;
@@ -381,8 +309,8 @@ pub fn set_scheduling(handle: ThreadHandle, policy: Option<i32>, priority: i32) 
 
 /// Sets the cancellation state, answering the one it replaced.
 ///
-/// [`None`] where the thread is not one this crate issued, which the caller must tell apart from
-/// a real previous state of zero.
+/// [`None`] where the thread is not one this crate issued, which the caller tells apart from a
+/// previous state of zero.
 pub fn swap_cancel_state(handle: ThreadHandle, state: i32) -> Option<i32> {
     let mut table = table().lock().ok()?;
     let record = table.get_mut(&handle)?;
@@ -391,8 +319,7 @@ pub fn swap_cancel_state(handle: ThreadHandle, state: i32) -> Option<i32> {
 
 /// Renames a thread, answering whether it is one this crate issued.
 ///
-/// **Worth more than it looks.** The name is what a trace shows instead of a handle, and a title
-/// that renames its threads is telling the reader what each one is for - PPSA02664 renames one.
+/// The name is what a trace shows in place of a handle.
 pub fn rename(handle: ThreadHandle, name: &str) -> bool {
     let Ok(mut table) = table().lock() else {
         return false;
@@ -423,25 +350,25 @@ pub fn all() -> Vec<ThreadRecord> {
 
 /// Host threads still running guest code, so they can be joined.
 ///
-/// Separate from the record table because a join *consumes* the handle, and the record
-/// must outlive it - a guest that joins a thread and then asks its name should still get
-/// an answer, and a trace of a finished thread is more useful than a gap.
+/// Separate from the record table because a join consumes the handle and the record must
+/// outlive it.
 fn joiners() -> &'static Mutex<BTreeMap<ThreadHandle, std::thread::JoinHandle<()>>> {
     static JOINERS: OnceLock<Mutex<BTreeMap<ThreadHandle, std::thread::JoinHandle<()>>>> =
         OnceLock::new();
     JOINERS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// What each finished guest thread returned - `rax` when its body returned - kept so a join can
-/// hand it back. Separate from `joiners` because the value has to be readable *after* the join
-/// handle is consumed, and it is stored from inside the thread's own body once its guest function
-/// has returned, so it is in place by the time `join` sees the host thread end (030-thread/join).
+/// What each finished guest thread returned in `rax`, kept so a join can hand it back.
+///
+/// Separate from `joiners` because the value must be readable after the join handle is
+/// consumed. It is stored from inside the thread's body, so it is in place when `join` sees the
+/// host thread end.
 fn exit_values() -> &'static Mutex<BTreeMap<ThreadHandle, u64>> {
     static EXITS: OnceLock<Mutex<BTreeMap<ThreadHandle, u64>>> = OnceLock::new();
     EXITS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Record what a thread returned, called from inside its body.
+/// Records what a thread returned, called from inside its body.
 fn set_exit_value(handle: ThreadHandle, value: u64) {
     if let Ok(mut map) = exit_values().lock() {
         map.insert(handle, value);
@@ -492,9 +419,8 @@ pub struct Start {
 
 /// Starts a guest thread on a real host thread.
 ///
-/// Each one gets its own stack at its own address, and its own thread pointer - the two
-/// pieces of per-thread state guest code reaches without asking. Sharing either would
-/// look like memory corruption rather than like a threading bug (principle 6).
+/// Each gets its own stack at its own address and its own thread pointer, the per-thread state
+/// guest code reaches without asking.
 ///
 /// # Errors
 ///
@@ -511,8 +437,8 @@ pub unsafe fn spawn(
     requested_priority: i32,
     requested_stack: u64,
 ) -> Result<ThreadHandle, SpawnError> {
-    // The *host's* core count, deliberately, even though the guest was told the target's.
-    // Folding a mask onto cores that do not exist here would place threads nowhere.
+    // The host's core count, although the guest was told the target's: folding a mask onto cores
+    // that do not exist here would place threads nowhere.
     let host_cores = CpuTopology::host().cores;
     let policy = configured().affinity;
     let handle = register(
@@ -528,41 +454,32 @@ pub unsafe fn spawn(
     let body = move || {
         become_thread(handle);
         let base = stack_base_for(slot);
-        // The requested size, capped to what fits this slot: the slots are
-        // `THREAD_STACK_SPACING` apart and a reservation adds a guard page below and a
-        // read-ahead page above, plus up to a page of rounding-up, so a size beyond the
-        // spacing less those three would run into the next thread's stack. A guest asking for
-        // more than a slot holds gets the largest that fits rather than an overrun.
+        // The requested size, capped to what fits this slot: slots are `THREAD_STACK_SPACING` apart,
+        // and a reservation adds a guard page below, a read-ahead page above and up to a page of
+        // rounding. A larger request gets the largest size that fits.
         let cap = THREAD_STACK_SPACING
             .saturating_sub(orbistoun_mem::stack::GUARD_SIZE)
             .saturating_sub(orbistoun_mem::stack::READAHEAD_GUARD)
             .saturating_sub(orbistoun_mem::stack::GUARD_SIZE);
         let Ok(stack) = orbistoun_mem::stack::GuestStack::reserve(base, requested_stack.min(cap))
         else {
-            // Reported rather than panicked: a thread that could not get a stack is a
-            // thread that never ran, and the record says so.
+            // A thread that could not get a stack never ran, and the record says so.
             finish(handle);
             return;
         };
-        // **Published as guest memory, because that is what it is.** The readable ranges are
-        // installed before the guest is entered, when no thread stack exists yet - so every
-        // argument a thread passed dumped as `no region this run mapped`, which reads as a
-        // wild pointer and is an ordinary stack address (D387).
+        // Published as guest memory, so arguments pointing into the stack dump as stack addresses
+        // (D387).
         orbistoun_thunk::note_readable_range(stack.lowest_usable(), stack.len());
-        // And to this thread, so `sceKernelIsStack` can answer about it. Same fact, needed by
-        // a second subsystem that had the same blind spot (D391).
+        // And to this thread, so `sceKernelIsStack` can answer about it.
         note_this_stack(stack.lowest_usable(), stack.len());
-        // Give this thread its own thread-local storage before it runs any guest code. A spawned
-        // thread got none, so its first `fs:`-relative access read a zero base and faulted (a new
-        // thread's `mov rax, fs:[0]`, worklog 286). Runs here, on the new thread, because the
-        // `fs` base it installs is per-thread. A no-op when nothing installed the hook.
+        // Give this thread its own thread-local storage before it runs any guest code. Runs here, on
+        // the new thread, because the `fs` base it installs is per-thread. A no-op when nothing
+        // installed the hook.
         if let Some(start) = ON_THREAD_START.get() {
             start();
         }
-        // The same float environment the process entry adopts. **Per thread**, because
-        // `MXCSR` is a per-thread register and a fresh host thread gets the host default -
-        // so without this a guest thread would do denormal arithmetic differently from the
-        // thread that spawned it, which is worse than every thread being wrong alike.
+        // The same float environment the process entry adopts. Per thread, because `MXCSR` is a
+        // per-thread register and a fresh host thread starts with the host default.
         orbistoun_abi::enter::adopt_guest_float_environment();
         // The value the guest thread function returns in `rax`, kept so a join can hand it back.
         // SAFETY: the caller of `spawn` guarantees `entry` is mapped, executable and
@@ -593,25 +510,16 @@ pub unsafe fn spawn(
 
 /// The arena reentrant guest calls take their stacks from.
 ///
-/// Distinct from the thread stacks ([`THREAD_STACK_BASE`]) and the mapping arena, so a reentrant
-/// call's stack cannot collide with a thread's or a guest allocation's. The addresses here are
-/// never handed to the guest as data.
+/// Distinct from the thread stacks ([`THREAD_STACK_BASE`]) and the mapping arena. The addresses
+/// are never handed to the guest as data.
 const REENTRANT_STACK_BASE: u64 = 0x0000_6800_0000_0000;
 
 /// Calls a guest function synchronously, on a fresh stack, and returns what it left in `rax`.
 ///
-/// # Why an HLE call needs this
-///
-/// Some calls a guest makes *are* callbacks: `call_once`'s initialiser, an `atexit` handler, a
-/// comparator handed to a sort. Implementing one means calling back into guest code from inside a
-/// handler already in flight, and then continuing - the same transfer [`spawn`] does for a new
-/// thread, but nested on the current one rather than forwards on a fresh one.
-///
-/// **A fresh stack, on the same thread.** The caller is mid-handler on the guest thread's own stack;
-/// a callback grown down into it would overwrite frames the handler still needs. A stack of its own
-/// avoids that while keeping the thread's thread-local state, which is what a callback usually
-/// reads. It is released when this returns. Up to three arguments - what an `InitOnce`-shaped
-/// callback takes.
+/// Some calls take callbacks (a `call_once` initialiser, an `atexit` handler, a sort
+/// comparator), so a handler in flight calls back into guest code and continues. The callback
+/// runs on the same thread, keeping its thread-local state, but on a stack of its own so it
+/// cannot overwrite the handler's frames. Up to three arguments.
 ///
 /// # Safety
 ///
@@ -625,16 +533,10 @@ pub unsafe fn call_guest(entry: u64, args: [u64; 3]) -> Option<u64> {
 
 /// [`call_guest`], with the arguments chosen once the stack exists.
 ///
-/// # Why a callback rather than three more parameters
-///
-/// A signal handler is handed a pointer to a structure **on the stack it runs on** - measured, and
-/// not a detail: pointed at a region of orbistoun's own instead, PPSA25872 walks forward from it
-/// until it leaves that region, because it is scanning for roots rather than reading a struct. A
-/// scan is bounded by the allocation it is in, so the context has to live in a real one (D656).
-///
-/// Only this function knows where that stack is, and it is released when the call returns, so the
-/// address cannot be handed out beforehand or kept afterwards. `place` receives the stack's lowest
-/// usable address and its length and answers the three arguments.
+/// A signal handler is handed a pointer to a context structure on the stack it runs on, and a
+/// guest may scan from it to the end of that allocation. Only this function knows where the
+/// stack is, so `place` receives its lowest usable address and length and answers the three
+/// arguments.
 ///
 /// # Safety
 ///
@@ -645,14 +547,13 @@ pub unsafe fn call_guest_placing(
 ) -> Option<u64> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(REENTRANT_STACK_BASE);
-    // One stack plus a gap, so nested reentrant calls never share a stack; the base advances and is
-    // not reused, which a run makes far too few reentrant calls to exhaust the arena of.
+    // One stack plus a gap, so nested reentrant calls never share a stack. The base only advances.
     let step = orbistoun_mem::stack::DEFAULT_STACK_SIZE.saturating_mul(2);
     let base = NEXT.fetch_add(step, Ordering::Relaxed);
     let stack =
         orbistoun_mem::stack::GuestStack::reserve(base, orbistoun_mem::stack::DEFAULT_STACK_SIZE)
             .ok()?;
-    // So a callback's own arguments dump as stack addresses rather than wild pointers (D387).
+    // So a callback's own arguments dump as stack addresses (D387).
     orbistoun_thunk::note_readable_range(stack.lowest_usable(), stack.len());
     let args = place(stack.lowest_usable(), stack.len());
     // SAFETY: the caller vouches `entry` is executable guest code; `stack` is a fresh, aligned,
@@ -671,15 +572,13 @@ pub unsafe fn call_guest_placing(
 
 /// Waits for a guest thread to finish.
 ///
-/// Returns whether there was anything to wait for. A second join on the same handle
-/// answers `false` rather than blocking forever, which is what a double-join is.
+/// Returns whether there was anything to wait for. A second join on the same handle answers
+/// `false` rather than blocking forever.
 pub fn join(handle: ThreadHandle) -> bool {
     let taken = joiners().lock().ok().and_then(|mut j| j.remove(&handle));
     match taken {
         Some(thread) => {
-            // The result is discarded deliberately: a guest thread that panicked has
-            // already been reported by the fault reporter, and there is nothing useful
-            // to hand back to a guest that only asked whether it was done.
+            // Discarded: a guest thread that panicked has already been reported by the fault reporter.
             let _ = thread.join();
             true
         }
@@ -689,9 +588,8 @@ pub fn join(handle: ThreadHandle) -> bool {
 
 /// The handle of the thread this code is running on.
 ///
-/// A thread-local rather than a lookup, because `scePthreadSelf` is asked constantly and
-/// the answer is fixed for the life of the thread. Zero on a thread the guest did not
-/// create - the process's first thread among them, which the guest also asks about.
+/// A thread-local, because `scePthreadSelf` is asked constantly and the answer is fixed for the
+/// thread's life. Zero on a thread the guest did not create.
 fn current_handle() -> &'static std::thread::LocalKey<std::cell::Cell<ThreadHandle>> {
     thread_local! {
         static CURRENT: std::cell::Cell<ThreadHandle> = const { std::cell::Cell::new(NO_THREAD) };
@@ -709,40 +607,35 @@ pub fn current() -> ThreadHandle {
 /// Called once, at the top of a spawned thread, before any guest code runs on it.
 pub fn become_thread(handle: ThreadHandle) {
     current_handle().with(|c| c.set(handle));
-    // Recorded here rather than at registration: a thread is created by one thread and *runs* on
-    // another, so the host identity is only knowable once it is the one asking.
+    // Recorded here rather than at registration: a thread is created by one thread and runs on
+    // another.
     if let Ok(mut table) = table().lock() {
         if let Some(record) = table.get_mut(&handle) {
             record.host = orbistoun_thunk::host_thread();
         }
     }
-    // The signal slot is cached in a thread-local here for the same reason, and because a wait
-    // predicate must be able to read it without taking any lock (D652).
+    // The signal slot is cached in a thread-local so a wait predicate reads it without a lock
+    // (D652).
     if let Ok(mut slots) = signal_slots().lock() {
         let slot = Arc::clone(slots.entry(handle).or_default());
         MY_SIGNALS.with(|s| *s.borrow_mut() = Some(slot));
     }
 }
 
-/// One thread's signal state: what has been raised on it, and whether it is somewhere a raise
-/// can reach.
+/// One thread's signal state: what has been raised on it, and whether a raise can reach it.
 ///
-/// # Why an `Arc` of atomics rather than a field in [`ThreadRecord`]
-///
-/// The pending flag is read from inside a condition-variable predicate, which runs **under the
-/// wait queue's own lock**. Reading it from the thread table there would take the table lock
-/// while holding the queue lock - and `sceKernelRaiseException` takes them the other way round,
-/// which is a lock-order inversion and eventually a deadlock. A slot each thread caches by
-/// `Arc` is read with no lock at all, so the inversion cannot arise (D652).
+/// An `Arc` of atomics rather than a field in [`ThreadRecord`]: the pending flag is read inside
+/// a condition-variable predicate under the wait queue's lock, and `sceKernelRaiseException`
+/// takes the table and queue locks in the other order. A slot read with no lock avoids the
+/// inversion (D652).
 #[derive(Debug, Default)]
 pub struct SignalSlot {
     /// The signal number raised and not yet run, or zero for none.
     pending: AtomicU64,
-    /// Whether this thread is asleep somewhere that will notice a pending signal.
+    /// Whether this thread is inside a wait that consults the pending flag.
     ///
-    /// **Not "asleep".** A thread spinning in guest code is unreachable, and so is one blocked in
-    /// a wait that does not consult the flag. This says only: *this* thread is inside a wait that
-    /// checks, so a signal raised on it now will run.
+    /// A thread spinning in guest code, or blocked in a wait that does not check, is not parked; a
+    /// signal raised on a parked thread runs.
     parked: AtomicBool,
 }
 
@@ -767,9 +660,8 @@ fn my_slot() -> Option<Arc<SignalSlot>> {
 
 /// Marks `signum` as raised on `handle`, answering whether the thread can be reached.
 ///
-/// **`false` is the honest refusal and the whole point.** A thread that is not parked in a wait
-/// that consults its slot will never run the handler, so saying so lets the caller refuse rather
-/// than answer a success the guest would act on (D652).
+/// `false` when the thread is not parked in a wait that consults its slot, so the caller
+/// refuses rather than answering a success the handler would never honour (D652).
 pub fn raise_pending(handle: ThreadHandle, signum: u64) -> bool {
     let Ok(slots) = signal_slots().lock() else {
         return false;
@@ -801,19 +693,16 @@ pub fn take_pending() -> Option<u64> {
 
 /// Records that this thread is, or is no longer, inside a wait that consults its slot.
 ///
-/// Returns the previous value so a nested wait restores rather than clears - a handler that
-/// itself waits must not leave the outer wait looking unreachable.
+/// Returns the previous value so a nested wait restores rather than clears it.
 pub fn set_parked(parked: bool) -> bool {
     my_slot().is_some_and(|slot| slot.parked.swap(parked, Ordering::AcqRel))
 }
 
 /// A hook run at the top of every spawned guest thread, before it enters guest code.
 ///
-/// The layer that builds the guest's thread-local storage installs this so a new thread can be
-/// given its own block: this crate *spawns* the thread but does not own the TLS template - the
-/// loader parses it and the worker holds it - so the setup is inverted down to here, exactly as
-/// the call budget is (D238 shape). Absent one - a run with no thread-locals, or a unit test -
-/// a spawned thread simply runs without it, which is the old behaviour and the right default.
+/// The layer that builds the guest's thread-local storage installs it: the loader parses the
+/// TLS template and the worker holds it, so this crate spawns the thread without owning the
+/// setup. Without a hook a spawned thread runs with no TLS block.
 static ON_THREAD_START: OnceLock<fn()> = OnceLock::new();
 
 /// Installs the per-thread start hook. Called once, by the worker, before the guest is entered.
@@ -823,18 +712,15 @@ pub fn install_thread_start(hook: fn()) {
 
 /// Gives the calling host thread a handle if it does not already have one.
 ///
-/// The process's first thread runs guest code without ever having been created by the
-/// guest, and the guest still asks it who it is. Answering zero would be answering "no
-/// thread" about a thread that is demonstrably running, and a guest comparing thread
-/// identities would find every unadopted thread equal to every other.
+/// The process's first thread runs guest code without being created by the guest, and the guest
+/// asks it who it is. Answering zero would make every unadopted thread equal to every other.
 pub fn adopt(name: &str) -> ThreadHandle {
     let existing = current();
     if existing != NO_THREAD {
         return existing;
     }
     let host_cores = CpuTopology::host().cores;
-    // Observe rather than the configured policy: this thread is already placed, and
-    // nothing was requested for it.
+    // Observe rather than the configured policy: this thread is already placed.
     let handle = register(
         name,
         Affinity::default(),
@@ -850,9 +736,8 @@ pub fn adopt(name: &str) -> ThreadHandle {
 thread_local! {
     /// The guest stack this host thread is running on, if it is running one.
     ///
-    /// A thread-local rather than a registry, because the question `sceKernelIsStack` asks is
-    /// about **the calling thread**: a table of every guest stack would answer yes for another
-    /// thread's, which is a different question with a different right answer.
+    /// A thread-local, because `sceKernelIsStack` asks about the calling thread; a table of every
+    /// stack would answer yes for another thread's.
     static MY_STACK: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
 }
 
@@ -869,9 +754,8 @@ fn note_this_stack(base: u64, len: u64) {
 
 /// The guest stack a thread runs on, by handle: the lowest usable address and the length.
 ///
-/// [`None`] for a handle nobody registered, for a thread that has not reserved its stack yet,
-/// and for the thread the guest was entered on - its span belongs to the crate root, which
-/// is told it rather than deriving it (D275).
+/// [`None`] for a handle nobody registered, for a thread that has not reserved its stack, and
+/// for the thread the guest was entered on, whose span belongs to the crate root.
 #[must_use]
 pub fn stack_of(handle: ThreadHandle) -> Option<(u64, u64)> {
     table().lock().ok()?.get(&handle)?.stack
@@ -886,11 +770,10 @@ pub fn this_stack() -> Option<(u64, u64)> {
     MY_STACK.with(std::cell::Cell::get)
 }
 
-/// Where guest thread stacks are reserved, and how far apart.
+/// Where guest thread stacks are reserved.
 ///
-/// Spaced by more than the largest stack so a guard page always has unmapped space
-/// beneath it - two stacks packed adjacently would let an overrun on one land in the
-/// other, which reads as memory corruption rather than as a stack overflow.
+/// Stacks are spaced by more than the largest stack, so a guard page always has unmapped space
+/// beneath it and an overrun faults rather than landing in another stack.
 pub const THREAD_STACK_BASE: u64 = 0x0000_6100_0000_0000;
 /// Distance between one thread's stack and the next.
 pub const THREAD_STACK_SPACING: u64 = 64 * 1024 * 1024;
@@ -902,10 +785,8 @@ pub const fn stack_base_for(index: u64) -> u64 {
 
 /// The next stack slot.
 ///
-/// A counter of its own rather than anything derived from the handle: handles became
-/// host addresses, and multiplying one by the stack spacing lands somewhere arbitrary.
-/// Never reused, so a stack cannot be handed to a second thread while the first is
-/// still unwinding out of it.
+/// A counter of its own, since handles are addresses. Never reused, so a stack cannot go to a
+/// second thread while the first is still unwinding out of it.
 fn next_stack_index() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -915,15 +796,10 @@ fn next_stack_index() -> u64 {
 #[cfg(test)]
 mod tests {
 
-    /// **A thread that is not parked refuses the signal**, which is the honesty this rests on.
+    /// A thread that is not parked refuses the signal.
     ///
-    /// The whole mechanism answers `0` to the guest for a raise it accepts, and `0` means the
-    /// handler will run. It can only run on a thread asleep in a wait that consults its slot, so
-    /// a raise at any other moment must be refused rather than accepted and dropped - a dropped
-    /// signal is a collector waiting forever for an acknowledgement it was promised (D652).
-    ///
-    /// The negative case first, because accepting when it cannot deliver is the failure that
-    /// would be invisible.
+    /// An accepted raise tells the guest the handler will run, which only a thread in a wait that
+    /// consults its slot can do (D652).
     #[test]
     fn a_raise_on_a_thread_that_is_not_parked_is_refused() {
         let handle = super::adopt("not-parked");
@@ -973,11 +849,7 @@ mod tests {
             "a handle this crate never handed out has no slot to write into"
         );
     }
-    /// **A thread that is not running a guest stack says so**, rather than claiming one.
-    ///
-    /// The failure this protects against is the silent direction: `sceKernelIsStack` falling
-    /// back to whatever the last thread recorded would answer yes about another thread's
-    /// stack, which is a different question (D391).
+    /// A thread that is not running a guest stack says so, rather than reporting another thread's.
     #[test]
     fn a_host_thread_has_no_guest_stack() {
         assert_eq!(super::this_stack(), None);
@@ -996,9 +868,7 @@ mod tests {
 
     #[test]
     fn the_default_topology_is_the_targets_and_not_the_hosts() {
-        // A guest asking how many cores it has is asking about the machine it was
-        // written for. Answering with a thirty-two-core host is how a program sizes a
-        // thread pool for a machine nobody tested it on.
+        // A guest asking how many cores it has is asking about the machine it was written for.
         let target = CpuTopology::default();
         assert_eq!(target.cores, 8);
         assert!(
@@ -1009,8 +879,8 @@ mod tests {
 
     #[test]
     fn a_handle_is_never_the_no_thread_value() {
-        // Zero is what a caller tests for. A real thread colliding with it would read as
-        // a failed creation that then gets joined.
+        // Zero is what a caller tests for; a real thread with that handle would read as a failed
+        // creation.
         let handle = register("worker", Affinity(0), 0, AffinityPolicy::Observe, 8)
             .expect("observe never refuses");
         assert_ne!(handle, NO_THREAD);
@@ -1018,9 +888,8 @@ mod tests {
 
     #[test]
     fn the_requested_mask_is_kept_even_when_it_is_not_honoured() {
-        // The whole point of the default policy. A title that turns out to depend on
-        // placement has to be findable, and it cannot be if the request was discarded
-        // at the door (D150).
+        // The default policy records the request, so a title that depends on placement can be found
+        // (D150).
         let handle = register(
             "audio",
             Affinity(0b1011_0000),
@@ -1039,8 +908,7 @@ mod tests {
 
     #[test]
     fn mapping_folds_rather_than_clamps() {
-        // Clamping collapses every out-of-range core onto the highest one, silently
-        // putting threads the guest deliberately separated back together.
+        // Clamping would collapse every out-of-range core onto the highest one.
         let asked = Affinity(0b0011_0000); // cores 4 and 5
         let mapped = asked
             .mapped(AffinityPolicy::Map, 4)
@@ -1055,8 +923,7 @@ mod tests {
 
     #[test]
     fn strict_refuses_what_the_host_cannot_satisfy() {
-        // The reason this policy exists: it answers "did this title need exactly what it
-        // asked for?" and it can only answer that by failing when it cannot.
+        // Strict answers whether a title needs exactly what it asked for, by failing when it cannot.
         let asked = Affinity(1 << 6);
         assert!(asked.mapped(AffinityPolicy::Strict, 4).is_none());
         assert_eq!(asked.mapped(AffinityPolicy::Strict, 8), Some(asked));
@@ -1064,7 +931,7 @@ mod tests {
 
     #[test]
     fn an_empty_mask_means_anywhere_under_every_policy() {
-        // Not a request the host cannot meet - a guest saying it does not care.
+        // An unset mask is a guest saying it does not care, not a request the host cannot meet.
         for policy in [
             AffinityPolicy::Observe,
             AffinityPolicy::Map,
@@ -1080,9 +947,7 @@ mod tests {
 
     #[test]
     fn settings_survive_a_round_trip_through_a_file() {
-        // The whole point of putting these in data: if they cannot be written and read
-        // back, "edit a TOML and relaunch" is not actually available and every question
-        // about threading costs a rebuild.
+        // The settings round-trip through TOML, so they can be edited without a rebuild.
         let chosen = super::Settings {
             topology: CpuTopology {
                 cores: 4,
@@ -1098,18 +963,15 @@ mod tests {
 
     #[test]
     fn an_empty_configuration_file_is_the_default_rather_than_an_error() {
-        // A configuration that must be complete to be valid is one nobody can edit a
-        // single field of.
+        // Every field is optional, so a file can set a single one.
         let back: super::Settings = toml::from_str("").expect("an empty file is valid");
         assert_eq!(back, super::Settings::default());
     }
 
     #[test]
     fn a_handle_is_memory_the_guest_can_read_through() {
-        // The evidence for this was sitting in the knowledge file before the code was
-        // written: an unimplemented `scePthreadSelf` returned `0x7FFF0001` and a title
-        // faulted with `read of 0x5` - the error code being dereferenced at an offset.
-        // A handle of `1` reproduces that fault at a lower address (D151).
+        // An error code handed back as a thread handle is dereferenced by the guest, so a handle is a
+        // real readable block (D151).
         let handle = register(
             "readable",
             Affinity::default(),
@@ -1131,23 +993,21 @@ mod tests {
 
     #[test]
     fn an_arbitrary_guest_value_is_not_treated_as_a_handle() {
-        // Now that handles are addresses, believing one the guest made up would turn a
-        // guest bug into a host memory access.
+        // Handles are addresses, so a made-up guest value must not be believed.
         assert!(!super::is_issued(0x1234_5678));
         assert!(!super::is_issued(NO_THREAD));
     }
 
     #[test]
     fn a_host_thread_the_guest_did_not_make_reports_no_thread() {
-        // The process's first thread is one of these, and the guest asks about it. A
-        // fabricated handle there would be a handle nothing can join.
+        // The process's first thread is unadopted here, and a fabricated handle would be one nothing
+        // can join.
         assert_eq!(super::current(), NO_THREAD);
     }
 
     #[test]
     fn claiming_a_thread_is_visible_only_on_that_thread() {
-        // `scePthreadSelf` must answer per-thread or every thread believes it is the
-        // same one, and any per-thread bookkeeping the guest keeps collapses.
+        // `scePthreadSelf` answers per thread.
         super::become_thread(42);
         assert_eq!(super::current(), 42);
 
@@ -1158,8 +1018,7 @@ mod tests {
 
     #[test]
     fn thread_stacks_are_spaced_further_apart_than_they_are_tall() {
-        // Packed adjacently, an overrun on one stack lands in the next and reads as
-        // memory corruption instead of as a stack overflow.
+        // Adjacent stacks would let an overrun on one land in the next.
         let gap = super::stack_base_for(1) - super::stack_base_for(0);
         assert!(
             gap > orbistoun_mem::stack::DEFAULT_STACK_SIZE,
@@ -1169,9 +1028,7 @@ mod tests {
 
     #[test]
     fn the_default_policy_records_rather_than_places() {
-        // Deliberately not chosen because it is easiest: no title has been shown to
-        // depend on placement, and a mapping invented before evidence exists is a guess
-        // that later reads as a measurement.
+        // Observe is the default: no title examined depends on placement.
         assert_eq!(AffinityPolicy::default(), AffinityPolicy::Observe);
     }
 }

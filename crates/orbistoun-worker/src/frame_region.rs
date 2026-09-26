@@ -1,24 +1,17 @@
 //! The frame-region transport: a rendered frame's bytes cross to the shim as a file the worker
 //! writes and the shim reads, named by an [`Event::Frame`] descriptor (D695).
 //!
-//! D695 decided the route - bytes in a shared region named by a small descriptor, never pixels in a
-//! message (D035) - and deliberately left the bulk mechanism open, asking for the simplest thing that
-//! works. That is a file in a shared frames directory; D035 keeps it swappable if a measured need
-//! ever calls for shared memory.
-//!
-//! **Write and read live together on purpose.** The region's layout - its name, and that the file
-//! holds exactly the frame's bytes - is defined once, by the side that writes it. Two places
-//! computing the name or the length differently is how a reader comes to disagree with the writer and
-//! the mismatch reads as a corrupt frame forever (D084). So the shim reads through [`read_frame`]
-//! here rather than reimplementing it.
+//! The bytes live in a file in a shared frames directory, never in a message. Writing and reading
+//! live together so the region's name and length are defined once: the shim reads through
+//! [`read_frame`] rather than reimplementing it, and cannot disagree with the writer.
 
 use orbistoun_proto::{Event, FrameFormat};
 use std::path::Path;
 
 /// The name of the region file a frame's bytes are written to.
 ///
-/// A bare name, not a path: the descriptor carries it and the shim resolves it against the same
-/// directory, so a message never carries an absolute path either (D035).
+/// A bare name, not a path: the shim resolves it against the same directory, so a message never
+/// carries an absolute path.
 #[must_use]
 pub fn region_name(sequence: u64) -> String {
     format!("frame-{sequence}.bin")
@@ -67,9 +60,8 @@ pub fn read_frame(dir: &Path, event: &Event) -> std::io::Result<Vec<u8>> {
             "not a frame event",
         ));
     };
-    // The region is a name, not a path. A message is data, and this one may have come over the wire,
-    // so a `region` with a separator or a parent component is refused rather than resolved - it could
-    // otherwise read any file the process can (a traversal the descriptor has no business naming).
+    // A message may have come over the wire, so a `region` with a separator or a parent component is
+    // refused rather than resolved: it could otherwise name any file the process can read.
     if region.contains(['/', '\\']) || Path::new(region).components().count() != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -83,12 +75,8 @@ pub fn read_frame(dir: &Path, event: &Event) -> std::io::Result<Vec<u8>> {
 mod tests {
     use orbistoun_proto::{Event, FrameFormat};
 
-    /// **A written frame reads its bytes back, and a corrupted region does not.**
-    ///
-    /// The whole of the frame crossing (D695): the worker writes bytes into a region and names it in
-    /// a descriptor, and the shim reads exactly those bytes back through the same code. The negative
-    /// half is load-bearing - overwriting the region must change what reads back, or the test would
-    /// pass without the reader ever touching the file (principle 3).
+    /// A written frame reads its bytes back, and a corrupted region does not, so the reader is
+    /// shown to read the file rather than echo the descriptor.
     #[test]
     fn a_written_frame_reads_its_bytes_back_and_a_corrupted_region_does_not() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -101,11 +89,8 @@ mod tests {
             "the descriptor names its region and nothing more: {event:?}"
         );
 
-        // Round-trip: the shim reads exactly what the worker wrote.
         assert_eq!(super::read_frame(dir.path(), &event).expect("read"), bytes);
 
-        // Watched failing against a corrupted region: overwrite the bytes and they no longer match,
-        // which proves the reader reads the region rather than echoing the descriptor.
         std::fs::write(dir.path().join("frame-7.bin"), b"corrupt").expect("corrupt");
         assert_ne!(
             super::read_frame(dir.path(), &event).expect("read"),
@@ -114,10 +99,7 @@ mod tests {
         );
     }
 
-    /// **A descriptor whose region is not a bare name is refused, not resolved.**
-    ///
-    /// The descriptor is data and may arrive over the wire, so a `region` that walks out of the
-    /// frames directory must be refused before it names a file the frame had no business naming.
+    /// A descriptor whose region is not a bare name is refused, not resolved.
     #[test]
     fn a_region_name_that_escapes_the_directory_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");

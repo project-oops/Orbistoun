@@ -1,43 +1,13 @@
 //! What one machine has to contribute, gathered into one directory.
 //!
-//! # Why a bundle exists at all
-//!
-//! Every artifact a turn produces already writes itself somewhere. Nothing said *here is
-//! what this machine has to contribute*, and for a checkout that is a convenience - the
-//! files are in the tree and a diff shows them. For somebody running a binary it is the
-//! difference between contributing and not: their measurements sit in a data directory
-//! under their profile, their title results in whatever directory they happened to run
-//! from, and no single command collects either.
-//!
-//! # What a submission is allowed to carry
-//!
-//! Two kinds of claim, and one thing that is not a claim at all.
-//!
-//! - **Measurements** - what a function must answer, and what that rests on.
-//! - **Title results** - how far one title got, and under which policy.
-//! - **Proposals** - a source change, which nothing here can check.
-//!
-//! The first two are derived from running a binary the submitter owns, reproducible by
-//! anyone with the same title, and falsifiable by a command. That is a stronger contribution
-//! model than a diff, because a maintainer without the title cannot check a diff either -
-//! but they can accept a claim as `assumed` and promote it when somebody who owns the title
-//! confirms it (D297).
-//!
-//! **A [`Proposal`] is carried and reported separately, because it is settled differently.**
-//! A measurement is settled by re-deriving it; a patch is settled by a person reading it and
-//! running the gate. Listing them together would let a diff inherit the trust the
-//! measurements earned (D322).
-//!
-//! **Traces and run reports are deliberately excluded.** They are inputs rather than claims,
-//! they are large, and they carry far more of a title than a result needs to. A submission
-//! should be readable by the person receiving it.
-//!
-//! # How a received bundle is checked
-//!
-//! By re-deriving it, never by trusting it. [`Bundle::disagreements`] compares a submission
-//! against what this machine found and names every difference; agreement is silence. That is
-//! the same shape `audit --repair` already has for names, and the reason a claim is a better
-//! contribution than a patch.
+//! A submission carries measurements (what a function must answer, and what that rests on) and
+//! title results (how far a title got, under which policy). Both come from running a binary the
+//! submitter owns and are falsifiable by a command, so a maintainer without the title can accept a
+//! claim as `assumed` and promote it when somebody who owns the title confirms it (D297). Proposals
+//! (source changes) are carried and reported separately because they are settled by a person
+//! reading them. Traces and run reports are excluded: they are inputs, not claims. A
+//! received bundle is checked by re-deriving it: [`Bundle::disagreements`] names every difference,
+//! and agreement is silence.
 
 use std::collections::BTreeMap;
 
@@ -82,34 +52,18 @@ pub enum SubmitError {
 
 /// A source change somebody or something is proposing, and what it rests on.
 ///
-/// # Why this is not the thing the project warned against
-///
-/// `THE_LOOP.md` says a tool *"that produces plausible implementations **with no verification
-/// step** makes the codebase worse rather than better"*. The operative clause is the middle
-/// one. A patch that arrives here is inert: it is a file, nothing applies it, and it becomes
-/// a change only when a person reads it, runs the gate against it and merges it. That is a
-/// verification step, and a stronger one than most code in this tree got.
-///
-/// **The real constraint is provenance, not verification.** Principle 1 says a model in the
-/// loop is a third route to the convergence problem: *"this is what the function does"* can be
-/// recalled and then dressed as reasoning. Generating an implementation is exactly where that
-/// is most likely and least visible - so a proposal carries [`Oracle`] like every other
-/// recorded fact, and one that cannot say better than `assumed` is merged by somebody willing
-/// to say where the behaviour came from, or not at all.
-///
-/// The diff itself is a file in [`PATCHES_DIR`] rather than a string in here. A bundle should
-/// be readable, and a patch is read with the tools people already read patches with.
+/// A proposal is inert: nothing applies it, and it becomes a change only when a person reads it,
+/// runs the gate and merges it. It carries an [`Oracle`] like every other recorded fact, so one
+/// that cannot say better than `assumed` is merged only by somebody who can say where the behaviour
+/// came from. The diff itself is a file in [`PATCHES_DIR`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proposal {
     /// The file in [`PATCHES_DIR`], by name.
     pub file: String,
     /// What it changes, in a line.
     pub what: String,
-    /// Who or what wrote it.
-    ///
-    /// **Named rather than implied.** A patch written by a person and one produced by a model
-    /// need different reading, and a bundle that did not distinguish them would make the
-    /// careful reading the exception.
+    /// Who or what wrote it. A patch written by a person and one produced by a model need different
+    /// reading.
     pub proposed_by: String,
     /// How the behaviour it implements is known.
     pub known: Oracle,
@@ -122,10 +76,7 @@ pub struct Proposal {
 
 impl Proposal {
     /// Whether this may be merged without somebody vouching for where the behaviour came from.
-    ///
-    /// **Never true for `assumed`, and that is the whole point.** An assumption written down
-    /// can be counted, ranked, probed and retired; one merged as though it were a fact never
-    /// will be.
+    /// Never true for `assumed`.
     #[must_use]
     pub fn is_promotable(&self) -> bool {
         !matches!(self.known, Oracle::Assumed)
@@ -141,10 +92,8 @@ pub struct Bundle {
     pub results: Results,
     /// Source changes being proposed, and what each rests on.
     ///
-    /// **Not claims, and reported as not claims.** A measurement is checked by re-deriving
-    /// it; a patch is checked by reading it and running the gate. Listing the two together
-    /// without saying which is which would let a diff inherit the trust the measurements
-    /// earned (D322).
+    /// Not claims, and reported apart from them: a measurement is checked by re-deriving it, a
+    /// patch by reading it and running the gate (D322).
     pub proposals: Vec<Proposal>,
     /// Who produced it and when.
     pub manifest: Manifest,
@@ -159,10 +108,7 @@ pub struct Proposals {
 }
 
 impl Proposals {
-    /// Reads the file that says what each patch rests on.
-    ///
-    /// Here rather than in a shim so the format has one reader. Two would drift, and this one
-    /// carries the provenance field - the last place a drift should be possible.
+    /// Reads the file that says what each patch rests on. The format has one reader, here.
     ///
     /// # Errors
     ///
@@ -171,11 +117,8 @@ impl Proposals {
         toml::from_str(text).map_err(|e| SubmitError::Proposals(Box::new(e)))
     }
 
-    /// The file as text, for writing it back.
-    ///
-    /// Beside [`parse`](Self::parse) so the format has one reader and one writer. A shim that
-    /// serialised this itself would be the second definition, and the field it would drift on
-    /// is the provenance one (principle 13).
+    /// The file as text, for writing it back; the format's one writer, beside
+    /// [`parse`](Self::parse).
     ///
     /// # Errors
     ///
@@ -193,17 +136,16 @@ pub struct Results {
     pub status: BTreeMap<String, Status>,
     /// The furthest each title got while being helped along, by title.
     ///
-    /// **Kept apart rather than merged.** The two answer different questions and one
-    /// best-ever entry cannot hold both without silently overwriting the other (D312).
+    /// Kept apart from `status`: the two answer different questions, and one best-ever entry cannot
+    /// hold both (D312).
     #[serde(default)]
     pub experiment: BTreeMap<String, Status>,
 }
 
 /// Who produced a bundle, and what is in it.
 ///
-/// **The build is the load-bearing field.** A claim that cannot name the tree it came from
-/// is not checkable, and every run report this project produced for months said `unknown`
-/// because nothing ever set it. A submission is where that costs the most.
+/// The build is the load-bearing field: a claim that cannot name the tree it came from is not
+/// checkable.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     /// The build that produced it.
@@ -216,10 +158,8 @@ pub struct Manifest {
     /// How many title results it carries.
     #[serde(default)]
     pub titles: usize,
-    /// How many source changes it proposes.
-    ///
-    /// Counted apart from the claims, because it is the number that decides whether a
-    /// receiver has reading to do rather than a command to run.
+    /// How many source changes it proposes, counted apart from the claims: it says whether a
+    /// receiver has reading to do.
     #[serde(default)]
     pub proposals: usize,
 }
@@ -227,9 +167,8 @@ pub struct Manifest {
 impl Bundle {
     /// Gathers what a machine holds into one bundle.
     ///
-    /// Takes the parts rather than reading them, so the shape of a submission is testable
-    /// without a data directory, a checkout or a title - the same separation
-    /// `orbistoun-mem` makes between deciding and doing (principle 8).
+    /// Takes the parts rather than reading them, so a submission's shape is testable without a data
+    /// directory, a checkout or a title.
     #[must_use]
     pub fn gather(learned: Learned, results: Results, by: String, on: String) -> Self {
         let manifest = Manifest {
@@ -247,10 +186,8 @@ impl Bundle {
         }
     }
 
-    /// Attaches source changes being proposed.
-    ///
-    /// Separate from [`gather`](Self::gather) because they are a separate kind of thing, and
-    /// a bundle that carried none is the ordinary case.
+    /// Attaches source changes being proposed. Separate from [`gather`](Self::gather) because they
+    /// are a separate kind of thing, and none is the ordinary case.
     #[must_use]
     pub fn proposing(mut self, proposals: Vec<Proposal>) -> Self {
         self.manifest.proposals = proposals.len();
@@ -258,11 +195,8 @@ impl Bundle {
         self
     }
 
-    /// Proposals nobody may merge without vouching for where the behaviour came from.
-    ///
-    /// **The list a reviewer starts from.** Everything else in a bundle is checked by
-    /// re-deriving it; these cannot be, so the only useful thing to say about them is which
-    /// ones carry no oracle better than a guess (D322).
+    /// Proposals nobody may merge without vouching for where the behaviour came from: the ones with
+    /// no oracle better than a guess (D322).
     #[must_use]
     pub fn needing_a_voucher(&self) -> Vec<&Proposal> {
         self.proposals
@@ -273,10 +207,7 @@ impl Bundle {
 
     /// What the bundle actually carries: measurements, then title results.
     ///
-    /// **Counted from the contents, never read off the manifest.** A manifest is a claim by
-    /// whoever sent it, and a receiver that quotes it back is reporting the sender's
-    /// arithmetic as its own measurement. Found by editing a bundle by hand and watching
-    /// `submit check` announce the old totals (D315).
+    /// Counted from the contents, never read off the manifest, which is the sender's claim (D315).
     #[must_use]
     pub fn counts(&self) -> (usize, usize) {
         (
@@ -287,8 +218,8 @@ impl Bundle {
 
     /// Whether the manifest describes what is actually here.
     ///
-    /// Not proof of tampering and not treated as such - a hand-edited bundle is the ordinary
-    /// cause. It means the manifest cannot be quoted, which is worth one line of output.
+    /// Not treated as tampering, since a hand-edited bundle is the ordinary cause; it means the
+    /// manifest cannot be quoted.
     #[must_use]
     pub fn manifest_matches_contents(&self) -> bool {
         let (measurements, titles) = self.counts();
@@ -299,9 +230,8 @@ impl Bundle {
 
     /// Whether there is anything worth sending.
     ///
-    /// **Asked before writing, because an empty bundle is worse than no bundle.** It reads
-    /// as "this machine found nothing" when it usually means the loop was never turned, and
-    /// those are different facts - the distinction `known_by` exists to hold, one level up.
+    /// Asked before writing: an empty bundle reads as "this machine found nothing" when it usually
+    /// means the loop was never run.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.learned.measurements.is_empty()
@@ -311,9 +241,8 @@ impl Bundle {
 
     /// The files a bundle is written as, ready for a caller to put on disk.
     ///
-    /// Returned rather than written for the reason [`gather`](Self::gather) takes its parts:
-    /// producing the content is a judgement about what a submission carries, writing it is a
-    /// decision about a machine, and principle 13 puts the second in a shim.
+    /// Returned rather than written: producing the content is this crate's judgement, writing it is
+    /// a shim's decision about a machine.
     ///
     /// # Errors
     ///
@@ -327,9 +256,8 @@ impl Bundle {
             (LEARNED_FILE, learned),
             (RESULTS_FILE, results),
         ];
-        // Written only when there are any. A bundle full of empty files makes a reader look
-        // for something that is not there, and `patches.toml` with nothing under it reads as
-        // a proposal that failed to serialise rather than as a machine with none.
+        // Written only when there are any: an empty `patches.toml` reads as a proposal that failed
+        // to serialise.
         if !self.proposals.is_empty() {
             let proposals = Proposals {
                 proposal: self.proposals.clone(),
@@ -341,13 +269,13 @@ impl Bundle {
 
     /// Reads a bundle back from its files.
     ///
+    /// `proposals` is the text of [`PROPOSALS_FILE`], or `None` where the bundle carries no
+    /// patches, the ordinary case.
+    ///
     /// # Errors
     ///
-    /// When any part cannot be parsed. Deliberately not lenient: a submission that half
-    /// parsed would be accepted as a smaller submission, which is a silent loss of somebody
-    /// else's work.
-    /// `proposals` is the text of [`PROPOSALS_FILE`], or `None` where the bundle carries no
-    /// patches - which is the ordinary case and not an error.
+    /// When any part cannot be parsed. Not lenient: a half-parsed submission would be accepted as a
+    /// smaller one, silently losing work.
     pub fn from_files(
         manifest: &str,
         learned: &str,
@@ -374,9 +302,8 @@ impl Bundle {
 
     /// How a submission and what this machine found differ.
     ///
-    /// **Checked by re-deriving, never by trusting.** Agreement is silence; every difference
-    /// is named, and "we never measured that" is reported as its own kind rather than as a
-    /// contradiction.
+    /// Checked by re-deriving. Agreement is silence; every difference is named, and "never measured
+    /// here" is its own kind rather than a contradiction.
     #[must_use]
     pub fn disagreements(&self, theirs: &Self) -> Vec<Disagreement> {
         let mut out: Vec<Disagreement> = self
@@ -391,10 +318,9 @@ impl Bundle {
                 None => out.push(Disagreement::TitleNotRunHere {
                     title: title.clone(),
                 }),
-                // **Only the reach ladder is compared.** Imports and calls vary between two
-                // machines running the same title - a different time limit, a different
-                // wall-clock - and reporting that as a contradiction would make every
-                // honest submission look like a dispute.
+                // Only the reach ladder is compared. Import and call counts vary between machines
+                // running the same title (time limit, wall clock), so comparing them would flag
+                // every honest submission.
                 Some(ours) if ours.reach != claimed.reach => {
                     out.push(Disagreement::ReachDiffers {
                         title: title.clone(),
@@ -416,8 +342,7 @@ pub enum Disagreement {
     Measurement(orbistoun_hle::learned::Disagreement),
     /// This machine has never run that title.
     ///
-    /// **Not a refutation**, and the common case for a submission worth having: the whole
-    /// argument for accepting these is that other people hold titles this one does not.
+    /// Not a refutation, and the common case: other people hold titles this one does not.
     TitleNotRunHere {
         /// The title the submission names.
         title: String,
@@ -532,10 +457,7 @@ mod tests {
             .expect("every file is present")
     }
 
-    /// **What leaves one machine is what arrives at another**, assumptions included.
-    ///
-    /// The property the whole crate rests on. A claim that arrives stronger than it left,
-    /// having quietly shed what it rests on, is worse than one that does not arrive.
+    /// What leaves one machine is what arrives at another, assumptions included.
     #[test]
     fn a_bundle_survives_a_round_trip_with_its_assumptions() {
         let sent = bundle(
@@ -567,11 +489,7 @@ mod tests {
         assert!(!one.manifest.by.is_empty(), "a claim has to name its build");
     }
 
-    /// **A receiver counts the contents rather than quoting the manifest.**
-    ///
-    /// A manifest is a claim by whoever sent it. `submit check` announced six title results
-    /// from a bundle carrying seven, because it read the number instead of the files - the
-    /// same failure as every other one in this log, arriving in the newest code (D315).
+    /// A receiver counts the contents rather than quoting the manifest (D315).
     #[test]
     fn the_counts_come_from_the_contents_not_the_manifest() {
         let mut sent = bundle(&["sceFoo"], &[("PPSA02664", Reach::Entered)]);
@@ -601,11 +519,7 @@ mod tests {
         }
     }
 
-    /// **A guess is never merged on its own authority, however good the diff looks.**
-    ///
-    /// The promotion ladder is the verification step that makes generating a patch safe at
-    /// all: it arrives inert, and becomes a change when somebody who can say where the
-    /// behaviour came from merges it. `assumed` means nobody can say that yet (D322).
+    /// A guess is never merged on its own authority (D322).
     #[test]
     fn a_proposal_resting_on_a_guess_needs_somebody_to_vouch_for_it() {
         let guessed = proposal("a.patch", Oracle::Assumed);
@@ -620,10 +534,7 @@ mod tests {
         assert_eq!(vouching[0].file, "a.patch");
     }
 
-    /// **Proposals survive the trip with their provenance and their assumptions.**
-    ///
-    /// The fields that decide whether a patch may be merged are exactly the fields a
-    /// careless round trip would drop, leaving a diff that looks measured.
+    /// Proposals survive the trip with their provenance and their assumptions.
     #[test]
     fn a_proposal_arrives_with_what_it_rests_on() {
         let sent = bundle(&["sceFoo"], &[]).proposing(vec![proposal("a.patch", Oracle::Assumed)]);
@@ -658,7 +569,7 @@ mod tests {
         );
     }
 
-    /// **An empty bundle is a different fact from a machine that found nothing.**
+    /// An empty bundle is a different fact from a machine that found nothing.
     #[test]
     fn a_bundle_with_nothing_in_it_says_so() {
         assert!(Bundle::default().is_empty());
@@ -666,7 +577,7 @@ mod tests {
         assert!(!bundle(&[], &[("PPSA02664", Reach::Entered)]).is_empty());
     }
 
-    /// **A submission is checked by re-deriving it, and agreement is silence.**
+    /// A submission is checked by re-deriving it, and agreement is silence.
     #[test]
     fn an_agreeing_submission_produces_no_complaints() {
         let here = bundle(&["sceFoo"], &[("PPSA02664", Reach::Entered)]);
@@ -675,11 +586,7 @@ mod tests {
         assert!(here.disagreements(&theirs).is_empty());
     }
 
-    /// **"We never looked" is not "it is wrong", and this is the common case.**
-    ///
-    /// The entire argument for accepting these is that other people hold titles this machine
-    /// does not. If that arrived as a contradiction, every submission worth having would
-    /// look like a dispute.
+    /// A title never run here is reported as such, not as a contradiction.
     #[test]
     fn a_title_this_machine_never_ran_is_not_a_refutation() {
         let here = bundle(&[], &[]);
@@ -710,11 +617,7 @@ mod tests {
         ));
     }
 
-    /// **Counts differing is not a disagreement.**
-    ///
-    /// Two machines running one title report different import and call totals - a different
-    /// time limit, a different wall-clock. Comparing those would make every honest
-    /// submission look like a dispute, which is how a check stops being read.
+    /// Differing counts are not a disagreement.
     #[test]
     fn differing_counts_on_the_same_reach_are_not_a_disagreement() {
         let mut here = bundle(&[], &[]);

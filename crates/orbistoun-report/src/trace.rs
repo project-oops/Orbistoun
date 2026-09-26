@@ -1,19 +1,8 @@
 //! What a guest asked for, and how one run compares with the last.
 //!
-//! # Why these live here rather than with the fault handler that fills them
-//!
-//! They were in `orbistoun-worker`, next to the code that produces them, which reads as
-//! the obvious place until a second shim needs them. `orbistoun-worker` sits *above*
-//! `orbistoun-service` in the spine, so nothing in the service layer could see these
-//! types - and the comparison logic that turns two of them into a verdict ended up in
-//! `orbistoun-cli`, where the GUI cannot reach it either.
-//!
-//! That is principle 13's exact warning arriving on schedule: a shim had started holding
-//! logic, and it was invisible while there was only one shim to notice. Moving the data
-//! down the spine is what lets the orchestration live in one place (D160).
-//!
-//! The *producing* side - the fault handler, the region table, the allocation-free line
-//! writer - stays in the worker. Only the shapes and the pure comparison move.
+//! The trace types and the pure comparison live here, below both shims, so the CLI and the
+//! GUI share one implementation (D034). The producing side (the fault handler, the region
+//! table, the allocation-free line writer) stays in `orbistoun-worker`.
 
 /// What a guest asked for, in the order of how much it wanted it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -28,76 +17,52 @@ pub struct CallTrace {
     pub distinct: usize,
     /// Frames the guest handed to the output layer, counted by the port that accepted them.
     ///
-    /// **Not derived from this list.** A call to the submit function that a port refused - a
-    /// handle this process never issued - is still a call to something implemented, so counting
-    /// labels here would report frames a guest never got. The number comes from the video
-    /// crate's own table, which is the only place that knows which submissions were taken
-    /// (D558).
+    /// Not derived from `calls`: a submit a port refused is still a call to something
+    /// implemented. The number comes from the video crate's port table (D558).
     #[serde(default)]
     pub frames: u64,
     /// Whether the buffer the guest last flipped held bytes it had written.
     ///
-    /// **The framebuffer signal that separates `presented` from `flipped` (9b1f).** `frames`
-    /// counts flips a port accepted; this says one of those flips carried a buffer the guest
-    /// actually wrote into. The worker reads the last-flipped buffer back after the run and
-    /// sets this when its head differs from the zero a fresh allocation holds - a positive
-    /// measurement against a known prior, which is the framebuffer-diffing oracle this project
-    /// treats as its only cheap correctness signal. `status_of` awards `Reach::Presented` only
-    /// when it is set. Defaults false, so a trace that predates the field, and every run whose
-    /// flipped buffer is unwritten or unreadable, stays at `flipped` - which is the whole
-    /// corpus until a run says otherwise.
+    /// Separates `presented` from `flipped`. The worker reads the last-flipped buffer back
+    /// after the run and sets this when its head differs from the zero a fresh allocation
+    /// holds. `status_of` awards `Reach::Presented` only when it is set; it defaults false,
+    /// so an unwritten or unreadable buffer stays at `flipped`.
     #[serde(default)]
     pub frame_written: bool,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
-    /// Every system call the guest asked the kernel for **directly**, not through a stub.
+    /// Every system call the guest made directly, not through a stub.
     ///
-    /// # Why this is a field of its own and not part of `calls`
-    ///
-    /// A guest that reaches the kernel by number never touches an import, so it leaves no mark
-    /// on the ranked list at all. The open-toolchain payloads work exactly that way: they
-    /// resolve one function to build a gadget and then go straight to the kernel, so a run that
-    /// stopped dead on an unimplemented call could report *no imports of interest* and be
-    /// telling the truth (D401).
-    ///
-    /// Folding them into `calls` would have been shorter and wrong twice: `distinct` means
-    /// distinct **imports** and every report that prints it says so, and a syscall has no stub
-    /// index to be indexed by.
+    /// A guest that enters the kernel by number touches no import, so these are tracked
+    /// separately (D401). They are not in `calls`, because `distinct` counts imports and a
+    /// system call has no stub index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub syscalls: Vec<AskedSyscall>,
     /// The last calls the guest made, in the order it made them.
     ///
-    /// **The neighbourhood of the wall.** A ranked list says what a guest spends its time
-    /// on, which is the right question for deciding what to implement - and the wrong one
-    /// entirely when something has just handed it a null and it died. For that, the only
-    /// useful question is what it called *last*, and the ranked list cannot answer it at
-    /// any length (D154).
-    ///
-    /// The ordering was always recorded; it just never left the process.
+    /// The ranked list says what a guest spends its time on; at a fault the question is
+    /// what it called last, which only the ordered tail answers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tail: Vec<TracedCall>,
     /// How the guest's calls measured against the calling convention.
     ///
-    /// Always present, so "no misaligned calls" is a *measurement* rather than a silence.
-    /// A field that only appears when something is wrong is indistinguishable from a
-    /// field nobody wired up (D159).
+    /// Always present, so "no misaligned calls" is a measurement rather than a silence
+    /// (D159).
     #[serde(default)]
     pub abi: AbiReport,
     /// How file reads went.
     ///
-    /// Always present, so "no short reads" is a measurement rather than a silence - the
-    /// same rule the stack-conformance line follows (D175).
+    /// Always present, so "no short reads" is a measurement rather than a silence.
     #[serde(default)]
     pub reads: ReadReport,
     /// How formatted writes went.
     ///
     /// Always present once anything was formatted, so "nothing refused" is a measurement
-    /// rather than a silence - the same rule the read and stack lines follow (D175).
+    /// rather than a silence.
     #[serde(default)]
     pub formats: FormatReport,
-    /// What the first command buffer the guest submitted to the graphics driver contained, if it
-    /// reached one. `None` until a guest hands a buffer to `sceAgcDriverSubmitDcb`; the corpus stalls
-    /// earlier today, so it is the first title to get this far that fills it (3861).
+    /// What the first command buffer the guest submitted to the graphics driver contained.
+    /// `None` until a guest hands a buffer to `sceAgcDriverSubmitDcb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission: Option<SubmissionSummary>,
     /// What the guest was pointing at, for calls nothing implements.
@@ -105,116 +70,71 @@ pub struct CallTrace {
     pub dumps: Vec<ArgumentDump>,
     /// What the run was subject to.
     ///
-    /// Recorded so that two traces can be told apart from two *measurements* - see
-    /// [`Conditions`].
+    /// Recorded so two runs under different conditions are not compared as one
+    /// measurement; see [`Conditions`].
     #[serde(default)]
     pub conditions: Conditions,
     /// Why the guest stopped itself, if it did.
     ///
-    /// **A third outcome, and it was being reported as the second.** A run ends by
-    /// faulting, by being stopped from outside when it runs out of time, or by the guest
-    /// deciding to stop. With no field for the third, a guest that called `abort` was
-    /// described as having "run to the time limit" - which is not merely imprecise, it is
-    /// the opposite of what happened (D177).
+    /// A run ends by faulting, by being stopped at a limit, or by the guest deciding to
+    /// stop; this records the third, which is its own outcome (D177).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<String>,
     /// Where it died, if it did.
     ///
-    /// **The progress measure.** How far a guest got before faulting is the one number
-    /// that says whether a change helped: an instruction pointer that moved forward
-    /// means the guest executed code it could not reach before, and nothing else in a
-    /// run reports that as directly (D080).
+    /// A progress measure: a faulting instruction pointer that moved forward means the
+    /// guest executed code it could not reach before (D129).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<FaultSite>,
-    /// Imports a run **named** with `ORBISTOUN_DUMP`, by label.
+    /// Imports a run named with `ORBISTOUN_DUMP`, by label.
     ///
-    /// **Empty in an ordinary run, and that is the whole of it.** A `Gap::Captured` finding is an
-    /// answer to a question somebody asked, so it must fire only for the imports they asked
-    /// about - never for whatever happened to be dumped. Without this it fired for every
-    /// float-only implementation, because the default dump condition tests the *integer* handler
-    /// and a function answering in `xmm0` has none: two noise findings printed ahead of the
-    /// actual wall (D637).
+    /// Empty in an ordinary run. A `Gap::Captured` finding fires only for imports named
+    /// here, not for whatever the default dump condition captured, which also matches every
+    /// floating-point-only implementation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forced_dumps: Vec<String>,
     /// How long the guest went without asking the host for anything, when the clock ended it.
     ///
-    /// **"Ran to the time limit" cannot tell working from stuck**, and it reports them the same
-    /// way. PPSA25872 makes 310,987 calls and then nothing: the same 310,987 at a twenty-second
-    /// limit and at a ninety-second one, so it was blocked - and the only thing that separated
-    /// those was running it twice and comparing by hand (D645, and the same shape as D177).
-    ///
-    /// `None` for a run that faulted, stopped itself, or spent its call budget - in all three the
-    /// guest was going when it ended, so there is no silence to report and a zero would read as
-    /// one.
+    /// Separates a guest still working at the time limit from one that stopped asking for
+    /// anything, from a single run. `None` for a run that faulted, stopped itself or spent
+    /// its call budget, since the guest was active when it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<Quiet>,
     /// Which limit stopped the run, when one did.
     ///
-    /// **D238 requires these not to read alike**: *"'ran out of clock' and 'made the calls it was
-    /// allowed' call for different next steps and must not read alike"*. The worker distinguishes
-    /// them - it exits with `TIME_LIMIT_EXIT` or `CALL_BUDGET_EXIT` - but that is an exit code the
-    /// *parent* sees, and the trace is written before it. So both arrived at `describe_end` as
-    /// the same absence and both were recorded as `ran to the time limit`, including for a guest
-    /// that never ran out of clock at all.
-    ///
-    /// Set by the branch that stopped the run, which is the only branch that knows. `None` for a
-    /// run that ended on its own - a fault, a deliberate exit - where no limit fired and a value
-    /// here would be claiming one did.
+    /// Running out of clock and spending the call budget must not read alike (D238). The
+    /// worker's exit code is seen only by the parent after the trace is written, so the
+    /// branch that stopped the run records it here. `None` when no limit fired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_by: Option<String>,
     /// What the guest put into words, oldest first.
     ///
-    /// **The only signal in a run that arrives already interpreted.** A fault address, an import
-    /// count and a silent thread all have to be reasoned back to a cause; this *is* the cause,
-    /// written by the guest, in English. D186 named four functions by reading two titles'
-    /// diagnostics by hand - this is that, systematically, for every run.
-    ///
-    /// Captured at the platform ABI - the C library's format family, the console's log call, and
-    /// writes to the standard descriptors - so nothing about it is specific to one engine. A
-    /// homebrew payload using `printf` and a commercial engine's own logger land in the same
-    /// place.
+    /// The guest's own diagnostics, which often state a cause directly. Captured at the
+    /// platform ABI (the C library's format family, the system log call, and writes to the
+    /// standard descriptors), so it is independent of any one engine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub said: Vec<String>,
     /// Every guest thread, and the last call each one made.
     ///
-    /// **A run that goes quiet has a thread doing something, and the report could not say which.**
-    /// PPSA25872 stops with eleven threads alive: one of them raises a signal on `main` and then
-    /// waits on a semaphore for an acknowledgement, and `main` never makes another call. Reaching
-    /// that took three rounds of hand instrumentation - a print of the thread table, a print of
-    /// the call index, and a hand-join of the recorded calls against it - all of which this field
-    /// answers directly (D651).
-    ///
-    /// Empty for a run with no thread registry, which is every unit test.
+    /// Says which thread a run that goes quiet is waiting on. Empty for a run with no thread
+    /// registry, such as a unit test.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub threads: Vec<ThreadNote>,
-    /// Modules the **title itself ships**, by the library name its imports carry.
+    /// Modules the title itself ships, by the library name its imports carry (D640).
     ///
-    /// **A symbol from one of these is the game's own, and no vendor vocabulary will ever hold
-    /// it.** `PS5Util` and `Il2cppUserAssemblies` are files in the title's own directory; their
-    /// exports were written by whoever wrote the game. Telling a reader to extend a vendor word
-    /// list to name one is advice that cannot succeed, and it was the advice given for six of
-    /// the seven unnamed imports in the corpus - including the single busiest call this project
-    /// has ever recorded (D630, D631).
-    ///
-    /// Empty for a guest that ships no modules of its own, and empty for any run whose loader
-    /// did not report - in both cases the advice falls back to what it always said, because
-    /// "nobody told me" must not become "this is the game's".
+    /// A symbol from one of these is the title's own, so no vendor vocabulary names it and
+    /// the advice changes accordingly. Empty when the title ships none or the loader did not
+    /// report; an empty list never implies a symbol is the title's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub title_modules: Vec<String>,
 }
 
 /// The silence at the end of a run the clock stopped.
 ///
-/// # What it measures, and what it does not
-///
-/// "Activity" is one number: import calls plus system calls, both monotonic, both already
-/// counted. A guest that stops moving that number has stopped asking the host for anything -
-/// which is what a thread waiting on something that will never arrive looks like.
-///
-/// **It is not proof the guest is blocked**, and the wording everywhere it is printed says only
-/// what was counted. A guest spinning in its own code, computing, calls nothing either. The
-/// difference is that this measurement is free and available from a *single* run, where the
-/// alternative was running twice at different limits and comparing by hand.
+/// Activity is import calls plus system calls. A guest that stops moving that number has
+/// stopped asking the host for anything, as a thread waiting forever does. It is not proof
+/// of blocking, since a guest computing in its own code calls nothing either, so the wording
+/// says only what was counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Quiet {
     /// Milliseconds between the last counted activity and the clock expiring.
@@ -225,18 +145,15 @@ pub struct Quiet {
     pub run_ms: u64,
     /// How often the counters were read.
     ///
-    /// **Recorded because it bounds the claim.** A silence measured at quarter-second
-    /// resolution is not known to a millisecond, and a field that printed one without the other
-    /// would be reporting more than the measurement supports (principle 3).
+    /// Recorded because it bounds the precision of the silence.
     pub sample_ms: u64,
 }
 
 impl Quiet {
     /// Whether the silence is worth a reader's attention.
     ///
-    /// Half the run, and at least a second. Both halves earn their place: the fraction is what
-    /// makes it interesting rather than the absolute, and the floor keeps a 2-second run from
-    /// reporting a 1.1-second silence as though it meant something.
+    /// Half the run, and at least a second, so a short run does not report a trivial
+    /// silence.
     #[must_use]
     pub fn is_notable(&self) -> bool {
         self.silent_ms >= 1_000 && self.silent_ms.saturating_mul(2) >= self.run_ms
@@ -260,8 +177,8 @@ impl Quiet {
 
 /// How many calls of context to keep before the end.
 ///
-/// Enough to see past a burst of one repeated function - a guest clearing memory calls
-/// `memset` hundreds of times in a row, and a shorter tail would show nothing but that.
+/// Enough to see past a burst of one repeated function, such as `memset` while clearing
+/// memory.
 pub const TAIL_CALLS: usize = 48;
 
 /// One guest thread, as it was when the run ended.
@@ -269,15 +186,14 @@ pub const TAIL_CALLS: usize = 48;
 pub struct ThreadNote {
     /// The handle the guest holds, which is what it passes to calls naming a thread.
     pub handle: u64,
-    /// The name the guest gave it. Unity names its threads, and the names are the whole story.
+    /// The name the guest gave it.
     pub name: String,
     /// Whether it has ended.
     pub finished: bool,
     /// The last call this thread made, if one is still in the recorded window.
     ///
-    /// [`None`] means **not seen recently**, not "made no calls": the window holds the last
-    /// forty-eight calls of the whole run, so a thread that went quiet early falls out of it. The
-    /// distinction matters - a thread with no recent call is the interesting one.
+    /// [`None`] means not seen recently, not "made no calls": the window holds the last
+    /// [`TAIL_CALLS`] calls of the whole run, so a thread that went quiet early falls out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_call: Option<String>,
     /// Where that call sits in the run's order, for reading against the tail.
@@ -296,8 +212,8 @@ pub struct AbiReport {
     /// The import that first arrived misaligned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_misaligned_import: Option<String>,
-    /// The stack pointer it arrived with, whole - the full value says which region the
-    /// stack was in, which a remainder alone cannot.
+    /// The stack pointer it arrived with, whole, since the full value says which region
+    /// the stack was in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_misaligned_rsp: Option<u64>,
 }
@@ -309,44 +225,27 @@ pub struct TracedCall {
     pub sequence: u64,
     /// Library and name, or library and hash when no name is known yet.
     pub label: String,
-    /// The integer arguments, in register order - `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`.
+    /// The integer arguments, in register order: `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`.
     ///
-    /// Kept because at a wall they are often the whole answer: a guest passing an address it was
-    /// handed a moment earlier makes the chain visible without any other tooling.
-    ///
-    /// **All six, and it used to be only the first.** A value handed on as a *size* is visible
-    /// only if the size happens to be the first argument - the four gigabytes of D564 were, and
-    /// the same value passed as `arg2` would have left no trace. An attempt to classify
-    /// unimplemented functions by what the guest did with their answers found one usable
-    /// observation in four runs, entirely because of this (D570).
+    /// All six, because a value handed on from an earlier answer can appear in any slot.
     #[serde(default)]
     pub args: [u64; 6],
     /// Which host thread made it, matching `FaultSite::host_thread`.
     ///
-    /// Only ever compared for equality, and only to answer one question: was this call on the
-    /// thread that faulted? A tail that could not say pairs a fault with a call from somewhere
-    /// else, which is exactly what happened for four decisions (D621).
+    /// Only compared for equality, to say whether this call was on the thread that faulted
+    /// (D621).
     #[serde(default)]
     pub thread: u64,
     /// The guest address this call returns to - one instruction past the call site.
     ///
-    /// **The same address space a fault's frame walk reports**, which is the point: a
-    /// stack trace and a call trace can be read against each other, and a frame stops
-    /// being a bare number the moment an import was called from it (D173).
+    /// In the same address space a fault's frame walk reports, so a stack trace and a call
+    /// trace can be read against each other.
     #[serde(default)]
     pub from: u64,
-    /// What this call **answered** in `rax`, when it had returned before the trace was read.
+    /// What this call answered in `rax`, when it returned before the trace was read (D459).
     ///
-    /// **The half of a call the tail never carried.** `arg0` is what the guest passed *in*;
-    /// this is what our implementation handed *back* - and at the walls this project hits,
-    /// the wrong value is almost always the one we answered, not the one we were given (the
-    /// D125 class). A tail that showed the call and not its result could not see that at all
-    /// (D459).
-    ///
-    /// [`None`] when the answer was not known: a call still running, or - the common case
-    /// at a fault - one whose guest crashed in its own code the instant the call returned.
-    /// Kept distinct from `Some(0)`, because zero is `OK` and saying "unknown" is not the
-    /// same as saying "it succeeded".
+    /// [`None`] when the answer is not known: a call still running, or one whose guest
+    /// faulted as the call returned. Distinct from `Some(0)`, which is success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returned: Option<u64>,
 }
@@ -354,7 +253,7 @@ pub struct TracedCall {
 /// Where a guest faulted.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FaultSite {
-    /// What it was doing - a read, a write, an instruction fetch.
+    /// What it was doing: a read, a write, an instruction fetch.
     ///
     /// Not every value here describes touching an address. See
     /// [`FaultSite::touched_an_address`], which is the question most callers actually
@@ -366,13 +265,8 @@ pub struct FaultSite {
     pub instruction_pointer: u64,
     /// Where the instruction was: a region orbistoun placed, or the host module holding it.
     ///
-    /// **Host modules are named too, and for a measurement reason rather than a cosmetic one.**
-    /// A fault in host code used to be recorded as a bare address, and those move - Windows
-    /// bases system modules per boot, so the same fault reached the same way was
-    /// `0x7fff13abdc8d` one day and `0x7ff9c071dc8d` the next. A recorded outcome that cannot be
-    /// reproduced after a reboot is not a measurement of the guest, and `compare` read the
-    /// change as the ending having moved. An offset into a named module reproduces (worklog
-    /// 594).
+    /// Host modules are named because Windows bases system modules per boot, so a bare host
+    /// address does not reproduce across reboots while an offset into a named module does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     /// Offset into that region or module.
@@ -380,94 +274,70 @@ pub struct FaultSite {
     pub offset: Option<u64>,
     /// What each register that holds a readable address is pointing at.
     ///
-    /// # Why the registers alone are not enough
-    ///
-    /// A fault dump names sixteen values and says nothing about any of them. At this title's
-    /// wall the argument that mattered was a short text label in `r12`, and reading it meant
-    /// arming a watchpoint on a stack address that orbistoun's own shims churn - which filled
-    /// the recorder with host sites and never showed the guest's own access (D522).
-    ///
-    /// The argument dumper has named and dumped pointers since D198; a fault had no equivalent.
-    /// Filled by the worker, because deciding whether an address is readable and naming its
-    /// region both need the running process, and this crate has neither.
+    /// The register values alone do not say what they point at. Filled by the worker,
+    /// because deciding whether an address is readable and naming its region need the
+    /// running process.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pointees: Vec<String>,
     /// The import the guest was inside when it faulted, if it was inside one.
     ///
-    /// **The question a fault in host code cannot otherwise answer.** An instruction
-    /// pointer outside every placed region says only "this is ours, not the guest's",
-    /// which narrows the search to the whole emulator. Naming the import narrows it to one
-    /// function (D158).
+    /// For a fault in host code, this narrows the search from the whole emulator to one
+    /// function.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside_import: Option<String>,
     /// The guest's own call path, innermost first.
     ///
-    /// Empty when the chain could not be walked, which is the ordinary case for optimised
-    /// code that omits the frame pointer - not a failure (D172).
+    /// Empty when the chain could not be walked, which is ordinary for optimised code that
+    /// omits the frame pointer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames: Vec<Frame>,
     /// The host thread the fault happened on, as the recorded calls carry it.
     ///
-    /// Compared for equality against `TracedCall::thread`, which is the only thing either is
-    /// for: it says which of the recent calls were on the thread that died (D621).
+    /// Compared for equality against `TracedCall::thread`, to say which recent calls were on
+    /// the thread that faulted (D621).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_thread: Option<u64>,
     /// Which guest thread faulted, as the guest's own handle for it.
     ///
-    /// **Because the report shows one fault and the call tail shows every thread.** A reader
-    /// looking at a fault beside a list of recent calls has no way to tell which of them
-    /// happened on the thread that died - and four decisions were written treating a blocked
-    /// wait on one thread as the cause of a fault that may have been on another (D621).
-    ///
-    /// `None` when nothing claimed this host thread as a guest one, which is the main thread
+    /// The call tail shows every thread, so this says which one the fault was on (D621).
+    /// `None` when nothing claimed this host thread as a guest one, as for the main thread
     /// before the loader hands over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<u64>,
     /// The registers as they were at the fault.
     ///
-    /// Captured because the handler has always had them - a vectored handler is passed the
-    /// full context record - and threw them away. A stack pointer alone distinguishes
-    /// "the guest ran out of stack" from "a pointer was wrong", which was guesswork
-    /// before.
+    /// Taken from the context record the vectored handler receives. The stack pointer alone
+    /// distinguishes stack exhaustion from a bad pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registers: Option<Registers>,
     /// The bytes of the faulting instruction itself.
     ///
-    /// **The worker reads these at fault time and used to keep them only for its own live print.**
-    /// Empty then in the trace, so the ranked findings - which are the ones the loop routes on -
-    /// could not tell a guest dereferencing a bad pointer from a guest *entering the kernel* via
-    /// `int 0x41`, and reported both as "read of some address". Carrying the bytes here lets
-    /// [`classify_trap`] name the fault class in the finding, not just in the crash print (worklog
-    /// 605).
+    /// Read by the worker at fault time, so [`classify_trap`] can tell a bad dereference from
+    /// a kernel entry such as `int 0x41` in the ranked finding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instruction: Vec<u8>,
 }
 
-/// A faulting instruction that is a *trap* - the guest leaving ordinary execution deliberately or
-/// by entering the kernel - as opposed to an ordinary instruction that touched a bad address.
-///
-/// The two are different kinds of wall and the difference is the whole diagnosis: a kernel entry
-/// is orbistoun's gap to implement, a guest trap is the guest aborting on something it decided.
+/// A faulting instruction that is a trap (the guest entering the kernel or stopping itself),
+/// as opposed to an ordinary instruction that touched a bad address. A kernel entry is a gap
+/// for orbistoun to implement; a guest trap is the guest aborting on its own check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrapKind {
-    /// `int`, `syscall`, `sysenter`, `hlt` - the guest entered the kernel through an instruction
-    /// orbistoun implements no handler for. The vector is carried for `int`, because it names
-    /// exactly which entry has to be characterised.
+    /// `int`, `syscall`, `sysenter` or `hlt`: the guest entered the kernel through an
+    /// instruction with no handler. The vector is carried for `int`, since it names the entry.
     KernelEntry {
         /// The interrupt vector for `int n`; `None` for `syscall`/`sysenter`/`hlt`.
         vector: Option<u8>,
     },
-    /// `ud2` - a trap the guest raised itself, an assertion or abort after a check it failed. The
-    /// cause is upstream, in whatever the guest was told just before.
+    /// `ud2`: a trap the guest raised itself after a failed check. The cause is upstream, in
+    /// whatever the guest was told just before.
     GuestTrap,
 }
 
 /// Classifies a faulting instruction as a trap, if it is one.
 ///
-/// **One classifier, so the live crash print and the ranked finding cannot disagree.** They used to
-/// be two: the worker's fault handler recognised `int` and the finding builder did not, so the same
-/// fault named itself in the crash output and hid in the worklist. Pure and allocation-free, so the
-/// fault handler can call it too.
+/// One classifier for the live crash print and the ranked finding, so they agree. Pure and
+/// allocation-free, so the fault handler can call it.
 #[must_use]
 pub fn classify_trap(opcode: &[u8]) -> Option<TrapKind> {
     match opcode.first().copied()? {
@@ -492,35 +362,24 @@ impl FaultSite {
 
     /// The kind a breakpoint carries when the faulting address is inside the stub table.
     ///
-    /// **Only when that has actually been checked.** Every breakpoint used to be reported
-    /// under this string, from a table keyed on the exception code alone - so a guest that
-    /// executed a trap instruction of its own was told it had entered a stub off its start,
-    /// with no part of the program having looked at where it was. The report contradicted
-    /// itself in one line, naming the address as stub padding and locating it in the title's
-    /// own modules, and a session read the false half and recorded it as a finding (D576).
+    /// Only when the address has been checked against the stub table.
     pub const BREAKPOINT_IN_STUBS: &'static str = "breakpoint - stub padding - at";
     /// A breakpoint at an address the stub table demonstrably does not cover.
     ///
-    /// Says what was determined and stops there. A trap instruction the guest executed
-    /// itself, an assertion in its own code, and a debugger attaching all land here, and
-    /// nothing in a fault record tells them apart - so this names none of them.
+    /// A guest trap instruction, an assertion or a debugger attaching all land here, and a
+    /// fault record cannot tell them apart, so this names none of them.
     pub const BREAKPOINT_OUTSIDE_STUBS: &'static str = "breakpoint - not stub padding - at";
     /// A breakpoint that could not be placed, because no stub table was registered.
     ///
-    /// Distinct from [`Self::BREAKPOINT_OUTSIDE_STUBS`] on purpose: "checked, and it is not
-    /// there" and "there was nothing to check against" are different states, and collapsing
-    /// them would put this back to claiming more than it measured one level down.
+    /// Distinct from [`Self::BREAKPOINT_OUTSIDE_STUBS`]: "checked, and not there" and
+    /// "nothing to check against" are different states.
     pub const BREAKPOINT_UNPLACED: &'static str = "breakpoint - at";
 
-    /// Kinds whose [`address`](Self::address) is **the faulting instruction itself**.
+    /// Kinds whose [`address`](Self::address) is the faulting instruction itself.
     ///
     /// These exceptions carry no address parameters, so the reporter fills the field with
-    /// the instruction pointer. The number is real, and it is not somewhere the guest
-    /// asked for - so comparing it across runs answers a question nobody asked.
-    ///
-    /// **Five, since the breakpoint split into three.** A consumer deciding whether an
-    /// address is one the guest asked for has to see every kind that is not; a kind absent
-    /// from here is one such a consumer classifies by falling through (D576).
+    /// the instruction pointer, which is not an address the guest asked for. Every such kind
+    /// must be listed, or a consumer misclassifies it by falling through.
     pub const AT_THE_INSTRUCTION: [&'static str; 5] = [
         "illegal instruction at",
         Self::BREAKPOINT_IN_STUBS,
@@ -531,14 +390,9 @@ impl FaultSite {
 
     /// Whether [`address`](Self::address) is somewhere the guest asked for.
     ///
-    /// **Worth its own method because getting it wrong reads as a result.** A sweep
-    /// planting sentinels at an argument compares where the guest faulted, run to run. Do
-    /// that against an illegal instruction and both sentinels produce the *same* address -
-    /// the instruction pointer - so the fault appears to have moved somewhere unrelated to
-    /// what was planted, and gets reported as an inconsistent move rather than as the
-    /// plant having broken control flow. Measured on a live title: planting at `arg1` of
-    /// one import derailed the guest into non-code at a fixed address, and the sweep
-    /// called it `Moved`.
+    /// A sweep planting sentinels compares fault addresses run to run; for a kind that
+    /// reports the instruction pointer, both sentinels give the same address, which would
+    /// read as a move unrelated to the plant.
     #[must_use]
     pub fn touched_an_address(&self) -> bool {
         Self::TOUCHED.contains(&self.kind.as_str())
@@ -558,11 +412,8 @@ pub struct ReadReport {
 
 /// What the guest was pointing at when it called something nothing implements.
 ///
-/// **The question a call trace cannot otherwise answer.** A trace says an unimplemented
-/// function was called and with what first argument; it does not say what that argument
-/// *was*, and for an out-parameter or a descriptor struct that is the whole of the
-/// information. `sceKernelDirectMemoryQuery` was understood because the guest passed a
-/// structure size and somebody read it by hand (D083); this is that, automatically.
+/// A trace gives an argument's value; for an out-parameter or a descriptor structure the
+/// bytes it points at are the information.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArgumentDump {
     /// The import that was called, named where a name is known.
@@ -576,21 +427,18 @@ pub struct ArgumentDump {
     pub value: u64,
     /// The bytes at that address, hex-encoded, when it pointed into mapped memory.
     ///
-    /// Empty for a scalar - a size, a flag, a count - which is evidence in itself and was
-    /// invisible while only pointers were recorded (D198).
+    /// Empty for a scalar (a size, a flag, a count), whose raw value is the evidence.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bytes: String,
-    /// The same bytes as text, where they read as one - a name is worth more than its hex.
+    /// The same bytes as text, where they read as text.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
 }
 
 /// What formatted writes managed.
 ///
-/// **Reported because "implemented" and "answered correctly" are different claims**, and
-/// nothing else in a run can tell them apart. A formatted write that refuses hands the
-/// guest an empty string; the call still counts as reaching an implementation, so the
-/// standing figure rises and the guest is no better off. Only this says so (D183).
+/// A formatted write that refuses hands the guest an empty string yet still counts as
+/// reaching an implementation, so this separates "implemented" from "answered" (D183).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FormatReport {
     /// Formatted writes attempted.
@@ -606,13 +454,10 @@ pub struct FormatReport {
 
 /// What the first command buffer a guest submitted turned out to contain.
 ///
-/// A submission is the first real graphics measurement a title produces: the packets it built, the
-/// registers it set, the draws it asked for and the shader addresses it named. It belongs in the
-/// report beside the reach and call counts, not only in a trace, because it is the number that says
-/// where translation effort goes once a guest gets this far (3861). A summary rather than the whole
-/// `SubmissionReport`, because the report carries diagnostic vectors that are the translator's to read
-/// and not the run report's to serialise - with one exception, the shader failures, carried as text
-/// because they are the reason a draw has nothing bound (worklog 818).
+/// The packets a title built, the registers it set, the draws it asked for and the shader
+/// addresses it named: the first graphics measurement a run produces. A summary of
+/// `SubmissionReport`, plus the shader failures as text, since they explain a draw with
+/// nothing bound.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubmissionSummary {
     /// Packets the walk recognised in the submitted buffer.
@@ -625,11 +470,9 @@ pub struct SubmissionSummary {
     pub shaders_found: usize,
     /// Of the addresses a register named, how many fell in a region the guest was given.
     ///
-    /// **D101's first route.** A GPU address the stream carries and a guest address are the same
-    /// number only if the assumption D101 leaves open holds; every address that resolves against the
-    /// guest's own regions is a data point that it did, here at least, and every one that does not is
-    /// a point against. Counted apart from the shader outcome, because an address can resolve and its
-    /// shader still fail to translate.
+    /// Evidence on whether GPU addresses in the stream equal guest addresses (D101). Counted
+    /// apart from the shader outcome, because an address can resolve and its shader still
+    /// fail to translate.
     #[serde(default)]
     pub addresses_resolved: usize,
     /// Addresses a register named that fell in no region the guest was given.
@@ -640,116 +483,76 @@ pub struct SubmissionSummary {
     pub shaders_translated: usize,
     /// Every shader that did not translate, as `stage at address: reason`.
     ///
-    /// **The line that says why a draw has nothing bound.** Both fully-owned baselines resolved both
-    /// their shader addresses and translated neither, and the run report said only "2 shader
-    /// candidates" - so a backend refusing every draw for want of shaders read as a backend gap
-    /// rather than the translation gap it was (worklog 818).
+    /// Says why a draw has nothing bound, so a translation gap is not read as a backend gap.
     #[serde(default)]
     pub shader_failures: Vec<String>,
 }
 
 /// What a run was subject to, as opposed to what it found.
 ///
-/// # Why a verdict without this is not evidence
-///
-/// The whole loop rests on one inference: run, change one thing, run again, attribute the
-/// difference to the change. That is valid only if everything *else* was identical, and
-/// nothing recorded whether it was. Two settings break it in opposite directions and both
-/// are one line of TOML away.
-///
-/// **The time limit is wall-clock**, so the same build on the same title reaches further on
-/// a faster machine. Two contributors comparing runs are comparing their hardware. That
-/// matters more the moment results are shared rather than kept.
-///
-/// **The stub policy decides what unimplemented functions answer.** Loosening it to `ok`
-/// makes every number improve at once - the guest stops checking, runs on, and dies much
-/// later - while nothing whatever has been implemented. It is the highest-scoring one-line
-/// change available to anything optimising a call count, which is precisely why it has to
-/// be visible in the comparison rather than inferred from a changelog.
-///
-/// Recorded rather than forbidden. Answering `ok` everywhere is a legitimate bisection
-/// technique and the loop depends on being able to try it (principle 5); what makes it a
-/// hack is doing it *unlabelled*.
+/// Attributing a difference between two runs to a change is valid only if everything else
+/// was identical (D181). The time limit is wall-clock, so a faster machine reaches further;
+/// the stub policy decides what unimplemented functions answer, and loosening it improves
+/// every number without implementing anything. Both are recorded rather than forbidden, so
+/// a comparison shows them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conditions {
     /// The wall-clock limit in seconds, or `None` for no limit.
     ///
-    /// **A backstop, not the measurement.** It fixes the duration and lets the call count
-    /// vary, and the call count is what a verdict is read off - three identical runs of one
-    /// title returned 77.5M, 75.8M and 87.6M calls. What it catches that a budget cannot is
-    /// a guest that stops calling imports altogether (D238).
+    /// A backstop, not the measurement: it fixes the duration and lets the call count vary.
+    /// It catches a guest that stops calling imports altogether (D238).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_seconds: Option<u64>,
     /// Diagnostics that were asked for and did nothing at all.
     ///
-    /// **The failure this whole family keeps having.** A diagnostic that never reached the
-    /// thing under test and one that reached it and changed nothing produce identical
-    /// output - an ordinary-looking run - and only the second is a measurement. Two
-    /// recorded eliminations turned out to be the first kind (D229, D230), and each was
-    /// believed for weeks.
-    ///
-    /// So a diagnostic that applied zero times is recorded as having applied zero times,
-    /// and the report says so where the verdict is read rather than in a line above it
-    /// (D241).
+    /// A diagnostic that never reached its target looks like one that changed nothing, so
+    /// one that applied zero times is recorded and reported at the verdict (D227).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub did_nothing: Vec<String>,
     /// Imports the guest was allowed to call, or `None` for no budget.
     ///
-    /// The deterministic half: two runs of one build stop at the same call, so a verdict
-    /// between them measures the change rather than the machine.
+    /// Deterministic: two runs of one build stop at the same call, so a verdict measures the
+    /// change rather than the machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_budget: Option<u64>,
     /// What a function with no implementation answered, spelled as the policy spells it.
     ///
-    /// A string rather than the policy type: this crate sits below the one that defines it,
-    /// and the value is for a person and a diff to read, not to act on.
+    /// A string rather than the policy type, which is defined in a crate above this one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_return: String,
-    /// How many symbols the policy said something specific about - an answer, a region, or
-    /// both, counted once each.
+    /// How many symbols the policy said something specific about (an answer, a region, or
+    /// both), counted once each.
     #[serde(default)]
     pub overrides: usize,
     /// How many of those rest on nothing measured, and are therefore holding the run up.
     ///
-    /// **The distinction the record could not draw.** An answer taken from the target is the
-    /// emulator being *right*, and a run using it measures the emulator as it stands; an answer
-    /// somebody guessed until the guest moved is a prop. Counting both as "an override exists"
-    /// made an honest compatibility entry unreachable for any title with a learned fact loaded
-    /// (D555, D557).
+    /// An answer measured on the target is the emulator being right; a guessed answer is a
+    /// prop. Only props hold a compatibility entry back (D557).
     #[serde(default)]
     pub propping: usize,
     /// Every diagnostic the run was put under, or empty for an ordinary run.
     ///
-    /// **A run under a diagnostic is answering a different question** - "does this depend on
-    /// memory nobody wrote?", "is this argument an out-parameter?" - rather than "how far
-    /// does it get?". Comparing the two as though they measured the same thing is
-    /// meaningless, and this is what stops it (D185, D218).
-    ///
-    /// One field rather than one per diagnostic. There were two, a third was never recorded
-    /// at all, and five more were wanted - which is the shape that drifts (D220).
+    /// A run under a diagnostic answers a different question from "how far does it get?",
+    /// so it is not compared as an ordinary run. One field for every diagnostic, so a new
+    /// one cannot go unrecorded.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub experiments: String,
     /// The physical memory map the guest was shown, region by region.
     ///
-    /// **A run that cannot say what map it presented cannot answer a question about maps.**
-    /// The offsets a guest queries only mean something against the boundaries it was given,
-    /// and those were computed inside the emulator and thrown away - so a reader comparing
-    /// them had to know which shape was configured and recompute it, which is a second copy
-    /// of the thing being measured (D357).
+    /// The offsets a guest queries mean something only against the boundaries it was
+    /// given, so the run records them rather than leaving a reader to recompute them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_map: Vec<(u64, u64, bool)>,
-    /// Whether any of them **changed the program** rather than only observing it.
+    /// Whether any of them changed the program rather than only observing it.
     ///
-    /// Recorded separately from the words above because it is acted on rather than read:
-    /// a verdict earned under an intervention carries a warning, and parsing that back out
-    /// of prose would be a second place for the rule to live (D227).
+    /// Separate from the words above because it is acted on: a verdict earned under an
+    /// intervention carries a warning (D227).
     #[serde(default)]
     pub intervened: bool,
     /// The build that produced the trace.
     ///
-    /// Recorded but deliberately **not** compared: it changes on every release and would
-    /// fire constantly, drowning the two conditions that actually change what a run does.
-    /// It is here for a result contributed by somebody whose tree you cannot see.
+    /// Recorded but not compared, since it changes with every build; it identifies a
+    /// result contributed from another tree.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub build: String,
 }
@@ -764,9 +567,8 @@ impl Conditions {
 
     /// What differs from an earlier run, in words a report can print directly.
     ///
-    /// Empty means the two are comparable. Sentences rather than a struct because the
-    /// only consumer is a line of output whose whole job is to stop somebody trusting a
-    /// verdict that measures a settings change.
+    /// Empty means the two are comparable. Sentences, because the only consumer prints them
+    /// beside a verdict.
     pub fn differences_from(&self, before: &Self) -> Vec<String> {
         let mut changed = Vec::new();
         if self.call_budget != before.call_budget {
@@ -831,12 +633,11 @@ fn describe_limit(seconds: Option<u64>) -> String {
 
 /// One frame on the guest's stack.
 ///
-/// A fault address says *where* the guest died; it does not say who called it. At the top
-/// of a function - which is where a null dereference usually lands - the instruction
-/// pointer alone is nearly content-free.
+/// A fault address says where the guest died, not who called it; at the top of a function,
+/// where a null dereference usually lands, the instruction pointer alone says little.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
-    /// Where this frame returns to - the call site, one instruction past the call.
+    /// Where this frame returns to: one instruction past the call site.
     pub return_address: u64,
     /// The frame pointer it was found through.
     pub frame_pointer: u64,
@@ -873,8 +674,7 @@ pub struct Registers {
 impl Registers {
     /// Every register, in dump order, with its name.
     ///
-    /// One list, used by both the printed lines and the pointee description, so a register
-    /// cannot appear in one and be missing from the other (D522).
+    /// One list, used by both the printed lines and the pointee description, so they agree.
     pub fn named(&self) -> [(&'static str, u64); 16] {
         [
             ("rax", self.rax),
@@ -898,15 +698,8 @@ impl Registers {
 
     /// Every register, as lines to print under a fault.
     ///
-    /// **All sixteen, not the four that usually matter.** The short form named `rax`,
-    /// `rcx`, `rdx` and `rdi` because those carry an address or a size in most faults - and
-    /// at the `image+0xafc959` wall the question was *which register held the base that
-    /// should not have been zero*, which the four cannot answer. The values were captured
-    /// and recorded all along; only the last step threw them away, so a run had to be
-    /// repeated to learn something already sitting in its own trace (D230).
-    ///
-    /// Grouped four to a line because sixteen on one line wraps in a terminal, and a
-    /// wrapped register dump is read wrongly.
+    /// All sixteen, since any register may hold the bad base. Grouped four to a line so the
+    /// dump does not wrap in a terminal.
     pub fn lines(&self) -> Vec<String> {
         let all = self.named();
         all.chunks(4)
@@ -928,8 +721,7 @@ pub struct AskedSyscall {
     /// What this run knows that number to be, where it knows anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Its first argument, kept because for a call nobody can name it is most of what
-    /// there is to go on - `649(2, ...)` narrows what a thing might be in a way `649` does not.
+    /// Its first argument, which for an unnamed call narrows what it might be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_argument: Option<u64>,
 }
@@ -937,7 +729,7 @@ pub struct AskedSyscall {
 /// One import a guest called, and whether anything answered it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CalledImport {
-    /// Dynamic symbol index - the stub it landed on.
+    /// Dynamic symbol index: the stub it landed on.
     pub index: usize,
     /// Library and name, or library and hash when no name is known yet.
     pub label: String,
@@ -945,19 +737,12 @@ pub struct CalledImport {
     pub calls: u64,
     /// Whether anything actually implements it, or whether it landed on a stub.
     ///
-    /// **The most directly actionable fact a run reports.** Without it a trace cannot tell
-    /// "the guest used this and it worked" from "the guest used this and got a
-    /// placeholder", which are opposite conclusions drawn from the same line (D179).
+    /// Separates a call that was answered from one that got a placeholder (D179).
     #[serde(default)]
     pub implemented: bool,
-    /// The signature inferred from how the guest called it - `(ptr, u32, ptr?)` - or empty when
-    /// nothing was sampled.
-    ///
-    /// **The guest describing an import it cannot document.** The firmware behind a vendor stub is
-    /// unreadable, so its arity and argument kinds are not knowable from the binary; but the
-    /// guest's own calls carry them, and a slot that is always a pointer is a pointer. It is a
-    /// characterisation, not a proof - a lower bound a black box allows - and it is exactly the
-    /// starting point for implementing an unimplemented function or designing a probe for it.
+    /// The signature inferred from how the guest called it, such as `(ptr, u32, ptr?)`, or
+    /// empty when nothing was sampled. A characterisation from the guest's own calls, not a
+    /// proof: a starting point for implementing the function or designing a probe for it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shape: String,
 }
@@ -965,10 +750,8 @@ pub struct CalledImport {
 impl CallTrace {
     /// Calls that landed on something with no implementation behind them.
     ///
-    /// **The discount on the headline number.** A call count is progress only to the extent
-    /// the calls were answered by something real; the rest is the guest proceeding on the
-    /// strength of a placeholder. Both are worth knowing and they are not the same thing,
-    /// so neither is reported without the other (D181).
+    /// A call count is progress only to the extent the calls were answered by something
+    /// real, so this is reported beside it.
     pub fn stubbed_calls(&self) -> u64 {
         self.calls
             .iter()
@@ -979,27 +762,16 @@ impl CallTrace {
 
     /// Distinct imports the guest called that had nothing behind them.
     ///
-    /// # Why this and not the call share
-    ///
-    /// `stubbed_share` is a percentage of **calls**, and calls are dominated by whatever the
-    /// guest happens to loop on: PPSA02664 spent 12,924 of them in one wait. So a day that took
-    /// the unimplemented functions it called from 35 to 20 moved that percentage from 0.22% to
-    /// 0.008% - both of which round to a `standing` of 100, and the record could not see any of
-    /// it (D563).
-    ///
-    /// This counts **functions**, which is stable against a hot loop and is also the work list:
-    /// it is exactly the number of things the guest asked for and did not get.
+    /// Counts functions rather than calls: `stubbed_share` is dominated by whatever the
+    /// guest loops on, while this is stable against a hot loop and is the work list (D563).
     pub fn unanswered_imports(&self) -> usize {
         self.calls.iter().filter(|c| !c.implemented).count()
     }
 
     /// The distinct imports the guest called that landed on a placeholder, most-called first.
     ///
-    /// **The candidate causes of a fault, named.** When a run dies, the honest first question is
-    /// what orbistoun answered wrongly on the way there (D708), and every one of these is a place
-    /// orbistoun handed the guest a placeholder instead of a real answer - any of which could be
-    /// what steered it into the wall. Ordered by call count so the ones the guest leaned on hardest
-    /// sort to the top.
+    /// The candidate causes of a fault: each is a place orbistoun answered with a placeholder
+    /// (D708).
     pub fn stubbed_imports(&self) -> Vec<&CalledImport> {
         let mut stubbed: Vec<&CalledImport> =
             self.calls.iter().filter(|c| !c.implemented).collect();
@@ -1009,8 +781,7 @@ impl CallTrace {
 
     /// What share of the run rested on stubs, as a percentage.
     ///
-    /// Zero when nothing was called, rather than a division by zero - a run that made no
-    /// calls borrowed nothing, which is the honest reading.
+    /// Zero when nothing was called.
     pub fn stubbed_share(&self) -> u32 {
         if self.total_calls == 0 {
             return 0;
@@ -1021,36 +792,21 @@ impl CallTrace {
 
 /// What a run says about a title, for the compatibility record.
 ///
-/// **Derived, never typed.** A compatibility database whose grades are written by hand
-/// drifts from what the tool observed the moment somebody is optimistic, and the drift is
-/// invisible because there is nothing to check a hand-written grade against. Every field
-/// here comes off the trace, so an entry is a transcription of a measurement rather than
-/// an opinion about one.
-///
-/// `measured_on` is passed in because this crate has no clock and should not grow one -
-/// a date fetched here would also make the function untestable.
+/// Derived from the trace, never written by hand, so an entry transcribes a measurement.
+/// `measured_on` is passed in because this crate has no clock, which keeps it testable.
 pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides::Status {
     use orbistoun_overrides::Reach;
 
-    // The ladder is read off what actually happened, in the order the phases occur. A
-    // guest that faulted still *entered*; that it then died - or survived to the limit -
-    // is the outcome, not the distance, and `outcome` carries it.
+    // The ladder follows the phases in order. A guest that faulted still entered; how it
+    // ended is the outcome, carried by `outcome`.
     let reach = match trace.reached.as_str() {
-        // **Promoted by a measurement, not by a claim.** The worker reports how far it got in
-        // words; the frame count comes from the video crate's own port table, so a title
-        // reaches this rung by a flip a real port accepted rather than by a call it made
-        // (D558).
-        // **The top rung, awarded by a readback and nothing weaker.** A flip reaches
-        // `Flipped`; a flip whose buffer the worker read back and found holding bytes the
-        // guest wrote reaches `Presented`. This is the framebuffer-diffing oracle arriving as
-        // a rung - a positive measurement against the zero a fresh buffer held, which reaching
-        // the interface cannot fake (9b1f, and the rung's own doc in `orbistoun-overrides`).
-        // Above the plain flip arm because it is the stronger, more specific claim.
+        // The frame count comes from the video crate's port table, so a flip rung needs a
+        // flip a port accepted (D558). A flip whose buffer read back holding guest-written
+        // bytes reaches `Presented`; checked before the plain flip arm as the stronger claim.
         "Entered" if trace.frames > 0 && trace.frame_written => Reach::Presented,
         "Entered" if trace.frames > 0 => Reach::Flipped,
-        // **Checked after the flip, deliberately.** A guest that presented a frame and then
-        // exited is recorded as having flipped: the frame is the stronger claim, and the
-        // deliberate stop is still carried in the outcome.
+        // After the flip arms: a guest that flipped and then exited is recorded as flipped,
+        // with the deliberate stop carried in the outcome.
         "Entered" if trace.stopped.as_deref() == Some(orbistoun_overrides::DELIBERATE_EXIT) => {
             Reach::Exited
         }
@@ -1080,13 +836,9 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
 
 /// The file name a module's trace is written to.
 ///
-/// **Declared once because two places need it and they must agree.** The worker writes
-/// the file and a shim reads it back to compare runs; if the two ever computed the name
-/// differently the comparison would find nothing, report "first run of this module"
-/// forever, and never once look wrong (D084).
-///
-/// The last two path components, because a bare `eboot.bin` is the same name in every
-/// title and would have them all overwriting one file.
+/// Declared once, because the worker writes the file and a shim reads it back, and the two
+/// must agree. The last two path components, because `eboot.bin` alone is the same in
+/// every title.
 pub fn trace_file_name(module: &str) -> String {
     let stem: String = std::path::Path::new(module)
         .components()
@@ -1103,9 +855,8 @@ pub fn trace_file_name(module: &str) -> String {
 
 /// Reads the trace a previous run of `module` left behind.
 ///
-/// `None` covers both "no previous run" and "the file is unreadable or stale-format", and
-/// deliberately does not distinguish them: the caller's next move is the same either way,
-/// and a first run is not an error.
+/// `None` covers both "no previous run" and "the file is unreadable or stale-format": the
+/// caller acts the same either way, and a first run is not an error.
 pub fn load_previous(traces_dir: &std::path::Path, module: &std::path::Path) -> Option<CallTrace> {
     let name = trace_file_name(&module.to_string_lossy());
     let text = std::fs::read_to_string(traces_dir.join(name)).ok()?;
@@ -1114,8 +865,8 @@ pub fn load_previous(traces_dir: &std::path::Path, module: &std::path::Path) -> 
 
 /// Identity of a trace file on disk, for telling one run's trace from an older one.
 ///
-/// Modification time *and* length, because either alone can repeat: two runs of the same
-/// guest produce traces of very similar size, and a filesystem's timestamp can be coarse.
+/// Modification time and length, because either alone can repeat: traces of one guest
+/// have similar sizes, and a filesystem timestamp can be coarse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp {
     /// When the file was last written.
@@ -1136,22 +887,9 @@ pub fn stamp_of(traces_dir: &std::path::Path, module: &std::path::Path) -> Optio
 
 /// Whether the run that just finished actually wrote a trace.
 ///
-/// # Why this is asked at all
-///
-/// A run reads the stored trace *after* the guest stops, on the reasoning that the worker
-/// has just written it. When the worker dies without writing one - a fault it cannot report,
-/// or a crash inside orbistoun itself - the file that is read is the **previous** run's, and
-/// every line drawn from it is presented as though it were this run's. It compares equal to
-/// itself, so the verdict reads `same - nothing moved`, which is the most convincing possible
-/// way to say nothing happened.
-///
-/// That cost a session: an implementation that worked was reported as unimplemented, six runs
-/// running, because all six reports were one file from hours earlier (D470). A stale
-/// measurement presented as a current one is exactly what principle 3 forbids, so the answer
-/// is to notice rather than to guess.
-///
-/// A pure decision so it can be tested without a filesystem, in the shape `orbistoun-mem`
-/// established: the effectful half is [`stamp_of`].
+/// A worker that dies without writing leaves the previous run's file in place, which would
+/// otherwise be reported as this run's and compare as "same" (D470). A pure decision, so it
+/// is testable without a filesystem; the effectful half is [`stamp_of`].
 #[must_use]
 pub fn wrote_a_trace(before: Option<Stamp>, after: Option<Stamp>) -> bool {
     match (before, after) {
@@ -1166,9 +904,8 @@ pub fn wrote_a_trace(before: Option<Stamp>, after: Option<Stamp>) -> bool {
 
 /// How this run compares with the last one of the same module.
 ///
-/// **Two signals, deliberately.** Reporting one hid a run that reached eight more
-/// subsystems behind an instruction pointer that had gone backwards, because the code
-/// path had changed underneath it (D129).
+/// Two signals, interface reached and fault position, because either can move while the
+/// other goes backwards when the code path changes (D129).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// Nothing to compare against.
@@ -1179,7 +916,7 @@ pub enum Verdict {
     Back,
     /// Nothing moved.
     Same,
-    /// More of the interface, but along a different path - the positions do not compare.
+    /// More of the interface, but along a different path whose positions do not compare.
     MoreInterfaceDifferentPath,
     /// Further along its path, but reaching less of the interface.
     FurtherButNarrower,
@@ -1188,9 +925,7 @@ pub enum Verdict {
 impl Verdict {
     /// The short label a shim prints beside the summary.
     ///
-    /// Loud for the ones that matter and quiet for the ones that do not: `FURTHER` is the
-    /// only thing this project is trying to produce, so it should be findable by eye in a
-    /// wall of terminal output.
+    /// Upper case for the verdicts that matter, so `FURTHER` stands out in terminal output.
     pub const fn label(self) -> &'static str {
         match self {
             Self::FirstRun => "",
@@ -1203,17 +938,12 @@ impl Verdict {
 
     /// The one-line summary a shim prints.
     ///
-    /// Here rather than in a shim so the CLI and the GUI cannot describe the same
-    /// measurement differently - which is the whole reason these moved (D160).
+    /// Here rather than in a shim, so the CLI and the GUI describe it identically (D034).
     pub const fn summary(self) -> &'static str {
         match self {
             Self::FirstRun => "first run of this module - nothing to compare against yet",
-            // **Both causes, because there are two.** `Further` fires either for more of
-            // the interface *or* for the same interface with the fault further along, and
-            // this said "reached imports it could not reach before" for both - which reads
-            // as a falsehood next to a `(+0)` distinct count, in the one line this project
-            // steers by. Executing code it could not reach before is true of either, and is
-            // how D080 states the measure in the first place (D224).
+            // `Further` fires for more of the interface or for the same interface with the
+            // fault further along; executing code it could not reach before is true of both.
             Self::Further => "executed code it could not reach before",
             Self::Back => "reaching less of the interface than it did",
             Self::Same => "nothing moved",
@@ -1247,42 +977,25 @@ pub struct Progress {
     pub verdict: Verdict,
     /// Whether this run got further while the program was being altered.
     ///
-    /// **A `FURTHER` under an intervention is not a diagnosis.** A diagnostic that only
-    /// *observes* leaves the program alone, so a verdict under it measures the emulator. One
-    /// that *intervenes* - a poked value, a poisoned region, a reservation the guest never
-    /// asked for - changes the program being measured, so the guest may be getting further
-    /// on an answer that is simply wrong.
-    ///
-    /// This exists because that mistake was made here: a mapping moved a wall, the movement
-    /// was read as confirming the hypothesis that motivated the mapping, and watching what
-    /// the guest *wrote* one run later said the opposite (D224, D226).
+    /// A diagnostic that intervenes (a poked value, a poisoned region, an unrequested
+    /// reservation) changes the program being measured, so progress under it may rest on a
+    /// wrong answer and is not a diagnosis (D227).
     pub bought_under_intervention: bool,
     /// Whether this run ended without faulting at all.
     ///
-    /// **Then reach has stopped measuring progress.** `Further` rests on the interface count
-    /// alone here, so it means "reached more imports", not "got further" - and this project
-    /// steers by that one word, so the difference belongs on screen rather than inferred
-    /// (D301).
-    ///
-    /// The comparison used to invent a position rather than admit it had none: a run that
-    /// faulted where the last one had not scored as *further along*, and one that stopped
-    /// faulting scored as *back*. Both are fabrications, and both were unasserted - while
-    /// `describe_end` a few lines above already refuses to pretend a missing fault is an
-    /// address. The two halves of this file disagreed about the same absent value (D309).
+    /// Then `Further` rests on the interface count alone and means "reached more imports",
+    /// not "got further", and the report says so (D301).
     pub ended_without_a_fault: bool,
     /// What changed about the *run* rather than about the emulator, in words.
     ///
-    /// **A verdict with this non-empty is not evidence.** The comparison still renders,
-    /// because the numbers are real and refusing to show them helps nobody - but it
-    /// measures a settings change, and anything reading it has to be told so rather than
-    /// left to infer it from a changelog (D181).
+    /// When non-empty, the verdict measures a settings change; it still renders, labelled
+    /// as such (D181).
     pub conditions_changed: Vec<String>,
 }
 
 /// Describes where a run ended, for comparison and for display.
 ///
-/// A run that hit the time limit has no fault position at all, and saying so is not the
-/// same as saying it died at address zero.
+/// A run that hit a limit has no fault position, which is not the same as address zero.
 fn describe_end(trace: &CallTrace) -> String {
     if let Some(fault) = &trace.fault {
         return match (&fault.region, fault.offset) {
@@ -1290,26 +1003,15 @@ fn describe_end(trace: &CallTrace) -> String {
             _ => format!("{:#x}", fault.instruction_pointer),
         };
     }
-    // The guest stopping itself is a *decision*, not a failure, and describing it as a
-    // time limit reports the opposite of what happened.
+    // The guest stopping itself is a decision, not a limit.
     if let Some(stopped) = &trace.stopped {
         return stopped.clone();
     }
-    // **Stuck and working both end on the clock, and were recorded identically.** D645
-    // measured the silence and `print_quiet` shows it in the run report - but the *outcome*,
-    // the string that reaches `compat/` and the frontier table, stayed flat. So a title
-    // waiting on something it never got was filed exactly as one still working when the clock
-    // ended, and the table a reader actually reads could not tell them apart.
-    //
-    // **Categorical, not quantitative, and that is deliberate.** `compare` tests this string
-    // between runs to decide whether the ending changed; a duration embedded here would make
-    // every pair of runs differ and the field would stop meaning anything. The measurement
-    // stays in `quiet`, where `Quiet::describe` reports it in the terms it was taken, bounded
-    // by its own sample interval.
-    // **The budget and the clock are different endings** and D238 says so in as many words.
-    // Only the branch that stopped the run knows which fired, so this reads what that branch
-    // recorded rather than inferring it from a call count against a budget - the inference would
-    // be a report naming a cause it did not determine.
+    // The budget and the clock are different endings (D238). Only the branch that stopped
+    // the run knows which fired, so this reads what it recorded rather than inferring it.
+    // A stuck guest and a working one both end on the clock and get different outcomes.
+    // The outcome is categorical: `compare` tests it between runs, so a duration here would
+    // make every pair differ; the measurement stays in `quiet`.
     if trace.ended_by.as_deref() == Some(SPENT_THE_BUDGET) {
         return SPENT_THE_BUDGET.to_owned();
     }
@@ -1322,27 +1024,20 @@ fn describe_end(trace: &CallTrace) -> String {
 /// A run the clock ended while the guest was still asking the host for things.
 pub const RAN_TO_LIMIT: &str = "ran to the time limit";
 
-/// A run the **call budget** ended, which is not the clock running out.
-///
-/// A guest that spends twenty million calls in four seconds had all the time it asked for and
-/// used up its allowance; a guest the clock stopped may have been making one call a second. The
-/// next step differs - raise the budget, or find out what it is waiting for - so D238 requires
-/// the two not to read alike, and until now they did.
+/// A run the call budget ended, which is not the clock running out: the next step is to
+/// raise the budget rather than find what the guest waits for (D238).
 pub const SPENT_THE_BUDGET: &str = "spent its call budget";
 
 /// A run the clock ended after the guest had stopped asking for anything.
 ///
-/// "Went quiet" is the whole claim, and it is narrower than "was waiting for input": the
-/// measurement is that no import or system call was made for at least a second and for at least
-/// half the run ([`Quiet::is_notable`]). A guest computing hard in its own code with no host
-/// calls reaches this too, and calling it *waiting* would report more than was measured.
+/// "Went quiet" is the whole claim: no import or system call for at least a second and at
+/// least half the run ([`Quiet::is_notable`]). A guest computing in its own code reaches
+/// this too, so it does not claim the guest was waiting.
 pub const QUIET_TO_LIMIT: &str = "went quiet, then ran to the time limit";
 
 /// Compares a run against the one before it.
 ///
-/// Pure, so the verdict is testable without running a guest - which matters because this
-/// is the only measure of progress the project has, and a bug in it would silently
-/// mis-rank every change made from here on (D080).
+/// Pure, so the verdict is testable without running a guest (D129).
 pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
     use core::cmp::Ordering::{Equal, Greater, Less};
 
@@ -1363,19 +1058,17 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
 
     let previous = describe_end(before);
     let surface = after.distinct.cmp(&before.distinct);
-    // Positions only compare when both runs died in the same place-kind; an instruction
-    // pointer from a different code path is a different number about a different thing.
+    // Positions compare only when both runs died in the same kind of place; an instruction
+    // pointer on a different code path is not comparable.
     let position = match (&after.fault, &before.fault) {
         (Some(a), Some(b)) if a.region == b.region => Some(a.offset.cmp(&b.offset)),
-        // **A missing fault is not a position, in either direction.** A run that did not
-        // fault has no place it got to; ordering it against one that did is comparing a
-        // number with its absence. The surface count still measures something and decides
-        // the verdict alone from here (D309).
+        // A missing fault is not a position in either direction; the surface count alone
+        // decides the verdict (D301).
         _ => None,
     };
 
-    // The two signals disagreeing is a real case with its own answer, so it is matched
-    // first; after that either signal moving alone decides it.
+    // Disagreeing signals have their own verdicts and are matched first; then either signal
+    // moving alone decides.
     let verdict = match (surface, position) {
         (Greater, Some(Less)) => Verdict::MoreInterfaceDifferentPath,
         (Less, Some(Greater)) => Verdict::FurtherButNarrower,
@@ -1390,9 +1083,8 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
         fault,
         previous_fault: (previous != describe_end(after)).then_some(previous),
         verdict,
-        // Only when the verdict is progress. An intervention that changed nothing needs no
-        // caveat, and a caveat on every instrumented run would be noise people learn to
-        // scroll past - which is how a warning stops working (D227).
+        // Only when the verdict is progress, so the caveat is not noise on every
+        // instrumented run (D227).
         bought_under_intervention: matches!(
             verdict,
             Verdict::Further | Verdict::FurtherButNarrower | Verdict::MoreInterfaceDifferentPath
@@ -1406,12 +1098,8 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
 mod syscall_record_tests {
     use super::{AskedSyscall, CallTrace};
 
-    /// **A trace written before this field existed still loads.**
-    ///
-    /// The traces directory is not wiped between versions - the work list reads every file in
-    /// it, including ones written weeks ago. A field without a default turns those into parse
-    /// errors, and `cmd_worklist` skips what it cannot parse *with a note rather than a
-    /// failure*, so the whole history would have quietly stopped counting.
+    /// A trace without the newer fields still loads, since the work list reads every file in
+    /// the traces directory.
     #[test]
     fn a_trace_without_the_field_still_loads() {
         let older = r#"{"module":"x","reached":"Entered","total_calls":0,"distinct":0,"calls":[]}"#;
@@ -1438,8 +1126,7 @@ mod syscall_record_tests {
         assert_eq!(back.syscalls[0].first_argument, Some(2));
     }
 
-    /// A submission's resolved and unresolved address counts survive serialisation, so D101's first
-    /// route reaches a report a reader opens rather than only the process that measured it (5bff).
+    /// A submission's resolved and unresolved address counts survive serialisation (D101).
     #[test]
     fn a_submissions_resolved_counts_survive_the_round_trip() {
         let mut trace: CallTrace = serde_json::from_str(
@@ -1476,9 +1163,7 @@ mod tail_return_tests {
         .expect("parses")
     }
 
-    /// A recorded answer of **zero** survives, and is not confused with absence: zero is
-    /// `OK`, the commonest answer, and losing it would blind the tail to every successful
-    /// call (D459).
+    /// A recorded answer of zero survives and is not confused with absence (D459).
     #[test]
     fn a_zero_answer_survives_and_is_not_absence() {
         let mut trace = base();
@@ -1495,8 +1180,7 @@ mod tail_return_tests {
         assert_eq!(back.tail[0].returned, Some(0));
     }
 
-    /// An **unknown** answer writes nothing, so a reader can never read it back as zero -
-    /// "we did not see what it returned" and "it returned zero" are opposite claims.
+    /// An unknown answer writes nothing, so it never reads back as zero.
     #[test]
     fn an_unknown_answer_is_absent_rather_than_zero() {
         let mut trace = base();
@@ -1517,8 +1201,7 @@ mod tail_return_tests {
         assert_eq!(back.tail[0].returned, None);
     }
 
-    /// A trace written before the field existed still loads, reading as unknown - the traces
-    /// directory is not wiped between versions and the work list reads every file in it.
+    /// A trace without the answer field still loads, reading as unknown.
     #[test]
     fn a_tail_without_the_field_still_loads() {
         let older = r#"{"module":"x","reached":"Entered","total_calls":0,"distinct":0,"calls":[],"tail":[{"sequence":1,"label":"libc::strlen","arg0":16,"from":32}]}"#;
@@ -1536,9 +1219,7 @@ mod tests {
 
     /// A guest still calling when the clock stopped it is not quiet.
     ///
-    /// **The negative case first**, because it is the one that costs something to get wrong: a
-    /// notable verdict on an ordinary run puts a warning and a suggested rerun on every report
-    /// that hits the limit, and a reader learns to skip the line (principle 3).
+    /// A false positive would put a warning on every report that hits the limit.
     #[test]
     fn a_run_that_called_something_at_the_end_is_not_notable() {
         let busy = super::Quiet {
@@ -1552,8 +1233,7 @@ mod tests {
 
     /// A silence under a second is not notable however large a share of the run it is.
     ///
-    /// The floor exists for short runs: an 1,800ms run that went quiet at 900ms is exactly half
-    /// silent and says nothing - that is the sample interval and startup, not a wall.
+    /// The floor exists for short runs, where half the run is sampling and startup.
     #[test]
     fn a_brief_silence_in_a_brief_run_is_not_notable() {
         let brief = super::Quiet {
@@ -1566,7 +1246,7 @@ mod tests {
         assert!(!brief.is_notable());
     }
 
-    /// The measured case: PPSA25872's own numbers, rounded to what a sampler would see.
+    /// A long silence at the end of a long run is notable and described in tenths of a second.
     #[test]
     fn a_guest_that_stopped_calling_is_notable_and_says_when() {
         let stuck = super::Quiet {
@@ -1576,20 +1256,15 @@ mod tests {
             sample_ms: 250,
         };
         assert!(stuck.is_notable());
-        // Tenths, and the tenth is truncated rather than rounded - the sample interval is a
-        // quarter second, so a rounded tenth would claim precision the measurement lacks.
+        // Tenths, truncated rather than rounded, since the sample interval is a quarter second.
         assert_eq!(
             stuck.describe(),
             "made no call in its last 17.2s of 20.0s - the last import or system call was at 2.7s, sampled every 250ms"
         );
     }
 
-    /// **The unanswered count is of functions, not of calls.**
-    ///
-    /// The whole reason D563 added it. A percentage of calls belongs to whatever the guest loops
-    /// on - PPSA02664 spent 12,924 of them in one wait - so it swings wildly while the thing a
-    /// person acts on, the list of functions with nothing behind them, barely moves. Counting
-    /// calls here would rebuild the metric this replaces.
+    /// The unanswered count is of functions, not of calls, so a hot loop does not swing it
+    /// (D563).
     #[test]
     fn the_record_counts_functions_not_calls() {
         let mut t = trace(3, 10_000, None, None);
@@ -1633,18 +1308,8 @@ mod tests {
         assert_eq!(status.answered(), 1, "of three imports, one was answered");
     }
 
-    /// **A run is promoted to the presenting rung by a frame, not by a word.**
-    ///
-    /// The worker reports how far it got in prose; the frame count comes from the video crate's
-    /// port table. Deriving the rung from the count is what makes it a measurement - a title
-    /// cannot reach it by calling the submit function, only by having a port accept one (D558).
-    ///
-    /// # What this cannot assert
-    ///
-    /// **That the count itself is honest**, which is the port table's property and is tested
-    /// where the table lives. If `flips_accepted` ever counted refused submissions, this would
-    /// pass and the rung would be wrong - which is exactly why the count is read from the port
-    /// rather than from the call list this report already has.
+    /// A run reaches the flip rung by a frame count from the port table, not by a word
+    /// (D558). The count's own correctness is tested where the port table lives.
     #[test]
     fn the_presenting_rung_comes_from_the_frame_count() {
         use orbistoun_overrides::Reach;
@@ -1664,16 +1329,8 @@ mod tests {
         assert_eq!(status.frames, 1, "and the count travels with the rung");
     }
 
-    /// **A guest that went quiet and one still working do not share an outcome.**
-    ///
-    /// Both end on the clock, and both used to be filed as `ran to the time limit` - which reads
-    /// as "still going" and was the opposite of the truth for the title that gets furthest here
-    /// (D645: 310,987 calls, then nothing, for seventeen of twenty seconds). The silence was
-    /// measured and printed, but never reached the outcome, so `compat/` and the frontier table
-    /// could not tell the two apart.
-    ///
-    /// The negative half matters as much: a silence too short or too small a fraction of the run
-    /// must **not** change the outcome, or the split reports noise as a finding.
+    /// A guest that went quiet and one still working get different outcomes, and a silence
+    /// too short or too small a fraction of the run does not change the outcome.
     #[test]
     fn a_run_that_went_quiet_is_not_filed_as_one_still_working() {
         let working = trace(47, 933, None, None);
@@ -1693,8 +1350,7 @@ mod tests {
         });
         assert_eq!(super::describe_end(&stuck), super::QUIET_TO_LIMIT);
 
-        // Half the run, but under the one-second floor: a 1.5s run going quiet for 0.9s is not
-        // a finding, and a rule without the floor would file it as one.
+        // Half the run, but under the one-second floor.
         let mut brief = trace(47, 933, None, None);
         brief.quiet = Some(super::Quiet {
             silent_ms: 900,
@@ -1738,17 +1394,8 @@ mod tests {
         );
     }
 
-    /// **A spent call budget is not the clock running out, and no longer reads as it.**
-    ///
-    /// D238 put these on separate exit codes and said why: *"'ran out of clock' and 'made the
-    /// calls it was allowed' call for different next steps and must not read alike"*. A guest
-    /// that burns twenty million calls in four seconds had all the time it wanted; one the clock
-    /// stopped may have been making a call a second. Raise the budget, or find out what it is
-    /// waiting for - different answers, and the outcome now says which.
-    ///
-    /// The negative half is the important one: this must come from the branch that stopped the
-    /// run, never from comparing a call count against a budget. A report that inferred it would
-    /// be naming a cause it did not determine.
+    /// A spent call budget reads differently from the clock running out (D238), and comes
+    /// from the branch that stopped the run, never from a call count.
     #[test]
     fn a_spent_budget_and_a_spent_clock_are_different_endings() {
         let mut budget = trace(47, 20_000_000, None, None);
@@ -1760,8 +1407,7 @@ mod tests {
         clock.ended_by = Some(super::RAN_TO_LIMIT.to_owned());
         assert_eq!(super::describe_end(&clock), super::RAN_TO_LIMIT);
 
-        // A budget-ended run that also went quiet is still a budget: it cannot have been
-        // waiting for anything if it was spending calls fast enough to run out.
+        // A budget-ended run that also went quiet is still a budget ending.
         let mut both = trace(47, 20_000_000, None, None);
         both.ended_by = Some(super::SPENT_THE_BUDGET.to_owned());
         both.quiet = Some(super::Quiet {
@@ -1787,20 +1433,8 @@ mod tests {
         assert_eq!(super::describe_end(&faulted), "image+0x1234");
     }
 
-    /// **A written frame reaches `Presented`; an unwritten flip stops at `Flipped`.**
-    ///
-    /// `Reach::Presented` is the framebuffer-diffing oracle as a rung: awarded when the buffer a
-    /// flip carried was read back and found holding bytes the guest wrote, which the worker
-    /// records in `frame_written` (9b1f). This replaces the test that asserted the rung was out
-    /// of reach - the readback landed, so the claim to protect is now what reaches it and, just
-    /// as much, what does not.
-    ///
-    /// Three things hold together, or the rung would be reachable by less than a presented frame:
-    /// a written frame (`Entered`, a flip accepted, and `frame_written`) reaches it; the same run
-    /// with nothing written stops at `Flipped`, which is why the corpus is unchanged - every
-    /// title flips an unwritten buffer; and `frame_written` without an accepted flip, or below
-    /// `Entered`, does not reach it - a buffer nobody flipped is not a presented frame, and a
-    /// guest whose imports never resolved cannot present one.
+    /// A written frame reaches `Presented`; an unwritten flip stops at `Flipped`; and
+    /// `frame_written` without an accepted flip, or below `Entered`, does not reach it.
     #[test]
     fn a_written_frame_reaches_presented_and_an_unwritten_flip_stops_at_flipped() {
         use orbistoun_overrides::Reach;
@@ -1815,7 +1449,7 @@ mod tests {
 
         // A flip whose buffer the guest wrote into is the one thing that reaches the top rung.
         assert_eq!(reach("Entered", 1, true), Reach::Presented);
-        // The same run with nothing written stops one below, at flipped - the corpus's place.
+        // The same run with nothing written stops one below, at flipped.
         assert_eq!(reach("Entered", 1, false), Reach::Flipped);
         // A written buffer that no port accepted a flip for is not a presented frame.
         assert_eq!(reach("Entered", 0, true), Reach::Entered);
@@ -1836,10 +1470,7 @@ mod tests {
         }
     }
 
-    /// **A run that never entered is not promoted by a frame count.**
-    ///
-    /// The negative half. `reached` still decides the floor: a guest whose imports never
-    /// resolved cannot present, and a stray count must not lift it past the rungs it skipped.
+    /// A run that never entered is not promoted by a frame count: `reached` decides the floor.
     #[test]
     fn a_frame_count_cannot_lift_a_run_that_never_entered() {
         use orbistoun_overrides::Reach;
@@ -1897,9 +1528,8 @@ mod tests {
 
     #[test]
     fn further_says_what_moved_without_claiming_the_other_signal() {
-        // The case that exposed this: the same imports reached, and the fault further along
-        // the same function. A summary naming *imports* would be a falsehood printed beside
-        // a `(+0)` distinct count, in the line the whole project steers by (D224).
+        // The same imports reached and the fault further along the same function: the
+        // summary must not claim new imports.
         let before = trace(23, 222, Some("image"), Some(0x00af_c959));
         let after = trace(23, 222, Some("image"), Some(0x00af_ca2e));
         let progress = compare(Some(&before), &after);
@@ -1913,7 +1543,7 @@ mod tests {
 
     #[test]
     fn a_first_run_says_so_rather_than_claiming_no_change() {
-        // "same - nothing moved" against nothing is a lie that reads as a real result.
+        // With nothing to compare against, the verdict is a first run, not "same".
         let now = trace(3, 10, Some("image"), Some(0x100));
         assert_eq!(compare(None, &now).verdict, Verdict::FirstRun);
     }
@@ -1930,8 +1560,7 @@ mod tests {
 
     #[test]
     fn the_same_imports_but_a_later_fault_is_still_progress() {
-        // The guest executed code it could not reach before, which is the definition
-        // this project uses (D080).
+        // The guest executed code it could not reach before (D129).
         let before = trace(3, 10, Some("image"), Some(0x100));
         let after = trace(3, 10, Some("image"), Some(0x900));
         assert_eq!(compare(Some(&before), &after).verdict, Verdict::Further);
@@ -1939,9 +1568,8 @@ mod tests {
 
     #[test]
     fn more_interface_along_a_different_path_is_not_reported_as_a_regression() {
-        // The case that forced two signals: eight more subsystems reached behind an
-        // instruction pointer that had gone backwards, because the path changed
-        // underneath it (D129). Calling that BACK would have buried a real gain.
+        // More interface reached behind an instruction pointer that went backwards on a
+        // changed path is not BACK (D129).
         let before = trace(3, 10, Some("image"), Some(0x900));
         let after = trace(9, 40, Some("image"), Some(0x100));
         let seen = compare(Some(&before), &after);
@@ -1951,8 +1579,7 @@ mod tests {
 
     #[test]
     fn positions_in_different_regions_are_not_compared() {
-        // An instruction pointer from a different code path is a different number about
-        // a different thing; ordering them would invent a result.
+        // Instruction pointers on different code paths are not ordered.
         let before = trace(3, 10, Some("image"), Some(0x900));
         let after = trace(3, 10, Some("stubs"), Some(0x100));
         assert_eq!(compare(Some(&before), &after).verdict, Verdict::Same);
@@ -1967,8 +1594,7 @@ mod tests {
 
     #[test]
     fn every_verdict_has_a_summary_a_person_can_read() {
-        // The summary lives here so two shims cannot describe one measurement
-        // differently, which is the whole reason this moved (D160).
+        // Every verdict has a summary, shared by both shims (D034).
         for verdict in [
             Verdict::FirstRun,
             Verdict::Further,
@@ -1991,15 +1617,8 @@ mod tests {
 
     #[test]
     fn loosening_the_stub_policy_is_reported_as_a_settings_change() {
-        // **The reward hack, and the whole reason conditions are recorded.** Making
-        // unimplemented functions answer `ok` is one line of TOML and improves every
-        // number at once: the guest stops checking, runs on, and reaches imports it never
-        // reached before. Nothing has been implemented. Anything steering by a call count
-        // finds this within a few iterations because it is the highest-scoring single
-        // change available.
-        //
-        // The verdict still renders - the numbers are real - but it cannot be allowed to
-        // render *unqualified*.
+        // Answering `ok` for unimplemented functions improves every number without
+        // implementing anything, so the verdict renders qualified by the policy change.
         let before = under(Conditions {
             default_return: "unimplemented".to_owned(),
             ..Conditions::default()
@@ -2031,9 +1650,8 @@ mod tests {
 
     #[test]
     fn the_wall_clock_limit_is_a_condition_because_it_measures_the_host() {
-        // Same build, same title, different machine: a faster host reaches further inside
-        // the same number of seconds. Two contributors comparing runs would be comparing
-        // their hardware, which is the failure that matters once results are shared.
+        // A faster host reaches further in the same wall-clock limit, so a limit change is
+        // a difference.
         let before = under(Conditions {
             limit_seconds: Some(10),
             call_budget: None,
@@ -2054,9 +1672,7 @@ mod tests {
 
     #[test]
     fn the_build_is_recorded_but_never_compared() {
-        // It changes on every release and would fire on every comparison, drowning the two
-        // conditions that actually change what a run does. Recorded for a result somebody
-        // else contributed, not for the local loop.
+        // The build changes with every release, so it is recorded but not compared.
         let before = under(Conditions {
             build: "0.1.0".to_owned(),
             ..Conditions::default()
@@ -2071,8 +1687,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_setup_leaves_the_verdict_unqualified() {
-        // The ordinary case has to stay quiet, or the caveat becomes noise and stops being
-        // read - the same rule the stack-conformance line follows in reverse.
+        // Identical conditions produce no caveat.
         let conditions = Conditions {
             experiments: String::new(),
             intervened: false,
@@ -2100,10 +1715,8 @@ mod tests {
         );
     }
 
-    /// **The guard, made to fail.** A worker that dies without writing leaves the previous
-    /// run's file in place; reading it back and reporting it is how six identical reports
-    /// came out of six runs of changed code (D470). Unchanged identity must read as "no
-    /// trace from this run", never as a measurement.
+    /// An unchanged trace file reads as "no trace from this run", never as a measurement
+    /// (D470).
     #[test]
     fn a_trace_that_was_not_rewritten_is_not_this_run_s() {
         let stamp = super::Stamp {
@@ -2119,8 +1732,8 @@ mod tests {
         );
     }
 
-    /// The same length at a different time, and the same time at a different length, are both
-    /// rewrites - which is why the stamp carries two fields rather than one.
+    /// The same length at a different time, and the same time at a different length, are
+    /// both rewrites.
     #[test]
     fn either_half_of_the_stamp_changing_is_a_rewrite() {
         let was = super::Stamp {
@@ -2159,9 +1772,7 @@ mod tests {
 
     #[test]
     fn only_calls_nothing_implements_count_against_the_total() {
-        // The discount on the headline number. 60 of 100 calls reached real code, so the
-        // run stands on 40% placeholder - and a report giving only the 100 lets the two
-        // be confused in the direction that flatters.
+        // 60 of 100 calls reached real code, so the run stands on 40% placeholder.
         let trace = CallTrace {
             total_calls: 100,
             calls: vec![
@@ -2199,9 +1810,8 @@ mod tests {
 
     #[test]
     fn answering_blindly_is_anything_other_than_reporting_unimplemented() {
-        // A raw code is a *specific* answer somebody established, which is not the same as
-        // the loud default - but it is also not a report of "nothing implements this", so
-        // a run under one is still standing on something it has not proved.
+        // A raw code is a specific answer rather than the default, but a run under one still
+        // stands on something unproved.
         assert!(
             !Conditions::default().answers_blindly(),
             "unset says nothing"
@@ -2226,10 +1836,7 @@ mod tests {
 
     /// A verdict taken under a different call budget is labelled as one.
     ///
-    /// The budget exists to make a verdict trustworthy, so a budget that changed between
-    /// two runs is exactly the case where the verdict is not - a guest stopped at twenty
-    /// million calls and one stopped at ten reaches less for a reason that has nothing to
-    /// do with the build (D238).
+    /// A different budget changes how far a guest reaches regardless of the build (D238).
     #[test]
     fn a_changed_call_budget_is_reported_as_a_difference() {
         let before = Conditions {
@@ -2245,8 +1852,7 @@ mod tests {
         assert!(said[0].contains("10000000"), "{said:?}");
         assert!(said[0].contains("20000000"), "{said:?}");
 
-        // And identical budgets are not a difference, or every run would carry the note
-        // and people would learn to skip the line.
+        // Identical budgets are not a difference.
         assert!(after.differences_from(&after).is_empty());
     }
 
@@ -2261,12 +1867,7 @@ mod tests {
         assert_eq!(some.differences_from(&none).len(), 1);
     }
 
-    /// **A run that stopped faulting is not a run that went backwards.**
-    ///
-    /// The comparison scored a missing fault as position `Less` and reported `BACK` from it -
-    /// on a run where the wall the last one hit had gone. Nothing asserted either arm, so it
-    /// had never been looked at; `describe_end`, thirty lines above, already refuses to
-    /// pretend a missing fault is an address (D309).
+    /// A run that stopped faulting is not a run that went backwards (D301).
     #[test]
     fn a_run_that_stopped_faulting_is_not_reported_as_going_backwards() {
         let before = trace(23, 222, Some("image"), Some(0x00af_c959));
@@ -2285,11 +1886,7 @@ mod tests {
         );
     }
 
-    /// **And a run that started faulting did not thereby get further.**
-    ///
-    /// The mirror fabrication: position `Greater` purely because this run has a fault and the
-    /// last one did not, which read as `FURTHER` on the same imports. Reach is the one word
-    /// this project steers by, so inventing it is the expensive direction to be wrong in.
+    /// A run that started faulting did not thereby get further (D301).
     #[test]
     fn a_run_that_began_faulting_is_not_reported_as_further() {
         let before = trace(23, 222, None, None);
@@ -2310,8 +1907,7 @@ mod tests {
 
     /// The surface signal still decides when there is no position to compare.
     ///
-    /// Dropping the invented ordering must not drop the measurement that survives it: more
-    /// imports is still progress whether or not anything faulted.
+    /// More imports is progress whether or not anything faulted.
     #[test]
     fn reaching_more_imports_is_still_progress_with_no_fault_either_side() {
         let before = trace(3, 10, None, None);
@@ -2353,16 +1949,15 @@ mod ladder {
         assert!(Reach::Exited > Reach::Entered);
     }
 
-    /// **A frame is the harder thing.** A guest that presented and then exited is recorded as
-    /// having flipped; the deliberate stop is still carried in the outcome.
+    /// A guest that flipped and then exited is recorded as flipped; the deliberate stop is
+    /// carried in the outcome.
     #[test]
     fn a_frame_outranks_a_deliberate_exit() {
         assert!(Reach::Flipped > Reach::Exited);
         assert_eq!(reach_of(8, Some(DELIBERATE_EXIT)), Reach::Flipped);
     }
 
-    /// **Only exiting earns it.** Giving up is not finishing, and a guest that aborted or took a
-    /// signal it could not handle stopped without completing anything.
+    /// Only exiting earns the rung; an abort or an unhandled signal does not.
     #[test]
     fn giving_up_does_not_earn_the_rung() {
         assert_eq!(reach_of(0, Some("the guest called abort")), Reach::Entered);
@@ -2376,12 +1971,8 @@ mod ladder {
         assert_eq!(reach_of(0, Some("ran to the time limit")), Reach::Entered);
     }
 
-    /// **A deliberate exit beats a fault at equal reach, even on fewer imports** (D686).
-    ///
-    /// This is the case the tiebreaker exists for and the only one it was asked for: the
-    /// conformance payload's import count fell by one *because* it stopped correctly, having
-    /// previously made six further calls only by running past its own refused `exit`. A tiebreaker
-    /// below `imports` could never fire here, which is why this one sits above it.
+    /// A deliberate exit beats a fault at equal reach, even on fewer imports, so the
+    /// tiebreaker sits above `imports` (D686).
     #[test]
     fn a_deliberate_exit_beats_a_fault_at_equal_reach() {
         let exited = status_of(&ran(8, Some(DELIBERATE_EXIT)), "2026-09-14".to_owned());
@@ -2389,8 +1980,8 @@ mod ladder {
         let mut faulted_trace = ran(8, None);
         faulted_trace.distinct += 1;
         faulted_trace.total_calls += 6;
-        // Built from JSON so the test states only the fields it cares about: a fault happened,
-        // at the small address the payload used to die at.
+        // Built from JSON so the test states only the fields it needs: a fault at a small
+        // address.
         faulted_trace.fault = Some(
             serde_json::from_str(r#"{"kind":"read","address":24109,"instruction_pointer":24109}"#)
                 .expect("a fault site"),
@@ -2405,13 +1996,8 @@ mod ladder {
         assert!(!faulted.beats(&exited), "and it is not symmetric");
     }
 
-    /// **The hazard this rung is placed below a flip to avoid.**
-    ///
-    /// `ranking_key` compares the rung before anything else, so a rung above `Flipped` would sort
-    /// a program whose first instruction is `exit(0)` - nothing learned, no imports - above a title
-    /// rendering frames. On this corpus that put the conformance probe at the head of the frontier,
-    /// above every game. This asserts the ordering that prevents it, so moving the variant up in
-    /// the enum fails here rather than quietly reordering the frontier.
+    /// The exit rung sits below `Flipped`: `ranking_key` compares the rung first, so a
+    /// program that only calls `exit(0)` must not rank above a title presenting frames.
     #[test]
     fn a_trivial_exit_does_not_outrank_a_title_that_rendered() {
         let trivial = status_of(&ran(0, Some(DELIBERATE_EXIT)), "2026-09-14".to_owned());

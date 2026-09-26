@@ -1,30 +1,11 @@
 //! A model downloaded once and then run inside this process.
 //!
-//! No server, no daemon, nothing to install. The first request that needs a model
-//! fetches it; every request after that finds it on disk.
-//!
-//! # First use, not first run
-//!
-//! The download is triggered by the first request that actually needs the weights -
-//! not at startup, not on construction, and certainly not from `check`. Several
-//! gigabytes arriving because somebody ran a lint would be an unpleasant surprise, and
-//! an engine that is configured but never asked anything should cost nothing.
-//!
-//! # Where the bytes go
-//!
-//! Into a directory the **caller** supplies. This crate has no opinion about paths
-//! and no dependency on the crate that does, which is what keeps it isolated - but the
-//! consequence matters: `orbistoun-paths` guarantees that orbistoun never writes
-//! outside its own resolved root, and a multi-gigabyte download landing in some
-//! ambient user cache would break that guarantee quietly. So the root is an argument,
-//! and the caller that has the guarantee is the one that supplies it.
-//!
-//! # Partial downloads
-//!
-//! Written to `.part` and renamed on completion. A file that exists is therefore a
-//! file that is whole - which matters because the alternative failure is a truncated
-//! GGUF, and a truncated GGUF is not a download error, it is a parse error somewhere
-//! deep in a loader, minutes later, that reads like a bug in this code.
+//! No server or daemon. The first request that needs the weights downloads them - never at
+//! startup, construction or `check` - so a configured but unused engine costs nothing. The files
+//! go into a directory the caller supplies, since the caller holds `orbistoun-paths`' guarantee
+//! that nothing is written outside the resolved root. Downloads are written to `.part` and
+//! renamed on completion, so a file that exists is whole and a truncated GGUF never reaches a
+//! loader.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -42,10 +23,7 @@ use crate::catalog::{Arch, Offline};
 use crate::engine::{Engine, Request};
 use crate::select::Device;
 
-/// Where a model's files are fetched from.
-///
-/// One host, stated once. The path shape is that host's published convention for
-/// resolving a file out of a repository.
+/// Where a model's files are fetched from; the path shape is that host's published convention.
 const HOST: &str = "https://huggingface.co";
 
 /// The tokenizer file, which lives in the base repository rather than beside the
@@ -54,16 +32,14 @@ const TOKENIZER: &str = "tokenizer.json";
 
 /// How long to wait for a connection before giving up on the host.
 ///
-/// Deliberately paired with **no overall deadline**: a slow link fetching five gigabytes
-/// is working, not hung, and the default whole-request timeout would abandon it. The
-/// connect phase is where a dead host actually shows up.
+/// There is no overall deadline: a slow link fetching gigabytes is working, and a dead host
+/// shows up at connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A model that runs here.
 ///
-/// The weights load on first use and stay loaded. The mutex is not for safety - it is
-/// because generation walks a key-value cache that belongs to one sequence at a time,
-/// so two concurrent requests through one model would interleave into nonsense.
+/// The weights load on first use and stay loaded. The mutex exists because generation walks a
+/// key-value cache for one sequence at a time.
 #[derive(Debug)]
 pub struct EmbeddedEngine {
     model: Offline,
@@ -82,9 +58,7 @@ struct Loaded {
 
 impl std::fmt::Debug for Loaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The weights are gigabytes and the tokeniser is a vocabulary; neither belongs
-        // in a debug line, and `missing_debug_implementations` is a workspace lint, so
-        // this is written rather than derived.
+        // Written rather than derived: neither the weights nor the tokeniser belong in a debug line.
         f.debug_struct("Loaded")
             .field("device", &self.device)
             .field("end_of_turn", &self.end_of_turn)
@@ -94,10 +68,8 @@ impl std::fmt::Debug for Loaded {
 
 /// One loader per architecture, dispatched from catalogue data.
 ///
-/// The reason this is an enum rather than a boxed trait: there are two, they are
-/// named in a data file, and an unknown name is refused rather than approximated. A
-/// model family read through another family's loader does not fail - it produces
-/// fluent output that is wrong, which is the exact shape principle 3 exists to stop.
+/// An enum: the loaders are named in a data file and an unknown name is refused, because another
+/// family's loader produces fluent wrong output rather than failing.
 enum Weights {
     Qwen3(quantized_qwen3::ModelWeights),
     Qwen2(quantized_qwen2::ModelWeights),
@@ -177,9 +149,8 @@ impl EmbeddedEngine {
         let tokenizer = Tokenizer::from_file(dir.join(TOKENIZER))
             .map_err(|e| Error::Model(format!("loading the tokeniser: {e}")))?;
         let end_of_turn = tokenizer.token_to_id(END_OF_TURN).ok_or_else(|| {
-            // Without it, generation only ever stops at the token cap: every reply
-            // would carry the start of an invented next turn, and every caller would
-            // have to strip it.
+            // Without the end-of-turn token, generation stops only at the token cap and every reply
+            // carries the start of an invented next turn.
             Error::Model(format!(
                 concat!(
                     "the tokeniser for {} has no `{}` token, so nothing would end ",
@@ -200,16 +171,8 @@ impl EmbeddedEngine {
 
     /// The device to place weights on: the processor, always.
     ///
-    /// **This engine is the fallback, and being the fallback is its whole job.** A
-    /// `cuda` feature used to sit here and was removed: it needed a vendor toolkit at
-    /// build time, produced a binary that would not load elsewhere, and covered one
-    /// vendor. [`crate::runtime`] reaches a GPU with none of that, from a binary
-    /// somebody was handed, so there was nothing left for the feature to be better at
-    /// (D219).
-    ///
-    /// An entry asking for an accelerator here is a configuration that cannot be
-    /// honoured, and it says so rather than quietly running slowly - which is what the
-    /// feature-gated version did, to a subscriber nobody had attached.
+    /// This engine is the CPU fallback; [`crate::runtime`] reaches a GPU with no build-time vendor
+    /// toolkit (D219). An entry asking for an accelerator here cannot be honoured, and says so.
     fn candle_device(&self) -> CandleDevice {
         if self.device == Device::Gpu {
             tracing::warn!(
@@ -226,10 +189,8 @@ impl EmbeddedEngine {
 
 /// Fetches a model's files if they are missing, and returns the weights.
 ///
-/// Free rather than a method because two engines need the same bytes: this one loads
-/// them in-process, and [`crate::runtime`] hands the path to a server it supervises.
-/// A GGUF is the same file either way, so a machine that has used one engine has
-/// already paid for the other.
+/// Free rather than a method because this engine and [`crate::runtime`] use the same GGUF, so a
+/// machine that used one has the other's download.
 ///
 /// # Errors
 ///
@@ -256,17 +217,11 @@ pub fn ensure_model(model: &Offline, cache_root: &Path) -> Result<PathBuf, Error
     Ok(weights)
 }
 
-/// Whether the **in-process** engine can put weights on an accelerator. It cannot.
+/// Whether the in-process engine can put weights on an accelerator. It cannot.
 ///
-/// A constant rather than a check, and kept as a function rather than inlined at its
-/// two call sites, because it is the thing that stops an accelerator entry from being
-/// offered by this engine - and the failure it prevents is worth keeping visible.
-///
-/// That failure happened: a machine with sixteen gigabytes of accelerator memory picked
-/// an in-process accelerator entry, sized a model against **VRAM**, then ran it on the
-/// processor - a model chosen for hardware it never touched, with nothing saying so.
-///
-/// [`crate::runtime`] is the accelerated path and needs no build feature at all (D219).
+/// A function so its callers keep this engine from being offered for an accelerator entry,
+/// which would size a model against VRAM and run it on the CPU. [`crate::runtime`] is the
+/// accelerated path (D219).
 #[must_use]
 pub const fn accelerator_supported() -> bool {
     false
@@ -277,11 +232,8 @@ const END_OF_TURN: &str = "<|im_end|>";
 
 /// Wraps a request in the chat template these models were trained on.
 ///
-/// `/no_think` is appended to the system message for Qwen3, which otherwise spends a
-/// large part of the token budget reasoning in the open before answering. This crate
-/// asks bounded questions and reads whole answers, so that budget is better spent on
-/// the answer - and the reasoning is not recorded anywhere, so it cannot be inspected
-/// even when it would be interesting.
+/// `/no_think` is appended to the system message for Qwen3, which otherwise spends much of the
+/// token budget reasoning before it answers; the reasoning is not recorded anywhere.
 fn chat_prompt(arch: Arch, request: &Request) -> String {
     let mut system = request.system.clone().unwrap_or_default();
     if arch == Arch::Qwen3 {
@@ -328,8 +280,8 @@ impl Engine for EmbeddedEngine {
         }
         let loaded = guard.as_mut().expect("just loaded");
         let text = generate(loaded, &chat_prompt(self.model.arch, request), request)?;
-        // `/no_think` above suppresses the reasoning *content* and not the tags, so a
-        // reply still arrives wrapped in an empty pair of them (D336).
+        // `/no_think` suppresses the reasoning content but not the tags, so a reply can still arrive
+        // wrapped in an empty pair.
         Ok(crate::engine::without_reasoning(&text).to_owned())
     }
 }
@@ -347,9 +299,8 @@ fn generate(loaded: &mut Loaded, prompt: &str, request: &Request) -> Result<Stri
         return Err(Error::Model("the prompt tokenised to nothing".into()));
     }
 
-    // A temperature of zero is argmax, which candle expresses as no sampling at all
-    // rather than as a temperature of zero - dividing logits by zero would not do what
-    // the caller meant.
+    // Zero temperature is argmax, which candle expresses as no sampling rather than dividing
+    // logits by zero.
     let temperature = (request.temperature > 0.0).then(|| f64::from(request.temperature));
     let mut sampler = LogitsProcessor::new(request.seed, temperature, None);
 
@@ -404,9 +355,8 @@ fn decode(loaded: &Loaded, tokens: &[u32]) -> Result<String, Error> {
 
 /// True when a file exists and holds something.
 ///
-/// A zero-length file is treated as absent. It is what a killed download leaves behind
-/// when it dies before the first write, and "exists" would otherwise be enough to skip
-/// re-fetching it forever.
+/// A zero-length file, as a download killed before its first write leaves, is treated as
+/// absent.
 fn whole(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
@@ -469,9 +419,8 @@ pub(crate) fn fetch(url: &str, destination: &Path, size_mb: u32, model: &str) ->
         .map_err(|e| Error::Download(format!("flushing {}: {e}", part.display())))?;
     drop(file);
 
-    // A truncated body is not an error at the socket, so the length is checked here.
-    // Without this the rename below would publish a partial file as a complete one,
-    // and the symptom would be a loader failing on corrupt weights.
+    // A truncated body is not a socket error, so the length is checked here before the rename
+    // publishes the file.
     if let Some(total) = expected {
         if written != total {
             let _ = std::fs::remove_file(&part);
@@ -503,9 +452,6 @@ mod tests {
     }
 
     /// Constructing an engine downloads nothing and writes nothing.
-    ///
-    /// The property behind "first use of a model, not first run of anything": listing
-    /// what is configured must not cost gigabytes.
     #[test]
     fn constructing_an_engine_touches_no_disk() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -521,9 +467,6 @@ mod tests {
     }
 
     /// A zero-length file counts as absent.
-    ///
-    /// It is what a download killed before its first write leaves behind, and treating
-    /// existence as sufficient would skip re-fetching it forever.
     #[test]
     fn an_empty_file_is_not_a_download() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -534,10 +477,8 @@ mod tests {
         assert!(whole(&path));
     }
 
-    /// The chat template closes the user turn and opens the assistant's.
-    ///
-    /// Getting this wrong does not error - the model simply continues the user's
-    /// message, and the reply looks like the question restated.
+    /// The chat template closes the user turn and opens the assistant's; otherwise the model
+    /// continues the user's message.
     #[test]
     fn the_chat_template_hands_the_turn_over() {
         let prompt = chat_prompt(Arch::Qwen2, &Request::new("why"));
@@ -570,16 +511,12 @@ mod tests {
         assert!(engine(dir.path()).describe().contains("CPU"));
     }
 
-    /// The real thing, end to end. Opt-in: it downloads a model and runs inference.
+    /// The offline path end to end: download, GGUF parse, architecture loader, chat template and
+    /// stop token. Opt-in, since it downloads a model and runs inference.
     ///
     /// ```text
     /// cargo test -p orbistoun-llm --release -- --ignored embedded_model
     /// ```
-    ///
-    /// This is the regression net for everything the unit tests above cannot reach -
-    /// the download, the GGUF parse, the loader matching the architecture, the chat
-    /// template, and the stop token. A green run means the offline path works; the
-    /// quality of what a small model says is a separate question.
     #[test]
     #[ignore = "downloads a model and runs inference; opt-in via --ignored"]
     fn embedded_model_loads_and_answers() {

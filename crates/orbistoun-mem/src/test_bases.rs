@@ -1,43 +1,18 @@
 //! Addresses for tests that reserve real host memory, handed out rather than chosen.
 //!
-//! # Why this is not a comment telling people to be careful
-//!
-//! Anything built on this crate reserves **real host memory at fixed addresses**, so two
-//! tests using the same base race and one of them fails. That has now happened twice, and
-//! both times the address was picked by a person reading a file and choosing a gap:
-//!
-//! - Inside `orbistoun-mem`, a new test chose `+0x300_0000` and a test three functions
-//!   later was already using it. It failed about one run in ten - often enough to be real,
-//!   rare enough to be dismissed.
-//! - Inside `orbistoun-thunk`, four tests for [`crate`]-backed storage all took the shipped
-//!   base, and whichever arrived second got `Conflict` (D323).
-//!
-//! `stack.rs` fixed the first by handing out bases from a counter, which removes the choice
-//! *within one binary*. `docs/BACKLOG.md` recorded that the same hazard **between** crates
-//! was still open, because a per-binary counter cannot see another binary - and `cargo test`
-//! runs several at once.
-//!
-//! This closes it. A crate takes its own [`Range`], and a test takes the next address from
-//! it. Nobody picks a number at either level.
-//!
-//! # Why it ships rather than hiding behind `cfg(test)`
-//!
-//! `#[cfg(test)]` items are invisible to other crates, so every dependent would define its
-//! own - which is exactly the duplication that lets two of them choose the same range. It
-//! is three constants and a counter, and it costs a crate that ignores it nothing.
+//! Tests built on this crate reserve host memory at fixed addresses, and two tests using the
+//! same base race: within one binary on parallel threads, and across binaries that `cargo test`
+//! runs at once. Each crate takes its own [`Range`] from the table in [`crates`], and each test
+//! takes the next address from it, so nobody picks a number (D324). It ships rather than
+//! living behind `cfg(test)`, which would hide it from the crates that need it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Distance between one crate's test range and the next.
-///
-/// Enormous relative to anything a test reserves, so a crate cannot run out and reach into
-/// its neighbour however many tests it grows.
+/// Distance between one crate's test range and the next, far larger than any crate's tests
+/// reserve.
 pub const RANGE_STRIDE: u64 = 0x0000_0100_0000_0000;
 
-/// Where the first crate's range begins.
-///
-/// Far from anything a normal process maps, so a test is about the mechanism rather than
-/// about luck.
+/// Where the first crate's range begins, far from anything a normal process maps.
 pub const FIRST_RANGE: u64 = 0x0000_6000_0000_0000;
 
 /// Distance between the address one test gets and the next within a range.
@@ -45,9 +20,7 @@ pub const TEST_STRIDE: u64 = 0x0000_0000_0100_0000;
 
 /// One crate's slice of the test address space.
 ///
-/// **Declare one `static` per crate and take every base from it.** Two tests in one binary
-/// run on parallel threads and two binaries run at once, so an address used twice fails
-/// either way - and neither failure looks like an address problem when it arrives.
+/// Declare one `static` per crate and take every base from it.
 #[derive(Debug)]
 pub struct Range {
     /// Where this crate's addresses start.
@@ -59,9 +32,8 @@ pub struct Range {
 impl Range {
     /// Claims the `nth` crate range.
     ///
-    /// **The numbers are assigned in [`crates`], not chosen at the call site.** A crate
-    /// passing a literal here is choosing an address again, one level up, which is the
-    /// thing this module exists to stop.
+    /// The numbers are assigned in [`crates`]; a literal at the call site is choosing an address
+    /// again.
     #[must_use]
     pub const fn nth(nth: u64) -> Self {
         Self {
@@ -70,28 +42,17 @@ impl Range {
         }
     }
 
-    /// An address no other test taking from **this instance** will get.
+    /// An address no other test taking from this instance will get.
     ///
-    /// # The distinction is the whole trap
-    ///
-    /// The cursor is atomic, so concurrent takes from one `Range` are safe. But a test that
-    /// writes `static RANGE: Range = Range::nth(crates::MINE);` *inside its own function* gets
-    /// its own instance - and a second test in the same crate doing the same gets another,
-    /// whose cursor also starts at zero and therefore hands out the same addresses.
-    ///
-    /// It cost a flaky gate: two loader tests reserved identical pages and whichever ran
-    /// second failed, so it passed alone and passed most of the time in a suite. Declare one
-    /// static per **test module**, not per test (D399).
+    /// The cursor is atomic, so concurrent takes from one `Range` are safe. A `static` declared
+    /// inside a test function is its own instance with its own cursor starting at zero, so
+    /// declare one static per test module, not per test (D324).
     pub fn take(&self) -> u64 {
         self.base + self.next.fetch_add(TEST_STRIDE, Ordering::Relaxed)
     }
 }
 
-/// Which crate has which range, in one place so no two can disagree.
-///
-/// A table rather than a constant per crate, because the property that matters is that they
-/// are **distinct** - and that is checkable here and nowhere else. A crate adding itself
-/// appends a line and the test below proves it collides with nothing.
+/// Which crate has which range, in one table so the test below can prove they are distinct.
 pub mod crates {
     /// `orbistoun-mem`.
     pub const MEM: u64 = 0;
@@ -121,11 +82,7 @@ pub mod crates {
 mod tests {
     use super::{RANGE_STRIDE, Range, TEST_STRIDE, crates};
 
-    /// **No two crates share a range**, which is the whole claim.
-    ///
-    /// Asserted rather than trusted to review: the table is the kind of thing somebody
-    /// appends to in a hurry, and a duplicate would reintroduce exactly the intermittent
-    /// cross-binary failure this replaced.
+    /// No two crates share a range.
     #[test]
     fn every_crate_range_is_distinct() {
         let mut seen = std::collections::BTreeMap::new();

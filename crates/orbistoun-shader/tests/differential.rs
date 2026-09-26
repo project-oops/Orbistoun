@@ -1,33 +1,12 @@
 //! Differential test: our decoder against a reference disassembler.
 //!
-//! # What this proves that a unit test cannot
-//!
-//! Every other test in this crate uses instruction streams this project generated
-//! from its own encoding table, so they check that the decoder implements the table.
-//! They cannot check that the *table* is right - a wrong row is self-consistent and
-//! passes every one of them.
-//!
-//! These fixtures come from somewhere else entirely. LLVM compiled them from source
-//! in `tools/shader-fixtures/`, and LLVM's disassembler said where each instruction
-//! begins. If our offsets track that reference exactly, then every instruction length
-//! in the table is right - and length is the value whose being wrong is catastrophic,
-//! because one bad length shifts every instruction after it.
-//!
-//! # Why offsets are the assertion
-//!
-//! Not instruction count, which can coincidentally match while the boundaries are
-//! wrong. Not the bytes, which are the input. **Offsets**: the position of every
-//! instruction is a claim derived from every length before it, so the first offset
-//! where the two disagree names the instruction whose encoding is wrong.
-//!
-//! # Provenance
-//!
-//! The reference is used to *detect* an error. Correcting one is done from the
-//! published specification, not by reading the reference implementation's tables
-//! (D085, and the note on `orbistoun-gen`'s `fixtures` module).
-//!
-//! Fixtures are committed, so this runs on any machine with no GPU toolchain present.
-//! Regenerate with `tools/shader-fixtures/generate.sh`.
+//! Unit tests use streams generated from the encoding table, so a wrong row passes them.
+//! These fixtures were compiled by LLVM from source in `tools/shader-fixtures/`, and LLVM's
+//! disassembler reported where each instruction begins. Offsets are the assertion: each is
+//! the sum of every length before it, so the first disagreement names the instruction whose
+//! encoding is wrong. The reference detects errors; corrections come from the published
+//! specification (D085). Fixtures are committed; regenerate with
+//! `tools/shader-fixtures/generate.sh`.
 
 use std::path::PathBuf;
 
@@ -69,28 +48,21 @@ fn read_reference(name: &str) -> Vec<Reference> {
                 offset,
                 length,
                 mnemonic,
-                // Everything left on the line. Operands contain spaces, so they cannot
-                // be a fixed number of whitespace-separated fields.
+                // Everything left on the line; operands contain spaces.
                 operands: parts.collect::<Vec<_>>().join(" "),
             }
         })
-        // Stop at the padding the compiler writes past the end of a shader. The fixture
-        // records everything the reference disassembler printed, which is the right
-        // thing for it to be - a faithful record of the compiler's output - but most of
-        // that output is padding: `arith` is nineteen instructions followed by
-        // forty-eight `s_code_end`.
-        //
-        // The decoder stops there deliberately, because padding is not code, so the
-        // comparison has to as well. Truncating here rather than in the fixture keeps
-        // the fixture honest about what was actually produced.
+        // Stop at the padding the compiler writes past the end of a shader (`arith` is
+        // nineteen instructions and forty-eight `s_code_end`). The decoder stops there, so
+        // the comparison does too; the fixture keeps the full compiler output.
         .take_while(|entry: &Reference| entry.mnemonic != PADDING)
         .collect()
 }
 
 /// The instruction compilers pad past the end of a shader with.
 ///
-/// Deliberately an illegal instruction, so a prefetch running off the end faults instead
-/// of executing whatever follows it in memory.
+/// An illegal instruction, so a prefetch running off the end faults instead of executing
+/// what follows in memory.
 const PADDING: &str = "s_code_end";
 
 fn read_binary(name: &str) -> Vec<u8> {
@@ -100,9 +72,8 @@ fn read_binary(name: &str) -> Vec<u8> {
 
 /// Encoding families a mnemonic prefix is allowed to belong to.
 ///
-/// A softer check than offsets, and it catches a different fault: a table where two
-/// families have swapped identifying bits can still produce correct lengths if they
-/// happen to share a width, and only a classification check notices.
+/// Catches two families with swapped identifying bits that share a width, which offsets
+/// alone would not.
 fn permitted_families(mnemonic: &str) -> &'static [&'static str] {
     if mnemonic.starts_with("s_load") || mnemonic.starts_with("s_store") {
         &["SMEM"]
@@ -124,8 +95,7 @@ fn permitted_families(mnemonic: &str) -> &'static [&'static str] {
     } else if mnemonic.starts_with("exp") {
         &["EXP"]
     } else {
-        // An unrecognised prefix is not a failure - it means this check has nothing to
-        // say about the instruction, and the offset assertion still applies.
+        // An unrecognised prefix means this check has nothing to say; offsets still apply.
         &[]
     }
 }
@@ -170,21 +140,11 @@ const FIXTURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Every fixture on disk is read by this suite.
 #[test]
 fn every_fixture_on_disk_is_in_the_list() {
-    // Generated fixtures carry their own extension, distinct from the one a shader
-    // dumped out of a title uses: that one is console-derived and banned from the index,
-    // these are committed on purpose. Sharing an extension conflated an obligation with
-    // its opposite, and the provenance guard was the thing that noticed.
-    //
-    // The list above is written by hand, and a fixture missing from it is not a
-    // failure - it is silence. Adding `unreached.s` to the generator produced its
-    // `.gcn` and `.txt` and changed nothing about this suite, which reported green
-    // while never opening either file.
-    //
-    // That is the same failure mode as a skipped device test passing quietly, and it
-    // deserves the same treatment: make the gap assertable rather than remembering to
-    // close it.
+    // The list above is written by hand; a fixture missing from it would be silently
+    // skipped. Generated fixtures use their own extension, distinct from guest dumps.
     let mut on_disk: Vec<String> = std::fs::read_dir(fixtures_dir())
         .expect("fixtures directory")
         .filter_map(|entry| {
@@ -203,6 +163,7 @@ fn every_fixture_on_disk_is_in_the_list() {
     );
 }
 
+/// Every instruction boundary and length matches the reference.
 #[test]
 fn every_instruction_boundary_matches_the_reference() {
     let table = EncodingTable::builtin().expect("built-in encoding table");
@@ -218,9 +179,8 @@ fn every_instruction_boundary_matches_the_reference() {
             "{name}: fixture is empty - regenerate with tools/shader-fixtures/generate.sh"
         );
 
-        // Checked before the per-instruction comparison: a desynchronised decode
-        // explains any number of downstream mismatches, and reporting those instead
-        // would bury the cause under its consequences.
+        // Checked first: a desynchronised decode explains any number of downstream
+        // mismatches.
         assert!(
             decoded.is_trustworthy(),
             concat!(
@@ -280,11 +240,9 @@ fn every_instruction_boundary_matches_the_reference() {
     assert!(total > 0, "no fixtures were checked");
 }
 
+/// No instruction in real compiler output is unrecognised.
 #[test]
 fn no_instruction_in_real_compiler_output_is_unrecognised() {
-    // The coverage claim. These are not contrived streams - they are what a real
-    // compiler emits for ordinary arithmetic, branching and memory access, so an
-    // unrecognised instruction here means the table has a hole in the common path.
     let table = EncodingTable::builtin().expect("built-in encoding table");
 
     for (name, exercises) in FIXTURES {
@@ -304,11 +262,9 @@ fn no_instruction_in_real_compiler_output_is_unrecognised() {
     }
 }
 
+/// Each instruction decodes into an encoding family its mnemonic permits.
 #[test]
 fn instructions_are_classified_into_the_right_encoding_family() {
-    // Offsets alone cannot catch two families with swapped identifying bits when they
-    // share an instruction width. The mnemonic says which family the reference thinks
-    // it is; this checks we agree.
     let table = EncodingTable::builtin().expect("built-in encoding table");
     let mut checked = 0usize;
 
@@ -341,20 +297,18 @@ fn instructions_are_classified_into_the_right_encoding_family() {
     );
 }
 
+/// A worklist over the whole fixture corpus renders a named top blocker.
 #[test]
 fn a_worklist_over_the_whole_fixture_corpus_reads_sensibly() {
-    // The end-to-end shape: decode real compiler output, accumulate coverage, rank the
-    // blockers, render. Each stage is unit-tested in isolation; this is the only test
-    // that runs all of them against material this project did not generate from its own
-    // table, which is where an interface between them would drift unnoticed.
+    // The only test running decode, coverage, ranking and rendering together on material
+    // not generated from the table.
     use orbistoun_shader::{CorpusCoverage, MnemonicTable, report};
 
     let table = EncodingTable::builtin().expect("table");
     let mnemonics = MnemonicTable::builtin().expect("mnemonics");
     let mut coverage = CorpusCoverage::new();
 
-    // Nothing is supported yet, so every instruction is a blocker. That is the honest
-    // starting state and the report should say so plainly.
+    // Nothing is supported, so every instruction is a blocker.
     for (name, _) in FIXTURES {
         coverage.observe(
             name,
@@ -373,12 +327,8 @@ fn a_worklist_over_the_whole_fixture_corpus_reads_sensibly() {
     println!("\n{rendered}");
 
     assert!(
-        // Derived from the list rather than written out, because the previous literal
-        // said nine and adding a fixture made this test fail for a reason that had
-        // nothing to do with what it checks.
-        //
-        // No translator was run here, so the count is the opcode-level bound and the line
-        // says which it is. That wording is asserted below rather than assumed.
+        // Derived from the list. No translator ran, so the line says the count is the
+        // opcode-level bound.
         rendered.contains(&format!("0 of {}", FIXTURES.len())),
         "nothing is supported, so no shader is complete:
 {rendered}"
@@ -392,11 +342,8 @@ fn a_worklist_over_the_whole_fixture_corpus_reads_sensibly() {
         !rendered.contains("suspect"),
         "every fixture should decode cleanly:\n{rendered}"
     );
-    // The top blocker must be named, not a bare opcode number - the whole point of the
-    // mnemonic table is that the first line of the worklist is actionable.
-    // Anchored on the table header, not on "shaders" - the summary line contains that
-    // word too, so the looser match selected the summary and the assertion below was
-    // checking the wrong line entirely.
+    // The top blocker carries a name. Anchored on the table header, since the summary
+    // line also contains "shaders".
     let first = rendered
         .lines()
         .skip_while(|l| !l.contains("known"))
@@ -408,22 +355,10 @@ fn a_worklist_over_the_whole_fixture_corpus_reads_sensibly() {
     );
 }
 
-/// Reduces a reference operand to the form the decoder produces.
-///
-/// The reference prints a multi-register operand as a range - `s[4:5]` for a 64-bit
-/// value held in two registers - while the decoder reports the first register, because
-/// how many registers an operand spans is a property of the *instruction*, not of the
-/// operand field, and that is not decoded yet.
-///
-/// Collapsing the range to its base is therefore the honest comparison: it checks the
-/// register number, which is what the operand field encodes, and stays silent about
-/// the width, which it does not.
 /// Whether two operand texts are the same number written differently.
 ///
-/// The reference prints a memory offset in hex and a branch offset in decimal, and this
-/// decoder prints every immediate in hex. That is a spelling difference and nothing
-/// else - so it is collapsed here rather than by making the decoder guess which
-/// immediates a disassembler would have chosen to print in base ten.
+/// The reference prints a memory offset in hex and a branch offset in decimal; this decoder
+/// prints every immediate in hex.
 fn same_number(left: &str, right: &str) -> bool {
     fn value(text: &str) -> Option<i64> {
         text.strip_prefix("0x")
@@ -435,8 +370,8 @@ fn same_number(left: &str, right: &str) -> bool {
 
 /// Tokens the reference prints that are not operands.
 ///
-/// The probe solver skips the same words for the same reason, and the two lists agreeing
-/// is what makes a solved layout comparable to a printed one.
+/// The probe solver skips the same words, which keeps a solved layout comparable to a
+/// printed one.
 const MODIFIERS: &[&str] = &[
     "off", "glc", "slc", "dlc", "lds", "gds", "offen", "idxen", "tfe", "nv", "done", "compr", "vm",
     "unorm",
@@ -444,18 +379,10 @@ const MODIFIERS: &[&str] = &[
 
 /// An operand the reference spells as a name, and the code it stands for.
 ///
-/// # Why these are written down here when nothing else is
-///
-/// Every other number in this comparison is one the reference printed. These are not:
-/// `mrt0` and `p10` are spellings, and the decoder reports the field's value. Something
-/// has to relate the two.
-///
-/// The codes were **measured** rather than transcribed - `derive_symbolic_codes` in
-/// `orbistoun-gen operands` holds an instruction constant, varies the name, and
-/// reads the bits that moved. What is written here is that measurement's result, so this
-/// test checks that the decoder agrees with the reference *given* that mapping, and does
-/// not independently establish the mapping. Worth being explicit about: if the mapping
-/// were wrong, the solver would have failed to find a consistent field long before this.
+/// `mrt0` and `p10` are spellings, while the decoder reports the field's value. The codes
+/// are measured by `derive_symbolic_codes` in `orbistoun-gen operands`, which holds an
+/// instruction constant, varies the name and reads the bits that moved. This test checks the
+/// decoder against the reference given that mapping; it does not establish the mapping.
 fn symbolic_code(token: &str) -> Option<u32> {
     let numbered = |prefix: &str, base: u32, count: u32| -> Option<u32> {
         let index: u32 = token.strip_prefix(prefix)?.parse().ok()?;
@@ -463,11 +390,9 @@ fn symbolic_code(token: &str) -> Option<u32> {
     };
     match token {
         "mrtz" => Some(8),
-        // Two unrelated things that happen to be nine: the export target `null`, and the
-        // geometry-engine allocation request the reference prints by name. Measured the same
-        // way as the targets - the assembler encodes `s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)`
-        // as 0xbf900009, and the console-run vertex program in `primitive.s` carries that
-        // exact word. Sharing an arm is the lint's doing and says nothing about them.
+        // Two unrelated nines: the export target `null`, and the geometry-engine allocation
+        // request; the assembler encodes `s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)` as 0xbf900009,
+        // the word in `primitive.s`. The shared arm is the lint's doing.
         "null" | "sendmsg(MSG_GS_ALLOC_REQ)" => Some(9),
         "prim" => Some(20),
         "p10" => Some(0),
@@ -481,34 +406,24 @@ fn symbolic_code(token: &str) -> Option<u32> {
 
 /// The reference's operand text, as the values a decoded operand could equal.
 ///
-/// # Why a piece can hold more than one operand
-///
-/// The reference does not put a comma between every operand. An export prints its target
-/// and its first source as `mrt0 v0`, and an interpolation prints an attribute and a
-/// channel as one token, `attr3.y`. Taking the first word of each comma-piece - which is
-/// what this did, to strip trailing modifiers - silently dropped the rest.
-///
-/// That was invisible while those families decoded no operands at all: with nothing to
-/// compare, nothing could mismatch. Solving their layouts turned the omission into a
-/// failure, which is the test doing its job a step later than would have been ideal.
+/// The reference does not put a comma between every operand: an export prints `mrt0 v0`,
+/// and an interpolation prints attribute and channel as one token, `attr3.y`. A register
+/// range collapses to its base register, since the operand field encodes the base and the
+/// span is a property of the instruction.
 fn normalise(reference: &str) -> Vec<String> {
     let mut out = Vec::new();
     for piece in reference.split(',') {
         for token in piece.split_whitespace() {
-            // A leading sign on a *register* is a source modifier - a separate field that
-            // negates the value on the way in - and the operand field itself still encodes
-            // the plain register number. Stripped only before a register letter: doing it
-            // unconditionally would make `-1.0` match `1.0` and hide a real sign error in
-            // the inline constants, which is a fault worth keeping loud.
+            // A leading sign on a register is a source modifier, a separate field; the
+            // operand field holds the plain register. Stripped only before a register
+            // letter, so `-1.0` never matches `1.0`.
             let token = match token.strip_prefix('-') {
                 Some(rest) if rest.starts_with('v') || rest.starts_with('s') => rest,
                 _ => token,
             };
-            // `off` is the reference's spelling for a flat access with no scalar base, and
-            // the field holds the code our operand table names `null` - the same code, named
-            // per field by one and globally by the other, which is a fact about the encoding
-            // rather than a disagreement. Offered alongside so the decoded `null` matches,
-            // and the token is still dropped as an operand, as every modifier is.
+            // `off` is the reference's spelling of a flat access with no scalar base; the
+            // field holds the code our operand table names `null`. Offered alongside, and
+            // the token is dropped as a modifier.
             if token == "off" {
                 out.push("null".to_owned());
                 continue;
@@ -526,25 +441,15 @@ fn normalise(reference: &str) -> Vec<String> {
                     }
                 }
             }
-            // Both spellings, not one. A name is only an export target *in an export* -
-            // `null` is one there and a special register in a vector instruction, and the
-            // reference prints it in both. Replacing the token with its code broke every
-            // instruction using the register sense, so the code is offered *alongside*
-            // rather than instead.
-            //
-            // This accepts a decoded `9` where the reference said `null`. That is a real
-            // loosening and a small one: the alternative is threading the family through
-            // here to decide which sense applies, and the decode error it would catch -
-            // a field read as a number where a register was meant - is already caught by
-            // every other operand of the same instruction.
+            // Both spellings: `null` is an export target in an export and a special register
+            // in a vector instruction. Accepting a decoded `9` for `null` is a small
+            // loosening; other operands of the same instruction catch a field misread as a
+            // number.
             if let Some(code) = symbolic_code(token) {
                 out.push(code.to_string());
             }
-            // `dmask:0xf` and the like: a value the encoding carries in a field, printed
-            // with the field's name attached. The probe solver splits these the same way
-            // and finds the field, so the comparison has to split them too - otherwise a
-            // correctly decoded image mask has nothing to match and every image
-            // instruction fails here the moment its layout is solved.
+            // `dmask:0xf` and the like: a field value printed with the field's name. The
+            // probe solver splits these the same way.
             if let Some((name, value)) = token.split_once(':')
                 && !name.is_empty()
                 && value.starts_with(|c: char| c.is_ascii_digit())
@@ -566,43 +471,22 @@ fn normalise(reference: &str) -> Vec<String> {
 
 /// Instructions the decoder knowingly reports no operands for.
 ///
-/// Every entry is a gap with a reason, and the list is asserted to be *exact* - so
-/// closing one fails here until it is removed, and opening a new one fails here too.
+/// Every entry is a gap with a reason, and the list is asserted exact, so closing or
+/// opening a gap fails until the list is updated.
 const NO_OPERANDS_DECODED: &[&str] = &[
-    // MIMG is no longer here. It was listed for the same reason MTBUF once was - its
-    // resource operand is a descriptor spanning several consecutive scalar registers, and a
-    // field read without modelling what it points at produces a number that reads like a
-    // register and is not one. The field turns out to name where the group *starts*, at a
-    // quarter scale, exactly as the buffer descriptors do, and probes solved it (worklog
-    // 549). What the descriptor points at is still unmodelled; that is the translator's
-    // problem now rather than the decoder's.
-    // Structured immediates: one encoded field carrying several independent values.
-    // `s_waitcnt` packs three separate counters into sixteen bits and the reference
-    // prints whichever are not at their maximum, so the operand text and the encoded
-    // field are not in any positional correspondence at all. `s_clause` is the same shape.
-    // The solver refuses rather than fitting a field to text it cannot explain.
+    // Structured immediates: one field carrying several values. `s_waitcnt` packs three
+    // counters into sixteen bits and the reference prints only those not at maximum, so
+    // text and field have no positional correspondence; `s_clause` is the same shape. The
+    // solver refuses rather than fit a field to text it cannot explain.
     "s_clause",
     "s_waitcnt",
 ];
 
+/// Every instruction that decodes no operands is listed in `NO_OPERANDS_DECODED`.
 #[test]
 fn an_instruction_that_decodes_no_operands_is_a_listed_gap() {
-    // The converse of the test above, and the reason this one exists.
-    //
-    // `every_decoded_operand_appears_in_the_reference` iterates the operands we produced
-    // and looks each up in the reference. Produce none and the loop body never runs, so
-    // it passes - vacuously, silently, and most loudly for exactly the instructions that
-    // matter most.
-    //
-    // That is not hypothetical. `v_mov_b32_e32` had no operand row at all: its
-    // destination is ambiguous between an eight-bit vector register and a nine-bit
-    // source whose top bit is a family constant, so the solver refused it, correctly.
-    // Every move in every fixture then decoded with an empty operand list and the whole
-    // differential suite stayed green. The most common instruction in the set.
-    //
-    // So the skip is inventoried rather than silent. A gap has to be written down here,
-    // which is cheap, and the cost of not writing it down is a test suite that reports
-    // success for an empty answer.
+    // `every_decoded_operand_appears_in_the_reference` passes vacuously for an instruction
+    // that decodes no operands, so such gaps are inventoried here.
     let table = EncodingTable::builtin().expect("table");
     let operands = operands();
     let mut silent: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -611,8 +495,7 @@ fn an_instruction_that_decodes_no_operands_is_a_listed_gap() {
         let reference = read_reference(name);
         let decoded = decode(&read_binary(name), &table, &operands);
         for (expected, actual) in reference.iter().zip(&decoded.instructions) {
-            // Only instructions the reference printed operands for. One that genuinely
-            // takes none - `s_endpgm` - decodes none correctly and is not a gap.
+            // Only instructions the reference printed operands for; `s_endpgm` takes none.
             if expected.operands.trim().is_empty() {
                 continue;
             }
@@ -638,12 +521,11 @@ the set of instructions decoding no operands has changed.
     );
 }
 
+/// Every decoded operand appears in the reference's operand text.
 #[test]
 fn every_decoded_operand_appears_in_the_reference() {
-    // The assertion that makes translation possible. An encoding table can be right
-    // about *which* instruction a word is and wrong about what it operates on, and
-    // that error is silent: a misread inline constant becomes a valid register index,
-    // so the resulting shader compiles, runs, and draws the wrong thing.
+    // A misread inline constant becomes a valid register index, so a wrong operand
+    // layout yields a shader that compiles and draws the wrong thing.
     let table = EncodingTable::builtin().expect("table");
     let operands = operands();
     let mut checked = 0usize;
@@ -653,29 +535,18 @@ fn every_decoded_operand_appears_in_the_reference() {
         let decoded = decode(&read_binary(name), &table, &operands);
 
         for (expected, actual) in reference.iter().zip(&decoded.instructions) {
-            // Families whose operand layout has not been established decode nothing,
-            // which is different from an instruction that takes nothing. Only the
-            // established ones are checked, so an unfilled family cannot pass by
-            // producing an empty list.
+            // Families with no established layout decode nothing and are skipped; an
+            // established layout must account for every operand.
             if !actual.operands_decoded {
                 continue;
             }
             let printed = normalise(&expected.operands);
             for operand in &actual.operands {
                 let rendered = operand.to_string();
-                // A 64-bit operand is printed by its pair name - `vcc` for the pair
-                // whose low half is `vcc_lo` - exactly as `s[4:5]` is printed for the
-                // pair based at `s4`. The decoder reports the register the field
-                // encodes, which is the low half. Accepting both is the same collapse
-                // as the range normalisation above, for the same reason: operand
-                // *width* is a property of the instruction and is not decoded yet.
-                // A named modifier at its default is not printed at all: the reference
-                // writes `ds_read_b32 v1, v2` where the encoding holds an offset field
-                // of zero. So a decoded zero immediate with no counterpart is a display
-                // convention rather than a decode that invented an operand.
-                //
-                // Narrow on purpose - it accepts only *zero*, so a wrongly decoded
-                // non-zero immediate still has to appear in the reference.
+                // A 64-bit operand is printed by its pair name (`vcc` for the pair based at
+                // `vcc_lo`), while the decoder reports the low register. A named modifier at
+                // its default is not printed, so a decoded zero immediate with no
+                // counterpart is accepted; any non-zero immediate must appear.
                 let omitted_default = rendered == "0x0";
                 assert!(
                     omitted_default

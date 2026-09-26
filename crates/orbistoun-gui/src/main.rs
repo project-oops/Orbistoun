@@ -1,30 +1,9 @@
 //! The desktop window.
 //!
-//! # It holds no logic, and that is enforced by what it depends on
-//!
-//! Principle 13: the crates are the emulator, and `orbistoun-cli`, this, and worker mode
-//! are interaction shims over them. This crate reads state and draws it. Every decision -
-//! what a title is, what a container contains, whether a run got further - is made below
-//! it and is reachable from the CLI too.
-//!
-//! Writing it is what proved the rule. Three things the CLI had quietly absorbed came out
-//! within an hour of starting: the run comparison, the previous-trace load, and worker
-//! bootstrap. None looked like logic in a shim until a second shim needed them (D160).
-//!
-//! # Why immediate mode
-//!
-//! A call tail, a register dump and an import ranking are tables that change wholesale
-//! every time a run finishes. Immediate mode draws from current state each frame, which is
-//! exactly that shape; a retained widget tree would need syncing against state that is
-//! replaced rather than edited (D161).
-//!
-//! # What is deliberately absent
-//!
-//! No output surface. The guest executes in a child process (D032) while the window lives
-//! here, so presenting a guest frame needs either a reparented child-owned window or
-//! shared images through external-memory extensions. That cost was deferred deliberately
-//! and stays deferred: there is no frame to present yet, and building the mechanism before
-//! there is anything to put through it is speculation by principle 12's own test.
+//! An interaction shim like `orbistoun-cli` and worker mode (D034): it reads state and
+//! draws it, and every decision is made in the crates below, reachable from the CLI too.
+//! Immediate mode (D161) suits tables such as a call tail, a register dump and an import
+//! ranking, which are replaced wholesale when a run finishes.
 
 mod app;
 mod capture;
@@ -40,14 +19,11 @@ mod shell_draw;
 
 /// Entry point.
 ///
-/// **Worker mode is checked first, before any window exists.** `WorkerHandle::spawn_self`
-/// re-executes this same binary with a flag, so a shim that cannot serve the protocol
-/// cannot run a guest at all. Reaching the window code in a worker process would open a
-/// second window every time a title was launched.
+/// Worker mode is checked first, before any window exists: `WorkerHandle::spawn_self`
+/// re-executes this binary with a flag (D033), and a worker must not open a window.
 fn main() -> eframe::Result<()> {
-    // This window had no logging at all. `run_native` does not return until it closes, so the
-    // guard bound here outlives every frame - dropping it early is how a session's log ends up
-    // missing the part somebody was reading it for.
+    // `run_native` does not return until the window closes, so this guard outlives every
+    // frame and the log covers the whole session.
     let _logging = oops_log::Logging::new("orbistoun-gui")
         .build(orbistoun_env::build::line_static())
         .init();
@@ -59,19 +35,17 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // A played window reads the host clock unless somebody chose otherwise (D723): the logical
-    // clock advances a step per reading, so a guest spinning on its counter races ahead of the
-    // player. Set before any worker exists, because each worker inherits it.
+    // A played window reads the host clock unless chosen otherwise (D723): the logical clock
+    // advances per reading, so a guest spinning on its counter races ahead of the player.
+    // Set before any worker exists, because each worker inherits it.
     if std::env::var_os(orbistoun_env::CLOCK.name).is_none() {
         // SAFETY: no worker or guest thread exists yet, and nothing started so far reads the
         // environment concurrently; the spawned workers inherit it at their start.
         unsafe { std::env::set_var(orbistoun_env::CLOCK.name, "host") };
     }
 
-    // Read before the window exists, so a contradictory command line is a message in the
-    // terminal that launched it rather than a window that opened somewhere unexplained.
-    // The stored default is read here too - it lives beside the library root, because both
-    // describe how somebody wants to meet their own collection (D314).
+    // Read before the window exists, so a contradictory command line is reported in the
+    // launching terminal. The stored default view lives beside the library root (D314).
     let paths = orbistoun_paths::Paths::resolve();
     let default_view = orbistoun_service::FileConfig::load(&paths.config_file())
         .map(|file| file.library.start_in)
@@ -84,31 +58,23 @@ fn main() -> eframe::Result<()> {
         }
     };
     // `--playback <file>`: captured input armed for the first launch, as if chosen from the
-    // toolbar's "playback input" before pressing launch (D721) - with `--title`, a capture
-    // played back where somebody can watch it.
+    // toolbar's "playback input" (D721).
     let playback = std::env::args()
         .skip_while(|argument| argument != "--playback")
         .nth(1)
         .map(std::path::PathBuf::from);
 
     let mut viewport = egui::ViewportBuilder::default()
-        // Large by default: the point of this window is showing a ranked import list
-        // and a call tail side by side, and neither is readable in a small one.
+        // Large by default, to fit a ranked import list and a call tail side by side.
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([900.0, 600.0])
         .with_title("orbistoun");
 
-    // The same logo the readme and the site use, so the taskbar entry is recognisable as
-    // this program rather than as whatever the platform picks for an unmarked window.
-    //
-    // `include_bytes!` resolves relative to *this file*, which is why the path is here and
-    // not behind a shared helper: a crate in oops-libs cannot embed a consumer's asset, the
-    // same constraint that keeps each application's documentation registry in the
-    // application.
+    // The project logo for the title bar and taskbar. `include_bytes!` resolves relative to
+    // this file, so the path cannot move behind a shared helper.
     match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),
-        // Reported and carried on, like the renderer line below. A window wearing the
-        // platform's default icon is worth more than no window.
+        // Reported and carried on: a window with the default icon is still usable.
         Err(e) => eprintln!("orbistoun: window icon: {e}"),
     }
 
@@ -120,11 +86,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "orbistoun",
         options,
-        // **Which backend this window got, reported rather than assumed.** `wgpu` picks from
-        // `Backends::PRIMARY`, which on this platform holds both Vulkan and DX12, and nothing
-        // here pins the choice - so "the window and the guest are both on Vulkan" was an
-        // assumption that any future frame-sharing work would have rested on. A window that
-        // cannot say what it rendered with is a report about nothing (D317).
+        // The backend is reported rather than assumed: `wgpu` picks from
+        // `Backends::PRIMARY`, which on Windows holds both Vulkan and DX12, unpinned here.
         Box::new(move |cc| {
             let renderer = cc.wgpu_render_state.as_ref().map_or_else(
                 || "renderer unknown".to_owned(),
@@ -133,8 +96,7 @@ fn main() -> eframe::Result<()> {
                     format!("{:?} - {}", info.backend, info.name)
                 },
             );
-            // To the terminal as well as the window, so it is answerable without opening
-            // anything - which is what makes it usable as a measurement rather than a label.
+            // To the terminal as well as the window, so it is readable without the window.
             eprintln!("orbistoun: renderer: {renderer}");
             Ok(Box::new(
                 app::App::new(start, renderer).arm_playback(playback),

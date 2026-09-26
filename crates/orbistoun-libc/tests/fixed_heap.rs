@@ -1,34 +1,21 @@
 //! The heap at an address the host did not choose.
 //!
-//! # Why this is one test in its own binary
-//!
-//! `ORBISTOUN_HEAP_BASE` is read once per process and the region is built once, so a test
-//! that sets it changes every other test in the same binary. More than that, the property
-//! under test is **an exact address**, which only holds while nothing else has allocated
-//! through the guest allocator first.
-//!
-//! So: one binary, one test function, and the variable set before the first call. Splitting
-//! it into several `#[test]`s would run them on parallel threads in an order nobody
-//! controls, and the first assertion below would then be asserting about whichever test won
-//! the race (`docs/TESTING.md`).
+//! `ORBISTOUN_HEAP_BASE` is read once per process and the property under test is an exact
+//! address, which holds only while nothing else has allocated first. So this binary has one
+//! test function, and the variable is set before the first call (`docs/TESTING.md`).
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
-/// Where this test puts its region.
-///
-/// Far from the bases the loader and the thunk table suggest, so a failure here is never a
-/// conflict with something else that happened to be mapped.
+/// Where this test puts its region, far from the bases the loader and the thunk table use.
 const BASE: u64 = 0x0000_6E00_0000_0000;
 
-/// How far the region reaches, mirroring `arena::SPAN`, which is crate-private.
+/// How far the region reaches, mirroring the crate-private `arena::SPAN`.
 ///
-/// Written out rather than exported: a constant exported only for a test is a claim the
-/// test makes about the implementation rather than about behaviour. If the module's span
-/// changes and this does not, the exhaustion step below stops exhausting - which is why
-/// that step asserts the *summary says it spilled* rather than counting allocations.
+/// The exhaustion step asserts that the summary reports a spill rather than counting
+/// allocations, so it holds if the span changes.
 const SPAN: u64 = 64 * 1024 * 1024;
 
-/// The alignment `malloc` allocates with, which is also the header size (D190).
+/// The alignment `malloc` allocates with, which is also the header size (D128).
 const HEADER: u64 = 16;
 
 fn implementation(name: &str) -> GuestFn {
@@ -49,25 +36,15 @@ fn call(name: &str, args: &[u64]) -> u64 {
     implementation(name)(&regs)
 }
 
-/// A pointer from the fixed heap is decided by the base, not by where the host put its heap.
-///
-/// # What this proves and what it cannot
-///
-/// It proves the address is a **function of the configured base** - the first block lands at
-/// exactly `base + 16` on every run, on every machine, whatever the host allocator was going
-/// to do. That is the whole point: D499's surviving candidate is a guest branching on a
-/// pointer value, and a pointer value that is host-chosen differs run to run.
-///
-/// It cannot prove the guest's *own* run becomes deterministic. Only twelve runs of the
-/// guest can say that, and this test is the instrument those runs use rather than the
-/// finding itself.
+/// A pointer from the fixed heap is decided by the configured base: the first block lands at
+/// exactly `base + 16`, whatever the host allocator would have done.
 #[test]
 fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
-    // SAFETY: set before any thread in this process reads the environment - this binary has
+    // SAFETY: set before any thread in this process reads the environment; this binary has
     // exactly one test, and nothing runs before it.
     unsafe { std::env::set_var("ORBISTOUN_HEAP_BASE", format!("{BASE:x}")) };
 
-    // --- the address is the base's, exactly -------------------------------------------
+    // The address is the base's, exactly.
     let first = call("malloc", &[64]);
     assert_eq!(
         first,
@@ -84,7 +61,7 @@ fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
         "the second block must follow the first inside the region, got {second:#x}"
     );
 
-    // --- and it is real, writable memory ----------------------------------------------
+    // And it is real, writable memory.
     for (offset, byte) in (0..64_u64).zip(0_u8..) {
         // SAFETY: inside the sixty-four bytes `malloc` just returned.
         unsafe {
@@ -102,7 +79,7 @@ fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
     };
     assert_eq!(last, 63, "the region must be writable and read back");
 
-    // --- freeing is a no-op, which is the documented behaviour ------------------------
+    // Freeing is a no-op.
     call("free", &[first]);
     let after = call("malloc", &[64]);
     assert_ne!(
@@ -110,7 +87,7 @@ fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
         "the region never reuses a block, so a fresh allocation must not land on a freed one"
     );
     // SAFETY: the region never returns a block, so the freed one is still mapped and still
-    // holds what was written. Reading it is the assertion.
+    // holds what was written.
     let survives = unsafe {
         std::ptr::read(std::ptr::with_exposed_provenance::<u8>(
             (first + 63) as usize,
@@ -121,16 +98,15 @@ fn a_fixed_heap_hands_out_addresses_the_host_did_not_choose() {
         "free must not have handed the block to the host allocator"
     );
 
-    // --- realloc copies across, with both blocks in the region ------------------------
+    // Realloc copies across, with both blocks in the region.
     let grown = call("realloc", &[after, 256]);
     assert!(
         (BASE..BASE + SPAN).contains(&grown),
         "a grown block stays in the region, got {grown:#x}"
     );
 
-    // --- exhaustion is reported, never hidden -----------------------------------------
-    // Sixty-five mebibyte blocks cannot fit in sixty-four mebibytes, so at least one of
-    // these must spill to the host heap whatever the region's exact span is.
+    // Exhaustion is reported. Sixty-five mebibyte blocks cannot fit in sixty-four mebibytes, so
+    // at least one spills to the host heap.
     let mut spilled_any = false;
     for _ in 0..65 {
         let block = call("malloc", &[1024 * 1024]);

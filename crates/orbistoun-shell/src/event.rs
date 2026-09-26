@@ -1,32 +1,13 @@
-//! Telling the guest that something happened to it.
+//! Lifecycle events the shell raises for the guest to drain.
 //!
-//! # The provenance problem, and why this file is shaped around it
+//! The repository has no lawful source for the vendor's event codes, so meaning and number
+//! are separate: [`ShellEvent`] is our vocabulary and carries no codes, and [`Delivery`]
+//! maps a meaning onto a measured code and is empty by default. An event with no code is
+//! not delivered and is counted, so a run report states what the guest was owed instead of
+//! a guessed code reaching it.
 //!
-//! A title finds out it was interrupted by draining an event queue the system fills. So
-//! the shell has to put something in that queue - and **this repository has no lawful
-//! source for what the vendor's events are numbered**.
-//!
-//! There are three ways to handle that and two of them are the same mistake. Inventing a
-//! plausible code is principle 3's forbidden case exactly: the guest reads a number that
-//! means something specific to it, acts on it, and the failure surfaces somewhere else
-//! entirely. Picking zero is the same thing wearing a humbler hat.
-//!
-//! The third is to **separate the meaning from the number**. [`ShellEvent`] is our
-//! vocabulary and carries no codes at all; [`Delivery`] maps a meaning onto a code and is
-//! **empty until something measures one** (principle 5). An event with no code is not
-//! delivered, and what is not delivered is *counted* - so a run report can say "the guest
-//! was owed four events and got none, because no code is known for them" rather than
-//! quietly behaving as though the shell were working.
-//!
-//! That is a worse emulator today and the only version that can become a correct one. The
-//! codes arrive the way every other fact here does: measured, attributed, and checkable
-//! (`known_by`), not recalled.
-//!
-//! # Why the queue is bounded
-//!
-//! A guest that never drains is the ordinary case, not the exception - most titles here do
-//! not reach their event loop. An unbounded queue behind a guest that never reads is a slow
-//! leak that looks like nothing at all, so the queue has a ceiling and says what it dropped.
+//! The queue is bounded because a guest that never drains is common; it drops the oldest
+//! event and counts the drop.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
@@ -35,9 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Something the shell did to the title, in our own vocabulary.
 ///
-/// **Meanings, not codes.** Nothing here is a vendor identifier and nothing here may
-/// become one; the mapping is [`Delivery`], kept separate precisely so this enum stays
-/// something the repository is entitled to assert.
+/// Meanings, not codes: the mapping to vendor identifiers is [`Delivery`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShellEvent {
@@ -47,17 +26,14 @@ pub enum ShellEvent {
     FocusGained,
     /// The title is no longer the presenting surface.
     ///
-    /// Distinct from [`Self::FocusLost`], and a title may reasonably act on one and not
-    /// the other: losing the pad is a reason to pause, losing the screen is a reason to
-    /// stop rendering.
+    /// Distinct from [`Self::FocusLost`]: losing the controller is a reason to pause,
+    /// losing the screen a reason to stop rendering.
     Backgrounded,
     /// The title is the presenting surface again.
     Foregrounded,
     /// The title is being asked to end.
     ///
-    /// **Not a guarantee of time to comply.** Whether the shell waits for the guest to
-    /// finish is the shell's decision, and a title that treats this as a promise of a
-    /// clean shutdown window is making an assumption nothing here has made to it.
+    /// It does not promise time to comply; whether the shell waits is the shell's decision.
     Quitting,
 }
 
@@ -77,10 +53,9 @@ impl ShellEvent {
 
 /// Which guest-visible code stands for which meaning.
 ///
-/// **Empty by default and that is the honest state.** Every entry is a claim about the
-/// vendor's interface, so one arrives only by measurement - and the file it is loaded from
-/// is a runtime input rather than a compiled constant, which is what lets a code be added
-/// without a rebuild and removed when it turns out to be wrong (principle 5).
+/// Empty by default. Every entry is a claim about the vendor's interface, so it comes only
+/// from measurement, loaded from a runtime file so a code is added or removed without a
+/// rebuild.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     /// One code per meaning. Absent means undeliverable.
@@ -115,9 +90,7 @@ impl Delivery {
 
 /// What the guest was owed and did not get.
 ///
-/// **The point of the whole arrangement.** Withholding an event is defensible; withholding
-/// it silently is the failure this project keeps writing decisions about. A count that
-/// reaches a run report turns "the shell does nothing" from a mystery into a measurement.
+/// Withheld events are counted so the run report states them rather than hiding them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Withheld {
     /// How many of each meaning could not be delivered, because no code is known.
@@ -164,16 +137,14 @@ impl Withheld {
 
 /// Most undelivered events held before the oldest is dropped.
 ///
-/// Small on purpose. These are lifecycle changes at the rate a person presses buttons, so
-/// a queue this deep already means the guest has not looked in a very long time - and a
-/// larger number would only postpone the same report.
+/// Small because these are lifecycle changes at the rate a person presses buttons; a queue
+/// this deep already means the guest is not draining.
 pub const CAPACITY: usize = 16;
 
 /// Events the shell has raised and the guest has not yet taken.
 ///
-/// Synchronised internally so a shim can hold one in a `static`: it is written by whatever
-/// carries shell requests into the worker and read by guest threads, which are not the
-/// same thread and never will be.
+/// Synchronised internally so a shim can hold one in a `static`: it is written by the
+/// thread carrying shell requests into the worker and read by guest threads.
 #[derive(Debug, Default)]
 pub struct EventQueue {
     inner: Mutex<Inner>,
@@ -208,9 +179,7 @@ impl Inner {
 impl EventQueue {
     /// An empty queue.
     ///
-    /// `const`, because a shim holds one in a `static`: the guest threads that drain it and
-    /// whatever carries shell requests into the worker are different threads, so there is no
-    /// single owner to hand it to.
+    /// `const`, because a shim holds one in a `static` shared by several threads.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -220,13 +189,8 @@ impl EventQueue {
 
     /// Offers an event to the guest.
     ///
-    /// **The undeliverable case is decided here rather than at the far end**, so the queue
-    /// only ever holds things the guest can actually be given. An event with no measured
-    /// code that sat in the queue waiting for one would block every later event behind it,
-    /// and the guest would be denied the events that *do* work because of the ones that do
-    /// not.
-    ///
-    /// Answers whether it was queued.
+    /// An event with no measured code is counted and not queued, so it never blocks the
+    /// deliverable events behind it. Answers whether it was queued.
     pub fn post(&self, event: ShellEvent, delivery: &Delivery) -> bool {
         let mut inner = self.lock();
         let Some(code) = delivery.code_for(event) else {
@@ -234,9 +198,7 @@ impl EventQueue {
             return false;
         };
         if inner.pending.len() >= CAPACITY {
-            // Oldest, so the most recent picture of what happened survives. A title that
-            // finally drains cares far more about "you are backgrounded now" than about
-            // the focus change fifteen presses ago.
+            // Drop the oldest, so the most recent state survives.
             inner.pending.pop_front();
             inner.withheld.overflowed += 1;
         }
@@ -263,17 +225,16 @@ impl EventQueue {
 
     /// Empties the queue, for a title ending.
     ///
-    /// The withheld tally is **kept**: it describes the run, not the queue, and a report
-    /// written after the title exited is exactly when somebody reads it.
+    /// The withheld tally is kept: it describes the run, not the queue, and the report is
+    /// written after the title exits.
     pub fn clear(&self) {
         self.lock().pending.clear();
     }
 
     /// The guard, with a poisoned lock treated as ordinary.
     ///
-    /// A panic in one guest thread must not turn every later event into a panic in a
-    /// different one; the queue holds plain numbers and no invariant a partial write could
-    /// break.
+    /// A panic in one guest thread must not panic every later caller; the queue holds plain
+    /// numbers and no invariant a partial write could break.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
@@ -292,10 +253,7 @@ mod tests {
         delivery
     }
 
-    /// **The default state of this crate is "cannot deliver anything", and it is deliberate.**
-    ///
-    /// If this test ever needs changing because codes were added to the shipped default,
-    /// the question to ask first is where those codes were measured.
+    /// The default table delivers nothing: every code must come from measurement.
     #[test]
     fn nothing_is_deliverable_until_a_code_has_been_measured() {
         assert!(Delivery::empty().is_empty());
@@ -341,10 +299,7 @@ mod tests {
         assert!(queue.withheld().is_empty());
     }
 
-    /// **A partly-measured table delivers what it knows and does not block on what it does not.**
-    ///
-    /// The failure this prevents: one unmapped meaning parked at the head of the queue,
-    /// denying the guest every deliverable event behind it.
+    /// A partly-measured table delivers what it knows and does not block on the rest.
     #[test]
     fn an_unmapped_event_does_not_block_the_ones_that_work() {
         let delivery = delivering(ShellEvent::Foregrounded, 4);
@@ -357,7 +312,7 @@ mod tests {
         assert_eq!(queue.withheld().unmapped.len(), 1);
     }
 
-    /// A guest that never drains does not grow the queue without bound, and it is said so.
+    /// A guest that never drains does not grow the queue without bound; drops are counted.
     #[test]
     fn a_guest_that_never_drains_overflows_visibly_rather_than_leaking() {
         let delivery = delivering(ShellEvent::FocusLost, 1);

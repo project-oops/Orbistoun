@@ -1,27 +1,12 @@
-//! Memory a guest asked for and got.
+//! Record of the mappings a guest asked for, placed or refused.
 //!
-//! # The other half of a report that only prints failures
+//! The run report prints failed reservations; this keeps the successes too, in order, so two
+//! runs whose arenas diverge can be compared by sequence. The arena is bump-allocated, so an
+//! address depends on everything placed before it.
 //!
-//! A run says *"1 reservation(s) failed, first at 0x7400047e0000"* and nothing at all about the
-//! hundreds that succeeded. That is the same asymmetry `orbistoun-fs` had before D578: the
-//! failures are visible, the successes are not, and a question about *where a pointer came
-//! from* can only be answered by the half that is missing.
-//!
-//! It is what a determinism question needs, too. Two runs of one build placed the same
-//! reservation at `0x7400047e0000` and `0x740004830000` - `0x50000` apart - and the arena is
-//! bump-allocated, so the difference is in what was placed *before* it. Nothing recorded what
-//! that was, so the two runs could be seen to differ and not where (D581).
-//!
-//! # Off unless asked for
-//!
-//! A title maps steadily for as long as it runs, so this is gated on `ORBISTOUN_TRACE_MAPS` and
-//! an ordinary run pays one atomic load per mapping - the rule `opened` follows, for the same
-//! reason (principle 9).
-//!
-//! # Recorded here, printed by the reporting layer
-//!
-//! Reached from the guest's own call on the guest's own stack, so it takes a lock and pushes a
-//! record and nothing else. Formatting happens after the guest has stopped (D381).
+//! Recording is gated on `ORBISTOUN_TRACE_MAPS`, so an ordinary run pays one atomic load per
+//! mapping. A record is pushed under a lock from the guest's call and formatted by the reporting
+//! layer after the guest stops.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -37,33 +22,28 @@ pub struct Mapping {
     pub readable: bool,
     /// How many guest calls had been made when it was placed.
     ///
-    /// **The field that turns a diff into a question somebody can answer.** Two runs whose
-    /// mapping sequences differ, compared by address alone, say only *that* they diverged;
-    /// compared by call ordinal they say *when*, and the call trace says what was running.
+    /// Compared by call ordinal, two diverging mapping sequences say when they diverged, not only
+    /// that they did.
     pub at_call: u64,
     /// Which import was most recently called when it was placed, by index.
     ///
-    /// **A call ordinal says when two runs diverged; this says what was running.** Resolving an
-    /// index to a name needs the import table, which this crate does not have - so the number
-    /// is carried and the reporting layer, which does, spells it (D581).
+    /// This crate has no import table, so the reporting layer resolves the index to a name.
     pub during: Option<u32>,
     /// Whether the guest asked for this address, rather than taking what the arena offered.
     ///
-    /// **Kept because it is the difference between two kinds of address.** A hinted mapping is
-    /// the guest's own arithmetic and repeats; an arena one is this process's counter and moves
-    /// when anything before it moves.
+    /// A hinted address is the guest's own arithmetic and repeats; an arena address moves when
+    /// anything placed before it moves.
     pub hinted: bool,
     /// Why the guest did not get it, when it did not.
     ///
-    /// [`None`] for a mapping that was placed. **A refusal and a success are the same event
-    /// from the guest's side** - it asked - and only one of them was being recorded (D602).
+    /// [`None`] for a mapping that was placed.
     pub refused: Option<String>,
 }
 
 /// Every mapping this run placed, in the order it placed them.
 ///
-/// A list rather than a set, because **order is the finding**: a bump allocator's addresses are
-/// a function of everything before them, so two runs that differ are diffed by sequence.
+/// A list rather than a set, because a bump allocator's addresses depend on everything before
+/// them, so two runs are diffed by sequence.
 fn placed() -> &'static Mutex<Vec<Mapping>> {
     static PLACED: OnceLock<Mutex<Vec<Mapping>>> = OnceLock::new();
     PLACED.get_or_init(|| Mutex::new(Vec::new()))
@@ -71,9 +51,8 @@ fn placed() -> &'static Mutex<Vec<Mapping>> {
 
 /// How many mappings to remember.
 ///
-/// A bound rather than none, for the reason `opened` gives: a list that grows with the length of
-/// the run rather than with what there is to say is a leak. Generous, because the divergence
-/// this exists to find can be anywhere in the sequence.
+/// Bounded so the record does not grow with the length of the run; generous because the
+/// divergence can be anywhere in the sequence.
 const MOST_REMEMBERED: usize = 4096;
 
 /// Whether recording is on: unread, on, off.
@@ -101,8 +80,7 @@ fn enabled() -> bool {
 
 /// Records a mapping the guest was given.
 ///
-/// Called only where one was actually placed, so the list holds what the guest got rather than
-/// what it asked for - which is the question the failure lines already answer.
+/// Called only where one was placed, so the list holds what the guest got.
 pub(crate) fn note(base: u64, len: u64, readable: bool, hinted: bool) {
     if len == 0 || !enabled() {
         return;
@@ -132,8 +110,7 @@ pub fn given() -> Vec<Mapping> {
 
 /// Whether this run was recording.
 ///
-/// For the reporting layer, which otherwise cannot tell an empty list from a list nobody asked
-/// for - opposite findings, and the distinction `opened` already draws.
+/// Lets the reporting layer tell an empty list from a list nobody asked for.
 #[must_use]
 pub fn recording() -> bool {
     enabled()
@@ -141,10 +118,7 @@ pub fn recording() -> bool {
 
 /// Records a mapping the guest asked for and did not get.
 ///
-/// **The record kept successes only**, which is the half `wanted` teaches to keep - and it left
-/// exactly one question unanswerable: a run missing a mapping could not be told from a run that
-/// never attempted it. PPSA03416 alternates between those two outcomes and the difference is
-/// worth one line (D602).
+/// Without it, a run missing a mapping could not be told from a run that never attempted it.
 pub(crate) fn note_failed(base: u64, len: u64, why: &str, hinted: bool) {
     if len == 0 || !enabled() {
         return;
@@ -167,11 +141,11 @@ pub(crate) fn note_failed(base: u64, len: u64, why: &str, hinted: bool) {
 }
 #[cfg(test)]
 mod tests {
-    /// Off by default, and an ordinary run records nothing.
+    /// Recording is off by default, and an ordinary run records nothing.
     #[test]
     fn nothing_is_recorded_unless_it_was_asked_for() {
-        // The environment is process-wide and tests share it, so this asserts the decision
-        // rather than setting the variable - mutating it here is the flaky shape D569 names.
+        // The environment is process-wide and shared by tests, so this asserts the decision rather
+        // than setting the variable.
         if orbistoun_env::TRACE_MAPS.is_set() {
             return;
         }
@@ -183,7 +157,7 @@ mod tests {
         assert!(!super::recording());
     }
 
-    /// A zero-length mapping is not one.
+    /// A zero-length mapping is not recorded.
     #[test]
     fn an_empty_mapping_is_not_recorded() {
         super::note(0x7400_0000_0000, 0, true, false);

@@ -1,23 +1,10 @@
 //! How many pads there are, and what drives each one.
 //!
-//! # Why keys are strings here
-//!
-//! This crate names a key as text and never as a windowing library's enum. Principle 12
-//! says abstract at the level of what the guest asks for rather than what the host
-//! provides, and a key is about as host-shaped as anything gets. A mapping written against
-//! one window toolkit would carry that toolkit into the input contract, and then into the
-//! settings file, where it would outlive any decision to change toolkits.
-//!
-//! So the window resolves a name to whatever its own key type is, and a name it does not
-//! recognise is reported rather than dropped: a mapping that silently ignores a typo is a
-//! button that does nothing for a reason nobody can see.
-//!
-//! # Why a port can be empty
-//!
-//! Two pads configured and one controller plugged in is the ordinary case, not an error.
-//! An empty port is a pad a title can see and nobody is holding, which is a real state - and
-//! a much better answer than pretending the port is not there, because a title that
-//! enumerates pads at startup would then never find the one somebody plugs in later.
+//! Keys are named as text, never as a windowing library's enum, so no toolkit leaks into the
+//! input contract or the settings file. The window resolves a name to its own key type and
+//! reports a name it does not recognise rather than dropping it. A port can be empty: a pad a
+//! title can see and nobody is holding is a real state, and a title enumerating pads at
+//! startup still finds it when a controller is plugged in later.
 
 use std::collections::BTreeMap;
 
@@ -27,9 +14,8 @@ use crate::pad::Button;
 
 /// Most pads this emulator offers.
 ///
-/// **Ours rather than the hardware's.** Nothing here has measured how many the target
-/// permits; four is what this offers, and a title that asks for a fifth is told there is
-/// not one, which is a state any title supporting fewer players already handles.
+/// This emulator's choice, not a measured hardware limit; a title asking for a fifth is told
+/// there is none, as a title supporting fewer players already handles.
 pub const MAX_PORTS: usize = 4;
 
 /// What drives one port.
@@ -43,27 +29,18 @@ pub enum Source {
     Keyboard,
     /// Driven by the nth gamepad the host reports.
     ///
-    /// By index rather than by name, because a name is not stable across a replug on every
-    /// platform and an index at least fails in an obvious way - the wrong pad moves, which
-    /// somebody notices immediately.
+    /// By index rather than name: names are not stable across a replug on every platform, and a
+    /// wrong index shows at once as the wrong pad moving.
     Gamepad {
         /// Which host gamepad, counting from zero.
         index: usize,
     },
     /// Driven by a recorded script of timed pad states, read from a file.
     ///
-    /// **The deterministic source, and the only one the headless worker can drive itself.**
-    /// [`Keyboard`](Self::Keyboard) and [`Gamepad`](Self::Gamepad) are live host input, which
-    /// reaches a run only through the GUI shim streaming it in as it happens - so a run with no
-    /// window, which is every compatibility run, can never press anything. A script is a pure
-    /// function of how long the run has been going ([`crate::script`]), sampled where the guest
-    /// asks, so the same file and the same guest give the same run. That is what makes a
-    /// compatibility result that got past a prompt mean anything (`REQ-20260915T0929Z-02a0`).
-    ///
-    /// The path is to a file of timed steps; the worker reads and validates it, because
-    /// deserialising a format is the caller's job and this crate carries no format dependency
-    /// (see [`crate::script`]). A path that does not resolve, or a script that does not
-    /// validate, fails the run rather than running an input nobody wrote (D153).
+    /// The deterministic source, and the only one a headless worker can drive: live keyboard and
+    /// gamepad input reaches a run only through the GUI shim. A script is a pure function of run
+    /// time ([`crate::script`]), so the same file and guest give the same run (D707). The worker
+    /// reads and validates the file, and a path or script that fails fails the run.
     Script {
         /// Where the script file is, resolved by the reader relative to the configuration.
         path: String,
@@ -72,9 +49,8 @@ pub enum Source {
 
 /// One way a key can push a stick.
 ///
-/// **A direction rather than an axis**, because a key is on or off and an axis is a
-/// number: one key per axis could only ever move it one way. Naming the eight pushes makes
-/// a keyboard mapping say exactly what it does.
+/// A direction rather than an axis: a key is on or off, so one key per axis could move it only
+/// one way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Push {
@@ -126,9 +102,8 @@ impl Push {
 
     /// Which stick this pushes, and how far along which axis.
     ///
-    /// The `y` axis is positive downward, matching [`crate::pad::Stick`] and every
-    /// windowing system on this host - so a source never has to flip one axis and leave
-    /// somebody wondering later which one was flipped.
+    /// `y` is positive downward, matching [`crate::pad::Stick`] and every windowing system on this
+    /// host.
     #[must_use]
     pub fn amount(self) -> (usize, f32, f32) {
         match self {
@@ -152,14 +127,12 @@ pub struct Port {
     pub source: Source,
     /// Which key stands for which button, when the source is the keyboard.
     ///
-    /// Kept even when the source is not the keyboard, so switching a port to keyboard and
-    /// back does not throw away a mapping somebody spent time on.
+    /// Kept when the source changes, so switching a port away from the keyboard and back keeps
+    /// its mapping.
     pub keys: BTreeMap<Button, String>,
     /// Which key pushes which stick, which way.
     ///
-    /// **Separate from `keys` because a stick is not a button.** A button is a bit and an
-    /// axis is a number, and a mapping that tried to hold both in one table would have to
-    /// pick one shape and lie about the other.
+    /// Separate from `keys`: a button is a bit and an axis is a number.
     #[serde(default)]
     pub axes: BTreeMap<Push, String>,
 }
@@ -176,9 +149,8 @@ impl Default for Port {
 
 /// The default keyboard layout for the first port.
 ///
-/// Chosen so somebody can reach the shell and move around without reading anything: arrows
-/// for the pad, the home row for the face buttons, and a key of its own for the shell
-/// button - which is the one this whole subsystem exists to make pressable.
+/// Arrows for the directional pad, the home row for the face buttons, and a key of its own
+/// for the shell button, so a person can reach the shell without reading anything.
 #[must_use]
 pub fn default_keys() -> BTreeMap<Button, String> {
     [
@@ -207,13 +179,9 @@ pub fn default_keys() -> BTreeMap<Button, String> {
 
 /// The default stick layout for the first port.
 ///
-/// **Bound out of the box, because the default port is a keyboard and most titles are 3D.**
-/// A shipped configuration that can press seventeen buttons and move neither stick cannot
-/// play them, and nothing would have said so.
-///
-/// The left stick takes the usual four; the right takes the block beside them, which leaves
-/// the arrows free for the directional pad - and the pad is what moves the shell, so it has
-/// to stay somewhere obvious.
+/// Bound out of the box, because the default port is a keyboard and most titles are 3D. The
+/// left stick takes the usual four keys and the right the block beside them, leaving the arrows
+/// for the directional pad that moves the shell.
 #[must_use]
 pub fn default_axes() -> BTreeMap<Push, String> {
     [
@@ -241,9 +209,8 @@ pub struct Pads {
 
 impl Default for Pads {
     fn default() -> Self {
-        // One port, driven by the keyboard. A default of zero would mean a fresh
-        // installation has no way to press anything, and a default of four would put three
-        // empty pads in front of somebody who has one keyboard.
+        // One keyboard port: zero would leave a fresh installation unable to press anything, and four
+        // would put three empty pads in front of one keyboard.
         Self {
             ports: vec![Port {
                 source: Source::Keyboard,
@@ -263,12 +230,8 @@ impl Pads {
 
     /// Changes the number of ports, keeping what is already configured.
     ///
-    /// **Growing adds empty ports and shrinking drops the last ones**, rather than
-    /// rebuilding the list. Somebody who set up port two and then changed the count to
-    /// three has not asked for port two to be forgotten.
-    ///
-    /// Clamped to `1..=MAX_PORTS`: zero ports is a machine nobody can press anything on,
-    /// which is never what a person meant to ask for.
+    /// Growing adds empty ports and shrinking drops the last ones. Clamped to `1..=MAX_PORTS`,
+    /// since zero ports leaves nothing to press.
     pub fn set_count(&mut self, count: usize) {
         let count = count.clamp(1, MAX_PORTS);
         while self.ports.len() < count {
@@ -277,19 +240,14 @@ impl Pads {
         self.ports.truncate(count);
     }
 
-    /// Keys bound to more than one button on one port.
+    /// Keys bound to more than one thing, on one port or across ports.
     ///
-    /// **Reported rather than resolved.** One key that presses two buttons is almost always
-    /// a mistake made while rebinding, and the alternative - letting whichever came first
-    /// win - is a binding that half works with nothing saying so.
+    /// Reported rather than resolved: letting the first binding win gives a binding that half
+    /// works with nothing saying so.
     #[must_use]
     pub fn conflicts(&self) -> Vec<Conflict> {
-        // **One map across every port, not one per port.** Built inside the loop, a key
-        // bound on two ports was never reported - and the two ways to set up a second
-        // keyboard player were to copy this port's layout, which silently collides on all
-        // seventeen and makes one person drive two pads, or to bind them all by hand. The
-        // docstring's own argument applies with a wider blast radius: a binding that half
-        // works with nothing saying so.
+        // One map across every port, so a key bound on two ports is reported: copying one port's
+        // layout to another would otherwise make one person drive two pads (D341).
         let mut seen: BTreeMap<&str, (usize, String)> = BTreeMap::new();
         let mut found = Vec::new();
         for (port, held) in self.ports.iter().enumerate() {
@@ -335,8 +293,7 @@ pub struct Conflict {
 impl Conflict {
     /// Whether the clash is between two different ports.
     ///
-    /// Worth distinguishing: within a port it is usually a slip while rebinding, and across
-    /// ports it means two players would move together.
+    /// Within a port it is usually a rebinding slip; across ports, two players move together.
     #[must_use]
     pub fn across_ports(&self) -> bool {
         self.port != self.other_port
@@ -372,10 +329,7 @@ mod tests {
     use super::{MAX_PORTS, Pads, Port, Source, default_keys};
     use crate::pad::Button;
 
-    /// **A fresh installation can press something.**
-    ///
-    /// A default of no ports, or of ports with no source, is a machine that looks broken to
-    /// somebody who has not opened the settings window yet.
+    /// A fresh installation has one port somebody can use.
     #[test]
     fn the_default_is_one_port_somebody_can_actually_use() {
         let pads = Pads::default();
@@ -387,12 +341,10 @@ mod tests {
         );
     }
 
-    /// **A script-driven port survives the round trip through the configuration file.**
+    /// A script-driven port survives the round trip through the configuration file.
     ///
-    /// The config file is where a compat run names an input script, so [`Source::Script`] has to
-    /// serialise and read back with its path intact. An internally-tagged enum with a struct
-    /// variant is the shape TOML is fussiest about, so the config schema is pinned by an actual
-    /// round trip rather than a hand-written shape that might not match the serialiser (D707).
+    /// An internally tagged enum with a struct variant is the shape TOML is fussiest about, so the
+    /// schema is pinned by a real round trip (D707).
     #[test]
     fn a_script_source_survives_the_config_round_trip() {
         let mut pads = Pads::default();
@@ -420,7 +372,7 @@ mod tests {
         }
     }
 
-    /// **Changing the count keeps what was already set up.**
+    /// Changing the count keeps what was already set up.
     #[test]
     fn growing_and_shrinking_preserves_configured_ports() {
         let mut pads = Pads::default();
@@ -449,10 +401,7 @@ mod tests {
         assert_eq!(pads.count(), MAX_PORTS);
     }
 
-    /// **A key bound twice is reported, not silently resolved.**
-    ///
-    /// Asserted on the failure: letting the first binding win produces a rebind that half
-    /// worked, with nothing anywhere saying why.
+    /// A key bound to two buttons is a reported conflict.
     #[test]
     fn one_key_on_two_buttons_is_a_reported_conflict() {
         let mut pads = Pads::default();
@@ -486,12 +435,7 @@ mod tests {
         assert_eq!(back, pads);
     }
 
-    /// **A key bound on two ports is a conflict too, and that was the whole bug.**
-    ///
-    /// The check built its seen-map *inside* the per-port loop, so a clash across ports was
-    /// invisible. That left exactly two ways to add a second keyboard player: copy this
-    /// port's layout and have all seventeen keys silently drive both pads, or bind every one
-    /// by hand. Found by review against a parallel implementation (D341).
+    /// A key bound on two ports is a reported conflict (D341).
     #[test]
     fn one_key_on_two_ports_is_a_reported_conflict() {
         let mut pads = Pads::default();
@@ -515,12 +459,7 @@ mod tests {
         );
     }
 
-    /// **Opposite pushes cancel to centre rather than one winning.**
-    ///
-    /// A keyboard can hold left and right at once and a stick cannot be in two places. The
-    /// reader sums and clamps, so the pair means "not pushed" - a position a stick can
-    /// actually be in. Letting the first one win would make left+right mean something no pad
-    /// can express (D341).
+    /// Opposite pushes sum to centre rather than one winning (D341).
     #[test]
     fn opposite_pushes_sum_to_centre() {
         for (a, b) in [
@@ -537,10 +476,7 @@ mod tests {
         }
     }
 
-    /// **The shipped layout can move a stick.**
-    ///
-    /// The default port is a keyboard, so a default with no stick bindings is a shipped
-    /// configuration that cannot play most 3D titles - and nothing would have said so.
+    /// The shipped layout binds both sticks.
     #[test]
     fn the_default_layout_binds_both_sticks() {
         let pads = Pads::default();

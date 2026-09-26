@@ -1,30 +1,10 @@
 //! Asking a model for vocabulary, as a tool rather than a test.
 //!
-//! # Why this is opt-in and separate
-//!
-//! Everything here is slow and optional. A round takes seconds to minutes; a boot of the
-//! guest takes about a tenth of a second. Nothing on the path a person actually runs -
-//! `./bin/orbistoun run` - may wait on a model, so this lives behind its own binary and the
-//! run report *mentions* it rather than invoking it.
-//!
-//! # Why a model is allowed to guess here and nowhere else
-//!
-//! **The space is not enumerable and the answer is checkable.** You cannot loop over every
-//! plausible English noun, which is what makes proposing them worth paying for; and the NID
-//! hash decides every proposal for free, so a wrong one costs a sweep and vanishes. It
-//! cannot enter the database, cannot produce a false name, and cannot mislead a reader.
-//!
-//! Both halves are load-bearing. Where enumeration works it wins - measured, repeatedly:
-//! sweeping every argument of every import beats any model asked to pick one. Where there
-//! is no oracle, output is plausible and unverifiable, which is the failure this project
-//! treats most seriously.
-//!
-//! # What it is short of, before you ask it for words
-//!
-//! `tests/shapes.rs` reports whether the names this project cannot spell are short of
-//! *vocabulary* or short of *shapes*. When it is shapes, more words buy nothing, and the
-//! measured answer today is that shapes outnumber words three to one. Ask this for words
-//! when the measurement says words.
+//! Slow and optional, so it lives behind its own binary and nothing a person runs routinely
+//! waits on it. A model may guess here because the space of plausible words is not enumerable
+//! and the NID hash checks every proposal for free: a wrong word costs a sweep and cannot become
+//! a name. Where enumeration works, it wins. `tests/shapes.rs` reports whether unspelled names
+//! are short of vocabulary or of shapes; more words help only in the first case.
 
 use crate::bank::Bank;
 use crate::vocabulary::{Context, Round, Vocabulary};
@@ -35,9 +15,8 @@ use std::path::Path;
 
 /// The positions a run extends, and what each holds.
 ///
-/// **Asked per position, not in general.** The first live run asked for vocabulary at large
-/// over six rounds and earned one usable word. Shortest list first, because that is where
-/// one word changes the most.
+/// Asked per position rather than for vocabulary at large, and shortest list first, where one
+/// word changes the most.
 pub const SLOTS: &[(&str, &str)] = &[
     (
         "tail",
@@ -58,14 +37,14 @@ pub const SLOTS: &[(&str, &str)] = &[
 
 /// Words asked for per round.
 ///
-/// **Small on purpose.** Asked for forty, a model with a dozen ideas pads the rest, and the
-/// padding is not inert - each one costs a place in the round's budget and a sweep.
+/// Small, because a model asked for many pads the list, and each padded word costs a place in
+/// the round's budget and a sweep.
 pub const WANT: usize = 12;
 
 /// What a run of this produced.
 #[derive(Debug, Default)]
 pub struct Summary {
-    /// Rounds actually asked.
+    /// Rounds asked.
     pub rounds: usize,
     /// Words offered and accepted for sweeping.
     pub proposed: usize,
@@ -94,8 +73,8 @@ pub fn wanted(path: &Path) -> Result<Vec<Nid>, crate::Error> {
 
 /// Confirmed names, to show the convention by example.
 ///
-/// Vendor-shaped only: the database also holds C++ ABI symbols and POSIX names, and showing
-/// `_ZNSt9exceptionD2Ev` as an example of the convention teaches the wrong one.
+/// Vendor-shaped only: the database also holds C++ ABI symbols and POSIX names, which would
+/// teach the wrong convention.
 ///
 /// # Errors
 ///
@@ -122,16 +101,10 @@ const VENDOR_PREFIX: &str = "sce";
 
 /// The libraries a set of vendor-shaped names belongs to.
 ///
-/// **Derived, not fabricated, and the difference was measurable.** This was once four
-/// hardcoded strings, and every name a model has ever earned came from a library that was
-/// not among them - the graphics driver, the auth library, spatial audio. A model told the
-/// wrong domain is being pointed away from the answer, and domain vocabulary is the one
-/// thing it is measurably good at proposing.
-///
-/// A name is the prefix, a module word, then the rest, and the module words are a list the
-/// grammar already carries - so this reads the real segmentation rather than guessing where
-/// the name divides. Longest first, because `Np` is a prefix of `NpAuth` and the longer one
-/// is the real library.
+/// Derived from the names, so the model is pointed at the domains the examples come from. A name
+/// is the prefix, a module word, then the rest; the module words are a list the grammar carries,
+/// so this reads the real segmentation. Longest first, because `Np` is a prefix of `NpAuth` and
+/// the longer one is the library.
 #[must_use]
 pub fn libraries_of(grammar: &Grammar, examples: &[String]) -> Vec<String> {
     let mut modules: Vec<String> = grammar
@@ -158,9 +131,8 @@ pub fn libraries_of(grammar: &Grammar, examples: &[String]) -> Vec<String> {
 
 /// What the model is told for one round.
 ///
-/// A different slice of the examples each time, and the libraries follow the slice - so the
-/// question narrows on its own as the window rotates, which matters because the vocabulary
-/// a model is any good at proposing is exactly the vocabulary that clusters by subsystem.
+/// A different slice of the examples each round, with the libraries following the slice, so
+/// the question narrows by subsystem as the window rotates.
 #[must_use]
 pub fn context_for(grammar: &Grammar, round: u64, role: &str, every_example: &[String]) -> Context {
     let window = (round as usize * 7) % every_example.len().max(1);
@@ -180,17 +152,12 @@ pub fn context_for(grammar: &Grammar, round: u64, role: &str, every_example: &[S
     }
 }
 
-/// Everything one run of the loop needs.
-///
-/// A struct rather than eight arguments, which is what it was until a lint objected and was
-/// right to. It also reads better at the call site: every field is named at the point it is
-/// supplied, and `rounds` stops being a bare integer between two references.
+/// Everything one run of the loop needs, with every field named at the call site.
 pub struct Session<'a> {
     /// What answers the questions.
     ///
-    /// A trait object rather than the service, so a caller can drive the whole loop with a
-    /// canned reply and no model at all - which is what makes it testable on a machine
-    /// with no GPU (D212).
+    /// A trait object, so a caller can drive the whole loop with a canned reply and no model
+    /// (D212).
     pub asker: &'a dyn orbistoun_llm::Ask,
     /// The vocabulary and shapes to extend.
     pub grammar: &'a Grammar,
@@ -202,18 +169,12 @@ pub struct Session<'a> {
     pub examples: &'a [String],
     /// Where a slot's banked words are kept.
     pub bank_for: &'a dyn Fn(&str) -> std::path::PathBuf,
-    /// Rounds per position.
-    ///
-    /// Measured over thirty-six: effectively all of the yield is in the first round of
-    /// each, so a long run is not a better one.
+    /// Rounds per position. Almost all of the yield is in each position's first round.
     pub rounds: u64,
 }
 
 impl std::fmt::Debug for Session<'_> {
-    /// Written by hand because a closure has no `Debug`.
-    ///
-    /// The alternative was to leave the whole struct without one, and the workspace denies
-    /// that - a type nobody can print is a type nobody can put in an error message.
+    /// Written by hand because a closure has no `Debug`, and the workspace requires one.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("asker", &self.asker)

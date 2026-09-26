@@ -1,36 +1,10 @@
 //! Reading a formatted string, and writing a formatted time.
 //!
-//! # The two calls between `ftpsrv` and a listening port
-//!
-//! Measured: with everything else implemented, `ftpsrv` imports exactly two names nothing here
-//! serves - `sscanf` and `strftime`. A file server parses the numbers out of a command with
-//! one and stamps a directory listing with the other, and it does both before it says anything
-//! useful.
-//!
-//! # `sscanf` is `printf` run backwards, and has the same limit
-//!
-//! Arguments arrive in registers, six of them, two spent on the string and the format. So four
-//! conversions can be assigned and a fifth cannot - the pointer for it was passed on the stack,
-//! which the trampoline does not reach (the same wall `snprintf` documents).
-//!
-//! **A format that needs more is refused entirely**, rather than assigning the four it can.
-//! Returning a partial count is worse than returning none: `sscanf`'s contract is that the
-//! count says how many conversions succeeded, so a caller that asked for six and is told four
-//! believes the first four are good - and here they might be, or the arguments might have been
-//! misaligned from the start. Refusing is the same choice the renderer makes and for the same
-//! reason (principle 3).
-//!
-//! # `struct tm` is citable, and its layout is the whole of `strftime`
-//!
-//! ```text
-//! include/time.h
-//!     int  tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst;
-//!     long tm_gmtoff;
-//!     char *tm_zone;
-//! ```
-//!
-//! Nine `int`s then a `long` - so the integers are at offsets 0 to 32 in four-byte steps, and
-//! nothing this needs lies past them.
+//! `sscanf` receives its destinations in registers: six arguments, two spent on the string
+//! and the format, so four conversions can be assigned. A format that needs more is refused
+//! entirely, since a partial count tells a caller its first conversions are good when the
+//! arguments may be misaligned. `strftime` reads the nine leading `int`s of FreeBSD's
+//! `struct tm` (`include/time.h`), at offsets 0 to 32 in four-byte steps.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
@@ -41,16 +15,15 @@ const ASSIGNABLE: usize = GUEST_ARG_REGISTERS - 2;
 
 /// What `sscanf` answers when the input ended before anything matched.
 ///
-/// `EOF`, which is negative one widened - and distinct from zero, which means the input was
-/// there and did not match.
+/// `EOF`, negative one widened; zero means the input was there and did not match.
 const NO_INPUT: u64 = -1_i64 as u64;
 
 /// Reads a NUL-terminated guest string as bytes.
 ///
 /// # Safety
 ///
-/// `address` must name a NUL-terminated string in guest memory, which is the contract every
-/// string function here has under the identity mapping (D014).
+/// `address` must name a NUL-terminated string in guest memory, as every string function
+/// here requires under the identity mapping.
 unsafe fn guest_str<'a>(address: u64) -> Option<&'a [u8]> {
     if address == 0 {
         return None;
@@ -87,17 +60,14 @@ impl Wanted {
 
 /// `sscanf(input, format, ...)`.
 ///
-/// Supports the conversions a command parser uses: `%d`, `%i`, `%u`, `%x`, `%o`, `%s`, `%c`,
-/// a literal `%%`, a maximum field width, and the assignment-suppressing `*`. Whitespace in
-/// the format matches any run of whitespace, as the standard says, and any other character
-/// must match itself.
-///
-/// Answers how many conversions were assigned, or `EOF` when the input ran out before the
-/// first one - which is the distinction a caller loops on.
+/// Supports `%d`, `%i`, `%u`, `%x`, `%o`, `%s`, `%c`, `%%`, a maximum field width and the
+/// assignment-suppressing `*`. Whitespace in the format matches any run of whitespace; any
+/// other character must match itself. Answers how many conversions were assigned, or `EOF`
+/// when the input ran out before the first one.
 ///
 /// Reference: ISO C `sscanf`; POSIX.1-2008 `sscanf(3)`.
 fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    // SAFETY: guest-supplied strings under the identity mapping (D014).
+    // SAFETY: guest-supplied strings under the identity mapping.
     let (Some(input), Some(format)) =
         (unsafe { guest_str(args[0]) }, unsafe { guest_str(args[1]) })
     else {
@@ -162,14 +132,13 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             b'o' => Wanted::Unsigned(8),
             b's' => Wanted::String,
             b'c' => Wanted::Character,
-            // A conversion this cannot read stops the scan rather than skipping it: carrying
-            // on would assign the *next* argument from the wrong place.
+            // A conversion this cannot read stops the scan: carrying on would assign the next
+            // argument from the wrong place.
             _ => return assigned,
         };
 
-        // **The register wall.** A destination past the sixth argument was passed on the
-        // stack, which the trampoline does not reach - so the whole call is refused rather
-        // than partly performed.
+        // A destination past the sixth argument was passed on the stack, which the trampoline does
+        // not reach, so the whole call is refused.
         let destination = if suppress {
             0
         } else {
@@ -252,8 +221,8 @@ fn scan_number(
     bytes: usize,
 ) -> Option<usize> {
     let mut cursor = at;
-    // Leading whitespace is skipped by every numeric conversion, which is the standard's rule
-    // and not the same as the format containing a space.
+    // Every numeric conversion skips leading whitespace, the standard's rule and not the same
+    // as a space in the format.
     while input.get(cursor).is_some_and(u8::is_ascii_whitespace) {
         cursor += 1;
     }
@@ -290,8 +259,8 @@ fn write_bytes(destination: u64, bytes: &[u8]) {
     let Ok(at) = usize::try_from(destination) else {
         return;
     };
-    // SAFETY: a guest-supplied destination under the identity mapping (D014), which the guest
-    // promised is large enough - the same promise the real call relies on.
+    // SAFETY: a guest-supplied destination under the identity mapping, which the guest promised
+    // is large enough, as the real call requires.
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -303,8 +272,7 @@ fn write_bytes(destination: u64, bytes: &[u8]) {
 
 /// Reads a `struct tm` a guest passed.
 ///
-/// Only the nine leading `int`s, which is everything the conversions below need: the offset
-/// and the zone name sit past them and nothing here reports a zone.
+/// Only the nine leading `int`s; the offset and zone name past them are not used.
 fn read_tm(address: u64) -> Option<[i32; 9]> {
     let at = usize::try_from(address).ok()?;
     if at == 0 {
@@ -313,8 +281,8 @@ fn read_tm(address: u64) -> Option<[i32; 9]> {
     let base = std::ptr::with_exposed_provenance::<i32>(at);
     let mut out = [0_i32; 9];
     for (index, field) in out.iter_mut().enumerate() {
-        // SAFETY: a guest-supplied `struct tm` under the identity mapping (D014), whose first
-        // nine fields are `int` per `include/time.h`.
+        // SAFETY: a guest-supplied `struct tm` under the identity mapping, whose first nine fields
+        // are `int` per `include/time.h`.
         let slot = unsafe { base.add(index) };
         // SAFETY: in bounds by the line above.
         *field = unsafe { std::ptr::read_unaligned(slot) };
@@ -351,19 +319,15 @@ const MONTHS: [&str; 12] = [
 
 /// `strftime(dest, max, format, tm)`.
 ///
-/// Supports what a listing or a log line uses: `%Y %m %d %H %M %S %y %j %b %B %a %A %p %e %F
-/// %T %D %R %n %t %%`. A conversion it cannot render **stops the whole thing** and answers
-/// zero, as the interface says it must when the result does not fit - a half-rendered
-/// timestamp is a wrong date rather than a short one.
-///
-/// **No timezone and no locale.** `%Z` and `%z` would need the fields past the nine this reads
-/// and a zone this emulator has no notion of, so they are among the conversions that stop it.
-/// The names are the C locale's, which is what a file listing wants.
+/// Supports `%Y %m %d %H %M %S %y %j %b %B %a %A %p %e %F %T %D %R %n %t %%` and the forms
+/// below. A conversion it cannot render answers zero, as the interface requires when the
+/// result does not fit: a half-rendered timestamp is a wrong date. No timezone or locale is
+/// modelled, so `%Z` and `%z` stop it and the names are the C locale's.
 ///
 /// Reference: ISO C `strftime`; POSIX.1-2008 `strftime(3)`; `struct tm` from `include/time.h`.
 fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (dest, max, format, tm) = (args[0], args[1] as usize, args[2], args[3]);
-    // SAFETY: a guest-supplied string under the identity mapping (D014).
+    // SAFETY: a guest-supplied string under the identity mapping.
     let (Some(format), Some(tm)) = (unsafe { guest_str(format) }, read_tm(tm)) else {
         return 0;
     };
@@ -390,17 +354,15 @@ fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             b'y' => format!("{:02}", (year + 1900).rem_euclid(100)),
             b'm' => format!("{:02}", mon + 1),
             b'd' => format!("{mday:02}"),
-            // Space-padded rather than zero-padded, which is the difference between `%e` and
-            // `%d` and the reason a listing uses it.
+            // Space-padded rather than zero-padded, the difference between `%e` and `%d`.
             b'e' => format!("{mday:2}"),
             b'H' => format!("{hour:02}"),
             b'M' => format!("{min:02}"),
             b'S' => format!("{sec:02}"),
             b'j' => format!("{:03}", yday + 1),
             b'p' => (if hour < 12 { "AM" } else { "PM" }).to_owned(),
-            // A `tm_wday` of nine is a guest with a broken structure, and rendering
-            // "Wednesday" for it would hide that - so an index the table does not hold stops
-            // the whole thing, exactly as an unrenderable conversion does.
+            // An index the table does not hold is a broken structure, and stops the rendering
+            // rather than naming a day.
             b'a' => match name(&DAYS, wday).and_then(|day| day.get(..3)) {
                 Some(short) => short.to_owned(),
                 None => return 0,
@@ -418,8 +380,7 @@ fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                 None => return 0,
             },
             b'F' => format!("{}-{:02}-{:02}", year + 1900, mon + 1, mday),
-            // `%X` is the C-locale time, which is `%T` outright; `%x` the C-locale date, `%D`.
-            // Only the C locale is modelled, so they are the same rendering, not a lookup.
+            // `%X` is the C-locale time, `%T`; `%x` the C-locale date, `%D`.
             b'T' | b'X' => format!("{hour:02}:{min:02}:{sec:02}"),
             b'R' => format!("{hour:02}:{min:02}"),
             b'D' | b'x' => format!(
@@ -447,8 +408,7 @@ fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             b'C' => format!("{:02}", (year + 1900).div_euclid(100)),
             // `%c` is the C-locale date-and-time, `%a %b %e %H:%M:%S %Y`.
             b'c' => {
-                // The day and month names refuse a broken structure, exactly as `%a` and `%b`
-                // do on their own - a `%c` that rendered a wrong name would hide it.
+                // The day and month names refuse a broken structure, as `%a` and `%b` do.
                 let (Some(day), Some(month)) = (
                     name(&DAYS, wday).and_then(|day| day.get(..3)),
                     name(&MONTHS, mon).and_then(|month| month.get(..3)),
@@ -460,14 +420,13 @@ fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                     year + 1900
                 )
             }
-            // Anything else - a zone, a week number, a locale modifier - stops it. A half-rendered
-            // timestamp is a wrong date rather than a short one.
+            // Anything else (a zone, a week number, a locale modifier) stops it.
             _ => return 0,
         };
         out.extend_from_slice(rendered.as_bytes());
     }
 
-    // One byte for the terminator, which is what makes the count meaningful.
+    // One byte for the terminator.
     if out.len() + 1 > max {
         return 0;
     }
@@ -478,8 +437,7 @@ fn strftime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// A name from a table, by an index a guest supplied.
 ///
-/// [`None`] rather than a wrap, because a `tm_wday` of nine is a guest with a broken structure
-/// and rendering "Wednesday" for it would hide that.
+/// [`None`] rather than a wrap, so a broken `tm_wday` is not rendered as a real day.
 fn name(table: &[&'static str], index: i32) -> Option<&'static str> {
     table.get(usize::try_from(index).ok()?).copied()
 }
@@ -546,11 +504,8 @@ mod tests {
         assert_eq!(second, 0, "and the second was left alone");
     }
 
-    /// **The register wall, refused rather than half-performed.**
-    ///
-    /// Five conversions need five destinations and only four arrive; assigning four and
-    /// answering four would tell a caller its first four are good when the arguments may have
-    /// been misaligned from the start.
+    /// A format needing more destinations than the registers carry is refused, not partly
+    /// assigned.
     #[test]
     fn a_format_needing_more_destinations_than_arrived_is_refused() {
         let mut values = [0_i32; 4];
@@ -650,10 +605,7 @@ mod tests {
         String::from_utf8(out[..end].to_vec()).expect("ascii")
     }
 
-    /// **The twelve-hour clock, the weekday numbers, and the C-locale date/time forms.**
-    ///
-    /// Each is a pure function of the fields `struct tm` holds. 2026-08-29 21:47:05 is an
-    /// afternoon, so `%I` wraps twenty-one to nine and `%r` reads `PM`.
+    /// The twelve-hour clock, the weekday numbers, and the C-locale date and time forms.
     #[test]
     fn the_twelve_hour_and_c_locale_forms_render() {
         let tm = a_time();
@@ -673,10 +625,7 @@ mod tests {
         assert_eq!(rendered(&tm, c"%c"), "Sat Aug 29 21:47:05 2026");
     }
 
-    /// **Midnight reads as twelve, and Sunday is the day the two weekday scales disagree.**
-    ///
-    /// `%I` of hour zero is twelve, not zero, and `%r` says `AM`; `%u` puts Sunday at seven where
-    /// `%w` puts it at zero, which is the one weekday that separates the ISO scale from the other.
+    /// Midnight reads as twelve with `AM`, and Sunday is seven under `%u` and zero under `%w`.
     #[test]
     fn midnight_and_sunday_hit_the_clock_and_weekday_edges() {
         // 2026-08-30 00:00:00, the Sunday after the Saturday above.
@@ -690,10 +639,7 @@ mod tests {
         );
     }
 
-    /// **A conversion it cannot render stops the whole thing.**
-    ///
-    /// A half-rendered timestamp is a wrong date rather than a short one, and a caller that
-    /// prints it has no way to tell.
+    /// A conversion it cannot render stops the whole rendering.
     #[test]
     fn a_conversion_it_cannot_render_answers_nothing() {
         let tm = a_time();

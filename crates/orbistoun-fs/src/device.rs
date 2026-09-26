@@ -1,27 +1,11 @@
-//! The paths that are not files, and are not on the host either.
+//! The paths that are devices rather than files, answered before the mount table.
 //!
-//! # Why a device needs its own answer
-//!
-//! Everything else in this crate resolves a guest path to a host path and opens it. `/dev/klog`
-//! has no host path: it is a stream the kernel produces, and here the kernel is this emulator.
-//! So it is answered before the mount table is consulted, by name.
-//!
-//! **A short list, deliberately.** Each entry is a claim that the platform has that device *and*
-//! that this project can serve it truthfully, because a device answering plausibly is worse than
-//! one that is absent - the guest cannot tell. `/dev/klog` earns its place because orbistoun
-//! already writes exactly what belongs in it (D389).
-//!
-//! `/dev/random` earns its place on a different argument, and it is worth stating rather than
-//! assuming: **a random device's contract is that its bytes carry no meaning.** There is no
-//! layout to invent and no vendor semantics to guess, which is what disqualifies most candidates
-//! here - so it can be served without inventing anything. Two titles ask for it by name (D578).
-//!
-//! What it hands back is deterministic, which is the emulator-wide trade
-//! [`orbistoun_core::entropy`] documents: a run that cannot be repeated cannot be measured. That
-//! is a real limitation and it is the *device's* limitation to state, not something for a reader
-//! to discover.
-//!
-//! `/dev/null` and the rest still do not have an argument made for them.
+//! `/dev/klog` has no host path: it is a stream the kernel produces, and here the kernel is
+//! this emulator, which already writes what belongs in it (D389). The list is short because
+//! each entry claims the platform has the device and that it is served truthfully; a device
+//! answering plausibly is worse than an absent one. `/dev/random` qualifies because its
+//! bytes carry no meaning, so serving it invents nothing. Its stream is deterministic,
+//! the emulator-wide trade [`orbistoun_core::entropy`] documents.
 
 use orbistoun_core::klog;
 
@@ -30,9 +14,8 @@ pub const KLOG: &str = "/dev/klog";
 
 /// The random device, and the name a program actually opens.
 ///
-/// **Both names, one device, which is FreeBSD's own arrangement** - `urandom` is the same
-/// device under a second name and neither blocks once the pool is seeded. The target kernel
-/// is FreeBSD-derived, so that is a citable shape rather than a guess.
+/// Both names reach one device, as on FreeBSD: `urandom` is the same device under a second
+/// name and neither blocks once seeded.
 pub const RANDOM: &str = "/dev/random";
 /// The second name for [`RANDOM`].
 pub const URANDOM: &str = "/dev/urandom";
@@ -48,8 +31,7 @@ pub enum Device {
 
 /// The device a path names, or nothing.
 ///
-/// Exact match only. A device is a name, not a prefix: `/dev/klog.old` is not the kernel log,
-/// and treating it as one would answer a guest's typo with a working descriptor.
+/// Exact match only: `/dev/klog.old` is not the kernel log.
 #[must_use]
 pub fn named(guest_path: &str) -> Option<Device> {
     match guest_path.replace('\\', "/").as_str() {
@@ -61,8 +43,8 @@ pub fn named(guest_path: &str) -> Option<Device> {
 
 /// The directory every device here lives in.
 ///
-/// Named so `stat` and a listing can agree that `/dev` is a directory without the mount table
-/// knowing about it - nothing is mounted there and nothing should be.
+/// Named so `stat` and a listing agree that `/dev` is a directory without anything mounted
+/// there.
 pub const DIRECTORY: &str = "/dev";
 
 /// Whether a guest path is the device directory.
@@ -85,17 +67,13 @@ pub fn in_directory() -> Vec<String> {
 impl Device {
     /// Reads from the device, answering how many bytes arrived.
     ///
-    /// Zero means *nothing waiting*, which for a log is not an end of file: the kernel is
-    /// still running and will have more to say. A guest that treats zero as the end stops
-    /// early, which is why `select` and `kevent` report a log with nothing in it as **not
-    /// ready** rather than readable.
+    /// Zero means nothing waiting, which for a log is not end of file: the kernel is still
+    /// running. So `select` and `kevent` report an empty log as not ready rather than readable.
     pub fn read(self, into: &mut [u8]) -> usize {
         match self {
             Self::KernelLog => klog::read_into(into),
-            // Deterministic on purpose, and that caveat belongs to the whole emulator rather
-            // than to this device - see `orbistoun_core::entropy`. A guest seeding a
-            // generator gets what it needs; a guest doing cryptography does not, and
-            // nothing observed does.
+            // Deterministic; see `orbistoun_core::entropy`. Enough to seed a generator, not
+            // for cryptography.
             Self::Random => {
                 orbistoun_core::entropy::fill(into);
                 into.len()
@@ -108,32 +86,24 @@ impl Device {
     pub fn readable(self) -> bool {
         match self {
             Self::KernelLog => klog::has_lines(),
-            // Always. FreeBSD's random device does not block once seeded, and there is no
-            // pool to be short of here - so a `select` reports it ready, which is true.
+            // Always: FreeBSD's random device does not block once seeded.
             Self::Random => true,
         }
     }
 
     /// Whether a write would be accepted.
     ///
-    /// **Never, for the kernel log.** A program writing to `/dev/klog` on this platform would
-    /// be asking the kernel to log on its behalf, and a guest that could inject lines into the
-    /// record another guest reads is a guest editing the evidence. Refused rather than
-    /// discarded, so a caller that checks knows.
-    ///
-    /// **Every device answers for itself, even where the answer is the same.** Clippy is right
-    /// that the arms are identical and wrong about what to do with it: collapsing them to a
-    /// wildcard would make the next device added silently non-writable, without anyone deciding
-    /// it. The reasons differ - the log must not be forgeable, the random pool has nothing to
-    /// stir - and each new device should have to write one.
+    /// Never for the kernel log: a guest writing lines into the record another guest reads
+    /// would be forging it. Refused rather than discarded, so a caller that checks knows.
+    /// Every device has its own arm, even where the answer is the same, so adding a device
+    /// means deciding its answer.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub const fn writable(self) -> bool {
         match self {
             Self::KernelLog => false,
-            // A write to FreeBSD's random device stirs the pool, and this pool is a fixed
-            // sequence with nothing to stir. Accepting the write would claim an effect
-            // that does not happen, so it is refused and the caller can tell (D578).
+            // A write to FreeBSD's random device stirs the pool; this pool is a fixed sequence
+            // with nothing to stir, so accepting the write would claim an effect (D578).
             Self::Random => false,
         }
     }
@@ -141,7 +111,7 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
-    /// **A device is a name, not a prefix.**
+    /// A device is a name, not a prefix.
     #[test]
     fn only_the_exact_name_is_the_device() {
         assert_eq!(super::named("/dev/klog"), Some(super::Device::KernelLog));
@@ -197,9 +167,7 @@ mod random_tests {
 
     /// A read fills the whole buffer and says so.
     ///
-    /// The failure this catches is the one the module note warns about: a device that answers
-    /// plausibly. Reporting bytes it did not write would hand a guest its own stale buffer and
-    /// call it randomness, which is indistinguishable from working until something hashes it.
+    /// Reporting bytes it did not write would hand a guest its own stale buffer as randomness.
     #[test]
     fn a_read_fills_what_it_says_it_filled() {
         let mut buffer = [0xA5_u8; 9];

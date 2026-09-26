@@ -1,42 +1,16 @@
 //! The diagnostics a run can be put under, and the one place that knows about them.
 //!
-//! # Why these are not settings
-//!
-//! Each answers **one question**, once. A setting configures how the emulator behaves; a
-//! diagnostic changes the program being observed in order to find something out, and then
-//! goes away. Anything here that outlived its question would drift into being a permanent
-//! workaround for a bug nobody found (D185).
-//!
-//! So they are read from the environment rather than the run configuration, and every one
-//! of them is **recorded in the run's conditions** - because a verdict taken under a
-//! diagnostic is not comparable with an ordinary one, and comparing them anyway is how a
-//! settings change gets read as progress (D181).
-//!
-//! # Why they share a home
-//!
-//! There were three of these, each with its own parser, its own conditions field and its
-//! own paragraph of documentation, and five more were wanted. Eight copies of one pattern
-//! is the shape that drifts - three separate instances of exactly that were removed the
-//! same day this was written (D213, D215, D217), and the last one had silently disabled
-//! the only tool that could see the biggest wall.
-//!
-//! The *interface* stays one variable per question, because `ORBISTOUN_STACK_FILL=5a` is
-//! easier to remember and to type than a grammar. Only the plumbing is shared (D220).
-//!
-//! # Why the method is black-box at all
-//!
-//! Worth stating plainly, because it is unusual. An emulator for this platform would
-//! normally answer "what does this structure hold?" by reading an SDK header, another
-//! project's source, or a disassembly of the vendor's own library. Principle 1 closes all
-//! three. What is left is measurement - so the measuring tools are not a side quest here,
-//! they *are* the method, and every one of them converts a guess into an experiment.
+//! Each diagnostic answers one question by changing the program being observed, so it is read
+//! from the environment rather than the run configuration (D221), and every one is recorded in
+//! the run's conditions: a verdict taken under a diagnostic is not comparable with an ordinary
+//! one (D181). The interface is one variable per question; only the parsing and recording are
+//! shared. Measurement is the method here, since provenance rules out reading vendor headers,
+//! other projects' source or disassembled vendor libraries.
 
 /// Which import an experiment applies to, and how that is decided.
-///
-/// Matching is by name **or by any part of the label**, so `libkernel::0x6abac2f3dc6f8cee`
-/// is reachable as `0x6abac2f3dc6f8cee`. That is not a convenience: the functions most
-/// worth experimenting on are the ones nothing has named, and a mechanism keyed only by
-/// name would exclude exactly them (D198).
+/// Matching is by name or by any part of the label, so `libkernel::0x6abac2f3dc6f8cee` is
+/// reachable as `0x6abac2f3dc6f8cee`: the functions most worth experimenting on are often the
+/// ones nothing has named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target(String);
 
@@ -56,121 +30,76 @@ impl Target {
 /// Everything a run has been asked to do differently.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Experiments {
-    /// Imports to dump arguments for even though something implements them.
-    ///
-    /// The case that matters is when the implementation is *yours* and you suspect it:
-    /// `memalign` was implemented in the morning and suspected by the afternoon, and the
-    /// tool had just stopped being able to show what it was asked for (D198).
+    /// Imports to dump arguments for even though something implements them, for when the
+    /// implementation itself is suspect.
     pub dump: Vec<Target>,
     /// A byte to fill the guest stack with before entering.
     ///
-    /// Answers "does this run depend on memory nobody wrote?". If two runs with different
-    /// fills disagree, the guest read something uninitialised; if they agree, a whole class
-    /// of explanation is eliminated rather than argued about (D185).
+    /// Two runs with different fills that disagree show the guest read uninitialised stack.
     pub stack_fill: Option<u8>,
     /// A byte to fill every heap allocation with before handing it to the guest.
     ///
-    /// The same question, for the region the stack poison cannot reach. The host allocator
-    /// returns uninitialised memory, which on a fresh page is usually **zero** - so a field
-    /// nobody filled in and a deliberate zero are currently indistinguishable on the heap,
-    /// and that is precisely the ambiguity the stack poison exists to remove (D220).
+    /// The host allocator's fresh pages are usually zero, so without a fill a field nobody wrote
+    /// and a deliberate zero look the same on the heap.
     pub heap_fill: Option<u8>,
     /// A value to plant at the address in an argument, before an import answers.
     ///
-    /// Answers "is this argument an out-parameter the guest expects filled?". A stub policy
-    /// can change what a function *answers*; nothing else can change what it *does* (D218).
+    /// Answers "is this argument an out-parameter the guest expects filled?".
     pub write: Vec<(Target, u8, i64, u64)>,
     /// Imports to answer with a chosen 64-bit value.
     ///
-    /// **The one thing no diagnostic here could do.** The others change what memory holds
-    /// or what an argument points at; none could change what a function *answers* unless
-    /// it had a name, because the only mechanism for that is a policy file keyed by one.
-    /// The function on the biggest wall has no name, so the question went untested while
-    /// reading as tested (D230).
+    /// Reaches functions by hash as well as name, which a policy file keyed by symbol name
+    /// cannot (D166).
     pub returns: Vec<(Target, u64)>,
     /// A byte to fill zero-initialised static data with before the guest runs.
     ///
-    /// The last region a poison could not reach. **It breaks a contract on purpose**: the
-    /// guest is entitled to assume `.bss` is zero, so this makes it misbehave in ways an
-    /// ordinary run would not. That is the point - if the value it was going to read from a
-    /// static was never written by anything, the fault moves and says so (D223).
+    /// It breaks the guarantee that `.bss` is zero on purpose: if the guest reads a static that
+    /// nothing wrote, the fault moves.
     pub bss_fill: Option<u8>,
     /// How the loader was told to resolve imports, when it was told anything.
     ///
-    /// **In this list because it changes what the guest is.** An import left unresolved is a
-    /// slot the guest finds empty, so a run under it reaches fewer imports by construction
-    /// and is not comparable with an ordinary one - which is the whole reason the two slots
-    /// exist (D312, D392).
+    /// An intervention: an unresolved import is a slot the guest finds empty, so the run is not
+    /// comparable with an ordinary one (D392).
     pub resolve: Option<String>,
     /// Which entry argument a run was told to hand over, when it was told.
     ///
-    /// **Registered here as well as declared**, which is the step that gets forgotten: a
-    /// setting `Experiments` cannot see is one a run can be under while reporting itself as
-    /// ordinary, and that is how an honest status slot gets written by a propped run (D397).
+    /// Registered here so a run under it cannot report itself as ordinary.
     pub entry_argument: Option<String>,
     /// Which handoff field was poisoned, when one was.
     ///
-    /// Also an intervention: the field holds an address nothing maps, so a runtime that uses
-    /// it stops there rather than where it otherwise would (D390).
+    /// An intervention: the field holds an address nothing maps, so a runtime that uses it stops
+    /// there (D390).
     pub handoff_poison: Option<String>,
     /// A region of guest address space to reserve before the run.
     ///
-    /// **Asks a question the other diagnostics cannot.** They all assume the guest computed
-    /// a wrong address; this asks whether the address was right all along and the region
-    /// simply was not there. A fault reported as *"an address in no region this run mapped"*
-    /// is as consistent with a missing mapping as with a bad pointer, and nothing had ever
-    /// tested the first reading (D224).
-    ///
-    /// Emphatically a diagnostic. Mapping memory until a fault stops happening is the
-    /// plausible-output trap principle 3 exists to refuse - what makes this legitimate is
-    /// that it is ephemeral, recorded in the conditions, and answers a question rather than
-    /// fixing a symptom.
+    /// Asks whether a faulting address was right and the region simply absent, rather than a bad
+    /// pointer. It is a diagnostic only: ephemeral, recorded in the conditions, never a fix.
     pub map: Option<(u64, u64)>,
     /// A value to write at a guest address before the run.
     ///
-    /// **The absolute-address counterpart to [`Self::write`].** That one plants into what an
-    /// argument points at, which reaches the stack; this reaches anything the loader mapped -
-    /// which is where a static object lives, and static objects are where the walls are.
-    ///
-    /// Applied after relocation and before the entry jump, so it survives everything the
-    /// loader does and is in place before the guest can read it (D223).
+    /// The absolute-address counterpart to [`Self::write`], reaching anything the loader mapped,
+    /// including static objects. Applied after relocation and before the entry jump.
     pub poke: Option<(u64, u64)>,
     /// A region of guest memory to snapshot before the run and diff afterwards.
     ///
-    /// **The cheapest way to ask what the guest actually initialised.** A watchpoint says
-    /// which byte was touched and when, at the cost of debug registers and a per-platform
-    /// API; a snapshot says which bytes ended up different, for a memcpy and no platform
-    /// code at all. For "did anything ever fill this slot in?" the second is the whole
-    /// answer (D223).
+    /// The cheapest way to ask what the guest initialised; see [`crate::watch`].
     pub watch: Option<(u64, u64)>,
 
-    /// Addresses to trap on, as written - parsed where a bad one can be refused out loud.
+    /// Addresses to trap on, as written.
     ///
-    /// **The other half of `watch`, kept separate on purpose.** A snapshot says which bytes
-    /// ended up different and this says which instruction touched them, so the cheap one is
-    /// still the one to run first and the two compose: the snapshot names the words nobody
-    /// wrote, and up to four of those addresses become the watchpoints for the next run
-    /// (D223, D276).
-    ///
-    /// Held as text rather than parsed here because [`Experiments::from_env`] has nowhere to
-    /// report a malformed request to, and a watchpoint that was asked for and silently not
-    /// armed is the exact failure every diagnostic in this crate exists to avoid (D185).
+    /// Separate from `watch` (D276): the snapshot names the words nobody wrote, and those
+    /// addresses become the next run's watchpoints. Held as text because
+    /// [`Experiments::from_env`] cannot report a malformed request; [`Self::watchpoints`] parses
+    /// it where a refusal can halt the run.
     pub watchpoint: String,
     /// Whether to write self-identifying values into the memory-query structure.
     ///
-    /// **The cheapest diagnostic here, and the most standard.** Instead of plausible
-    /// values, each field gets a value that names itself - so whatever the guest does next
-    /// says which field it read. No watchpoints and no new machinery: only different bytes.
-    ///
-    /// It has already worked by accident. The guest's next query offset is the `end` value,
-    /// which is how field 1 is known to be the one it walks by - nobody set out to learn
-    /// that (D220).
+    /// Each field gets a value that names itself, so whatever the guest does next says which
+    /// field it read.
     pub mark_query: bool,
     /// Whether the asynchronous file path delivers the file it resolved.
     ///
-    /// **Carried here because it intervenes**, and a diagnostic the conditions record does not
-    /// know about produces a verdict with no caveat beside it - which is the whole thing
-    /// `needs_caveat` exists to prevent (D569, D589).
+    /// Carried here because it intervenes, so the verdict carries a caveat.
     pub apr_deliver: bool,
 }
 
@@ -201,33 +130,18 @@ impl Experiments {
         *self == Self::default()
     }
 
-    /// Whether any diagnostic in force **changes the program** rather than only observing.
+    /// Whether any diagnostic in force changes the program rather than only observing (D227).
     ///
-    /// # Asked of the registry, not of a list kept beside it
-    ///
-    /// This used to enumerate every field of this struct against its variable's effect, with a
-    /// note saying the *effect* was derived so it could not be wrong in two places. The effects
-    /// were - the **presence** list was not, and it was hand-maintained. A diagnostic added
-    /// without an entry here was silently non-intervening.
-    ///
-    /// That is what happened to `ORBISTOUN_TAG_PLACEHOLDERS` within an hour of it existing: three
-    /// titles' honest compatibility records were overwritten by tagged runs, because the guard
-    /// that refuses to record an intervened run (D227, D355) never saw the intervention. The same
-    /// D220 shape as every other setting this project has consulted nowhere.
-    ///
-    /// Asking [`orbistoun_env::active`] closes the class rather than the instance: every variable
-    /// that is set is checked against the effect the registry records for it, so a new diagnostic
-    /// is covered by existing. It also errs the safe way - a variable set but unparseable still
-    /// counts as intervening, so the run is refused rather than filed (D569).
+    /// Asked of the [`orbistoun_env`] registry for every variable that is set, so a new diagnostic
+    /// is covered by being declared. A variable set but unparseable still counts as intervening,
+    /// so the run is refused rather than recorded.
     pub fn intervenes(&self) -> bool {
         any_intervenes(&orbistoun_env::active())
     }
 
     /// Every active diagnostic, in one line, for the run conditions.
     ///
-    /// **Not the switches - what they did.** `dump` costs nothing to state; the others carry
-    /// what they changed, because a diagnostic that was requested and had no effect must not
-    /// read the same as one that ran (D218).
+    /// Each part states what the diagnostic changed, not only that it was switched on.
     pub fn describe(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if !self.dump.is_empty() {
@@ -286,9 +200,8 @@ impl Experiments {
 
     /// The watchpoints this run asked for, or why the request cannot be honoured.
     ///
-    /// Separated from [`Self::from_env`] so the caller decides what a refusal means - which
-    /// here is halting before the guest starts, because running anyway would produce a
-    /// report indistinguishable from one where the watchpoints had worked.
+    /// Separated from [`Self::from_env`] so the caller decides what a refusal means: here, halting
+    /// before the guest starts, since a run without its watchpoints reads like one with them.
     ///
     /// # Errors
     ///
@@ -317,8 +230,7 @@ fn byte(raw: &str) -> Option<u8> {
 
 /// Whether a switch with no value is on.
 ///
-/// Anything but an explicit off. A switch somebody set to `0` meaning "off" and got "on"
-/// would be a diagnostic running when nobody asked, which is worse than one that refuses.
+/// Anything but an explicit off, so `0` meaning "off" never runs a diagnostic nobody asked for.
 fn truthy(raw: &str) -> bool {
     !raw.is_empty() && !matches!(raw, "0" | "off" | "no" | "false")
 }
@@ -334,9 +246,7 @@ fn parse_pair(raw: &str) -> Option<(u64, u64)> {
 
 /// `<addr>` or `<addr>+<len>`, refused outright when it is neither.
 ///
-/// A default length rather than a required one, because the common case is "show me what
-/// happened around this address" and a person copying an address out of a fault report
-/// should not have to invent a size to go with it.
+/// The length defaults, so an address copied out of a fault report needs no invented size.
 fn parse_region(raw: &str) -> Option<(u64, u64)> {
     /// Enough for a small structure and its neighbours, which is what a report is read for.
     const DEFAULT_LENGTH: u64 = 0x80;
@@ -362,35 +272,25 @@ fn number(text: &str) -> Option<u64> {
     )
 }
 
-/// `<import>:<slot>[+<offset>]:<value>`, comma-separated for more than one.
-///
-/// A malformed request that silently planted nothing would be reported as "the experiment
-/// ran and changed nothing", which is the failure this whole mechanism exists to avoid - so
-/// **one bad clause refuses the whole list** rather than quietly planting the rest.
-///
-/// The offset is what makes a structure addressable. Without it only the word an argument
-/// points *at* can be planted, and the question at a wall is which member of that structure
-/// the guest was waiting for. With distinct values per clause, one run answers it (D229).
 /// Whether a target is shaped like a label rather than like a mis-split clause.
 ///
-/// **Reading a clause from the right makes the target greedy, and this is the guard on
-/// it.** A label is a bare symbol, a bare hash, or `library::symbol` - so it may hold
-/// double colons and must hold no single one. Without this, `f:0x1:0x2` parses happily
-/// as a target of `f:0x1`, which is not a name anything exports; an existing test said so
-/// and caught the first version of this change.
+/// Reading a clause from the right makes the target greedy, and this guards it: a label is a
+/// bare symbol, a bare hash, or `library::symbol`, so it may hold double colons and no single
+/// one. Without it `f:0x1:0x2` parses as a target of `f:0x1`.
 fn is_label(target: &str) -> bool {
     !target.replace("::", "").contains(':')
 }
 
+/// `<import>:<slot>[+<offset>]:<value>`, comma-separated for more than one.
+///
+/// One bad clause refuses the whole list, since a partly planted list would report an
+/// experiment that ran. The signed offset addresses a member of the structure an argument
+/// points at, and distinct values per clause let one run name the member the guest used.
 fn parse_write(raw: &str) -> Vec<(Target, u8, i64, u64)> {
     let mut plants = Vec::new();
     for clause in raw.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-        // **From the right, so the import may contain colons.** The trailing two fields
-        // are fixed - a slot and a value - so everything before them is the target, and
-        // `libkernel::sceFoo` becomes expressible. Splitting left to right could not
-        // represent it: a qualified label produced five fields where three were expected
-        // and the whole clause was rejected, which is how two hundred and seventy-six runs
-        // planted nothing and reported twenty-three clean negatives.
+        // From the right, so the import may be qualified: the trailing slot and value are fixed and
+        // everything before them is the target.
         let mut parts = clause.rsplitn(3, ':');
         let (Some(value), Some(slot), Some(import)) = (parts.next(), parts.next(), parts.next())
         else {
@@ -450,10 +350,8 @@ fn parse_returns(raw: &str) -> Vec<(Target, u64)> {
 
 /// Whether any of these active variables changes the program.
 ///
-/// **The decision, with the environment left outside it.** [`Experiments::intervenes`] is the thin
-/// wrapper that reads; this is the part worth testing, and testing it needs no process-global
-/// mutation - which in a parallel suite is flaky by construction and is what principle 8's "a pure
-/// decision function plus a thin effectful wrapper" exists to avoid (D569).
+/// The decision, with the environment left outside it: [`Experiments::intervenes`] is the thin
+/// wrapper that reads, and this is testable without mutating process-global state.
 fn any_intervenes(active: &[(&'static orbistoun_env::Var, String)]) -> bool {
     active.iter().any(|(var, _)| var.effect.needs_caveat())
 }
@@ -462,13 +360,7 @@ fn any_intervenes(active: &[(&'static orbistoun_env::Var, String)]) -> bool {
 mod tests {
     use super::{Experiments, Target, byte, parse_returns, parse_write, targets, truthy};
 
-    /// **A qualified label can be asked for, and could not be before.**
-    ///
-    /// `ORBISTOUN_WRITE` is `<import>:<slot>:<value>`. Split left to right,
-    /// `libkernel::sceFoo:1:0x1100` is five fields where three are expected, so the whole
-    /// clause was discarded and the run planted nothing - silently, because a run that
-    /// plants nothing looks exactly like one that changed nothing. That distinction is the
-    /// only reason it was ever noticed.
+    /// A library-qualified label can be asked for in a plant and a forced return.
     #[test]
     fn a_library_qualified_import_can_be_asked_for() {
         assert_eq!(
@@ -481,11 +373,7 @@ mod tests {
         );
     }
 
-    /// **A stray single colon is still a mis-split, not a name.**
-    ///
-    /// Reading from the right makes the target greedy, so it has to be checked. A label is
-    /// a bare symbol, a bare hash, or `library::symbol`; `f:0x1` is none of those, and an
-    /// existing test caught the first version of this change accepting it.
+    /// A stray single colon is a mis-split, not a name, and a real label is still accepted.
     #[test]
     fn a_target_with_a_stray_colon_is_refused() {
         assert!(parse_returns("f:0x1:0x2").is_empty());
@@ -511,9 +399,7 @@ mod tests {
 
     /// Too few fields is still refused, rather than silently taking a default.
     ///
-    /// Reading from the right makes over-long clauses legal, and it must not make
-    /// under-long ones legal too - a clause missing its slot would otherwise plant a value
-    /// at argument zero of something nobody named.
+    /// A clause missing its slot must not plant at argument zero of something nobody named.
     #[test]
     fn a_clause_missing_a_field_is_still_refused() {
         assert!(parse_write("sceFoo").is_empty());
@@ -525,11 +411,9 @@ mod tests {
         );
     }
 
+    /// An unnamed import is reachable by its hash, and a name matches only its own label.
     #[test]
     fn an_unnamed_import_is_reachable_by_its_hash() {
-        // **The case the whole mechanism is for.** The functions most worth experimenting
-        // on are the ones nothing has named, and matching only on names would exclude
-        // exactly them (D198).
         let by_hash = Target("0x6abac2f3dc6f8cee".to_owned());
         assert!(by_hash.matches("libkernel::0x6abac2f3dc6f8cee"));
         assert!(!by_hash.matches("libkernel::sceKernelCreateSema"));
@@ -539,6 +423,7 @@ mod tests {
         assert!(!by_name.matches("libkernel::0x6abac2f3dc6f8cee"));
     }
 
+    /// A malformed write request is refused rather than half understood.
     #[test]
     fn a_malformed_request_is_refused_rather_than_half_understood() {
         assert_eq!(
@@ -562,16 +447,16 @@ mod tests {
         }
     }
 
+    /// A switch is on unless explicitly off.
     #[test]
     fn a_switch_is_on_unless_it_is_explicitly_off() {
-        // Somebody setting `0` and meaning "off" must not get "on": a diagnostic running
-        // when nobody asked is worse than one that refuses to.
         assert!(truthy("1") && truthy("yes") && truthy("on"));
         for off in ["", "0", "off", "no", "false"] {
             assert!(!truthy(off), "{off:?} should be off");
         }
     }
 
+    /// A target list and a fill byte tolerate the spacing and prefixes people type.
     #[test]
     fn a_list_survives_the_spacing_people_actually_type() {
         let parsed = targets(" memalign , 0xabc ,, ");
@@ -584,11 +469,10 @@ mod tests {
         assert_eq!(byte("zz"), None);
     }
 
+    /// An ordinary run's conditions line is empty, and a diagnostic run's names what changed
+    /// (D181).
     #[test]
     fn an_ordinary_run_says_nothing_and_a_diagnostic_run_says_what_it_did() {
-        // The conditions line is what stops a verdict taken under a diagnostic being
-        // compared with an ordinary one, so an empty run must produce an empty line and a
-        // non-empty one must name what changed (D181, D185).
         assert!(Experiments::default().is_empty());
         assert_eq!(Experiments::default().describe(), "");
 
@@ -603,12 +487,7 @@ mod tests {
         assert!(described.contains("marked"), "{described}");
     }
 
-    /// A structure member is reachable, and more than one in a run.
-    ///
-    /// The list is the point: six candidate slots used to be six runs against six separate
-    /// baselines, and with distinct values it is one run where the guest names the slot it
-    /// used. Offsets carry a sign because a header below a pointer is as ordinary a shape
-    /// as a field above one.
+    /// A plant may name a signed offset into a structure, and several plants fit in one run.
     #[test]
     fn a_plant_may_name_an_offset_and_a_list() {
         assert_eq!(
@@ -629,9 +508,6 @@ mod tests {
     }
 
     /// One bad clause refuses the whole list rather than planting the rest.
-    ///
-    /// The half-applied case is the one that lies: it reports an experiment that ran, under
-    /// conditions that describe what was asked for rather than what happened.
     #[test]
     fn a_malformed_clause_refuses_every_plant() {
         for bad in [
@@ -647,10 +523,7 @@ mod tests {
         }
     }
 
-    /// A forced answer is reachable by hash, which is the whole point of it.
-    ///
-    /// The policy file is keyed by symbol name, so the function on the biggest wall - which
-    /// has none - was unreachable by any means of changing what it answered.
+    /// A forced answer reaches a function by hash, and a malformed clause refuses the list.
     #[test]
     fn a_forced_return_reaches_a_function_with_no_name() {
         assert_eq!(
@@ -666,28 +539,11 @@ mod tests {
         }
     }
 
-    /// **Every diagnostic the registry marks as changing the program makes a run intervened.**
+    /// Every diagnostic the registry marks as changing the program makes a run intervened.
     ///
-    /// The list this replaced was hand-maintained, so a diagnostic added without an entry was
-    /// silently non-intervening - and one was not remembered, which let tagged runs overwrite
-    /// three titles' honest compatibility records (D569).
-    ///
-    /// Driven from the **registry**, so a diagnostic declared tomorrow is covered the day it is
-    /// declared. No environment is touched: each variable is offered to the decision directly.
-    ///
-    /// # What this cannot assert
-    ///
-    /// That the effect recorded for a variable is the right one. A diagnostic declared `Observes`
-    /// that in fact changes the program is invisible here and everywhere else - the registry is
-    /// the single source, so a wrong entry is wrong once and completely.
-    ///
-    /// **Nor anything about the wrapper.** Replacing `orbistoun_env::active()` with an empty slice
-    /// inside [`Experiments::intervenes`] does **not** fail this - a break that was tried, and did
-    /// not fire. Covering it means controlling process-global environment from a test, which in a
-    /// parallel suite is flaky by construction; the line is drawn where this project draws it
-    /// elsewhere, at a one-line effectful wrapper left deliberately untested. What that leaves
-    /// uncovered is exactly one call, and it is named here so it is a choice rather than an
-    /// oversight (D569).
+    /// Driven from the registry, so a new diagnostic is covered once declared. It cannot catch a
+    /// wrong effect in the registry, nor a break in the one-line wrapper
+    /// [`Experiments::intervenes`], which reads process-global state and is left untested.
     #[test]
     fn every_intervening_diagnostic_in_the_registry_makes_a_run_intervened() {
         let intervening: Vec<&orbistoun_env::Var> = orbistoun_env::REGISTRY
@@ -711,21 +567,13 @@ mod tests {
         }
     }
 
-    /// **A run under nothing is not an intervened run.**
-    ///
-    /// The direction that decides whether anything is ever recorded: were this true
-    /// unconditionally, the guard would refuse every ordinary run and the compatibility record
-    /// would silently stop moving.
+    /// A run under no diagnostic is not intervened, or the guard would refuse every ordinary run.
     #[test]
     fn a_run_under_no_diagnostic_is_not_intervened() {
         assert!(!super::any_intervenes(&[]));
     }
 
-    /// **An observing diagnostic does not make a run intervened.**
-    ///
-    /// The other half of the registry's distinction. `Observes` exists so a run can be watched
-    /// without being disqualified; treating every set variable as an intervention would make the
-    /// observing tier pointless and quietly stop the record moving.
+    /// An observing diagnostic leaves a run recordable, which is what the `Observes` tier is for.
     #[test]
     fn an_observing_diagnostic_leaves_a_run_recordable() {
         let observing: Vec<&orbistoun_env::Var> = orbistoun_env::REGISTRY

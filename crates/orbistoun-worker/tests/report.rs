@@ -1,23 +1,10 @@
 //! The pieces a fault report is assembled from.
 //!
-//! # Why this is worth more than its size suggests
-//!
 //! `Line` runs inside a fault handler, where the allocator lock may be held by the code that
-//! just crashed - so it allocates nothing, formats its own hexadecimal, and truncates rather
-//! than growing. None of that can be stepped through: by the time it runs, the process is
-//! already in the state that made it run. **A bug here appears as a garbled message at the
-//! exact moment the message is most needed**, and principle 3 says a report is as capable of
-//! plausible output as a stub is.
-//!
-//! The truncation is the clearest case. It is a guard, and a guard nobody has watched reject
-//! something is a guard nobody knows anything about - so it is made to fail here, at a
-//! boundary, rather than trusted.
-//!
-//! # Process-wide state
-//!
-//! Regions and import labels are global and set once, so everything depending on them is in a
-//! single test. `Line` itself depends on the regions only through `address`, and the tests
-//! that do not use `address` are free-standing.
+//! crashed, so it allocates nothing, formats its own hexadecimal and truncates rather than
+//! grows. A defect in it shows as a garbled message at the moment one is needed, so its guards
+//! are made to fail at their boundaries here. Regions and import labels are process-wide and
+//! set once, so everything depending on them is in a single test.
 
 use orbistoun_worker::report::{Line, Region, describe_region, label_of, locate, name_imports};
 
@@ -26,7 +13,7 @@ fn rendered(line: &Line) -> String {
     String::from_utf8(line.as_bytes().to_vec()).expect("these lines are ASCII")
 }
 
-// --- the line builder ----------------------------------------------------------------------
+// The line builder.
 
 /// A fresh line holds nothing, however it was made.
 #[test]
@@ -37,8 +24,7 @@ fn a_fresh_line_is_empty() {
 
 /// Text is appended in order and nothing is inserted between pieces.
 ///
-/// The report's wording depends on it: `kind` carries its own preposition, so anything
-/// helpfully adding a separator here would put one in the middle of "read of".
+/// `kind` carries its own preposition, so a separator added here would split "read of".
 #[test]
 fn text_is_appended_exactly_as_given() {
     let mut line = Line::new();
@@ -48,9 +34,8 @@ fn text_is_appended_exactly_as_given() {
 
 /// Hexadecimal is rendered without a leading zero run, and always with the prefix.
 ///
-/// Hand-rolled because the formatting machinery allocates, which is the whole reason this
-/// type exists - and hand-rolled digit emission is where an off-by-one lives. Zero is the
-/// case a loop that tests before it writes gets wrong, producing `0x` with no digits at all.
+/// Hand-rolled, because the formatting machinery allocates. Zero is the case a loop that tests
+/// before it writes gets wrong, producing `0x` with no digits.
 #[test]
 fn hexadecimal_is_rendered_without_a_leading_zero_run() {
     for (value, want) in [
@@ -72,9 +57,8 @@ fn hexadecimal_is_rendered_without_a_leading_zero_run() {
 
 /// Digits come out most significant first.
 ///
-/// A hand-rolled conversion produces them in the opposite order and has to reverse them, so
-/// a value whose digits are not a palindrome is the only one that catches a missed reversal.
-/// `0x1234` does; `0xEEEE` would not.
+/// A hand-rolled conversion produces them in reverse and must reverse them back; only digits
+/// that are not a palindrome, like `0x1234`, catch a missed reversal.
 #[test]
 fn hexadecimal_digits_are_not_reversed() {
     let mut line = Line::new();
@@ -95,10 +79,8 @@ fn appends_chain_in_the_order_they_are_written() {
 
 /// Text past the end is dropped, not wrapped, and never overflows.
 ///
-/// **Made to fail here rather than trusted.** The buffer is fixed and the handler cannot
-/// grow it, so the only question is which of the two wrong things happens at the boundary:
-/// losing the tail, or writing past the end of a fixed array in a process that is already
-/// crashing.
+/// The buffer is fixed and the handler cannot grow it, so at the boundary the tail is lost
+/// rather than a fixed array overrun in a crashing process.
 #[test]
 fn text_past_the_end_is_dropped_rather_than_wrapped() {
     let mut line = Line::new();
@@ -120,8 +102,8 @@ fn text_past_the_end_is_dropped_rather_than_wrapped() {
 
 /// A line filled to one byte short still refuses to overrun.
 ///
-/// The off-by-one boundary: there is room for one more byte and the text is longer, so the
-/// partial append is the case a `>=` in the wrong place turns into a panic.
+/// There is room for one more byte and the text is longer, the partial append a misplaced `>=`
+/// turns into a panic.
 #[test]
 fn a_line_one_byte_short_of_full_takes_only_what_fits() {
     let mut line = Line::new();
@@ -137,8 +119,8 @@ fn a_line_one_byte_short_of_full_takes_only_what_fits() {
 
 /// A number that will not fit is truncated without overrunning either.
 ///
-/// The digit loop has its own bounds check, separate from the one in `text` - so a full line
-/// asked for a long number exercises a guard nothing else reaches.
+/// The digit loop has its own bounds check, separate from the one in `text`, which only a full
+/// line asked for a long number reaches.
 #[test]
 fn a_number_that_does_not_fit_is_truncated_too() {
     let mut line = Line::new();
@@ -152,14 +134,13 @@ fn a_number_that_does_not_fit_is_truncated_too() {
     assert_eq!(&line.as_bytes()[Line::CAPACITY - 3..], b"0xf");
 }
 
-// --- regions -----------------------------------------------------------------------------
+// Regions.
 
 /// Every region and label question, in one test.
 ///
-/// **One test on purpose.** The region table and the import labels are process-wide - the
-/// handler cannot chase a pointer the faulting code may have invalidated, so they are fixed
-/// statics - and a second test registering its own regions would be answering questions about
-/// this one's.
+/// One test because the region table and the import labels are process-wide statics (the
+/// handler cannot chase a pointer the faulting code may have invalidated), and a second test
+/// registering regions would see this one's.
 #[test]
 fn an_address_is_named_by_the_region_that_actually_contains_it() {
     const IMAGE: u64 = 0x0040_0000;
@@ -167,8 +148,7 @@ fn an_address_is_named_by_the_region_that_actually_contains_it() {
     const STACK: u64 = 0x7000_0000;
     const LEN: u64 = 0x1000;
 
-    // Before anything is registered, nothing can be named - and saying so is the honest
-    // answer rather than guessing at the nearest region.
+    // Before anything is registered, nothing is named rather than guessed at.
     assert_eq!(locate(IMAGE), None, "nothing is registered yet");
 
     describe_region(Region::Image, IMAGE, LEN);
@@ -205,7 +185,7 @@ fn an_address_is_named_by_the_region_that_actually_contains_it() {
         "and the top of the space does not wrap"
     );
 
-    // --- what a line does with them ------------------------------------------------------
+    // What a line does with them.
 
     let mut known = Line::new();
     known.text("read of ").address(IMAGE + 0x24);
@@ -226,7 +206,7 @@ fn an_address_is_named_by_the_region_that_actually_contains_it() {
         )
     );
 
-    // --- import labels -------------------------------------------------------------------
+    // Import labels.
 
     assert_eq!(
         label_of(0),

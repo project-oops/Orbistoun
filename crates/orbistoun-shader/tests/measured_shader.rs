@@ -1,24 +1,11 @@
-//! orbistoun's RDNA2 decoder, held against a shader captured from live GPU memory.
+//! The RDNA2 decoder, held against a shader captured from live GPU memory.
 //!
-//! # Why this is a different kind of evidence from the fixtures
-//!
-//! `differential.rs` checks the decoder against shaders this project generated and disassembled
-//! with a reference tool - strong for coverage, but every byte in it was produced here. This is
-//! bytecode obSCEne read out of a **running compositor** (`AgcCompositor.elf`) on hardware
-//! (`170-gpu-capture`, `payload-klog.obs.log`): a real title's real shader, not a fixture.
-//!
-//! # The one instruction obSCEne decoded, and the window it did not
-//!
-//! obSCEne scanned the captured shader for the program terminator and reported
-//! `endpgm-word 0xbf810000` at `endpgm-offset 0x24` - its own independent identification of
-//! `s_endpgm`. That is the cross-check: two readers agreeing on one live-hardware instruction,
-//! the shader-side analog of the PM4-header agreement in `orbistoun-gpu`'s `measured_packets`.
-//!
-//! It also captured a 16-byte window of the bytecode, `00 01 28 f4 40 00 00 fa 7f c0 8c bf 00 00
-//! 2f d5`, which it did not decode instruction by instruction. orbistoun does, and the first two
-//! are complete: an SMEM load (eight bytes) and an SOPP `s_waitcnt` (four). The trailing VOP3 is
-//! cut off at the window edge, so only those twelve bytes are walked - the point is the decode of
-//! real captured bytes, not the truncated tail.
+//! `differential.rs` checks the decoder against shaders generated here; this checks it
+//! against bytecode obSCEne read from a running system compositor on hardware (check
+//! `170-gpu-capture`). obSCEne's own scan reported `endpgm-word 0xbf810000` at
+//! `endpgm-offset 0x24`, and captured the 16-byte window `00 01 28 f4 40 00 00 fa 7f c0 8c bf
+//! 00 00 2f d5`. The first twelve bytes are an SMEM load and an SOPP `s_waitcnt`; the
+//! trailing VOP3 is cut off at the window edge and not walked.
 
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 
@@ -37,12 +24,10 @@ fn family<'a>(inst: &orbistoun_shader::Instruction, table: &'a EncodingTable) ->
         .map_or("<unrecognised>", |e| e.name.as_str())
 }
 
-/// **The terminator obSCEne found is the one orbistoun decodes.**
+/// The terminator obSCEne found is the one orbistoun decodes.
 ///
-/// obSCEne identified `0xbf810000` as `s_endpgm` by its own scan of the shader (it is what
-/// `170-gpu-capture/shader-blob` searches for and reports as `endpgm-word`). orbistoun's decoder,
-/// given the same word, must call it SOPP opcode 1, `s_endpgm` - or the two disagree on where a
-/// real shader ends, which is where the coverage ranking anchors.
+/// obSCEne identified `0xbf810000` as `s_endpgm` by its own scan; the decoder must read the
+/// same word as SOPP opcode 1, `s_endpgm`, or the two disagree on where a shader ends.
 #[test]
 fn the_terminator_obscene_identified_is_the_one_orbistoun_decodes() {
     let table = table();
@@ -59,12 +44,10 @@ fn the_terminator_obscene_identified_is_the_one_orbistoun_decodes() {
     );
 }
 
-/// **The captured window's complete instructions decode as real RDNA2.**
+/// The captured window's complete instructions decode as RDNA2.
 ///
-/// The first twelve bytes of obSCEne's captured window are two whole instructions: an SMEM at
-/// offset 0 (eight bytes, `f4280100 fa000040`) and an SOPP `s_waitcnt` at offset 8 (four bytes,
-/// `bf8cc07f`, opcode 0x0c). Decoding real bytecode from live memory into the right families is
-/// the thing the fixtures cannot prove, because they were made here.
+/// The first twelve bytes are an SMEM at offset 0 (eight bytes, `f4280100 fa000040`) and an
+/// SOPP `s_waitcnt` at offset 8 (four bytes, `bf8cc07f`, opcode 0x0c).
 #[test]
 fn the_captured_window_decodes_as_real_rdna2() {
     let table = table();

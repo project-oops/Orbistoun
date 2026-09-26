@@ -4,19 +4,8 @@ use anyhow::Result;
 
 /// Prints how this corpus compares with the last time it was looked at, and records it.
 ///
-/// # Why the shader work needs this
-///
-/// The import side ends every run with `FURTHER`, `same` or `BACK`, and that is what makes
-/// it iterable: a change either moved something or it did not, and nobody carries two
-/// numbers between runs in their head. The shader side has had the same loop all along -
-/// rank what blocks, implement the top entry, run again - with no way to say whether it
-/// worked except reading figures off consecutive screens.
-///
-/// Deliberately the same vocabulary as the import side. They are one loop pointed at
-/// different material, and giving them different words would suggest otherwise.
-///
-/// Keyed by corpus path, so several corpora do not overwrite each other's history - the
-/// same reason traces are keyed by module.
+/// Uses the import side's `FURTHER` / `same` / `BACK` vocabulary, since both are the same loop over
+/// different material. Keyed by corpus path so corpora keep separate histories.
 fn report_shader_movement(
     coverage: &orbistoun_shader::coverage::CorpusCoverage,
     encodings: &orbistoun_shader::EncodingTable,
@@ -60,9 +49,8 @@ fn report_shader_movement(
         for name in &movement.cleared {
             println!("  cleared {name}");
         }
-        // Reported apart from a regression: implementing one blocker routinely uncovers
-        // the next instruction in a shader that could not be reached past it, and that is
-        // progress rather than breakage.
+        // Reported apart from a regression: implementing one blocker routinely uncovers the next
+        // instruction in a shader, which is progress.
         for name in &movement.uncovered {
             println!("  uncovered  {name}");
         }
@@ -73,13 +61,10 @@ fn report_shader_movement(
 
 /// Where a corpus's history lives.
 ///
-/// Named from the path so two corpora do not share one file. Hashed rather than escaped
-/// because a path is not a filename and making one into the other legibly is a problem
-/// nobody needs solved here.
+/// Named by a hash of the path, so two corpora never share one file.
 fn shader_summary_path(corpus: &std::path::Path) -> std::path::PathBuf {
     let paths = orbistoun_paths::Paths::resolve();
-    // A small stable digest of the path. Not a security property - it only has to give
-    // two different corpora two different filenames.
+    // A small stable digest of the path; it only has to separate corpora, not resist collision.
     let mut key: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in corpus.display().to_string().bytes() {
         key ^= u64::from(byte);
@@ -95,9 +80,7 @@ fn read_shader_summary(corpus: &std::path::Path) -> Option<orbistoun_shader::cov
 
 /// Records this run, so the next one has something to compare against.
 ///
-/// A failure here is reported and not fatal. The comparison is a convenience; refusing to
-/// print a worklist because a history file could not be written would trade the useful
-/// output for the optional one.
+/// A failure is reported and not fatal: the comparison is optional and the worklist is not.
 fn write_shader_summary(corpus: &std::path::Path, summary: &orbistoun_shader::coverage::Summary) {
     let path = shader_summary_path(corpus);
     let written = path
@@ -113,37 +96,13 @@ fn write_shader_summary(corpus: &std::path::Path, summary: &orbistoun_shader::co
     }
 }
 
-/// Whether a translator produces a module for this shader, at any stage it could belong to.
+/// Whether a shader translates at any stage, and every distinct refusal if not.
 ///
-/// # Why every stage is tried rather than one
-///
-/// A corpus is a directory of binaries and nothing in a binary says which stage ran it. The
-/// stage is not cosmetic: an export has nowhere to go in a compute dispatch and is refused,
-/// so judging a pixel shader as compute would report it untranslatable for a reason that is
-/// about the question rather than the shader. Asking "is there a stage this translates at"
-/// is the honest form of the question a corpus can answer, and it is cheap - only shaders that
-/// fail everywhere pay for every stage.
-///
-/// The mesh stage joined the sweep when it was built (worklog 558): a guest vertex program is a
-/// primitive shader, and judging one as compute refuses it at the message it opens with.
-///
-/// Wavefront fidelity, because it is the one that is correct unconditionally: a refusal here
-/// is about the shader rather than about a model that cannot represent a lane mask.
-/// Whether a shader translates at any stage, and what refused it if not.
-///
-/// # Why the reason comes back and not just the verdict
-///
-/// The census answered "11 of 14" and gave no way to find the three. That is fine while the
-/// blocker list explains them - an unsupported instruction names itself - and useless the moment
-/// every instruction is supported and three shaders still refuse, which is where the corpus now
-/// is (worklog 578). A tool that can count a failure and not name it sends the reader to write
-/// a one-off program, which is the thing first-party tooling exists to avoid.
-///
-/// **Every distinct refusal, not the last one.** Reporting only the last was tried first and is
-/// actively misleading: a shader that samples is refused at the mesh stage for *being* a mesh
-/// module, which says nothing about why the fragment stage - the one that could have run it -
-/// turned it down. The stages that agree are collapsed, so a shader refused identically
-/// everywhere still reads as one line.
+/// A binary does not say which stage ran it, and the stage matters: an export has nowhere to go in
+/// a compute dispatch, and a guest vertex program is a primitive shader refused as compute. So
+/// every stage is tried, at wavefront fidelity, which is correct unconditionally. Every distinct
+/// refusal is returned, because the last stage's reason says nothing about why the stage that could
+/// have run the shader refused it; identical refusals collapse to one line.
 fn translates(
     decoded: &orbistoun_shader::Decode,
     encodings: &orbistoun_shader::EncodingTable,
@@ -151,11 +110,8 @@ fn translates(
     use orbistoun_translate::Width;
     use orbistoun_translate::wavefront::{Stage, Window, translate_for};
 
-    // **The default window, because this asks whether a shader translates and never runs one.**
-    // `Window::base` says where the guest-memory window sits, which every memory access is
-    // checked against at execution; it cannot change whether translation succeeds, only what the
-    // translated module then reads. A probe that answers "does this translate" therefore has no
-    // base to supply and must not invent one that looks meaningful.
+    // The default window: this asks whether a shader translates and never runs one. The window base
+    // affects only what the translated module reads, not whether translation succeeds.
     let window = Window::default();
     let mut refused: Vec<String> = Vec::new();
     for stage in [Stage::Compute, Stage::Fragment, Stage::Mesh] {
@@ -174,9 +130,8 @@ fn translates(
 
 /// Analyses every shader binary in a directory.
 ///
-/// A thin shim over `orbistoun_shader::report`, per principle 13: what the report says
-/// is a property of the analysis, so this command and the run report cannot disagree
-/// about it.
+/// A shim over `orbistoun_shader::report`, so this command and the run report cannot disagree
+/// (D034).
 pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<()> {
     use orbistoun_shader::corpus::is_shader;
     use orbistoun_shader::{
@@ -194,27 +149,22 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
         .filter(|p| p.is_file())
         .collect();
 
-    // Only the corpus's own extension. Reading everything in the directory decoded the
-    // reference-text files alongside the binaries and reported eighteen shaders where
-    // there were nine - plausible output, entirely wrong, and exactly the failure this
-    // crate exists to make visible in guest code.
+    // Only the corpus's own extension: the directory also holds reference-text files that would
+    // decode as shaders.
     let mut entries: Vec<std::path::PathBuf> = files
         .iter()
-        // Both kinds: a shader dumped from a title, and one generated here. They
-        // decode identically and differ only in provenance - which decides whether they
-        // may be committed, not whether this can read them.
+        // Both kinds: a shader dumped from a title and one generated here decode identically. Their
+        // provenance decides whether they may be committed, not whether this can read them.
         .filter(|p| is_shader(p))
         .cloned()
         .collect();
-    // Sorted so two runs over an unchanged directory produce identical output, which
-    // is what makes the report diffable at all.
+    // Sorted so two runs over an unchanged directory produce identical output.
     entries.sort();
 
     let skipped = files.len() - entries.len();
 
     if entries.is_empty() {
-        // Said plainly rather than reported as a clean sweep. An empty corpus produces
-        // "0 of 0 complete", which reads like success.
+        // Said plainly: "0 of 0 complete" reads like success.
         println!(
             "no shader files in {} ({skipped} other file(s) present)",
             path.display()
@@ -223,8 +173,8 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
     }
 
     let mut coverage = CorpusCoverage::new();
-    // Every shader that translated at no stage, and what the last stage said. Collected here
-    // rather than derived from the coverage, which records the verdict and not the reason.
+    // Every shader that translated at no stage, and why. The coverage records the verdict, not the
+    // reason.
     let mut refusals: Vec<(String, Vec<String>)> = Vec::new();
     for entry in &entries {
         let bytes =
@@ -233,10 +183,8 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("<unnamed>");
-        // The worklist ranks what is *not* translatable, so it has to ask the
-        // translator rather than assume. Wiring these together is what makes the
-        // report move as instructions are implemented instead of staying a fixed
-        // picture of an empty translator.
+        // The worklist ranks what is not translatable, so it asks the translator rather than
+        // assuming.
         let supported = |key: orbistoun_shader::OpcodeKey| {
             key.encoding
                 .and_then(|i| encodings.encodings().get(usize::from(i)))
@@ -252,9 +200,8 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
         coverage.observe_translated(name, &decoded, &supported, Some(verdict.is_ok()));
     }
 
-    // The tier comes from the translator, which is the only layer that knows *why* an
-    // instruction is refused. The shader crate can see what blocks a shader and not what
-    // it would cost to fix, so the two are joined here rather than either guessing.
+    // The tier comes from the translator, the only layer that knows why an instruction is refused;
+    // the shader crate sees only what blocks a shader.
     let effort_of = |key: orbistoun_shader::coverage::OpcodeKey| {
         let named = key
             .encoding
@@ -272,9 +219,8 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
         report::render(&coverage, &encodings, &mnemonics, top, effort_of)
     );
 
-    // **Named, not merely counted.** The blocker list above explains a shader refused for an
-    // instruction; this explains one refused for anything else, which is the only kind left once
-    // every instruction is supported.
+    // Named, not merely counted: this explains refusals that are not about an unsupported
+    // instruction.
     if !refusals.is_empty() {
         println!("\nshaders that translate at no stage");
         for (name, reasons) in &refusals {
@@ -287,8 +233,7 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
 
     report_shader_movement(&coverage, &encodings, &mnemonics, path);
     if skipped > 0 {
-        // Reported rather than assumed irrelevant: a corpus whose files carry a
-        // different extension would otherwise look empty for no stated reason.
+        // Reported so a corpus with a different extension does not look empty for no stated reason.
         println!(
             "
 {skipped} file(s) skipped - not a shader"

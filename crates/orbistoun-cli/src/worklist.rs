@@ -3,21 +3,8 @@
 use crate::common::library_or;
 use orbistoun_service::Service;
 
-/// Ranks the calls a guest made to the kernel directly, which no import list can show.
-///
-/// # Why this is a section of its own
-///
-/// A guest reaching the kernel by number touches no stub, so it contributes nothing to the
-/// ranked imports above. That is not an edge case: it is how every open-toolchain payload
-/// works - resolve one function to build a gadget, then go straight to the kernel - so a run
-/// that stopped dead on an unimplemented call could report nothing of interest and be telling
-/// the truth (D401).
-///
-/// Ranked by **how many runs asked**, not by how often. The recorder is a bitmap and knows only
-/// that a number came up; a call count would be a number nobody measured.
 /// What the census has gathered about one direct syscall number: how many runs asked, the name
-/// where one is known, the first argument, and the set of guests that issued it. The last is what
-/// keeps a number attributed to the guest whose trace carried it rather than the title just run.
+/// where one is known, the first argument, and the guests whose traces carried it.
 type KernelCall = (
     usize,
     Option<String>,
@@ -25,6 +12,11 @@ type KernelCall = (
     std::collections::BTreeSet<String>,
 );
 
+/// Ranks the calls a guest made to the kernel directly, which no import list can show.
+///
+/// A guest reaching the kernel by number touches no stub, so it contributes nothing to the ranked
+/// imports; open-toolchain payloads work this way (D401). Ranked by how many runs asked, because
+/// the recorder is a bitmap and has no call count.
 fn report_kernel_calls(kernel: &std::collections::BTreeMap<u64, KernelCall>) {
     let unserved: Vec<_> = kernel
         .iter()
@@ -42,18 +34,14 @@ fn report_kernel_calls(kernel: &std::collections::BTreeMap<u64, KernelCall>) {
 {} system call(s) asked for directly that nothing here implements",
         ranked.len()
     );
-    // **`ASKED BY` names the guest, not the title just run.** This census totals every module's
-    // trace, so a number here belongs to whichever guest's trace carried it - reading it as the
-    // title the command named is how syscall 601 was twice taken for a retail title's wall when
-    // it was a homebrew payload's log write (worklog 727).
+    // `ASKED BY` names the guest whose trace carried the number. The census totals every module's
+    // trace, so a number need not belong to the title just run.
     println!(
         "{:>6}  {:>5}  {:<14}  ASKED BY",
         "CALL", "RUNS", "FIRST ARGUMENT"
     );
     for (number, (runs, _, argument, who)) in &ranked {
-        // The argument is shown because for a call nobody can name it is most of what there is
-        // to go on - a number alone says which entry to write, and the argument starts to say
-        // what it is for.
+        // For a call nobody can name, the argument is most of what there is to go on.
         let argument = argument.map_or_else(|| "-".to_owned(), |a| format!("{a:#x}"));
         let who = who.iter().cloned().collect::<Vec<_>>().join(", ");
         println!("{number:>6}  {runs:>5}  {argument:<14}  {who}");
@@ -62,12 +50,9 @@ fn report_kernel_calls(kernel: &std::collections::BTreeMap<u64, KernelCall>) {
 
 /// What is imported and unimplemented, grouped by where an answer can come from.
 ///
-/// **The counterpart to [`cmd_worklist`], and deliberately not a replacement.** That one totals
-/// the call traces, which is a fact about runs that have happened; this reads the import tables,
-/// which is a fact about what the guests would need if they got that far. For a published
-/// interface the second is enough to act on - the standard is the oracle, so the function can be
-/// written and tested without any guest reaching it - and waiting for a run to trip over one is
-/// a session spent per function (D472).
+/// The counterpart to [`cmd_worklist`], not a replacement: that one totals call traces from runs
+/// that happened; this reads the import tables. For a published interface the standard is the
+/// oracle, so a function can be written and tested before any guest reaches it (D472).
 pub(crate) fn cmd_worklist_static(service: &Service, top: usize) {
     use orbistoun_hle::origin::{self, Origin};
     use std::collections::{BTreeMap, BTreeSet};
@@ -78,20 +63,18 @@ pub(crate) fn cmd_worklist_static(service: &Service, top: usize) {
         .filter(|d| d.implemented)
         .map(|d| d.symbol.clone())
         .collect();
-    // **Implemented is not the same as finished.** A function that answers the easy case and
-    // gives up counts as present here and is not, so the ones that declare what they do not do
-    // are counted separately rather than folded into the same number (D474).
+    // Implemented is not finished: functions that declare what they do not do are counted
+    // separately (D474).
     let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
     let mut partial: BTreeMap<String, String> = BTreeMap::new();
 
     let mut modules = 0_usize;
     let mut unnamed: BTreeMap<String, usize> = BTreeMap::new();
-    // Distinct by name, because the same function imported by four titles is one job.
+    // Distinct by name: the same function imported by several titles is one job.
     let mut missing: BTreeMap<Origin, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     let mut needed: BTreeMap<Origin, BTreeSet<String>> = BTreeMap::new();
-    // Counted flat as well as per library, because a symbol two libraries both name is **one
-    // job**, and summing the per-library sets reported more missing than needed - a number that
-    // is impossible on its face, which is the kind a report must not print (principle 3).
+    // Counted flat as well as per library: a symbol two libraries both name is one job, and summing
+    // the per-library sets would over-count.
     let mut missing_names: BTreeMap<Origin, BTreeSet<String>> = BTreeMap::new();
 
     for entry in std::fs::read_dir(library_or(None))
@@ -146,9 +129,7 @@ pub(crate) fn cmd_worklist_static(service: &Service, top: usize) {
 
 /// The counted half of the static gap report: how many of each kind, and what is unfinished.
 ///
-/// Split from [`cmd_worklist_static`] because the two halves have nothing to say to each
-/// other - one gathers, one prints - and together they were past the length this workspace
-/// lints for.
+/// Split from [`cmd_worklist_static`]: one half gathers, the other prints.
 fn print_static_gap(
     modules: usize,
     needed: &std::collections::BTreeMap<
@@ -223,8 +204,7 @@ fn print_static_gap_lists(
                 println!("    {name}");
             }
             if sorted.len() > top {
-                // Said out loud rather than truncated silently: a list that stops without
-                // saying so reads as a list that ended (principle 3).
+                // Said out loud: a list truncated silently reads as a list that ended.
                 println!(
                     "    ... and {} more (--top to see further)",
                     sorted.len() - top
@@ -242,18 +222,15 @@ fn print_static_gap_lists(
     }
 }
 
-/// Guests this collection builds, one name per line - see the file's own header for why it is a
-/// list and not a rule.
+/// Guests this collection builds, one name per line; the file's header says why it is a list and
+/// not a rule.
 const OUR_GUESTS: &str = include_str!("../data/our-guests.txt");
 
 /// Whether a trace came from a guest we wrote.
 ///
-/// Matched on **path components**, not as a substring: a module is
-/// `titles/PPSA99980/eboot.bin` or `.../oops-apps/home/dist/eboot.bin`, and a bare `contains`
-/// would let a short name like `dist` match an unrelated path that happens to contain it.
-///
-/// A guest missing from the list reads as third-party, which is the safe direction - it can
-/// understate how much of a ranking is our own noise and never overstate it.
+/// Matched on path components, not as a substring, so a short name like `dist` does not match an
+/// unrelated path containing it. A guest missing from the list reads as third-party, which can
+/// understate our share of a ranking but never overstate it.
 fn is_our_guest(module: &str) -> bool {
     let ours: Vec<&str> = OUR_GUESTS
         .lines()
@@ -267,19 +244,16 @@ fn is_our_guest(module: &str) -> bool {
 
 /// A short, recognisable name for the guest a trace came from.
 ///
-/// The directory the eboot sits in, which is the title id for a retail title (`PPSA02664-app0`)
-/// and the payload name for one of ours (`dist`). Used to say **which guest** asked for a direct
-/// syscall in the census, so a number there is read against the guest that issued it rather than
-/// against whichever title the `run` command happened to name - the aggregate census totals every
-/// module's trace, and a syscall in it need not belong to the title just run (worklog 727).
+/// The directory the eboot sits in: the title id for a retail title (`PPSA02664-app0`) and the
+/// payload name for one of ours (`dist`). The census attributes each direct syscall with it,
+/// because the aggregate census totals every module's trace.
 fn guest_label(module: &str) -> String {
     let parts: Vec<&str> = module
         .split(['/', std::path::MAIN_SEPARATOR])
         .filter(|p| !p.is_empty())
         .collect();
     match parts.as_slice() {
-        // The eboot's parent directory is the recognisable name; the file itself is always
-        // `eboot.bin`, which names nothing.
+        // The eboot's parent directory; the file itself is always `eboot.bin`.
         [.., parent, _file] => (*parent).to_owned(),
         [only] => (*only).to_owned(),
         _ => module.to_owned(),
@@ -288,9 +262,8 @@ fn guest_label(module: &str) -> String {
 
 /// One ranked import table, printed with the share each row is of its own group.
 ///
-/// **Shares are within the group, deliberately.** A row's percentage of a corpus that mixes our
-/// probes with retail titles is a number about which guests happened to run, which is the thing
-/// splitting the table exists to stop reporting.
+/// Shares are within the group: a share of a corpus mixing our probes with retail titles depends on
+/// which guests happened to run.
 fn print_ranked(totals: &std::collections::BTreeMap<String, (u64, usize)>, top: usize) {
     let mut ranked: Vec<(&String, u64, usize)> =
         totals.iter().map(|(l, (c, m))| (l, *c, *m)).collect();
@@ -311,6 +284,7 @@ fn print_ranked(totals: &std::collections::BTreeMap<String, (u64, usize)>, top: 
     }
 }
 
+/// `worklist` - rank what to implement next, across every run so far.
 pub(crate) fn cmd_worklist(top: usize) {
     let paths = orbistoun_paths::Paths::resolve();
     let dir = paths.traces_dir();
@@ -320,22 +294,17 @@ pub(crate) fn cmd_worklist(top: usize) {
         return;
     };
 
-    // Totalled by label rather than by index. A stub index is per-module - index 260 is
-    // a different function in every title - so summing by index would produce confident
-    // nonsense the moment a second module was involved.
+    // Totalled by label, not by index: a stub index is per-module, so summing by index is wrong as
+    // soon as a second module is involved.
     let mut totals: std::collections::BTreeMap<String, (u64, usize)> =
         std::collections::BTreeMap::new();
-    // **A second table, because one answers a question nobody asked.** Our own probes are built
-    // to exercise everything, so they out-call a title that dies early and dominate a combined
-    // ranking - which is how `sceKernelDlsym` came to head this report at 27% of all calls while
-    // every retail title calls it exactly once (worklog 542).
+    // A second table for our own guests: probes are built to exercise everything, so they out-call
+    // a title that stops early and would dominate a combined ranking.
     let mut ours: std::collections::BTreeMap<String, (u64, usize)> =
         std::collections::BTreeMap::new();
     let mut our_runs = 0;
-    // Kept apart from the imports above, and counted differently on purpose. The recorder is a
-    // bitmap: it knows a number was asked for, not how many times. Ranking these by call volume
-    // would mean inventing the volume, so they rank by **how many runs wanted them** - which is
-    // a fact, and is the right question anyway for something that blocks a payload outright.
+    // Kept apart from the imports and ranked by how many runs asked, because the recorder is a
+    // bitmap and has no call volume.
     let mut kernel: std::collections::BTreeMap<u64, KernelCall> = std::collections::BTreeMap::new();
     let mut modules = 0;
 
@@ -389,11 +358,8 @@ pub(crate) fn cmd_worklist(top: usize) {
         ours.len()
     );
 
-    // **What this ranks, said outright.** Call volume answers *what is missing*, and the question
-    // a reader brings is *what is blocking* - which is a different question with a different
-    // answer. On 2026-09-14 the top four candidates this report offered were each tested with
-    // `ORBISTOUN_RETURN` and **none of them was a wall**: PPSA21564 answers 500,258 of its 500,260
-    // calls with a real implementation and still faults in its own code (worklog 562).
+    // This ranks what is missing by call volume, which is not the same as what is blocking: a title
+    // can answer nearly every call with a real implementation and still fault in its own code.
     println!("Ranked by how often a guest called it - which is what is MISSING, not what is");
     println!("BLOCKING. Before implementing one, answer it without implementing it:");
     println!("  ORBISTOUN_RETURN=<function>:0x0 ./bin/orbistoun run <title>");
@@ -408,9 +374,8 @@ pub(crate) fn cmd_worklist(top: usize) {
         print_ranked(&totals, top);
     }
 
-    // Separated rather than excluded: our probes exercise the platform deliberately and what they
-    // reach is worth seeing - it just cannot share a ranking with titles, because they are built
-    // to call everything and a title is not (worklog 542).
+    // Separated rather than excluded: what probes reach is worth seeing, but they are built to call
+    // everything and cannot share a ranking with titles.
     println!("\nGUESTS WE WROTE - probes, built to exercise everything");
     if ours.is_empty() {
         println!("  (none traced)");
@@ -420,8 +385,8 @@ pub(crate) fn cmd_worklist(top: usize) {
 
     report_kernel_calls(&kernel);
 
-    // Counted across both tables: an unnamed hash is a gap in the symbol database, and which
-    // kind of guest happened to call it says nothing about that.
+    // Counted across both tables: an unnamed hash is a gap in the symbol database whichever guest
+    // called it.
     let all_labels = totals.keys().chain(ours.keys());
     let named: Vec<&String> = all_labels.collect();
     let unnamed = named.iter().filter(|l| l.contains("::0x")).count();
@@ -436,30 +401,27 @@ pub(crate) fn cmd_worklist(top: usize) {
 #[cfg(test)]
 mod tests {
 
-    /// **Our own guests are told apart by name, and the hard case is the one that looks retail.**
+    /// Our own guests are told apart by name, including one with a retail-shaped title id.
     ///
-    /// `PPSA99980` is obSCEne's homebrew registered under a retail-shaped title id. Any rule that
-    /// reads the shape of a name gets it wrong, which is why the list is curated - and why this
-    /// asserts the awkward case rather than the obvious ones.
+    /// `PPSA99980` is obSCEne's homebrew under a retail-shaped id, so no rule over the shape of a
+    /// name works; the list is curated.
     #[test]
     fn our_own_guests_are_recognised_including_the_one_shaped_like_a_title() {
         for module in [
             "titles/obscene/eboot.bin",
             "titles/obscene-payload/eboot.bin",
             "titles/PPSA99980/eboot.bin",
-            // An absolute path, because a trace records one - written generically, since a real
-            // machine path must never be committed.
+            // An absolute path, as a trace records one, written generically.
             "/build/oops-apps/home/dist/eboot.bin",
         ] {
             assert!(super::is_our_guest(module), "{module} is ours");
         }
     }
 
-    /// **A title is not ours, and a near-miss is not either.**
+    /// A title is not ours, and a near-miss is not either.
     ///
-    /// The second case is what path-component matching buys over `contains`: a directory whose name
-    /// merely ends in one of ours must not be swept up, or the split silently understates the
-    /// retail table - the exact failure the split exists to correct.
+    /// A directory whose name merely ends in one of ours is not swept up, which is what
+    /// path-component matching buys over `contains`.
     #[test]
     fn titles_we_did_not_write_are_not_claimed() {
         for module in [
@@ -472,16 +434,12 @@ mod tests {
         }
     }
 
-    /// **A direct syscall is labelled by the guest that issued it, not the title just run.**
+    /// A direct syscall is labelled by the guest that issued it, not the title just run.
     ///
-    /// This is the guard on the census misattribution worklog 727 records: syscall 601 was a
-    /// homebrew payload's log write, read twice as a retail title's wall because the aggregate
-    /// census does not say whose trace a number came from. `guest_label` is what now says it, so
-    /// the case that matters is the *probe* path resolving to the payload name (`dist`) - never to
-    /// the title the command happened to name.
+    /// The probe path resolves to the payload name (`dist`), never to the title the command named.
     #[test]
     fn a_guest_is_labelled_by_its_own_eboot_directory() {
-        // The payload that actually issues syscall 601 - it must read as `dist`, not as any title.
+        // A payload path reads as `dist`, not as any title.
         assert_eq!(
             super::guest_label("/build/oops-apps/home/dist/eboot.bin"),
             "dist"
@@ -491,7 +449,7 @@ mod tests {
             super::guest_label("titles/PPSA02664-app0/eboot.bin"),
             "PPSA02664-app0"
         );
-        // Windows separators, as a real trace on this platform records them.
+        // Windows separators, as a trace on that platform records them.
         assert_eq!(
             super::guest_label("C:\\x\\oops-apps\\home\\dist\\eboot.bin"),
             "dist"

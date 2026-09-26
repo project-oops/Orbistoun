@@ -4,28 +4,10 @@
 //! cargo test -p orbistoun-turn --release --test tail -- --ignored --nocapture
 //! ```
 //!
-//! # Why exhaustive, rather than asking something which to try
-//!
-//! The single-target sweep on this wall took **1.77 seconds** for thirteen boots - the
-//! guest reaches the fault almost immediately, so a run costs about a tenth of a second
-//! rather than the twenty this was budgeted at.
-//!
-//! That changes the shape of the problem entirely. `docs/BACKLOG.md` frames automated
-//! semantics search around query cost - *"the value of any prior is entirely in reducing
-//! the number of queries"* - and at a tenth of a second a query is nearly free. Every
-//! import the guest called can be swept in the time it takes to describe one.
-//!
-//! So this asks nothing and guesses nothing. It plants two sentinels in all six argument
-//! slots of **every distinct import in the trace** and reports which, if any, the fault
-//! address follows. A model-driven proposer is worth building only if this comes back
-//! with nothing.
-//!
-//! # What a negative result would mean
-//!
-//! That the base the guest expected filled does not arrive through any argument of any
-//! call it made - which would rule out the out-parameter explanation for this wall
-//! entirely, rather than narrowing it. That is a stronger statement than anything
-//! reached by hand so far, and it is worth having either way.
+//! A boot against this wall costs about a tenth of a second, so every import the guest called can
+//! be swept rather than a likely one chosen. This plants two sentinels in all six argument slots of
+//! every distinct import in the trace and reports which, if any, the fault address follows. A
+//! negative rules out an out-parameter explanation for the wall through any call it made.
 
 use std::collections::BTreeSet;
 
@@ -37,9 +19,8 @@ const BINARY: &str = "../../target/release/orbistoun-cli.exe";
 
 /// Every distinct import the guest called, most-used first.
 ///
-/// From `calls`, which is the ranked list of everything reached - not `tail`, which is
-/// only the last few. A wall reached through a call made early and used once is exactly
-/// the case a tail would miss.
+/// From `calls`, the ranked list of everything reached, not `tail`, which holds only the last few
+/// and misses a call made early and used once.
 fn imports(trace: &serde_json::Value) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -47,13 +28,8 @@ fn imports(trace: &serde_json::Value) -> Vec<String> {
         let Some(label) = call["label"].as_str() else {
             continue;
         };
-        // **The library prefix is stripped, and it has to be.** `ORBISTOUN_WRITE` is
-        // `<import>:<slot>:<value>`, split on `:` - so a label like
-        // `libkernel::scePthreadMutexInit` produces five fields instead of three and no
-        // target is ever resolved. The worker matches on the bare symbol anyway.
-        //
-        // Found by running this: passing whole labels made all 23 imports report
-        // `NeverPlanted`, which is the only reason it was not read as "nothing moved".
+        // The library prefix is stripped: `ORBISTOUN_WRITE` is `<import>:<slot>:<value>` split on
+        // `:`, so a qualified label resolves no target. The worker matches on the bare symbol.
         let symbol = label.rsplit("::").next().unwrap_or(label);
         if seen.insert(symbol.to_owned()) {
             out.push(symbol.to_owned());
@@ -62,6 +38,7 @@ fn imports(trace: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// Every import the guest called is swept, and the sweep has targets to sweep.
 #[test]
 #[ignore = "boots a commercial title several hundred times; opt-in via --ignored"]
 fn sweep_every_import_the_guest_called() {
@@ -78,7 +55,7 @@ fn sweep_every_import_the_guest_called() {
     let mut trial = GuestTrial::new(BINARY, TITLE, &traces)
         .with_env(orbistoun_env::DATA_DIR.name, data.path().to_string_lossy());
 
-    // One baseline, to find out what the guest actually calls.
+    // One baseline, to find out what the guest calls.
     let baseline = trial.run(None).expect("a baseline run");
     let trace = trial.trace().expect("a trace");
     let targets = imports(&trace);
@@ -107,9 +84,8 @@ fn sweep_every_import_the_guest_called() {
                 answer,
             } => {
                 interesting.push((target.clone(), finding.clone()));
-                // The condition is part of the finding: without it the line claims the guest
-                // reads the slot unconditionally, which for the wall this was built for is
-                // false (D286).
+                // The condition is part of the finding: without it the line claims the guest reads
+                // the slot unconditionally (D286).
                 let needs = answer.map_or(String::new(), |a| format!(", when it answers {a:#x}"));
                 format!("*** arg{slot}, fault follows it by {offset:#x}{needs}")
             }
@@ -164,10 +140,8 @@ fn sweep_every_import_the_guest_called() {
         }
     }
 
-    // Not asserted: which import, or none, is a fact about the guest. What is asserted is
-    // that the sweep had something to sweep - an empty target list means the trace was
-    // not read, and reporting that as "nothing moved" would be a conclusion drawn from a
-    // measurement that never happened.
+    // Not asserted: which import, or none, is a fact about the guest. What is asserted is that the
+    // sweep had something to sweep, since an empty target list means the trace was not read.
     assert!(
         !targets.is_empty(),
         "the trace listed no imports, so nothing was swept"

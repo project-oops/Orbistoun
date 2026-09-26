@@ -1,30 +1,11 @@
-//! Offline generators for the shader data tables.
+//! Offline generators for the committed data tables.
 //!
-//! # What this is, and what it is not
-//!
-//! **Not part of the emulator.** Nothing here is on the build, test, or run path of
-//! anything that executes a guest. It exists to produce the `.toml` files under
-//! `crates/orbistoun-shader/data/`, which are committed, and which the decoder reads.
-//!
-//! **No machine in this project's normal setup can run these against a live assembler.**
-//! They need `llvm-mc` with the AMDGPU target, which `tools/toolchain/setup.sh` builds a VM
-//! for. That constraint is the reason for the seam below, and for everything about how this
-//! crate is tested.
-//!
-//! # The seam that makes it checkable
-//!
-//! Every generator gets its bytes through [`assembler`], which either shells out to
-//! `llvm-mc` or replays a committed recording of having done so. The second mode needs
-//! nothing installed, which is what lets the solvers be tested at all - and the solvers are
-//! where the difficulty lives. The subprocess call is a dozen lines; the bit arithmetic is
-//! two thousand.
-//!
-//! # Fidelity over improvement
-//!
-//! The correctness argument for the port is that it produces byte-identical output. So the
-//! translation is deliberately literal, including where the original reads oddly. Improving
-//! a solver and porting it at the same time makes any difference in the result impossible
-//! to attribute.
+//! Not on the build, test or run path of anything that executes a guest: these produce the
+//! committed `.toml` files the decoder and other crates read. A live run needs `llvm-mc`
+//! with the `AMDGPU` target, which `tools/toolchain/setup.sh` builds a VM for, so every
+//! generator gets its bytes through [`assembler`], which either invokes `llvm-mc` or
+//! replays a committed recording (D209). Replay needs nothing installed, so the solvers
+//! are tested everywhere.
 
 mod assembler;
 mod buffer_formats;
@@ -51,9 +32,8 @@ use clap::{Parser, Subcommand};
 struct Cli {
     /// Replay a recorded assembler transcript instead of invoking `llvm-mc`.
     ///
-    /// **The mode that needs no toolchain.** A recording is taken once, on a machine with
-    /// an AMDGPU-enabled LLVM, and committed - after which the solver can be re-run and
-    /// its output diffed anywhere, including in CI.
+    /// Needs no toolchain: a recording taken once with an `AMDGPU`-enabled LLVM and
+    /// committed lets the solver re-run and its output be diffed anywhere, including CI.
     #[arg(long, global = true, value_name = "DIR")]
     transcript: Option<PathBuf>,
 
@@ -63,8 +43,7 @@ struct Cli {
 
     /// Print what would be written instead of writing it.
     ///
-    /// The honest way to check a port: generate, diff against what is committed, and only
-    /// then overwrite.
+    /// Generate and diff against what is committed before overwriting.
     #[arg(long, global = true)]
     dry_run: bool,
 
@@ -76,17 +55,16 @@ struct Cli {
 enum Command {
     /// Print one field of the target the generators assemble for.
     ///
-    /// Exists so a shell script reads the same source the generators do, rather than
-    /// hardcoding a target that then outlives its correctness (D139).
+    /// So a shell script reads the same target the generators do, rather than hardcoding
+    /// one (D139).
     Target {
         /// One of `mcpu`, `mattr`, `triple`, `graphics-triple`.
         field: String,
     },
     /// Solve each encoding family's identifying bits from assembled samples.
     ///
-    /// Reports rather than writes: `data/encodings.toml` carries reasoning and citations a
-    /// person maintains, and this solves the numbers in it. Overwriting the file would throw
-    /// the prose away.
+    /// Reports rather than writes, because `data/encodings.toml` carries hand-maintained
+    /// reasoning and citations beside the numbers this solves.
     Encodings {
         /// Directory of per-family probe files.
         #[arg(long, default_value = "tools/shader-fixtures/families")]
@@ -95,8 +73,7 @@ enum Command {
     /// Regenerate the differential-test fixtures and the mnemonic table.
     ///
     /// Writes `.gcn` and `.txt` per source, plus `data/mnemonics.toml` from what the
-    /// reference disassembler actually named. Both are committed, so LLVM is not a test
-    /// dependency - this runs when somebody wants new coverage, the tests run everywhere.
+    /// reference disassembler named. Both are committed, so LLVM is not a test dependency.
     Fixtures {
         /// Directory of shader sources to compile.
         #[arg(long, default_value = "tools/shader-fixtures")]
@@ -129,35 +106,17 @@ enum Command {
         )]
         out: PathBuf,
     },
-    /// Harvest ABI constants from a FreeBSD source checkout.
+    /// Write the committed table of what conformance runs measured.
     ///
-    /// The naming harvest takes symbol *names* and deliberately no constants, which was
-    /// right while the work was naming. Implementing needs numbers - `AF_INET` cannot be
-    /// mapped onto a host socket by guessing it (D352).
-    ///
-    /// Only headers are read, so a sparse checkout is plenty:
-    ///
-    ///     git clone --filter=blob:none --sparse https://github.com/freebsd/freebsd-src
-    ///     cd freebsd-src
-    ///     git sparse-checkout set lib/libc lib/libsys lib/libthr lib/libutil lib/msun
-    ///     git sparse-checkout add sys/sys sys/netinet include
-    /// Write the committed table of what a conformance run measured.
-    ///
-    /// The `measure` records carry subject, condition, observation and kind, which is enough
-    /// for an assertion to name one and be checked against it. A measurement every run agreed
-    /// on is marked constant; one they disagreed on is kept and marked not.
+    /// The `measure` records carry subject, condition, observation and kind, enough for an
+    /// assertion to name one. A measurement every run agreed on is marked constant; one they
+    /// disagreed on is kept and marked not.
     Measurements {
         /// A directory of capture files, in the sibling conformance-probe repository.
         ///
-        /// **Repeatable, and every one is read into a single table.** That is not a
-        /// convenience: whether a measurement is `constant` is decided by every run that
-        /// took it agreeing, so a table built from one directory while captures sit in
-        /// another marks values constant that a run elsewhere contradicts. One table, every
-        /// capture (D609).
-        ///
-        /// A directory that does not exist is skipped with a warning rather than refused -
-        /// the defaults name a sibling checkout, and somebody holding one of the two should
-        /// get the table their captures support rather than an error.
+        /// Repeatable, all read into one table, because `constant` requires every run that
+        /// took the measurement to agree. A missing directory is skipped with a warning,
+        /// since the defaults name a sibling checkout.
         #[arg(
             long,
             default_values = [
@@ -174,9 +133,8 @@ enum Command {
     /// Attach conformance-run observations to the functions they exercised.
     ///
     /// Joins `try` and `res` on their check id and records each outcome as an edge case on
-    /// the function it names - **quoted, not interpreted**. The value's meaning lives in the
-    /// check rather than the record, so reading every one as a return value would write
-    /// timestamps and loop counters into the knowledge base as behaviour.
+    /// the function it names, quoted, not interpreted: the value's meaning lives in the
+    /// check, and not every value is a return value.
     Hardware {
         /// The directory of capture files, in the sibling conformance-probe repository.
         #[arg(long, default_value = "../obscene/data/hardware")]
@@ -188,10 +146,9 @@ enum Command {
     /// Derive knowledge entries from the implementations' own documentation.
     ///
     /// For every implemented symbol with no entry, reads the doc comment on the function
-    /// that implements it and records what it says - purpose, the specification it cites,
-    /// and the caveats it emphasised. **Nothing is invented**: documentation citing no
-    /// standard lands as `assumed`, and every entry goes through the format's own
-    /// provenance rules, which stop the write rather than warning (D180).
+    /// that implements it and records its purpose, the specification it cites and its
+    /// caveats. Documentation citing no standard lands as `assumed`, and the format's
+    /// provenance rules stop the write rather than warning (D180).
     Knowledge {
         /// The crate sources to read implementations and declarations from.
         #[arg(long, default_value = "crates")]
@@ -202,9 +159,8 @@ enum Command {
     },
     /// Read the character-classification tables from an obSCEne hardware capture.
     ///
-    /// The values are the platform C library's own, so nothing lawful states them and the
-    /// capture is the oracle. It carries its own spot-checks, and the generator refuses a
-    /// table that disagrees with them.
+    /// The values are the platform C library's own, so the capture is the oracle. The
+    /// generator refuses a table that disagrees with the capture's own spot-checks.
     Ctype {
         /// Path to an obSCEne capture holding the `035-libc/getpctype` probe.
         source: PathBuf,
@@ -212,6 +168,15 @@ enum Command {
         #[arg(long, default_value = "crates/orbistoun-libc/data/ctype.toml")]
         out: PathBuf,
     },
+    /// Harvest ABI constants from a FreeBSD source checkout (D352).
+    ///
+    /// Implementing needs numbers: `AF_INET` cannot be mapped onto a host socket by
+    /// guessing it. Only headers are read, so a sparse checkout is enough:
+    ///
+    ///     git clone --filter=blob:none --sparse https://github.com/freebsd/freebsd-src
+    ///     cd freebsd-src
+    ///     git sparse-checkout set lib/libc lib/libsys lib/libthr lib/libutil lib/msun
+    ///     git sparse-checkout add sys/sys sys/netinet include
     Constants {
         /// Path to a FreeBSD source checkout.
         source: PathBuf,
@@ -231,8 +196,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    // A generator writes committed artefacts from data files, so what it decided on the way is
-    // worth being able to ask about after the fact.
+    // A generator writes committed artefacts, so its decisions are logged.
     let _logging = oops_log::Logging::new("orbistoun-gen")
         .build(orbistoun_env::build::line_static())
         .init();
@@ -294,8 +258,7 @@ fn main() -> Result<()> {
                     .with_context(|| format!("writing {}", mnemonics.display()))?;
             }
             eprint!("{}", fixtures::render_report(&report));
-            // A conflict means the classification is wrong, which makes every name in the
-            // table suspect rather than one of them. Not something to exit zero on.
+            // A conflict means the classification is wrong and every name is suspect.
             anyhow::ensure!(
                 report.conflicts.is_empty(),
                 "{} classification conflict(s) - see above",
@@ -318,8 +281,7 @@ fn main() -> Result<()> {
         Command::Encodings { families } => {
             let report = encodings::run(&source, families, cli.record.as_deref())?;
             print!("{}", encodings::render(&report));
-            // Non-zero when anything went unsolved. A generator that reports a problem and
-            // exits successfully is one a script will happily ignore.
+            // Non-zero when anything went unsolved, so a script cannot ignore it.
             anyhow::ensure!(
                 report.problems.is_empty(),
                 "{} family problem(s) - see above",
@@ -332,11 +294,9 @@ fn main() -> Result<()> {
 
 /// Derives the missing knowledge entries and writes them, or shows what it would write.
 ///
-/// **Refuses on a provenance fault rather than warning.** The format's rules are the reason
-/// this is safe to run unattended: an entry claiming an outside source without citing one is
-/// rejected by [`orbistoun_hle::knowledge::KnowledgeFile::merge`], and one rejected entry
-/// stops the whole write. Reporting and carrying on would leave the file in a state nobody
-/// chose (D180).
+/// Refuses on a provenance fault rather than warning: an entry claiming an outside source
+/// without citing one is rejected by [`orbistoun_hle::knowledge::KnowledgeFile::merge`],
+/// and one rejected entry stops the whole write (D180).
 fn run_knowledge(crates: &std::path::Path, out: &std::path::Path, dry_run: bool) -> Result<()> {
     let sources = rust_sources(crates)?;
     anyhow::ensure!(!sources.is_empty(), "no sources under {}", crates.display());
@@ -363,9 +323,8 @@ fn run_knowledge(crates: &std::path::Path, out: &std::path::Path, dry_run: bool)
 
 /// Attaches conformance-run observations to the entries for the functions they exercised.
 ///
-/// **Refuses on a provenance fault**, exactly as the derivation does: the knowledge format's
-/// own rules decide admissibility, and one rejected entry stops the write rather than leaving
-/// the files in a state nobody chose (D180).
+/// Refuses on a provenance fault, as the derivation does: one rejected entry stops the
+/// write (D180).
 fn run_hardware(records: &std::path::Path, out: &std::path::Path, dry_run: bool) -> Result<()> {
     let mut observations = Vec::new();
     let mut seen = 0_usize;
@@ -432,11 +391,8 @@ fn run_measurements(records: &[PathBuf], out: &std::path::Path, dry_run: bool) -
         "no capture in the {read} directory/ies read carried a measure record"
     );
 
-    // **What is already committed is folded in beside what was read.** A report directory is
-    // overwritten - six files become six different files an hour later - so a regeneration that
-    // took only what is on disk would drop the earlier batch entirely, and a measurement that was
-    // non-constant *because* two batches disagreed would become constant again for want of the
-    // evidence against it (D618).
+    // What is already committed is folded in beside what was read: report directories are
+    // overwritten, and dropping an earlier batch could turn a disputed measurement constant.
     let carried = match std::fs::read_to_string(out) {
         Ok(text) => {
             let table: orbistoun_hle::hardware::Measurements =
@@ -449,8 +405,8 @@ fn run_measurements(records: &[PathBuf], out: &std::path::Path, dry_run: bool) -
             );
             rows
         }
-        // Absent is the ordinary first run. Any other error is a real problem and must not be
-        // mistaken for it, or a permissions fault silently starts the table from nothing.
+        // Absent is the ordinary first run; any other error is real and must not start the
+        // table from nothing.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", out.display())),
     };
@@ -467,15 +423,8 @@ fn run_measurements(records: &[PathBuf], out: &std::path::Path, dry_run: bool) -
 
 /// Every capture file under a directory, as (name, contents).
 ///
-/// # Two extensions, because the probe writes two
-///
-/// A session transcript is `.txt` and a report is `.obs.log`, and this accepted only the
-/// first. Pointed at a directory of reports it therefore found nothing and said "no capture
-/// carried a measure record" - which is true of what it read and false of what is there
-/// (D609).
-///
-/// Anything else is skipped rather than read: a directory of captures holds READMEs, module
-/// dumps and `.sprx` files, and a binary read as a transcript is a parse error at best.
+/// Two extensions, because a session transcript is `.txt` and a report is `.obs.log`.
+/// Anything else (READMEs, module dumps, `.sprx` files) is skipped rather than read.
 fn captures(records: &std::path::Path) -> Result<Vec<(String, String)>> {
     /// What a capture file is called.
     const CAPTURE_SUFFIXES: &[&str] = &[".txt", ".obs.log"];
@@ -491,12 +440,8 @@ fn captures(records: &std::path::Path) -> Result<Vec<(String, String)>> {
         if !CAPTURE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
             continue;
         }
-        // **A file that is not text is not a transcript, and is not an error either.** A
-        // capture directory holds raw kernel logs beside session transcripts, and one of
-        // them is not valid UTF-8. Failing the whole run on it means the other forty
-        // captures go unread because of a file nobody was asking about - but skipping it
-        // silently would leave a reader thinking it had been searched, so it is named
-        // (D609).
+        // A file that is not UTF-8 text is not a transcript and not an error: it is skipped
+        // and named, so the rest are still read.
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) => {
@@ -554,9 +499,8 @@ fn write_knowledge(
 
 /// Every `.rs` file under a directory, read into memory.
 ///
-/// Generated sources are skipped: a table emitted by another generator carries no
-/// documentation worth deriving from, and reading it back would record a machine's output as
-/// though somebody had established it.
+/// Generated sources are skipped, so a generator's output is never recorded as though
+/// somebody had established it.
 fn rust_sources(root: &std::path::Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];

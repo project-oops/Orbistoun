@@ -1,15 +1,8 @@
-//! Retention: artifacts are a dev cycle, not an archive.
+//! Retention: run artifacts serve the development cycle, not an archive.
 //!
-//! Two guards, because either alone fails:
-//!
-//! - **Age.** [`DEFAULT_MAX_AGE_HOURS`] hours. Enough to compare against yesterday,
-//!   not enough to accumulate.
-//! - **Size.** An agent doing hundreds of runs with traces enabled can breach a disk
-//!   budget well inside the age window, so the byte cap is the one that actually
-//!   fires in the case that matters.
-//!
-//! Purging is oldest-first, which relies on [`crate::RunId`] sorting chronologically
-//! as a string - so a filename listing is already in age order.
+//! Two guards: an age limit ([`DEFAULT_MAX_AGE_HOURS`]), long enough to compare against
+//! yesterday, and a byte budget, because many runs with traces can fill a disk well
+//! inside the age window. Purging is oldest-first.
 
 use std::fs;
 use std::io;
@@ -21,9 +14,7 @@ pub const DEFAULT_MAX_AGE_HOURS: u64 = 72;
 
 /// Byte budget across all artifacts in one directory.
 ///
-/// Conservative on purpose: it is a guard against a runaway loop filling a disk, not
-/// a tuned figure. Adjust once real traces exist and their size is known rather than
-/// guessed.
+/// A guard against a runaway loop filling a disk, not a tuned figure.
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// What a purge did.
@@ -68,8 +59,8 @@ struct Candidate {
 /// Removes artifacts older than the policy allows, then oldest-first until the byte
 /// budget is met.
 ///
-/// A missing directory is success with nothing done, not an error: purging runs on
-/// startup, and a first run has nothing to purge.
+/// A missing directory is success with nothing done: purging runs on startup, and a first
+/// run has nothing to purge.
 pub fn purge(dir: &Path, policy: Policy, now: SystemTime) -> io::Result<PurgeReport> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -171,8 +162,7 @@ mod tests {
 
     #[test]
     fn the_byte_budget_fires_even_when_nothing_is_old() {
-        // The case that actually matters: an agent doing hundreds of runs breaches a
-        // disk budget well inside the age window.
+        // The byte budget applies to files still inside the age window.
         let tmp = tempfile::tempdir().expect("tempdir");
         for i in 0..5 {
             write(tmp.path(), &format!("run-{i}.json"), 100);

@@ -1,23 +1,14 @@
 //! The provenance guards, tested by making each one fail.
 //!
-//! # Why this file exists
-//!
-//! Three guards in this repository have reported success while checking nothing: a `sed`
-//! that aborted and emptied its own offender list (D199), a walker that tested one filename
-//! and skipped the two it was written for (D191), and an audit that returned before its
-//! ceiling comparison so a stale ceiling passed silently (D213). All three were written
-//! carefully. None had ever been observed failing.
-//!
-//! So the rule these tests hold to is that **a guard is not finished until somebody has
-//! made it fail**. Every case below breaks something on purpose and asserts that the guard
-//! notices - the passing direction is the cheap half.
+//! A guard is not trusted until it has been made to fail (D227). Every case breaks something on
+//! purpose and asserts that the guard notices.
 
 use std::io::Write as _;
 
 /// Builds a database file with one name and the derivation given, and audits it.
 ///
-/// Returns the command's combined output and whether it succeeded, because for these
-/// guards both matter: a fault that is reported and then exits zero is the failure mode.
+/// Returns the combined output and the exit status: a fault that is reported and then exits zero is
+/// the failure mode.
 fn audit(json: &str, extra: &[&str]) -> (String, bool) {
     let dir = tempfile::tempdir().expect("a temp dir");
     let db = dir.path().join("db.json");
@@ -28,8 +19,8 @@ fn audit(json: &str, extra: &[&str]) -> (String, bool) {
 
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_orbistoun-cli"));
     command.arg("audit").arg(&db).args(extra);
-    // The harvest check resolves the path each record names relative to the working
-    // directory, and the records below name paths inside this temp dir.
+    // The harvest check resolves each record's path against the working directory, and the records
+    // name paths inside this temp dir.
     command.current_dir(dir.path());
     let out = command.output().expect("running the audit");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -37,15 +28,14 @@ fn audit(json: &str, extra: &[&str]) -> (String, bool) {
     (text, out.status.success())
 }
 
-/// A suffix. The real one is a runtime input; nothing here depends on its value, because
-/// these tests are about records rather than about hashes.
+/// An arbitrary suffix; these tests are about records, not hashes.
 const SUFFIX: &str = "00112233";
 
+/// A static record naming a module that lacks its string fails the audit.
 #[test]
 fn a_static_record_naming_a_module_that_lacks_the_string_is_caught() {
-    // The claim a static record makes is "this exact string is in this exact file". It is
-    // the one claim in the vocabulary that a person holding the corpus can settle in
-    // seconds, and before the split nothing settled it at all.
+    // A static record claims "this exact string is in this exact file", which anyone holding the
+    // corpus can settle.
     let dir = tempfile::tempdir().expect("a temp dir");
     let module = dir.path().join("module.bin");
     std::fs::write(
@@ -75,10 +65,10 @@ fn a_static_record_naming_a_module_that_lacks_the_string_is_caught() {
     );
 }
 
+/// A static record whose module is present and contains the string passes.
 #[test]
 fn a_static_record_whose_module_is_present_and_contains_it_passes() {
-    // The other direction, so the test above is known to be measuring the record rather
-    // than the absence of a corpus.
+    // The converse, so the test above measures the record rather than the absence of a corpus.
     let dir = tempfile::tempdir().expect("a temp dir");
     let module = dir.path().join("module.bin");
     std::fs::write(&module, b"\0sceReallyInTheModule\0").expect("writing the module");
@@ -97,11 +87,10 @@ fn a_static_record_whose_module_is_present_and_contains_it_passes() {
     );
 }
 
+/// A module that is absent is reported unchecked, never passed as checked.
 #[test]
 fn a_module_that_is_not_here_is_reported_unchecked_and_never_passed_as_checked() {
-    // **The failure mode that matters most.** CI has no corpus and never will, so the
-    // absent case is the normal one - and a check that reports success for material it
-    // could not read is worse than no check.
+    // CI has no corpus, so the absent case is the normal one.
     let json = format!(
         r#"{{"suffix_hex":"{SUFFIX}","names":["sceSomethingOrOther"],
             "derivations":{{"sceSomethingOrOther":
@@ -120,12 +109,11 @@ fn a_module_that_is_not_here_is_reported_unchecked_and_never_passed_as_checked()
     );
 }
 
+/// A stale ceiling fails even when every name is accounted for (D213).
 #[test]
 fn a_stale_ceiling_fails_even_when_nothing_is_unaccounted() {
-    // The hole this replaced: `audit` returned on "every name is accounted for" *before*
-    // comparing the ceiling, so the half of the ceiling's rule that says an entry which
-    // stopped applying must leave was unenforceable in the only state that triggers it.
-    // A 202-name ceiling passed against an empty unaccounted set (D213).
+    // The ceiling comparison runs even when the unaccounted set is empty: an entry that stopped
+    // applying must leave the ceiling.
     let dir = tempfile::tempdir().expect("a temp dir");
     let ceiling = dir.path().join("ceiling.txt");
     std::fs::write(
@@ -151,10 +139,11 @@ fn a_stale_ceiling_fails_even_when_nothing_is_unaccounted() {
     );
 }
 
+/// A generated record at the wrong index does not verify.
 #[test]
 fn a_generated_record_at_the_wrong_index_does_not_verify() {
-    // A forged record must fail exactly as loudly as a missing one, which is the whole
-    // argument for re-running a derivation rather than reading it.
+    // A forged record fails as loudly as a missing one, because the derivation is re-run rather
+    // than read.
     let json = format!(
         r#"{{"suffix_hex":"{SUFFIX}","names":["sceKernelSomething"],
             "derivations":{{"sceKernelSomething":
@@ -169,10 +158,10 @@ fn a_generated_record_at_the_wrong_index_does_not_verify() {
     );
 }
 
+/// The evidence summary counts every class, including the empty ones.
 #[test]
 fn the_evidence_summary_counts_every_class_including_the_empty_ones() {
-    // "0 external" is the most reassuring number in the line and would be the easiest to
-    // omit, so it is asserted rather than assumed.
+    // "0 external" is asserted rather than assumed.
     let json = format!(
         r#"{{"suffix_hex":"{SUFFIX}","names":["sceOne","sceTwo"],
             "derivations":{{

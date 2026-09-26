@@ -1,9 +1,8 @@
 //! Whether this machine can install a guest thread pointer.
 //!
-//! `CPUID` says whether the processor has the feature; the operating system must also
-//! have enabled it, and nothing in user code can observe that. So the only honest check
-//! is to write the base and read it back - which is what this does, on a scratch block,
-//! restoring whatever the host was using afterwards.
+//! `CPUID` reports the processor feature, but whether the operating system enabled it is not
+//! observable from user code. This writes the base on a scratch block, reads it back, and
+//! restores the host's value.
 //!
 //! ```text
 //! cargo run -p orbistoun-abi --example thread-pointer
@@ -43,8 +42,7 @@ fn main() {
     }
 
     if let Some(previous) = restore {
-        // The host owns this thread; leaving its base pointing at a stack array would
-        // break whatever runs on it next.
+        // The host owns this thread; its base must not be left pointing at a stack array.
         // SAFETY: restoring a value this thread was already using.
         unsafe {
             let _ = thread_pointer::install(previous);

@@ -1,10 +1,8 @@
-//! The performance overlay: where a running title's time goes, drawn over its picture (worklog 844).
+//! The performance overlay: where a running title's time goes, drawn over its picture.
 //!
-//! The worker streams a [`PerfReport`] about once a second. This draws it: the frame rate, how many
-//! submissions and draws that took, and each part of presenting a frame as its share of the second -
-//! with the remainder, the guest's own time and whatever nothing measures, said as such rather than
-//! left out. The biggest share is highlighted, because the point of the overlay is to say what to
-//! make faster.
+//! The worker streams a [`PerfReport`] about once a second. This draws the frame rate, the
+//! submissions and draws behind it, and each part of presenting a frame as its share of the
+//! second, including the unmeasured remainder. The biggest share is highlighted.
 
 use orbistoun_proto::PerfReport;
 
@@ -25,8 +23,8 @@ pub(crate) fn lines(report: &PerfReport) -> (Vec<String>, Option<usize>) {
         ),
     ];
     let share = |ms: f64| 100.0 * ms / report.window_ms.max(f64::EPSILON);
-    // The device's busy time runs alongside the host's, so it is its own line - how much of the
-    // second the GPU was working - and is kept out of the host's shares below.
+    // The device's busy time runs alongside the host's, so it is its own line and is kept
+    // out of the host's shares below.
     if let Some((_, gpu)) = report
         .phases
         .iter()
@@ -60,8 +58,8 @@ pub(crate) fn lines(report: &PerfReport) -> (Vec<String>, Option<usize>) {
         .filter(|(name, ms)| *ms > 0.0 && !is_total(name))
         .map(|(name, ms)| (name.clone(), share(*ms)))
         .collect();
-    // **A whole submit contains the phases before "present"**, so what it holds beyond them is the
-    // submit path's own unmeasured work - and the window beyond it and "present" is the guest's.
+    // A whole submit contains the phases before "present", so its excess over them is the
+    // submit path's unmeasured work; the time beyond the submit and "present" is the guest's.
     match submit_total {
         Some(total) => {
             let inside = measured - present;
@@ -121,9 +119,7 @@ pub(crate) fn draw(ui: &egui::Ui, over: egui::Rect, report: &PerfReport) {
 mod tests {
     use orbistoun_proto::PerfReport;
 
-    /// **The rates are per second, and the remainder is said, not dropped.** Half a second of
-    /// flips at 10 is 20 fps; 300 ms measured out of 500 leaves 40% to the guest, and that is the
-    /// biggest share, so it is the one highlighted.
+    /// Rates are per second and the unmeasured remainder is shown and can be the highlight.
     #[test]
     fn the_overlay_says_the_rate_and_where_the_rest_went() {
         let report = PerfReport {

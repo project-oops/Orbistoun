@@ -1,20 +1,20 @@
-//! Kernel memory emulation for payload escape primitives.
+//! Simulated kernel memory for the kernel read interface open-toolchain payloads use.
 //!
-//! Open-toolchain payloads use a kernel read/write primitive (built over a socket/pipe pair)
-//! to walk kernel structures (`allproc` -> `struct proc` -> `dynlib_obj`) and resolve library
-//! symbols like `sceKernelDlsym`.
+//! The interface is built over a socket and pipe pair; payloads use it to walk kernel
+//! structures (`allproc` -> `struct proc` -> `dynlib_obj`) and resolve library symbols such
+//! as `sceKernelDlsym`. This module answers those reads from fixed synthetic tables.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static KERNEL_READ_ADDR: AtomicU64 = AtomicU64::new(0);
 
-/// Sets the current kernel address targeted by the escape setsockopt primitive.
+/// Sets the kernel address the next read through the socket option interface targets.
 pub fn set_kernel_read_address(addr: u64) {
     KERNEL_READ_ADDR.store(addr, Ordering::SeqCst);
 }
 
-/// Gets the current kernel address targeted by the escape primitive.
+/// The kernel address the next read targets.
 pub fn get_kernel_read_address() -> u64 {
     KERNEL_READ_ADDR.load(Ordering::SeqCst)
 }
@@ -53,10 +53,10 @@ fn kernel_tables() -> &'static KernelTables {
         let mut symtab = Vec::new();
         let mut strtab = Vec::new();
 
-        // Initial 0 byte in strtab
+        // The string table starts with a NUL byte.
         strtab.push(0);
 
-        // Symbols with their confirmed/measured vaddrs
+        // Symbols and their addresses.
         let symbols: &[(&str, u64)] = &[
             ("sceKernelDlsym", 0x135f0),
             ("sceKernelLoadStartModule", 0x16d90),
@@ -113,7 +113,7 @@ fn kernel_tables() -> &'static KernelTables {
         let hasher = orbistoun_nid::NidHasher::default();
 
         for &(name, vaddr) in symbols {
-            // 1. Sony NID encoded form (11 chars + null)
+            // 1. The encoded NID form (11 characters and a NUL).
             let nid = hasher.hash(name);
             let encoded = orbistoun_nid::encode_nid(nid);
             let str_offset = strtab.len() as u32;
@@ -125,7 +125,7 @@ fn kernel_tables() -> &'static KernelTables {
             entry[8..16].copy_from_slice(&vaddr.to_le_bytes());
             symtab.extend_from_slice(&entry);
 
-            // 2. Raw name form (string + null)
+            // 2. The raw name form (string and a NUL).
             let raw_offset = strtab.len() as u32;
             strtab.extend_from_slice(name.as_bytes());
             strtab.push(0);
@@ -140,8 +140,8 @@ fn kernel_tables() -> &'static KernelTables {
     })
 }
 
-/// Copies `buf` from `offset` into `out`, as far as either reaches - the tail every region of the
-/// simulated kernel space shares.
+/// Copies `buf` from `offset` into `out`, as far as either reaches: the tail every region of
+/// the simulated kernel space shares.
 fn copy_from(out: &mut [u8], buf: &[u8], offset: usize) {
     if offset < buf.len() {
         let copy_len = out.len().min(buf.len() - offset);
@@ -149,9 +149,9 @@ fn copy_from(out: &mut [u8], buf: &[u8], offset: usize) {
     }
 }
 
-/// One `struct dynlib_obj` the resolver walks: its `next` link and its handle over the fixed fields
-/// the three real entries (libkernel, libc, main) share - a path pointer, an image base, and the
-/// pointer to the shared metadata block.
+/// One `struct dynlib_obj` the resolver walks: its `next` link and its handle over the fixed
+/// fields the three entries (libkernel, libc, main) share: a path pointer, an image base, and
+/// the pointer to the shared metadata block.
 fn dynlib_obj(next: u64, handle: i32) -> [u8; 0x200] {
     let mut buf = [0u8; 0x200];
     buf[0x00..0x08].copy_from_slice(&next.to_le_bytes());
@@ -162,13 +162,13 @@ fn dynlib_obj(next: u64, handle: i32) -> [u8; 0x200] {
     buf
 }
 
-/// Reads `out.len()` bytes from the simulated kernel memory space starting at `get_kernel_read_address()`.
+/// Reads `out.len()` bytes of simulated kernel memory starting at the targeted address.
 pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
     let addr = get_kernel_read_address();
     let len = out.len();
     out.fill(0);
 
-    // KERNEL_DATA_BASE region (allproc lookup)
+    // KERNEL_DATA_BASE region (`allproc` lookup).
     if (KERNEL_DATA_BASE..KERNEL_DATA_BASE + 0x1000_0000).contains(&addr) {
         let ptr = KPROC_ADDR;
         let bytes = ptr.to_le_bytes();
@@ -177,7 +177,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
         return len;
     }
 
-    // KPROC_ADDR region (struct proc)
+    // KPROC_ADDR region (`struct proc`).
     if (KPROC_ADDR..KPROC_ADDR + 0x1000).contains(&addr) {
         let offset = (addr - KPROC_ADDR) as usize;
         let mut proc_buf = vec![0u8; 0x500];
@@ -200,7 +200,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
         return len;
     }
 
-    // DYNLIB_HEAD_ADDR region (LIST_HEAD pointing to first dynlib_obj)
+    // DYNLIB_HEAD_ADDR region (list head pointing at the first `dynlib_obj`).
     if (DYNLIB_HEAD_ADDR..DYNLIB_HEAD_ADDR + 0x100).contains(&addr) {
         copy_from(
             out,
@@ -232,7 +232,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
         return len;
     }
 
-    // DYNLIB_PATH_ADDR region
+    // DYNLIB_PATH_ADDR region.
     if (DYNLIB_PATH_ADDR..DYNLIB_PATH_ADDR + 0x100).contains(&addr) {
         copy_from(
             out,
@@ -242,7 +242,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
         return len;
     }
 
-    // RTLD_META_ADDR region
+    // RTLD_META_ADDR region.
     if (RTLD_META_ADDR..RTLD_META_ADDR + 0x200).contains(&addr) {
         let tables = kernel_tables();
         let offset = (addr - RTLD_META_ADDR) as usize;
@@ -267,7 +267,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
         return len;
     }
 
-    // SYMTAB_ADDR region
+    // SYMTAB_ADDR region.
     if (SYMTAB_ADDR..SYMTAB_ADDR + 0x4000).contains(&addr) {
         let tables = kernel_tables();
         let offset = (addr - SYMTAB_ADDR) as usize;
@@ -279,7 +279,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
         return len;
     }
 
-    // STRTAB_ADDR region
+    // STRTAB_ADDR region.
     if (STRTAB_ADDR..STRTAB_ADDR + 0x8000).contains(&addr) {
         let tables = kernel_tables();
         let offset = (addr - STRTAB_ADDR) as usize;
@@ -298,6 +298,7 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
 mod tests {
     use super::*;
 
+    /// Reads through the kernel pipe answer the `allproc` and `struct proc` layout.
     #[test]
     fn kernel_read_pipe_answers_allproc_and_proc() {
         set_kernel_read_address(KERNEL_DATA_BASE + 0x20000);

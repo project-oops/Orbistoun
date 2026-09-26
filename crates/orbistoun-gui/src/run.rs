@@ -1,13 +1,8 @@
-//! Driving a run without freezing the window.
+//! Drives a run on its own thread so the window stays responsive.
 //!
-//! A guest runs until it faults or hits the time limit, which is up to twenty seconds. On
-//! the UI thread that is an application that has hung, so the work happens on a thread of
-//! its own and the result arrives through a channel.
-//!
-//! **The orchestration itself is not here.** Spawning a worker, reading the previous
-//! trace, and comparing the two are all below this crate - see `orbistoun_report::trace`
-//! and `orbistoun_worker`. What this file owns is "on another thread, and report back",
-//! which is a property of having a window rather than a property of running a guest.
+//! A run lasts until the guest faults or hits the time limit, so it runs off the UI thread
+//! and its result arrives through a channel. Spawning the worker and comparing traces live
+//! in `orbistoun_worker` and `orbistoun_report::trace`; this file owns only the threading.
 
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
@@ -32,30 +27,27 @@ pub(crate) struct InFlight {
     receiver: Receiver<Finished>,
     /// Terminates the worker from this thread.
     ///
-    /// Taken before the handle was moved, because the thread that owns the handle is the
-    /// one blocked reading from it - and that is exactly the thread that cannot act on a
-    /// stop request.
+    /// Taken before the handle moves, because the thread owning the handle is blocked
+    /// reading from it and cannot act on a stop request.
     stopper: Receiver<orbistoun_worker::Stopper>,
     /// Kept once received, so a second press does not wait on an empty channel.
     held: std::cell::Cell<Option<orbistoun_worker::Stopper>>,
     /// Carries a shell action into the running guest, from this thread.
     ///
-    /// The same shape as the stopper and for the same reason - but a different act. A
-    /// stopper ends the process; this **tells the title something** and leaves it running,
-    /// which is the difference between quitting a title and pulling its power out.
+    /// The same shape as the stopper, but it tells the title something and leaves it
+    /// running, where the stopper ends the process.
     control: Receiver<orbistoun_worker::Control>,
     /// What was last sent to the guest, so an unchanged pad sends nothing.
     ///
-    /// Held here rather than in the window, because "what the worker already knows" is a
-    /// fact about this run - a new run starts knowing nothing and must be told again.
+    /// Held per run, because a new run starts knowing nothing and must be told again.
     last_sent: std::cell::RefCell<Option<Vec<orbistoun_input::PadState>>>,
     /// Kept once received, so repeated actions do not race an empty channel.
     control_held: std::cell::RefCell<Option<orbistoun_worker::Control>>,
-    /// Each frame the guest presents, as it is presented (worklog 841).
+    /// Each frame the guest presents, as it is presented.
     frames: Receiver<egui::ColorImage>,
-    /// Each title the guest asked the system to start (worklog 842).
+    /// Each title the guest asked the system to start.
     launches: Receiver<String>,
-    /// Where each second of the run went (worklog 844).
+    /// Where each second of the run went.
     perf: Receiver<orbistoun_proto::PerfReport>,
 }
 
@@ -70,8 +62,7 @@ struct Live {
 impl InFlight {
     /// The result, if it has arrived.
     ///
-    /// `Err(())` means the worker thread died without sending - which should not happen,
-    /// but a UI that waits forever on it would be indistinguishable from one that hung.
+    /// `Err(())` means the run thread died without sending, reported rather than waited on.
     pub(crate) fn poll(&self) -> Result<Option<Finished>, ()> {
         // Pick the stopper up as soon as the run thread publishes it, so a stop pressed
         // later does not race the spawn.
@@ -92,8 +83,8 @@ impl InFlight {
         }
     }
 
-    /// The newest frame the guest has presented since the last call, if any - older ones that
-    /// arrived in between are skipped, because only the newest is worth showing.
+    /// The newest frame the guest has presented since the last call, if any; older ones are
+    /// skipped.
     pub(crate) fn latest_frame(&self) -> Option<egui::ColorImage> {
         let mut latest = None;
         while let Ok(frame) = self.frames.try_recv() {
@@ -118,9 +109,8 @@ impl InFlight {
 
     /// Terminates the run.
     ///
-    /// The result still arrives through the channel: the worker dies, the request fails,
-    /// and the thread reports that as an ordinary failed run. A stopped run keeps whatever
-    /// trace it had already written, because the worker writes it as it goes.
+    /// The result still arrives through the channel as an ordinary failed run. A stopped
+    /// run keeps the trace written so far, because the worker writes it as it goes.
     pub(crate) fn stop(&self) {
         if let Some(stopper) = self.held.take() {
             stopper.stop();
@@ -129,10 +119,8 @@ impl InFlight {
 
     /// Tells the running title something, and leaves it running.
     ///
-    /// Answers whether it could be sent. A `false` is the ordinary race between a run
-    /// ending and somebody pressing a button, not a failure worth reporting - but it is
-    /// **not** silently discarded either, because a caller that then terminates the worker
-    /// needs to know the guest was never told.
+    /// Answers whether it could be sent. `false` is the ordinary race with a run ending,
+    /// returned so a caller that then terminates the worker knows the guest was never told.
     pub(crate) fn shell(&self, action: orbistoun_shell::Request) -> bool {
         self.control_held
             .borrow()
@@ -160,12 +148,9 @@ impl InFlight {
 
     /// Tells the running title what the pads are doing.
     ///
-    /// Answers whether anything was sent - `false` when the state has not changed, which is
-    /// the ordinary case for most frames.
+    /// Answers whether anything was sent: `false` when the state has not changed.
     pub(crate) fn input(&self, pads: &[orbistoun_input::PadState]) -> bool {
-        // **Only when it changes.** Input is a level rather than a stream: a title asks what
-        // the pad is doing now, so an unchanged pad needs no message. Sending one per frame
-        // would put sixty JSON lines a second down a pipe to say nothing happened.
+        // Only when it changes: input is a level, so an unchanged pad needs no message (D345).
         if self.last_sent.borrow().as_deref() == Some(pads) {
             return false;
         }
@@ -181,12 +166,8 @@ impl InFlight {
     }
 }
 
-/// Starts a run on a thread of its own.
-///
-/// `limit` is in seconds; zero asks for no limit, which is the same explicit choice the
-/// CLI offers rather than a magic sentinel.
-/// What a run does with pad input beyond the window's own (D721): a script to play from its entry,
-/// and a file to capture into from its entry - each chosen on the toolbar before the launch.
+/// What a run does with pad input beyond the window's own (D721): a script to play and a
+/// file to capture into, each from the run's entry and chosen on the toolbar before launch.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunInput {
     /// The pad script to play.
@@ -195,6 +176,9 @@ pub(crate) struct RunInput {
     pub(crate) capture: Option<std::path::PathBuf>,
 }
 
+/// Starts a run on a thread of its own.
+///
+/// `limit` is in seconds; zero asks for no limit, the same explicit choice the CLI offers.
 pub(crate) fn start(
     module: &std::path::Path,
     limit: u64,
@@ -224,8 +208,7 @@ pub(crate) fn start(
             (&stop_sender, &control_sender),
             &live,
         );
-        // A failed send means the window closed while the guest was running, which is a
-        // normal thing for a person to do and not worth reporting.
+        // A failed send means the window closed during the run, which is normal.
         let _ = sender.send(finished);
     });
 
@@ -260,28 +243,26 @@ fn execute(
     };
     // Published before anything blocks, so a stop pressed immediately is still honoured.
     let _ = stop_sender.send(worker.stopper());
-    // Same moment, same reason. From here this thread is inside the run, and a shell action
-    // that arrived after it started would have nowhere to go without this.
+    // Likewise, so a shell action sent after the run starts has somewhere to go.
     let _ = control_sender.send(worker.control());
 
-    // Read before the run, because the run overwrites it. The comparison is the whole
-    // reason traces are kept at all.
+    // Read before the run, because the run overwrites it.
     let before = orbistoun_report::trace::load_previous(traces_dir, module);
 
-    // Each presented frame goes to the window as it arrives (worklog 841); a region that cannot be
-    // read is skipped - the next flip brings another.
+    // Each presented frame goes to the window as it arrives; a region that cannot be read is
+    // skipped, since the next flip brings another.
     let events = worker.request_streaming(
         &orbistoun_proto::Request::Run {
             path: module.to_path_buf(),
             symbols_db: None,
             limit_seconds: (limit > 0).then_some(limit),
             call_budget: (budget > 0).then_some(budget),
-            // The window's own pads drive a GUI run; a script or a capture only when the toolbar
-            // asked for one before the launch (D721).
+            // The window's own pads drive a GUI run; a script or a capture only when the
+            // toolbar asked for one before the launch (D721).
             input_script: input.play,
             capture_input: input.capture,
-            // A library title's storage is known from where it lies (D722); the window launches
-            // only library titles, so it never asks.
+            // A library title's storage is known from where it lies (D722), and the window
+            // launches only library titles.
             staged: false,
         },
         |event| match event {
@@ -346,12 +327,9 @@ fn failed(error: String) -> Finished {
 
 /// Renders one protocol event.
 ///
-/// Presentation, which is this crate's whole remit - the event types themselves are
-/// `orbistoun-proto` data and say nothing about how they are shown.
-///
-/// A `Frame` event carries only a descriptor; its bytes are in a region on the same shared route the
-/// traces take (`frames_dir`), so this is where the shim reads them back (D695). Rendered as a line
-/// today, and read whole - the image goes to a texture once a run produces one to send (36c0).
+/// The event types are `orbistoun-proto` data; how they are shown is this crate's job. A
+/// `Frame` event carries only a descriptor, and its bytes are read back from a region in
+/// `frames_dir` (D695) and rendered as a line.
 fn describe(event: &orbistoun_proto::Event, frames_dir: &std::path::Path) -> String {
     match event {
         orbistoun_proto::Event::Reached { phase } => format!("reached    {phase:?}"),

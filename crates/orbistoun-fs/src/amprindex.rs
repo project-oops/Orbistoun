@@ -1,19 +1,9 @@
-//! The index a dumped title ships so the asynchronous file path can be served.
+//! The file index a title ships so the asynchronous file path can be served.
 //!
-//! # What this is, and why reading it is ordinary
-//!
-//! PPSA03416's directory holds `ampr_emu.index` beside a replacement `fakelib/libSceAmpr.sprx`.
-//! The replacement exports every `sceAmpr*` name the title imports and implements them **in
-//! guest code** - which is why orbistoun never records a call to one, and why the command
-//! buffer arrives already built. What that guest code then calls is the three `sceKernelApr*`
-//! functions in `libkernel`, and this file is the table it expects them to be answered from
-//! (D591, D592).
-//!
-//! It is **guest material at rest** - a file in a title directory, nothing executed, nothing
-//! disassembled - which `docs/PROVENANCE.md` calls `static` evidence, the same category as a
-//! module's own import table.
-//!
-//! # The format, checked rather than assumed
+//! Some title directories hold `ampr_emu.index` beside a replacement `libSceAmpr.sprx` that
+//! implements every `sceAmpr*` function in guest code and calls the three `sceKernelApr*`
+//! functions in `libkernel`; this file is the table those are answered from. It is guest
+//! material at rest, `static` evidence in `docs/PROVENANCE.md` terms.
 //!
 //! ```text
 //! +0x00  "AMPRIDX3"
@@ -24,22 +14,16 @@
 //! ```
 //!
 //! An entry is `{u32 name_offset, u32 name_length, u64 size, u64 modified}`, and the names
-//! begin where the entries end. Decoded against the directory five times before being written
-//! down: `/app0/debug.log` at 0, `eboot.bin` at 27,744,015, the replacement library at 218,678,
-//! `keystone` at 96, and `/app0/Media/globalgamemanagers` at 224,748 - every one matching what
-//! is on disk.
-//!
-//! Four header words between `+0x18` and `+0x2c` are **not** understood and are not read. Saying
-//! so is cheaper than inventing a meaning for them.
+//! begin where the entries end. The four header words between `+0x18` and `+0x2c` are not
+//! understood and not read.
 
 /// What the file begins with.
 const MAGIC: &[u8] = b"AMPRIDX3";
 
 /// The version this parser understands.
 ///
-/// Refused rather than attempted for any other value: a format that changed under the same
-/// magic would parse into plausible-looking rubbish, and a wrong size handed to a guest is
-/// exactly the answer principle 3 exists to refuse.
+/// Any other value is refused: a format changed under the same magic would parse into
+/// plausible sizes that are wrong.
 const VERSION: u32 = 3;
 
 /// Where the entries start.
@@ -61,8 +45,8 @@ pub struct Entry {
 
 /// Reads an index out of bytes, or nothing if they are not one.
 ///
-/// **Refuses rather than salvages.** A truncated or unknown-version index parses to `None`, so a
-/// caller answers "no" instead of answering from half a table.
+/// A truncated or unknown-version index parses to `None`, so a caller answers "no" instead
+/// of answering from half a table.
 #[must_use]
 pub fn parse(bytes: &[u8]) -> Option<Vec<Entry>> {
     if bytes.len() < ENTRIES_AT || !bytes.starts_with(MAGIC) {
@@ -108,9 +92,7 @@ fn word64(bytes: &[u8], at: usize) -> Option<u64> {
 mod tests {
     /// Builds an index in the format the module note documents.
     ///
-    /// A synthetic index can only show the parser is self-consistent. What pins the format to
-    /// reality is the five entries checked against a real title directory, recorded in the
-    /// module note - a test cannot do that part and should not pretend to.
+    /// A synthetic index shows only that the parser is self-consistent.
     fn an_index(paths: &[(&str, u64)]) -> Vec<u8> {
         let mut out = vec![0_u8; super::ENTRIES_AT];
         out[..8].copy_from_slice(super::MAGIC);
@@ -146,11 +128,7 @@ mod tests {
         assert_eq!(entries[1].id, 1);
     }
 
-    /// **Anything that is not this format is refused, not salvaged.**
-    ///
-    /// Watched failing: without the version check, an index claiming version 4 parses into
-    /// entries whose sizes are whatever the new layout put where the old one kept a length -
-    /// and a wrong size handed to a guest is the plausible answer principle 3 refuses.
+    /// Anything that is not this format is refused, not salvaged.
     #[test]
     fn only_this_format_is_read() {
         let mut wrong_magic = an_index(&[("/a", 1)]);

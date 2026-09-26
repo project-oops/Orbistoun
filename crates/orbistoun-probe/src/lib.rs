@@ -1,38 +1,13 @@
-//! Reading the records a hardware probe produces.
+//! Reading the records a conformance probe produces.
 //!
-//! # What this is
+//! obSCEne runs on real hardware and speaks the line protocol in its `docs/PROTOCOL.md`,
+//! answering with `OBS|` records (D207). This crate turns those records, from a captured
+//! transcript or a committed corpus, into values; the fixtures under
+//! `tests/fixtures/protocol/` are real exchanges copied in as data.
 //!
-//! obSCEne is a conformance probe that runs on real hardware and answers questions this
-//! project can otherwise only infer. It speaks a line protocol, specified in that project's
-//! `docs/PROTOCOL.md`, and what comes back is a stream of `OBS|` records.
-//!
-//! This crate reads those records. It does not drive a session, it does not open a socket,
-//! and it does not know what a Steam Deck is. Records arrive as bytes - from a captured
-//! transcript, from a committed corpus - and become values a test or an implementation can
-//! use.
-//!
-//! # Why this exists before there is any hardware
-//!
-//! The protocol ships with captured transcripts, and their stated purpose is that a
-//! consumer can be built and tested without hardware attached. That is what happens here:
-//! every fixture under `tests/fixtures/protocol/` is a real exchange, and parsing all of
-//! them is the conformance test.
-//!
-//! The transcripts are **copied in as data**, never referenced across repositories. A test
-//! that reads a sibling checkout fails for everyone who does not have one, and a build
-//! dependency between the two projects is exactly the coupling D207 exists to prevent.
-//!
-//! # The one thing this type system is for
-//!
-//! A command that did not answer must never be readable as one that answered.
-//!
-//! `died` is not `returned 0`. `timeout` is not `died`. The protocol says a corpus blurring
-//! those is worse than no corpus, because the fiction is indistinguishable from evidence -
-//! and evidence is what this project is short of.
-//!
-//! So [`Outcome`] carries a value **only** in the variant that observed one. There is no
-//! field to read for a call that died, no default to fall through to, and no way to write
-//! code that treats the two alike without saying so out loud. That is the whole design.
+//! A command that did not answer is never readable as one that answered: `died` is not
+//! `returned 0` and `timeout` is not `died`, so [`Outcome`] carries a value only in the
+//! variant that observed one.
 
 #![forbid(unsafe_code)]
 
@@ -56,13 +31,9 @@ pub const VERSION: u32 = 1;
 
 /// Something a probe can do, announced during negotiation.
 ///
-/// Read rather than assumed: a stand-in target with none of the platform's libraries
-/// announces no [`Capability::Resolve`], and a consumer discovers that here instead of
-/// asking a question the target cannot answer.
-///
-/// Unknown tokens are **kept**, not dropped. The protocol permits new capabilities within a
-/// version, and a reader that silently discarded them would report a newer probe as less
-/// capable than it is.
+/// Read rather than assumed: a stand-in target without the platform's libraries announces
+/// no [`Capability::Resolve`]. Unknown tokens are kept, since the protocol permits new
+/// capabilities within a version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
     /// Invoke a function by address.
@@ -109,7 +80,7 @@ pub enum Refusal {
     UnknownVerb,
     /// The verb is known and this target cannot do it.
     Unsupported,
-    /// An argument was malformed - including a sequence number that did not increase.
+    /// An argument was malformed, including a sequence number that did not increase.
     BadArgument,
     /// Another session holds the probe.
     Busy,
@@ -119,9 +90,8 @@ pub enum Refusal {
     Unmapped,
     /// The session secret was wrong or absent.
     ///
-    /// The probe generates one per startup and displays it, because a console has no other
-    /// channel. A restart replaces it, so this is what a stale key looks like as well as a
-    /// wrong one.
+    /// The probe generates one per startup and displays it; a restart replaces it, so a
+    /// stale key reads the same as a wrong one.
     Unauthorised,
     /// A reason this version does not know.
     Other(String),
@@ -144,9 +114,8 @@ impl Refusal {
 
 /// Who established an outcome.
 ///
-/// A probe cannot report its own death - the process is gone - so the facts that matter
-/// most are the ones it did *not* say. Keeping the distinction means a reader can tell
-/// something the system reported from something inferred from its silence.
+/// A probe cannot report its own death, so a reader must tell what the probe said from
+/// what was inferred from its silence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedBy {
     /// The probe said so.
@@ -157,22 +126,15 @@ pub enum ObservedBy {
 
 /// What a command did.
 ///
-/// # The variants that carry no value
-///
-/// [`Outcome::Died`], [`Outcome::Timeout`] and [`Outcome::Lost`] have no result field, and
-/// that is deliberate rather than an omission. A call that faulted did not return zero; it
-/// did not return. Giving those variants a value - even an `Option` - creates a place for a
-/// reader to find a number that was never observed, and a number found in a record is
-/// eventually trusted.
+/// [`Outcome::Died`], [`Outcome::Timeout`] and [`Outcome::Lost`] have no result field: a
+/// call that faulted did not return, and no field means no unobserved number to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The command completed and had nothing to return.
     Ok,
     /// The command returned this value from the integer return register.
     ///
-    /// The integer register and nothing else - a function returning a float leaves its
-    /// answer somewhere this does not read, and the record says `returned` because that is
-    /// what was observed.
+    /// The integer register only; a floating-point answer is not read.
     Returned(u64),
     /// The thing asked about does not exist. A fact, not a failure.
     Absent,
@@ -180,32 +142,22 @@ pub enum Outcome {
     Died,
     /// The command has not returned yet. The probe may be alive, blocked, or looping.
     ///
-    /// Deliberately not resolved into [`Outcome::Died`]: a blocked call and a dead process
-    /// look identical from one end of a socket, and the honest record says which was
-    /// observed rather than which was guessed.
+    /// Not resolved into [`Outcome::Died`]: a blocked call and a dead process look
+    /// identical from one end of a socket.
     Timeout,
     /// The connection closed and the probe never came back. Ambiguous, recorded as such.
     Lost,
     /// An outcome word this version does not know.
     ///
-    /// # Two rules meeting, and neither yielding
-    ///
-    /// Report enum values are **open**: the probe may add one without bumping the format
-    /// version, and a reader degrades rather than failing. Refusing the line would make this
-    /// consumer break on a stream it was told to expect.
-    ///
-    /// A command that did not answer is **never** recorded as having answered. An outcome
-    /// nobody here understands has not been understood, so it cannot be a result.
-    ///
-    /// Both hold at once: the line parses, and the outcome carries no value and reports
-    /// [`Outcome::answered`] as false. Degrading is not the same as assuming the best.
+    /// Report enum values are open, so the line parses; an outcome not understood is not a
+    /// result, so it carries no value and [`Outcome::answered`] is false.
     Unrecognised(String),
 }
 
 impl Outcome {
     /// The value observed, if one was.
     ///
-    /// `None` for every non-answer, and there is no variant this could invent a number for.
+    /// `None` for every non-answer.
     pub const fn value(&self) -> Option<u64> {
         match self {
             Self::Returned(value) => Some(*value),
@@ -223,9 +175,8 @@ impl Outcome {
         match self {
             // Only the driver can report these: the probe was gone or silent.
             Self::Died | Self::Timeout | Self::Lost => ObservedBy::Driver,
-            // An unrecognised word arrived *from* the probe, so the probe observed
-            // something - this reader simply cannot say what. That is a different fact
-            // from silence and is not filed with it.
+            // An unrecognised word came from the probe, so the probe observed something;
+            // that is not silence.
             _ => ObservedBy::Probe,
         }
     }
@@ -247,15 +198,9 @@ impl fmt::Display for Outcome {
 
 /// How much a reader should trust one result, in the probe's own vocabulary.
 ///
-/// # Why this is not simply mapped on arrival
-///
-/// The probe and this project both grade their facts, and the two vocabularies overlap
-/// without matching. Translating on the way in would lose the original, and the original is
-/// what a later reader needs when a mapping turns out to have been too generous.
-///
-/// So the probe's word is kept verbatim and [`Provenance::oracle`] performs the mapping at
-/// the point of use, where the session is also in hand - which turns out to matter more
-/// than the word itself.
+/// The probe's grading vocabulary overlaps this project's without matching, so the word is
+/// kept verbatim and [`Provenance::oracle`] maps it at the point of use, where the origin
+/// is also known.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Provenance {
     /// The probe's own reasoning. Sensible, unconfirmed, could be wrong in any direction.
@@ -268,26 +213,20 @@ pub enum Provenance {
     Spec,
     /// Vendor interface documentation describes this behaviour specifically.
     Documented,
-    /// Observed on a console.
+    /// Observed on hardware.
     Hardware,
     /// A grade this version does not know.
     ///
-    /// **Not the same as no grade at all.** An absent field means the record predates
-    /// grading and claims nothing; this means the record claims something and this reader
-    /// cannot say what. Both end up ungraded, but only one of them says *the consumer is
-    /// out of date* - and that is worth surfacing rather than quietly filing under
-    /// "claims nothing".
+    /// Not the same as no grade: an absent field claims nothing, while this claims
+    /// something this reader cannot parse, which means the reader is out of date.
     Unrecognised(String),
 }
 
 impl Provenance {
     /// Reads a provenance token, or `None` if there was none.
     ///
-    /// **Absent is not a value.** The record format gained this field after some record
-    /// kinds were already being written, and its own documentation records that the table
-    /// drifted and a parser written against it would have been wrong about half the stream.
-    /// A record without the field is one that predates it, not one claiming anything, and
-    /// treating the gap as a default would invent a grade nobody assigned.
+    /// Absent is not a value: some record kinds carry no provenance field, and a default
+    /// would invent a grade nobody assigned.
     pub fn parse(token: &str) -> Option<Self> {
         match token {
             "assumed" => Some(Self::Assumed),
@@ -295,9 +234,8 @@ impl Provenance {
             "spec" => Some(Self::Spec),
             "documented" => Some(Self::Documented),
             "hardware" => Some(Self::Hardware),
-            // An empty field is absent; anything else is a grade that was given and not
-            // understood. Report enum values are open, so this is expected rather than
-            // exceptional.
+            // An empty field is absent; anything else is a grade given and not understood,
+            // which open enum values make expected.
             "" => None,
             other => Some(Self::Unrecognised(other.to_owned())),
         }
@@ -305,56 +243,24 @@ impl Provenance {
 
     /// What this project would call the same fact, given where it was observed.
     ///
-    /// # The mapping
+    /// `hardware` maps to `measured`, and `spec`, `documented` and `derived` to `published`,
+    /// whose definition here includes the tree the target C library derives from; `assumed`
+    /// stays `assumed`.
     ///
-    /// | probe | here | why |
-    /// |---|---|---|
-    /// | `hardware` | `measured` | observed on a console by a conformance probe, which is this project's definition of measured, word for word |
-    /// | `spec` | `published` | ISO C or POSIX settles it |
-    /// | `documented` | `published` | vendor interface documentation describes it specifically |
-    /// | `derived` | `published` | this project's `published` explicitly covers the tree the target C library derives from |
-    /// | `assumed` | `assumed` | |
-    ///
-    /// `derived` is the one worth pausing on, because the conservative instinct is to
-    /// downgrade it. That would be wrong rather than careful: it is genuinely stronger than
-    /// an assumption, and `published` here is *defined* to include the derivation case. A
-    /// grade that under-reports is not free - it makes a fact indistinguishable from a
-    /// guess, and this project's whole accounting exists so the two can be told apart.
-    ///
-    /// # The origin is not a detail, and it is not read off the wire
-    ///
-    /// **A `hardware` result is only `measured` if the operator asserted real hardware.**
-    ///
-    /// Not if the session *said* so. A probe cannot certify its own machine: inside an
-    /// emulator it reports the emulator's version as the platform's, so `target|console`
-    /// arriving on the wire is a claim and not evidence. The operator's assertion is the
-    /// only thing that separates a measurement of a console from an emulator's answer
-    /// wearing a console's badge.
-    ///
-    /// Everything else is `assumed` - which is the honest grade for a number that is
-    /// probably right and has never been checked against the thing it describes.
-    ///
-    /// Silent promotion is the failure this guards. A number measured on one device and
-    /// read later as authoritative for another is wrong with nothing in the record saying
-    /// so - and that has already cost this project months, pointed at the wrong GPU
-    /// generation with nothing complaining.
-    // `Hardware` and `Assumed` reach the same grade and must not be merged into one arm.
-    // They arrive there for opposite reasons: one is a measurement demoted because it was
-    // taken on the wrong part, the other never claimed anything. Collapsing them would
-    // delete the only place the demotion is visible in the code, and a reader would find a
-    // mapping that looks like it never downgrades anything.
+    /// A `hardware` result is `measured` only if the operator asserted the target (D246).
+    /// A probe cannot certify its own machine, since inside an emulator it reports the
+    /// emulator's version, so a session's claim is not evidence. Otherwise it is `assumed`.
+    // `Hardware` and `Assumed` reach the same grade for opposite reasons, and separate arms
+    // keep the demotion visible.
     #[allow(clippy::match_same_arms, reason = "the demotion must stay visible")]
     pub fn oracle(&self, origin: &Origin) -> Oracle {
         match self {
             Self::Hardware if origin.is_target => Oracle::Measured,
-            // Real hardware, wrong hardware - a stand-in measures itself accurately and
-            // says nothing about the target.
+            // A stand-in measures itself, not the target.
             Self::Hardware => Oracle::Assumed,
             Self::Spec | Self::Documented | Self::Derived => Oracle::Published,
             Self::Assumed => Oracle::Assumed,
-            // A grade nobody here understands cannot be honoured, and the safe reading is
-            // the weakest one. Never the strongest: an unknown word must not become a
-            // measurement on the strength of being unfamiliar.
+            // A grade not understood takes the weakest reading.
             Self::Unrecognised(_) => Oracle::Assumed,
         }
     }
@@ -396,8 +302,8 @@ pub enum Line {
     Request {
         /// Sequence number, strictly increasing within a session.
         ///
-        /// `None` where the transcript carried something that was not a number - which is
-        /// itself a case the protocol specifies, refused with sequence zero.
+        /// `None` where the transcript carried something that was not a number, a case the
+        /// protocol specifies and refuses with sequence zero.
         seq: Option<u64>,
         /// The verb.
         verb: String,
@@ -411,7 +317,7 @@ pub enum Line {
 /// A record from a probe, or written by a driver about a probe's silence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Record {
-    /// A command was received, written *before* it was carried out.
+    /// A command was received, written before it was carried out.
     Ack {
         /// Sequence of the command being acknowledged.
         seq: u64,
@@ -454,11 +360,9 @@ pub enum Record {
     },
     /// What produced a report.
     ///
-    /// A report is not a session: it carries no negotiation, so there is no `hello` and no
-    /// `part`. This is the nearest thing it has to an origin - and it names the *binary
-    /// kind*, `module`, `payload` or `host`, rather than the device. **A report therefore
-    /// cannot say which hardware produced it**, which is a limit worth reading off the
-    /// record rather than working around.
+    /// A report carries no negotiation, so this is its nearest thing to an origin. It
+    /// names the binary kind, not the device, so a report cannot say which hardware
+    /// produced it.
     Build {
         /// Build identifier.
         build: String,
@@ -467,10 +371,8 @@ pub enum Record {
     },
     /// Whether a symbol exists, and how it is reached.
     ///
-    /// The cheapest useful fact a probe produces, and one this project cannot establish any
-    /// other way: a name recovered from a hash can only ever be a name something already
-    /// imports, whereas a platform asked directly answers for symbols nothing imports at
-    /// all.
+    /// A platform asked directly answers for symbols nothing imports, which no name
+    /// recovered from a hash can cover.
     Sym {
         /// Library the symbol was looked for in.
         library: String,
@@ -478,20 +380,14 @@ pub enum Record {
         symbol: String,
         /// `present` or `absent`.
         presence: String,
-        /// How it is reached - `shared`, and whatever else a target reports.
+        /// How it is reached: `shared`, or whatever else a target reports.
         availability: String,
     },
     /// Whether a symbol exists, and where it resolved to.
     ///
-    /// # Why this is separate from [`Self::Sym`]
-    ///
-    /// They carry the same first three fields and a different fourth: `sym` says *how* the
-    /// symbol is reached, `resolve` says *where* it landed. Neither is a superset, so
-    /// folding them would mean inventing whichever field the record did not have.
-    ///
-    /// The probe emits this from its symbol census. It was reaching this reader and being
-    /// carried as [`Self::Other`] - kept, correctly, but contributing no existence fact -
-    /// so a by-name census answered a question nothing here was asking (D245).
+    /// Separate from [`Self::Sym`]: the same first three fields, but `sym` says how the
+    /// symbol is reached and `resolve` where it landed, and neither is a superset. The
+    /// probe emits this from its by-name symbol census.
     Resolve {
         /// Library the symbol was looked for in.
         library: String,
@@ -513,7 +409,7 @@ pub enum Record {
     },
     /// One field of the target's account of itself.
     ///
-    /// Read the state, never only the value - see [`Confidence`].
+    /// Read the state, never only the value; see [`Confidence`].
     SysInfo {
         /// What the field is called.
         field: String,
@@ -531,10 +427,9 @@ pub enum Record {
     },
     /// A run of memory, as hexadecimal.
     ///
-    /// The same record a report uses, so a parser written for one reads the other without
-    /// knowing this protocol exists.
+    /// The same record a report uses, so one parser reads both.
     Bytes {
-        /// What produced it - `read/0x<address>` for a memory read.
+        /// What produced it: `read/0x<address>` for a memory read.
         id: String,
         /// Where it came from, in the probe's words.
         source: String,
@@ -560,12 +455,9 @@ pub enum Record {
     },
     /// A check is about to run, naming what it will exercise.
     ///
-    /// The record that makes a result mean something. A `res` identifies its check by
-    /// `section/name` and says nothing about which function was called; this says which,
-    /// and the two are paired by check identifier.
-    ///
-    /// It is also emitted *before* the call, for the same reason `ack` is written before a
-    /// command runs: a `try` with no matching `res` names the call that did not return.
+    /// A `res` identifies its check by `section/name` only; this names the function, and
+    /// the two pair by check identifier. Emitted before the call, like `ack`, so a `try`
+    /// with no matching `res` names the call that did not return.
     Try {
         /// Check identifier, matching the `res` that follows.
         check: String,
@@ -589,16 +481,8 @@ pub enum Record {
     },
     /// One number a probe measured, in the section that measured it.
     ///
-    /// **The most numerous record kind in every report, and this crate read none of them.**
-    /// Every one landed in [`Record::Other`] and was carried without interpretation, which
-    /// the protocol permits and which was the right default while nothing consumed them.
-    /// What made it worth fixing is that three reports carried 3,319 of these and the
-    /// reader's own summary said how many records it had read - a count that was true and
-    /// an impression that was not (D605).
-    ///
-    /// The shape is fixed at seven fields. Unlike a `res`, a measurement carries no
-    /// verdict: it is a number and the name of what was counted, and what it means is the
-    /// consumer's business.
+    /// Seven fields. Unlike a `res`, a measurement carries no verdict: it is a number and
+    /// the name of what was counted, and its meaning is the consumer's.
     Measure {
         /// Section that took the measurement, prefixed so it sorts into running order.
         section: String,
@@ -608,18 +492,16 @@ pub enum Record {
         field: String,
         /// The value, verbatim.
         ///
-        /// **Not parsed here.** Most are hexadecimal and some are not, and a reader that
-        /// silently turned an unparseable value into zero would manufacture a measurement
-        /// (principle 3). [`Measurement::number`] parses, and says when it could not.
+        /// Not parsed here, since not every value is hexadecimal; [`Measurement::number`]
+        /// parses and says when it could not.
         value: String,
         /// What the value counts: `bytes`, `ticks`, `address`, `offset`, and so on.
         unit: String,
     },
     /// Any other record kind, carried without interpretation.
     ///
-    /// The protocol permits new record kinds within a version and requires a consumer to
-    /// ignore what it does not recognise. Ignoring is not the same as discarding: the
-    /// fields are kept so a later reader can make sense of them.
+    /// The protocol permits new record kinds within a version; the fields are kept so a
+    /// later reader can use them.
     Other {
         /// Record kind.
         kind: String,
@@ -691,9 +573,8 @@ fn hex(text: &str) -> Option<u64> {
 
 /// Reads one line.
 ///
-/// A line that is neither a request nor a record is a note. Transcripts are commented
-/// prose as much as data, and the comments carry the reasoning - dropping them would
-/// throw away the part a person reads.
+/// A line that is neither a request nor a record is a note, kept because transcript
+/// comments carry the reasoning.
 ///
 /// # Errors
 ///
@@ -713,9 +594,8 @@ pub fn parse_line(text: &str) -> Result<Line, LineError> {
                 return Err(LineError::NoVerb);
             }
             Ok(Line::Request {
-                // Deliberately not an error. A sequence that is not a number is a case the
-                // protocol specifies - it is refused, and a transcript capturing that
-                // refusal has to be readable or the case cannot be tested.
+                // Not an error: the protocol specifies a non-numeric sequence as a refusal,
+                // and a transcript capturing it must be readable.
                 seq: seq.parse().ok(),
                 verb: verb.to_owned(),
                 arguments: fields[3.min(fields.len())..]
@@ -731,8 +611,8 @@ pub fn parse_line(text: &str) -> Result<Line, LineError> {
 
 /// Reads an outcome word and the value beside it.
 ///
-/// Split out of [`parse_record`] because it carries the rule the whole crate is shaped
-/// around, and a rule worth stating is worth being able to find.
+/// Separate from [`parse_record`] because it holds the rule that a non-answer carries no
+/// value.
 fn parse_outcome(word: &str, value: &str) -> Result<Outcome, LineError> {
     let outcome = match word {
         "ok" => Outcome::Ok,
@@ -743,14 +623,11 @@ fn parse_outcome(word: &str, value: &str) -> Result<Outcome, LineError> {
         "returned" => Outcome::Returned(
             hex(value).ok_or_else(|| LineError::ReturnedWithoutValue(value.to_owned()))?,
         ),
-        // Not an error. The probe is permitted to add outcome words without a version
-        // bump, so a reader that refused the line would break on a stream it was told to
-        // expect. It degrades instead - and degrading means "no result", not "probably
-        // fine".
+        // Not an error: the probe may add outcome words without a version bump. An unknown
+        // word means no result.
         other => Outcome::Unrecognised(other.to_owned()),
     };
-    // A non-answer carrying a value is the exact confusion this crate exists to prevent,
-    // so it is refused at the door rather than parsed into a shape that cannot hold it.
+    // A non-answer carrying a value is refused.
     if !outcome.answered() && !value.is_empty() {
         return Err(LineError::ValueWithoutAnswer);
     }
@@ -844,9 +721,7 @@ fn parse_record(fields: &[&str]) -> Result<Record, LineError> {
             status: Status::parse(at(3)),
             value: at(4).to_owned(),
             detail: at(5).to_owned(),
-            // Absent rather than defaulted. A record predating the field claims nothing,
-            // and inventing a grade for it would be the one thing this crate exists to
-            // stop.
+            // Absent rather than defaulted: a record without the field claims nothing.
             provenance: Provenance::parse(at(6)),
         }),
         "measure" => Ok(parse_measure(at(2), at(3), at(4), at(5), at(6))),
@@ -864,9 +739,7 @@ fn parse_record(fields: &[&str]) -> Result<Record, LineError> {
 
 /// A measured number, with the section that measured it.
 ///
-/// Split out of [`parse_record`] for length rather than for meaning, and the fields are
-/// taken by name so a caller cannot silently pass them in the wrong order - which is the
-/// one mistake a five-string signature invites.
+/// Split out of [`parse_record`] for length.
 fn parse_measure(section: &str, subject: &str, field: &str, value: &str, unit: &str) -> Record {
     Record::Measure {
         section: section.to_owned(),
@@ -879,8 +752,7 @@ fn parse_measure(section: &str, subject: &str, field: &str, value: &str, unit: &
 
 /// The probe's by-name census record.
 ///
-/// Its own function only because `parse_record` is at its line budget; the reason it exists
-/// is in D245.
+/// Its own function because `parse_record` is at its line budget.
 fn parse_resolve(library: &str, symbol: &str, presence: &str, address: &str) -> Record {
     Record::Resolve {
         library: library.to_owned(),
@@ -919,22 +791,14 @@ pub struct Session {
 impl Session {
     /// Whether a capability was announced.
     ///
-    /// The question to ask before sending a command, and the reason a consumer never has
-    /// to assume: a target with no system libraries announces no `resolve`, and asking it
-    /// to resolve a symbol is a question it cannot answer rather than one it answers badly.
+    /// Asked before sending a command: a target with no system libraries announces no
+    /// `resolve`.
     pub fn can(&self, capability: &Capability) -> bool {
         self.capabilities.contains(capability)
     }
 
-    /// What the session *claimed* it was running on.
-    ///
-    /// **A claim, never evidence.** A probe cannot certify its own machine - inside an
-    /// emulator it reports the emulator's version as the platform's - so this says what
-    /// arrived on the wire and nothing about what is true. Grading uses [`Origin`], which
-    /// the operator asserts.
-    ///
-    /// Kept because a claim that disagrees with the operator is worth seeing, and because
-    /// a transcript is easier to read with it than without.
+    /// What the session claimed it was running on: a claim, never evidence, since a probe
+    /// cannot certify its own machine. Grading uses [`Origin`], which the operator asserts.
     pub fn claimed_target(&self) -> Option<&str> {
         self.parts.get("target").map(String::as_str)
     }
@@ -971,17 +835,13 @@ impl Exchange {
 pub struct Transcript {
     /// Every session the transcript covers, in order.
     ///
-    /// More than one means the probe restarted - a faulting command ends it, and a fresh
-    /// identifier is how that becomes visible rather than being silently continuous.
+    /// More than one means the probe restarted, which a faulting command causes.
     pub sessions: Vec<Session>,
     /// Every command, in the order it was issued.
     pub exchanges: Vec<Exchange>,
     /// Records that arrived outside any command.
     ///
-    /// A *corpus* has no commands in it. The session transcript is the interface; what gets
-    /// committed is the report the run produced, and that is records all the way down. A
-    /// reader that only looked inside exchanges would find nothing in the artefact that
-    /// actually matters - which is precisely what happened before this field existed.
+    /// A committed report has no commands, so all of its records land here.
     pub records: Vec<Record>,
 }
 
@@ -1034,10 +894,8 @@ impl Transcript {
                         key,
                         value,
                     } => {
-                        // Attached to the session it names rather than the most recent one.
-                        // A transcript spanning a restart carries records for both, and
-                        // binding metadata to whichever came last would attribute one
-                        // process's answers to another.
+                        // Attached to the session it names rather than the most recent one,
+                        // since a transcript spanning a restart carries records for both.
                         if let Some(found) = transcript
                             .sessions
                             .iter_mut()
@@ -1085,9 +943,8 @@ impl Transcript {
 
     /// Commands that were acknowledged and never answered.
     ///
-    /// The shape of a probe that died mid-command, seen from the other end. A driver turns
-    /// these into `died` records; a transcript that simply stops leaves them here, which is
-    /// a more honest reading than inventing an outcome for them.
+    /// A probe that died mid-command. A driver turns these into `died` records; a
+    /// transcript that simply stops leaves them here rather than inventing an outcome.
     pub fn unanswered(&self) -> impl Iterator<Item = &Exchange> {
         self.exchanges.iter().filter(|exchange| {
             exchange.acknowledged && exchange.outcome.is_none() && exchange.refusal.is_none()
@@ -1095,47 +952,23 @@ impl Transcript {
     }
 }
 
-/// What machine produced a run, **as asserted by the operator**.
+/// What machine produced a run, as asserted by the operator.
 ///
-/// # Why this is not read off the wire
-///
-/// A probe cannot certify its own machine. Running inside an emulator, obSCEne's call to
-/// the platform's version query returns *the emulator's* chosen version - so a probe that
-/// stamped that as `firmware=` would be putting an emulator's answer in a console's badge.
-/// It would look exactly like a measurement of real hardware, and it is the one confusion
-/// this project's whole grading vocabulary exists to catch.
-///
-/// The `part` records a session announces are therefore **claims**, useful for reading a
-/// transcript and worthless as evidence of what ran. The operator - the person who knows
-/// whether the thing on the desk is a console or a window on a laptop - asserts it, and
-/// that assertion is what a grade rests on.
-///
-/// # The default is the safe one
-///
-/// [`Origin::unasserted`] says nothing was claimed, and under it **no result can be graded
-/// as measured**. That is deliberate: a client that forgets to ask the operator produces a
-/// corpus of assumptions, which is recoverable, rather than a corpus of measurements that
-/// were never measured, which is not.
+/// A probe cannot certify its own machine: inside an emulator, the platform's version
+/// query returns the emulator's version. The `part` records a session announces are claims;
+/// the operator's assertion is what a grade rests on. Under [`Origin::unasserted`] no
+/// result grades as measured, so a forgotten assertion yields assumptions, not false
+/// measurements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
-    /// What the operator says this ran on - a console, a named emulator, a stand-in part.
+    /// What the operator says this ran on: the target, a named emulator, a stand-in part.
     pub device: String,
     /// Firmware or version, where the operator knows it.
     pub firmware: String,
-    /// Whether the operator asserts this **is the target platform**.
+    /// Whether the operator asserts this is the target platform.
     ///
-    /// # Not "is it real hardware", and the difference is a bug that was live
-    ///
-    /// This field was called `real_hardware` and it was wrong in the one direction that
-    /// matters. A Steam Deck **is** real hardware. Somebody connecting one and reading that
-    /// name honestly would assert it, and every measurement taken on a Deck would be graded
-    /// as a fact about the console - which is precisely the silent promotion the whole
-    /// mechanism exists to prevent, reachable by an accurate reading of the field's own
-    /// name.
-    ///
-    /// The grading question was never whether the silicon was real. It is whether the
-    /// silicon was **the thing being emulated**. A Deck is real and is not it; an emulator
-    /// is neither.
+    /// Not whether it is real hardware: a real stand-in device is not the thing being
+    /// emulated, and its measurements must not grade as facts about the target.
     pub is_target: bool,
     /// Anything else the operator recorded, and anything the probe claimed.
     pub notes: BTreeMap<String, String>,
@@ -1144,8 +977,7 @@ pub struct Origin {
 impl Origin {
     /// An origin nobody asserted.
     ///
-    /// Nothing under this grades above an assumption, which is the correct answer when
-    /// nothing is known about what ran.
+    /// Nothing under this grades above an assumption.
     pub fn unasserted() -> Self {
         Self {
             device: "unasserted".to_owned(),
@@ -1169,11 +1001,8 @@ impl Origin {
         }
     }
 
-    /// Adds what a session *claimed* about itself, kept as context and never as evidence.
-    ///
-    /// Carried so a transcript remains readable and so a claim that disagrees with the
-    /// operator is visible rather than lost - an emulator announcing `target|console` next
-    /// to an operator saying otherwise is worth seeing.
+    /// Adds what a session claimed about itself, as context and never as evidence, so a
+    /// claim that disagrees with the operator stays visible.
     #[must_use]
     pub fn with_claims(mut self, session: &Session) -> Self {
         for (key, value) in &session.parts {
@@ -1182,20 +1011,11 @@ impl Origin {
         self
     }
 
-    /// Whether a device name is one this project knows is **not** the target.
+    /// Whether a device name is one this project knows is not the target.
     ///
-    /// # Why a list rather than a question
-    ///
-    /// Asking "is this the target?" separately from "what is this?" asks the operator the
-    /// same thing twice, and the second question is the one they have to reason about
-    /// rather than simply know. Somebody in a hurry answers it the way that gets their data
-    /// graded.
-    ///
-    /// So the device name carries the answer wherever it can, and the list is of the
-    /// **stand-ins** rather than the targets. That direction is deliberate: an unrecognised
-    /// name defaults to *not the target*, so a new emulator nobody has listed is treated
-    /// conservatively rather than promoted by default. Being wrong here costs a demotion,
-    /// which is recoverable; the other direction is not.
+    /// The device name carries the answer where it can, rather than asking the operator a
+    /// second question. The list names stand-ins, not targets, so the caller treats an
+    /// unrecognised name as not the target.
     pub fn is_known_stand_in(device: &str) -> bool {
         let device = device.to_ascii_lowercase();
         [
@@ -1211,10 +1031,8 @@ impl Origin {
             "gpcs4",
             "kyty",
             "obliteration",
-            // Ourselves, and the one that would be easiest to forget. orbistoun answers
-            // the same command protocol now, so a transcript can be *this emulator's own
-            // account of itself* - and grading that as a fact about the platform would be
-            // the project marking its own homework (D236).
+            // orbistoun answers the same protocol (D207), so its own transcripts must never
+            // grade as facts about the platform.
             "orbistoun",
             "unasserted",
         ]
@@ -1235,12 +1053,8 @@ impl Origin {
 
 /// One function, one thing established about it, and how firmly.
 ///
-/// # Why this is not simply a `res` record
-///
-/// A result identifies its check by `section/name` and never says which function it
-/// exercised. The `try` emitted before it does. Pairing them is the whole step from "this
-/// check passed" to "this function returns this, and here is how well we know it" - and the
-/// second is the only form this project can act on.
+/// A `res` names only its check; pairing it with the preceding `try` says which function
+/// it exercised and how firmly the result is known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     /// Library the symbol lives in.
@@ -1257,9 +1071,8 @@ pub struct Finding {
     pub detail: String,
     /// How firmly it is known, already adjusted for what produced it.
     ///
-    /// `None` where the record carried no grade - which is not the same as a weak grade,
-    /// and is why this is an `Option` rather than defaulting to [`Oracle::Assumed`]. A
-    /// caller that wants to treat the two alike has to say so.
+    /// `None` where the record carried no grade, which is not the same as
+    /// [`Oracle::Assumed`].
     pub known_by: Option<Oracle>,
 }
 
@@ -1271,29 +1084,13 @@ impl Finding {
 
     /// This finding as an entry the knowledge base would accept.
     ///
-    /// # The rules it has to satisfy, and the one that bites
+    /// An entry must say how it is known, an outside source must be cited, and an
+    /// `assumed` grade cites nothing (D180). A measurement demoted to `assumed` records
+    /// its run in the note and an explicit assumption instead.
     ///
-    /// An entry recording behaviour must say how it is known. A grade that claims an
-    /// outside source must cite one. And a grade of `assumed` must cite **nothing** -
-    /// because a citation beside a guess reads as evidence at a glance, which is the exact
-    /// confusion the field exists to stop.
-    ///
-    /// That last rule bites here, and correctly. A measurement taken on a stand-in is
-    /// demoted to `assumed`, and then it may not carry the citation naming the run it came
-    /// from - even though that run is known precisely. The information does not vanish: it
-    /// goes into the note and into an explicit assumption, where it reads as *the reason
-    /// this is not settled* rather than as the authority for it.
-    ///
-    /// Being able to say where a guess came from is useful. Being able to say it in the
-    /// field reserved for established facts is how a guess becomes one.
-    ///
-    /// # What is deliberately not filled in
-    ///
-    /// Arity, purpose, argument names, and what kind of value the function returns. A check
-    /// observed one call with one set of arguments; it did not establish the shape of the
-    /// function. Inferring arity from a single call would be reading one observation as a
-    /// rule, and `Returns` in particular decides what an unimplemented stub hands back -
-    /// getting it wrong hands the guest a wild pointer.
+    /// Arity, purpose, argument names and return kind are not filled in: one observed call
+    /// does not establish the function's shape, and a wrong `Returns` would hand the guest
+    /// a wild pointer from a stub.
     pub fn knowledge(&self, origin: &Origin) -> FunctionKnowledge {
         let mut entry = FunctionKnowledge {
             name: self.symbol.clone(),
@@ -1317,8 +1114,8 @@ impl Finding {
                 entry.edge_cases.push(observed);
             }
             Some(_) => {
-                // A demoted measurement, or something the probe was itself guessing at.
-                // Where it came from belongs in the note, never in `cites`.
+                // A demoted measurement or a probe guess: its source goes in the note, never
+                // in `cites`.
                 entry.note = format!("{observed}; {}", self.cites(origin));
                 entry.assumptions.push(format!(
                     concat!(
@@ -1330,9 +1127,7 @@ impl Finding {
                 ));
             }
             None => {
-                // No grade at all. The record predates the field, so it claims nothing and
-                // this entry must not claim anything either - not even that it is a guess,
-                // which would be a grade nobody assigned.
+                // No grade: the record claims nothing, so the entry claims nothing either.
                 entry.note = format!("{observed}; {} - ungraded", self.cites(origin));
             }
         }
@@ -1341,8 +1136,7 @@ impl Finding {
 
     /// A citation naming where the fact came from, for the entry it would become.
     ///
-    /// Names the check and the part, because "measured" without saying on what is the
-    /// claim this project has already been burned by.
+    /// Names the check and the part, so a measurement says what it was taken on.
     pub fn cites(&self, origin: &Origin) -> String {
         format!(
             "conformance probe, check {} on {}",
@@ -1355,9 +1149,8 @@ impl Finding {
 impl Transcript {
     /// The build a report came from, where it says.
     ///
-    /// Present on a report, absent on a live transcript, and **never a substitute for a
-    /// session**: it identifies the binary, not the machine. Anything graded from a report
-    /// alone is therefore ungraded, and saying so is better than picking a device.
+    /// Present on a report, absent on a live transcript. It identifies the binary, not the
+    /// machine, so it never substitutes for a session.
     pub fn build(&self) -> Option<(&str, &str)> {
         self.every_record().find_map(|record| match record {
             Record::Build { build, kind } => Some((build.as_str(), kind.as_str())),
@@ -1367,11 +1160,8 @@ impl Transcript {
 
     /// Every check that named a function, paired with what it concluded.
     ///
-    /// A `try` with no matching `res` is **omitted rather than reported as failing**: the
-    /// probe announced a call and never came back, so nothing was concluded. Recording that
-    /// as a failure would be recording an outcome nobody observed, which is the same error
-    /// as reading a death as a return value. [`Transcript::attempted_without_result`] lists
-    /// them, because a call that killed the probe is a finding of its own kind.
+    /// A `try` with no matching `res` is omitted rather than reported as failing, since
+    /// nothing was concluded; [`Transcript::attempted_without_result`] lists those.
     pub fn findings(&self, origin: &Origin) -> Vec<Finding> {
         let mut attempted: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
         let mut findings = Vec::new();
@@ -1393,9 +1183,8 @@ impl Transcript {
                     provenance,
                 } => {
                     let Some((library, symbol)) = attempted.get(check.as_str()) else {
-                        // A result for a check that never announced what it was exercising.
-                        // Nothing here can say which function it concerns, and guessing
-                        // from the check identifier would be reading a name as evidence.
+                        // A result whose check never named its function; the check
+                        // identifier is not evidence of one.
                         continue;
                     };
                     findings.push(Finding {
@@ -1416,13 +1205,9 @@ impl Transcript {
 
     /// Checks that announced a call and never reported a result.
     ///
-    /// The shape of a call that ended the probe, seen from the report rather than the wire.
-    ///
-    /// **Keyed by check, not by symbol.** Several checks exercise one function - a real
-    /// report opens a missing path and then a null one - so a symbol can have concluded
-    /// results and an unconcluded check at the same time. Reporting "this symbol did not
-    /// conclude" would then contradict a finding sitting beside it, and the specific check
-    /// is what a reader needs to repeat it anyway.
+    /// A call that ended the probe, seen from the report. Keyed by check, not symbol,
+    /// because several checks exercise one function and a symbol can have concluded
+    /// results beside an unconcluded check.
     pub fn attempted_without_result(&self) -> Vec<(String, String, String)> {
         let mut attempted: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
         let mut concluded: Vec<&str> = Vec::new();
@@ -1460,25 +1245,11 @@ impl Transcript {
 
 /// Whether a symbol exists on the target.
 ///
-/// # Why this is worth its own type
-///
-/// It is a different kind of fact from a return value: a return value depends on arguments,
-/// on state and on the part, where existence is a property of an interface.
-///
-/// **It is graded the same way regardless**, and the reasoning that said otherwise was
-/// wrong in a way that mattered. It used to read: *a symbol that resolves, resolves - so a
-/// `present` from a stand-in still says the name is spelled correctly*. That is true of what
-/// the stand-in believes and says nothing about the platform, because **a stand-in's symbol
-/// table is itself sourced from name lists mined out of other projects**.
-///
-/// So "confirmed present by an emulator" is not a measurement. It is a name from a mined
-/// list, arriving through a side channel, and it would have been recorded as a probe
-/// result - precisely the import D242 refuses, laundered into the strongest provenance this
-/// project has (D246).
-///
-/// An existence fact therefore carries an [`Oracle`] like any other: `Measured` when the
-/// operator asserts the run was on **the target**, `Assumed` otherwise. Only the first may
-/// source a name.
+/// Existence is a property of an interface, unlike a return value, which depends on
+/// arguments, state and the part. It is still graded by origin: a stand-in's symbol table
+/// is sourced from name lists mined elsewhere, so its `present` is not a measurement. The
+/// [`Oracle`] is `Measured` only when the operator asserts the target, and only then may
+/// the fact source a name (D246).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolFact {
     /// Library the symbol was looked for in.
@@ -1489,25 +1260,22 @@ pub struct SymbolFact {
     pub present: bool,
     /// How it is reached, verbatim, when the record carried it.
     ///
-    /// `None` for a `resolve` record, which does not have the field. **Not an empty
-    /// string**: "reached in a way this record did not say" and "reached by a means named
-    /// as nothing" are different facts, and a reader cannot tell them apart once they are
-    /// spelled the same (D245).
+    /// `None` for a `resolve` record, which does not have the field; not an empty string,
+    /// which would name a means as nothing.
     pub availability: Option<String>,
     /// Where it resolved to, when the record carried it. `None` for a `sym` record.
     pub address: Option<String>,
     /// How much this existence fact is worth, given what it ran on.
     ///
-    /// `Oracle::Measured` only from the target. Anything else is `Oracle::Assumed` - not
-    /// worthless, but never a source for a name (D246).
+    /// `Oracle::Measured` only from the target; anything else is `Oracle::Assumed`, never a
+    /// source for a name (D246).
     pub known_by: Oracle,
 }
 
 impl SymbolFact {
     /// Whether this fact may be used as the source of a name in the symbol database.
     ///
-    /// The one question the naming rule turns on, answered in one place so no caller has to
-    /// re-derive it - which is how two counters came to disagree (D239, D242, D246).
+    /// The question the naming rule turns on, answered in one place so callers agree (D246).
     pub fn may_source_a_name(&self) -> bool {
         self.present && self.known_by == Oracle::Measured
     }
@@ -1516,15 +1284,11 @@ impl SymbolFact {
 impl Transcript {
     /// Every symbol the run established the existence of, graded by what it ran on.
     ///
-    /// **Takes the origin rather than grading nothing.** This used to return facts with no
-    /// grade at all, on the reasoning that existence is a property of an interface and so
-    /// survives a stand-in. What that missed is where a stand-in's symbol table comes from:
-    /// name lists mined out of other emulators. A `present` from one is that list speaking,
-    /// and returning it ungraded made it indistinguishable from a console answering (D246).
+    /// Takes the origin because a stand-in's symbol table comes from name lists mined
+    /// elsewhere, so its `present` must not read as the target answering (D246).
     pub fn symbols(&self, origin: &Origin) -> Vec<SymbolFact> {
-        // The same demotion the behaviour grading applies, for the same reason: the
-        // question is not whether the silicon was real but whether it was the thing being
-        // emulated. A Steam Deck is real and is not it; an emulator is neither.
+        // The same demotion as behaviour grading: the question is whether the silicon was
+        // the thing being emulated.
         let known_by = if origin.is_target {
             Oracle::Measured
         } else {
@@ -1546,10 +1310,8 @@ impl Transcript {
                     address: None,
                     known_by,
                 }),
-                // The probe's by-name census. Same existence fact, carrying where it
-                // landed instead of how it is reached - and worth more to this project
-                // than any other record it emits, because it answers for symbols no title
-                // imports, which a collision search can never reach (D245).
+                // The probe's by-name census: the same existence fact, carrying where it
+                // landed; it covers symbols no title imports.
                 Record::Resolve {
                     library,
                     symbol,
@@ -1571,17 +1333,9 @@ impl Transcript {
 
 /// One area of the platform, and how much of it came out green.
 ///
-/// # Why a per-section view rather than one total
-///
-/// A single tally says how much was checked and nothing about *what is understood*. Ninety
-/// passes spread thinly across every area and ninety concentrated in one are the same
-/// number and completely different situations - and the second is the one that means a
-/// subsystem can be relied on.
-///
-/// The sections carry a `purpose` line saying what each is establishing, which is what
-/// turns a count into an answer. It is carried here rather than summarised, because the
-/// probe's own words about what a section proves are worth more than anything this side
-/// would write.
+/// Per section rather than one total, because the same number of passes spread thinly or
+/// concentrated in one area means different things. The probe's `purpose` line is carried
+/// verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionCoverage {
     /// Section identifier, prefixed so it sorts into running order.
@@ -1608,9 +1362,7 @@ impl SectionCoverage {
 
     /// Whether everything in this section passed outright.
     ///
-    /// A skip is **not** green. It is a check that did not run, so the section did not
-    /// establish what it claims to establish, and rounding a skip up is how a subsystem
-    /// gets relied on for something nobody tested.
+    /// A skip is not green: a check that did not run established nothing.
     pub const fn is_wholly_green(&self) -> bool {
         self.total() > 0 && self.pass == self.total()
     }
@@ -1619,10 +1371,8 @@ impl SectionCoverage {
 impl Transcript {
     /// Each section with its tally, in running order.
     ///
-    /// A section with no tally, or a tally naming no section, still appears. Both are
-    /// incomplete reports rather than absent ones, and dropping either would quietly
-    /// shrink the denominator - which flatters the result in exactly the direction nobody
-    /// should be flattered.
+    /// A section with no tally, or a tally naming no section, still appears: dropping
+    /// either would shrink the denominator.
     pub fn sections(&self) -> Vec<SectionCoverage> {
         let mut found: BTreeMap<String, SectionCoverage> = BTreeMap::new();
         for record in self.every_record() {
@@ -1670,12 +1420,8 @@ impl Transcript {
 
 /// Memory a read returned, reassembled.
 ///
-/// # Why a partial read is still returned
-///
-/// A read that dies part way through has still established what it read before it died.
-/// Those bytes are evidence; discarding them because the command did not complete would
-/// throw away the only thing the run produced - and on a target where a fatal address is
-/// the normal case, that is most runs.
+/// A read that dies part way through still established the bytes before the fault, so a
+/// partial read is returned.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Memory {
     /// Address the read started at, where the records said.
@@ -1684,16 +1430,13 @@ pub struct Memory {
     pub bytes: Vec<u8>,
     /// Runs whose hexadecimal could not be decoded.
     ///
-    /// Kept as a count rather than dropped silently. A run this cannot read is a gap in
-    /// the middle of a buffer, and a caller reassembling one needs to know it is there
-    /// rather than receiving a shorter buffer that looks complete.
+    /// Counted rather than dropped, so a gap in the buffer is visible to the caller.
     pub undecodable: usize,
 }
 
 /// Reads a hexadecimal run into bytes.
 ///
-/// An odd number of digits is **refused** rather than rounded. Half a byte is not a byte,
-/// and guessing which half was meant would put a value in a buffer that nothing observed.
+/// An odd number of digits is refused rather than guessed at.
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
     if hex.len() % 2 != 0 {
         return None;
@@ -1717,7 +1460,7 @@ impl Transcript {
                 continue;
             };
             if memory.address.is_none() {
-                // `read/0x8003f510` - one `0x`, and the address after it.
+                // `read/0x8003f510`: one `0x`, and the address after it.
                 memory.address = id
                     .rsplit_once("/0x")
                     .and_then(|(_, address)| u64::from_str_radix(address, 16).ok());
@@ -1737,18 +1480,10 @@ impl Transcript {
 
 /// How well the target established one fact about itself.
 ///
-/// # Why this is not a boolean, and not folded into the value
-///
-/// All three states can carry the value `unknown`, and they mean entirely different things.
-/// A consumer that collapses them keeps the least useful part of the record:
-///
-/// - **`known`** - read through a confirmed signature. A real reading.
-/// - **`unconfirmed`** - the query resolves, but the probe has no confirmed signature to
-///   call it through yet. The probe's unfinished wiring, not a platform gap.
-/// - **`absent`** - no such query here. The platform gap.
-///
-/// "This emulator does not implement it", "obSCEne has not wired it up", and "here is the
-/// number" are three different findings, and only one of them is anybody's bug.
+/// All three states can carry the value `unknown` with different meanings: `known` is a
+/// reading through a confirmed signature, `unconfirmed` means the query resolves but the
+/// probe has no confirmed signature for it, and `absent` means the platform has no such
+/// query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confidence {
     /// Read through a confirmed signature.
@@ -1759,10 +1494,7 @@ pub enum Confidence {
     Absent,
     /// A state this version does not know.
     ///
-    /// **Deliberately not resolved to any of the others.** Reading an unrecognised state as
-    /// `absent` would blame the platform for something it may well do; reading it as `known`
-    /// would treat an unknown confidence as a reading. Neither is available, so it stays
-    /// unrecognised and a consumer has to decide in the open.
+    /// Not resolved to any of the others, so a consumer decides explicitly.
     Unrecognised(String),
 }
 
@@ -1784,18 +1516,12 @@ impl Confidence {
 
 /// One thing the target says about itself.
 ///
-/// # Never machine identity
-///
-/// These are **observations, not provenance**. Inside an emulator every one of them answers
-/// as the emulator chooses - `memory|known|441M` is that emulator's number wearing the
-/// target's badge, which is the same trap as a self-reported firmware version.
-///
-/// So nothing here reaches [`Origin`]: the machine a grade rests on is asserted by the
-/// operator and by nothing else. These are for display, and the type keeps them separate so
-/// that staying separate is structural rather than a habit.
+/// Observations, not provenance: inside an emulator every field answers as the emulator
+/// chooses. Nothing here reaches [`Origin`], which only the operator asserts; these are for
+/// display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfReport {
-    /// What the field is called - `memory`, `vram`, `generation`, and so on.
+    /// What the field is called: `memory`, `vram`, `generation`, and so on.
     pub field: String,
     /// How firmly the target established it.
     pub confidence: Confidence,
@@ -1806,8 +1532,7 @@ pub struct SelfReport {
 impl Transcript {
     /// What the target said about itself.
     ///
-    /// Ordered as it arrived, because the block is a status readout and its order is the
-    /// probe's editorial choice about what matters most.
+    /// Ordered as it arrived, which is the probe's chosen order.
     pub fn self_report(&self) -> Vec<SelfReport> {
         self.every_record()
             .filter_map(|record| match record {
@@ -1828,38 +1553,24 @@ impl Transcript {
 
 /// What a live answer is allowed to do for the guest.
 ///
-/// # The rule, and why it keys on the return kind
-///
-/// A value asked of the console under the probe's state rather than the guest's is very
-/// likely right and is not certainly right. That is still better than a stub, which is
-/// certainly wrong - so it is returned, recorded, and labelled.
-///
-/// **Except for a handle.** A function returning a handle or a pointer hands back a value
-/// from the *console's* address space, meaningless in this one. The guest dereferences it
-/// and dies somewhere unrelated hours later: certainly wrong, and it looks right, which is
-/// the one failure this project has no cheap detector for.
-///
-/// The first version of this rule asked whether a function was *pure*. That is a
-/// per-function judgement nobody makes reliably in advance and it fails silently. The
-/// return kind is a property already recorded, already load-bearing - it is why an error
-/// code is correct for a status function and a wild pointer for a handle one - and it is
-/// checkable. (D125, D225)
+/// A value asked of the target under the probe's state is likely right, which beats a stub,
+/// so it is returned, recorded and labelled (D225). A handle or pointer is the exception:
+/// it comes from the target's address space and is meaningless in the guest's. The rule
+/// keys on the recorded return kind, which is checkable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Use {
     /// Hand it to the guest, and record it.
     Return,
     /// Record it, and do not hand it over.
     ///
-    /// Not a failure. The answer is evidence about the function and is kept as such; what
-    /// is withheld is only its use *as this guest's return value*.
+    /// Not a failure: the answer is kept as evidence and withheld only as the guest's
+    /// return value.
     RecordOnly,
 }
 
 /// Whether a live answer may be handed to the guest.
 ///
-/// `None` for an unknown return kind, which is treated as [`Use::RecordOnly`] by any caller
-/// that follows the rule: not knowing what kind of value a function returns is precisely
-/// when passing one through is most dangerous.
+/// An unknown return kind (`None`) is [`Use::RecordOnly`].
 pub fn usable(returns: Option<Returns>) -> Use {
     match returns {
         // A status is a number that means the same thing in any address space.
@@ -1871,12 +1582,8 @@ pub fn usable(returns: Option<Returns>) -> Use {
 
 /// A live answer, ready to be written down.
 ///
-/// # What this carries that a bare value does not
-///
-/// The arguments it was asked with, and the fact that the state was the probe's rather than
-/// the guest's. Both belong with the number: a return value without its arguments is not a
-/// fact about a function, and `measured` without the divergence reads as fully trustworthy
-/// to whoever finds it in six months.
+/// Carries the arguments it was asked with and the fact that the state was the probe's
+/// rather than the guest's, since both qualify the number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asked {
     /// The symbol asked about.
@@ -1892,16 +1599,9 @@ pub struct Asked {
 impl Asked {
     /// Records the answer as a knowledge entry.
     ///
-    /// # Why the caveat is an assumption rather than a weaker grade
-    ///
-    /// The measurement is real: a console executed that function with those arguments and
-    /// returned that value. What is *not* established is that the guest would have got the
-    /// same answer, because the probe's process has not done what the guest did.
-    ///
-    /// A weaker grade would lose the first half; a bare `measured` would lose the second.
-    /// So the grade stays `measured` and the divergence travels beside it as a stated
-    /// assumption - which is also what makes it a **worklist item** rather than a footnote,
-    /// since the assumption count is a thing this project ranks and retires.
+    /// The measurement is real, but the guest's process state differs from the probe's.
+    /// The grade stays `measured` and the divergence is a stated assumption, which the
+    /// assumption count then tracks.
     pub fn knowledge(&self, origin: &Origin) -> FunctionKnowledge {
         let arguments = self
             .arguments
@@ -1951,9 +1651,7 @@ impl Asked {
                     );
                 }
             }
-            // A non-answer is still a finding, and it is emphatically not a value. What is
-            // recorded is that asking killed the probe, which is a fact about the function
-            // worth having and is the shape of most first attempts.
+            // A non-answer is a finding, not a value: asking killed the probe.
             outcome => {
                 entry.note = format!(
                     "asked live of {} with ({arguments}): {outcome}",
@@ -1974,12 +1672,8 @@ impl Asked {
 
 /// What a corpus establishes, and how firmly.
 ///
-/// # Why a count by grade is the useful summary
-///
-/// The question a reader has before trusting any of this is not "how many checks ran" but
-/// "how many of these are facts". A run of four hundred results where every one is
-/// `assumed` has established nothing about the platform, and a summary reporting four
-/// hundred results would be describing effort rather than evidence.
+/// Counted by grade, because how many results are facts matters more than how many checks
+/// ran.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Established {
     /// Results whose grade is a measurement of the target.
@@ -1989,16 +1683,14 @@ pub struct Established {
     /// Results that are somebody's reasoning, including measurements demoted because they
     /// were taken on a stand-in.
     pub assumed: usize,
-    /// Results carrying no grade at all - written before the field existed.
+    /// Results carrying no grade at all.
     pub ungraded: usize,
     /// Commands acknowledged and never answered.
     pub unanswered: usize,
     /// Commands that ended the process, timed out, or vanished.
     ///
-    /// Counted separately from [`Established::unanswered`] because they are a different
-    /// observation: these were *reported* as not answering, where an unanswered command is
-    /// one the transcript simply stops after. Both mean no result; only one was written
-    /// down by something that saw it happen.
+    /// Separate from [`Established::unanswered`]: these were reported as not answering,
+    /// where an unanswered command is one the transcript simply stops after.
     pub did_not_return: usize,
 }
 
@@ -2057,9 +1749,8 @@ impl fmt::Display for Established {
 impl Transcript {
     /// Counts what this transcript establishes, grading each result by where it was seen.
     ///
-    /// The session matters: the same `hardware` result is a measurement of the target or an
-    /// approximation of it depending on what produced it, and the count has to reflect that
-    /// or it would report a stand-in run as having settled things it cannot settle.
+    /// The same `hardware` result is a measurement or an assumption depending on the
+    /// origin.
     pub fn established(&self, origin: &Origin) -> Established {
         let mut summary = Established {
             unanswered: self.unanswered().count(),
@@ -2071,9 +1762,8 @@ impl Transcript {
             ..Established::default()
         };
 
-        // Records from inside a command and records standing on their own are the same
-        // evidence. A live session produces the first; a committed corpus is entirely the
-        // second.
+        // Records inside a command (a live session) and standing alone (a committed corpus)
+        // are the same evidence.
         {
             for record in self.every_record() {
                 let Record::Res { provenance, .. } = record else {
@@ -2085,11 +1775,8 @@ impl Transcript {
                 };
                 match provenance.oracle(origin) {
                     Oracle::Measured => summary.measured += 1,
-                    // `Differential` cannot come out of `Provenance::oracle` - the probe's
-                    // grades are hardware, spec, documented, derived and assumed, and none
-                    // maps to it. The arm exists because the enum is exhaustive, and it
-                    // counts as published rather than assumed because that is what a
-                    // differential result is: a published claim somebody verified (D478).
+                    // `Provenance::oracle` never yields `Differential`; the arm exists for
+                    // exhaustiveness and counts it as published, a verified claim (D478).
                     Oracle::Published | Oracle::Differential => summary.published += 1,
                     Oracle::GuestObserved | Oracle::Assumed => summary.assumed += 1,
                 }
@@ -2099,10 +1786,9 @@ impl Transcript {
     }
 }
 
-/// The section a console's own kernel export table arrives under.
+/// The section the target's kernel export table arrives under.
 ///
-/// Named once because two readers spelling it differently is a silent miss, and a miss
-/// here looks exactly like a report that did not carry the table.
+/// Named once, because a misspelling would read as a report without the table.
 pub const KEXPORT_SECTION: &str = "140-oracle/kexport-table";
 
 /// The field a kexport record puts its address in.
@@ -2110,13 +1796,8 @@ const KEXPORT_FIELD: &str = "vaddr";
 
 /// One number a probe measured, with the section that took it and what it is worth.
 ///
-/// # Why this is not a [`Finding`]
-///
-/// A finding carries a verdict - something passed, partly passed or failed - and its
-/// grade turns on that verdict being about the platform. A measurement has no verdict at
-/// all. It is a quantity and the name of what was counted, and every interpretation of it
-/// belongs to whoever asked. Conflating the two would let "the cache reported 32768" and
-/// "the cache behaved correctly" wear the same type.
+/// Not a [`Finding`]: a finding carries a verdict, while a measurement is a quantity and
+/// the name of what was counted, interpreted by whoever asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Measurement {
     /// Section that took it.
@@ -2136,29 +1817,18 @@ pub struct Measurement {
 impl Measurement {
     /// The value as a number, or `None` when it is not one.
     ///
-    /// **Hexadecimal only when it says so.** A bare `10` is ten, not sixteen, and a
-    /// reader that guessed would turn a correct measurement into a wrong one without
-    /// changing a character of the record.
+    /// Hexadecimal only with an `0x` prefix: a bare `10` is ten.
     #[must_use]
     pub fn number(&self) -> Option<u64> {
         hex(&self.value).or_else(|| self.value.parse().ok())
     }
 }
 
-/// One symbol a console's kernel exports, as its own export table spells it.
+/// One symbol the target's kernel exports, as its own export table spells it.
 ///
-/// # What this is worth, and what it is not
-///
-/// The table carries a hash and an address. It carries **no name**, so nothing here can
-/// name anything on its own - the name comes from this project's own vocabulary, by
-/// hashing a candidate and seeing whether the hash agrees. That is the same oracle the
-/// brute-force search has always used, and it is why reading this table imports no
-/// material from anywhere: the hashes are numbers and the words are ours (principle 1).
-///
-/// What it *does* carry that nothing else does is **which hashes the platform exports at
-/// all**, and **which of them are the same function**. Two hashes at one address are one
-/// function under two names, and that is a fact about the platform no amount of guessing
-/// recovers.
+/// The table carries a hash and an address but no name; a name comes from this project's
+/// own vocabulary by hashing a candidate (D242). It says which hashes the platform exports,
+/// and two hashes at one address are one function under two names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelExport {
     /// The hash, decoded.
@@ -2171,11 +1841,9 @@ pub struct KernelExport {
     pub known_by: Oracle,
 }
 
-/// Two or more exports the console places at one address.
-///
-/// One function, several names. The strongest thing in the table: given a name for any
-/// member, every other member is a **variant of that name**, and a variant is a candidate
-/// a search can test - where a hash with nothing beside it is not.
+/// Two or more exports the target places at one address: one function, several names.
+/// Given a name for any member, every other member is a variant of it that a search can
+/// test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportAlias {
     /// The address they share.
@@ -2215,10 +1883,7 @@ impl Transcript {
 
     /// How many measurements each section took.
     ///
-    /// **So a consumer can say what it did not use.** Three reports carried 3,319
-    /// measurements at a point when this crate read none of them, and nothing said so:
-    /// the reader's record count was correct and its impression was not. A per-section
-    /// tally makes the unread part of a report as visible as the read part (D605).
+    /// So a consumer can say which parts of a report it did not use.
     pub fn measured_sections(&self) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for record in self.every_record() {
@@ -2231,10 +1896,9 @@ impl Transcript {
 
     /// The kernel export table, decoded.
     ///
-    /// **A record whose subject is not eleven characters of the alphabet is skipped, not
-    /// guessed at.** The section is identified by name, so anything else appearing under
-    /// it would otherwise decode to a plausible hash - and a plausible hash is the one
-    /// error this project has no way to notice afterwards (D070).
+    /// A record whose subject is not eleven characters of the hash alphabet is skipped, not
+    /// guessed at, since anything under the section would otherwise decode to a plausible
+    /// hash.
     pub fn kernel_exports(&self, origin: &Origin) -> Vec<KernelExport> {
         let known_by = if origin.is_target {
             Oracle::Measured
@@ -2263,8 +1927,7 @@ impl Transcript {
 
 /// Groups exports by the address they share, keeping only the addresses with more than one.
 ///
-/// Order is by address so two runs of one report produce the same list, which is what
-/// makes a difference between two reports readable (D181).
+/// Ordered by address, so two reports compare line by line.
 #[must_use]
 pub fn export_aliases(exports: &[KernelExport]) -> Vec<ExportAlias> {
     let mut by_address: BTreeMap<u64, Vec<KernelExport>> = BTreeMap::new();
@@ -2283,15 +1946,9 @@ pub fn export_aliases(exports: &[KernelExport]) -> Vec<ExportAlias> {
 
 /// One check two transcripts disagree about.
 ///
-/// # Why a verdict diff is the strongest tool this project has
-///
-/// The conformance probe is the only guest whose source we hold, it passes on a console, and it
-/// runs under orbistoun. So the same binary can be run in both places and its own verdicts
-/// compared - and every check that passes there and fails here is a **named, sourced defect**,
-/// with the probe's own sentence explaining what it expected.
-///
-/// That is a different kind of evidence from everything else here. A title's wall says *where* it
-/// stopped; this says *what is wrong*, in the words of the thing that tried it (D622).
+/// The conformance probe runs both on the hardware and under orbistoun, so its verdicts
+/// compare directly: a check that passes there and fails here is a named defect, with the
+/// probe's own sentence saying what it expected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Divergence {
     /// The check, `section/name`.
@@ -2327,12 +1984,8 @@ impl Transcript {
 
     /// Checks that concluded differently here than in `reference`.
     ///
-    /// **Only where both ran it.** A check one side skipped is not a disagreement about
-    /// behaviour, it is a difference in what was reachable - and reporting it as a defect would
-    /// bury the ones that are (principle 3).
-    ///
-    /// Ordered worst-first: a check that passes in the reference and fails here is the finding;
-    /// one that merely partially passes is a lead.
+    /// Only where both ran it: a check one side skipped differs in reachability, not
+    /// behaviour. Ordered worst-first, pass-there-fail-here before partial passes.
     #[must_use]
     pub fn diverges_from(&self, reference: &Self) -> Vec<Divergence> {
         let theirs = reference.verdicts();

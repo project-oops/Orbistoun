@@ -1,69 +1,13 @@
-//! Local-first language-model access, as a generic question-and-answer service.
+//! Language-model access as a generic question-and-answer service: [`Request`] in, [`Reply`] out.
 //!
-//! # What this crate is for
-//!
-//! Somewhere above this crate there is a loop: run a title, read what the run reports,
-//! decide what to change, change it, run again. Two of its steps are a person
-//! ([THE_LOOP.md](../../../docs/THE_LOOP.md) marks them 17 and 18), and this crate is
-//! the machinery that lets something else attempt them.
-//!
-//! It does not attempt them. **Nothing here knows what orbistoun is.** This crate has
-//! no dependency on any other crate in the workspace, deliberately: the callers arrive
-//! later and there will be several of them, with different jobs, and a service shaped
-//! around whichever one came first is a service the rest fight. What it offers is
-//! [`Request`] in and [`Reply`] out.
-//!
-//! # What it does on its own
-//!
-//! ```text
-//!   Host::probe()          what is this machine
-//!        |
-//!   select::recommend()    the largest catalogue model that fits it
-//!        |
-//!   Config::seeded_for()   an ordered registry, written once and then owned by a person
-//!        |
-//!   Llm::ask()             first compatible + configured entry that answers
-//!        |
-//!   EmbeddedEngine         downloads on first use, then runs in this process
-//! ```
-//!
-//! No setup, no server, no key. A machine that has never been configured probes
-//! itself, writes a registry, fetches a model sized for it, and answers - and every
-//! step of that is overridable by editing one file, because none of it is a decision
-//! anybody should have to accept.
-//!
-//! # Three properties worth stating
-//!
-//! **Local outranks hosted.** A trace, a fault address and a guest's own strings are
-//! this project's material. The default ladder puts this machine first and reaches a
-//! hosted provider only when configured to.
-//!
-//! **Deterministic by default.** Temperature zero, fixed seed. The loop above measures
-//! progress by changing one thing and re-running; a proposer that answers differently
-//! each time makes that measurement meaningless.
-//!
-//! **Attributable.** A [`Reply`] carries which entry answered, which model, and what
-//! was tried before it. D046 makes a run report embed its own inputs so a difference
-//! between runs can be blamed on the change rather than on drift - a model is such an
-//! input, and one that silently fell back from a 4B to a 0.6B has drifted.
-//!
-//! # What it will not do
-//!
-//! Fabricate. Every failure is an [`Error`] naming what went wrong; nothing here
-//! returns an empty or invented reply to avoid one. A hosted refusal is reported as a
-//! refusal rather than as an empty answer, because "proposed nothing" and "was not
-//! allowed to propose" are different facts and only one of them is worth retrying.
-//! Principle 3.
-//!
-//! # Provenance
-//!
-//! CLAUDE.md principle 1 names a model in the loop as a route to contaminated
-//! provenance: a thing that has read the public internet can *recall* an answer and
-//! present it as reasoning. This crate does not attempt to solve that, and should not
-//! be read as having solved it. It moves bytes. Whether a proposal that came back
-//! through it may be recorded as knowledge, and under what account, is a question for
-//! the caller and for the knowledge vocabulary - which is where the mechanism for it
-//! already lives.
+//! Nothing here knows what orbistoun is, and the crate depends on no other workspace crate, so
+//! callers with different jobs share it (D212). An unconfigured machine probes itself
+//! (`Host::probe`), sizes a model (`select::recommend`), writes an ordered registry
+//! (`Config::seeded_for`) and answers through the first compatible, configured entry, every
+//! step overridable in one file. Requests are deterministic by default, and a [`Reply`] names
+//! the entry and model that answered and what was tried first. Every failure is an
+//! [`Error`]; nothing returns an empty or invented reply. Whether a proposal may be recorded as
+//! knowledge, given a model can recall rather than reason, is the caller's question.
 
 #![forbid(unsafe_code)]
 
@@ -90,9 +34,9 @@ pub use select::Device;
 
 /// Anything that can go wrong, named by which part of the world failed.
 ///
-/// Split this finely because the caller's response differs: a missing key is a person's
-/// job, an unreachable endpoint is worth trying the next entry for, a refusal is
-/// neither, and a protocol surprise means this crate is wrong about something.
+/// Split finely because the responses differ: a missing key is a person's job, an unreachable
+/// endpoint means trying the next entry, a refusal is neither, and a protocol surprise means
+/// this crate is wrong.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The catalogue could not be read.
@@ -126,9 +70,7 @@ pub enum Error {
     Protocol(String),
     /// Nothing was available to ask.
     ///
-    /// Carries every entry that was considered and what was wrong with it, because
-    /// "no AI available" with no further detail is the least actionable message a tool
-    /// can produce.
+    /// Carries every entry considered and what was wrong with it.
     #[error("no usable AI backend: {0}")]
     Unavailable(String),
 }
@@ -141,49 +83,34 @@ pub const MODELS_DIR: &str = "models";
 
 /// The service.
 ///
-/// Holds a catalogue, a registry, a measured host, and a root to write beneath. Cheap
-/// to construct - nothing is downloaded or loaded until something is asked.
+/// Holds a catalogue, a registry, a measured host, and a root to write beneath. Cheap to
+/// construct: nothing is downloaded or loaded until something is asked.
 #[derive(Debug)]
 pub struct Llm {
     catalog: Catalog,
     config: Config,
     host: Host,
     root: PathBuf,
-    /// Engines already built, by entry id.
-    ///
-    /// **Not an optimisation.** Without it every ask rebuilt its engine, which for the
-    /// in-process one meant re-reading gigabytes of weights per question, and for the
-    /// managed one would mean starting and killing a server per question. The cost was
-    /// real and measured: it was most of a round in the first live experiment.
+    /// Engines already built, by entry id, so an ask does not reload weights or restart a server.
     engines: Mutex<HashMap<String, Arc<dyn Engine>>>,
 }
 
 impl Llm {
     /// Opens the service beneath `root`, configuring this machine if it never has been.
     ///
-    /// `root` is supplied rather than resolved because this crate has no path policy
-    /// of its own and must not acquire one: orbistoun guarantees it never writes
-    /// outside its own resolved root, and a several-gigabyte download landing in an
-    /// ambient user cache would break that guarantee without any error. The caller
-    /// that holds the guarantee passes the directory.
-    ///
-    /// On a machine with no registry this probes, sizes, writes one, and says so. A
-    /// registry that cannot be *written* is logged and not fatal - a read-only
-    /// installation still works, it simply re-decides every time.
+    /// `root` is supplied because this crate has no path policy: the caller holds the guarantee
+    /// that orbistoun writes nowhere outside its resolved root. A registry that cannot be written is
+    /// logged and not fatal, so a read-only installation re-decides each time.
     ///
     /// # Errors
     ///
-    /// If an existing registry is present but unreadable. That is not reseeded:
-    /// somebody wrote that file, and replacing it with defaults would destroy what
-    /// they meant and report success.
+    /// If an existing registry is present but unreadable; it is never reseeded over.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Error> {
         Self::open_with(root, Catalog::default(), Host::probe())
     }
 
-    /// [`Llm::open`], with the catalogue and host supplied.
-    ///
-    /// Exists so the whole resolution path is testable on one machine: every decision
-    /// this crate makes is a function of these two arguments.
+    /// [`Llm::open`], with the catalogue and host supplied, so every decision this crate makes is
+    /// testable on one machine.
     ///
     /// # Errors
     ///
@@ -210,8 +137,7 @@ impl Llm {
             tracing::info!(host = %host.summary(), "no AI configuration; sizing this machine");
             let seeded = Config::seeded_for(&catalog, &host);
             if let Err(e) = seeded.save(&path) {
-                // Not fatal. A read-only installation is fully usable; it just decides
-                // afresh each time, which is the same decision.
+                // Not fatal: a read-only installation decides afresh each time, and reaches the same decision.
                 tracing::warn!(error = %e, "could not persist the AI configuration");
             }
             seeded
@@ -247,27 +173,14 @@ impl Llm {
 
     /// Measures every configured entry and reorders the ladder by what came back.
     ///
-    /// **The order is a measurement, not a policy.** It used to be an argument - local
-    /// engines first, on the reasoning that this project's material should not be posted
-    /// elsewhere by default - and that is now settled by running them instead (D334).
-    ///
-    /// **The request is the caller's, and it matters that it is representative.** A short
-    /// easy question does not discriminate - measured, and it ranked two engines equal
-    /// that differ by six times in the real loop (D334).
-    ///
-    /// Ranked by usable words returned, with latency as a tiebreak, for the reason
-    /// [`bench`](mod@bench) gives at length: ranking by speed picks the engine that answers quickly
-    /// and says almost nothing, and the model's time is a rounding error beside the sweep
-    /// that follows it anyway.
-    ///
-    /// Written to the registry, because the point of measuring is that the next run does
-    /// not have to. Every entry is asked, including ones below the one that answers today,
-    /// since an engine that never runs is one nobody can find out about.
+    /// The order is a measurement, ranked by usable words with latency as a tiebreak (see
+    /// [`bench`](mod@bench)), on the caller's representative request, since an easy question does
+    /// not discriminate (D334). Every entry is asked, and the result is written to the registry.
     ///
     /// # Errors
     ///
-    /// If the reordered registry cannot be written. A single entry failing to answer is a
-    /// result rather than an error - it scores nothing and sorts last.
+    /// If the reordered registry cannot be written. An entry failing to answer scores nothing and
+    /// sorts last.
     pub fn benchmark(
         &mut self,
         request: &Request,
@@ -295,9 +208,8 @@ impl Llm {
         }
         bench::rank(&mut measured);
 
-        // Applied back to front, so each `prefer` puts its entry ahead of the ones already
-        // moved. Entries nobody measured - not compatible here, not configured - keep
-        // their places behind everything that was.
+        // Applied back to front, so each `prefer` puts its entry ahead of those already moved. Entries
+        // not measured keep their places behind.
         for measurement in measured.iter().rev() {
             self.config.prefer(&measurement.id);
         }
@@ -325,11 +237,8 @@ impl Llm {
         self.root.join(MODELS_DIR)
     }
 
-    /// Replaces the registry and persists it, marking it as a person's decision.
-    ///
-    /// After this the registry is never machine-rewritten. That is the whole purpose
-    /// of the flag: without it, re-tuning would silently revert a deliberate choice
-    /// and the only symptom would be a setting that keeps coming back.
+    /// Replaces the registry and persists it, marking it as a person's decision, which is never
+    /// machine-rewritten.
     ///
     /// # Errors
     ///
@@ -341,10 +250,8 @@ impl Llm {
         Ok(())
     }
 
-    /// Re-sizes this machine and replaces the registry, but only if nobody has
-    /// expressed an opinion.
-    ///
-    /// Returns whether anything was written.
+    /// Re-sizes this machine and replaces the registry, but only if nobody has expressed an
+    /// opinion. Returns whether anything was written.
     ///
     /// # Errors
     ///
@@ -369,10 +276,8 @@ impl Llm {
             .is_some()
     }
 
-    /// Builds the engine for one entry.
-    ///
-    /// Public because a caller may want to warm a model, report on one, or drive a
-    /// specific entry rather than the ladder.
+    /// Builds the engine for one entry, for a caller that warms, reports on or drives a specific
+    /// entry rather than the ladder.
     ///
     /// # Errors
     ///
@@ -435,10 +340,8 @@ impl Llm {
     ///
     /// # Errors
     ///
-    /// [`Error::Unavailable`] when nothing is configured for this machine, or when
-    /// every configured entry failed - carrying what each one said, because a bare
-    /// "no AI available" tells nobody which of a missing key, a stopped server and a
-    /// failed download to go and fix.
+    /// [`Error::Unavailable`] when nothing is configured for this machine or every configured entry
+    /// failed, carrying what each one said.
     pub fn ask(&self, request: &Request) -> Result<Reply, Error> {
         let mut attempts: Vec<Attempt> = Vec::new();
 
@@ -494,9 +397,8 @@ impl Llm {
                     self.config_path().display()
                 );
             }
-            // Positional rather than named: a format string built by `concat!` is a
-            // macro expansion, and `format_args!` refuses to capture from the
-            // surrounding scope through one.
+            // Positional: `format_args!` cannot capture from the surrounding scope through a `concat!`
+            // expansion.
             return format!(
                 concat!(
                     "none of the {} configured entries is usable on this machine ({}). ",
@@ -521,10 +423,7 @@ impl Ask for Llm {
     }
 }
 
-/// Opens the service beneath `root`, or reports why not.
-///
-/// A convenience for the common case, where a caller wants an [`Option`] and a log
-/// line rather than an error to handle.
+/// Opens the service beneath `root`, or logs why not and answers `None`.
 pub fn open_or_warn(root: &Path) -> Option<Llm> {
     match Llm::open(root) {
         Ok(llm) => Some(llm),
@@ -562,10 +461,7 @@ mod tests {
         assert!(dir.path().join(CONFIG_FILE).exists());
     }
 
-    /// Opening writes a registry and nothing else. No model, no download.
-    ///
-    /// The property behind "download on first use of a model": opening the service is
-    /// something a status line does, and it must not cost gigabytes.
+    /// Opening writes a registry and nothing else: no model, no download.
     #[test]
     fn opening_downloads_nothing() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -580,9 +476,6 @@ mod tests {
     }
 
     /// A person's registry is never machine-rewritten afterwards.
-    ///
-    /// Without the flag, re-tuning would silently revert a deliberate choice and the
-    /// only symptom would be a setting that keeps coming back.
     #[test]
     fn a_saved_registry_is_never_retuned() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -620,10 +513,7 @@ mod tests {
         assert!(Llm::open_with(dir.path(), Catalog::default(), host()).is_err());
     }
 
-    /// With nothing configured, asking says what to do about it.
-    ///
-    /// A bare "no AI available" tells nobody which of a missing key, a stopped server
-    /// and a failed download to go and fix, so the message names the file.
+    /// With nothing configured, asking names the file to fix.
     #[test]
     fn an_empty_registry_explains_itself() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -637,11 +527,6 @@ mod tests {
     }
 
     /// Models are stored beneath the supplied root and nowhere else.
-    ///
-    /// This is the containment guarantee this crate has to honour without being able
-    /// to state it: `orbistoun-paths` promises orbistoun never writes outside its own
-    /// root, and several gigabytes landing in an ambient cache would break that with
-    /// no error anywhere.
     #[test]
     fn everything_is_written_beneath_the_supplied_root() {
         let dir = tempfile::tempdir().expect("temp dir");
