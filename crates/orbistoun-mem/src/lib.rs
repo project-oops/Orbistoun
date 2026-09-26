@@ -303,6 +303,42 @@ impl AddressSpace {
         Ok(region)
     }
 
+    /// Records a range something else already mapped, such as an executable image the host's own
+    /// loader placed (D724), so it is protected and reported like a reservation.
+    ///
+    /// The range is not released when the space drops: its mapping belongs to whoever made it.
+    ///
+    /// # Errors
+    ///
+    /// When the range breaks the reservation rules, overlaps a region this space holds, or is not
+    /// committed in this process.
+    pub fn adopt(
+        &mut self,
+        base: u64,
+        len: u64,
+        protection: Protection,
+    ) -> Result<Region, MemError> {
+        if let Err(e) = self.validate(base, len, false) {
+            note_reserve_failure(base, len, &e);
+            return Err(e);
+        }
+        if !platform::committed(base, len) {
+            let error = MemError::HostRefused(format!(
+                "{base:#x}..{:#x} is not mapped in this process, so there is nothing to adopt",
+                base.saturating_add(len)
+            ));
+            note_reserve_failure(base, len, &error);
+            return Err(error);
+        }
+        let region = Region {
+            base,
+            len,
+            protection,
+        };
+        self.regions.push(region);
+        Ok(region)
+    }
+
     /// Whether `[base, base + len)` lies entirely within a single region this space reserved.
     ///
     /// Lets a caller that commits into an existing reservation (reserve with one call, map

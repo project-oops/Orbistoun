@@ -1094,6 +1094,25 @@ impl Service {
         })
     }
 
+    /// Takes over a container the host's own loader already mapped at `base`, as it maps an
+    /// orbistoun-aot executable (D724): the image [`Self::place_image`] would give, copying
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// When the container cannot be parsed or its span is not mapped.
+    pub fn adopt_image(
+        &self,
+        bytes: &[u8],
+        base: u64,
+    ) -> Result<orbistoun_loader::Image, ServiceError> {
+        Ok(orbistoun_loader::image::adopt(
+            bytes,
+            base,
+            orbistoun_core::GUEST_PAGE_SIZE,
+        )?)
+    }
+
     /// Places a container in memory: reserves its span and copies every loadable segment, zeroing
     /// `.bss`.
     ///
