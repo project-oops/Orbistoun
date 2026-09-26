@@ -10,10 +10,11 @@ so the plan holds no implementation. It is stored in the title library, keyed by
 executable's hash, the loader's build and the host CPU's features. Every run links afresh and
 compares its plan with the stored one: the stored plan is a check, not a cache, and a
 difference under the same key is a loader defect. `orbistoun-cli link` stores a plan without
-running the guest, and `run --relink` replaces one. A native executable is the same plan
-written as a host image that loads one orbistoun runtime library, built only by
-`orbistoun-cli link --native` and never by `run`. Every mode keeps the thunks, so every mode
-writes the same trace.
+running the guest, and `run --relink` replaces one. An orbistoun-aot build is the title's
+folder with a launcher beside it: orbistoun's run path as a program of its own, which runs the
+executable in its folder in its own process, linking and checking as `run` does. It is made
+only by `orbistoun-cli link --native`. Every mode keeps the thunks, so every mode writes the
+same trace.
 
 **Why:** native execution means the guest runs the same way in every mode; only the time of
 linking differs, so which one ran is not a property of the title. Keying on what the plan was
@@ -32,3 +33,5 @@ relink. Keeping the thunks keeps the trace, and with it the loop.
   and the check stay either way. A second path would save under 2% of a run.
 - Native output that binds imports straight to the runtime library: loses the per-import
   count and order the trace depends on (D062).
+- Writing the plan as a host image for the system loader to map: the launcher places the
+  image with the loader every run uses, so a build cannot link differently from a run.

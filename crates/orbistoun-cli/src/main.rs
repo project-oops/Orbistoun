@@ -34,7 +34,7 @@ use crate::module::{
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
 use crate::questions::cmd_questions;
-use crate::run::{cmd_handoff, cmd_link, cmd_run};
+use crate::run::{cmd_handoff, cmd_link, cmd_native_build, cmd_run};
 use crate::shaders::cmd_shaders;
 use crate::status::cmd_status;
 use crate::submit::dispatch_submit;
@@ -132,6 +132,13 @@ enum Command {
         /// Replace the stored plan whatever its key, printing what differed.
         #[arg(long)]
         relink: bool,
+        /// Also write an orbistoun-aot build into this folder: the title's files with a launcher
+        /// beside them (D724).
+        #[arg(long)]
+        native: Option<std::path::PathBuf>,
+        /// What to name the build's launcher; the title's id when omitted.
+        #[arg(long, requires = "native")]
+        name: Option<String>,
     },
     /// Execute a guest, in a worker process.
     Run {
@@ -940,8 +947,16 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             fields,
             limit,
         } => cmd_handoff(path, fields, limit)?,
-        Command::Link { ref path, relink } => {
-            cmd_link(path, cli.symbols_db.as_deref(), relink)?;
+        Command::Link {
+            ref path,
+            relink,
+            ref native,
+            ref name,
+        } => {
+            let summary = cmd_link(path, cli.symbols_db.as_deref(), relink)?;
+            if let Some(out) = native {
+                cmd_native_build(path, out, name.as_deref(), summary.digest)?;
+            }
         }
         Command::Names {
             ref path,

@@ -28,7 +28,7 @@ pub(crate) fn cmd_link(
     path: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
     relink: bool,
-) -> Result<()> {
+) -> Result<orbistoun_proto::LinkSummary> {
     let mut worker =
         orbistoun_worker::WorkerHandle::spawn_self().context("spawning a worker process")?;
     let events = worker
@@ -45,13 +45,43 @@ pub(crate) fn cmd_link(
                 for line in describe_link(&summary, relink) {
                     println!("{line}");
                 }
-                return Ok(());
+                return Ok(summary);
             }
             orbistoun_proto::Event::Failed { error } => anyhow::bail!("linking failed: {error}"),
             _ => {}
         }
     }
     anyhow::bail!("the worker ended without reporting a link")
+}
+
+/// `link --native` - writes an orbistoun-aot build of a linked title into `out` (D724).
+pub(crate) fn cmd_native_build(
+    path: &std::path::Path,
+    out: &std::path::Path,
+    name: Option<&str>,
+    link_plan: String,
+) -> Result<()> {
+    let launcher = std::env::current_exe()
+        .context("finding this program")?
+        .with_file_name(orbistoun_service::aot::LAUNCHER_FILE);
+    anyhow::ensure!(
+        launcher.is_file(),
+        "no launcher at {} - build it with `cargo build --release -p orbistoun-aot`",
+        launcher.display()
+    );
+    let staging = orbistoun_paths::Paths::resolve().staged_titles_dir();
+    let manifest = orbistoun_service::aot::Manifest::for_title(path, &staging, link_plan);
+    let name = name.unwrap_or(&manifest.title).to_owned();
+    let build = orbistoun_service::aot::write_build(path, out, &launcher, &name, &manifest)
+        .with_context(|| format!("writing the build into {}", out.display()))?;
+    println!(
+        "built    {} ({} files, {} MB copied{})",
+        build.launcher.display(),
+        build.files,
+        build.bytes / 1_000_000,
+        if manifest.staged { ", staged" } else { "" }
+    );
+    Ok(())
 }
 
 /// What a link decided, one line per fact, then what differed.

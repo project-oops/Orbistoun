@@ -43,9 +43,10 @@ needs a guest module to reproduce stays outside the repository.
 
 ## Not a way to ship titles
 
-A title linked ahead of time into a native host executable (D724) is derived from the
-operator's own copy of that title. It is built on the machine that runs it and never
-published, packaged or shared, and orbistoun offers nothing that distributes one.
+An orbistoun-aot build (D724) carries the title's own files. Built from a commercial title, it
+is the operator's own copy, built on the machine that runs it and never published, packaged or
+shared, and orbistoun offers nothing that distributes one. Homebrew whose licence allows it,
+such as Neverball built with oops-sdk, is its builder's to share.
 
 ## Not an online-services implementation
 

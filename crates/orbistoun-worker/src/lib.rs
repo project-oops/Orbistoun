@@ -1126,6 +1126,47 @@ fn write_process_image(
 ///
 /// When the run configuration is malformed, or the protocol stream fails.
 pub fn serve_as_worker_process() -> Result<(), Error> {
+    let service = standing_service()?;
+    // The handle rather than a lock on it: reading happens on its own thread, and a `StdinLock`
+    // holds a `MutexGuard`, which is not `Send`. This process is the only reader.
+    //
+    // Stdout is unlocked too: a presented frame is announced mid-run from the thread that flips it,
+    // which a lock held for the whole run would block. Each message is written in one call
+    // (`write_message`), and `Stdout` locks per call, so writers interleave only between whole
+    // lines. Stdout is the shim protocol, not a log: protocol messages only, never diagnostics.
+    render::stream_events_to(|event| {
+        let _ = write_message(&mut io::stdout(), event);
+    });
+    serve(
+        BufReader::new(io::stdin()),
+        io::stdout(),
+        &service,
+        end_orphaned_worker,
+    )
+    .map_err(Error::WorkerLoop)
+}
+
+/// Runs one title in this process, as an orbistoun-aot launcher does (D724): the request a shim
+/// would send, answered by the same loop, with its events written to stderr.
+///
+/// # Errors
+///
+/// As [`serve_as_worker_process`].
+pub fn run_standalone(run: Request) -> Result<(), Error> {
+    let service = standing_service()?;
+    render::stream_events_to(|event| {
+        let _ = write_message(&mut io::stderr(), event);
+    });
+    let mut script = Vec::new();
+    for request in [run, Request::Shutdown] {
+        write_message(&mut script, &request).map_err(Error::WorkerLoop)?;
+    }
+    serve(io::Cursor::new(script), io::stderr(), &service, || {}).map_err(Error::WorkerLoop)
+}
+
+/// The service a worker answers with: real paths, the run configuration and this machine's
+/// learned policy, and the platform settings a person chose.
+fn standing_service() -> Result<Service, Error> {
     // Real paths: the worker is the only process that sees a call trace, and it has to be written
     // where the shims look for it.
     let paths = orbistoun_paths::Paths::resolve();
@@ -1181,7 +1222,7 @@ pub fn serve_as_worker_process() -> Result<(), Error> {
         orbistoun_shell::Parameters::empty(),
         orbistoun_shell::Delivery::empty(),
     );
-    let service = Service::new(orbistoun_service::ServiceConfig {
+    Ok(Service::new(orbistoun_service::ServiceConfig {
         paths: Some(paths),
         entry_settings: file.entry,
         thread_settings: file.threads,
@@ -1189,24 +1230,7 @@ pub fn serve_as_worker_process() -> Result<(), Error> {
         stub_policy: policy,
         pads: file.pads,
         ..orbistoun_service::ServiceConfig::default()
-    });
-    // The handle rather than a lock on it: reading happens on its own thread, and a `StdinLock`
-    // holds a `MutexGuard`, which is not `Send`. This process is the only reader.
-    //
-    // Stdout is unlocked too: a presented frame is announced mid-run from the thread that flips it,
-    // which a lock held for the whole run would block. Each message is written in one call
-    // (`write_message`), and `Stdout` locks per call, so writers interleave only between whole
-    // lines. Stdout is the shim protocol, not a log: protocol messages only, never diagnostics.
-    render::stream_events_to(|event| {
-        let _ = write_message(&mut io::stdout(), event);
-    });
-    serve(
-        BufReader::new(io::stdin()),
-        io::stdout(),
-        &service,
-        end_orphaned_worker,
-    )
-    .map_err(Error::WorkerLoop)
+    }))
 }
 
 /// Stands up the firmware skeleton when the run presents a firmware.

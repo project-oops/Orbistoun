@@ -105,6 +105,7 @@ orbistoun-cli imports <module>            # what a module imports, without runni
 orbistoun-cli imports <module> --own      # the modules the title ships that answer its imports
 orbistoun-cli report <module>             # survey a module, persist a report, show the delta
 orbistoun-cli link <module> [--relink]    # link a title, store its plan, print modules, writes, digest
+orbistoun-cli link <module> --native <dir> [--name <n>]  # also write an orbistoun-aot build into <dir>
 orbistoun-cli compat list                 # how far each title got, furthest first
 ```
 

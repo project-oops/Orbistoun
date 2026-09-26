@@ -42,7 +42,7 @@ applied to the largest surface in the collection.
 where each segment sits, what each import resolves to, the thunk table, thread-local storage,
 instruction rewrites and raw `syscall` sites. Every run builds it in the worker and checks it
 against the plan stored in the title library; `orbistoun-cli link` stores one without running
-the guest; a native executable is the same plan written as a host image (D724).
+the guest; an orbistoun-aot build is the title's folder with a launcher that runs it (D724).
 
 **Instruction rewrite** - an instruction the guest CPU has and the host CPU lacks, replaced at
 link with an equivalent sequence (D725). It is the only change the link plan makes to guest

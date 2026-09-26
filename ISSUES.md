@@ -34,7 +34,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Linking
 
-- Native host executable output is not built (D724).
+- An orbistoun-aot build runs headless: it opens no window and reads no pad, so a title it runs is watched only through its trace (D724).
 - `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725).
 
 ## Kernel, libraries and filesystem

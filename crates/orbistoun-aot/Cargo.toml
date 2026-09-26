@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "orbistoun-aot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Launcher for an orbistoun-aot build: runs the title in its own folder (D724)."
+
+[lints]
+workspace = true
+
+[dependencies]
+oops-log = { workspace = true }
+orbistoun-env = { workspace = true }
+orbistoun-proto = { workspace = true }
+orbistoun-service = { workspace = true }
+orbistoun-worker = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
