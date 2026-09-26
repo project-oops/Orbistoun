@@ -44,8 +44,9 @@ screen beside its command-line equivalent.
 
 `orbistoun-cli link <eboot> --native <dir> --name <name>` writes an orbistoun-aot build: the
 title's folder with orbistoun's window beside it as `<name>.exe`, which plays only that title and
-keeps everything it writes beneath the folder (D724). A commercial title's build stays on the
-machine that made it ([docs/SCOPE.md](docs/SCOPE.md)).
+keeps everything it writes beneath the folder (D724). Before the title starts it shows which key
+drives which pad control, until a key is pressed or for ten seconds. A commercial title's build
+stays on the machine that made it ([docs/SCOPE.md](docs/SCOPE.md)).
 
 [neverball-aot-portable-win.zip](https://github.com/project-oops/Orbistoun/releases/download/aot-demo/neverball-aot-portable-win.zip)
 is one: Neverball, built from source with oops-sdk, packed by the manually run

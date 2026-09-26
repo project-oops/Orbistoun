@@ -126,6 +126,8 @@ pub(crate) struct App {
     power_menu: bool,
     /// The orbistoun-aot build this window launches, whose one title is the whole library (D724).
     aot: Option<std::path::PathBuf>,
+    /// When the controls card went up, while it is up: a build shows it before its title starts.
+    controls_card: Option<std::time::Instant>,
     /// When the last frame was drawn, for the press-versus-hold decision.
     last_frame: std::time::Instant,
     /// Where the highlight is in the shell.
@@ -196,6 +198,7 @@ impl App {
             session: orbistoun_shell::Lifecycle::Exited,
             power_menu: false,
 
+            controls_card: build.is_some().then(std::time::Instant::now),
             aot: build,
             last_frame: std::time::Instant::now(),
             at: orbistoun_shell::Cross {
@@ -226,6 +229,31 @@ impl App {
             self.deferred.launch = true;
             self.wanted_title = None;
         }
+    }
+
+    /// Draws the controls card a build shows before its title starts, and answers whether it is
+    /// still up (D724).
+    fn controls_card_up(&mut self, ctx: &egui::Context) -> bool {
+        let Some(since) = self.controls_card else {
+            return false;
+        };
+        let port = self
+            .prefs
+            .file
+            .pads
+            .ports
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let title = self
+            .rows
+            .first()
+            .map_or_else(String::new, |row| row.title.clone());
+        if crate::controls::card(ctx, &title, &port, since.elapsed()) {
+            self.controls_card = None;
+            return false;
+        }
+        true
     }
 
     /// Acts on what somebody did in the shell.
@@ -1500,6 +1528,11 @@ impl eframe::App for App {
         // Before drawing, so a press acts on its own frame and the session state below is
         // current.
         self.read_input(ctx);
+
+        // The launch waits until a build's controls card is gone (D724).
+        if self.controls_card_up(ctx) {
+            return;
+        }
 
         // Once a running title has presented a frame, the window shows that frame in place
         // of the library.

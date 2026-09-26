@@ -7,6 +7,7 @@
 
 mod app;
 mod capture;
+mod controls;
 mod frame;
 mod icons;
 mod input;
