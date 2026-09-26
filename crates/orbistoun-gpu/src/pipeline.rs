@@ -983,7 +983,8 @@ impl Pipeline {
             ^ primitive_salt(primitive)
             ^ window_salt(self.window)
             ^ width_salt
-            ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48);
+            ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
+            ^ crate::pixel_inputs::salt(user_data);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -1497,12 +1498,15 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             count: count(RSRC2_REGISTERS[0]),
             block_offset: 0,
             dx10_clamp: dx10_clamp(RSRC1_REGISTERS[0]),
+            pixel_inputs: None,
         },
         UserData {
             first_register: 0,
             count: count(RSRC2_REGISTERS[1]),
             block_offset: USER_DATA_STAGE_WORDS,
             dx10_clamp: dx10_clamp(RSRC1_REGISTERS[1]),
+            // Set by `set_environment` for every backend.
+            pixel_inputs: None,
         },
     ]
 }
@@ -1532,6 +1536,9 @@ impl Pipeline {
         } else {
             [UserData::default(); 2]
         };
+        // Which vector registers the pixel shader starts with: built-in inputs on the host, so
+        // every backend supplies them whether or not it feeds user data.
+        self.user_data[1].pixel_inputs = crate::pixel_inputs::decode(writes);
     }
 
     /// Places the window at the constant base the vertex-stage candidate's shader forms (D711).

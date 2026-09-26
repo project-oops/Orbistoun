@@ -21,6 +21,9 @@ use crate::model::{self, Model};
 use crate::predicated::{MEMORY_WORDS, OBSERVED_REGISTERS, OBSERVED_WORDS, REGISTER_COUNT};
 use crate::{TranslateError, Width};
 
+mod pixel_inputs;
+pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
+
 /// Lanes in a wavefront.
 pub const WAVE: u32 = Width::Wave64.lanes();
 
@@ -363,6 +366,10 @@ pub struct UserData {
     /// `S_00B848_DX10_CLAMP`): whether an output clamp turns a NaN into zero (set) or passes it
     /// through (clear). `None` when no `RSRC1` was seen, and then a clamped instruction is refused.
     pub dx10_clamp: Option<bool>,
+    /// A pixel shader's input registers, which place its system values after the interpolants.
+    /// `None` when the stream set none, and then no vector register is seeded.
+    #[serde(default)]
+    pub pixel_inputs: Option<PixelInputs>,
 }
 
 /// Words in the push-constant block: sixteen per stage, two stages. 128 bytes is the smallest
@@ -1148,6 +1155,7 @@ impl<'a> Wavefront<'a> {
         // Reserved before the header for the same reason: every input the entry point touches must
         // be named in its interface, and a driver does not reliably reject a module that omits one.
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
+        let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
         let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
         emit_header(&mut b, stage, primitive, main, output);
 
@@ -1159,6 +1167,7 @@ impl<'a> Wavefront<'a> {
         b.declare(op::TYPE_BOOL, &[bool_type.0]);
         let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
+        system.declare(&mut b, vec4, bool_type);
         let mesh = declare_mesh_outputs(
             &mut b,
             f32_type,
@@ -1174,6 +1183,7 @@ impl<'a> Wavefront<'a> {
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
         let mut interface: Vec<u32> = input_ids.iter().map(|(_, _, id)| id.0).collect();
+        interface.extend(system.interface());
         interface.extend(output.map(|(_, colour)| colour.0));
         interface.extend(mesh_reserved.interface(stage));
         if stage == Stage::Mesh {
@@ -1240,6 +1250,8 @@ impl<'a> Wavefront<'a> {
         if let Some(source) = user_data_source {
             this.load_user_data(source, user_data);
         }
+        // The system values where the hardware puts them: after the interpolants, in field order.
+        system.seed(&mut this);
         this
     }
 
@@ -2252,6 +2264,9 @@ pub fn translate_with_user_data(
             offset: 0,
             detail: "a mesh module's user data is the geometry stage's share of the block, at offset zero",
         });
+    }
+    if let (Stage::Fragment, Some(inputs)) = (stage, user_data.pixel_inputs) {
+        inputs.seeded()?;
     }
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);

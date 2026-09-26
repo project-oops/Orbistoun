@@ -483,7 +483,10 @@ impl Session {
                 available.vertex_pipeline_stores_and_atomics == vk::TRUE,
             )
             // `texture_compression_bc` lets the report say whether an upload path needs a decoder.
-            .texture_compression_bc(available.texture_compression_bc == vk::TRUE);
+            .texture_compression_bc(available.texture_compression_bc == vk::TRUE)
+            // `geometry_shader` serves a pixel shader that reads its render-target layer, which
+            // SPIR-V spells as the `Geometry` capability.
+            .geometry_shader(available.geometry_shader == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
