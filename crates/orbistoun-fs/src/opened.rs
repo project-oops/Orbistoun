@@ -105,6 +105,49 @@ pub(crate) fn note_read(guest_path: &str, wanted: usize, got: usize) {
     reads.push(format!("{guest_path}: asked {wanted}, got {got}"));
 }
 
+/// The guest path behind each open descriptor, kept only while recording, so a read through a
+/// descriptor names its file.
+fn descriptor_paths() -> &'static Mutex<std::collections::BTreeMap<u64, String>> {
+    static PATHS: OnceLock<Mutex<std::collections::BTreeMap<u64, String>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Records which guest path a descriptor was opened on.
+pub(crate) fn note_descriptor(fd: u64, guest_path: &str) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut paths) = descriptor_paths().lock() {
+        paths.insert(fd, guest_path.to_owned());
+    }
+}
+
+/// Forgets a closed descriptor, so a reused number does not name the old file.
+pub(crate) fn forget_descriptor(fd: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut paths) = descriptor_paths().lock() {
+        paths.remove(&fd);
+    }
+}
+
+/// Records a read through a descriptor, under the path it was opened on.
+pub(crate) fn note_descriptor_read(fd: u64, wanted: usize, got: Option<usize>) {
+    if !enabled() {
+        return;
+    }
+    let path = descriptor_paths()
+        .lock()
+        .ok()
+        .and_then(|paths| paths.get(&fd).cloned())
+        .unwrap_or_else(|| format!("descriptor {fd}"));
+    match got {
+        Some(got) => note_read(&path, wanted, got),
+        None => note_read(&path, wanted, 0),
+    }
+}
+
 /// Every read this run made, in order.
 #[must_use]
 pub fn reads_made() -> Vec<String> {

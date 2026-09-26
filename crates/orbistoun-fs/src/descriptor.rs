@@ -90,6 +90,7 @@ pub fn open(guest_path: &str) -> Option<u64> {
     crate::opened::note(guest_path);
     let is_directory = host.is_dir();
     let fd = insert_file(file)?;
+    crate::opened::note_descriptor(fd, guest_path);
     // A directory's listing, for a guest that reads it through the descriptor.
     if is_directory {
         crate::dirent::note_directory(fd, guest_path);
@@ -204,6 +205,14 @@ pub(crate) fn with_socket<T>(
 /// Reading from a standard stream answers zero rather than blocking the worker on the host's
 /// own input.
 pub fn read(fd: u64, into: &mut [u8]) -> Option<usize> {
+    let wanted = into.len();
+    let got = read_unrecorded(fd, into);
+    crate::opened::note_descriptor_read(fd, wanted, got);
+    got
+}
+
+/// [`read`], without the record.
+fn read_unrecorded(fd: u64, into: &mut [u8]) -> Option<usize> {
     use std::io::Read as _;
     if is_standard(fd) {
         return Some(0);
@@ -444,7 +453,10 @@ pub fn read_at(fd: u64, into: &mut [u8], offset: u64) -> Option<usize> {
     let Target::File(file) = table.get_mut(&fd)? else {
         return None;
     };
-    positioned_read(file, into, offset)
+    let wanted = into.len();
+    let got = positioned_read(file, into, offset);
+    crate::opened::note_descriptor_read(fd, wanted, got);
+    got
 }
 
 /// Writes at an offset without moving the descriptor's own position.
@@ -665,6 +677,7 @@ pub fn close(fd: u64) -> bool {
     // them.
     crate::fcntl::forget(fd);
     crate::dirent::forget(fd);
+    crate::opened::forget_descriptor(fd);
     if is_standard(fd) {
         return true;
     }

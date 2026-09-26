@@ -11,13 +11,25 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Every string this run rendered, in order.
-fn said() -> &'static Mutex<Vec<String>> {
-    static SAID: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-    SAID.get_or_init(|| Mutex::new(Vec::new()))
+fn said() -> &'static Mutex<Said> {
+    static SAID: OnceLock<Mutex<Said>> = OnceLock::new();
+    SAID.get_or_init(|| Mutex::new(Said::default()))
 }
 
-/// How many strings to remember: the last ones, because a guest says the interesting thing
-/// just before it stops.
+/// What was rendered: the first strings, the last ones, and how many fell between.
+#[derive(Default)]
+struct Said {
+    first: Vec<String>,
+    last: std::collections::VecDeque<String>,
+    dropped: usize,
+}
+
+/// How many of the first strings to keep: a title explains a setup failure early, and a flood
+/// of later messages would otherwise push the explanation out.
+const FIRST_REMEMBERED: usize = 64;
+
+/// How many strings to remember from the end, because a guest says the interesting thing just
+/// before it stops.
 const MOST_REMEMBERED: usize = 256;
 
 /// How long a remembered string may be, so a guest rendering a megabyte does not take the
@@ -58,24 +70,39 @@ pub(crate) fn note(rendered: &[u8]) {
     let Ok(mut said) = said().lock() else {
         return;
     };
-    // The oldest goes; the useful end of this record is the recent one.
-    if said.len() >= MOST_REMEMBERED {
-        said.remove(0);
-    }
     let text = String::from_utf8_lossy(&rendered[..rendered.len().min(LONGEST)]);
     let text = text.trim_end_matches(['\n', '\r', '\0']);
     // And where it was said from: the call site is what a watchpoint or a disassembly needs
     // next. The format function's own thunk already records the address it returns to.
-    match orbistoun_thunk::last_call().map(|call| call.from) {
-        Some(from) if from != 0 => said.push(format!("{text}   [from {from:#x}]")),
-        _ => said.push(text.to_owned()),
+    let line = match orbistoun_thunk::last_call().map(|call| call.from) {
+        Some(from) if from != 0 => format!("{text}   [from {from:#x}]"),
+        _ => text.to_owned(),
+    };
+    if said.first.len() < FIRST_REMEMBERED {
+        said.first.push(line);
+        return;
     }
+    // Past the first few, the oldest of the rest goes; the useful end is the recent one.
+    if said.last.len() >= MOST_REMEMBERED {
+        said.last.pop_front();
+        said.dropped += 1;
+    }
+    said.last.push_back(line);
 }
 
-/// Every string this run rendered, oldest first.
+/// The strings this run rendered, oldest first: the first few, then a line saying how many were
+/// not kept, then the last ones.
 #[must_use]
 pub fn rendered() -> Vec<String> {
-    said().lock().map(|s| s.clone()).unwrap_or_default()
+    let Ok(said) = said().lock() else {
+        return Vec::new();
+    };
+    let mut out = said.first.clone();
+    if said.dropped > 0 {
+        out.push(format!("... {} more not kept ...", said.dropped));
+    }
+    out.extend(said.last.iter().cloned());
+    out
 }
 
 /// Whether this run was recording.
