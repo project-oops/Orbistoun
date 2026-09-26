@@ -24,6 +24,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - A second bound texture, a third texture per draw, or a descriptor from two table offsets is refused; no surface cache or format table exists.
 - MTBUF 11/10-bit packed floats, `SRGB` and packed stores are refused.
 - `v_rcp_f32` translates as an exact division; approximate instructions are not modelled.
+- A pixel shader enabling `SAMPLE_COVERAGE` or `POS_FIXED_PT` is refused: their register content is unmeasured. The ancillary word carries only the layer; its sample and shading-rate bits read zero.
 - The host side of the resource model (descriptor base to host memory) is unbuilt.
 - Submissions run synchronously; hardware queues the buffer and runs alongside the CPU.
 - Per-frame host cost remains in prepare, flip write-back, and the first read and detile of each cleared target.
