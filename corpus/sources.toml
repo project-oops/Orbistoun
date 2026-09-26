@@ -193,19 +193,6 @@ cite = "https://github.com/project-oops/oops-apps"
 asset = []
 
 [[source]]
-name = "CRFT00001"
-target = "titles"
-kind = "local"
-sources = [
-    "../oops-apps/src/oops-titles/craft/dist/craft-title-prospero.zip",
-    "https://github.com/project-oops/oops-apps/releases/download/latest-main/craft-title-prospero.zip",
-]
-archive = true
-licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
-cite = "https://github.com/project-oops/oops-apps"
-asset = []
-
-[[source]]
 name = "ETXR00001"
 target = "titles"
 kind = "local"
@@ -268,6 +255,38 @@ cite = "https://github.com/project-oops/oops-apps"
 [[source.asset]]
 file = "neverputt-title-prospero.zip"
 sha256 = "7ac23e31bc9402e1adc51528d29964a4252a16f3d1ed836deb3275628b74d45c"
+
+[[source]]
+name = "CRFT00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/craft/dist/craft-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/craft-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "craft-title-prospero.zip"
+sha256 = "9d43d90e9f0c2ba7c43f294c3d897a8b5773b27ff50b20c600cc8a02a7e65a85"
+
+[[source]]
+name = "OPSY00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-utilities/oopsy-daisy/dist/oopsy-daisy-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/oopsy-daisy-title-prospero.zip",
+]
+archive = true
+licence = "same suite (D043); our own application, not third-party"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "oopsy-daisy-title-prospero.zip"
+sha256 = "a1e87e58304d3acf441fe28610fd41327d87bea2d0253747bc013dbb6f2c28ba"
 
 [[source]]
 name = "RTRA00001"
@@ -352,22 +371,6 @@ cite = "https://github.com/project-oops/oops-apps"
 [[source.asset]]
 file = "net-tool-title-prospero.zip"
 sha256 = "9a62e80d5a08846d2c4e541eec43b55cf18c6f84bd9b970e3b4382ffd7e8d57d"
-
-[[source]]
-name = "OPSY00001"
-target = "titles"
-kind = "local"
-sources = [
-    "../oops-apps/src/oops-utilities/oopsy-daisy/dist/oopsy-daisy-title-prospero.zip",
-    "https://github.com/project-oops/oops-apps/releases/download/latest-main/oopsy-daisy-title-prospero.zip",
-]
-archive = true
-licence = "same suite (D043); our own application, not third-party"
-cite = "https://github.com/project-oops/oops-apps"
-
-[[source.asset]]
-file = "oopsy-daisy-title-prospero.zip"
-sha256 = "8aafc23f1400fea353ed4173e03808029421003297e4dd290a7eb7528c029244"
 
 [[source]]
 name = "PADV00001"
