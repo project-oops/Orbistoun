@@ -4,8 +4,9 @@
 //! Declaring the names makes a title that asks for the network visible in a report instead
 //! of failing on an unresolved import, and lets a guest that tolerates a refused connection
 //! carry on. Every name comes from a real import table (D504); unmeasured arities are `6`,
-//! the trampoline's full capture, which loses no argument where a low guess would. Only
-//! `socket` serves anything; the other libraries are listed in `SERVES_NOTHING`. Online
+//! the trampoline's full capture, which loses no argument where a low guess would. Sockets,
+//! the network pools, the HTTP client and its TLS contexts are carried out over the host's
+//! network (D727); the account-service libraries are listed in `SERVES_NOTHING`. Online
 //! services are out of scope (`docs/SCOPE.md`).
 
 pub mod http;
@@ -13,6 +14,7 @@ pub mod http2;
 pub mod netctl;
 pub mod npmanager;
 pub mod npwebapi2;
+pub mod pool;
 pub mod socket;
 pub mod ssl;
 
@@ -22,7 +24,18 @@ pub mod ssl;
 /// new module cannot be left unregistered.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, orbistoun_core::GuestFn)] {
-    socket::implementations()
+    static ALL: std::sync::OnceLock<Vec<(&'static str, orbistoun_core::GuestFn)>> =
+        std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        [
+            socket::implementations(),
+            pool::implementations(),
+            http::implementations(),
+            ssl::implementations(),
+            netctl::implementations(),
+        ]
+        .concat()
+    })
 }
 
 /// The base libSceNet numbers its errors from: `0x8041_0100`, not `0x8041_0000`.

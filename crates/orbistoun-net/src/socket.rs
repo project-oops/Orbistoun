@@ -7,7 +7,7 @@
 //!
 //! Arities other than `6` are the types obSCEne's `src/probe/sections/net.c` calls through:
 //! they establish the first N arguments, not that there is no further one. The resolvers,
-//! pools, datagram calls, `sceNetErrnoLoc` and `sceNetInetPton` are declared and unserved.
+//! datagram calls, `sceNetErrnoLoc` and `sceNetInetPton` are declared and unserved.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_fs::socket::{self as bodies, Answer};
@@ -96,8 +96,9 @@ guest_module! {
         "sceNetHtons" => 1,
         "sceNetInetPton" => 6,
         "sceNetListen" => 2,
-        "sceNetPoolCreate" => 6,
-        "sceNetPoolDestroy" => 6,
+        // (name, size, flags) and (pool): served by `pool.rs`.
+        "sceNetPoolCreate" => 3,
+        "sceNetPoolDestroy" => 1,
         "sceNetRecv" => 4,
         "sceNetRecvfrom" => 6,
         "sceNetResolverCreate" => 6,

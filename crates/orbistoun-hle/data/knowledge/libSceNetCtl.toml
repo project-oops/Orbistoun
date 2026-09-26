@@ -8,6 +8,24 @@ note = "Called 122 time(s) across the recorded corpus; nothing beyond the name a
 
 [[function]]
 name = "sceNetCtlInit"
-found_in = ["PPSA02664-app0"]
+arity = 0
+purpose = "Starts the network-configuration library."
+returns = "status"
+edge_cases = ["Answers zero: it holds nothing the host network needs, and oops-sdk's netctl.c treats zero as ready."]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/netctl.c (oops_net_ctl_init), which runs on hardware"
+found_in = ["PPSA02664-app0", "OPSY00001"]
 found_on = "2026-09-03"
-note = "Called 122 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceNetCtlTerm"
+arity = 0
+purpose = "Ends the network-configuration library."
+returns = "status"
+edge_cases = ["Nothing to release; oops-sdk ignores the answer."]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/netctl.c (oops_net_ctl_term), which runs on hardware"
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"

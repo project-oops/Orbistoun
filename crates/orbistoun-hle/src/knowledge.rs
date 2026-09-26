@@ -97,12 +97,20 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceMouse.toml"),
     ),
     (
+        "libSceHttp",
+        include_str!("../data/knowledge/libSceHttp.toml"),
+    ),
+    (
         "libSceNet",
         include_str!("../data/knowledge/libSceNet.toml"),
     ),
     (
         "libSceNetCtl",
         include_str!("../data/knowledge/libSceNetCtl.toml"),
+    ),
+    (
+        "libSceSsl",
+        include_str!("../data/knowledge/libSceSsl.toml"),
     ),
     (
         "libSceSaveData_native",

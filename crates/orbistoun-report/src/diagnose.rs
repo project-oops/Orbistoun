@@ -138,7 +138,7 @@ const ARGUMENT_REGISTERS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 /// guest's arguments. The high bit is set so a guest's own `rc < 0` check reads them as negative
 /// (D670).
 const PLACEHOLDER_LOW: u64 = orbistoun_core::PLACEHOLDER_BASE as u64;
-/// One past the fixed `GuestError` codes (`PLACEHOLDER_BASE | 0x1..=0x4`); tagged placeholders
+/// One past the fixed `GuestError` codes (`PLACEHOLDER_BASE | 0x1..=0x5`); tagged placeholders
 /// begin here.
 const PLACEHOLDER_HIGH: u64 = PLACEHOLDER_LOW + 0x10;
 

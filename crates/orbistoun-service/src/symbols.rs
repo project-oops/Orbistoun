@@ -522,16 +522,8 @@ mod knowledge_tests {
             "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
-            "libSceHttp",
-            "declared as 1 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
             "libSceHttp2",
             "declared as 23 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceNetCtl",
-            "declared as 2 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceNpManager",
@@ -540,10 +532,6 @@ mod knowledge_tests {
         (
             "libSceNpWebApi2",
             "declared as 8 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceSsl",
-            "declared as 10 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceJson2",

@@ -1,0 +1,350 @@
+library = "libSceHttp"
+
+[[function]]
+name = "sceHttpInit"
+arity = 3
+purpose = "Creates an HTTP context from a network pool, an SSL context and a pool size."
+returns = "status"
+edge_cases = [
+    "Answers a positive context id; the pools are the platform's memory accounting and hold nothing here, since the host transfer allocates its own.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Ids are drawn from one counter starting at 1; the platform's own numbering is unmeasured, and the guest relies only on an id being positive.",
+    "The context's default is to follow redirects; a template states its own.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpTerm"
+arity = 1
+purpose = "Ends an HTTP context."
+returns = "status"
+edge_cases = [
+    "A dead or non-context id is refused.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpCreateTemplate"
+arity = 4
+purpose = "Creates a template under a context: a user agent, an HTTP version and whether to follow redirects."
+returns = "status"
+edge_cases = [
+    "The user agent becomes the User-Agent header of every request made under the template.",
+    "Inherits the context's settings at creation.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Ids are drawn from one counter starting at 1; the platform's own numbering is unmeasured, and the guest relies only on an id being positive.",
+    "The HTTP version argument is recorded by nothing: the host negotiates the version.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpDeleteTemplate"
+arity = 1
+purpose = "Deletes a template."
+returns = "status"
+edge_cases = [
+    "A dead id is refused.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpCreateConnectionWithURL"
+arity = 3
+purpose = "Creates a connection under a template for the host a URL names."
+returns = "status"
+edge_cases = [
+    "An unparseable URL is refused.",
+    "Inherits the template's settings at creation; the keep-alive flag is the host's to honour.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Ids are drawn from one counter starting at 1; the platform's own numbering is unmeasured, and the guest relies only on an id being positive.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpDeleteConnection"
+arity = 1
+purpose = "Deletes a connection."
+returns = "status"
+edge_cases = [
+    "A dead id is refused.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpCreateRequestWithURL2"
+arity = 4
+purpose = "Creates a request on a connection: a method, a URL (whole, or a path on the connection) and a content length."
+returns = "status"
+edge_cases = [
+    "oops-sdk passes the whole URL again; a relative one is joined to the connection's.",
+    "Inherits the connection's settings at creation.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Ids are drawn from one counter starting at 1; the platform's own numbering is unmeasured, and the guest relies only on an id being positive.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpDeleteRequest"
+arity = 1
+purpose = "Deletes a request, releasing its response and header block."
+returns = "status"
+edge_cases = [
+    "The header block sceHttpGetAllResponseHeaders handed out is invalid afterwards.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpAddRequestHeader"
+arity = 4
+purpose = "Adds a header to a template, connection or request."
+returns = "status"
+edge_cases = [
+    "Mode 0 replaces a header of the same name, mode 1 adds another beside it; any other mode is refused.",
+    "A header set on a parent is inherited by children created afterwards.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "The meanings of modes 0 and 1 are the published SDK's; oops-sdk uses only 0, whose replacing behaviour it does not test.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpSetAutoRedirect"
+arity = 2
+purpose = "Sets whether a request (or its future children) follows redirects."
+returns = "status"
+edge_cases = [
+    "Off, a 3xx answer is the request's own answer and its Location is in the header block: oops-sdk follows by hand, one connection per host.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "How many redirects the platform follows before failing is unmeasured; the host's limit is 10.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpSetResolveTimeOut"
+arity = 2
+purpose = "Bounds host-name resolution, in microseconds."
+returns = "status"
+edge_cases = [
+    "Resolution and connection are one phase to the host, so this and the connect timeout are added.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Zero is taken as the host default.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpSetConnectTimeOut"
+arity = 2
+purpose = "Bounds connecting, in microseconds."
+returns = "status"
+edge_cases = [
+    "Added to the resolve timeout: one phase to the host.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Zero is taken as the host default.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpSetSendTimeOut"
+arity = 2
+purpose = "Bounds sending the request, in microseconds."
+returns = "status"
+edge_cases = [
+    "Used for waiting on the response when no receive timeout is set.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "The host bounds sending and waiting as one; a stalled send is bounded by the receive timeout when both are set.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpSetRecvTimeOut"
+arity = 2
+purpose = "Bounds waiting for the response and each read of its body, in microseconds."
+returns = "status"
+edge_cases = [
+    "A stalled body read fails the read rather than hanging it.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpsDisableOption"
+arity = 2
+purpose = "Turns off certificate checks for a context, template, connection or request."
+returns = "status"
+edge_cases = [
+    "Bits 0x01, 0x08, 0x10 and 0x20 (server verify, not-after, not-before, known CA) are the host verifier's single chain check; 0x04 (CN check) is its host-name check.",
+    "oops-sdk clears all five for the release CDN, whose certificate the console's verifier rejects on a CN mismatch (0x80431073).",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "The bit meanings are oops-sdk's, which names them for the hardware it runs on; they were not measured one by one.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpSendRequest"
+arity = 3
+purpose = "Sends a request with optional body data, up to the response headers."
+returns = "status"
+edge_cases = [
+    "The transfer is the host's, over rustls; the body stays unread until sceHttpReadData.",
+    "An unreachable host or a failed TLS handshake answers a negative code rather than hanging or succeeding.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpGetStatusCode"
+arity = 2
+purpose = "Writes a sent request's HTTP status code."
+returns = "status"
+edge_cases = [
+    "Refused before the request is sent.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpGetAllResponseHeaders"
+arity = 3
+purpose = "Hands out the response's header block and its size."
+returns = "status"
+edge_cases = [
+    "The block is the library's, valid until the request is deleted, NUL-terminated beyond the size given.",
+    "Each header is a 'Name: value' line ending CRLF; oops-sdk finds Location at the start of a line.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "The block begins with the status line and ends with an empty line; whether the platform's does is unmeasured.",
+    "Header names are the host's lower-case spelling.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpGetResponseContentLength"
+arity = 3
+purpose = "Writes whether the response states a length, and the length."
+returns = "status"
+edge_cases = [
+    "The result word is 0 when the length is present, which is the case oops-sdk tests.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "1 for no length and 2 for a chunked body are the published SDK's values, not measured.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceHttpReadData"
+arity = 3
+purpose = "Reads the next bytes of a response body."
+returns = "status"
+edge_cases = [
+    "Answers the count read, zero at the end of the body.",
+    "A chunked body arrives decoded.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
