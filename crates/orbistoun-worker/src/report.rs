@@ -3141,7 +3141,10 @@ mod tests {
             parse_indirect("[r15+0x8]+0x40", &regs),
             Some((0x7400_0204_78a8, 0x40))
         );
-        assert_eq!(parse_indirect("[r15]", &regs), Some((0x7400_0204_78a0, 0x100)));
+        assert_eq!(
+            parse_indirect("[r15]", &regs),
+            Some((0x7400_0204_78a0, 0x100))
+        );
         assert_eq!(parse_indirect("[r99+0x8]", &regs), None);
     }
 
