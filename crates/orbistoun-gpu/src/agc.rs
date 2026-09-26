@@ -416,15 +416,54 @@ fn dcb_set_uc_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceAgcDcbSetCxRegistersIndirect(dcb, ...)` - reserves the packet a title patches and hands
 /// back its real address.
 ///
-/// The producer half of the patch family. It appends a correctly sized packet and returns the real
-/// cursor, so the guest's `memcpy` and the patch that follows land in command-buffer memory. The
-/// header and 20-byte extent are measured; which argument becomes which body dword is not, and the
-/// guest fills the body itself through `sceAgcSetCxRegIndirectPatchAddRegisters` (D696).
+/// The producer half of the patch family. It appends the measured 20-byte packet, its body filled
+/// from `(dcb, table, count)`, and returns the real cursor, so the patches that follow amend it in
+/// command-buffer memory (`166-agc/patch-cx-registers-indirect`).
 fn dcb_set_cx_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::set_cx_registers_indirect_skeleton(),
+        &packet::build::set_cx_registers_indirect(args[1], args[2]),
     )
+}
+
+/// Offset of an indirect register packet's table address, low half then high half.
+const INDIRECT_TABLE_AT: u64 = 4;
+
+/// Offset of an indirect register packet's register count.
+const INDIRECT_COUNT_AT: u64 = 16;
+
+/// `sceAgcSetCxRegIndirectPatchAddRegisters(packet, count, ...)`: adds `count` to the packet's
+/// register count and answers `0x0`. Measured: one call moved dw4 from `0x3880` to `0x3881`, a
+/// second to `0x3882`, and nothing else in the packet or workload changed
+/// (`166-agc/patch-cx-registers-indirect`).
+fn cx_indirect_patch_add_registers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (packet, count) = (args[0], args[1] as u32);
+    if packet != 0 {
+        let at = packet.wrapping_add(INDIRECT_COUNT_AT);
+        // SAFETY: `packet` is the producer's answer the guest passes back, a 20-byte packet in its
+        // own command buffer; dw4 lies inside it.
+        let was = unsafe { guest::read_u32(at) }.unwrap_or(0);
+        let now = (was & !packet::build::INDIRECT_COUNT_MASK)
+            | (was.wrapping_add(count) & packet::build::INDIRECT_COUNT_MASK);
+        // SAFETY: the same dword, in the guest's own command buffer.
+        unsafe { guest::write_u32(at, now) };
+    }
+    OK
+}
+
+/// `sceAgcSetCxRegIndirectPatchSetAddress(packet, address)`: writes the table address into dw1
+/// and dw2 and answers `0x0`. Measured: address `0x2_0086_0000` came back as dw1 `0x860000`, dw2
+/// `0x2` (`166-agc/patch-cx-registers-indirect`).
+fn cx_indirect_patch_set_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (packet, address) = (args[0], args[1]);
+    if packet != 0 {
+        let at = packet.wrapping_add(INDIRECT_TABLE_AT);
+        // SAFETY: dw1 and dw2 of the producer's 20-byte packet, in the guest's command buffer.
+        unsafe { guest::write_u32(at, (address as u32) & !3) };
+        // SAFETY: as above, the next dword.
+        unsafe { guest::write_u32(at.wrapping_add(4), (address >> 32) as u32) };
+    }
+    OK
 }
 
 /// The `sceAgc*Patch*` family - amend an already-written packet in place, and return the measured
@@ -761,11 +800,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         // The whole `sceAgc*Patch*` family, each measured to return 0x0.
         (
             "sceAgcSetCxRegIndirectPatchAddRegisters",
-            agc_patch_returns_ok,
+            cx_indirect_patch_add_registers,
         ),
         (
             "sceAgcSetCxRegIndirectPatchSetAddress",
-            agc_patch_returns_ok,
+            cx_indirect_patch_set_address,
         ),
         (
             "sceAgcSetShRegIndirectPatchAddRegisters",

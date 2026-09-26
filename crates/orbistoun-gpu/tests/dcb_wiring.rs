@@ -313,13 +313,12 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     }
 }
 
-/// The whole `sceAgc*Patch*` family answers the measured `0x0`, not a placeholder. They are
-/// returns, not builders: no packet is appended and no writer touched.
+/// The rest of the `sceAgc*Patch*` family answers the measured `0x0`, not a placeholder, and
+/// touches no packet. The two Cx register patches write their measured fields and are replayed in
+/// `the_indirect_register_patches_replay_the_measured_sequence`.
 #[test]
 fn every_patch_answers_the_measured_success_not_a_placeholder() {
     for name in [
-        "sceAgcSetCxRegIndirectPatchAddRegisters",
-        "sceAgcSetCxRegIndirectPatchSetAddress",
         "sceAgcSetShRegIndirectPatchAddRegisters",
         "sceAgcSetShRegIndirectPatchSetAddress",
         "sceAgcSetUcRegIndirectPatchAddRegisters",
@@ -543,6 +542,40 @@ fn set_cx_registers_indirect_writes_measured_header_and_format() {
         ],
         "header 0xc0039f00, zeros, format 0x80000000, zero count"
     );
+}
+
+/// The probe's sequence (`166-agc/patch-cx-registers-indirect`): the producer called as
+/// `(dcb, 2, table)`, one `AddRegisters(packet, 1)`, `SetAddress(packet, 0x2_0086_0000)`, then a
+/// second `AddRegisters`, gives the measured dw1, dw2 and dw4 at each step.
+#[test]
+fn the_indirect_register_patches_replay_the_measured_sequence() {
+    let w = Writer::new(0x400);
+    let table = 0x0000_0002_0085_3880_u64;
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = 2;
+    args[2] = table;
+    let packet = call("sceAgcDcbSetCxRegistersIndirect", args);
+    let dword = |i: usize| u32::from_le_bytes(w.bytes()[i * 4..i * 4 + 4].try_into().unwrap());
+    assert_eq!((dword(1), dword(2), dword(4)), (0, 0, 0x3880));
+
+    let mut patch = [0u64; GUEST_ARG_REGISTERS];
+    patch[0] = packet;
+    patch[1] = 1;
+    assert_eq!(call("sceAgcSetCxRegIndirectPatchAddRegisters", patch), 0);
+    assert_eq!(dword(4), 0x3881);
+
+    patch[1] = 0x0000_0002_0086_0000;
+    assert_eq!(call("sceAgcSetCxRegIndirectPatchSetAddress", patch), 0);
+    assert_eq!(
+        (dword(1), dword(2), dword(3)),
+        (0x0086_0000, 2, 0x8000_0000)
+    );
+
+    patch[1] = 1;
+    assert_eq!(call("sceAgcSetCxRegIndirectPatchAddRegisters", patch), 0);
+    assert_eq!(dword(4), 0x3882);
+    assert_eq!(w.written(), 20, "the patches amend in place");
 }
 
 /// `sceAgcInit` (and alias `0x53bbd82b51d172db`) validates version 13 and returns 0.

@@ -403,17 +403,25 @@ pub mod build {
     /// cursor. The format word `0x80000000` in dw3 (offset-and-data, register offset 0) is measured
     /// (`166-agc/patch-cx-registers-indirect`). dw1-dw2 hold the base GPU address, set by
     /// `sceAgcSetCxRegIndirectPatchSetAddress`; dw4 holds the register count, incremented by
-    /// `sceAgcSetCxRegIndirectPatchAddRegisters`. The rest of the body is zero (D696).
+    /// `sceAgcSetCxRegIndirectPatchAddRegisters`.
+    ///
+    /// The producer fills it from its arguments `(dcb, table, count)`: dw1-dw2 the table address
+    /// with its low two bits clear, dw4 the count's low fourteen bits. Measured with the probe
+    /// passing `(dcb, 2, table)`, which came back as dw1 `0` and dw4 `0x3880`, the table pointer's
+    /// low bits.
     #[must_use]
-    pub fn set_cx_registers_indirect_skeleton() -> [u32; 5] {
+    pub fn set_cx_registers_indirect(table: u64, count: u64) -> [u32; 5] {
         [
             command_header(measured::SET_CONTEXT_REG_INDIRECT, 4),
-            0,
-            0,
+            (table as u32) & !3,
+            (table >> 32) as u32,
             0x8000_0000,
-            0,
+            (count as u32) & INDIRECT_COUNT_MASK,
         ]
     }
+
+    /// Bits of an indirect register packet's dw4 that hold the register count.
+    pub const INDIRECT_COUNT_MASK: u32 = 0x3fff;
 
     /// A `NOP` - a header-only no-op packet, one dword, four bytes.
     ///
