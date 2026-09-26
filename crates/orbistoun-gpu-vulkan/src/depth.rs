@@ -602,7 +602,7 @@ mod tests {
         let on = depth_stencil_state(Some(state(&[(0xA200, 0x16)]))).expect("maps");
         assert_eq!(on.depth_test_enable, vk::TRUE);
         assert_eq!(on.depth_write_enable, vk::TRUE);
-        assert!(on.depth_compare_op == vk::CompareOp::LESS);
+        assert_eq!(on.depth_compare_op.as_raw(), vk::CompareOp::LESS.as_raw());
         assert_eq!(on.stencil_test_enable, vk::FALSE);
         let off = depth_stencil_state(None).expect("maps");
         assert_eq!(off.depth_test_enable, vk::FALSE);
@@ -621,11 +621,23 @@ mod tests {
             (0xA10D, 0x0100_ff09),
         ];
         let mapped = depth_stencil_state(Some(state(&two))).expect("maps");
-        assert!(mapped.front.compare_op == vk::CompareOp::EQUAL);
-        assert!(mapped.front.pass_op == vk::StencilOp::REPLACE);
+        assert_eq!(
+            mapped.front.compare_op.as_raw(),
+            vk::CompareOp::EQUAL.as_raw()
+        );
+        assert_eq!(
+            mapped.front.pass_op.as_raw(),
+            vk::StencilOp::REPLACE.as_raw()
+        );
         assert_eq!(mapped.front.reference, 7);
-        assert!(mapped.back.compare_op == vk::CompareOp::NOT_EQUAL);
-        assert!(mapped.back.pass_op == vk::StencilOp::INCREMENT_AND_WRAP);
+        assert_eq!(
+            mapped.back.compare_op.as_raw(),
+            vk::CompareOp::NOT_EQUAL.as_raw()
+        );
+        assert_eq!(
+            mapped.back.pass_op.as_raw(),
+            vk::StencilOp::INCREMENT_AND_WRAP.as_raw()
+        );
         assert_eq!(mapped.back.reference, 9);
 
         let one = [
@@ -634,8 +646,11 @@ mod tests {
             (0xA10C, 0x0100_ff07),
         ];
         let mapped = depth_stencil_state(Some(state(&one))).expect("maps");
-        assert!(mapped.back.compare_op == mapped.front.compare_op);
-        assert!(mapped.back.pass_op == mapped.front.pass_op);
+        assert_eq!(
+            mapped.back.compare_op.as_raw(),
+            mapped.front.compare_op.as_raw()
+        );
+        assert_eq!(mapped.back.pass_op.as_raw(), mapped.front.pass_op.as_raw());
         assert_eq!(mapped.back.reference, 7);
     }
 
@@ -645,33 +660,48 @@ mod tests {
         let face = decode_stencil_ref_mask(0x0100_ff07);
         assert!(stencil_op(StencilOp::Xor, face).is_err());
         assert!(stencil_op(StencilOp::Ones, face).is_err());
-        assert!(stencil_op(StencilOp::AddClamp, face) == Ok(vk::StencilOp::INCREMENT_AND_CLAMP));
+        assert_eq!(
+            stencil_op(StencilOp::AddClamp, face).map(vk::StencilOp::as_raw),
+            Ok(vk::StencilOp::INCREMENT_AND_CLAMP.as_raw())
+        );
         let by_two = decode_stencil_ref_mask(0x0200_ff07);
         assert!(stencil_op(StencilOp::AddClamp, by_two).is_err());
         assert!(stencil_op(StencilOp::ReplaceOp, face).is_err());
         let same = decode_stencil_ref_mask(0x0700_ff07);
-        assert!(stencil_op(StencilOp::ReplaceOp, same) == Ok(vk::StencilOp::REPLACE));
+        assert_eq!(
+            stencil_op(StencilOp::ReplaceOp, same).map(vk::StencilOp::as_raw),
+            Ok(vk::StencilOp::REPLACE.as_raw())
+        );
         assert!(
             depth_stencil_state(Some(state(&[(0xA200, 0x16 | 0x8)]))).is_err(),
             "the depth-bounds test"
         );
     }
 
+    /// A rasterisation answer as numbers: `ash` implements `Debug` only when a workspace build
+    /// turns its feature on, so the tests compare raw values.
+    fn raw((cull, face): (vk::CullModeFlags, vk::FrontFace)) -> (u32, i32) {
+        (cull.as_raw(), face.as_raw())
+    }
+
     /// Cull bits and `FACE` map one to one; no cull state culls nothing.
     #[test]
     fn cull_state_maps_across() {
-        assert!(
-            rasterisation(Some(decode_cull(0x6)))
-                == (vk::CullModeFlags::BACK, vk::FrontFace::CLOCKWISE)
+        assert_eq!(
+            raw(rasterisation(Some(decode_cull(0x6)))),
+            raw((vk::CullModeFlags::BACK, vk::FrontFace::CLOCKWISE))
         );
-        assert!(
-            rasterisation(Some(decode_cull(0x3)))
-                == (
-                    vk::CullModeFlags::FRONT_AND_BACK,
-                    vk::FrontFace::COUNTER_CLOCKWISE
-                )
+        assert_eq!(
+            raw(rasterisation(Some(decode_cull(0x3)))),
+            raw((
+                vk::CullModeFlags::FRONT_AND_BACK,
+                vk::FrontFace::COUNTER_CLOCKWISE
+            ))
         );
-        assert!(rasterisation(None).0 == vk::CullModeFlags::NONE);
+        assert_eq!(
+            rasterisation(None).0.as_raw(),
+            vk::CullModeFlags::NONE.as_raw()
+        );
     }
 
     /// A later clear replaces only the aspects it names.

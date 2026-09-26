@@ -187,7 +187,8 @@ regex = "1"
 # compiles and reports the absence clearly instead of failing to link.
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 
-# HTTP, for `orbistoun-llm` only: hosted endpoints and model downloads. Blocking
+# HTTP: `orbistoun-llm`'s hosted endpoints and model downloads, the corpus fetch, and the guest
+# HTTP client in `orbistoun-net` (D727). Blocking
 # because this workspace has no async runtime and importing one to await two things in
 # sequence would be the largest dependency in the tree paying no rent. `rustls` rather
 # than native TLS so a build needs no system OpenSSL.

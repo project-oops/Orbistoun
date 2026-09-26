@@ -3015,6 +3015,9 @@ dependencies = [
  "orbistoun-core",
  "orbistoun-fs",
  "orbistoun-hle",
+ "orbistoun-mem",
+ "reqwest",
+ "tracing",
 ]
 
 [[package]]

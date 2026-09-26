@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Networking HLE: sockets over the filesystem shim's, and declarations for the rest."
+description = "Networking HLE: sockets over the filesystem shim's, the HTTP client over the host's network, and declarations for the rest."
 
 [lints]
 workspace = true
@@ -19,5 +19,10 @@ orbistoun-core = { workspace = true }
 # thing the two spellings disagree about (D667).
 orbistoun-fs = { workspace = true }
 orbistoun-hle = { workspace = true }
+# Guest strings, out-parameters and buffers for the HTTP client.
+orbistoun-mem = { workspace = true }
+# The HTTP client's transfers: blocking, over `rustls` (D727).
+reqwest = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]

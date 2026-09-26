@@ -19,6 +19,9 @@ pub enum GuestError {
     InvalidHandle,
     /// The operation could not get the memory it needed.
     NoMemory,
+    /// The host could not carry out what the guest asked - a network transfer that failed, say.
+    /// The platform's own code for the condition is unmeasured.
+    HostFailed,
     /// A code established for this call, carried verbatim as the raw bit pattern the guest sees.
     Raw(u32),
 }
@@ -116,6 +119,7 @@ impl GuestError {
             Self::InvalidArgument => PLACEHOLDER_BASE | 0x2,
             Self::InvalidHandle => PLACEHOLDER_BASE | 0x3,
             Self::NoMemory => PLACEHOLDER_BASE | 0x4,
+            Self::HostFailed => PLACEHOLDER_BASE | 0x5,
             Self::Raw(v) => v,
         }
     }
@@ -153,6 +157,7 @@ pub const fn placeholder_named(address: u64) -> Option<(&'static str, bool)> {
         v if v == PLACEHOLDER_BASE | 0x2 => Some("invalid argument"),
         v if v == PLACEHOLDER_BASE | 0x3 => Some("invalid handle"),
         v if v == PLACEHOLDER_BASE | 0x4 => Some("out of memory"),
+        v if v == PLACEHOLDER_BASE | 0x5 => Some("host failed"),
         _ => None,
     };
     if let Some(name) = exact {
@@ -173,6 +178,7 @@ impl fmt::Display for GuestError {
             Self::InvalidArgument => f.write_str("invalid argument"),
             Self::InvalidHandle => f.write_str("invalid handle"),
             Self::NoMemory => f.write_str("out of memory"),
+            Self::HostFailed => f.write_str("host failed"),
             Self::Raw(v) => write!(f, "sce error {v:#010x}"),
         }
     }
@@ -196,6 +202,7 @@ mod tests {
             (GuestError::InvalidArgument, "invalid argument"),
             (GuestError::InvalidHandle, "invalid handle"),
             (GuestError::NoMemory, "out of memory"),
+            (GuestError::HostFailed, "host failed"),
         ] {
             assert_eq!(
                 super::placeholder_named(u64::from(error.as_raw())),
@@ -308,6 +315,7 @@ mod tests {
             GuestError::InvalidArgument,
             GuestError::InvalidHandle,
             GuestError::NoMemory,
+            GuestError::HostFailed,
         ] {
             assert!(
                 (error.as_raw() as i32) < 0,
@@ -325,6 +333,7 @@ mod tests {
             GuestError::InvalidArgument,
             GuestError::InvalidHandle,
             GuestError::NoMemory,
+            GuestError::HostFailed,
         ] {
             assert_ne!(
                 error.as_raw() & 0xFF00_0000,

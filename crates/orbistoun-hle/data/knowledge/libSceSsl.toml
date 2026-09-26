@@ -1,0 +1,35 @@
+library = "libSceSsl"
+
+[[function]]
+name = "sceSslInit"
+arity = 1
+purpose = "Creates an SSL context of a given pool size."
+returns = "status"
+edge_cases = [
+    "Answers a positive id; the TLS is the host's, carried by the HTTP transfer, so the context holds nothing.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Ids are drawn from one counter starting at 1; the platform's own numbering is unmeasured, and the guest relies only on an id being positive.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceSslTerm"
+arity = 1
+purpose = "Ends an SSL context."
+returns = "status"
+edge_cases = [
+    "A dead id is refused.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"

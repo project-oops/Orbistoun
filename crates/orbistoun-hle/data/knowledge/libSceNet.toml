@@ -142,3 +142,37 @@ known_by = "published"
 cites = "POSIX.1-2008 htons(3); the platform's FreeBSD ancestor, sys/sys/endian.h."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-10"
+
+[[function]]
+name = "sceNetPoolCreate"
+arity = 3
+purpose = "Creates a network memory pool from a name, a size and flags."
+returns = "status"
+edge_cases = [
+    "Answers a positive id; the host allocates for its own sockets and transfers, so the pool holds nothing.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "Ids are drawn from one counter starting at 1; the platform's own numbering is unmeasured, and the guest relies only on an id being positive.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"
+
+[[function]]
+name = "sceNetPoolDestroy"
+arity = 1
+purpose = "Destroys a network memory pool."
+returns = "status"
+edge_cases = [
+    "A dead id is refused.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
+assumptions = [
+    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
+]
+found_in = ["OPSY00001"]
+found_on = "2026-09-26"

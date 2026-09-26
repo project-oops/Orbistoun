@@ -53,7 +53,8 @@ such as Neverball built with oops-sdk, is its builder's to share.
 The vendor's online services are out of scope. Their network calls are declared so that a
 title asking for them shows up in a report, and a guest that tolerates a refused connection
 carries on. BSD sockets are a different layer: a guest's own socket calls map onto host
-sockets ([PAYLOADS.md](PAYLOADS.md)).
+sockets ([PAYLOADS.md](PAYLOADS.md)). So is the platform's HTTP client and the TLS under it:
+a guest's HTTP request is a host transfer (D727).
 
 ## Not a previous-generation emulator
 
