@@ -883,6 +883,15 @@ pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
 /// variable initialised with one.
 #[must_use]
 pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
+    fullscreen_triangle_vertex_module_at_depth(0.0)
+}
+
+/// [`fullscreen_triangle_vertex_module`]'s triangle at clip-space depth `z`, so two of them at
+/// different depths tell a depth test from draw order.
+// A module is a linear sequence of declarations, each a local the next line needs.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn fullscreen_triangle_vertex_module_at_depth(z: f32) -> Vec<u32> {
     let mut b = Builder::new();
 
     let void = b.id();
@@ -908,6 +917,8 @@ pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
     let index = b.id();
     let slot = b.id();
     let chosen = b.id();
+    // Depth zero is the `zero` constant itself, so that module is unchanged by the parameter.
+    let depth = if z.to_bits() == 0 { zero } else { b.id() };
 
     b.header(op::CAPABILITY, &[capability::SHADER]);
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
@@ -946,18 +957,22 @@ pub fn fullscreen_triangle_vertex_module() -> Vec<u32> {
     b.declare(op::CONSTANT, &[f32_type.0, one.0, 1.0f32.to_bits()]);
     b.declare(op::CONSTANT, &[u32_type.0, length.0, 3]);
 
-    // The three corners. `w` is one and `z` is zero: no perspective, on the near plane.
+    if z.to_bits() != 0 {
+        b.declare(op::CONSTANT, &[f32_type.0, depth.0, z.to_bits()]);
+    }
+
+    // The three corners. `w` is one and `z` the depth asked for: no perspective.
     b.declare(
         op::CONSTANT_COMPOSITE,
-        &[vec4.0, corner.0, minus_one.0, minus_one.0, zero.0, one.0],
+        &[vec4.0, corner.0, minus_one.0, minus_one.0, depth.0, one.0],
     );
     b.declare(
         op::CONSTANT_COMPOSITE,
-        &[vec4.0, right.0, three.0, minus_one.0, zero.0, one.0],
+        &[vec4.0, right.0, three.0, minus_one.0, depth.0, one.0],
     );
     b.declare(
         op::CONSTANT_COMPOSITE,
-        &[vec4.0, up.0, minus_one.0, three.0, zero.0, one.0],
+        &[vec4.0, up.0, minus_one.0, three.0, depth.0, one.0],
     );
     b.declare(op::TYPE_ARRAY, &[array.0, vec4.0, length.0]);
     b.declare(
