@@ -677,15 +677,56 @@ fn parse_addr_len(text: &str) -> Option<(u64, usize)> {
 /// runs where naming the object cannot. `None` when the brackets are absent or malformed, so a plain
 /// `<addr>+len` falls through to [`parse_addr_len`].
 #[cfg(windows)]
-fn parse_indirect(text: &str) -> Option<(u64, usize)> {
+fn parse_indirect(text: &str, registers: &Registers) -> Option<(u64, usize)> {
     let (slot_part, rest) = text.trim().strip_prefix('[')?.split_once(']')?;
     let len = match rest.trim() {
         "" => 0x100,
         r => parse_len(r.strip_prefix('+')?)?,
     };
-    let slot_part = slot_part.trim();
-    let slot = u64::from_str_radix(slot_part.strip_prefix("0x").unwrap_or(slot_part), 16).ok()?;
+    let slot = slot_address(slot_part.trim(), registers)?;
     Some((slot, len))
+}
+
+/// The address a slot expression names: a hex address, or a register at the fault plus an
+/// optional hex offset (`r15+0x8`).
+///
+/// **For the object that moves.** A heap object's address changes every run, so neither it nor
+/// a fixed stack slot always reaches it - but the register holding it at the fault does. PPSA02664's
+/// binding object sits at `0x740001ec78a0` one run and `0x740001cc78a0` the next, always in `r15`,
+/// and `[r15+0x8]` is its sub-table whatever the run (worklog 876).
+#[cfg(windows)]
+fn slot_address(expr: &str, registers: &Registers) -> Option<u64> {
+    let (base, offset) = match expr.split_once('+') {
+        Some((b, o)) => (
+            b.trim(),
+            u64::from_str_radix(o.trim().strip_prefix("0x").unwrap_or(o.trim()), 16).ok()?,
+        ),
+        None => (expr, 0),
+    };
+    let named = match base {
+        "rax" => Some(registers.rax),
+        "rbx" => Some(registers.rbx),
+        "rcx" => Some(registers.rcx),
+        "rdx" => Some(registers.rdx),
+        "rsi" => Some(registers.rsi),
+        "rdi" => Some(registers.rdi),
+        "rbp" => Some(registers.rbp),
+        "rsp" => Some(registers.rsp),
+        "r8" => Some(registers.r8),
+        "r9" => Some(registers.r9),
+        "r10" => Some(registers.r10),
+        "r11" => Some(registers.r11),
+        "r12" => Some(registers.r12),
+        "r13" => Some(registers.r13),
+        "r14" => Some(registers.r14),
+        "r15" => Some(registers.r15),
+        _ => None,
+    };
+    let base = match named {
+        Some(value) => value,
+        None => u64::from_str_radix(base.strip_prefix("0x").unwrap_or(base), 16).ok()?,
+    };
+    Some(base.wrapping_add(offset))
 }
 
 /// Dumps the guest-memory windows `ORBISTOUN_DUMP` asks for, as a hexdump, after a fault.
@@ -699,7 +740,7 @@ fn parse_indirect(text: &str) -> Option<(u64, usize)> {
 /// bytes feed straight into a disassembler. It reads and prints only; it changes nothing the guest
 /// sees, which is why `ORBISTOUN_DUMP` observes rather than intervenes.
 #[cfg(windows)]
-fn dump_at_fault() {
+fn dump_at_fault(registers: &Registers) {
     use std::io::Write as _;
 
     let Ok(spec) = std::env::var(orbistoun_env::PEEK.name) else {
@@ -729,7 +770,7 @@ fn dump_at_fault() {
                 len,
                 " (ending at the faulting call site)".to_owned(),
             )
-        } else if let Some((slot, len)) = parse_indirect(part) {
+        } else if let Some((slot, len)) = parse_indirect(part, registers) {
             // Dereference the pointer at the slot and dump what it points to. The slot is stable
             // (a fixed stack base), the target is not (ASLR'd heap), so this reads an object no
             // static address could name across runs (worklog 743).
@@ -1333,7 +1374,7 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // for the hex, and reads guest memory the readable-checked way the byte windows above do. The
     // point is the code around a fault in a *runtime mapping*, which no static disassembly of the
     // module file reaches (worklog 724).
-    dump_at_fault();
+    dump_at_fault(&registers);
     caller_stacks_at_fault();
 
     // **The host stack, but only when the fault is ours.**
@@ -3064,26 +3105,44 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_indirect_peek_parses_the_slot_and_leaves_direct_specs_alone() {
+        let regs = orbistoun_report::trace::Registers::default();
         // A bracketed slot with an explicit length, and with the default length when none is given.
         assert_eq!(
-            parse_indirect("[0x6000007fc0b8]+0x80"),
+            parse_indirect("[0x6000007fc0b8]+0x80", &regs),
             Some((0x6000_007f_c0b8, 0x80))
         );
         assert_eq!(
-            parse_indirect("[0x6000007fc0b8]"),
+            parse_indirect("[0x6000007fc0b8]", &regs),
             Some((0x6000_007f_c0b8, 0x100))
         );
         // A plain direct spec is not indirect (no brackets), so it is left to `parse_addr_len`, which
         // does accept it - the two forms do not overlap.
-        assert_eq!(parse_indirect("0x6000007fc0b8+0x80"), None);
+        assert_eq!(parse_indirect("0x6000007fc0b8+0x80", &regs), None);
         assert_eq!(
             parse_addr_len("0x6000007fc0b8+0x80"),
             Some((0x6000_007f_c0b8, 0x80))
         );
         // Malformed brackets do not parse as indirect, so the caller reports the spec rather than
         // dereferencing junk: no closing bracket, and trailing text that is not a `+len`.
-        assert_eq!(parse_indirect("[0x10"), None);
-        assert_eq!(parse_indirect("[0x10]garbage"), None);
+        assert_eq!(parse_indirect("[0x10", &regs), None);
+        assert_eq!(parse_indirect("[0x10]garbage", &regs), None);
+    }
+
+    /// **A slot can be a register at the fault plus an offset** - `[r15+0x8]` reaches an object
+    /// whose address changes every run (worklog 876). An unknown name is refused, not read as zero.
+    #[cfg(windows)]
+    #[test]
+    fn an_indirect_peek_takes_a_register_base() {
+        let regs = orbistoun_report::trace::Registers {
+            r15: 0x7400_0204_78a0,
+            ..orbistoun_report::trace::Registers::default()
+        };
+        assert_eq!(
+            parse_indirect("[r15+0x8]+0x40", &regs),
+            Some((0x7400_0204_78a8, 0x40))
+        );
+        assert_eq!(parse_indirect("[r15]", &regs), Some((0x7400_0204_78a0, 0x100)));
+        assert_eq!(parse_indirect("[r99+0x8]", &regs), None);
     }
 
     /// **The flipped-buffer window is bounded to an allocated region, and refuses to leave it.**

@@ -890,3 +890,4 @@ context cannot re-derive.
 | - | [873. Execute breakpoints report their own hits](worklog/873-execute-breakpoints-report-their-own-hits.md) |
 | - | [874. sceAgcCreateShader patches the program address; the APR resolve stops at its first miss](worklog/874-create-shader-patches-the-program-address.md) |
 | - | [875. The POSIX file calls fail the POSIX way](worklog/875-posix-file-calls-fail-the-posix-way.md) |
+| - | [876. A peek can start from a fault register](worklog/876-a-peek-can-start-from-a-fault-register.md) |
