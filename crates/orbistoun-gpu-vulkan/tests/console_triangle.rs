@@ -2,9 +2,9 @@
 //!
 //! The triangle record's vertex shader carries its three positions as constants, so walking the
 //! stream, translating both shaders and driving the submission produces the hardware's own triangle
-//! with no vertex buffer (D701). Every texel the hardware drew is reproduced pixel-exact. The field
-//! the triangle does not cover differs: the backend clears to opaque black, while the hardware's
-//! target held `0x55555555`, the surface's prior contents rather than anything in the draw.
+//! with no vertex buffer (D701). The target is seeded with what the hardware's held before the draw,
+//! `0x55555555`, as the live path seeds it from guest memory, so the whole frame is reproduced
+//! pixel-exact: the drawn texels and the ones the triangle leaves alone.
 
 use orbistoun_gpu::pipeline::{GuestMemory, Pipeline, Queue};
 use orbistoun_gpu::{RenderCommand, ShaderStage, detile_64kb_rx_bpp4, drive};
@@ -22,8 +22,8 @@ const HEIGHT: u32 = 64;
 /// a pixel comes back as: `0xff0000ff` and `0x55555555`, MSB-first.
 const DRAWN: [u8; 4] = [0xff, 0x00, 0x00, 0xff];
 const CONSOLE_CLEAR: [u8; 4] = [0x55, 0x55, 0x55, 0x55];
-/// What the backend clears an attachment to: opaque black.
-const BACKEND_CLEAR: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
+/// The same prior contents as the word the target is seeded with.
+const CONSOLE_CLEAR_WORD: u32 = 0x5555_5555;
 
 fn device_or_skip(what: &str) -> bool {
     match probe() {
@@ -100,7 +100,7 @@ fn console_frame(target_capture: &str) -> Vec<[u8; 4]> {
 /// is the backend's black, not the target's prior clear, and that difference is asserted. Skips
 /// with no device.
 #[test]
-fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
+fn the_console_triangle_frame_is_reproduced_pixel_exact() {
     if !device_or_skip("the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear") {
         return;
     }
@@ -162,6 +162,12 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
     );
 
     let mut backend = VulkanBackend::new();
+    let (&target, _) = submission
+        .targets
+        .iter()
+        .next()
+        .expect("the stream names a colour target");
+    backend.seed_target_uniform(target, (WIDTH, HEIGHT), CONSOLE_CLEAR_WORD);
     let outcome = drive(&mut backend, &submission).expect("the console triangle drives");
     assert_eq!(
         outcome.refused, 0,
@@ -189,15 +195,14 @@ fn the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear() {
                 );
                 drawn += 1;
             } else {
-                // A texel the hardware left at its clear: `0x55555555` there, the backend's black
-                // here.
+                // A texel the hardware left as the target held it: the seeded prior contents.
                 assert_eq!(
                     want, CONSOLE_CLEAR,
                     "an undrawn console texel is not the clear colour"
                 );
                 assert_eq!(
-                    got, BACKEND_CLEAR,
-                    "the backend clear at ({x},{y}) is not opaque black - the clear gap changed"
+                    got, CONSOLE_CLEAR,
+                    "the undrawn texel ({x},{y}) lost the target's prior contents"
                 );
             }
         }
