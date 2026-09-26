@@ -333,6 +333,96 @@ fn a_stream_sets_the_pipeline_state_the_submission_carries() {
     assert_eq!(blend.color_dst, BlendFactor::OneMinusSrcAlpha);
 }
 
+/// A stream that binds a depth target, fills it and sets depth, stencil and cull state reaches the
+/// backend as commands: the target in `SetRenderTargets`, the fill as a `ClearDepthStencil`, and
+/// the state as `SetDepthStencil` and `SetCull` before the draw.
+///
+/// Register indices are `gfx103.json`'s: `DB_Z_INFO` context dword `0x010`, `DB_Z_WRITE_BASE`
+/// `0x014`, `DB_DEPTH_CONTROL` `0x200`, `PA_SU_SC_MODE_CNTL` `0x205`, `CB_COLOR0_ATTRIB2` `0x3b0`.
+#[test]
+fn a_depth_state_stream_reaches_the_backend_as_depth_commands() {
+    use orbistoun_gpu::CompareFunc;
+    use orbistoun_gpu::depth::{DepthFormat, DepthTarget, FrontFace, depth_target_id};
+
+    let header = (3u32 << 30) | ((2 - 1) << 16) | (0x69 << 8);
+    // DMA_DATA (0x50), six body words: SRC_SEL DATA (2 << 29) and DST_SEL address through L2
+    // (3 << 20), the pattern 1.0, the destination, and the byte count of a 64x64 `Z_32_FLOAT`
+    // surface.
+    let fill = [
+        (3u32 << 30) | ((6 - 1) << 16) | (0x50 << 8),
+        (2 << 29) | (3 << 20),
+        1.0f32.to_bits(),
+        0,
+        0x0003_0000,
+        0,
+        64 * 64 * 4,
+    ];
+    let mut words = vec![
+        header,
+        0x3b0,
+        0x000f_c03f, // extent 64x64
+        header,
+        0x010,
+        0x8000_0183, // Z_32_FLOAT
+        header,
+        0x014,
+        0x0000_0300, // depth surface at 0x3_0000
+    ];
+    words.extend(fill);
+    words.extend([
+        header,
+        0x200,
+        0x0000_0016, // Z on and written, ZFUNC LESS
+        header,
+        0x205,
+        0x0000_0246,                               // cull back faces, clockwise front
+        (3 << 30) | ((2 - 1) << 16) | (0x2D << 8), // DRAW_INDEX_AUTO, three vertices
+        3,
+        0,
+    ]);
+    let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+    let mut pipeline = pipeline();
+    let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory());
+    let depth = depth_target_id(&DepthTarget {
+        format: DepthFormat::Z32Float,
+        stencil: false,
+        base: 0x3_0000,
+        stencil_base: 0,
+    });
+
+    let position = |wanted: &dyn Fn(&RenderCommand) -> bool| {
+        submission
+            .commands
+            .iter()
+            .position(wanted)
+            .unwrap_or_else(|| panic!("a command is missing: {:?}", submission.commands))
+    };
+    let targets = position(
+        &|c| matches!(c, RenderCommand::SetRenderTargets { depth: Some(d), .. } if *d == depth),
+    );
+    let clear = position(&|c| {
+        matches!(c, RenderCommand::ClearDepthStencil { target, depth: Some(d), stencil: None }
+            if *target == depth && (*d - 1.0).abs() < f32::EPSILON)
+    });
+    let state = position(&|c| {
+        matches!(c, RenderCommand::SetDepthStencil(s)
+            if s.control.depth_test_enable
+                && s.control.depth_write_enable
+                && s.control.depth_func == CompareFunc::Less)
+    });
+    let cull = position(&|c| {
+        matches!(c, RenderCommand::SetCull(s)
+            if s.cull_back && !s.cull_front && s.front_face == FrontFace::Clockwise)
+    });
+    let draw = position(&|c| matches!(c, RenderCommand::Draw { vertices: 3, .. }));
+    assert!(
+        targets < clear && clear < draw && state < draw && cull < draw,
+        "the target, its clear and the state come before the draw: {:?}",
+        submission.commands
+    );
+}
+
 /// The guest-memory window is read out of guest memory and carried on the submission.
 ///
 /// The frontend reads exactly the window's span - the length the module masks against - so a

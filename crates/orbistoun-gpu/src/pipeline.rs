@@ -434,6 +434,8 @@ pub struct Pipeline {
     next_resource: u64,
     /// Translations kept across runs, consulted before translating and added to after (D113).
     store: Option<crate::translations::TranslationStore>,
+    /// Fills not yet matched against a depth target, which may clear one a later submission binds.
+    depth_fills: crate::depth::PendingFills,
 }
 
 impl Pipeline {
@@ -460,6 +462,7 @@ impl Pipeline {
             texels: TexelCache::new(),
             next_resource: 1,
             store: None,
+            depth_fills: crate::depth::PendingFills::default(),
         })
     }
 
@@ -566,13 +569,17 @@ impl Pipeline {
 
         // The colour target first, because a draw reads it. Decoding its size register lets a
         // backend allocate a real attachment. The `targets` map is keyed by extent (D702); the
-        // decoded base rides on `colour_target` below.
+        // decoded base rides on `colour_target` below. A depth target is sized to it.
+        let depth_target = colour_target_extent_at(&writes).and_then(|extent| {
+            let target = crate::depth::depth_target_at(&writes)?;
+            Some((crate::depth::depth_target_id(&target), target, extent))
+        });
         if let Some(extent) = colour_target_extent_at(&writes) {
             let target = colour_target_id(extent);
             submission.targets.insert(target, extent);
             submission.commands.push(RenderCommand::SetRenderTargets {
                 colour: vec![target],
-                depth: None,
+                depth: depth_target.map(|(id, _, _)| id),
             });
         }
 
@@ -628,6 +635,14 @@ impl Pipeline {
             )
         });
 
+        // A fill of the depth surface before the draws is its clear; the surface is never read.
+        if let Some(clear) =
+            self.depth_fills
+                .clear_in_stream((&walked, stream), &draws, depth_target.as_ref())
+        {
+            submission.commands.push(clear);
+        }
+
         // Draws and dispatches after the binds, in the stream's own packet order.
         span(Span::PrepareGeometry, || {
             push_geometry_commands(
@@ -635,6 +650,7 @@ impl Pipeline {
                 (&walked, stream, &draws),
                 &writes,
                 &per_draw,
+                depth_target.map(|(id, _, _)| id),
             );
         });
         span(Span::PrepareTextures, || {
@@ -1103,9 +1119,11 @@ fn push_geometry_commands(
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
     writes: &[RegisterWrite],
     shaders: &[Vec<(ShaderStage, ResourceId)>],
+    depth_target: Option<ResourceId>,
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
     let mut blend_sent = None;
+    let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
     // What each stage has bound so far: the up-front binds, then each draw's own.
     let mut bound: Vec<(ShaderStage, ResourceId)> = commands
@@ -1135,6 +1153,8 @@ fn push_geometry_commands(
             commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
             blend_sent = Some(value);
         }
+        // The depth, stencil and cull state in force at this draw, and a clear it asks for.
+        depth_sent.push(&mut sweep, at, depth_target, commands);
         // The clip-to-pixel transform in force at this draw, when the stream set one and it
         // changed.
         if let Some(transform) = viewport_transform_from(|register| sweep.latest(at, register))

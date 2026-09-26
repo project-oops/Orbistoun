@@ -108,6 +108,25 @@ pub enum RenderCommand {
     /// Emitted before a draw whenever the value in force changed: blend is per-draw state, not
     /// frame state.
     SetBlend(crate::registers::BlendControl),
+    /// The depth and stencil tests the draws that follow run under, as the stream's
+    /// `DB_DEPTH_CONTROL`, `DB_STENCIL_CONTROL` and `DB_STENCILREFMASK` pair stand at them.
+    ///
+    /// Emitted before a draw whenever the state in force changed, as [`Self::SetBlend`] is. It
+    /// applies to the depth target [`Self::SetRenderTargets`] bound; with none bound no test runs.
+    SetDepthStencil(crate::depth::DepthStencilState),
+    /// Which faces the draws that follow discard and which winding is front, as the stream's
+    /// `PA_SU_SC_MODE_CNTL` stands at them. Emitted before a draw whenever it changed.
+    SetCull(crate::depth::CullState),
+    /// Set a whole depth target to a value, as the guest cleared it: by a clear draw
+    /// (`DB_RENDER_CONTROL`) or by filling its surface.
+    ClearDepthStencil {
+        /// The depth target, as [`Self::SetRenderTargets`] names it.
+        target: ResourceId,
+        /// The depth every sample takes, when depth is cleared.
+        depth: Option<f32>,
+        /// The stencil every sample takes, when stencil is cleared.
+        stencil: Option<u8>,
+    },
     /// The texture the draws that follow sample, as linear `Rgba8` texels.
     ///
     /// Read out of guest memory from the image descriptor the draw's pixel shader names, only when

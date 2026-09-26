@@ -288,19 +288,65 @@ const fn address(low: u32, high: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 
+/// A `DMA_DATA` packet's operands, as this carries them out.
+struct DmaData {
+    src_sel: u32,
+    /// The source word: the pattern of a fill, or the low half of a copy's source address.
+    src_low: u32,
+    src_high: u32,
+    destination: u64,
+    count: usize,
+}
+
 /// `DMA_DATA`: word zero, source (data or address), destination address, command
 /// (`sid.h:177-184`); the byte count is 26 bits on this generation (`gfx103.json:12266`).
-fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -> Result<(), Stop> {
+fn decode_dma_data(body: &[u32]) -> Result<DmaData, Stop> {
     let [control, src_low, src_high, dst_low, dst_high, command, ..] = *body else {
         return Err(Stop::Malformed);
     };
-    let src_sel = (control >> 29) & 0x3;
     let dst_sel = (control >> 20) & 0x3;
     if !DST_SEL_ADDRESS.contains(&dst_sel) || command & ADDRESS_HOLD_BITS != 0 {
         return Err(Stop::NeedsGpu);
     }
-    let count = (command & BYTE_COUNT_MASK) as usize;
-    let destination = address(dst_low, dst_high);
+    Ok(DmaData {
+        src_sel: (control >> 29) & 0x3,
+        src_low,
+        src_high,
+        destination: address(dst_low, dst_high),
+        count: (command & BYTE_COUNT_MASK) as usize,
+    })
+}
+
+/// A `DMA_DATA` fill of memory with one repeated word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fill {
+    /// First byte written.
+    pub destination: u64,
+    /// The word repeated from the destination on.
+    pub pattern: u32,
+    /// Bytes written.
+    pub count: u64,
+}
+
+/// The fill a `DMA_DATA` body describes, or `None` for a copy or a packet this does not carry out.
+#[must_use]
+pub fn fill_of(body: &[u32]) -> Option<Fill> {
+    let dma = decode_dma_data(body).ok()?;
+    (dma.src_sel == SRC_SEL_DATA).then_some(Fill {
+        destination: dma.destination,
+        pattern: dma.src_low,
+        count: dma.count as u64,
+    })
+}
+
+fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -> Result<(), Stop> {
+    let DmaData {
+        src_sel,
+        src_low,
+        src_high,
+        destination,
+        count,
+    } = decode_dma_data(body)?;
     // In place: a GL frame fills and copies megabytes per submission.
     let done = if count == 0 {
         true
