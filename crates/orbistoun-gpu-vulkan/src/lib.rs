@@ -9,6 +9,7 @@
 //! lazily, through the session [`compute`] and [`framebuffer`] share.
 
 pub mod compute;
+mod depth;
 pub mod framebuffer;
 pub use compute::{Availability, DispatchError, Output, dispatch, probe};
 
@@ -243,6 +244,20 @@ pub struct VulkanBackend {
     /// Colour target zero's blend state for the next draw: the latest `SetBlend`; `None` draws
     /// opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// The depth target a `SetRenderTargets` bound beside the colour target, that a following draw
+    /// tests against.
+    current_depth: Option<ResourceId>,
+    /// The depth and stencil tests for the next draw: the latest `SetDepthStencil`; `None` tests
+    /// nothing.
+    depth_stencil: Option<orbistoun_gpu::depth::DepthStencilState>,
+    /// The cull state for the next draw: the latest `SetCull`; `None` culls nothing.
+    cull: Option<orbistoun_gpu::depth::CullState>,
+    /// Each depth target's attachment, by the id `SetRenderTargets` names: kept on the device across
+    /// submissions and never filled from guest memory ([`depth`]).
+    depths: BTreeMap<ResourceId, depth::DepthAttachment>,
+    /// Clears asked of each depth target and not yet carried out; the next draw on it starts with
+    /// them.
+    depth_clears: BTreeMap<ResourceId, depth::DepthClear>,
     /// The guest's clip-to-pixel transform for the next draw: the latest `SetViewportTransform`;
     /// `None` maps clip space over the whole attachment the host's way.
     viewport_transform: Option<orbistoun_gpu::ViewportTransform>,
@@ -295,6 +310,11 @@ impl VulkanBackend {
             texture: None,
             second_texture: None,
             blend: None,
+            current_depth: None,
+            depth_stencil: None,
+            cull: None,
+            depths: BTreeMap::new(),
+            depth_clears: BTreeMap::new(),
             viewport_transform: None,
             guest_memory: Vec::new(),
             guest_memory_generation: 0,
@@ -425,6 +445,81 @@ impl VulkanBackend {
         Ok(())
     }
 
+    /// How the next draw uses depth target `id` at `extent`, its attachment made (or remade at a
+    /// new extent) when it has none, and the clear the draw starts from. A pending clear is taken:
+    /// one the attachment was just made with is not repeated, and a stencil clear of an attachment
+    /// with no stencil is dropped. A depth state that cannot run on it is refused by name.
+    fn depth_for(
+        &mut self,
+        id: ResourceId,
+        extent: (u32, u32),
+    ) -> Result<(Option<depth::DepthDraw>, Option<depth::DepthClear>), BackendError> {
+        let device_error = |e: DispatchError| BackendError::Device(format!("depth target: {e:?}"));
+        let mut pending = self.depth_clears.remove(&id);
+        if self.depths.get(&id).is_some_and(|d| d.extent() != extent) {
+            // Framebuffers name the old view, so every pass over it goes first.
+            for resident in self.resident.values_mut() {
+                resident.detach_depth();
+            }
+            if let Some(old) = self.depths.remove(&id) {
+                old.destroy();
+            }
+        }
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.depths.entry(id) {
+            slot.insert(
+                depth::DepthAttachment::create(extent.0, extent.1, pending.take())
+                    .map_err(device_error)?,
+            );
+        }
+        let attachment = self
+            .depths
+            .get(&id)
+            .ok_or(BackendError::UnknownResource(id))?;
+        if let Err(what) = depth::check(self.depth_stencil, attachment) {
+            // The clear waits for a draw that runs.
+            if let Some(clear) = pending {
+                self.depth_clears.insert(id, clear);
+            }
+            self.refused += 1;
+            return Err(BackendError::Unsupported { command: what });
+        }
+        let stencil = attachment.has_stencil();
+        let clear = pending
+            .map(|clear| depth::DepthClear {
+                stencil: clear.stencil.filter(|_| stencil),
+                ..clear
+            })
+            .filter(|clear| clear.depth.is_some() || clear.stencil.is_some());
+        let draw = depth::DepthDraw {
+            state: self.depth_stencil,
+        };
+        Ok((Some(draw), clear))
+    }
+
+    /// Selects colour target `id` for the draws that follow, or the interim square for `None`; a
+    /// target that is not resident is an error.
+    fn select_target(&mut self, id: Option<ResourceId>) -> Result<(), BackendError> {
+        match id {
+            Some(id) if self.targets.contains_key(&id) => {
+                self.current_target = Some(id);
+                Ok(())
+            }
+            Some(id) => Err(BackendError::UnknownResource(id)),
+            None => {
+                self.current_target = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// Adds a clear of depth target `target` to the ones its next draw starts from.
+    fn queue_depth_clear(&mut self, target: ResourceId, clear: depth::DepthClear) {
+        self.depth_clears
+            .entry(target)
+            .and_modify(|earlier| *earlier = earlier.then(clear))
+            .or_insert(clear);
+    }
+
     /// Records the fixed-function state a following draw runs under - set now, applied at the draw.
     fn set_draw_state(&mut self, command: &RenderCommand) {
         match command {
@@ -437,6 +532,9 @@ impl VulkanBackend {
             }
             // The blend state.
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
+            // The depth and stencil tests, applied when a depth target is bound.
+            RenderCommand::SetDepthStencil(state) => self.depth_stencil = Some(*state),
+            RenderCommand::SetCull(cull) => self.cull = Some(*cull),
             _ => {}
         }
     }
@@ -726,8 +824,12 @@ impl VulkanBackend {
             .as_ref()
             .map(|t| t.hash)
             .hash(&mut hasher);
-        // The scissor too: it is fixed pipeline state. Floats are hashed by their bits.
+        // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
+        // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
+        self.current_depth.is_some().hash(&mut hasher);
+        self.depth_stencil.hash(&mut hasher);
+        self.cull.hash(&mut hasher);
         self.viewport_transform
             .map(|t| [t.x_scale, t.x_offset, t.y_scale, t.y_offset].map(f32::to_bits))
             .hash(&mut hasher);
@@ -758,10 +860,11 @@ impl VulkanBackend {
         true
     }
 
-    /// A draw through a mesh stage, into `target`'s resident attachment.
-    fn draw_mesh(
+    /// A draw into `target`'s resident attachment, beside the bound depth target's when `start`
+    /// has depth: through a mesh stage, or a vertex stage issuing `vertices` when that is given.
+    fn draw_resident(
         &mut self,
-        shaders: (&[u32], &[u32]),
+        (shaders, vertices): ((&[u32], &[u32]), Option<framebuffer::VertexDraw>),
         start: &framebuffer::Start<'_>,
         target: Option<ResourceId>,
         extent: (u32, u32),
@@ -769,7 +872,7 @@ impl VulkanBackend {
     ) -> Result<(), BackendError> {
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
-        if !mesh_stage_available() {
+        if vertices.is_none() && !mesh_stage_available() {
             self.refused += 1;
             return Err(BackendError::Unsupported {
                 command: "Draw of a mesh geometry shader on a device with no mesh stage",
@@ -781,11 +884,22 @@ impl VulkanBackend {
         let window = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeWindow, || {
             self.ensure_window_buffer()
         })?;
+        self.resident_for(target, extent)
+            .map_err(|e| device_error("draw (resident)", e))?;
         let resident = self
-            .resident_for(target, extent)
-            .map_err(|e| device_error("draw (mesh)", e))?;
-        let batched = framebuffer::draw_mesh_resident(shaders, start, resident, &window, scissor)
-            .map_err(|e| device_error("draw (mesh)", e))?;
+            .resident
+            .get_mut(&target)
+            .ok_or(BackendError::UnknownResource(ResourceId(0)))?;
+        if start.depth.is_some()
+            && let Some(depth) = self.current_depth.and_then(|id| self.depths.get(&id))
+        {
+            resident
+                .attach_depth(depth)
+                .map_err(|e| device_error("draw (depth)", e))?;
+        }
+        let batched =
+            framebuffer::draw_resident(shaders, vertices, start, resident, (&window, scissor))
+                .map_err(|e| device_error("draw (resident)", e))?;
         self.batched = batched.map(|key| (self.state_generation, key));
         self.unread.insert(target);
         self.last_drawn = Some(DrawnOn(target));
@@ -870,6 +984,12 @@ impl VulkanBackend {
             self.refused += 1;
             return Err(BackendError::Unsupported { command: what });
         }
+        // The bound depth target's attachment, sized to the colour target, and the clear it starts
+        // from; a depth state with no exact Vulkan form is refused like a blend state.
+        let (depth, depth_clear) = match self.current_depth {
+            Some(id) => self.depth_for(id, (width, height))?,
+            None => (None, None),
+        };
         let block = self.user_data;
         let texture = self.texture.clone();
         let second_texture = self.second_texture.clone();
@@ -883,17 +1003,31 @@ impl VulkanBackend {
             viewport: self.viewport_transform,
             second_texture: second_texture.as_ref().map(|t| (&t.texels[..], t.width)),
             pipeline_key: Some(pipeline_key),
+            depth,
+            cull: self.cull,
+            depth_clear,
         };
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
         if geometry_is_mesh {
-            self.draw_mesh(
-                (&geometry, &fragment),
+            self.draw_resident(
+                ((&geometry, &fragment), None),
                 &start,
                 target,
                 (width, height),
                 scissor,
             )?;
+        } else if !indexed && start.depth.is_some() {
+            // A vertex draw with depth draws on the resident attachment, where its depth
+            // attachment is kept.
+            self.draw_resident(
+                ((&geometry, &fragment), Some(draw)),
+                &start,
+                target,
+                (width, height),
+                scissor,
+            )?;
+            self.batched = None;
         } else if indexed {
             // A vertex pipeline's indexed draw fetches from a host index buffer the executor does
             // not bind. Only a vertex module (a test shader) reaches this, so it is refused rather
@@ -989,6 +1123,9 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetUserData { .. } => "SetUserData",
         RenderCommand::BindTexture { .. } => "BindTexture",
         RenderCommand::SetBlend(_) => "SetBlend",
+        RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
+        RenderCommand::SetCull(_) => "SetCull",
+        RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",
         RenderCommand::DrawIndexed { .. } => "DrawIndexed",
@@ -1063,23 +1200,28 @@ impl RenderBackend for VulkanBackend {
         match command {
             // The colour target a following draw renders into. Its first colour attachment sizes
             // the draw; a target named but not resident is an error, and an empty set clears the
-            // selection back to the interim square. Depth is not modelled, and the frontend emits
-            // none.
-            RenderCommand::SetRenderTargets { colour, depth: _ } => match colour.first() {
-                Some(id) if self.targets.contains_key(id) => {
-                    self.current_target = Some(*id);
-                    Ok(())
-                }
-                Some(id) => Err(BackendError::UnknownResource(*id)),
-                None => {
-                    self.current_target = None;
-                    Ok(())
-                }
-            },
+            // selection back to the interim square. A depth target needs no residency: its
+            // attachment is made at its first draw, sized to the colour target.
+            RenderCommand::SetRenderTargets { colour, depth } => {
+                self.current_depth = *depth;
+                self.select_target(colour.first().copied())
+            }
             RenderCommand::SetViewport(_)
             | RenderCommand::SetViewportTransform(_)
-            | RenderCommand::SetBlend(_) => {
+            | RenderCommand::SetBlend(_)
+            | RenderCommand::SetDepthStencil(_)
+            | RenderCommand::SetCull(_) => {
                 self.set_draw_state(command);
+                Ok(())
+            }
+            // Carried out at the next draw on the target, inside its pass, after the draws before.
+            RenderCommand::ClearDepthStencil {
+                target,
+                depth,
+                stencil,
+            } => {
+                let (depth, stencil) = (*depth, *stencil);
+                self.queue_depth_clear(*target, depth::DepthClear { depth, stencil });
                 Ok(())
             }
             // The guest's own texels, sampled by the draws that follow.
@@ -1191,6 +1333,10 @@ impl Drop for VulkanBackend {
     fn drop(&mut self) {
         for (_, resident) in std::mem::take(&mut self.resident) {
             resident.destroy();
+        }
+        // After the colour attachments, whose depth passes name these views.
+        for (_, depth) in std::mem::take(&mut self.depths) {
+            depth.destroy();
         }
         for (_, snapshot) in std::mem::take(&mut self.snapshots) {
             snapshot.destroy();

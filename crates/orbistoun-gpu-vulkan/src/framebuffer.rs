@@ -73,12 +73,24 @@ fn create_attachment(
     let image = unsafe { device.create_image(&info, None) }
         .map_err(|e| DispatchError::Vulkan("create_image", e))?;
 
+    let memory = bind_device_local(instance, physical, device, image)?;
+    Ok((image, memory))
+}
+
+/// Allocates device-local memory for `image` and binds it.
+///
+/// Device-local: an optimally tiled image is not host-readable in any memory, so a copy is needed
+/// to read one regardless.
+pub(crate) fn bind_device_local(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    device: &ash::Device,
+    image: vk::Image,
+) -> Result<vk::DeviceMemory, DispatchError> {
     // SAFETY: the image was created on this device and not yet destroyed.
     let requirements = unsafe { device.get_image_memory_requirements(image) };
     // SAFETY: the physical device is valid.
     let properties = unsafe { instance.get_physical_device_memory_properties(physical) };
-    // Device-local: an optimally tiled image is not host-readable in any memory, so the copy is
-    // needed regardless.
     let memory_type = (0..properties.memory_type_count)
         .find(|i| {
             requirements.memory_type_bits & (1 << i) != 0
@@ -98,7 +110,7 @@ fn create_attachment(
     // image asked for.
     unsafe { device.bind_image_memory(image, memory, 0) }
         .map_err(|e| DispatchError::Vulkan("bind_image_memory", e))?;
-    Ok((image, memory))
+    Ok(memory)
 }
 
 /// A render pass with one colour attachment, cleared on load and kept.
@@ -216,7 +228,7 @@ fn create_resident_render_pass(device: &ash::Device) -> Result<vk::RenderPass, D
 
 /// Records one command buffer with `body`, submits it, and waits for the device: for the resident
 /// attachment's seeding and readback, which run outside any draw.
-fn one_shot(
+pub(crate) fn one_shot(
     session: &crate::compute::Session,
     body: impl FnOnce(&ash::Device, vk::CommandBuffer),
 ) -> Result<(), DispatchError> {
@@ -349,9 +361,105 @@ pub(crate) struct ResidentAttachment {
     buffer_memory: vk::DeviceMemory,
     width: u32,
     height: u32,
+    /// The pass drawing on it with a depth attachment beside it, made for one depth attachment.
+    depth_pass: Option<DepthPass>,
+}
+
+/// A render pass and framebuffer over a colour attachment and a depth attachment together.
+#[derive(Debug)]
+struct DepthPass {
+    /// The depth attachment's view the framebuffer holds.
+    depth_view: vk::ImageView,
+    render_pass: vk::RenderPass,
+    framebuffer: vk::Framebuffer,
+}
+
+/// The render pass and framebuffer a resident draw records into, and the extent they cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DrawPass {
+    render_pass: vk::RenderPass,
+    framebuffer: vk::Framebuffer,
+    extent: (u32, u32),
 }
 
 impl ResidentAttachment {
+    /// Draws on it from now on may use `depth` beside it: the pass over the two is made, replacing
+    /// one made for another depth attachment.
+    pub(crate) fn attach_depth(
+        &mut self,
+        depth: &crate::depth::DepthAttachment,
+    ) -> Result<(), DispatchError> {
+        if self
+            .depth_pass
+            .as_ref()
+            .is_some_and(|pass| pass.depth_view == depth.view())
+        {
+            return Ok(());
+        }
+        self.detach_depth();
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let device = &session.device;
+        let render_pass = crate::depth::create_render_pass(device, FORMAT, depth.format())?;
+        let views = [self.view, depth.view()];
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&views)
+            .width(self.width)
+            .height(self.height)
+            .layers(1);
+        // SAFETY: the render pass and both views are live and the slice outlives the call.
+        let framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None) }
+            .map_err(|e| DispatchError::Vulkan("create_framebuffer(depth)", e))?;
+        self.depth_pass = Some(DepthPass {
+            depth_view: depth.view(),
+            render_pass,
+            framebuffer,
+        });
+        Ok(())
+    }
+
+    /// Releases the pass over it and a depth attachment, if it has one - before that depth
+    /// attachment is destroyed, since the framebuffer names its view.
+    pub(crate) fn detach_depth(&mut self) {
+        let Some(pass) = self.depth_pass.take() else {
+            return;
+        };
+        let Ok(session) = crate::compute::session() else {
+            return;
+        };
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Every recorded draw through the pass has run once the device settles.
+        let _ = settle(&session);
+        // SAFETY: created on this device, idle after the settle, destroyed exactly once, the
+        // framebuffer before the pass it was made for.
+        unsafe { session.device.destroy_framebuffer(pass.framebuffer, None) };
+        // SAFETY: as above.
+        unsafe { session.device.destroy_render_pass(pass.render_pass, None) };
+    }
+
+    /// The pass a draw records into: the one with its depth attachment when `depth`, else colour
+    /// alone. `None` when a depth pass is asked for and none is attached.
+    pub(crate) fn pass(&self, depth: bool) -> Option<DrawPass> {
+        let extent = self.extent();
+        if !depth {
+            return Some(DrawPass {
+                render_pass: self.render_pass,
+                framebuffer: self.framebuffer,
+                extent,
+            });
+        }
+        self.depth_pass.as_ref().map(|pass| DrawPass {
+            render_pass: pass.render_pass,
+            framebuffer: pass.framebuffer,
+            extent,
+        })
+    }
+
     /// Creates the attachment, holding `initial` (tightly packed `Rgba8`, exactly the extent) or
     /// cleared to `clear`, and leaves it ready to draw on.
     pub(crate) fn create(
@@ -452,6 +560,7 @@ impl ResidentAttachment {
             buffer_memory,
             width,
             height,
+            depth_pass: None,
         })
     }
 
@@ -715,7 +824,8 @@ impl ResidentAttachment {
     }
 
     /// Destroys it. Best-effort, like every release here: with no session the process is ending.
-    pub(crate) fn destroy(self) {
+    pub(crate) fn destroy(mut self) {
+        self.detach_depth();
         let Ok(session) = crate::compute::session() else {
             return;
         };
@@ -1567,6 +1677,7 @@ pub(crate) fn draw_vertices(
             blend: start.blend,
             viewport: start.viewport,
             second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+            cull: start.cull,
             ..Bound::default()
         },
     )
@@ -1594,6 +1705,12 @@ pub(crate) struct Start<'a> {
     /// The draw's pipeline, as the backend hashed it: a resident draw with a key reuses the
     /// pipeline built for the last draw with the same key. `None` builds afresh.
     pub(crate) pipeline_key: Option<std::num::NonZeroU64>,
+    /// The depth attachment's tests, when the draw has one; a resident draw only.
+    pub(crate) depth: Option<crate::depth::DepthDraw>,
+    /// The guest's cull state; `None` culls nothing.
+    pub(crate) cull: Option<orbistoun_gpu::depth::CullState>,
+    /// The clear the depth attachment takes before the draw.
+    pub(crate) depth_clear: Option<crate::depth::DepthClear>,
 }
 
 /// The Vulkan viewport a guest's transform describes.
@@ -2221,6 +2338,9 @@ fn render_resident(
 ) -> Result<Drawn, DispatchError> {
     let (instance, physical, device) = (&session.instance, session.physical, &session.device);
     orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
+    let pass = resident.pass(bound.depth.is_some()).ok_or_else(|| {
+        DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
+    })?;
     // A pipeline built for an earlier draw with the same key is reused, because building one per
     // draw dominates a frame. Only with a resident guest-memory buffer, which is re-bound here
     // because the key leaves it out.
@@ -2253,14 +2373,19 @@ fn render_resident(
                     physical,
                     device,
                 },
-                resident,
+                pass,
                 shaders,
                 geometry,
                 bound,
             ),
         })?;
     orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeRecord, || {
-        render_resident_with(session, resident, pipeline, cacheable.map(|(key, _)| key))
+        render_resident_with(
+            session,
+            (pass, bound.depth_clear),
+            pipeline,
+            cacheable.map(|(key, _)| key),
+        )
     })
 }
 
@@ -2563,17 +2688,17 @@ fn close_open_pass(session: &crate::compute::Session) -> Result<(), DispatchErro
     Ok(())
 }
 
-/// The command buffer draws on `resident` record into: the open pass when it is on this attachment,
+/// The command buffer draws through `pass` record into: the open pass when it is this one,
 /// otherwise a new one, closing any other first so draws keep their order.
 fn pass_on(
     session: &crate::compute::Session,
-    resident: &ResidentAttachment,
+    pass: DrawPass,
 ) -> Result<vk::CommandBuffer, DispatchError> {
     if let Some(open) = open_pass()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        && open.framebuffer == resident.framebuffer
+        && open.framebuffer == pass.framebuffer
     {
         return Ok(open.command);
     }
@@ -2609,10 +2734,10 @@ fn pass_on(
         );
     }
     let clock = gpu_clock_start(session, command);
-    let (width, height) = resident.extent();
+    let (width, height) = pass.extent;
     let pass_begin = vk::RenderPassBeginInfo::default()
-        .render_pass(resident.render_pass)
-        .framebuffer(resident.framebuffer)
+        .render_pass(pass.render_pass)
+        .framebuffer(pass.framebuffer)
         .render_area(vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D { width, height },
@@ -2624,7 +2749,7 @@ fn pass_on(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(OpenPass {
         command,
-        framebuffer: resident.framebuffer,
+        framebuffer: pass.framebuffer,
         clock,
         batch: None,
     });
@@ -2794,12 +2919,12 @@ fn rebind_guest_memory(
 /// Builds a resident draw's pipeline, seeding its own guest memory when it made one.
 fn build_resident_pipeline(
     devices: Devices<'_>,
-    resident: &ResidentAttachment,
+    pass: DrawPass,
     shaders: Option<(&[u32], &[u32])>,
     geometry: Geometry,
     bound: Bound<'_>,
 ) -> Result<Option<Pipeline>, DispatchError> {
-    let (width, height) = resident.extent();
+    let (width, height) = pass.extent;
     let (instance, physical, device) = (devices.instance, devices.physical, devices.device);
     shaders
         .map(|(vertex, fragment)| {
@@ -2810,7 +2935,7 @@ fn build_resident_pipeline(
                         physical,
                         device,
                     },
-                    resident.render_pass,
+                    pass.render_pass,
                     (vertex, fragment),
                     (width, height),
                     geometry,
@@ -2829,11 +2954,12 @@ fn build_resident_pipeline(
         .transpose()
 }
 
-/// Records, runs and reads back a resident draw with `pipeline`, then keeps the pipeline under
-/// `key` when it has one - or releases it when it does not.
+/// Records, runs and reads back a resident draw with `pipeline` through `pass`, after the depth
+/// clear it starts from if any, then keeps the pipeline under `key` when it has one - or releases
+/// it when it does not.
 fn render_resident_with(
     session: &crate::compute::Session,
-    resident: &ResidentAttachment,
+    (pass, clear): (DrawPass, Option<crate::depth::DepthClear>),
     pipeline: Option<Pipeline>,
     key: Option<u64>,
 ) -> Result<Drawn, DispatchError> {
@@ -2868,7 +2994,12 @@ fn render_resident_with(
     // once when asked for ([`read_buffer`]), and nothing reads a resident draw's storage image.
     orbistoun_gpu::perf::measure(orbistoun_gpu::perf::Phase::Execute, || {
         ensure_draw_room(session)?;
-        let command = pass_on(session, resident)?;
+        let command = pass_on(session, pass)?;
+        // The clear lands after the draws already batched and before this one.
+        if let Some(clear) = clear {
+            flush_batch(session)?;
+            crate::depth::record_clear(device, command, pass.extent, clear);
+        }
         let (geometry_words, fragment) = split_user_data(&built.user_data);
         // A cached mesh pipeline's draw joins a batch (D718), recorded when a differing draw or
         // anything else arrives.
@@ -2877,7 +3008,7 @@ fn render_resident_with(
                 session,
                 BatchKey {
                     pipeline: key,
-                    framebuffer: resident.framebuffer,
+                    framebuffer: pass.framebuffer,
                     window: (built.buffers[1].0, built.window_offset),
                     fragment,
                 },
@@ -3538,12 +3669,20 @@ fn create_graphics_pipeline(
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewports(&viewports)
         .scissors(&scissors);
-    // Culling off, so winding order cannot fail a draw.
+    // The guest's cull state; culling off when it set none, so winding order cannot fail a draw.
+    let (cull_mode, front_face) = crate::depth::rasterisation(bound.cull);
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .cull_mode(cull_mode)
+        .front_face(front_face)
         .line_width(1.0);
+    // Depth and stencil state only for a pass with a depth attachment; a state that does not map is
+    // refused before a draw reaches here.
+    let depth_stencil = bound
+        .depth
+        .map(|depth| crate::depth::depth_stencil_state(depth.state))
+        .transpose()
+        .map_err(|what| DispatchError::Unsupported(what.to_owned()))?;
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     // The guest's blend state, or opaque with every channel written when it set none. A state that
@@ -3552,7 +3691,7 @@ fn create_graphics_pipeline(
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
 
-    let infos = [vk::GraphicsPipelineCreateInfo::default()
+    let info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)
         .vertex_input_state(&vertex_input)
         .input_assembly_state(&assembly)
@@ -3562,7 +3701,11 @@ fn create_graphics_pipeline(
         .color_blend_state(&blend)
         .layout(layout)
         .render_pass(render_pass)
-        .subpass(0)];
+        .subpass(0);
+    let infos = [match &depth_stencil {
+        Some(state) => info.depth_stencil_state(state),
+        None => info,
+    }];
     // SAFETY: every referenced object is live and every slice outlives the call.
     let pipelines =
         unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &infos, None) }
@@ -3685,41 +3828,48 @@ pub(crate) fn draw_mesh_over_clipped(
     .map(|drawn| (drawn.pixels, drawn.memory))
 }
 
-/// Draws with a mesh stage over a resident guest-memory buffer, bound directly, into a
-/// [`ResidentAttachment`] in place.
+/// Draws over a resident guest-memory buffer, bound directly, into a [`ResidentAttachment`] in
+/// place: with a mesh stage, or with a vertex stage issuing `vertices` when that is given.
 ///
 /// The guest buffer is uploaded once by its owner (D703) and left intact; the window is read back
 /// after the draw, and its length is the resident buffer's own, the mask a module built against it
-/// applies. The attachment takes no pixels in or out. Returns the guest-memory window as the draw
-/// left it.
+/// applies. The attachment takes no pixels in or out. Returns the batch a mesh draw went into.
 ///
 /// # Errors
 ///
-/// When no device is available, when it has no mesh stage, or when any Vulkan call fails.
-pub(crate) fn draw_mesh_resident(
-    (mesh_words, fragment_words): (&[u32], &[u32]),
+/// When no device is available, when a mesh draw's device has no mesh stage, or when any Vulkan
+/// call fails.
+pub(crate) fn draw_resident(
+    (geometry_words, fragment_words): (&[u32], &[u32]),
+    vertices: Option<VertexDraw>,
     start: &Start<'_>,
     resident: &ResidentAttachment,
-    guest_buffer: &DispatchBuffer,
-    scissor: Option<vk::Rect2D>,
+    (guest_buffer, scissor): (&DispatchBuffer, Option<vk::Rect2D>),
 ) -> Result<Option<BatchKey>, DispatchError> {
+    let pass = resident.pass(start.depth.is_some()).ok_or_else(|| {
+        DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
+    })?;
     // A draw the open batch already describes joins it and does nothing else (D718): same pipeline
-    // (shaders, textures, blend, viewport and scissor), attachment, window and fragment words.
-    let key = start.pipeline_key.map(|pipeline| {
-        let (_, fragment) = split_user_data(start.user_data);
-        BatchKey {
-            pipeline: pipeline.get(),
-            framebuffer: resident.framebuffer,
-            window: (
-                guest_buffer.buffer,
-                u32::try_from(guest_buffer.offset).unwrap_or(0),
-            ),
-            fragment,
-        }
-    });
-    if let Some(key) = key {
-        let (geometry_words, _) = split_user_data(start.user_data);
-        if join_open_batch(&key, geometry_words) {
+    // (shaders, textures, blend, depth, cull, viewport and scissor), pass, window and fragment
+    // words. Only mesh draws batch, and a draw after a clear starts a batch of its own.
+    let key = start
+        .pipeline_key
+        .filter(|_| vertices.is_none())
+        .map(|pipeline| {
+            let (_, fragment) = split_user_data(start.user_data);
+            BatchKey {
+                pipeline: pipeline.get(),
+                framebuffer: pass.framebuffer,
+                window: (
+                    guest_buffer.buffer,
+                    u32::try_from(guest_buffer.offset).unwrap_or(0),
+                ),
+                fragment,
+            }
+        });
+    if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
+        let (words, _) = split_user_data(start.user_data);
+        if join_open_batch(&key, words) {
             return Ok(Some(key));
         }
     }
@@ -3728,8 +3878,8 @@ pub(crate) fn draw_mesh_resident(
         start.clear,
         width,
         height,
-        Some((mesh_words, fragment_words)),
-        Geometry::Mesh,
+        Some((geometry_words, fragment_words)),
+        vertices.map_or(Geometry::Mesh, Geometry::Vertex),
         Bound {
             windows: [DEFAULT_WINDOWS[0], guest_buffer.words],
             guest_buffer: Some(guest_buffer),
@@ -3741,6 +3891,9 @@ pub(crate) fn draw_mesh_resident(
             second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
             resident: Some(resident),
             pipeline_key: start.pipeline_key,
+            depth: start.depth.as_ref(),
+            cull: start.cull,
+            depth_clear: start.depth_clear,
             ..Bound::default()
         },
     )
@@ -3843,6 +3996,13 @@ struct Bound<'a> {
     /// The key a resident draw's pipeline is cached under; `None` builds and releases one per draw.
     /// Non-zero so the option costs no space.
     pipeline_key: Option<std::num::NonZeroU64>,
+    /// Draw through the resident attachment's depth pass with these tests; `None` draws colour
+    /// alone. By reference, so `Bound` stays cheap to pass by value.
+    depth: Option<&'a crate::depth::DepthDraw>,
+    /// The guest's cull state; `None` culls nothing.
+    cull: Option<orbistoun_gpu::depth::CullState>,
+    /// The clear the depth attachment takes before a resident draw.
+    depth_clear: Option<crate::depth::DepthClear>,
 }
 
 /// The block a draw that sets no user data pushes.
@@ -3864,6 +4024,9 @@ impl Default for Bound<'_> {
             resident: None,
             second_texture: (&NO_TEXTURE, 1),
             pipeline_key: None,
+            depth: None,
+            cull: None,
+            depth_clear: None,
         }
     }
 }

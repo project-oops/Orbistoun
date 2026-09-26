@@ -920,7 +920,7 @@ pub fn target_mask_at(writes: &[RegisterWrite]) -> Option<TargetMask> {
 /// Cited from oops-mesa `src/amd/registers/gfx103.json` (`CompareFrag`: `FRAG_NEVER` 0, `FRAG_LESS`
 /// 1, `FRAG_EQUAL` 2, `FRAG_LEQUAL` 3, `FRAG_GREATER` 4, `FRAG_NOTEQUAL` 5, `FRAG_GEQUAL` 6,
 /// `FRAG_ALWAYS` 7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompareFunc {
     /// The test never passes.
     Never,
@@ -960,7 +960,7 @@ pub fn decode_compare_func(field: u32) -> CompareFunc {
 
 /// `DB_DEPTH_CONTROL`, a context register at index `0xA200`: `src/amd/registers/gfx103.json` in
 /// oops-mesa maps it at byte `165888` and defines its fields.
-const DB_DEPTH_CONTROL: u32 = 0xA200;
+pub(crate) const DB_DEPTH_CONTROL: u32 = 0xA200;
 
 /// The depth- and stencil-test state a draw runs under, decoded from `DB_DEPTH_CONTROL`.
 ///
@@ -969,7 +969,7 @@ const DB_DEPTH_CONTROL: u32 = 0xA200;
 // Each bool is one of `DB_DEPTH_CONTROL`'s independent enable bits, named so a reader sees which
 // test a value turned on; the "too many bools" lint does not fit a register mirror.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DepthControl {
     /// `Z_ENABLE` (bit 1): the depth test runs.
     pub depth_test_enable: bool,
@@ -1022,7 +1022,7 @@ pub fn depth_control_at(writes: &[RegisterWrite]) -> Option<DepthControl> {
 ///
 /// What happens to a stencil value on each test outcome. Cited from oops-mesa
 /// `src/amd/registers/gfx103.json` (`StencilOp`: `STENCIL_KEEP` 0 .. `STENCIL_XNOR` 15).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StencilOp {
     /// Keep the current value.
     Keep,
@@ -1085,7 +1085,7 @@ pub fn decode_stencil_op(field: u32) -> StencilOp {
 
 /// `DB_STENCIL_CONTROL`, a context register at index `0xA10B`: `src/amd/registers/gfx103.json` in
 /// oops-mesa maps it at byte `164908` and defines its six four-bit `StencilOp` fields.
-const DB_STENCIL_CONTROL: u32 = 0xA10B;
+pub(crate) const DB_STENCIL_CONTROL: u32 = 0xA10B;
 
 /// The stencil operations a draw applies on each test outcome, decoded from `DB_STENCIL_CONTROL`.
 ///
@@ -1093,7 +1093,7 @@ const DB_STENCIL_CONTROL: u32 = 0xA10B;
 /// it passes and the depth test passes, and when it passes but the depth test fails. The back-face
 /// set applies only when `DB_DEPTH_CONTROL`'s back-face stencil is on
 /// ([`DepthControl::backface_enable`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StencilControl {
     /// `STENCILFAIL` (bits 0:3): front-face op when the stencil test fails.
     pub fail_op: StencilOp,
