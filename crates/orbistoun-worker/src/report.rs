@@ -379,6 +379,11 @@ pub fn describe_module(module: String) {
 #[cfg(windows)]
 static REPORTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// The thread writing the fault report, so a fault on another thread meanwhile can tell itself
+/// apart from a fault inside the report.
+#[cfg(windows)]
+static REPORTING_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
 /// Whether `len` bytes at `address` can be read without faulting.
 ///
 /// The page holding the faulting instruction pointer is mapped for a data fault but not for an
@@ -1111,8 +1116,17 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     use std::io::Write as _;
 
     if REPORTED.swap(true, Ordering::Relaxed) {
+        // Another thread's fault while the report is being written: left unhandled it would end
+        // the process mid-report and lose the trace, so this thread waits for the reporter, which
+        // ends the process. A fault inside the report itself falls through as before.
+        if REPORTING_THREAD.get() != Some(&std::thread::current().id()) {
+            loop {
+                std::thread::park();
+            }
+        }
         return;
     }
+    let _ = REPORTING_THREAD.set(std::thread::current().id());
     let inside = write_fault_line(kind, faulting_address, instruction_pointer, &registers);
 
     // The faulting page as the host holds it, and what this process did to its protection: a page

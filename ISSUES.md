@@ -68,7 +68,6 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Tracing and reporting
 
-- PPSA02664's fault at image+0xafafdb often ends the worker before its trace is written: the report stops after the register line, with no panic printed.
 - An execution and branch tracer from guest entry is needed to attribute the computed-dispatch walls; validate it on gl1-cube, gl2-cube and mesa-cube, then diff their frames against hardware output.
 - The shader census is not wired into the run report's FURTHER/same/BACK verdict.
 - The call ring keeps ordering only for 8192 entries; drain it periodically.
