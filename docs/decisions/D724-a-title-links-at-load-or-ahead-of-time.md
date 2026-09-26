@@ -11,8 +11,8 @@ executable's hash, the loader's build and the host CPU's features. Every run lin
 compares its plan with the stored one: the stored plan is a check, not a cache, and a
 difference under the same key is a loader defect. `orbistoun-cli link` stores a plan without
 running the guest, and `run --relink` replaces one. An orbistoun-aot build is the title's
-folder with a launcher beside it: orbistoun's run path as a program of its own, which runs the
-executable in its folder in its own process, linking and checking as `run` does. It is made
+folder with a launcher beside it: orbistoun's window, which plays only the executable in its
+folder, linking and checking as `run` does, or runs it with no window under `--headless`. It is made
 only by `orbistoun-cli link --native`. Every mode keeps the thunks, so every mode writes the
 same trace.
 

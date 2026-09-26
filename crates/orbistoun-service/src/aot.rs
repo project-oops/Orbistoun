@@ -12,12 +12,31 @@ pub const MANIFEST_FILE: &str = "orbistoun-aot.toml";
 /// The executable a launcher runs, beside it.
 pub const EXECUTABLE_FILE: &str = "eboot.bin";
 
-/// The launcher as the build produces it, beside the CLI.
+/// The launcher as the build produces it, beside the CLI: the window, which plays the title it
+/// finds a manifest beside.
 pub const LAUNCHER_FILE: &str = if cfg!(windows) {
-    "orbistoun-aot.exe"
+    "orbistoun-gui.exe"
 } else {
-    "orbistoun-aot"
+    "orbistoun-gui"
 };
+
+/// The folder of the orbistoun-aot build this program is the launcher of, and its manifest.
+#[must_use]
+pub fn beside_this_program() -> Option<(PathBuf, Manifest)> {
+    let folder = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let manifest = Manifest::read(&folder)?;
+    Some((folder, manifest))
+}
+
+/// The one title an orbistoun-aot build in `folder` holds.
+#[must_use]
+pub fn title_entry(folder: &Path, manifest: &Manifest) -> crate::TitleEntry {
+    crate::TitleEntry {
+        name: manifest.title.clone(),
+        module: folder.join(EXECUTABLE_FILE),
+        metadata: crate::read_title_metadata(folder),
+    }
+}
 
 /// How a launcher runs its title.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

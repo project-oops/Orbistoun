@@ -2724,19 +2724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orbistoun-aot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "oops-log",
- "orbistoun-env",
- "orbistoun-proto",
- "orbistoun-service",
- "orbistoun-worker",
-]
-
-[[package]]
 name = "orbistoun-audio"
 version = "0.1.0"
 dependencies = [

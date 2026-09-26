@@ -77,7 +77,6 @@ members = [
     "crates/orbistoun-worker",
     "crates/orbistoun-cli",
     "crates/orbistoun-gui",
-    "crates/orbistoun-aot",
 ]
 
 [workspace.package]

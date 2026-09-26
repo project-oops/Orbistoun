@@ -436,9 +436,10 @@ static RUN_STAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Where a module's title is stored, which decides whether its `/app0` is writable (D722).
 ///
-/// Staged when its directory lies directly under the library's staging tree, or when the run asked
-/// for it; an image otherwise. Only the path decides, never anything the title ships. The staged id
-/// is the directory's name.
+/// Staged when its directory lies directly under the library's staging tree, when an
+/// orbistoun-aot build there was made from that tree (D724), or when the run asked for it; an image
+/// otherwise. Only where it lies decides, never anything the title ships. The staged id is the
+/// directory's name.
 fn origin_of(module: &Path, staging: &Path, asked: bool) -> orbistoun_fs::sandbox::Origin {
     let directory = module.parent();
     let id = directory
@@ -449,7 +450,11 @@ fn origin_of(module: &Path, staging: &Path, asked: bool) -> orbistoun_fs::sandbo
         candidate.parent().map(canonical) == Some(canonical(staging))
     };
     match (directory, id) {
-        (Some(directory), Some(id)) if asked || under(directory) => {
+        (Some(directory), Some(id))
+            if asked
+                || under(directory)
+                || orbistoun_service::aot::Manifest::read(directory).is_some_and(|m| m.staged) =>
+        {
             orbistoun_fs::sandbox::Origin::Staged { id }
         }
         _ => orbistoun_fs::sandbox::Origin::Image,

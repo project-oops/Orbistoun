@@ -34,7 +34,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Linking
 
-- An orbistoun-aot build runs headless: it opens no window and reads no pad, so a title it runs is watched only through its trace (D724).
+- An orbistoun-aot build has been run only on the machine that built it; on another it keeps its data under that machine's `%APPDATA%\OOPS` rather than beside the build (D724).
 - `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725).
 
 ## Kernel, libraries and filesystem

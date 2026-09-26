@@ -124,6 +124,8 @@ pub(crate) struct App {
     ///
     /// The overlay itself is [`orbistoun_shell::Lifecycle::Overlaid`], not a flag here.
     power_menu: bool,
+    /// The orbistoun-aot build this window launches, whose one title is the whole library (D724).
+    aot: Option<std::path::PathBuf>,
     /// When the last frame was drawn, for the press-versus-hold decision.
     last_frame: std::time::Instant,
     /// Where the highlight is in the shell.
@@ -138,7 +140,10 @@ impl App {
     ///
     /// `start` has already reconciled the command line with the stored setting in
     /// `orbistoun_shell::startup`.
-    pub(crate) fn new(start: Start, renderer: String) -> Self {
+    ///
+    /// `build` is the folder of the orbistoun-aot build this program launches, whose one title is
+    /// the whole library (D724).
+    pub(crate) fn new(start: Start, renderer: String, build: Option<std::path::PathBuf>) -> Self {
         let paths = orbistoun_paths::Paths::resolve();
         let _ = paths.ensure_dirs();
         // Read first: it carries the library folder the scan below uses.
@@ -191,6 +196,7 @@ impl App {
             session: orbistoun_shell::Lifecycle::Exited,
             power_menu: false,
 
+            aot: build,
             last_frame: std::time::Instant::now(),
             at: orbistoun_shell::Cross {
                 category: crate::shell::Category::START,
@@ -466,10 +472,15 @@ impl App {
     /// Through `resolve`, so a relative root means the same folder however the window was
     /// started (D038).
     fn rescan(&mut self) {
-        self.titles = self
-            .service
-            .discover_titles(&self.prefs.file.library.resolve(self.paths.data_root()))
-            .map_err(|e| e.to_string());
+        self.titles = match &self.aot {
+            Some(folder) => orbistoun_service::aot::Manifest::read(folder)
+                .map(|manifest| vec![orbistoun_service::aot::title_entry(folder, &manifest)])
+                .ok_or_else(|| format!("{} has no build manifest", folder.display())),
+            None => self
+                .service
+                .discover_titles(&self.prefs.file.library.resolve(self.paths.data_root()))
+                .map_err(|e| e.to_string()),
+        };
         self.selected = None;
         self.detail = None;
         // Forgotten on rescan, so an icon that changed on disk is picked up.
@@ -541,10 +552,19 @@ impl App {
         // may still be submitting a frame that uses it; the next frame overwrites it.
         self.live_fresh = false;
         self.perf = None;
+        // A build is played, not measured, so it runs until the title ends.
+        let (limit, budget) = if self.aot.is_some() {
+            (0, 0)
+        } else {
+            (
+                self.prefs.file.library.run_limit_seconds,
+                self.prefs.file.library.run_call_budget,
+            )
+        };
         self.running = Some(run::start(
             module,
-            self.prefs.file.library.run_limit_seconds,
-            self.prefs.file.library.run_call_budget,
+            limit,
+            budget,
             self.paths.traces_dir(),
             run::RunInput {
                 play: self.input_playback.clone(),

@@ -66,7 +66,7 @@ pub(crate) fn cmd_native_build(
         .with_file_name(orbistoun_service::aot::LAUNCHER_FILE);
     anyhow::ensure!(
         launcher.is_file(),
-        "no launcher at {} - build it with `cargo build --release -p orbistoun-aot`",
+        "no launcher at {} - build it with `cargo build --release -p orbistoun-gui`",
         launcher.display()
     );
     let staging = orbistoun_paths::Paths::resolve().staged_titles_dir();
