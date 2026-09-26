@@ -1018,6 +1018,22 @@ fn mappings() -> &'static Mutex<orbistoun_mem::AddressSpace> {
     SPACE.get_or_init(|| Mutex::new(orbistoun_mem::AddressSpace::new()))
 }
 
+/// Runs `read` over the guest mappings this crate placed, as `(start, end)` virtual ranges, with
+/// them held so none can be unmapped while `read` looks inside one. `None` when the map is
+/// unavailable, including when another thread holds it: a run's report is written while guest
+/// threads are stopped, and one stopped inside a mapping call would never release it.
+pub fn with_guest_mappings<T>(read: impl FnOnce(&[(u64, u64)]) -> T) -> Option<T> {
+    let space = mappings().try_lock().ok()?;
+    let ranges: Vec<(u64, u64)> = space
+        .regions()
+        .iter()
+        .map(|r| (r.base, r.base.saturating_add(r.len)))
+        .collect();
+    let answer = read(&ranges);
+    drop(space);
+    Some(answer)
+}
+
 /// Regions the guest can read that this crate did not map itself: the loaded image, the guest
 /// stack, the main-thread TLS block. The loader and worker own them, so [`mappings`] never sees
 /// them; `virtual_query` consults this too, because a guest asking about its own code or stack
