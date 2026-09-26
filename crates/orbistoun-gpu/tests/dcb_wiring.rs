@@ -468,6 +468,34 @@ fn a_register_run_is_read_from_guest_memory() {
     );
 }
 
+/// With no values the run is reserved, payload zeroed, and its address returned; the payload
+/// pointer the unnamed helper gives for it is where the guest then writes the values.
+#[test]
+fn a_register_run_with_no_values_is_reserved_for_the_guest_to_fill() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = 0x240;
+    args[3] = 3;
+
+    let at = w.cursor();
+    assert_eq!(call("sceAgcCbSetShRegisterRangeDirect", args), at);
+    assert_eq!(w.written(), 20, "n + 2 dwords for n = 3");
+    assert_eq!(
+        &w.bytes()[..8],
+        &[0x00, 0x76, 0x03, 0xc0, 0x40, 0x02, 0x00, 0x00]
+    );
+    assert!(w.bytes()[8..].iter().all(|&b| b == 0));
+
+    let mut payload = 0u64;
+    let mut query = [0u64; GUEST_ARG_REGISTERS];
+    query[0] = std::ptr::addr_of_mut!(payload) as u64;
+    query[1] = at;
+    query[2] = 1;
+    assert_eq!(call("0x7d86501b8094ef57", query), 0);
+    assert_eq!(payload, at + 8);
+}
+
 /// A packet that does not fit is refused and nothing is written. The real library calls the
 /// overflow callback; this answers the placeholder instead of writing past the buffer.
 #[test]
@@ -515,17 +543,6 @@ fn set_cx_registers_indirect_writes_measured_header_and_format() {
         ],
         "header 0xc0039f00, zeros, format 0x80000000, zero count"
     );
-}
-
-/// The phantom `0x7d86501b8094ef57` query helper writes the workload size into `*arg0`.
-#[test]
-fn phantom_get_size_writes_workload_size() {
-    let mut size: u64 = 0;
-    let mut args = [0u64; GUEST_ARG_REGISTERS];
-    args[0] = std::ptr::addr_of_mut!(size) as u64;
-
-    assert_eq!(call("0x7d86501b8094ef57", args), 0);
-    assert_eq!(size, 0xa8, "workload buffer size is 168 (0xa8) bytes");
 }
 
 /// `sceAgcInit` (and alias `0x53bbd82b51d172db`) validates version 13 and returns 0.

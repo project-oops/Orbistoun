@@ -13,7 +13,7 @@ use orbistoun_hle::guest_module;
 
 guest_module! {
     "libSceAgc" {
-        "0x7d86501b8094ef57" => 1,
+        "0x7d86501b8094ef57" => 3,
         "sceAgcAcbAcquireMem" => 6,
         "sceAgcAcbDispatchIndirect" => 6,
         "sceAgcAcbDmaData" => 6,
@@ -449,20 +449,26 @@ fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Non-export inline query helper (`0x7d86501b8094ef57`).
+/// Bytes from a packet's start to the payload a caller fills in, for the packet kinds
+/// [`agc_packet_payload`] accepts: a data `NOP` (header and tag) and a register write (header and
+/// register offset) both carry two dwords before it.
+const PACKET_PAYLOAD_OFFSET: u64 = 8;
+
+/// `0x7d86501b8094ef57(out, packet, kind)`: where the payload of a packet the guest reserved
+/// begins.
 ///
-/// At its call site the value written through `arg0` is used as a byte size, aligned up to 8 and
-/// passed to buffer allocators. The value, `0xa8` (168), is guest-observed, not a measured return:
-/// on the hardware this NID is not exported, its import slot binds null and the call is never made
-/// (`166-agc/cb-unnamed-ef57`). `0xa8` stands in for the size the title's own inlined helper
-/// computes.
-fn agc_phantom_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let out = args[0];
-    if out != 0 {
-        // SAFETY: `out` is the guest-supplied out-parameter stack slot, eight bytes, holding the
-        // size.
-        unsafe { guest::write_u64(out, 0xa8) };
+/// Guest-observed: PPSA02664 calls it with a packet in the command buffer it is building, kind 1
+/// right after reserving a shader-register run with no values, and patches the answer as an
+/// address. Kinds 0 and 1 answer `packet + 8` and any other kind is refused, as a reference
+/// emulator (prosper) models it; AnyPS5 gives `packet + 4` for kind 0 and null when the packet's
+/// count is the placeholder `0x3fff`.
+fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (out, packet, kind) = (args[0], args[1], args[2]);
+    if out == 0 || packet == 0 || kind > 1 {
+        return BAD_ARGUMENT;
     }
+    // SAFETY: `out` is the guest-supplied pointer-sized out-parameter.
+    unsafe { guest::write_u64(out, packet.wrapping_add(PACKET_PAYLOAD_OFFSET)) };
     OK
 }
 
@@ -643,12 +649,23 @@ const MAX_REGISTER_RUN: u64 = 0x3ffe;
 /// `sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count)`. Measured
 /// (`166-agc/dcb-set-sh-reg-direct`): a two-register run comes back as `header, offset, value,
 /// value`, with no marker, `n + 2` dwords.
+///
+/// With no `values` the packet is reserved with its payload zeroed and its address returned: a
+/// title passes null and then fills the run itself through the payload pointer
+/// [`agc_packet_payload`] gives it (guest-observed in PPSA02664).
 fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (offset, values, count) = (args[1], args[2], args[3]);
-    if values == 0 || count == 0 || count > MAX_REGISTER_RUN {
+    if count == 0 || count > MAX_REGISTER_RUN {
         return BAD_ARGUMENT;
     }
     let mut run = Vec::with_capacity(count as usize);
+    if values == 0 {
+        run.resize(count as usize, 0);
+        return dcb_append(
+            args[0],
+            &packet::build::set_sh_register_range(offset as u16, &run),
+        );
+    }
     for i in 0..count {
         // SAFETY: `values` is the guest's own array of `count` dwords, the argument this call is
         // defined by; `count` is bounded above.
@@ -693,7 +710,7 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// pinned by `tests/dcb_wiring.rs`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
-        ("0x7d86501b8094ef57", agc_phantom_get_size),
+        ("0x7d86501b8094ef57", agc_packet_payload),
         ("sceAgcCreateShader", create_shader),
         ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
         ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
@@ -1088,15 +1105,23 @@ mod tests {
         );
     }
 
-    /// The phantom `0x7d86501b8094ef57` writes the workload size 168 (0xa8) into `*arg0`.
+    /// `0x7d86501b8094ef57` answers a packet's payload, two dwords in, for kinds 0 and 1, and
+    /// refuses any other kind without writing.
     #[test]
-    fn phantom_get_size_writes_workload_size() {
+    fn the_payload_of_a_reserved_packet_starts_two_dwords_in() {
         let mut slot: u64 = 0;
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = std::ptr::addr_of_mut!(slot) as u64;
-
-        assert_eq!(agc_phantom_get_size(&args), OK);
-        assert_eq!(slot, 0xa8);
+        args[1] = 0x7400_0218_7e30;
+        for kind in [0, 1] {
+            args[2] = kind;
+            assert_eq!(agc_packet_payload(&args), OK);
+            assert_eq!(slot, 0x7400_0218_7e38);
+        }
+        slot = 0;
+        args[2] = 2;
+        assert_eq!(agc_packet_payload(&args), BAD_ARGUMENT);
+        assert_eq!(slot, 0);
     }
 
     /// `sceAgcInit` returns 0 for version 13, and 0x8a6c0004 for other versions.

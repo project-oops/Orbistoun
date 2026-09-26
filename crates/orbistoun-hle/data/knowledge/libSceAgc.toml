@@ -2,15 +2,18 @@ library = "libSceAgc"
 
 [[function]]
 name = "0x7d86501b8094ef57"
-arity = 1
-purpose = "Query helper that reads as a GetSize for the indirect-register workload buffer - it writes a byte size to an out-param the caller then aligns and allocates against (worklog 725)."
+arity = 3
+purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing packet + 8 through out for kinds 0 (data NOP: header and tag) and 1 (register write: header and offset)."
 edge_cases = [
-    "GUEST-OBSERVED SIZE, not a measured return. Called at PPSA02664 0x4000000435b5 with arg0 an out-parameter stack pointer; the caller rounds the value up to 8 (add rbx, 7; and rbx, ~7) and passes it to buffer allocators (worklog 725). orbistoun writes 168 (0xa8) into *arg0 and returns 0x0. That 0xa8 is the size the guest's memcpy reads at the wall this path dies on - the +0xa8 read through a null pointer - so it is the best-available stand-in, NOT a hardware measurement of this call. Planting this size does not by itself clear the wall.",
+    "GUEST-OBSERVED SHAPE. PPSA02664 passes a packet inside the command buffer it is building (arg1 0x740002187e30, a NOP whose count field is the placeholder 0x3fff, with kind 0) and later the packet returned by sceAgcCbSetShRegisterRangeDirect called with a null values array (kind 1), then patches the answer as an address (sceAgcQueueEndOfPipeActionPatchAddress takes it as its address argument). So it answers a pointer, not the size 0xa8 an earlier reading planted.",
+    "ORACLES DISAGREE ON KIND 0. prosper answers packet + 8 for kinds 0 and 1 and invalid-argument otherwise, noting packet + 4 crashes another title; AnyPS5 answers packet + 8 for a non-zero kind, and for kind 0 packet + 4, or null when the count field is 0x3fff. orbistoun follows prosper, which reaches gameplay on PPSA02664; kind 0 with a placeholder count is exactly the case they split on.",
     "NON-EXPORT NID. Imported directly as raw hex NID 0x7d86501b8094ef57 with no declared C export. obSCEne 166-agc/cb-unnamed-ef57 (sweep 20260920-110931) measures a bare synthetic import of it binding null on retail; the probe null-checks before calling, so it reports call-executed 0x0, reason slot-is-null - the probe's caution, not the platform refusing the call.",
-    "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fault earlier, fetching an instruction from 0x0: it calls the slot with no null-check of its own. So on hardware PPSA02664 reaches this size through working code (the SDK helper, inlined or otherwise available to it), and answering the call with a size keeps it on the path it takes on hardware. A placeholder slot leaves the fault unchanged; the wall is downstream of this call, not at it.",
+    "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fault earlier, fetching an instruction from 0x0: it calls the slot with no null-check of its own (worklog 729).",
 ]
-known_by = "guest-observed"
-cites = "PPSA02664 fault and call site 0x4000000435b5, worklog 725 (0xa8 is guest-observed); worklog 729 (null-slot test: binding 0x0 faults BACK, so the slot must stay callable); obSCEne sweep 20260920-110931, reports/hardware/20260920-110931-eboot.obs.log, check 166-agc/cb-unnamed-ef57 (a bare synthetic import binds null; obSCEne's probe null-checks before calling)."
+assumptions = [
+    "The kind-0 answer for a NOP whose count is the placeholder 0x3fff: prosper's packet + 8 is taken over AnyPS5's null, on the strength of prosper reaching gameplay on PPSA02664. Reference emulators are oracles, not facts; no hardware measurement exists, since the NID is not exported to a probe.",
+]
+known_by = "assumed"
 found_on = "2026-09-20"
 
 [[function]]
@@ -146,6 +149,7 @@ purpose = "Writes a run of consecutive shader registers, the values carried dire
 edge_cases = [
     "MEASURED, complete packet: 16 bytes - header 0xc0027600, register offset 8, then two values 0x12345678 and 0x9abcdef0. Type 3, opcode 0x76, count 2, so four dwords: one header, one selector, and one dword per register written. For n registers that is n + 2 dwords.",
     "The length arithmetic closes: the header count field plus two dwords is exactly the byte count the builder advanced. Every builder measured with a header in this sweep closes this way, which confirms the type-3 field split D565 derived from four builders and could not then confirm.",
+    "GUEST-OBSERVED: PPSA02664 calls it with a null values array (offset 0x240) and then fills the run itself through the payload pointer 0x7d86501b8094ef57 gives it for the returned packet, so a null values array reserves the packet, payload unwritten, and answers its address.",
     "REFUTES a specific claim of prosper. Its table gives n + 4 dwords for this builder and states that it prepends a two-dword NOP marker 0x6875000d, described there as mirroring the real library. The measured packet begins with the register write itself and carries no marker of any kind, so the real library does not prepend one. n + 2 is what it emits.",
 ]
 known_by = "measured"
