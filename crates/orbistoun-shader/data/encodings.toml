@@ -299,7 +299,7 @@ width_bytes = 8
 #
 # so the length is eight plus four times the field. It is not a corner nobody reaches: a
 # reference compiler emits this form in preference to moving a register, which it did on the
-# first program written to ask (worklog 577). Reading it as eight bytes would desynchronise
+# first program written to ask (commit a8b2d74). Reading it as eight bytes would desynchronise
 # the decoder for the whole rest of the shader - the same failure `literal_operands` exists to
 # prevent for the other variable-length case.
 extra_dwords = { shift = 1, width = 2 }

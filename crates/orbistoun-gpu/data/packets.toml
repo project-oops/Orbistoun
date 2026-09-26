@@ -191,7 +191,7 @@ half = "high"
 # same code. On this generation the NGG wave takes its program counter from PGM_LO_ES (Mesa
 # `radv_shader.c:2078-2084`, `R_00B320` for GFX10 and 10.3; oops-sdk `gl_draw.c`, measured on the
 # console), and a mid-frame program switch rewrites only the GS and ES pairs - so every Neverball
-# draw after its switch to three-parameter vertices ran the two-parameter program here (worklog 836).
+# draw after its switch to three-parameter vertices ran the two-parameter program here (commit 8beebaa).
 [[shader_address]]
 register = 0x2CC8
 stage = "vertex"

@@ -4,7 +4,7 @@
 # sampling one at payload + 0x200, it takes two user SGPRs carrying the T#/S# table
 # address, and the frame hashed to 0xc51cec32 with the GPU clock at 0x49f1e432f1d. The
 # record is oops-sdk `docs/hardware/agc-gl-cube-oracle-fw1240.md`, record B; orbistoun
-# worklog 539. Everything said in record A's capture about provenance and buffer addresses
+# commit d666069. Everything said in record A's capture about provenance and buffer addresses
 # holds here unchanged.
 
 call  = "sceAgcDriverSubmitCommandBuffer"

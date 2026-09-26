@@ -5,7 +5,7 @@
 # that dies early, every time. Mixing them produces a ranking whose top row is an artefact of which
 # guests happen to have run. It put `libkernel::sceKernelDlsym` first at 27% of all calls, where
 # every retail title calls it exactly **once** and three obSCEne guests account for the rest
-# (worklog 542).
+# (commit d666069).
 #
 # Splitting them needs to know which guests are ours, and that is a judgement rather than a pattern.
 # `obscene` and `obscene-payload` are obvious from their names. `PPSA99980` is not: it is obSCEne's

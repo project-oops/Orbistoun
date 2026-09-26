@@ -364,7 +364,7 @@ pub(crate) fn cmd_worklist(top: usize) {
     println!("BLOCKING. Before implementing one, answer it without implementing it:");
     println!("  ORBISTOUN_RETURN=<function>:0x0 ./bin/orbistoun run <title>");
     println!(
-        "A wall moves. Four of four candidates tested this way moved nothing (worklog 562).\n"
+        "A wall moves. Four of four candidates tested this way moved nothing (commit a8b2d74).\n"
     );
 
     println!("TITLES WE DID NOT WRITE");

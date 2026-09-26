@@ -5,7 +5,7 @@
 # firmware 12.40 on 2026-09-14. The console drew it, the end-of-pipe fence read 0xbeefcafe,
 # the GPU clock read 0x49d0fe7836c, and the frame hashed to 0x9dbfe189 over all 1920 x 1080
 # pixels. The record, with the shader words and every buffer address, is
-# oops-sdk `docs/hardware/agc-gl-cube-oracle-fw1240.md`, record A; orbistoun worklog 539.
+# oops-sdk `docs/hardware/agc-gl-cube-oracle-fw1240.md`, record A; orbistoun commit d666069.
 #
 # What "the call said" here is what the writer knew it wrote: every expectation below is a
 # value oops-sdk's `src/gl/gl_draw.c` placed in the stream, named from that source, not

@@ -162,7 +162,7 @@ found_on = "2026-08-25"
 [[function]]
 name = "sceSystemServiceLaunchApp"
 arity = 3
-purpose = "Asks the system to start another title by id. The request is handed to whoever owns the run - the worker streams it to the front end, which ends this run and starts the title, as the console suspends the caller and brings the title up (worklog 842)."
+purpose = "Asks the system to start another title by id. The request is handed to whoever owns the run - the worker streams it to the front end, which ends this run and starts the title, as the console suspends the caller and brings the title up (commit 8beebaa)."
 returns = "status"
 edge_cases = [
     "Answers OK once the request is handed on; the guest carries on until its run is ended, as a suspended caller would.",

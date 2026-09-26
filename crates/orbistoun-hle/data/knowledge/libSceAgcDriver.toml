@@ -23,7 +23,7 @@ name = "sceAgcDriverCreateQueue"
 purpose = "Creates a submission queue (compute type 3 or the Universal Graphics Queue type 0) for handing command buffers to the driver."
 edge_cases = [
     "MEASURED (obSCEne 9a41): returns rc-create 0x0 for both type 3 and type 0 (sweeps 20260911-* and 20260912-003916). Real arity is 3 (type, out_queue, flags).",
-    "Writes a queue handle into *out_queue (worklog 809): the open-toolchain GL context gates its whole hardware path on `rc == 0 && queue != NULL`, so a null out-parameter kept use_hardware off and every draw fell to 'no hardware pipeline'. The handle is orbistoun's own opaque object at its own address - as every handle this project hands out is - not the console's placement (unmeasured), so it is not the fabricated pointer principle 3 forbids. The guest passes it to a submit that reads the descriptor, never the queue, so the object is opaque; its bytes are the measured header (38 00 00 00 03 00 00 00 00 00 02 00).",
+    "Writes a queue handle into *out_queue (commit d1502d2): the open-toolchain GL context gates its whole hardware path on `rc == 0 && queue != NULL`, so a null out-parameter kept use_hardware off and every draw fell to 'no hardware pipeline'. The handle is orbistoun's own opaque object at its own address - as every handle this project hands out is - not the console's placement (unmeasured), so it is not the fabricated pointer principle 3 forbids. The guest passes it to a submit that reads the descriptor, never the queue, so the object is opaque; its bytes are the measured header (38 00 00 00 03 00 00 00 00 00 02 00).",
 ]
 known_by = "measured"
 cites = "obSCEne 9a41, sweeps 20260911-* and 20260912-003916, section 166-agc/driver-create-queue."
@@ -33,7 +33,7 @@ found_on = "2026-09-12"
 name = "sceAgcDriverSubmitDcb"
 purpose = "Submits a draw command buffer to the graphics hardware - the handover from command building (libSceAgc) to the driver."
 edge_cases = [
-    "IMPLEMENTED (worklog 687): reads the 16-byte submit descriptor obSCEne measured ({gpu_addr: u64, size_dwords: u32, flags: u8, pad}, -1c97, sweep 20260917-124503), walks the command buffer it names through orbistoun_gpu::walk and the pipeline, and records a SubmissionReport - packets, register writes, draws, shader candidates - for the run report. This is the only point a real guest command stream enters the translator; no backend is attached, so it reports rather than renders (3861).",
+    "IMPLEMENTED (commit b4f7e73): reads the 16-byte submit descriptor obSCEne measured ({gpu_addr: u64, size_dwords: u32, flags: u8, pad}, -1c97, sweep 20260917-124503), walks the command buffer it names through orbistoun_gpu::walk and the pipeline, and records a SubmissionReport - packets, register writes, draws, shader candidates - for the run report. This is the only point a real guest command stream enters the translator; no backend is attached, so it reports rather than renders (3861).",
     "Returns 0x0, the rc-submit obSCEne measured on every 166-agc/driver-submit-* check and the primitive-draw submission (sweep 20260916-223136). It never fails on the guest's account: a null or absurd descriptor records nothing and still returns success, as the console's does.",
     "Shader GPU addresses the stream names read back as unresolved rather than dereferenced. The command buffer is CPU-side memory the guest built and owns (identity mapping D014), but a GPU address goes to a backend that can map it, and the D101 GPU-vs-guest-address assumption is unsettled - so a submit reads only the one range the descriptor named.",
     "No guest reaches this yet: the corpus stalls earlier (e.g. PPSA03416 blocks in sceKernelWaitEqueue on an unposted driver queue, D613). The report is exercised by tests and is ready for the first guest that arrives.",
@@ -47,8 +47,8 @@ name = "sceAgcDriverSubmitCommandBuffer"
 arity = 2
 purpose = "Submits a draw command buffer to a named queue - the same handover as sceAgcDriverSubmitDcb, with the queue handle first."
 edge_cases = [
-    "IMPLEMENTED (worklog 813): the open-toolchain SDK's GL context and draw path call this first as (queue, desc) and fall back to sceAgcDriverSubmitDcb only when it does not resolve. The queue is orbistoun's own opaque handle from sceAgcDriverCreateQueue; the 16-byte descriptor in argument one is walked exactly as SubmitDcb walks its argument zero.",
-    "Unnamed until worklog 813 (NID 0x145f597e80e9876f): it landed on the loud stub, whose placeholder the GL context read as 'the driver refused the command buffer', failing the hardware clear self-test and stopping every draw.",
+    "IMPLEMENTED (commit 8beebaa): the open-toolchain SDK's GL context and draw path call this first as (queue, desc) and fall back to sceAgcDriverSubmitDcb only when it does not resolve. The queue is orbistoun's own opaque handle from sceAgcDriverCreateQueue; the 16-byte descriptor in argument one is walked exactly as SubmitDcb walks its argument zero.",
+    "Unnamed until commit 8beebaa (NID 0x145f597e80e9876f): it landed on the loud stub, whose placeholder the GL context read as 'the driver refused the command buffer', failing the hardware clear self-test and stopping every draw.",
     "Returning success exposes the next gap: the guest then polls a fence the stream's RELEASE_MEM should write (0xbeefcafe plus a timestamp), and orbistoun performs no release-memory write, so each submit waits out the guest's own bound.",
 ]
 known_by = "guest-observed"
@@ -63,7 +63,7 @@ name = "sceAgcDriverRegisterOwner"
 purpose = "Registers a resource-registration owner - part of the AGC toolkit resource-registration subsystem."
 edge_cases = [
     "MEASURED (obSCEne 7b3c): a pure stub on retail firmware - libSceAgcDriver.sprx disassembles to `mov $0x8a6c9018, %eax; ret`, and hardware confirmed rc 0x8a6c9018 (RESOURCE_REGISTRATION_NOT_SUPPORTED) with zero bytes mutated in the caller buffer. Resource-registration is unsupported on retail; orbistoun returns the measured code for fidelity.",
-    "It does not clear PPSA28061's abort: that is gated on the later sceKernelMapperGetParam, whose engine wrapper aborts on any non-zero return (D677/worklog 516). This return is faithful, not an unblock.",
+    "It does not clear PPSA28061's abort: that is gated on the later sceKernelMapperGetParam, whose engine wrapper aborts on any non-zero return (D677/commit f35301c). This return is faithful, not an unblock.",
 ]
 known_by = "measured"
 cites = "obSCEne 7b3c, sweep 20260912-080231, libSceAgcDriver.sprx disassembly + section 166-agc/driver-resource-registration."
@@ -112,8 +112,8 @@ note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and
 name = "sceAgcDriverSetTFRing"
 purpose = "Configures the tessellation-factor ring for the graphics driver - GPU-driver setup Unity runs while bringing its device up, on PPSA02664's CreateWorkload path."
 edge_cases = [
-    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): libSceAgcDriver does not export it and dynamic resolution by name and NID both fail - the same status as sceAgcDriverAddEqEvent and every other function on PPSA02664's CreateWorkload path (worklog 723, six for six). It is an AGC SDK inline helper this build emitted out-of-line, so there is no export to measure and orbistoun must synthesise it in HLE.",
-    "Unity consumes its return: forcing it to 0x0 moved PPSA02664's run backwards into a different placeholder-as-address fault (worklog 722), so a guessed return is wrong (D708) and the real one is unmeasurable. Synthesis is the guest-oracle route, not a measurement.",
+    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): libSceAgcDriver does not export it and dynamic resolution by name and NID both fail - the same status as sceAgcDriverAddEqEvent and every other function on PPSA02664's CreateWorkload path (commit 3212e2a, six for six). It is an AGC SDK inline helper this build emitted out-of-line, so there is no export to measure and orbistoun must synthesise it in HLE.",
+    "Unity consumes its return: forcing it to 0x0 moved PPSA02664's run backwards into a different placeholder-as-address fault (commit 3212e2a), so a guessed return is wrong (D708) and the real one is unmeasurable. Synthesis is the guest-oracle route, not a measurement.",
 ]
 known_by = "measured"
 cites = "obSCEne c9e2, sweep 20260920-082906, reports/hardware/20260920-082906-eboot.obs.log:3782-3789 and :10398-10405 (export census + dynamic lookup, both fail)."
@@ -123,7 +123,7 @@ found_on = "2026-09-20"
 name = "sceAgcDriverSetHsOffchipParam"
 purpose = "Configures the hull-shader off-chip LDS parameter for the graphics driver - GPU-driver setup on the same CreateWorkload path."
 edge_cases = [
-    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): same status and reason as sceAgcDriverSetTFRing and sceAgcDriverAddEqEvent - an out-of-line SDK inline with no export to measure, to be synthesised in HLE (worklog 723).",
+    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): same status and reason as sceAgcDriverSetTFRing and sceAgcDriverAddEqEvent - an out-of-line SDK inline with no export to measure, to be synthesised in HLE (commit 3212e2a).",
 ]
 known_by = "measured"
 cites = "obSCEne c9e2, sweep 20260920-082906, reports/hardware/20260920-082906-eboot.obs.log:3782-3789 and :10398-10405."
