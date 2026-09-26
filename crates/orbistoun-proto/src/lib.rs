@@ -411,6 +411,19 @@ pub enum ImportKind {
     Unspecified,
 }
 
+/// How an import binds, as its symbol table says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportBinding {
+    /// Must be answered.
+    #[default]
+    Global,
+    /// Binds to zero when nothing answers it (D676).
+    Weak,
+    /// Local to the module, or a binding the table does not name.
+    Other,
+}
+
 /// One import a guest module asks for, and whether orbistoun can answer it.
 ///
 /// Wire data: the service returns it, the worker sends it, and a run report embeds it.
@@ -427,6 +440,9 @@ pub struct ImportRecord {
     /// Whether the guest wants code or data in this slot.
     #[serde(default)]
     pub kind: ImportKind,
+    /// How the import binds.
+    #[serde(default)]
+    pub binding: ImportBinding,
 }
 
 /// One symbol a module provides.

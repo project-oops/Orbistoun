@@ -335,24 +335,35 @@ pub(crate) fn cmd_module_tables(service: &Service, path: &std::path::Path) -> Re
 }
 
 /// `imports` - what a guest module needs, without executing it.
+/// One import as `imports` prints it: hash, library, name, then its marks.
+///
+/// Data imports are marked because a thunk is the wrong kind of answer for them: the guest
+/// dereferences instruction bytes (D307). Weak imports are marked because one nothing answers binds
+/// to zero rather than to a stub (D676).
+fn import_line(i: &orbistoun_proto::ImportRecord) -> String {
+    let data = if i.kind == orbistoun_proto::ImportKind::Object {
+        "  [data]"
+    } else {
+        ""
+    };
+    let weak = if i.binding == orbistoun_proto::ImportBinding::Weak {
+        "  [weak]"
+    } else {
+        ""
+    };
+    format!(
+        "{:#018x}  {}  {}{data}{weak}",
+        i.nid,
+        i.library.as_deref().unwrap_or("?"),
+        i.symbol.as_deref().unwrap_or("<unknown>"),
+    )
+}
+
 pub(crate) fn cmd_imports(service: &Service, path: &std::path::Path) -> Result<()> {
     let survey = service.survey_path(path)?;
     println!("entry {:#x}", survey.entry);
     for i in &survey.imports {
-        // Data imports are marked because a thunk is the wrong kind of answer for them: the guest
-        // dereferences instruction bytes (D307).
-        let data = if i.kind == orbistoun_proto::ImportKind::Object {
-            "  [data]"
-        } else {
-            ""
-        };
-        println!(
-            "{:#018x}  {}  {}{}",
-            i.nid,
-            i.library.as_deref().unwrap_or("?"),
-            i.symbol.as_deref().unwrap_or("<unknown>"),
-            data
-        );
+        println!("{}", import_line(i));
     }
     let data = survey
         .imports
@@ -425,4 +436,30 @@ pub(crate) fn cmd_verify(service: &Service, path: &std::path::Path) -> Result<()
         eprintln!("no --symbols-db given, so nothing could be named");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// An import line carries its hash, library and name, then a mark for data and for weak.
+    #[test]
+    fn an_import_line_marks_weak_and_data_imports() {
+        let mut import = orbistoun_proto::ImportRecord {
+            nid: 0x1234,
+            library: Some("libc".to_owned()),
+            symbol: Some("malloc".to_owned()),
+            known: true,
+            kind: orbistoun_proto::ImportKind::Function,
+            binding: orbistoun_proto::ImportBinding::Global,
+        };
+        assert_eq!(
+            super::import_line(&import),
+            "0x0000000000001234  libc  malloc"
+        );
+        import.binding = orbistoun_proto::ImportBinding::Weak;
+        import.kind = orbistoun_proto::ImportKind::Object;
+        assert_eq!(
+            super::import_line(&import),
+            "0x0000000000001234  libc  malloc  [data]  [weak]"
+        );
+    }
 }

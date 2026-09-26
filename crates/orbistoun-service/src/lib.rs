@@ -1761,6 +1761,15 @@ impl Service {
                     nid: i.nid.as_raw(),
                     library: i.library,
                     known: i.known,
+                    binding: match i.binding {
+                        orbistoun_elf::dynamic::Binding::Global => {
+                            orbistoun_proto::ImportBinding::Global
+                        }
+                        orbistoun_elf::dynamic::Binding::Weak => {
+                            orbistoun_proto::ImportBinding::Weak
+                        }
+                        _ => orbistoun_proto::ImportBinding::Other,
+                    },
                     kind: match i.kind {
                         orbistoun_elf::dynamic::Kind::Function => {
                             orbistoun_proto::ImportKind::Function
