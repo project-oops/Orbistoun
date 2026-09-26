@@ -154,6 +154,12 @@ enum Command {
         /// there is staged without asking.
         #[arg(long, alias = "homebrew")]
         staged: bool,
+        /// Link afresh and replace the title's stored link plan, printing what differed (D724).
+        ///
+        /// For after a stored plan's mismatch is understood; an ordinary run never overwrites a
+        /// plan stored under its own key.
+        #[arg(long)]
+        relink: bool,
     },
     /// Find out which handoff fields a guest's runtime uses.
     ///
@@ -908,13 +914,14 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             profile,
             input,
             staged,
+            relink,
         } => cmd_run(
             &path,
             limit,
             calls,
             profile.as_deref(),
             (cli.symbols_db.as_deref(), input.as_deref()),
-            staged,
+            (staged, relink),
         )?,
         Command::Handoff {
             ref path,

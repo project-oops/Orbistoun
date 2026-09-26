@@ -113,11 +113,109 @@ impl LinkPlan {
         name
     }
 
+    /// What differs between this stored plan and a fresh one: modules placed differently, then
+    /// every slot written differently, by module and address.
+    #[must_use]
+    pub fn differences(&self, fresh: &Self) -> PlanDifference {
+        let mut difference = PlanDifference::default();
+        let libraries = self
+            .modules
+            .iter()
+            .chain(&fresh.modules)
+            .map(|m| m.library.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        // Executable first, as the plan orders it.
+        let mut ordered: Vec<&str> = libraries.into_iter().collect();
+        ordered.sort_by_key(|library| !library.is_empty());
+        for library in ordered {
+            let was = self.modules.iter().find(|m| m.library == library);
+            let now = fresh.modules.iter().find(|m| m.library == library);
+            let placed = |m: &ModulePlan| (m.base, m.span, m.segments.clone());
+            if was.map(placed) != now.map(placed) {
+                difference.placements.push(library.to_owned());
+            }
+            let empty = Vec::new();
+            let was = was.map_or(&empty, |m| &m.writes);
+            let now = now.map_or(&empty, |m| &m.writes);
+            difference.slots.extend(slot_differences(library, was, now));
+        }
+        difference
+    }
+
     /// Total relocation writes across every module.
     #[must_use]
     pub fn write_count(&self) -> usize {
         self.modules.iter().map(|m| m.writes.len()).sum()
     }
+}
+
+/// One slot two plans wrote differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotDifference {
+    /// The module the slot belongs to, empty for the executable.
+    pub library: String,
+    /// The slot's guest address.
+    pub at: u64,
+    /// What the stored plan wrote there, if anything.
+    pub stored: Option<u64>,
+    /// What the fresh plan wrote there, if anything.
+    pub fresh: Option<u64>,
+}
+
+/// Everything two plans disagree on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanDifference {
+    /// Modules placed differently or present in only one plan, by library name.
+    pub placements: Vec<String>,
+    /// Slots written differently, executable first, each module's by address.
+    pub slots: Vec<SlotDifference>,
+}
+
+impl PlanDifference {
+    /// Whether the two plans agree.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.placements.is_empty() && self.slots.is_empty()
+    }
+}
+
+/// The slots two address-ordered write lists disagree on.
+fn slot_differences(library: &str, was: &[SlotWrite], now: &[SlotWrite]) -> Vec<SlotDifference> {
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    loop {
+        let (stored, fresh) = match (was.get(i), now.get(j)) {
+            (None, None) => break,
+            (Some(a), Some(b)) if a.at == b.at => {
+                i += 1;
+                j += 1;
+                if a.value == b.value {
+                    continue;
+                }
+                (Some(*a), Some(*b))
+            }
+            (Some(a), Some(b)) if a.at < b.at => {
+                i += 1;
+                (Some(*a), None)
+            }
+            (Some(a), None) => {
+                i += 1;
+                (Some(*a), None)
+            }
+            (_, Some(b)) => {
+                j += 1;
+                (None, Some(*b))
+            }
+        };
+        let at = stored.or(fresh).map_or(0, |w| w.at);
+        out.push(SlotDifference {
+            library: library.to_owned(),
+            at,
+            stored: stored.map(|w| w.value),
+            fresh: fresh.map(|w| w.value),
+        });
+    }
+    out
 }
 
 /// What a stored plan was computed from (D724).
@@ -262,19 +360,37 @@ pub fn settle(
     key: &PlanKey,
     plan: &LinkPlan,
 ) -> std::io::Result<(Standing, Option<StoredPlan>)> {
-    match load(path) {
-        Some(stored) if stored.key == *key => {
-            let standing = if stored.plan == *plan {
-                Standing::Match
-            } else {
-                Standing::Mismatch
-            };
-            Ok((standing, Some(stored)))
-        }
-        _ => {
-            store(path, key, plan)?;
-            Ok((Standing::New, None))
-        }
+    let stored = load(path);
+    let standing = standing_against(stored.as_ref(), key, plan);
+    if standing == Standing::New {
+        store(path, key, plan)?;
+    }
+    Ok((standing, stored))
+}
+
+/// [`settle`], except the fresh plan always replaces the stored one; the stored plan comes back
+/// whatever its key, so what changed can be shown.
+///
+/// # Errors
+///
+/// When the plan cannot be written.
+pub fn relink(
+    path: &Path,
+    key: &PlanKey,
+    plan: &LinkPlan,
+) -> std::io::Result<(Standing, Option<StoredPlan>)> {
+    let stored = load(path);
+    let standing = standing_against(stored.as_ref(), key, plan);
+    store(path, key, plan)?;
+    Ok((standing, stored))
+}
+
+/// How a fresh plan under `key` stands against what is stored.
+fn standing_against(stored: Option<&StoredPlan>, key: &PlanKey, plan: &LinkPlan) -> Standing {
+    match stored {
+        Some(stored) if stored.key == *key && stored.plan == *plan => Standing::Match,
+        Some(stored) if stored.key == *key => Standing::Mismatch,
+        _ => Standing::New,
     }
 }
 
@@ -320,6 +436,24 @@ mod tests {
         assert_eq!(super::load(&path).unwrap().plan, stored);
     }
 
+    /// A relink replaces a plan stored under the same key and hands back the one it replaced.
+    #[test]
+    fn a_relink_replaces_the_stored_plan_and_returns_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link-plan.json");
+        let stored = LinkPlan {
+            modules: vec![module(vec![SlotWrite { at: 8, value: 1 }])],
+        };
+        let fresh = LinkPlan {
+            modules: vec![module(vec![SlotWrite { at: 8, value: 2 }])],
+        };
+        super::settle(&path, &key(), &stored).unwrap();
+        let (standing, replaced) = super::relink(&path, &key(), &fresh).unwrap();
+        assert_eq!(standing, Standing::Mismatch);
+        assert_eq!(replaced.unwrap().plan, stored);
+        assert_eq!(super::load(&path).unwrap().plan, fresh);
+    }
+
     /// A changed key replaces the stored plan.
     #[test]
     fn a_changed_key_replaces_the_stored_plan() {
@@ -334,6 +468,55 @@ mod tests {
         assert_eq!(standing, Standing::New);
         let now = super::load(&path).unwrap();
         assert_eq!((now.key, now.plan), (rebuilt, fresh));
+    }
+
+    /// A changed value, a slot only the stored plan wrote and one only the fresh plan wrote are
+    /// each named, in address order; agreeing slots are not.
+    #[test]
+    fn differences_name_each_disagreeing_slot() {
+        let w = |at, value| SlotWrite { at, value };
+        let stored = LinkPlan {
+            modules: vec![module(vec![w(8, 1), w(16, 2), w(24, 3)])],
+        };
+        let fresh = LinkPlan {
+            modules: vec![module(vec![w(8, 1), w(16, 9), w(32, 4)])],
+        };
+        let difference = stored.differences(&fresh);
+        assert!(difference.placements.is_empty());
+        let slots: Vec<_> = difference
+            .slots
+            .iter()
+            .map(|d| (d.at, d.stored, d.fresh))
+            .collect();
+        assert_eq!(
+            slots,
+            vec![
+                (16, Some(2), Some(9)),
+                (24, Some(3), None),
+                (32, None, Some(4))
+            ]
+        );
+        assert!(stored.differences(&stored).is_empty());
+    }
+
+    /// A module placed elsewhere is named as a placement, executable first.
+    #[test]
+    fn differences_name_a_moved_module() {
+        let mut library = module(Vec::new());
+        library.library = "libc".to_owned();
+        let stored = LinkPlan {
+            modules: vec![module(Vec::new()), library.clone()],
+        };
+        library.base += 0x1000;
+        let mut executable = module(Vec::new());
+        executable.span.1 += 0x1000;
+        let fresh = LinkPlan {
+            modules: vec![executable, library],
+        };
+        assert_eq!(
+            stored.differences(&fresh).placements,
+            vec![String::new(), "libc".to_owned()]
+        );
     }
 
     /// The executable part of the key is its SHA-256.

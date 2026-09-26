@@ -84,6 +84,10 @@ pub enum Request {
         /// regardless; this is for a loose developer build.
         #[serde(default)]
         staged: bool,
+        /// Replace the title's stored link plan with this run's, whatever the stored one's key,
+        /// and report what differed (D724).
+        #[serde(default)]
+        relink: bool,
     },
     /// Carry a shell action into a running session.
     ///

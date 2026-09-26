@@ -158,6 +158,7 @@ fn serve_requests<W: Write>(
                 input_script,
                 capture_input: armed_capture,
                 staged,
+                relink,
             } => {
                 // A title exists from here, so a shell action has something to act on. An earlier
                 // request is refused and counted rather than queued for a title that may never
@@ -166,6 +167,7 @@ fn serve_requests<W: Write>(
                 *run_input_script() = input_script;
                 *run_capture_input() = armed_capture;
                 RUN_STAGED.store(staged, std::sync::atomic::Ordering::Relaxed);
+                RUN_RELINK.store(relink, std::sync::atomic::Ordering::Relaxed);
                 let ran = run_guest(
                     &mut output,
                     service,
@@ -180,6 +182,7 @@ fn serve_requests<W: Write>(
                 *run_input_script() = None;
                 *run_capture_input() = None;
                 RUN_STAGED.store(false, std::sync::atomic::Ordering::Relaxed);
+                RUN_RELINK.store(false, std::sync::atomic::Ordering::Relaxed);
                 capture_input(None);
                 play_input(None);
                 ran?;
@@ -407,6 +410,10 @@ fn title_of(module: &Path) -> String {
     )
 }
 
+/// Whether the current run asked to replace its stored link plan (`Request::Run::relink`), set from
+/// its request and cleared as it ends.
+static RUN_RELINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Whether the current run asked to be staged (`Request::Run::staged`), set from its request and
 /// cleared as it ends.
 static RUN_STAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -619,14 +626,20 @@ fn record_link_plan(
     let (path, bytes) = executable;
     let key = plan::PlanKey::for_executable(bytes, orbistoun_env::build::line());
     let stored = orbistoun_paths::Paths::resolve().title_link_plan_file(&title_of(path));
-    let standing = match plan::settle(&stored, &key, &fresh) {
-        Ok((standing, _)) => standing.word(),
+    let relink = RUN_RELINK.load(std::sync::atomic::Ordering::Relaxed);
+    let settled = if relink {
+        plan::relink(&stored, &key, &fresh)
+    } else {
+        plan::settle(&stored, &key, &fresh)
+    };
+    let (standing, previous) = match settled {
+        Ok((standing, previous)) => (standing.word(), previous),
         Err(e) => {
             tracing::warn!(
                 "the link plan could not be stored at {}: {e}",
                 stored.display()
             );
-            ""
+            ("", None)
         }
     };
     tracing::info!(
@@ -634,7 +647,78 @@ fn record_link_plan(
         fresh.modules.len(),
         fresh.write_count()
     );
-    report::note_link_plan(digest, standing);
+    // A mismatch is named in the report; a relink shows what it replaced whatever the key was.
+    let differs = match previous {
+        Some(previous) if relink || standing == plan::Standing::Mismatch.word() => {
+            let difference = previous.plan.differences(&fresh);
+            describe_plan_difference(&difference, &title.thunks, &title.labels)
+        }
+        _ => Vec::new(),
+    };
+    if relink {
+        if differs.is_empty() {
+            tracing::info!("relinked: the stored plan is now {digest}, and nothing differed");
+        } else {
+            tracing::info!("relinked: the stored plan is now {digest}; what differed:");
+        }
+        for line in &differs {
+            tracing::info!("  {line}");
+        }
+    }
+    let differs = if standing == plan::Standing::Mismatch.word() {
+        differs
+    } else {
+        Vec::new()
+    };
+    report::note_link_plan(digest, standing, differs);
+}
+
+/// How many differing slots a mismatch names before it only counts the rest.
+const PLAN_DIFFERENCES_NAMED: usize = 8;
+
+/// Two plans' differences in words: each module placed differently, then the first differing slots
+/// named by the import whose stub either plan wrote there.
+fn describe_plan_difference(
+    difference: &orbistoun_loader::plan::PlanDifference,
+    thunks: &orbistoun_thunk::ThunkTable,
+    labels: &[String],
+) -> Vec<String> {
+    let module = |library: &str| {
+        if library.is_empty() {
+            "the executable".to_owned()
+        } else {
+            library.to_owned()
+        }
+    };
+    let value = |v: Option<u64>| v.map_or_else(|| "nothing".to_owned(), |v| format!("{v:#x}"));
+    let mut lines: Vec<String> = difference
+        .placements
+        .iter()
+        .map(|library| format!("{} is placed differently", module(library)))
+        .collect();
+    for slot in difference.slots.iter().take(PLAN_DIFFERENCES_NAMED) {
+        let label = [slot.fresh, slot.stored]
+            .into_iter()
+            .flatten()
+            .filter_map(|v| thunks.index_of(v))
+            .find_map(|index| labels.get(index).filter(|l| !l.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| format!("{} slot", module(&slot.library)));
+        lines.push(format!(
+            "{label} at {:#x}: stored {}, now {}",
+            slot.at,
+            value(slot.stored),
+            value(slot.fresh)
+        ));
+    }
+    let rest = difference
+        .slots
+        .len()
+        .saturating_sub(PLAN_DIFFERENCES_NAMED);
+    if rest > 0 {
+        lines.push(format!("and {rest} more slots"));
+    }
+    lines
 }
 
 /// Fills the globals a guest reads without ever calling anything that could fill them.
@@ -983,6 +1067,7 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
         // Linking comes later; the report merges the digest in when it collects the trace.
         link_plan: String::new(),
         link_plan_stored: String::new(),
+        link_plan_differs: Vec::new(),
     });
     experiments
 }
@@ -3398,6 +3483,7 @@ mod tests {
             input_script: None,
             capture_input: None,
             staged: false,
+            relink: false,
         }]);
         assert!(matches!(events.as_slice(), [Event::Failed { .. }]));
     }
@@ -3470,6 +3556,7 @@ mod tests {
             input_script: None,
             capture_input: None,
             staged: false,
+            relink: false,
         }]);
         let reached: Vec<_> = events
             .iter()
@@ -3534,5 +3621,46 @@ mod stop_wording {
             orbistoun_core::StopReason::Exited.label(),
             "the ladder matches a string core no longer produces - Reach::Exited is now unreachable"
         );
+    }
+
+    /// A differing slot is named by the import whose stub either plan wrote there; a slot holding
+    /// no stub is named by its module, and slots past the first few are counted.
+    #[test]
+    fn a_plan_difference_names_slots_by_their_import() {
+        use orbistoun_loader::plan::{PlanDifference, SlotDifference};
+        use orbistoun_mem::test_bases::{Range, crates};
+        static RANGE: Range = Range::nth(crates::WORKER);
+        let thunks = orbistoun_thunk::ThunkTable::build(RANGE.take(), 2, 0x1000).expect("reserves");
+        let labels = vec![
+            "libkernel::sceKernelUsleep".to_owned(),
+            "libc::malloc".to_owned(),
+        ];
+        let slot = |library: &str, at, stored, fresh| SlotDifference {
+            library: library.to_owned(),
+            at,
+            stored,
+            fresh,
+        };
+        let mut slots = vec![
+            slot("", 0x10, thunks.address_of(0), thunks.address_of(1)),
+            slot("libfoo", 0x20, None, Some(0x1234)),
+        ];
+        slots.extend(
+            (0..super::PLAN_DIFFERENCES_NAMED)
+                .map(|i| slot("", 0x100 + i as u64, Some(1), Some(2))),
+        );
+        let difference = PlanDifference {
+            placements: vec![String::new()],
+            slots,
+        };
+        let lines = super::describe_plan_difference(&difference, &thunks, &labels);
+        assert_eq!(lines[0], "the executable is placed differently");
+        assert!(
+            lines[1].starts_with("libc::malloc at 0x10: stored 0x"),
+            "{}",
+            lines[1]
+        );
+        assert_eq!(lines[2], "libfoo slot at 0x20: stored nothing, now 0x1234");
+        assert_eq!(lines.last().map(String::as_str), Some("and 2 more slots"));
     }
 }

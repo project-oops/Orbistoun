@@ -200,6 +200,12 @@ pub fn step(finding: &Finding) -> Step {
                 target: bare(subject).to_owned(),
             },
         ),
+        Gap::LinkMismatch => Step::Person {
+            why: concat!(
+                "a link that differs from the stored plan under the same key is a loader defect, ",
+                "and no diagnostic of the guest varies how it was linked"
+            ),
+        },
         Gap::Submitted => Step::Person {
             why: concat!(
                 "a submission is progress, not a wall: what it names - shaders to translate, then ",

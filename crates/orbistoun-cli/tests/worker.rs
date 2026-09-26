@@ -60,6 +60,7 @@ fn a_missing_guest_crosses_the_boundary_as_a_request_failure() {
             input_script: None,
             capture_input: None,
             staged: false,
+            relink: false,
         })
         .expect("request");
     assert!(

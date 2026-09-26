@@ -188,6 +188,13 @@ impl ThunkTable {
         })
     }
 
+    /// The index whose stub starts at `address`, or `None` for any other address.
+    pub fn index_of(&self, address: u64) -> Option<usize> {
+        let offset = address.checked_sub(self.base)?;
+        let index = usize::try_from(offset / THUNK_SIZE).ok()?;
+        (offset % THUNK_SIZE == 0 && index < self.count).then_some(index)
+    }
+
     /// Where the table starts.
     pub const fn base(&self) -> u64 {
         self.base
@@ -449,6 +456,17 @@ mod data_tests {
         let last_import = table.address_of(2).expect("the last import");
         let first_named = table.address_of(3).expect("the first named stub");
         assert_eq!(first_named, last_import + THUNK_SIZE);
+    }
+
+    /// A stub's start names its index; any other address names none.
+    #[test]
+    fn a_stub_address_names_its_index() {
+        let table = ThunkTable::build_with_named(base(), 3, 2, 0x1000).expect("reserves");
+        let fourth = table.address_of(4).expect("the last stub");
+        assert_eq!(table.index_of(fourth), Some(4));
+        assert_eq!(table.index_of(fourth + 1), None);
+        assert_eq!(table.index_of(fourth + THUNK_SIZE), None);
+        assert_eq!(table.index_of(table.base() - THUNK_SIZE), None);
     }
 
     /// A lookup answers nothing for a name nobody published.

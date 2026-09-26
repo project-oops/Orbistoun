@@ -66,6 +66,11 @@ pub enum Gap {
     /// An answer rather than a gap: naming an implemented import with `ORBISTOUN_DUMP` shows its
     /// arguments even though no other finding is about that import.
     Captured,
+    /// The title linked differently from the plan stored for it under the same key.
+    ///
+    /// A loader defect, whatever the guest did next: the same executable, build and host must
+    /// link alike (D724).
+    LinkMismatch,
     /// The guest handed a command buffer to the graphics driver.
     ///
     /// Progress, not a wall. Like [`Self::Captured`] it is an answer rather than a gap: the finding
@@ -90,6 +95,7 @@ impl Gap {
             Self::GuestGaveUp | Self::Spinning | Self::Faulted => "the calls immediately before it",
             Self::AbiViolation => "crates/orbistoun-thunk, and how the guest is entered",
             Self::ShortRead => "crates/orbistoun-fs",
+            Self::LinkMismatch => "crates/orbistoun-loader, and what linking reads that varies",
             Self::Captured => "the implementation you asked about",
             Self::Submitted => "crates/orbistoun-gpu and its pipeline, then a backend crate",
         }
@@ -203,6 +209,7 @@ fn share(part: u64, whole: u64) -> u64 {
 /// Pure, so the rules are testable without running a guest.
 pub fn findings(trace: &CallTrace) -> Vec<Finding> {
     let mut out = Vec::new();
+    out.extend(link_mismatch(trace));
     out.extend(gave_up(trace));
     out.extend(error_used_as_pointer(trace));
     out.extend(spinning(trace));
@@ -1003,6 +1010,35 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
             .to_owned(),
         ),
         weight: trace.reads.short,
+    })
+}
+
+/// The title linked differently from its stored plan under the same key.
+///
+/// Ranked above everything: every other finding describes a guest linked in a way no earlier run
+/// was, so none of them can be compared until the loader is.
+fn link_mismatch(trace: &CallTrace) -> Option<Finding> {
+    let conditions = &trace.conditions;
+    if conditions.link_plan_stored != "mismatch" {
+        return None;
+    }
+    Some(Finding {
+        gap: Gap::LinkMismatch,
+        confidence: Confidence::Certain,
+        subject: None,
+        what: format!(
+            "the loader linked this title as plan {} although the plan stored under the same executable, build and host differs",
+            conditions.link_plan
+        ),
+        evidence: conditions.link_plan_differs.clone(),
+        action: Some(
+            concat!(
+                "a loader defect: find what linking read that is not in the key; ",
+                "`run --relink` replaces the stored plan once the difference is understood"
+            )
+            .to_owned(),
+        ),
+        weight: u64::MAX,
     })
 }
 
@@ -1873,6 +1909,25 @@ mod tests {
         assert_eq!(found[0].confidence, Confidence::Certain);
         assert_eq!(found[0].gap, Gap::ErrorUsedAsPointer);
         assert_eq!(found.last().expect("two findings").gap, Gap::ShortRead);
+    }
+
+    /// A plan that differs from the stored one under the same key heads the findings, with the
+    /// differing slots as its evidence; a new or matching plan raises nothing.
+    #[test]
+    fn a_link_mismatch_heads_the_findings() {
+        let mut trace = empty();
+        trace.tail = vec![call("libc::something", placeholder_code())];
+        trace.conditions.link_plan = "0123456789abcdef".to_owned();
+        for quiet in ["new", "match", ""] {
+            trace.conditions.link_plan_stored = quiet.to_owned();
+            assert!(findings(&trace).iter().all(|f| f.gap != Gap::LinkMismatch));
+        }
+        trace.conditions.link_plan_stored = "mismatch".to_owned();
+        trace.conditions.link_plan_differs = vec!["libc::malloc at 0x400000001000".to_owned()];
+        let found = findings(&trace);
+        assert_eq!(found[0].gap, Gap::LinkMismatch);
+        assert_eq!(found[0].evidence, trace.conditions.link_plan_differs);
+        assert!(found[0].what.contains("0123456789abcdef"));
     }
 
     #[test]

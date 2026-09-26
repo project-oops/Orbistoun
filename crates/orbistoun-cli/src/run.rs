@@ -32,7 +32,7 @@ pub(crate) fn cmd_run(
     calls: u64,
     profile: Option<&str>,
     (symbols_db, input): (Option<&std::path::Path>, Option<&std::path::Path>),
-    staged: bool,
+    (staged, relink): (bool, bool),
 ) -> Result<()> {
     set_profile_for_run(profile)?;
     let mut worker =
@@ -54,6 +54,7 @@ pub(crate) fn cmd_run(
             input_script: input.map(std::path::absolute).transpose()?,
             capture_input: None,
             staged,
+            relink,
         })
         .context("driving the worker")?;
 
@@ -199,6 +200,7 @@ fn run_quietly(path: &std::path::Path, limit: u64) -> Result<()> {
             input_script: None,
             capture_input: None,
             staged: false,
+            relink: false,
         })
         .context("driving the worker")?;
     worker.shutdown().context("shutting the worker down")

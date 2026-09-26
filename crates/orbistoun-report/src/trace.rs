@@ -566,6 +566,10 @@ pub struct Conditions {
     /// Recorded but not compared: the digest already says whether two runs linked alike.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_plan_stored: String,
+    /// On a mismatch, the first things the fresh plan decided differently from the stored one,
+    /// each in words: a placement, or a slot named by the import it answers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_plan_differs: Vec<String>,
 }
 
 impl Conditions {
@@ -1752,6 +1756,7 @@ mod tests {
             build: "0.1.0".to_owned(),
             link_plan: "0123456789abcdef".to_owned(),
             link_plan_stored: "new".to_owned(),
+            link_plan_differs: Vec::new(),
         };
         let before = under(conditions.clone());
         // The first run stored the plan the second matched: the same link.

@@ -52,6 +52,7 @@ depend on how many hashes it looks for (D213).
 | `--profile <name>` | `shell.toml` | Present a named hardware profile, e.g. `prospero-cex-12.40` |
 | `--input <script>` | none | Play this pad script on player 1 (D721) |
 | `--staged` | off | Run a loose build as a staged title with a writable `/app0` (D722) |
+| `--relink` | off | Replace the title's stored link plan with this run's and print what differed (D724) |
 
 ## One turn, unattended
 

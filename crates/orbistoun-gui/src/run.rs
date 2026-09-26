@@ -264,6 +264,7 @@ fn execute(
             // A library title's storage is known from where it lies (D722), and the window
             // launches only library titles.
             staged: false,
+            relink: false,
         },
         |event| match event {
             orbistoun_proto::Event::Frame { .. } => {
