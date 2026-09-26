@@ -99,3 +99,4 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - `agc_driver::tests::a_protected_target_is_trusted_until_a_write_to_it_faults` is flaky.
 - The GUI's embedded-docs registry in `orbistoun-gui/src/app.rs` has stale page names and blurbs.
 - Other oops-apps titles sync as images rather than staged directories.
+- `orbistoun-gen measurements` over obSCEne's current logs writes 7,288 measurements (11 MB) against the 638 committed, and repeats ids such as `166-agc/tiling-swizzle:variant-256x256:format`, so `hardware.toml` has not been regenerated since obSCEne's later sweeps.
