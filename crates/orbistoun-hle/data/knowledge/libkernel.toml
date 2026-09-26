@@ -220,6 +220,24 @@ found_in = ["PPSA02664"]
 found_on = "2026-09-03"
 
 [[function]]
+name = "_umtx_op"
+arity = 5
+purpose = "FreeBSD's futex and user-lock primitive; the wait and wake ops sleep while a word holds a value and wake sleepers on it."
+returns = "status"
+edge_cases = [
+    "Mesa's futex (util/futex.h, FreeBSD branch) waits with UMTX_OP_WAIT_UINT and wakes with UMTX_OP_WAKE; unimplemented, CRFT00001's main thread spent a 20-million-call budget retrying one wait on a word holding 2.",
+    "WAIT_UINT compares the 32-bit word only and WAIT the 64-bit one; a word that already differs answers zero at once, the caller re-reading it.",
+    "Private and shared keys coincide in one process, and the waits share the wait queue sceKernelSyncOnAddressWait sleeps on.",
+    "A timed wait (non-null uaddr2) and every op outside the wait/wake family are refused with the placeholder.",
+]
+found_by = "static"
+known_by = "published"
+cites = "FreeBSD sys/sys/umtx.h (op numbers) and sys/kern/kern_umtx.c (__umtx_op_wait, __umtx_op_wait_uint, __umtx_op_wake, do_wait)"
+assumptions = ["A failure answers the project placeholder or the vendor error, not -1 with errno as the FreeBSD wrapper does; only the success paths are exercised."]
+found_in = ["CRFT00001"]
+found_on = "2026-09-26"
+
+[[function]]
 name = "sceKernelAllocateDirectMemory"
 arity = 6
 purpose = "Reserves a span of physical memory. The guest maps it into its address space separately - this is closer to a physical allocator the application drives than to malloc."

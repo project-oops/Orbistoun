@@ -221,6 +221,7 @@ guest_module! {
         // Declared as the full register set: the arity of a variadic function is a property of each
         // call, and under-declaring would truncate the arguments before the renderer saw them.
         "memalign" => 2,
+        "posix_memalign" => 3,
         "printf" => 6,
         // Declared because it must not return: the default stub returns into the trap a compiler
         // places after a `noreturn` call (D177).
@@ -817,6 +818,35 @@ fn memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     }
     allocate(size, align)
+}
+
+/// `posix_memalign(memptr, alignment, size)`.
+///
+/// The alignment must be a power of two and a multiple of `sizeof(void *)`, or the answer is
+/// `EINVAL`; a failed allocation is `ENOMEM`. `*memptr` is written only on success, and `errno` is
+/// left alone: the error is the return value.
+///
+/// Reference: FreeBSD `posix_memalign(3)`, POSIX.1-2008.
+fn posix_memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    const EINVAL: u64 = 22;
+    const ENOMEM: u64 = 12;
+    let (Ok(at), Ok(align), Ok(size)) = (
+        usize::try_from(args[0]),
+        usize::try_from(args[1]),
+        usize::try_from(args[2]),
+    ) else {
+        return EINVAL;
+    };
+    if at == 0 || !align.is_power_of_two() || align < size_of::<u64>() {
+        return EINVAL;
+    }
+    let block = allocate(size, align);
+    if block == 0 {
+        return ENOMEM;
+    }
+    // SAFETY: a guest-supplied `void **` under the identity mapping, checked non-null above.
+    unsafe { std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(at), block) };
+    0
 }
 
 /// `free(pointer)`.
@@ -3045,6 +3075,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("bcmp", memcmp),
         ("memchr", memchr),
         ("memalign", memalign),
+        ("posix_memalign", posix_memalign),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
         ("vsprintf_s", vsprintf_s),
@@ -3755,6 +3786,29 @@ mod tests {
             assert_ne!(p, 0, "alignment {align} should be satisfiable");
             assert_eq!(p % align, 0, "alignment {align} was not honoured");
             call("free", [p, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn posix_memalign_stores_an_aligned_block_and_answers_zero() {
+        for align in [8_u64, 64, 4096] {
+            let mut out = 0_u64;
+            let at = std::ptr::from_mut(&mut out).expose_provenance() as u64;
+            assert_eq!(call("posix_memalign", [at, align, 300, 0, 0, 0]), 0);
+            assert_ne!(out, 0, "alignment {align} should be satisfiable");
+            assert_eq!(out % align, 0, "alignment {align} was not honoured");
+            call("free", [out, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn posix_memalign_refuses_a_bad_alignment_with_einval_and_leaves_the_pointer() {
+        // FreeBSD: a power of two no smaller than a pointer, or EINVAL and `*memptr` untouched.
+        for align in [0_u64, 4, 24] {
+            let mut out = 0xDEAD_u64;
+            let at = std::ptr::from_mut(&mut out).expose_provenance() as u64;
+            assert_eq!(call("posix_memalign", [at, align, 100, 0, 0, 0]), 22);
+            assert_eq!(out, 0xDEAD);
         }
     }
 
