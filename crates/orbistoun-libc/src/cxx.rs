@@ -46,7 +46,7 @@ fn stop_for(what: &str, detail: Option<String>) -> u64 {
         || format!("the guest reached {what}, which does not return"),
         |text| format!("the guest reached {what}: {text}"),
     );
-    eprintln!("orbistoun: {line}");
+    tracing::warn!("{line}");
     orbistoun_core::klog::note(&line);
     orbistoun_core::stop(orbistoun_core::StopReason::Aborted, 0)
 }

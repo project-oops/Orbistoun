@@ -398,6 +398,7 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
         // The third channel a guest can speak through, kept beside the other two so the run
         // report does not depend on which one a title happened to pick (D658).
         orbistoun_core::said::note(bytes);
+        // Guest output, not a log: the guest's own write, so it stays a direct write.
         let mut stderr = std::io::stderr();
         let _ = stderr.write_all(bytes);
         // Flushed per write, because a probe's output is only useful if it survives the

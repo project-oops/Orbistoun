@@ -1153,9 +1153,9 @@ fn allocate_main_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // to say so (CLAUDE.md principle 3). PPSA04263 is why: it asks for one span, is
         // refused, and faults on the next instruction, and nothing in the run said whether the
         // pool was short or the alignment was impossible.
-        eprintln!(
+        tracing::warn!(
             concat!(
-                "orbistoun: sceKernelAllocateMainDirectMemory refused {:#x} at alignment {:#x} ",
+                "sceKernelAllocateMainDirectMemory refused {:#x} at alignment {:#x} ",
                 "(asked {:#x}) - largest placeable span is {:#x}, {:#x} free in total, across ",
                 "{} region(s): {}"
             ),
@@ -6203,8 +6203,12 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             }
             None => "which nothing here implements".to_owned(),
         };
+        if address.is_some() {
+            tracing::debug!("the guest asked for the address of {name} - {verdict}");
+        } else {
+            tracing::warn!("the guest asked for the address of {name} - {verdict}");
+        }
         let line = format!("orbistoun: the guest asked for the address of {name} - {verdict}");
-        eprintln!("{line}");
         // **And to the kernel log**, which is what `klogsrv` forwards. A name the guest could
         // not resolve is the kernel talking about the process, which is exactly what belongs
         // there (D389).
@@ -6257,9 +6261,10 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn send_notification_request(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "orbistoun: the guest asked to show a notification ({} bytes at {:#x}) - accepted, and the message is not decoded because the structure is not published",
-            args[2], args[1]
+        tracing::info!(
+            "the guest asked to show a notification ({} bytes at {:#x}) - accepted, and the message is not decoded because the structure is not published",
+            args[2],
+            args[1]
         );
     }
     OK
@@ -6352,8 +6357,8 @@ fn pthread_exit(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if thread::current() == thread::adopt("main") {
         orbistoun_core::stop(orbistoun_core::StopReason::Exited, args[0])
     } else {
-        eprintln!(
-            "orbistoun: a guest thread ended itself with pthread_exit - parked rather than unwound, because nothing here can unwind guest frames"
+        tracing::warn!(
+            "a guest thread ended itself with pthread_exit - parked rather than unwound, because nothing here can unwind guest frames"
         );
         loop {
             std::thread::park();
@@ -7038,10 +7043,10 @@ fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if entry < MOST_PATHS_REPORTED {
             match answer {
                 Some((id, size)) => {
-                    eprintln!("orbistoun:   the index has {path} as entry {id}, {size} byte(s)");
+                    tracing::debug!("the index has {path} as entry {id}, {size} byte(s)");
                 }
                 None => {
-                    eprintln!("orbistoun:   the index does not name {path}; answered unresolved");
+                    tracing::debug!("the index does not name {path}; answered unresolved");
                 }
             }
             paths.push(path);
@@ -7082,8 +7087,8 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         .filter_map(|i| unsafe { guest::read_u64(buffer + i * 8) })
         .map(|w| format!("{w:#x}"))
         .collect();
-    eprintln!(
-        "orbistoun: the guest submitted an asynchronous file command buffer at {buffer:#x} - first words {}",
+    tracing::warn!(
+        "the guest submitted an asynchronous file command buffer at {buffer:#x} - first words {}",
         words.join(" ")
     );
     // **Where the non-zero bytes actually are.** The header claims one command of twenty bytes
@@ -7101,10 +7106,7 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     }
     if !nonzero.is_empty() {
-        eprintln!(
-            "orbistoun:   non-zero words around it: {}",
-            nonzero.join(" ")
-        );
+        tracing::debug!("non-zero words around it: {}", nonzero.join(" "));
     }
     // **The pointer at `+0x10`, checked in the run that produced it.** It was read as unmapped
     // once, from an address typed in out of a *previous* run - and the arena moves between runs
@@ -7127,10 +7129,7 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                 .filter_map(|i| unsafe { guest::read_u64(inner + i * 8) })
                 .map(|w| format!("{w:#x}"))
                 .collect();
-            eprintln!(
-                "orbistoun:   what it points at, {inner:#x}: {}",
-                head.join(" ")
-            );
+            tracing::debug!("what it points at, {inner:#x}: {}", head.join(" "));
             // **The whole storage, not its first eight words.** Every reading so far has looked
             // at the front and concluded it was empty; a command written at an offset would
             // have been invisible to all of them. Scanning says where the bytes are rather
@@ -7150,22 +7149,20 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                 }
             }
             if found.is_empty() {
-                eprintln!(
-                    "orbistoun:   and the first {STORAGE_SCAN_WORDS} words of it are all zero"
-                );
+                tracing::debug!("and the first {STORAGE_SCAN_WORDS} words of it are all zero");
             } else {
-                eprintln!("orbistoun:   non-zero in it: {}", found.join(" "));
+                tracing::debug!("non-zero in it: {}", found.join(" "));
             }
         } else if let Some((start, end)) = region_containing(inner) {
             // **Mapped, and merely not published to the dump.** Two different findings, and
             // this crate is the one that can tell them apart: `region_containing` consults the
             // live map rather than the list something published for diagnostics (D580).
-            eprintln!(
-                "orbistoun:   it points at {inner:#x}, inside a mapping of {start:#x}..{end:#x} that nothing published for reading"
+            tracing::debug!(
+                "it points at {inner:#x}, inside a mapping of {start:#x}..{end:#x} that nothing published for reading"
             );
         } else {
-            eprintln!(
-                "orbistoun:   it points at {inner:#x}, which this run never mapped - the guest is holding a buffer it was not given"
+            tracing::debug!(
+                "it points at {inner:#x}, which this run never mapped - the guest is holding a buffer it was not given"
             );
         }
     }
@@ -7178,7 +7175,7 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// returns, which is how the name was found: forcing three unnamed imports to distinct values
 /// in one run made the printed number name which of them the wrapper was reporting (D587).
 fn apr_wait_command_buffer(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    eprintln!("orbistoun: the guest waited on an asynchronous file command buffer");
+    tracing::warn!("the guest waited on an asynchronous file command buffer");
     u64::from(GuestError::Unimplemented.as_raw())
 }
 /// Reads the last resolved file into the buffer a command header names.
@@ -7194,7 +7191,7 @@ fn apr_wait_command_buffer(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// program, and mixing the two would put an intervention inside something named for observing.
 fn deliver_resolved_file(buffer: u64) {
     let Some(path) = apr::last_resolved() else {
-        eprintln!("orbistoun: asked to deliver a file, and no resolve named one");
+        tracing::warn!("asked to deliver a file, and no resolve named one");
         return;
     };
     // SAFETY: two words of the command header the guest submitted, valid by the call's contract.
@@ -7202,17 +7199,17 @@ fn deliver_resolved_file(buffer: u64) {
     // SAFETY: as above.
     let into = unsafe { guest::read_u64(buffer + 0x10) };
     let (Some(most), Some(into)) = (most, into) else {
-        eprintln!("orbistoun: asked to deliver {path}, and the command header could not be read");
+        tracing::warn!("asked to deliver {path}, and the command header could not be read");
         return;
     };
     // The length shares a word with the count above it, so only the low half is the size.
     let most = most & 0xFFFF_FFFF;
     match apr::deliver(&path, into, most) {
-        Some(got) => eprintln!(
-            "orbistoun: delivered {got} byte(s) of {path} into {into:#x} (up to {most:#x})"
-        ),
+        Some(got) => {
+            tracing::info!("delivered {got} byte(s) of {path} into {into:#x} (up to {most:#x})");
+        }
         None => {
-            eprintln!("orbistoun: asked to deliver {path}, and nothing installed a reader for it");
+            tracing::warn!("asked to deliver {path}, and nothing installed a reader for it");
         }
     }
 }

@@ -183,19 +183,12 @@ const fn primitive_salt(primitive: MeshPrimitive) -> u64 {
 /// any unknown value are **refused by name** rather than drawn as a triangle: assembling a shape
 /// the stream did not ask for is the plausible-output principle 3 forbids, at the last step
 /// before a picture.
-fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, String> {
+fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, PipelineError> {
     match topology {
         PrimitiveTopology::PointList => Ok(MeshPrimitive::Points),
         PrimitiveTopology::LineStrip => Ok(MeshPrimitive::Lines),
         PrimitiveTopology::TriangleStrip => Ok(MeshPrimitive::Triangles),
-        other => Err(format!(
-            concat!(
-                "the draw's primitive topology is {}, which has no mesh-primitive shape to ",
-                "assemble - a point, line or triangle is emitted, and this is refused rather ",
-                "than drawn as one of them"
-            ),
-            other.label()
-        )),
+        other => Err(PipelineError::NoMeshPrimitive(other)),
     }
 }
 
@@ -1180,7 +1173,9 @@ impl Pipeline {
         // a stream that set no topology draws the measured triangle (`-0c58`).
         let primitive = if host_stage == Stage::Mesh {
             match topology {
-                Some(t) => mesh_primitive_of(t).map_err(PrepareFailure::Resolved)?,
+                Some(t) => {
+                    mesh_primitive_of(t).map_err(|e| PrepareFailure::Resolved(e.to_string()))?
+                }
                 None => MeshPrimitive::default(),
             }
         } else {
@@ -2028,6 +2023,12 @@ pub enum PipelineError {
     /// A built-in table failed to load.
     #[error("a built-in table failed to load: {0}")]
     Table(String),
+    /// A draw's primitive topology has no mesh-primitive shape to assemble.
+    #[error(
+        "the draw's primitive topology is {}, which has no mesh-primitive shape to assemble - a point, line or triangle is emitted, and this is refused rather than drawn as one of them",
+        .0.label()
+    )]
+    NoMeshPrimitive(PrimitiveTopology),
 }
 
 /// The stage a register name refers to.
@@ -2410,12 +2411,16 @@ mod tests {
             Ok(MeshPrimitive::Triangles)
         );
 
-        let rect = mesh_primitive_of(PrimitiveTopology::RectangleList).unwrap_err();
+        let rect = mesh_primitive_of(PrimitiveTopology::RectangleList)
+            .unwrap_err()
+            .to_string();
         assert!(
             rect.contains("rectangle list") && rect.contains("refused"),
             "a rectangle list is refused by name, not drawn as a triangle: {rect}"
         );
-        let other = mesh_primitive_of(PrimitiveTopology::Other(9)).unwrap_err();
+        let other = mesh_primitive_of(PrimitiveTopology::Other(9))
+            .unwrap_err()
+            .to_string();
         assert!(
             other.contains("VGT_GS_OUTPRIM_TYPE 9"),
             "an unmeasured value is refused by its raw field: {other}"

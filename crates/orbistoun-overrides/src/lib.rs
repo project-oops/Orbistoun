@@ -31,6 +31,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Why a compatibility record could not be written.
+#[derive(Debug, thiserror::Error)]
+pub enum OverridesError {
+    /// The record could not be rendered as TOML.
+    #[error("serialising TOML: {0}")]
+    Toml(#[from] toml::ser::Error),
+}
+
 /// How the worker words a guest's deliberate exit, and the one string that identifies it.
 ///
 /// **A coupling, named once and guarded elsewhere.** `orbistoun-core::StopReason::Exited` produces
@@ -962,8 +970,12 @@ impl OverrideFile {
     }
 
     /// Serialises to TOML.
-    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
-        toml::to_string_pretty(self)
+    ///
+    /// # Errors
+    ///
+    /// When the record cannot be serialised.
+    pub fn to_toml(&self) -> Result<String, OverridesError> {
+        Ok(toml::to_string_pretty(self)?)
     }
 
     /// How to frame a fault this title just hit: whose gap it is, by the hardware ground truth

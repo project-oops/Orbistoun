@@ -529,12 +529,12 @@ impl VulkanBackend {
         ) {
             Ok(snapshot) => snapshot,
             Err(e) => {
-                eprintln!("orbistoun: a frame snapshot could not be made: {e:?}");
+                tracing::warn!("a frame snapshot could not be made: {e:?}");
                 return None;
             }
         };
         if let Err(e) = resident.snapshot_into(&snapshot) {
-            eprintln!("orbistoun: a resident frame could not be kept: {e:?}");
+            tracing::warn!("a resident frame could not be kept: {e:?}");
             self.release_snapshot(snapshot);
             return None;
         }
@@ -562,7 +562,7 @@ impl VulkanBackend {
         match pixels {
             Ok(pixels) => Some(pixels),
             Err(e) => {
-                eprintln!("orbistoun: a kept frame could not be read: {e:?}");
+                tracing::warn!("a kept frame could not be read: {e:?}");
                 None
             }
         }
@@ -578,11 +578,11 @@ impl VulkanBackend {
     /// The frame the most recent `Draw` rendered, or [`None`] if none has.
     ///
     /// A frame drawn into a resident attachment is read back here, once, the first time it is asked
-    /// for after a draw (worklog 839); `None` too when that readback fails, which is said on stderr.
+    /// for after a draw (worklog 839); `None` too when that readback fails, which is logged.
     pub fn last_frame(&mut self) -> Option<&framebuffer::Pixels> {
         let target = self.last_drawn?.0;
         if let Err(e) = self.read_back(target) {
-            eprintln!("orbistoun: a resident frame could not be read back: {e:?}");
+            tracing::warn!("a resident frame could not be read back: {e:?}");
             return None;
         }
         self.contents.get(&target)

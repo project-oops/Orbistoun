@@ -109,7 +109,7 @@ pub fn stream_events_to(sink: fn(&Event)) {
 /// launches it (worklog 842). With no front end listening it is logged, so a CLI run still says the
 /// launcher got as far as asking.
 pub fn request_launch(title_id: &str) {
-    eprintln!("[launch] the guest asked to start {title_id}");
+    tracing::info!("[launch] the guest asked to start {title_id}");
     if let Some(sink) = LIVE_EVENTS.get() {
         sink(&Event::LaunchApp {
             title_id: title_id.to_owned(),
@@ -157,7 +157,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // honoured, not this window. A frame due in the window comes with a device copy of its own.
     let (written, shown) = orbistoun_gpu::agc_driver::write_back_at_this_flip_showing(due);
     if !written {
-        eprintln!("orbistoun: a drawn frame could not be written back at the flip");
+        tracing::warn!("a drawn frame could not be written back at the flip");
     }
     report_perf(LIVE_EVENTS.get().copied());
     let Some((sink, dir)) = listening.filter(|_| due) else {
@@ -261,7 +261,7 @@ fn emit_presented((width, height): (u32, u32), bytes: &[u8], sink: fn(&Event), d
     let sequence = PRESENT_BASE + SHOWN.fetch_add(1, Ordering::Relaxed) % PRESENT_RING;
     match write_frame(dir, sequence, width, height, FrameFormat::Rgba8, bytes) {
         Ok(event) => sink(&event),
-        Err(e) => eprintln!("orbistoun: a presented frame could not be written: {e}"),
+        Err(e) => tracing::warn!("a presented frame could not be written: {e}"),
     }
 }
 
@@ -302,7 +302,7 @@ fn report_perf(sink: Option<fn(&Event)>) {
                 format!("{} {:.1} ms/{counted}", span.label(), ms(spent))
             })
             .collect();
-        eprintln!("orbistoun: perf detail: {}", spans.join(", "));
+        tracing::info!("perf detail: {}", spans.join(", "));
     }
     let report = orbistoun_proto::PerfReport {
         window_ms: window.as_secs_f64() * 1000.0,
@@ -330,8 +330,8 @@ fn report_perf(sink: Option<fn(&Event)>) {
             .filter(|(_, ms)| *ms > 0.0)
             .map(|(name, ms)| format!("{name} {ms:.0}"))
             .collect();
-        eprintln!(
-            "orbistoun: perf over {:.0} ms: {} flips, {} submissions, {} draws; ms: {}",
+        tracing::info!(
+            "perf over {:.0} ms: {} flips, {} submissions, {} draws; ms: {}",
             report.window_ms,
             report.flips,
             report.submissions,
@@ -350,8 +350,8 @@ fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Even
         .flatten()
     else {
         REFUSED.call_once(|| {
-            eprintln!(
-                "orbistoun: a flipped buffer at {address:#x} ({width}x{height}, format {:#x}, tiling {}) is not one this shows - no live frames",
+            tracing::warn!(
+                "a flipped buffer at {address:#x} ({width}x{height}, format {:#x}, tiling {}) is not one this shows - no live frames",
                 shape.format, shape.tiling
             );
         });
@@ -505,8 +505,8 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     let outcome = match perf::span(perf::Span::Drive, || drive(backend, submission)) {
         Ok(outcome) => outcome,
         Err(why) => {
-            eprintln!(
-                "orbistoun: a submission's draws could not run at submit, in {} ms: {why}",
+            tracing::warn!(
+                "a submission's draws could not run at submit, in {} ms: {why}",
                 started.elapsed().as_millis()
             );
             write_failed_submission(submission);
@@ -524,8 +524,8 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
         if !trace && outcome.refused == 0 {
             return;
         }
-        eprintln!(
-            "orbistoun: a submission's draws ran at submit: {} command(s), {} refused, in {} ms{}",
+        tracing::info!(
+            "a submission's draws ran at submit: {} command(s), {} refused, in {} ms{}{}",
             outcome.executed,
             outcome.refused,
             started.elapsed().as_millis(),
@@ -533,13 +533,11 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
                 ""
             } else {
                 " - not written back"
-            }
+            },
+            refusal_lines(&outcome.refusals)
         );
     });
     if outcome.refused > 0 {
-        for (why, count) in &outcome.refusals {
-            eprintln!("  refused {count:>5}  {why}");
-        }
         return None;
     }
     // A dumped submission's frame is read now, for its snapshot (worklog 837); every other frame stays
@@ -549,7 +547,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
         snapshot_frame(number, frame);
     }
     if let Err(e) = perf::span(perf::Span::SubmitDraws, || backend.submit_draws()) {
-        eprintln!("orbistoun: a submission's draws could not be sent to the device: {e:?}");
+        tracing::warn!("a submission's draws could not be sent to the device: {e:?}");
         return None;
     }
     Some(())
@@ -666,7 +664,7 @@ fn keep_latest_frame(frame: &Pixels) {
         && let Some(dir) = frames_dir()
         && let Err(e) = std::fs::write(dir.join(LATEST_DRAWN_FRAME), &frame.bytes)
     {
-        eprintln!("orbistoun: the drawn frame could not be kept: {e}");
+        tracing::warn!("the drawn frame could not be kept: {e}");
     }
 }
 
@@ -689,7 +687,7 @@ fn snapshot_frame(number: u64, frame: &Pixels) {
             h.div_ceil(4)
         );
         if let Err(e) = std::fs::write(dir.join(name), small) {
-            eprintln!("orbistoun: the drawn frame snapshot could not be kept: {e}");
+            tracing::warn!("the drawn frame snapshot could not be kept: {e}");
         }
     }
 }
@@ -750,11 +748,11 @@ fn write_submission(submission: &Submission, name: &str) {
         Ok(())
     });
     match written {
-        Ok(()) => eprintln!(
-            "orbistoun: the {name} submission's commands and {} module(s) are in {name}-submission.txt and {name}-module-*.spv in the traces directory",
+        Ok(()) => tracing::info!(
+            "the {name} submission's commands and {} module(s) are in {name}-submission.txt and {name}-module-*.spv in the traces directory",
             submission.modules.len()
         ),
-        Err(e) => eprintln!("orbistoun: the {name} submission could not be written: {e}"),
+        Err(e) => tracing::warn!("the {name} submission could not be written: {e}"),
     }
 }
 
@@ -790,14 +788,14 @@ pub fn render_and_log_last_submission() -> Option<Event> {
         return match write_frame(dir, sequence, width, height, FrameFormat::Rgba8, &bytes) {
             Ok(event) => {
                 if let Event::Frame { region, .. } = &event {
-                    eprintln!(
-                        "orbistoun: the last submission's frame, drawn at submit, is {region} in the traces directory"
+                    tracing::info!(
+                        "the last submission's frame, drawn at submit, is {region} in the traces directory"
                     );
                 }
                 Some(event)
             }
             Err(e) => {
-                eprintln!("orbistoun: the executed frame could not be written: {e}");
+                tracing::warn!("the executed frame could not be written: {e}");
                 None
             }
         };
@@ -829,19 +827,25 @@ fn frames_dir() -> Option<&'static Path> {
 /// device or no frame. The run path's whole step, taking the directory as an argument so a test can
 /// hand it a temporary one and read the frame back by the descriptor.
 pub fn render_submission_to(submission: &Submission, frames_dir: Option<&Path>) -> Option<Event> {
-    for line in command_summary(&submission.commands) {
-        eprintln!("  {line}");
-    }
+    let mut said = command_summary(&submission.commands)
+        .iter()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     // The textures the draws name - what binding each draw's own texture needs (worklog 827).
     let textures = &submission.report.textures;
     if !textures.is_empty() {
-        eprintln!("  {} distinct texture(s) named:", textures.len());
+        let _ = write!(said, "\n  {} distinct texture(s) named:", textures.len());
         for texture in textures.iter().take(SUMMARY_LINES) {
-            eprintln!(
-                "    {}x{} format {} {:?} at {:#x}",
+            let _ = write!(
+                said,
+                "\n    {}x{} format {} {:?} at {:#x}",
                 texture.width, texture.height, texture.format, texture.tiling, texture.base
             );
         }
+    }
+    if !said.is_empty() {
+        tracing::info!("{}", said.trim_start_matches('\n'));
     }
     let started = std::time::Instant::now();
     let rendered = render(submission);
@@ -853,8 +857,8 @@ pub fn render_submission_to(submission: &Submission, frames_dir: Option<&Path>) 
             match write_frame(dir, sequence, width, height, FrameFormat::Rgba8, bytes) {
                 Ok(event) => Some(event),
                 Err(e) => {
-                    eprintln!(
-                        "orbistoun: the rendered frame could not be written to {}: {e}",
+                    tracing::warn!(
+                        "the rendered frame could not be written to {}: {e}",
                         dir.display()
                     );
                     None
@@ -869,25 +873,23 @@ pub fn render_submission_to(submission: &Submission, frames_dir: Option<&Path>) 
 
 fn log_outcome(outcome: &RenderOutcome, took: std::time::Duration, written: Option<&Event>) {
     match &outcome.device {
-        None => eprintln!(
-            "orbistoun: a submission was made, but this build has no graphics device to render it"
+        None => tracing::warn!(
+            "a submission was made, but this build has no graphics device to render it"
         ),
         Some(device) => {
             let frame = match outcome.frame {
                 Some((w, h)) => format!(", frame {w}x{h}"),
                 None => String::new(),
             };
-            eprintln!(
-                "orbistoun: a submission reached the {device} backend: {} command(s) driven, {} refused{frame}, in {} ms",
+            tracing::info!(
+                "a submission reached the {device} backend: {} command(s) driven, {} refused{frame}, in {} ms{}",
                 outcome.executed,
                 outcome.refused,
                 took.as_millis(),
+                refusal_lines(&outcome.refusals)
             );
-            for (why, count) in &outcome.refusals {
-                eprintln!("  refused {count:>5}  {why}");
-            }
             if let Some(Event::Frame { region, .. }) = written {
-                eprintln!("orbistoun: the rendered frame is {region} in the traces directory");
+                tracing::info!("the rendered frame is {region} in the traces directory");
             }
         }
     }
@@ -944,6 +946,15 @@ fn command_summary(commands: &[orbistoun_gpu::RenderCommand]) -> Vec<String> {
     lines
 }
 
+/// Each refusal reason and its count, one indented line apiece, for the end of an outcome line.
+fn refusal_lines(refusals: &[(&'static str, usize)]) -> String {
+    let mut lines = String::new();
+    for (why, count) in refusals {
+        let _ = write!(lines, "\n  refused {count:>5}  {why}");
+    }
+    lines
+}
+
 /// How many summary lines a submission's commands print before the rest is elided.
 const SUMMARY_LINES: usize = 12;
 
@@ -964,9 +975,12 @@ fn log_execution() {
         ),
         Some(other) => format!("stopped: {other:?}"),
     };
-    eprintln!(
-        "orbistoun: the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}",
-        record.completed, record.submissions, record.drawn, record.bytes_written,
+    tracing::info!(
+        "the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}",
+        record.completed,
+        record.submissions,
+        record.drawn,
+        record.bytes_written,
     );
 }
 

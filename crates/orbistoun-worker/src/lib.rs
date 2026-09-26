@@ -26,6 +26,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use orbistoun_proto::codec::{read_message, write_message};
 use orbistoun_proto::{Event, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
 pub mod device_thread;
+mod error;
 pub mod experiment;
 pub mod fault;
 pub mod frame_region;
@@ -42,6 +43,8 @@ use orbistoun_loader::Image;
 use orbistoun_loader::process;
 use orbistoun_mem::stack::{DEFAULT_STACK_SIZE, GuestStack};
 use orbistoun_service::Service;
+
+pub use error::Error;
 
 /// Hidden flag that puts a shim into worker mode.
 ///
@@ -578,7 +581,7 @@ fn link_the_title(
     service: &Service,
     path: &Path,
     symbols: &orbistoun_nid::SymbolDbFile,
-) -> Result<orbistoun_service::LinkedTitle, String> {
+) -> Result<orbistoun_service::LinkedTitle, Error> {
     service
         .link_title_modules(
             path,
@@ -589,7 +592,7 @@ fn link_the_title(
             },
             symbols,
         )
-        .map_err(|e| format!("could not link the title: {e}"))
+        .map_err(Error::Link)
 }
 
 /// The symbol database this run names imports with.
@@ -698,7 +701,7 @@ fn describe_title_modules(title: &orbistoun_service::LinkedTitle) {
     // missing implementation for a month. "Six of six bound" and silence are different
     // statements and only one of them is evidence (D640).
     for line in title.binding.lines() {
-        eprintln!("{line}");
+        tracing::info!("{line}");
         orbistoun_core::klog::note(&line);
     }
     report::name_bound_imports(title.bound.keys().map(|i| *i as usize).collect());
@@ -923,7 +926,7 @@ fn prepare_diagnostics(
     for name in orbistoun_env::unknown() {
         // A command-line flag typed wrongly is refused; a variable typed wrongly is simply
         // absent, and the run reports an ordinary result. Saying so is the only defence.
-        eprintln!("orbistoun: {name} is not a diagnostic this build understands - ignored");
+        tracing::warn!("{name} is not a diagnostic this build understands - ignored");
     }
     report::record_conditions(orbistoun_report::trace::Conditions {
         limit_seconds: limits.seconds,
@@ -1054,13 +1057,13 @@ fn prepare_diagnostics(
             matched += hits;
         }
         for name in &unmatched {
-            eprintln!("orbistoun: ORBISTOUN_WRITE matched no import called {name:?}");
+            tracing::warn!("ORBISTOUN_WRITE matched no import called {name:?}");
         }
         if matched == 0 {
             // Said out loud rather than left to be inferred from an unchanged run. This is
             // the shape D187 and D191 both took: an experiment that never reached the thing
             // under test, reporting no change and being believed.
-            eprintln!("orbistoun: nothing was planted");
+            tracing::warn!("nothing was planted");
         } else {
             orbistoun_thunk::install_forced_writes(
                 writes.into_iter().map(Vec::into_boxed_slice).collect(),
@@ -1111,7 +1114,7 @@ fn write_process_image(
     stack: &GuestStack,
     module: &str,
     settings: &process::EntrySettings,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let mut auxiliary = vec![
         process::AuxEntry {
             kind: process::aux::AT_ENTRY,
@@ -1151,13 +1154,10 @@ fn write_process_image(
     };
 
     let built = process::build(stack.initial_pointer(), stack.len(), &description)
-        .ok_or_else(|| "the description does not fit in the guest stack".to_owned())?;
+        .ok_or(Error::StackTooSmall)?;
 
     let Ok(at) = usize::try_from(built.stack_pointer) else {
-        return Err(format!(
-            "stack pointer {:#x} is not addressable",
-            built.stack_pointer
-        ));
+        return Err(Error::StackPointer(built.stack_pointer));
     };
     // SAFETY: `built.stack_pointer` and the bytes above it lie inside `stack`, which was
     // just reserved as mapped, writable guest memory - `process::build` refuses rather
@@ -1184,7 +1184,7 @@ fn write_process_image(
 /// # Errors
 ///
 /// When the run configuration is malformed, or the protocol stream fails.
-pub fn serve_as_worker_process() -> Result<(), String> {
+pub fn serve_as_worker_process() -> Result<(), Error> {
     // Real paths, not the default of none. The worker is the only process that ever sees
     // a call trace, and a trace not written where the shims look for it may as well not
     // exist (D077).
@@ -1193,14 +1193,14 @@ pub fn serve_as_worker_process() -> Result<(), String> {
     // A malformed file fails the run instead of falling back quietly: a setting silently
     // ignored is indistinguishable from a setting that had no effect, and observing the
     // effect is the entire point (D153).
-    let file = orbistoun_service::FileConfig::load(&paths.config_file())
-        .map_err(|e| format!("reading the run configuration: {e}"))?;
+    let file =
+        orbistoun_service::FileConfig::load(&paths.config_file()).map_err(Error::Configuration)?;
     // What this machine measured, folded in **underneath** what a person wrote. A separate
     // file so deleting it is a complete undo and a diff keeps the two apart; absorbed rather
     // than merged so a deliberate entry always wins (D296). The policy is *derived* from the
     // measurements rather than stored, which is what keeps the file submittable (D297).
-    let learned = orbistoun_hle::learned::Learned::load(&paths.learned_file())
-        .map_err(|e| format!("reading what was learned: {e}"))?;
+    let learned =
+        orbistoun_hle::learned::Learned::load(&paths.learned_file()).map_err(Error::Learned)?;
     let mut policy = file.policy;
     policy.absorb(learned.policy());
     // **And the regions the shipped knowledge base declares, under both of the above.** A
@@ -1220,8 +1220,8 @@ pub fn serve_as_worker_process() -> Result<(), String> {
     // Read here rather than sent over the protocol, for the reason the trace path is: the
     // worker is a separate process and reads its own files, so a setting cannot arrive
     // half-applied or not at all because a message was dropped.
-    let mut settings = orbistoun_shell::Settings::load(&paths.shell_file())
-        .map_err(|e| format!("reading what the console is set to: {e}"))?;
+    let mut settings =
+        orbistoun_shell::Settings::load(&paths.shell_file()).map_err(Error::ConsoleSettings)?;
     // **A named profile, when one was asked for, replaces the configured machine for this run.**
     // It is validated in the CLI before the worker is spawned, so an unknown name never reaches
     // here; a name that somehow does not resolve leaves the configured machine untouched rather
@@ -1229,7 +1229,7 @@ pub fn serve_as_worker_process() -> Result<(), String> {
     if let Ok(profile) = std::env::var("ORBISTOUN_MACHINE_PROFILE") {
         if let Some(machine) = orbistoun_shell::profiles::machine(&profile) {
             settings.machine = machine;
-            let _ = writeln!(io::stderr(), "orbistoun: presenting profile {profile}");
+            tracing::info!("presenting profile {profile}");
         }
     }
     // **Which machine this run presents itself as**, published to the layer that answers a
@@ -1239,7 +1239,7 @@ pub fn serve_as_worker_process() -> Result<(), String> {
         "orbistoun: presenting a {} machine",
         settings.machine.describe()
     );
-    let _ = writeln!(io::stderr(), "{machine}");
+    tracing::info!("presenting a {} machine", settings.machine.describe());
     // **And to the kernel log while the guest can still read it.** The reports that feed it
     // otherwise all run after the guest has stopped, so a client connecting to `klogsrv`
     // found the device present and permanently empty - which is the same experience as it
@@ -1255,14 +1255,12 @@ pub fn serve_as_worker_process() -> Result<(), String> {
     // before this existed, with those accesses faulting as unmapped.
     if settings.machine.firmware != 0 {
         if let Err(e) = orbistoun_firmware::present() {
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: could not stand up the firmware skeleton: {e} - firmware accesses will fault as unmapped"
+            tracing::warn!(
+                "could not stand up the firmware skeleton: {e} - firmware accesses will fault as unmapped"
             );
         } else {
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: firmware skeleton mapped at {:#x}, base handed to guests at {:#x}",
+            tracing::debug!(
+                "firmware skeleton mapped at {:#x}, base handed to guests at {:#x}",
                 orbistoun_firmware::FIRMWARE_BASE,
                 orbistoun_firmware::handed_base()
             );
@@ -1288,23 +1286,18 @@ pub fn serve_as_worker_process() -> Result<(), String> {
             Some(gadget) => {
                 let trampoline = compact_trampoline(gadget);
                 if let Err(e) = orbistoun_firmware::present_console_gadget(&trampoline) {
-                    let _ = writeln!(
-                        io::stderr(),
-                        "orbistoun: could not serve the console syscall gadget: {e} - a payload's fallback syscall path will fault as unmapped"
+                    tracing::warn!(
+                        "could not serve the console syscall gadget: {e} - a payload's fallback syscall path will fault as unmapped"
                     );
                 } else {
-                    let _ = writeln!(
-                        io::stderr(),
-                        "orbistoun: console syscall gadget served at {:#x}",
+                    tracing::debug!(
+                        "console syscall gadget served at {:#x}",
                         orbistoun_firmware::console_gadget_address()
                     );
                 }
             }
             None => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "orbistoun: no syscall gadget built, cannot serve the console gadget address"
-                );
+                tracing::warn!("no syscall gadget built, cannot serve the console gadget address");
             }
         }
     }
@@ -1331,6 +1324,8 @@ pub fn serve_as_worker_process() -> Result<(), String> {
     // that flips it, mid-run, which a lock held for the whole run would block for good. Each
     // message is written in one call (`write_message`), and `Stdout` locks per call, so two
     // writers interleave only between whole lines.
+    //
+    // Stdout is the shim protocol, not a log: protocol messages only, never diagnostics.
     render::stream_events_to(|event| {
         let _ = write_message(&mut io::stdout(), event);
     });
@@ -1340,7 +1335,7 @@ pub fn serve_as_worker_process() -> Result<(), String> {
         &service,
         end_orphaned_worker,
     )
-    .map_err(|e| format!("worker loop: {e}"))
+    .map_err(Error::WorkerLoop)
 }
 
 /// Exit status of a worker that ended because its parent went away (D715).
@@ -1360,9 +1355,8 @@ pub const EXIT_ORPHANED: i32 = 3;
 /// One was found an hour after its window closed, still holding the release executable open so
 /// the next build could not replace it.
 fn end_orphaned_worker() {
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: worker: the control channel closed without a shutdown - the parent is gone, ending this worker and any run in it"
+    tracing::warn!(
+        "worker: the control channel closed without a shutdown - the parent is gone, ending this worker and any run in it"
     );
     std::process::exit(EXIT_ORPHANED);
 }
@@ -1418,9 +1412,8 @@ fn unnameable_imports(
         .and_then(|text| orbistoun_nid::SymbolDbFile::from_json(&text).ok());
     let file = supplied.unwrap_or_else(orbistoun_nid::SymbolDbFile::builtin);
     let Ok(labels) = service.import_labels_with(bytes, &file) else {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: asked to refuse unnameable imports, but the import list could not be read - nothing is refused"
+        tracing::warn!(
+            "asked to refuse unnameable imports, but the import list could not be read - nothing is refused"
         );
         return None;
     };
@@ -1437,9 +1430,8 @@ fn unnameable_imports(
         })
         .map(|(index, _)| index)
         .collect();
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: refusing {} of {} imports this build cannot name, so a guest can tell a symbol that exists from one that does not",
+    tracing::info!(
+        "refusing {} of {} imports this build cannot name, so a guest can tell a symbol that exists from one that does not",
         refused.len(),
         labels.len()
     );
@@ -1476,15 +1468,15 @@ fn force_returns(wanted: &[(experiment::Target, u64)], count: usize) {
             }
         }
         if hits == 0 {
-            eprintln!(
-                "orbistoun: ORBISTOUN_RETURN matched no import called {:?}",
+            tracing::warn!(
+                "ORBISTOUN_RETURN matched no import called {:?}",
                 target.as_str()
             );
         }
         matched += hits;
     }
     if matched == 0 {
-        eprintln!("orbistoun: no import will answer a forced value");
+        tracing::warn!("no import will answer a forced value");
     } else {
         orbistoun_thunk::install_forced_returns(forced);
     }
@@ -1530,7 +1522,7 @@ fn apply_memory_diagnostics(
         // Said out loud with the count. A fill that matched no writable segment would
         // otherwise be a run that reported an ordinary result, which is the failure every
         // diagnostic here is built to avoid.
-        eprintln!("orbistoun: filled {filled} bytes of static data with {byte:#04x}");
+        tracing::info!("filled {filled} bytes of static data with {byte:#04x}");
     }
 
     // Reserved before anything reads it, and **leaked on purpose**: an `AddressSpace`
@@ -1540,13 +1532,13 @@ fn apply_memory_diagnostics(
         let mut space = orbistoun_mem::AddressSpace::new();
         match space.reserve(base, len, orbistoun_mem::Protection::READ_WRITE) {
             Ok(_) => {
-                eprintln!("orbistoun: reserved {base:#x}+{len:#x} for this run only");
+                tracing::info!("reserved {base:#x}+{len:#x} for this run only");
                 std::mem::forget(space);
             }
             // Said out loud rather than left to be inferred from an unchanged fault. A
             // reservation that failed and a region the guest did not want look identical
             // from the fault address alone (D224).
-            Err(e) => eprintln!("orbistoun: could not reserve {base:#x}+{len:#x}: {e}"),
+            Err(e) => tracing::warn!("could not reserve {base:#x}+{len:#x}: {e}"),
         }
     }
 
@@ -1578,12 +1570,12 @@ fn apply_memory_diagnostics(
                         value,
                     );
                 }
-                eprintln!("orbistoun: poked {value:#x} into {at:#x}");
+                tracing::info!("poked {value:#x} into {at:#x}");
             }
         } else {
             // Said out loud. A poke that landed nowhere would read as a run that changed
             // nothing, which is the failure every diagnostic here is built to avoid.
-            eprintln!("orbistoun: {at:#x} is not inside a writable segment - nothing poked");
+            tracing::warn!("{at:#x} is not inside a writable segment - nothing poked");
         }
     }
 }
@@ -1610,7 +1602,7 @@ fn apply_memory_diagnostics(
 fn install_reporting(
     stack: &GuestStack,
     experiments: &experiment::Experiments,
-) -> Result<bool, String> {
+) -> Result<bool, Error> {
     report::describe_region(
         report::Region::Stack,
         stack.guard(),
@@ -1627,9 +1619,9 @@ fn install_reporting(
     let armed = experiments
         .watchpoints()
         .and_then(|requests| watchpoint::arm(&requests))
-        .map_err(|why| format!("the watchpoints could not be armed: {why}"))?;
+        .map_err(|why| Error::Watchpoints(Box::new(why)))?;
     if !armed.is_empty() {
-        eprintln!("orbistoun: watching {armed}");
+        tracing::info!("watching {armed}");
     }
     Ok(reporting)
 }
@@ -1693,9 +1685,8 @@ fn overridden_entry_argument() -> Option<process::EntryArgument> {
         // that behaves exactly like a run under none is the shape that made the handoff
         // instrument wrong for as long as it was.
         Some(other) => {
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: {other} is not an entry argument this knows - the configured one stands"
+            tracing::warn!(
+                "{other} is not an entry argument this knows - the configured one stands"
             );
             None
         }
@@ -1935,31 +1926,27 @@ struct Filled {
 /// Says what the fill did, because a run that quietly initialised a guest differently from
 /// how it says it did is worth nothing.
 fn report_globals_filled(what: &Filled) {
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: entering past the runtime, so {} of {} named globals were resolved the way it would have resolved them",
+    tracing::info!(
+        "entering past the runtime, so {} of {} named globals were resolved the way it would have resolved them",
         what.resolved,
         what.total
     );
     if what.ambiguous > 0 {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: {} were left alone because their names are not unique - a name that names several slots does not name a function",
+        tracing::warn!(
+            "{} were left alone because their names are not unique - a name that names several slots does not name a function",
             what.ambiguous
         );
     }
     if !what.gadget_names.is_empty() {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: {} named by this run hold a stub that reports how it was called",
+        tracing::info!(
+            "{} named by this run hold a stub that reports how it was called",
             what.gadget_names.len()
         );
         orbistoun_abi::enter::install_global_names(what.gadget_names.clone());
     }
     for (says, name) in &what.marked {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: {name} names nothing implemented - it holds {says:#x}, so a use of it faults on an address that says which it was"
+        tracing::info!(
+            "{name} names nothing implemented - it holds {says:#x}, so a use of it faults on an address that says which it was"
         );
     }
 }
@@ -2016,10 +2003,7 @@ extern "sysv64" fn unimplemented_libkernel_export(vaddr: u64) -> u64 {
         })
         .unwrap_or("unknown");
     if first_time_unimplemented_export(vaddr) {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: payload called unimplemented libkernel export {name} at vaddr {vaddr:#x}"
-        );
+        tracing::warn!("payload called unimplemented libkernel export {name} at vaddr {vaddr:#x}");
         orbistoun_core::klog::note(&format!(
             "orbistoun: unimplemented libkernel export {name} at {vaddr:#x}"
         ));
@@ -2109,9 +2093,8 @@ fn libkernel_word0() -> Option<u64> {
     for placement in &plan {
         if let Some((next_name, next_vaddr)) = &placement.collides_with {
             collisions += 1;
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: libkernel {} at {:#x} overruns {next_name} at {next_vaddr:#x}",
+            tracing::warn!(
+                "libkernel {} at {:#x} overruns {next_name} at {next_vaddr:#x}",
                 placement.name,
                 placement.vaddr
             );
@@ -2133,18 +2116,13 @@ fn libkernel_word0() -> Option<u64> {
         };
 
         if let Err(e) = orbistoun_firmware::place_export(placement.vaddr, &code_bytes) {
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: could not lay out libkernel {}: {e}",
-                placement.name
-            );
+            tracing::warn!("could not lay out libkernel {}: {e}", placement.name);
             return None;
         }
     }
 
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: libkernel laid out ({} exports, {collisions} collisions), getpid at {:#x} handed as payload_args[0]",
+    tracing::debug!(
+        "libkernel laid out ({} exports, {collisions} collisions), getpid at {:#x} handed as payload_args[0]",
         plan.len(),
         orbistoun_firmware::getpid_address()
     );
@@ -2157,10 +2135,7 @@ fn libkernel_word0() -> Option<u64> {
 /// no thunk, which would mean no syscall gadget to anchor the whole scheme on.
 fn getpid_anchor_bytes() -> Option<Vec<u8>> {
     let thunk_addr = orbistoun_thunk::name_thunk("getpid").or_else(|| {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: no thunk for getpid, cannot lay out the syscall gadget"
-        );
+        tracing::warn!("no thunk for getpid, cannot lay out the syscall gadget");
         None
     })?;
     let at = usize::try_from(thunk_addr).ok()?;
@@ -2250,9 +2225,8 @@ fn handoff_block(named_fields: &[[u64; 2]]) -> u64 {
     let resolver = libkernel_word0()
         .or_else(|| orbistoun_thunk::name_thunk("sceKernelDlsym"))
         .unwrap_or_else(|| {
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: nothing implements sceKernelDlsym, so the handoff structure has no resolver to offer"
+            tracing::warn!(
+                "nothing implements sceKernelDlsym, so the handoff structure has no resolver to offer"
             );
             0
         });
@@ -2335,9 +2309,8 @@ fn poisoned_field() -> Option<(u64, u64)> {
     let raw = orbistoun_env::HANDOFF_POISON.get()?;
     let field: u64 = raw.trim().parse().ok()?;
     let value = POISON_BASE + field * POISON_STRIDE;
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: handoff field {field} holds {value:#x}, which nothing maps - a fault on it means the runtime used the field"
+    tracing::info!(
+        "handoff field {field} holds {value:#x}, which nothing maps - a fault on it means the runtime used the field"
     );
     Some((field, value))
 }
@@ -2399,9 +2372,8 @@ fn mapped_unknown_fields() -> u64 {
                 base
             }
             Err(e) => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "orbistoun: could not map the handoff structure's unknown fields ({e}) - they stay unmapped markers"
+                tracing::warn!(
+                    "could not map the handoff structure's unknown fields ({e}) - they stay unmapped markers"
                 );
                 base
             }
@@ -2431,9 +2403,8 @@ fn starting_address(image: &Image, settings: &process::EntrySettings) -> u64 {
     };
     let entry = image.base().saturating_add(at);
     if entry != image.entry() {
-        let _ = writeln!(
-            io::stderr(),
-            "orbistoun: entering at {entry:#x} (image+{at:#x}), not the declared entry {:#x}",
+        tracing::info!(
+            "entering at {entry:#x} (image+{at:#x}), not the declared entry {:#x}",
             image.entry()
         );
     }
@@ -2492,12 +2463,10 @@ fn build_tls_block(
     base_arena: u64,
     layout: &orbistoun_loader::tls::TlsLayout,
     tdata: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let alloc = layout.allocation_size();
-    let alloc_len = usize::try_from(alloc)
-        .map_err(|_| "thread-local block does not fit a pointer".to_owned())?;
-    let region = GuestStack::reserve(base_arena, alloc)
-        .map_err(|e| format!("could not reserve a thread-local block: {e}"))?;
+    let alloc_len = usize::try_from(alloc).map_err(|_| Error::TlsTooLarge)?;
+    let region = GuestStack::reserve(base_arena, alloc).map_err(Error::TlsReserve)?;
     let base = region.lowest_usable();
 
     // SAFETY: `region` is freshly reserved and committed read-write at `base` for `alloc_len` bytes,
@@ -2508,8 +2477,7 @@ fn build_tls_block(
 
     // SAFETY: sets the calling thread's `fs` base to the block just built, which is what that
     // thread reads its thread-locals through.
-    unsafe { orbistoun_abi::thread_pointer::install(tp) }
-        .map_err(|e| format!("could not install the thread pointer: {e}"))?;
+    unsafe { orbistoun_abi::thread_pointer::install(tp) }.map_err(Error::ThreadPointerInstall)?;
     match orbistoun_abi::thread_pointer::current() {
         Some(v) if v == tp => {
             // Remembered so the fault handler can restore it after a host context switch drops it
@@ -2517,15 +2485,16 @@ fn build_tls_block(
             tls_backstop::remember(tp);
             Ok(tp)
         }
-        other => Err(format!(
-            "the thread pointer read back as {other:x?}, not the {tp:#x} that was written"
-        )),
+        other => Err(Error::ThreadPointerMismatch {
+            read: other,
+            written: tp,
+        }),
     }
 }
 
-fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, String> {
-    let Some((layout, _index, vaddr)) = orbistoun_loader::tls::layout_of(bytes)
-        .map_err(|e| format!("could not read the thread-local layout: {e}"))?
+fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, Error> {
+    let Some((layout, _index, vaddr)) =
+        orbistoun_loader::tls::layout_of(bytes).map_err(Error::TlsLayout)?
     else {
         // Remembered as "no thread-locals" so a spawned thread's hook has a definite answer.
         let _ = TLS_TEMPLATE.set(None);
@@ -2576,9 +2545,7 @@ fn set_up_this_threads_tls() {
         .saturating_add(unit);
     let base = NEXT_THREAD_TLS.fetch_add(step, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = build_tls_block(base, layout, tdata) {
-        eprintln!(
-            "orbistoun: could not set up thread-local storage for a spawned guest thread: {e}"
-        );
+        tracing::warn!("could not set up thread-local storage for a spawned guest thread: {e}");
     }
 }
 /// Everything the run is put under, planted before the guest starts, and the spans it may touch.
@@ -2597,7 +2564,7 @@ fn arm_diagnostics(
     stack: &mut GuestStack,
     image: &Image,
     module: &str,
-) -> Result<experiment::Experiments, String> {
+) -> Result<experiment::Experiments, Error> {
     // Every diagnostic this run is under. Read here rather than passed in: `enter` is
     // reached long after `prepare_diagnostics`, and threading one struct through four
     // signatures to avoid a second read of the environment would be the worse trade.
@@ -2607,10 +2574,8 @@ fn arm_diagnostics(
     // something deliberately wrote. Refused rather than skipped on failure: a diagnostic
     // that silently did not run answers the question wrongly and confidently (D185).
     if let Some(byte) = experiments.stack_fill {
-        if let Err(e) = stack.fill(byte) {
-            return Err(format!(
-                "could not fill the guest stack with {byte:#04x}: {e}"
-            ));
+        if let Err(source) = stack.fill(byte) {
+            return Err(Error::StackFill { byte, source });
         }
     }
 
@@ -2688,10 +2653,10 @@ fn start_placed_modules_if_asked() {
     if orbistoun_env::START_MODULES.get().is_none() {
         return;
     }
-    eprintln!("orbistoun: starting every placed module before entry");
+    tracing::info!("starting every placed module before entry");
     let (modules, initialisers) = orbistoun_kernel::start_every_placed_module();
-    eprintln!(
-        "orbistoun: started {modules} placed module(s) before entry, {initialisers} initialiser(s) ran"
+    tracing::info!(
+        "started {modules} placed module(s) before entry, {initialisers} initialiser(s) ran"
     );
 }
 
@@ -2708,7 +2673,7 @@ fn start_placed_modules_if_asked() {
 /// # Errors
 ///
 /// When the configured script cannot be read, parsed, or validated.
-fn install_scripted_input(service: &Service) -> Result<(), String> {
+fn install_scripted_input(service: &Service) -> Result<(), Error> {
     // A flip-keyed script counts the guest's own flips (D721), whichever run it is.
     orbistoun_input::script::install_flip_clock(orbistoun_video::flips_accepted);
     // A capture asked for before the launch starts here, with the run (D721).
@@ -2719,12 +2684,15 @@ fn install_scripted_input(service: &Service) -> Result<(), String> {
     // The run's own script first (D721), then one the configuration names.
     let named = run_input_script().clone();
     let chosen = match named {
-        Some(path) => Some((path.clone(), orbistoun_service::read_pad_script(&path)?)),
+        Some(path) => Some((
+            path.clone(),
+            orbistoun_service::read_pad_script(&path).map_err(Error::PadScript)?,
+        )),
         None => match service.paths() {
             Some(paths) => {
                 let config = paths.config_file();
                 let base = config.parent().unwrap_or_else(|| Path::new("."));
-                orbistoun_service::scripted_pad(service.pads(), base)?
+                orbistoun_service::scripted_pad(service.pads(), base).map_err(Error::PadScript)?
             }
             None => None,
         },
@@ -2734,9 +2702,8 @@ fn install_scripted_input(service: &Service) -> Result<(), String> {
     };
     let steps = script.len();
     orbistoun_input::script::install(script);
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: playing input script {} ({steps} step(s)) on player 1",
+    tracing::info!(
+        "playing input script {} ({steps} step(s)) on player 1",
         path.display()
     );
     Ok(())
@@ -2783,11 +2750,7 @@ fn capture_input(to: Option<&Path>) {
     let mut file = match opened {
         Ok(file) => file,
         Err(e) => {
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: input is not captured - {}: {e}",
-                path.display()
-            );
+            tracing::warn!("input is not captured - {}: {e}", path.display());
             return;
         }
     };
@@ -2802,11 +2765,7 @@ fn capture_input(to: Option<&Path>) {
             let _ = file.flush();
         }
     });
-    let _ = writeln!(
-        io::stderr(),
-        "orbistoun: capturing input to {}",
-        path.display()
-    );
+    tracing::info!("capturing input to {}", path.display());
 }
 
 /// **Plays the pad script `script` from now, or stops with `None`** (D721) - the toolbar's
@@ -2821,14 +2780,13 @@ fn play_input(script: Option<&Path>) {
         Ok(script) => {
             let steps = script.len();
             orbistoun_input::script::install(script);
-            let _ = writeln!(
-                io::stderr(),
-                "orbistoun: playing input script {} ({steps} step(s)) on player 1",
+            tracing::info!(
+                "playing input script {} ({steps} step(s)) on player 1",
                 path.display()
             );
         }
         Err(why) => {
-            let _ = writeln!(io::stderr(), "orbistoun: input is not played - {why}");
+            tracing::warn!("input is not played - {why}");
         }
     }
 }
@@ -3369,13 +3327,14 @@ fn with_shape_diagnostic(
     if asked.is_empty() {
         return settings;
     }
-    match orbistoun_kernel::direct::MapShape::named(asked) {
-        Some(shape) => settings.map_shape = shape,
-        None => eprintln!(
-            "orbistoun: {} is not a map shape ({}) - left as configured",
+    if let Some(shape) = orbistoun_kernel::direct::MapShape::named(asked) {
+        settings.map_shape = shape;
+    } else {
+        tracing::warn!(
+            "{} is not a map shape ({}) - left as configured",
             asked,
             orbistoun_kernel::direct::MapShape::NAMES.join(", ")
-        ),
+        );
     }
     settings
 }
@@ -3460,8 +3419,8 @@ fn declare_by_name(thunks: &orbistoun_thunk::ThunkTable, labels: &[String]) {
             named.insert(name.to_owned(), at);
         }
     }
-    eprintln!(
-        "orbistoun: {} declared name(s) are resolvable by name under ORBISTOUN_DLSYM_STUBS",
+    tracing::info!(
+        "{} declared name(s) are resolvable by name under ORBISTOUN_DLSYM_STUBS",
         named.len()
     );
     orbistoun_thunk::install_declared_thunks(named);
@@ -3498,10 +3457,10 @@ fn arm_dumps(targets: &[experiment::Target], total: usize) {
         }
     }
     for name in &unmatched {
-        eprintln!("orbistoun: ORBISTOUN_DUMP matched no import called {name:?}");
+        tracing::warn!("ORBISTOUN_DUMP matched no import called {name:?}");
     }
     let slots = forced.iter().filter(|f| **f).count();
-    eprintln!("orbistoun: ORBISTOUN_DUMP armed {slots} of {total} stub slot(s)");
+    tracing::info!("ORBISTOUN_DUMP armed {slots} of {total} stub slot(s)");
     // **Which labels, not just how many.** A `Gap::Captured` finding answers a question somebody
     // asked, so the reporter has to know which imports were asked about - otherwise it answers
     // for every import that happened to be dumped (D637).
@@ -3532,8 +3491,8 @@ fn name_guest_functions_from(bytes: &[u8]) {
     if functions.is_empty() {
         return;
     }
-    eprintln!(
-        "orbistoun: the module names {} of its own functions, so a fault in it can say which",
+    tracing::debug!(
+        "the module names {} of its own functions, so a fault in it can say which",
         functions.len()
     );
     report::name_guest_functions(

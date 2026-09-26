@@ -36,6 +36,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use orbistoun_report::trace::Registers;
 
+use crate::Error;
+
 /// How many the hardware has. Not a tunable.
 pub const MAX_WATCHPOINTS: usize = 4;
 
@@ -130,18 +132,18 @@ impl Request {
     }
 
     /// Why the hardware would refuse this, if it would.
-    fn objection(self) -> Option<String> {
+    fn objection(self) -> Option<Error> {
         if self.length_bits().is_none() {
-            return Some(format!(
-                "{:#x}+{}: a watchpoint covers one, two, four or eight bytes",
-                self.address, self.length
-            ));
+            return Some(Error::WatchpointLength {
+                address: self.address,
+                length: self.length,
+            });
         }
         if self.address % self.length != 0 {
-            return Some(format!(
-                "{:#x}+{}: an {}-byte watchpoint needs an {}-byte-aligned address",
-                self.address, self.length, self.length, self.length
-            ));
+            return Some(Error::WatchpointAlignment {
+                address: self.address,
+                length: self.length,
+            });
         }
         None
     }
@@ -156,14 +158,18 @@ impl Request {
 /// **Refuses rather than skips.** A watchpoint that was requested and not armed reports a
 /// run under a diagnostic that did nothing, which is the failure every diagnostic in this
 /// crate is built to avoid (D185, D218).
-pub fn parse(raw: &str) -> Result<Vec<Request>, String> {
+///
+/// # Errors
+///
+/// When a field names an unknown kind, is not a number, asks for a length or alignment the
+/// debug registers cannot encode, or when more are asked for than the hardware has.
+pub fn parse(raw: &str) -> Result<Vec<Request>, Error> {
     let mut requests = Vec::new();
     for field in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (site, kind) = match field.split_once(':') {
             Some((site, kind)) => (
                 site,
-                Kind::parse(kind.trim())
-                    .ok_or_else(|| format!("{kind}: a watchpoint is w, rw or x"))?,
+                Kind::parse(kind.trim()).ok_or_else(|| Error::WatchpointKind(kind.to_owned()))?,
             ),
             None => (field, Kind::Access),
         };
@@ -186,22 +192,19 @@ pub fn parse(raw: &str) -> Result<Vec<Request>, String> {
         requests.push(request);
     }
     if requests.len() > MAX_WATCHPOINTS {
-        return Err(format!(
-            "{} requested; the hardware has {MAX_WATCHPOINTS}",
-            requests.len()
-        ));
+        return Err(Error::TooManyWatchpoints(requests.len()));
     }
     Ok(requests)
 }
 
 /// A number, decimal or hexadecimal.
-fn number(raw: &str) -> Result<u64, String> {
+fn number(raw: &str) -> Result<u64, Error> {
     let text = raw.trim();
     let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         Some(hex) => u64::from_str_radix(hex, 16),
         None => text.parse(),
     };
-    parsed.map_err(|_| format!("{text}: not a number"))
+    parsed.map_err(|_| Error::NotANumber(text.to_owned()))
 }
 
 // --- What was armed, so a hit can be described -------------------------------
@@ -443,17 +446,14 @@ static SUMMARISED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 /// exactly as it did before. An execute breakpoint disarms itself on its one hit, so `armed()`
 /// is false by the end; the snapshot it left is what says it did anything, so it is checked too.
 pub fn summarise() {
-    use std::io::Write as _;
-
     let fired_execute = EXEC_RIP.load(Ordering::Relaxed) != 0;
     if (!armed() && !fired_execute) || SUMMARISED.swap(true, Ordering::Relaxed) {
         return;
     }
-    let mut lines = vec!["orbistoun: watchpoints".to_owned()];
+    let mut lines = vec!["watchpoints".to_owned()];
     lines.extend(sites());
     lines.extend(execute_snapshot());
-    lines.push(String::new());
-    let _ = std::io::stderr().write_all(lines.join("\n").as_bytes());
+    tracing::info!("{}", lines.join("\n"));
 }
 
 /// The register snapshot an execute breakpoint captured, as lines, or nothing if none fired.
@@ -524,7 +524,11 @@ fn located(address: u64) -> String {
 /// Returns what was armed, in the words the run conditions will carry. The caller states the
 /// outcome out loud either way, because a diagnostic that was asked for and did not run must
 /// never read like an ordinary run.
-pub fn arm(requests: &[Request]) -> Result<String, String> {
+///
+/// # Errors
+///
+/// When the debug registers cannot be written on this thread, or this host has none wired up.
+pub fn arm(requests: &[Request]) -> Result<String, Error> {
     if requests.is_empty() {
         return Ok(String::new());
     }
@@ -553,7 +557,7 @@ pub fn arm_this_thread() {
         return;
     };
     if let Err(reason) = imp::arm(requests) {
-        eprintln!("orbistoun: a spawned guest thread runs unwatched: {reason}");
+        tracing::warn!("a spawned guest thread runs unwatched: {reason}");
     }
 }
 
@@ -680,12 +684,15 @@ fn announce(slot: usize, after: u64) {
         .text("; it now holds ")
         .hex(value_at(address, length))
         .text(NEWLINE);
+    // Written directly, not through `tracing`: this runs in the exception handler on the guest's
+    // stack, where a subscriber's allocation and locking are not safe.
     let _ = std::io::stderr().write_all(line.as_bytes());
 }
 
 #[cfg(windows)]
 mod imp {
     use super::{MAX_WATCHPOINTS, Request};
+    use crate::Error;
 
     /// Everything below the per-watchpoint fields.
     ///
@@ -727,7 +734,7 @@ mod imp {
     /// and a thread cannot suspend itself. So a helper is spawned to suspend this one, write
     /// the registers, and resume it - the textbook shape, rather than the widely-copied
     /// version that sets its own context and works until it does not.
-    pub(super) fn arm(requests: &[Request]) -> Result<String, String> {
+    pub(super) fn arm(requests: &[Request]) -> Result<String, Error> {
         use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle};
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
 
@@ -758,7 +765,7 @@ mod imp {
             )
         };
         if copied == 0 || duplicated.is_null() {
-            return Err("could not take a handle to the thread about to run the guest".to_owned());
+            return Err(Error::ThreadHandle);
         }
 
         // Carried as a number because a raw handle is not `Send`. It is a value the operating
@@ -767,7 +774,7 @@ mod imp {
         let carried = duplicated.expose_provenance();
         let outcome = std::thread::spawn(move || write_registers(carried, control, addresses))
             .join()
-            .unwrap_or_else(|_| Err("the arming thread died".to_owned()));
+            .unwrap_or(Err(Error::ArmingThreadDied));
 
         // SAFETY: `duplicated` came from `DuplicateHandle` above, has not been closed, and
         // the arming thread has been joined so nothing else holds it.
@@ -782,7 +789,7 @@ mod imp {
         thread: usize,
         control: u64,
         addresses: [u64; MAX_WATCHPOINTS],
-    ) -> Result<String, String> {
+    ) -> Result<String, Error> {
         use windows_sys::Win32::System::Diagnostics::Debug::{
             CONTEXT, GetThreadContext, SetThreadContext,
         };
@@ -793,7 +800,7 @@ mod imp {
         // SAFETY: a live thread handle taken by `DuplicateHandle`, kept open by the caller
         // until this function has been joined.
         if unsafe { SuspendThread(handle) } == SUSPEND_FAILED {
-            return Err("could not suspend the thread to set its debug registers".to_owned());
+            return Err(Error::SuspendThread);
         }
 
         // SAFETY: `CONTEXT` is plain data with no invalid bit patterns, and every field read
@@ -808,7 +815,7 @@ mod imp {
             // SAFETY: as above. Resuming matters more than the error being returned, because
             // a thread left suspended hangs the run with nothing said.
             unsafe { ResumeThread(handle) };
-            return Err("could not read the thread's debug registers".to_owned());
+            return Err(Error::ReadDebugRegisters);
         }
 
         context.Dr0 = addresses[0];
@@ -826,10 +833,10 @@ mod imp {
         // SAFETY: the handle is live and the thread was suspended by this function.
         let resumed = unsafe { ResumeThread(handle) };
         if written == 0 {
-            return Err("could not set the thread's debug registers".to_owned());
+            return Err(Error::SetDebugRegisters);
         }
         if resumed == SUSPEND_FAILED {
-            return Err("the thread could not be resumed after arming".to_owned());
+            return Err(Error::ResumeThread);
         }
         Ok(String::new())
     }
@@ -838,6 +845,7 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::Request;
+    use crate::Error;
 
     /// Not implemented away from Windows yet.
     ///
@@ -845,8 +853,8 @@ mod imp {
     /// a tracer process rather than a thread arming itself. Saying so plainly beats a
     /// function that returns success and arms nothing - which is the one outcome a
     /// diagnostic must never have (D185).
-    pub(super) fn arm(_requests: &[Request]) -> Result<String, String> {
-        Err("watchpoints need debug registers, which are only wired up on Windows".to_owned())
+    pub(super) fn arm(_requests: &[Request]) -> Result<String, Error> {
+        Err(Error::WatchpointsUnsupported)
     }
 }
 
@@ -881,21 +889,26 @@ mod tests {
     fn an_unaligned_address_is_refused_with_the_reason() {
         // The hardware would watch a different eight bytes than the ones asked for, and a
         // diagnostic watching the wrong address answers the question confidently and wrongly.
-        let refused = parse("0x1004").expect_err("an eight-byte watch needs eight-byte alignment");
+        let refused = parse("0x1004")
+            .expect_err("an eight-byte watch needs eight-byte alignment")
+            .to_string();
         assert!(refused.contains("aligned"), "{refused}");
     }
 
     #[test]
     fn a_length_the_hardware_cannot_encode_is_refused() {
-        let refused = parse("0x1000+16").expect_err("sixteen bytes is not a watchpoint");
+        let refused = parse("0x1000+16")
+            .expect_err("sixteen bytes is not a watchpoint")
+            .to_string();
         assert!(refused.contains("one, two, four or eight"), "{refused}");
     }
 
     #[test]
     fn more_than_the_hardware_has_is_refused_rather_than_truncated() {
         // Truncating would arm four of five and report as though all five had run.
-        let refused =
-            parse("0x1000,0x2000,0x3000,0x4000,0x5000").expect_err("five into four does not go");
+        let refused = parse("0x1000,0x2000,0x3000,0x4000,0x5000")
+            .expect_err("five into four does not go")
+            .to_string();
         assert!(refused.contains(&MAX_WATCHPOINTS.to_string()), "{refused}");
     }
 

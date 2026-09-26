@@ -412,9 +412,8 @@ pub fn listen(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     // host, D-socket) lets an operator, or a driver, connect to the thing that just opened. To
     // the kernel log too, so a `klogsrv` reader tailing it sees the service announce itself.
     if let Ok(addr) = listener.local_addr() {
-        use std::io::Write as _;
+        tracing::info!("guest listening on {addr}");
         let line = format!("orbistoun: guest listening on {addr}");
-        let _ = writeln!(std::io::stderr(), "{line}");
         orbistoun_core::klog::note(&line);
     }
     crate::descriptor::with_socket(args[0], |socket| {
@@ -813,8 +812,8 @@ fn refuse_option(level: u64, option: u64) -> Answer {
             || format!("option {option:#x} at level {level:#x}"),
             |name| format!("{name} (level {level:#x})"),
         );
+        tracing::warn!("getsockopt asked for {named}, which is not answered here");
         let line = format!("orbistoun: getsockopt asked for {named}, which is not answered here");
-        eprintln!("{line}");
         orbistoun_core::klog::note(&line);
     }
     Err(UNNAMED)

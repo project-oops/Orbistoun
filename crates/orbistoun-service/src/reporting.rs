@@ -83,11 +83,9 @@ pub(crate) fn emit(
     let store = ReportStore::new(paths.reports_dir());
     let previous = store
         .previous_for_title(&report)
-        .map_err(|e| ServiceError::Serialise(e.to_string()))?;
+        .map_err(ServiceError::Report)?;
     let diff = previous.as_ref().map(|p| RunDiff::between(p, &report));
-    let written_to = store
-        .write(&report)
-        .map_err(|e| ServiceError::Serialise(e.to_string()))?;
+    let written_to = store.write(&report).map_err(ServiceError::Report)?;
 
     Ok(RunOutput {
         report,

@@ -739,12 +739,11 @@ fn slot_address(expr: &str, registers: &Registers) -> Option<u64> {
 /// sees, which is why `ORBISTOUN_DUMP` observes rather than intervenes.
 #[cfg(windows)]
 fn dump_at_fault(registers: &Registers) {
-    use std::io::Write as _;
+    use std::fmt::Write as _;
 
     let Ok(spec) = std::env::var(orbistoun_env::PEEK.name) else {
         return;
     };
-    let mut err = std::io::stderr();
     for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let (start, len, note) = if let Some(rest) = part.strip_prefix("caller") {
             let len = rest.strip_prefix('+').and_then(parse_len).unwrap_or(0x100);
@@ -754,9 +753,8 @@ fn dump_at_fault(registers: &Registers) {
             // address the guest returns into - one past the call that faulted (D-thunk dispatch).
             let return_address = orbistoun_thunk::last_call().map_or(0, |call| call.from);
             if return_address == 0 {
-                let _ = writeln!(
-                    err,
-                    "orbistoun: ORBISTOUN_PEEK caller - no recorded call to take a return address from"
+                tracing::warn!(
+                    "ORBISTOUN_PEEK caller - no recorded call to take a return address from"
                 );
                 continue;
             }
@@ -774,9 +772,8 @@ fn dump_at_fault(registers: &Registers) {
             // static address could name across runs (worklog 743).
             let ptr = read_window(slot, 8);
             if ptr.len() < 8 {
-                let _ = writeln!(
-                    err,
-                    "orbistoun: ORBISTOUN_DUMP indirect [{slot:#x}] - {}",
+                tracing::warn!(
+                    "ORBISTOUN_DUMP indirect [{slot:#x}] - {}",
                     describe_unreadable(slot)
                 );
                 continue;
@@ -786,24 +783,18 @@ fn dump_at_fault(registers: &Registers) {
         } else if let Some((addr, len)) = parse_addr_len(part) {
             (addr, len, String::new())
         } else {
-            let _ = writeln!(
-                err,
-                "orbistoun: ORBISTOUN_DUMP {part:?} is not `caller`, `<addr>[+len]` or `[<slot>][+len]`"
+            tracing::warn!(
+                "ORBISTOUN_DUMP {part:?} is not `caller`, `<addr>[+len]` or `[<slot>][+len]`"
             );
             continue;
         };
         let bytes = read_window(start, len);
         if bytes.is_empty() {
-            let _ = writeln!(
-                err,
-                "orbistoun: ORBISTOUN_DUMP {start:#x} - {}",
-                describe_unreadable(start)
-            );
+            tracing::warn!("ORBISTOUN_DUMP {start:#x} - {}", describe_unreadable(start));
             continue;
         }
-        let _ = writeln!(
-            err,
-            "orbistoun: ORBISTOUN_DUMP {:#x}..{:#x} ({} bytes){note}:",
+        let mut dump = format!(
+            "ORBISTOUN_DUMP {:#x}..{:#x} ({} bytes){note}:",
             start,
             start + bytes.len() as u64,
             bytes.len(),
@@ -815,8 +806,9 @@ fn dump_at_fault(registers: &Registers) {
                 hex.push(char::from(b"0123456789abcdef"[(b & 0xf) as usize]));
                 hex.push(' ');
             }
-            let _ = writeln!(err, "  {:#010x}  {hex}", start + (row * 16) as u64);
+            let _ = write!(dump, "\n  {:#010x}  {hex}", start + (row * 16) as u64);
         }
+        tracing::info!("{dump}");
     }
 }
 
@@ -829,13 +821,10 @@ fn dump_at_fault(registers: &Registers) {
 /// always exact.
 #[cfg(windows)]
 fn caller_stacks_at_fault() {
-    use std::io::Write as _;
-
     let stacks = orbistoun_thunk::caller_stacks();
     if stacks.is_empty() {
         return;
     }
-    let mut err = std::io::stderr();
     for stack in stacks {
         let label = label_of(stack.index as usize).unwrap_or("unknown");
         let code: Vec<String> = stack
@@ -847,9 +836,8 @@ fn caller_stacks_at_fault() {
                 is_code_region(region).then(|| format!("+{:#x}: {region}+{offset:#x}", word * 8))
             })
             .collect();
-        let _ = writeln!(
-            err,
-            "orbistoun: caller stack of call {} to {label} (code addresses on the stack, return address first; later ones may be stale): {}",
+        tracing::info!(
+            "caller stack of call {} to {label} (code addresses on the stack, return address first; later ones may be stale): {}",
             stack.sequence,
             if code.is_empty() {
                 "none".to_owned()
@@ -1353,6 +1341,8 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     line.hex(registers.rax);
     line.text(NEWLINE);
 
+    // Written directly, not through `tracing`: this is the allocation-free part of the exception
+    // handler, which must be out of the door before anything that allocates or locks runs.
     let _ = std::io::stderr().write_all(line.as_bytes());
     let _ = std::io::stderr().flush();
 
@@ -1362,6 +1352,7 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     if faulting_address != u64::MAX {
         let mut page = Line::new();
         note_page(&mut page, faulting_address);
+        // Written directly for the same reason as the line above: still allocation-free.
         let _ = std::io::stderr().write_all(page.as_bytes());
         let _ = std::io::stderr().flush();
     }
@@ -1386,12 +1377,12 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // implementation stops short of it (D381).
     if inside.is_some() {
         let backtrace = std::backtrace::Backtrace::force_capture();
-        let mut err = std::io::stderr();
-        let _ = writeln!(err, "  the host stack that got there:");
+        let mut said = String::from("  the host stack that got there:");
         for one in backtrace.to_string().lines().take(40) {
-            let _ = writeln!(err, "  {one}");
+            said.push_str("\n  ");
+            said.push_str(one);
         }
-        let _ = err.flush();
+        tracing::warn!("{said}");
     }
 
     // What the guest asked the kernel for directly, which a fault is very often the end of.
@@ -1558,28 +1549,24 @@ fn printable_text(bytes: &[u8]) -> Option<String> {
 ///
 /// Read here rather than printed there, as everything else on the guest's stack is (D381).
 pub(crate) fn paths_wanted() {
-    use std::io::Write as _;
-
     let wanted = orbistoun_fs::wanted::unanswered();
     if wanted.is_empty() {
         return;
     }
-    let mut err = std::io::stderr();
-    let _ = writeln!(
-        err,
-        "orbistoun: the guest asked for {} path{} nothing here holds:",
+    let mut said = format!(
+        "the guest asked for {} path{} nothing here holds:",
         wanted.len(),
         if wanted.len() == 1 { "" } else { "s" }
     );
     for path in &wanted {
-        let _ = writeln!(err, "  {path}");
+        said.push_str("\n  ");
+        said.push_str(path);
         orbistoun_core::klog::note(&format!("orbistoun: no such path {path}"));
     }
-    let _ = writeln!(
-        err,
-        "  each is a directory or file the platform has and the mount table does not - a work item, spelled by the thing that wanted it"
+    said.push_str(
+        "\n  each is a directory or file the platform has and the mount table does not - a work item, spelled by the thing that wanted it",
     );
-    let _ = err.flush();
+    tracing::info!("{said}");
 }
 
 /// Says what the guest opened, when the run was asked to record it.
@@ -1594,31 +1581,27 @@ pub(crate) fn paths_wanted() {
 /// opened nothing says so rather than printing nothing at all. That is the whole reason this
 /// asks the recorder whether it was on.
 pub(crate) fn paths_opened() {
-    use std::io::Write as _;
-
     if !orbistoun_fs::opened::recording() {
         return;
     }
     let opened = orbistoun_fs::opened::answered();
-    let mut err = std::io::stderr();
     if opened.is_empty() {
-        let _ = writeln!(
-            err,
-            "orbistoun: the guest opened nothing - it read no file at all, which is a finding rather than an empty list"
+        tracing::info!(
+            "the guest opened nothing - it read no file at all, which is a finding rather than an empty list"
         );
-        let _ = err.flush();
         return;
     }
-    let _ = writeln!(
-        err,
-        "orbistoun: the guest opened {} path{}:",
-        opened.len(),
-        if opened.len() == 1 { "" } else { "s" }
+    tracing::info!(
+        "{}",
+        indented(
+            format!(
+                "the guest opened {} path{}:",
+                opened.len(),
+                if opened.len() == 1 { "" } else { "s" }
+            ),
+            &opened
+        )
     );
-    for path in &opened {
-        let _ = writeln!(err, "  {path}");
-    }
-    let _ = err.flush();
 
     // **And what each read got.** A list of opens says the guest found its files; this says
     // what came back, which for a title that reads zero bytes is the whole finding (D595).
@@ -1626,15 +1609,25 @@ pub(crate) fn paths_opened() {
     if reads.is_empty() {
         return;
     }
-    let _ = writeln!(
-        err,
-        "orbistoun: and read from them {} time(s):",
-        reads.len()
+    tracing::info!(
+        "{}",
+        indented(
+            format!("and read from them {} time(s):", reads.len()),
+            &reads
+        )
     );
-    for line in &reads {
-        let _ = writeln!(err, "  {line}");
+}
+
+/// A header followed by each item on its own line, indented under it: one log event for what
+/// reads as one block.
+fn indented<T: std::fmt::Display>(header: String, items: &[T]) -> String {
+    use std::fmt::Write as _;
+
+    let mut block = header;
+    for item in items {
+        let _ = write!(block, "\n  {item}");
     }
-    let _ = err.flush();
+    block
 }
 
 /// Every mapping the guest was given, in the order it was given them.
@@ -1645,34 +1638,27 @@ pub(crate) fn paths_opened() {
 /// differ and not where. The arena is bump-allocated, so order is the finding and the list is
 /// printed in it (D581).
 pub(crate) fn maps_given() {
-    use std::io::Write as _;
+    use std::fmt::Write as _;
 
     if !orbistoun_kernel::mapped::recording() {
         return;
     }
     let given = orbistoun_kernel::mapped::given();
-    let mut err = std::io::stderr();
     if given.is_empty() {
-        let _ = writeln!(
-            err,
-            "orbistoun: the guest was given no mapping at all, which is a finding rather than an empty list"
+        tracing::info!(
+            "the guest was given no mapping at all, which is a finding rather than an empty list"
         );
-        let _ = err.flush();
         return;
     }
     // Cumulative, because the question a diff asks is *which* placement first moved - and an
     // address on its own does not say how much was placed before it.
     let mut total = 0_u64;
-    let _ = writeln!(
-        err,
-        "orbistoun: the guest was given {} mapping(s):",
-        given.len()
-    );
+    let mut said = format!("the guest was given {} mapping(s):", given.len());
     for (index, m) in given.iter().enumerate() {
         total = total.saturating_add(m.len);
-        let _ = writeln!(
-            err,
-            "  {index:4}  call {:<8}  {:#018x} +{:#x}  {}{}  (cumulative {:#x})  during {}{}",
+        let _ = write!(
+            said,
+            "\n  {index:4}  call {:<8}  {:#018x} +{:#x}  {}{}  (cumulative {:#x})  during {}{}",
             m.at_call,
             m.base,
             m.len,
@@ -1691,7 +1677,7 @@ pub(crate) fn maps_given() {
                 .map_or_else(String::new, |why| format!("  REFUSED: {why}"))
         );
     }
-    let _ = err.flush();
+    tracing::info!("{said}");
 }
 
 /// Everything the guest asked the system for, in one call.
@@ -1706,30 +1692,23 @@ pub(crate) fn maps_given() {
 /// **The last ones**, because a title says the interesting thing just before it stops. Printed
 /// after the guest has stopped, like every other record here (D381, D590).
 pub(crate) fn what_it_said() {
-    use std::io::Write as _;
-
     if !orbistoun_libc::said::recording() {
         return;
     }
     let said = orbistoun_libc::said::rendered();
-    let mut err = std::io::stderr();
     if said.is_empty() {
-        let _ = writeln!(
-            err,
-            "orbistoun: the guest formatted nothing at all, which is a finding rather than an empty list"
+        tracing::info!(
+            "the guest formatted nothing at all, which is a finding rather than an empty list"
         );
-        let _ = err.flush();
         return;
     }
-    let _ = writeln!(
-        err,
-        "orbistoun: the guest formatted {} string(s):",
-        said.len()
+    tracing::info!(
+        "{}",
+        indented(
+            format!("the guest formatted {} string(s):", said.len()),
+            &said
+        )
     );
-    for text in &said {
-        let _ = writeln!(err, "  {text}");
-    }
-    let _ = err.flush();
 }
 
 /// Says when the argument dump ran out of room.
@@ -1739,18 +1718,13 @@ pub(crate) fn what_it_said() {
 /// before an interesting one - so a run that dropped any has to say by how much, or asking for one
 /// import and getting a list without it looks like an answer (D623).
 pub(crate) fn dumps_dropped() {
-    use std::io::Write as _;
-
     let dropped = orbistoun_thunk::dumps_dropped();
     if dropped == 0 {
         return;
     }
-    let mut err = std::io::stderr();
-    let _ = writeln!(
-        err,
-        "orbistoun: {dropped} argument dump(s) wanted after the buffer was full - name an import with ORBISTOUN_DUMP to spend the room on it"
+    tracing::warn!(
+        "{dropped} argument dump(s) wanted after the buffer was full - name an import with ORBISTOUN_DUMP to spend the room on it"
     );
-    let _ = err.flush();
 }
 
 /// Says when the argument dump ran out of room to remember where it may read.
@@ -1758,18 +1732,13 @@ pub(crate) fn dumps_dropped() {
 /// **A dropped range and a wrong pointer print identically**, so a run that dropped any has to
 /// say so - otherwise every unreadable argument in it reads as the guest's mistake (D588).
 pub(crate) fn ranges_dropped() {
-    use std::io::Write as _;
-
     let dropped = orbistoun_thunk::dropped_ranges();
     if dropped == 0 {
         return;
     }
-    let mut err = std::io::stderr();
-    let _ = writeln!(
-        err,
-        "orbistoun: {dropped} readable range(s) could not be remembered - an argument pointing into one of them reports as unreadable, and that is this run's blind spot rather than a bad pointer"
+    tracing::warn!(
+        "{dropped} readable range(s) could not be remembered - an argument pointing into one of them reports as unreadable, and that is this run's blind spot rather than a bad pointer"
     );
-    let _ = err.flush();
 }
 
 pub(crate) fn what_the_guest_asked_for() {
@@ -1799,50 +1768,42 @@ pub(crate) fn what_the_guest_asked_for() {
 /// D379), and the one that made the syscall boundary invisible for exactly as long as it had
 /// existed. Both paths a run can end by call it now: the ordinary return, and the fault.
 pub(crate) fn syscalls_asked_for() {
-    use std::io::Write as _;
+    use std::fmt::Write as _;
 
     // The sequence first, because *when* is what says what the guest was doing (D388).
     let sequence = orbistoun_thunk::syscall::syscalls_in_order();
     if !sequence.made.is_empty() {
-        let mut err = std::io::stderr();
-        let _ = writeln!(
-            err,
-            "orbistoun: the guest made {} syscalls, in this order:",
-            sequence.total
-        );
+        let mut said = format!("the guest made {} syscalls, in this order:", sequence.total);
         for (position, asked) in sequence.made.iter().enumerate() {
             let called = asked.name.unwrap_or("nothing here implements it");
-            let _ = writeln!(
-                err,
-                "  {position:3}  {:5}  {called}  ({:#x})",
+            let _ = write!(
+                said,
+                "\n  {position:3}  {:5}  {called}  ({:#x})",
                 asked.number, asked.argument
             );
             orbistoun_core::klog::note(&format!("orbistoun: syscall {} - {called}", asked.number));
         }
         let kept = sequence.made.len() as u64;
         if sequence.total > kept {
-            let _ = writeln!(
-                err,
-                "  and {} more, past what this run records in order",
+            let _ = write!(
+                said,
+                "\n  and {} more, past what this run records in order",
                 sequence.total - kept
             );
         }
-        let _ = err.flush();
+        tracing::info!("{said}");
     }
 
     for (number, name) in orbistoun_thunk::syscall::syscalls_asked_for() {
-        let mut err = std::io::stderr();
-        let _ = match name {
-            Some(name) => writeln!(
-                err,
-                "orbistoun: the guest asked the kernel for call {number} directly, which is {name}"
-            ),
-            None => writeln!(
-                err,
-                "orbistoun: the guest asked the kernel for call {number} directly, and nothing here implements it"
-            ),
-        };
-        let _ = err.flush();
+        if let Some(name) = name {
+            tracing::info!(
+                "the guest asked the kernel for call {number} directly, which is {name}"
+            );
+        } else {
+            tracing::info!(
+                "the guest asked the kernel for call {number} directly, and nothing here implements it"
+            );
+        }
     }
 }
 
@@ -2424,12 +2385,12 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
     // the guest crashed would be silent for the title that never crashes (D223).
     let changed = crate::watch::changes();
     if !changed.is_empty() {
-        use std::io::Write as _;
-        let mut err = std::io::stderr().lock();
-        let _ = writeln!(err, "orbistoun: watched region:");
+        let mut said = String::from("watched region:");
         for line in &changed {
-            let _ = writeln!(err, "{line}");
+            said.push('\n');
+            said.push_str(line);
         }
+        tracing::info!("{said}");
     }
 
     let mut counts: Vec<(usize, u64)> = orbistoun_thunk::call_counts()
@@ -2643,8 +2604,8 @@ pub fn persist(trace: &CallTrace) {
         // The count as well as the last one: two runs can report an identical last failure and
         // still have failed a different number of reservations, which is the difference that
         // matters when they took different paths (D487).
-        eprintln!(
-            "orbistoun: {} reservation(s) failed, first at {:#x}, last: base={:#x} len={:#x} - {}",
+        tracing::warn!(
+            "{} reservation(s) failed, first at {:#x}, last: base={:#x} len={:#x} - {}",
             orbistoun_mem::reserve_failures(),
             orbistoun_mem::first_reserve_failure_base().unwrap_or(0),
             failure.base,
@@ -2672,7 +2633,7 @@ pub fn persist(trace: &CallTrace) {
     .into_iter()
     .flatten()
     {
-        eprintln!("orbistoun: {fill}");
+        tracing::info!("{fill}");
     }
     let Some(path) = TRACE_PATH.get() else {
         return;
@@ -2683,13 +2644,10 @@ pub fn persist(trace: &CallTrace) {
     match serde_json::to_string_pretty(trace) {
         Ok(text) => {
             if let Err(e) = std::fs::write(path, text) {
-                eprintln!(
-                    "orbistoun: could not write the call trace to {}: {e}",
-                    path.display()
-                );
+                tracing::warn!("could not write the call trace to {}: {e}", path.display());
             }
         }
-        Err(e) => eprintln!("orbistoun: could not serialise the call trace: {e}"),
+        Err(e) => tracing::warn!("could not serialise the call trace: {e}"),
     }
 }
 
@@ -2718,8 +2676,6 @@ pub const CALL_BUDGET_EXIT: i32 = 0x0B0F;
 /// before it kills: a guest that gave up has still said what it wanted, and that is the
 /// whole output of the run.
 fn guest_stopped(reason: orbistoun_core::StopReason, code: u64) -> ! {
-    use std::io::Write as _;
-
     // Recorded before the trace is collected, so the report says the guest stopped rather
     // than describing an absent fault as a time limit.
     let _ = STOPPED.set(reason.label().to_owned());
@@ -2737,15 +2693,7 @@ fn guest_stopped(reason: orbistoun_core::StopReason, code: u64) -> ! {
     let trace = collect_calls(module, "Entered");
     persist(&trace);
 
-    let mut line = Line::new();
-    line.text("orbistoun: ").text(reason.label()).text(" (");
-    line.hex(code);
-    line.text(
-        ")
-",
-    );
-    let _ = std::io::stderr().write_all(line.as_bytes());
-    let _ = std::io::stderr().flush();
+    tracing::info!("{} ({code:#x})", reason.label());
 
     std::process::exit(orbistoun_core::stop::EXIT_GUEST_STOPPED);
 }
@@ -3036,19 +2984,17 @@ fn on_budget_reached() {
 /// The counts are the work list: implementing the top of this list is what moves a
 /// guest further, and the order is not guessable from a static import dump.
 fn summarise_calls(stopped: &str, trace: &CallTrace) {
-    use std::io::Write as _;
+    use std::fmt::Write as _;
 
-    let mut err = std::io::stderr().lock();
-    let _ = writeln!(
-        err,
-        "orbistoun: the guest was still running {stopped}; {} import calls across {} distinct imports",
+    let mut said = format!(
+        "the guest was still running {stopped}; {} import calls across {} distinct imports",
         trace.total_calls, trace.distinct
     );
     // **Printed whether or not it is notable.** The number a reader most often wants from a
     // run that hit the clock is when it went quiet, and a line that appears only sometimes
     // teaches people to read its absence as "fine" rather than as "not measured" (D159).
     if let Some(quiet) = trace.quiet {
-        let _ = writeln!(err, "orbistoun: it {}", quiet.describe());
+        let _ = write!(said, "\nit {}", quiet.describe());
     }
     for call in trace.calls.iter().take(MOST_CALLED_REPORTED) {
         // Integer tenths of a percent rather than floating point: the counts run into
@@ -3062,13 +3008,13 @@ fn summarise_calls(stopped: &str, trace: &CallTrace) {
         // Formatted as text, so the width below is a width. A precision on a string
         // truncates it - `{share:5.1}` silently turned "99.9" into "9".
         let share = format!("{}.{}", tenths / 10, tenths % 10);
-        let _ = writeln!(
-            err,
-            "orbistoun:   {:>12} calls ({share:>5}%)  {}",
+        let _ = write!(
+            said,
+            "\n  {:>12} calls ({share:>5}%)  {}",
             call.calls, call.label
         );
     }
-    let _ = err.flush();
+    tracing::info!("{said}");
 }
 
 /// How many of the most-called imports are listed when a limit expires.
@@ -3473,30 +3419,27 @@ mod tests {
 /// this exists for the question two runs raise when they diverge - and the position *is* the call
 /// ordinal, so it lines up with the mapping record without anybody counting (D603).
 pub(crate) fn opening_calls() {
-    use std::io::Write as _;
+    use std::fmt::Write as _;
 
     if !orbistoun_env::TRACE_CALLS.is_set() {
         return;
     }
     let calls = orbistoun_thunk::opening_sequence();
-    let mut err = std::io::stderr();
     if calls.is_empty() {
-        let _ = writeln!(
-            err,
-            "orbistoun: the guest made no call at all, which is a finding rather than an empty list"
+        tracing::info!(
+            "the guest made no call at all, which is a finding rather than an empty list"
         );
-        let _ = err.flush();
         return;
     }
-    let _ = writeln!(err, "orbistoun: its opening {} call(s):", calls.len());
+    let mut said = format!("its opening {} call(s):", calls.len());
     for (sequence, index, from) in &calls {
-        let _ = writeln!(
-            err,
-            "  call {sequence:<6} {:<52} from {from:#x}",
+        let _ = write!(
+            said,
+            "\n  call {sequence:<6} {:<52} from {from:#x}",
             label_of(*index as usize).unwrap_or("unknown")
         );
     }
-    let _ = err.flush();
+    tracing::info!("{said}");
 }
 #[cfg(test)]
 mod pointee_tests {
@@ -3623,15 +3566,14 @@ pub(crate) fn tables_disagree() {
     if labels == counters {
         return;
     }
-    eprintln!(
+    tracing::warn!(
         concat!(
-            "orbistoun: the tables an import index is used against are different lengths - ",
-            "{} label(s), {} call counter(s)"
+            "the tables an import index is used against are different lengths - ",
+            "{} label(s), {} call counter(s)\n",
+            "  an index past the shortest of those names one import and counts another"
         ),
-        labels, counters
-    );
-    eprintln!(
-        "orbistoun:   an index past the shortest of those names one import and counts another"
+        labels,
+        counters
     );
 }
 /// Says so when a bound import was called through a stub anyway.
@@ -3647,17 +3589,18 @@ pub(crate) fn bound_yet_called() {
         return;
     }
     let total: u64 = offenders.iter().map(|(_, calls)| *calls).sum();
-    eprintln!(
+    let mut said = format!(
         concat!(
-            "orbistoun: {} import(s) were bound into a module this title ships and were called ",
+            "{} import(s) were bound into a module this title ships and were called ",
             "through a stub anyway, {} time(s) - the binding did not reach the relocation"
         ),
         offenders.len(),
         total
     );
     for (label, calls) in offenders.iter().take(6) {
-        eprintln!("orbistoun:   {label}, {calls} call(s)");
+        let _ = std::fmt::Write::write_fmt(&mut said, format_args!("\n  {label}, {calls} call(s)"));
     }
+    tracing::warn!("{said}");
 }
 
 #[cfg(all(test, windows))]

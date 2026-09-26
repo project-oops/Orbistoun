@@ -58,6 +58,28 @@ pub const PATCHES_DIR: &str = "patches";
 /// What each patch in [`PATCHES_DIR`] rests on.
 pub const PROPOSALS_FILE: &str = "patches.toml";
 
+/// Why a submission could not be read or written.
+#[derive(Debug, thiserror::Error)]
+pub enum SubmitError {
+    /// A proposals file that is not one, boxed to keep the error small.
+    #[error("{0}")]
+    Proposals(Box<toml::de::Error>),
+    /// One part of a received bundle that is not the format it should be.
+    #[error("{part}: {source}")]
+    Part {
+        /// Which part: `manifest`, `measurements`, `results` or `proposals`.
+        part: &'static str,
+        /// What the parser said, boxed to keep the error small.
+        source: Box<toml::de::Error>,
+    },
+    /// The measurements could not be rendered.
+    #[error("{0}")]
+    Learned(#[from] orbistoun_hle::HleError),
+    /// A part could not be rendered as TOML.
+    #[error("serialising TOML: {0}")]
+    Toml(#[from] toml::ser::Error),
+}
+
 /// A source change somebody or something is proposing, and what it rests on.
 ///
 /// # Why this is not the thing the project warned against
@@ -145,8 +167,8 @@ impl Proposals {
     /// # Errors
     ///
     /// When the text is not a proposals file.
-    pub fn parse(text: &str) -> Result<Self, String> {
-        toml::from_str(text).map_err(|e| e.to_string())
+    pub fn parse(text: &str) -> Result<Self, SubmitError> {
+        toml::from_str(text).map_err(|e| SubmitError::Proposals(Box::new(e)))
     }
 
     /// The file as text, for writing it back.
@@ -158,8 +180,8 @@ impl Proposals {
     /// # Errors
     ///
     /// When the proposals cannot be serialised.
-    pub fn to_toml(&self) -> Result<String, String> {
-        toml::to_string_pretty(self).map_err(|e| e.to_string())
+    pub fn to_toml(&self) -> Result<String, SubmitError> {
+        Ok(toml::to_string_pretty(self)?)
     }
 }
 
@@ -296,10 +318,10 @@ impl Bundle {
     /// # Errors
     ///
     /// When any part cannot be serialised.
-    pub fn to_files(&self) -> Result<Vec<(&'static str, String)>, String> {
-        let manifest = toml::to_string_pretty(&self.manifest).map_err(|e| e.to_string())?;
+    pub fn to_files(&self) -> Result<Vec<(&'static str, String)>, SubmitError> {
+        let manifest = toml::to_string_pretty(&self.manifest)?;
         let learned = self.learned.to_toml()?;
-        let results = toml::to_string_pretty(&self.results).map_err(|e| e.to_string())?;
+        let results = toml::to_string_pretty(&self.results)?;
         let mut files = vec![
             (MANIFEST_FILE, manifest),
             (LEARNED_FILE, learned),
@@ -312,10 +334,7 @@ impl Bundle {
             let proposals = Proposals {
                 proposal: self.proposals.clone(),
             };
-            files.push((
-                PROPOSALS_FILE,
-                toml::to_string_pretty(&proposals).map_err(|e| e.to_string())?,
-            ));
+            files.push((PROPOSALS_FILE, toml::to_string_pretty(&proposals)?));
         }
         Ok(files)
     }
@@ -334,15 +353,21 @@ impl Bundle {
         learned: &str,
         results: &str,
         proposals: Option<&str>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SubmitError> {
+        let part = |part: &'static str| {
+            move |source| SubmitError::Part {
+                part,
+                source: Box::new(source),
+            }
+        };
         let proposals: Proposals = match proposals {
-            Some(text) => toml::from_str(text).map_err(|e| format!("proposals: {e}"))?,
+            Some(text) => toml::from_str(text).map_err(part("proposals"))?,
             None => Proposals::default(),
         };
         Ok(Self {
-            manifest: toml::from_str(manifest).map_err(|e| format!("manifest: {e}"))?,
-            learned: toml::from_str(learned).map_err(|e| format!("measurements: {e}"))?,
-            results: toml::from_str(results).map_err(|e| format!("results: {e}"))?,
+            manifest: toml::from_str(manifest).map_err(part("manifest"))?,
+            learned: toml::from_str(learned).map_err(part("measurements"))?,
+            results: toml::from_str(results).map_err(part("results"))?,
             proposals: proposals.proposal,
         })
     }
@@ -743,6 +768,6 @@ mod tests {
         let error =
             Bundle::from_files("by = 1", "", "", None).expect_err("a number is not a build");
 
-        assert!(error.starts_with("manifest:"), "{error}");
+        assert!(error.to_string().starts_with("manifest:"), "{error}");
     }
 }

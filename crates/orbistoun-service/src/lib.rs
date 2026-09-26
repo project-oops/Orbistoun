@@ -60,9 +60,50 @@ pub enum ServiceError {
     /// A guest region could not be reserved or re-protected.
     #[error("address space: {0}")]
     Memory(#[from] orbistoun_mem::MemError),
-    /// Serialising a result failed.
+    /// Rendering a result as TOML failed.
+    #[error("serialising TOML: {0}")]
+    Toml(#[from] toml::ser::Error),
+    /// The configuration file exists and could not be read.
     #[error("serialising: {0}")]
-    Serialise(String),
+    ConfigRead(std::io::Error),
+    /// The configuration file was read and is not the format it should be.
+    #[error("serialising: {0}")]
+    ConfigParse(Box<toml::de::Error>),
+    /// The library directory could not be listed.
+    #[error("serialising: cannot read library at {}: {source}", path.display())]
+    Library {
+        /// The library root.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+    /// The run-report store could not be read or written.
+    #[error("serialising: {0}")]
+    Report(orbistoun_report::store::StoreError),
+    /// A pad script could not be read.
+    #[error("reading input script {}: {source}", path.display())]
+    ScriptRead {
+        /// The script file.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+    /// A pad script is not the format it should be.
+    #[error("parsing input script {}: {source}", path.display())]
+    ScriptParse {
+        /// The script file.
+        path: PathBuf,
+        /// What the parser said, boxed to keep the error small.
+        source: Box<toml::de::Error>,
+    },
+    /// A pad script parsed but names a run that could not happen.
+    #[error("input script {}: {reason}", path.display())]
+    ScriptInvalid {
+        /// The script file.
+        path: PathBuf,
+        /// Why the script was refused.
+        reason: orbistoun_input::script::ScriptError,
+    },
 }
 
 /// One runnable title found on disk.
@@ -301,7 +342,7 @@ pub struct FileConfig {
 pub fn scripted_pad(
     pads: &orbistoun_input::Pads,
     base: &Path,
-) -> Result<Option<(PathBuf, orbistoun_input::script::Script)>, String> {
+) -> Result<Option<(PathBuf, orbistoun_input::script::Script)>, ServiceError> {
     let Some(path) = pads.ports.iter().find_map(|port| match &port.source {
         orbistoun_input::Source::Script { path } => Some(path.as_str()),
         _ => None,
@@ -324,14 +365,22 @@ pub fn scripted_pad(
 ///
 /// When the file cannot be read, does not parse as a script, or names a run that could not
 /// happen (D153).
-pub fn read_pad_script(path: &Path) -> Result<orbistoun_input::script::Script, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading input script {}: {e}", path.display()))?;
-    let script: orbistoun_input::script::Script = toml::from_str(&text)
-        .map_err(|e| format!("parsing input script {}: {e}", path.display()))?;
+pub fn read_pad_script(path: &Path) -> Result<orbistoun_input::script::Script, ServiceError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ServiceError::ScriptRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let script: orbistoun_input::script::Script =
+        toml::from_str(&text).map_err(|source| ServiceError::ScriptParse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })?;
     script
         .validate()
-        .map_err(|e| format!("input script {}: {e}", path.display()))?;
+        .map_err(|reason| ServiceError::ScriptInvalid {
+            path: path.to_path_buf(),
+            reason,
+        })?;
     Ok(script)
 }
 
@@ -448,9 +497,9 @@ impl FileConfig {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(ServiceError::Serialise(e.to_string())),
+            Err(e) => return Err(ServiceError::ConfigRead(e)),
         };
-        toml::from_str(&text).map_err(|e| ServiceError::Serialise(e.to_string()))
+        toml::from_str(&text).map_err(|e| ServiceError::ConfigParse(Box::new(e)))
     }
 
     /// The settings as editable TOML, for writing a starting file.
@@ -459,7 +508,7 @@ impl FileConfig {
     ///
     /// When the settings cannot be serialised.
     pub fn to_toml(&self) -> Result<String, ServiceError> {
-        toml::to_string_pretty(self).map_err(|e| ServiceError::Serialise(e.to_string()))
+        Ok(toml::to_string_pretty(self)?)
     }
 }
 
@@ -1052,7 +1101,10 @@ impl Service {
             // With the path in it. `io::Error` does not carry one, so the bare message is
             // "the system cannot find the path specified" - which is not an answer to the
             // only question the reader has.
-            ServiceError::Serialise(format!("cannot read library at {}: {e}", root.display()))
+            ServiceError::Library {
+                path: root.to_path_buf(),
+                source: e,
+            }
         })?;
         // **Staged titles too, and they win.** The library's `data/homebrew` tree holds titles
         // staged as the console stages homebrew (D722); one also present as an image is the same
@@ -1083,7 +1135,7 @@ impl Service {
 
     /// The default stub policy as editable TOML.
     pub fn default_policy_toml(&self) -> Result<String, ServiceError> {
-        toml::to_string_pretty(&self.policy).map_err(|e| ServiceError::Serialise(e.to_string()))
+        Ok(toml::to_string_pretty(&self.policy)?)
     }
 
     /// Reports a container's structure without executing or fully parsing it.
@@ -1271,9 +1323,10 @@ impl Service {
                 continue;
             };
             let Some(base) = reserve_somewhere(&mut plants.next, plan.bytes) else {
-                eprintln!(
-                    "orbistoun: {} asks for {:#x} bytes and none were free - it will answer without one",
-                    resolved.name, plan.bytes
+                tracing::warn!(
+                    "{} asks for {:#x} bytes and none were free - it will answer without one",
+                    resolved.name,
+                    plan.bytes
                 );
                 continue;
             };
@@ -1495,8 +1548,8 @@ impl Service {
         if !unplaced.is_empty() {
             // Not fatal: the rest of the run is still worth having, and a report that names
             // the functions is worth more than a refusal that names none of them.
-            eprintln!(
-                "orbistoun: {} implemented functions could not be bound to a stub slot and will answer a placeholder: {}",
+            tracing::warn!(
+                "{} implemented functions could not be bound to a stub slot and will answer a placeholder: {}",
                 unplaced.len(),
                 unplaced.join(", ")
             );
@@ -2602,7 +2655,7 @@ mod tests {
         let why = scripted_pad(&pads_playing("absent.toml"), dir.path())
             .expect_err("a missing file is refused");
         assert!(
-            why.contains("absent.toml"),
+            why.to_string().contains("absent.toml"),
             "the error names the file: {why}"
         );
     }
@@ -2621,7 +2674,7 @@ mod tests {
         let why = scripted_pad(&pads_playing("backwards.toml"), dir.path())
             .expect_err("steps out of order are refused");
         assert!(
-            why.contains("backwards.toml") && why.contains("after"),
+            why.to_string().contains("backwards.toml") && why.to_string().contains("after"),
             "the error names the file and the reason: {why}"
         );
     }

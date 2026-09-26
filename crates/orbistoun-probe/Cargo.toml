@@ -15,3 +15,4 @@ workspace = true
 [dependencies]
 orbistoun-hle = { workspace = true }
 orbistoun-nid = { workspace = true }
+thiserror = { workspace = true }

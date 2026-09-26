@@ -26,6 +26,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ShellError;
+
 /// Which button confirms.
 ///
 /// **Named by position, not by glyph.** The two conventions differ by region and the
@@ -162,13 +164,21 @@ impl Settings {
     /// When the file exists and cannot be parsed. **Not silent**: a malformed file that
     /// fell back to defaults would look exactly like a machine nobody had configured, and
     /// the person who edited it would be debugging the wrong thing.
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+    pub fn load(path: &std::path::Path) -> Result<Self, ShellError> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+            Err(source) => {
+                return Err(ShellError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
         };
-        toml::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
+        toml::from_str(&text).map_err(|source| ShellError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })
     }
 
     /// The file as text, for writing it back.
@@ -176,8 +186,8 @@ impl Settings {
     /// # Errors
     ///
     /// When the settings cannot be serialised.
-    pub fn to_toml(&self) -> Result<String, String> {
-        toml::to_string_pretty(self).map_err(|e| e.to_string())
+    pub fn to_toml(&self) -> Result<String, ShellError> {
+        Ok(toml::to_string_pretty(self)?)
     }
 }
 

@@ -628,13 +628,49 @@ pub enum Record {
     },
 }
 
+/// Why one line is outside the grammar.
+///
+/// The crate's one error enum: [`ParseError`] places it in a transcript and
+/// [`client::ClientError::Malformed`] places it on a live stream.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LineError {
+    /// A request line with an empty verb field.
+    #[error("a request carries no verb")]
+    NoVerb,
+    /// A line that is not blank, not a comment, and neither a request nor a record.
+    #[error("line begins with neither {REQUEST} nor {RECORD}: {0}")]
+    Unrecognised(String),
+    /// A `returned` outcome whose value is not hexadecimal.
+    #[error("a returned outcome carries no hexadecimal value: {0:?}")]
+    ReturnedWithoutValue(String),
+    /// An outcome that did not answer, carrying a value anyway.
+    #[error(
+        "an outcome that did not answer carries a value - a command that did not answer has no result, and recording one would make a fiction indistinguishable from evidence"
+    )]
+    ValueWithoutAnswer,
+    /// A record that needs a sequence number and has none that parses.
+    #[error("{kind} record has no sequence number: {found:?}")]
+    NoSequence {
+        /// The record kind.
+        kind: String,
+        /// The field where the number should be.
+        found: String,
+    },
+    /// A `hello` record whose version does not parse.
+    #[error("hello carries no version: {0:?}")]
+    NoVersion(String),
+    /// A record line with an empty kind field.
+    #[error("record carries no kind")]
+    NoKind,
+}
+
 /// A transcript that could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     /// One-based line number.
     pub line: usize,
     /// What was wrong.
-    pub detail: String,
+    pub detail: LineError,
 }
 
 impl fmt::Display for ParseError {
@@ -658,7 +694,11 @@ fn hex(text: &str) -> Option<u64> {
 /// A line that is neither a request nor a record is a note. Transcripts are commented
 /// prose as much as data, and the comments carry the reasoning - dropping them would
 /// throw away the part a person reads.
-pub fn parse_line(text: &str) -> Result<Line, String> {
+///
+/// # Errors
+///
+/// When the line is outside the grammar.
+pub fn parse_line(text: &str) -> Result<Line, LineError> {
     let trimmed = text.trim_end_matches(['\r', '\n']);
     if trimmed.trim().is_empty() || trimmed.trim_start().starts_with('#') {
         return Ok(Line::Note(trimmed.to_owned()));
@@ -670,7 +710,7 @@ pub fn parse_line(text: &str) -> Result<Line, String> {
             let seq = fields.get(1).copied().unwrap_or_default();
             let verb = fields.get(2).copied().unwrap_or_default();
             if verb.is_empty() {
-                return Err("a request carries no verb".to_owned());
+                return Err(LineError::NoVerb);
             }
             Ok(Line::Request {
                 // Deliberately not an error. A sequence that is not a number is a case the
@@ -685,9 +725,7 @@ pub fn parse_line(text: &str) -> Result<Line, String> {
             })
         }
         Some(RECORD) => parse_record(&fields).map(Line::Record),
-        _ => Err(format!(
-            "line begins with neither {REQUEST} nor {RECORD}: {trimmed}"
-        )),
+        _ => Err(LineError::Unrecognised(trimmed.to_owned())),
     }
 }
 
@@ -695,16 +733,16 @@ pub fn parse_line(text: &str) -> Result<Line, String> {
 ///
 /// Split out of [`parse_record`] because it carries the rule the whole crate is shaped
 /// around, and a rule worth stating is worth being able to find.
-fn parse_outcome(word: &str, value: &str) -> Result<Outcome, String> {
+fn parse_outcome(word: &str, value: &str) -> Result<Outcome, LineError> {
     let outcome = match word {
         "ok" => Outcome::Ok,
         "absent" => Outcome::Absent,
         "died" => Outcome::Died,
         "timeout" => Outcome::Timeout,
         "lost" => Outcome::Lost,
-        "returned" => Outcome::Returned(hex(value).ok_or_else(|| {
-            format!("a returned outcome carries no hexadecimal value: {value:?}")
-        })?),
+        "returned" => Outcome::Returned(
+            hex(value).ok_or_else(|| LineError::ReturnedWithoutValue(value.to_owned()))?,
+        ),
         // Not an error. The probe is permitted to add outcome words without a version
         // bump, so a reader that refused the line would break on a stream it was told to
         // expect. It degrades instead - and degrading means "no result", not "probably
@@ -714,23 +752,19 @@ fn parse_outcome(word: &str, value: &str) -> Result<Outcome, String> {
     // A non-answer carrying a value is the exact confusion this crate exists to prevent,
     // so it is refused at the door rather than parsed into a shape that cannot hold it.
     if !outcome.answered() && !value.is_empty() {
-        return Err(concat!(
-            "an outcome that did not answer carries a value - a command that did not ",
-            "answer has no result, and recording one would make a fiction ",
-            "indistinguishable from evidence"
-        )
-        .to_owned());
+        return Err(LineError::ValueWithoutAnswer);
     }
     Ok(outcome)
 }
 
-fn parse_record(fields: &[&str]) -> Result<Record, String> {
+fn parse_record(fields: &[&str]) -> Result<Record, LineError> {
     let kind = fields.get(1).copied().unwrap_or_default();
     let at = |index: usize| fields.get(index).copied().unwrap_or_default();
-    let sequence = |index: usize| -> Result<u64, String> {
-        at(index)
-            .parse::<u64>()
-            .map_err(|_| format!("{kind} record has no sequence number: {:?}", at(index)))
+    let sequence = |index: usize| -> Result<u64, LineError> {
+        at(index).parse::<u64>().map_err(|_| LineError::NoSequence {
+            kind: kind.to_owned(),
+            found: at(index).to_owned(),
+        })
     };
 
     match kind {
@@ -741,7 +775,7 @@ fn parse_record(fields: &[&str]) -> Result<Record, String> {
         "hello" => Ok(Record::Hello {
             version: at(2)
                 .parse()
-                .map_err(|_| format!("hello carries no version: {:?}", at(2)))?,
+                .map_err(|_| LineError::NoVersion(at(2).to_owned()))?,
             session: at(3).to_owned(),
             capabilities: at(4)
                 .split(',')
@@ -820,7 +854,7 @@ fn parse_record(fields: &[&str]) -> Result<Record, String> {
             seq: sequence(2)?,
             reason: Refusal::parse(at(3)),
         }),
-        "" => Err("record carries no kind".to_owned()),
+        "" => Err(LineError::NoKind),
         other => Ok(Record::Other {
             kind: other.to_owned(),
             fields: fields[2..].iter().map(|f| (*f).to_owned()).collect(),

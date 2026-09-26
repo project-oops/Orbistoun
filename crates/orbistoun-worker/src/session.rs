@@ -109,8 +109,6 @@ pub fn apply(request: Request) -> Result<Lifecycle, Refused> {
 /// Silent when nothing asked for anything, so an ordinary run stays as quiet as it was
 /// before this existed.
 pub fn summarise() {
-    use std::io::Write as _;
-
     let applied = APPLIED.load(Ordering::Relaxed);
     let refused = REFUSED.load(Ordering::Relaxed);
     let withheld = orbistoun_systemservice::console::summarise();
@@ -122,7 +120,7 @@ pub fn summarise() {
         return;
     }
 
-    let mut lines = vec!["orbistoun: shell".to_owned()];
+    let mut lines = vec!["shell".to_owned()];
     lines.push(format!("  {applied} request(s) carried out"));
     if refused > 0 {
         // Worth a line of its own. It means the window believed the title was somewhere it
@@ -157,8 +155,7 @@ pub fn summarise() {
             );
         }
     }
-    lines.push(String::new());
-    let _ = std::io::stderr().write_all(lines.join("\n").as_bytes());
+    tracing::info!("{}", lines.join("\n"));
 }
 
 /// The guard, with a poisoned lock treated as ordinary.

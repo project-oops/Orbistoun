@@ -482,6 +482,7 @@ fn kernel_debug_out_text(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // saying the same thing an engine says through `printf`, and the report should not care
     // which of the two a title happened to use (D658).
     orbistoun_core::said::note(&bytes);
+    // Guest output, not a log: the guest's own write, so it stays a direct write.
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(&bytes);
     let _ = stderr.flush();

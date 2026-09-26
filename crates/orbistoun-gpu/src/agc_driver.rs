@@ -994,8 +994,8 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         resolved.push((base, len));
     }
     let Some(frame) = (hooks.take)(copy.snapshot) else {
-        eprintln!(
-            "orbistoun: a deferred copy's frame could not be read - {:#x} keeps what it held",
+        tracing::warn!(
+            "a deferred copy's frame could not be read - {:#x} keeps what it held",
             copy.destination
         );
         return false;

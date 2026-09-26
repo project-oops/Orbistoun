@@ -91,8 +91,8 @@ fn report(thread: &str, samples: &[(u64, u64)]) {
         .take(shown().unwrap_or(SHOWN))
         .map(|(name, count)| format!("{} {name}", percent(*count)))
         .collect();
-    eprintln!(
-        "orbistoun: profile of the {thread} thread, {} samples, {} in the guest's image:\n  {}",
+    tracing::info!(
+        "profile of the {thread} thread, {} samples, {} in the guest's image:\n  {}",
         samples.len(),
         percent(guest),
         lines.join("\n  ")
@@ -141,7 +141,7 @@ mod imp {
             )
         };
         if ok == 0 {
-            eprintln!("orbistoun: the profiler could not hold the {name} thread");
+            tracing::warn!("the profiler could not hold the {name} thread");
             return;
         }
         let first = {
@@ -255,6 +255,6 @@ mod imp {
 mod imp {
     /// No sampler away from Windows yet.
     pub(super) fn watch(_name: &'static str) {
-        eprintln!("orbistoun: the profiler samples on Windows only");
+        tracing::warn!("the profiler samples on Windows only");
     }
 }

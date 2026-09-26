@@ -20,3 +20,4 @@ orbistoun-hle = { workspace = true }
 orbistoun-overrides = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+thiserror = { workspace = true }

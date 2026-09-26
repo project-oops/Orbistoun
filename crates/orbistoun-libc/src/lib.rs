@@ -2124,6 +2124,7 @@ fn printf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     };
 
+    // Guest output, not a log: the guest's own write, so it stays a direct write.
     let mut err = std::io::stderr();
     let _ = err.write_all(&rendered);
     let _ = err.flush();
@@ -2343,6 +2344,7 @@ fn vprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(rendered) = render_va(args[0], args[1]) else {
         return 0;
     };
+    // Guest output, not a log: the guest's own write, so it stays a direct write.
     let mut err = std::io::stderr();
     let _ = err.write_all(&rendered);
     let _ = err.flush();
@@ -2395,6 +2397,7 @@ fn puts(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: `c_len` established `len` readable bytes from `text`.
     let bytes = unsafe { std::slice::from_raw_parts(ptr(text).cast_const(), len) };
 
+    // Guest output, not a log: the guest's own write, so it stays a direct write.
     let mut err = std::io::stderr();
     let _ = err.write_all(bytes);
     let _ = err.write_all(b"\n");
@@ -2415,6 +2418,7 @@ fn putchar(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     use std::io::Write as _;
 
     let byte = args[0] as u8;
+    // Guest output, not a log: the guest's own write, so it stays a direct write.
     let mut err = std::io::stderr();
     let _ = err.write_all(&[byte]);
     let _ = err.flush();
@@ -2817,6 +2821,7 @@ fn perror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     line.extend_from_slice(format!("error {number} (orbistoun has no message table)").as_bytes());
     line.push(b'\n');
 
+    // Guest output, not a log: the guest's own write, so it stays a direct write.
     let mut err = std::io::stderr();
     let _ = err.write_all(&line);
     let _ = err.flush();
@@ -3300,7 +3305,6 @@ fn note_unknown_sysctl(mib: &str) {
         .get_or_insert_with(Default::default)
         .insert(mib.to_owned())
     {
-        use std::io::Write as _;
         let line = format!(
             concat!(
                 "orbistoun: sysctl asked for [{}] and nothing here knows it - refused with ",
@@ -3308,8 +3312,9 @@ fn note_unknown_sysctl(mib: &str) {
             ),
             mib
         );
-        let mut err = std::io::stderr();
-        let _ = writeln!(err, "{line}");
+        tracing::warn!(
+            "sysctl asked for [{mib}] and nothing here knows it - refused with the documented failure"
+        );
         // And to the kernel log, while the guest is still running to read it (D396).
         orbistoun_core::klog::note(&line);
     }
@@ -3343,7 +3348,7 @@ fn assert_failed(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let bytes = unsafe { std::slice::from_raw_parts(ptr(args[0]).cast_const(), len) };
         String::from_utf8_lossy(bytes).into_owned()
     };
-    eprintln!("orbistoun: the guest failed an assertion: {message}");
+    tracing::warn!("the guest failed an assertion: {message}");
     orbistoun_core::klog::note(&format!("assertion failed: {message}"));
     orbistoun_core::stop(orbistoun_core::StopReason::Aborted, 0)
 }

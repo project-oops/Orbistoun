@@ -165,6 +165,7 @@ impl Preferences {
         let shell = self
             .shell
             .to_toml()
+            .map_err(|e| e.to_string())
             .and_then(|text| std::fs::write(shell_path, text).map_err(|e| e.to_string()));
         self.status = Some(match (config, shell) {
             (Ok(()), Ok(())) => Ok(format!("saved to {}", path.display())),

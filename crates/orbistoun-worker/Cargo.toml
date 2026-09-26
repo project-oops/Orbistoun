@@ -41,6 +41,8 @@ orbistoun-service = { workspace = true }
 orbistoun-systemservice = { workspace = true }
 orbistoun-thunk = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 # Frames move between word and byte views of the same pixels without a copy through an iterator.
 zerocopy = { workspace = true }
 # A title's `filesystem_view` setting, merged from its shipped record and the user's file.

@@ -16,3 +16,4 @@ workspace = true
 # Pure derive, no IO: these are domain types two layers that cannot see each
 # other both need to store and read (D394).
 serde = { workspace = true }
+tracing = { workspace = true }

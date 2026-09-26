@@ -40,7 +40,7 @@ pub enum ClientError {
         /// The line, verbatim.
         line: String,
         /// What was wrong with it.
-        detail: String,
+        detail: crate::LineError,
     },
     /// The probe refused the command.
     Refused(Refusal),

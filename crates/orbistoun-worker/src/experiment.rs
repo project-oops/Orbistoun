@@ -289,7 +289,11 @@ impl Experiments {
     /// Separated from [`Self::from_env`] so the caller decides what a refusal means - which
     /// here is halting before the guest starts, because running anyway would produce a
     /// report indistinguishable from one where the watchpoints had worked.
-    pub fn watchpoints(&self) -> Result<Vec<crate::watchpoint::Request>, String> {
+    ///
+    /// # Errors
+    ///
+    /// When the watchpoint list does not parse; see [`crate::watchpoint::parse`].
+    pub fn watchpoints(&self) -> Result<Vec<crate::watchpoint::Request>, crate::Error> {
         crate::watchpoint::parse(&self.watchpoint)
     }
 }

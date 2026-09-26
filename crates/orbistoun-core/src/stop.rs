@@ -79,10 +79,9 @@ pub fn stop(reason: StopReason, code: u64) -> ! {
     if let Some(handler) = HANDLER.get() {
         handler(reason, code);
     }
-    // No handler: nothing is recording, so there is nothing to flush. Said plainly on the
-    // error stream first, because a process that vanishes silently is indistinguishable
-    // from one that crashed.
-    eprintln!("orbistoun: {} ({code:#x})", reason.label());
+    // No handler: nothing is recording, so there is nothing to flush. Logged plainly first,
+    // because a process that vanishes silently is indistinguishable from one that crashed.
+    tracing::error!("{} ({code:#x})", reason.label());
     std::process::exit(EXIT_GUEST_STOPPED);
 }
 

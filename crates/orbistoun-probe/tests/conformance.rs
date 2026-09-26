@@ -277,7 +277,7 @@ fn a_non_answer_carrying_a_value_is_refused_at_the_door() {
     let error =
         orbistoun_probe::parse_line(line).expect_err("a died outcome with a value must be refused");
     assert!(
-        error.contains("did not answer"),
+        error.to_string().contains("did not answer"),
         "the refusal should say why: {error}"
     );
 }

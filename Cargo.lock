@@ -2759,6 +2759,7 @@ name = "orbistoun-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -2810,6 +2811,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-mem",
  "orbistoun-nid",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -2843,6 +2845,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",
+ "tracing",
  "zerocopy",
 ]
 
@@ -2856,6 +2859,7 @@ dependencies = [
  "orbistoun-spirv",
  "orbistoun-translate",
  "thiserror 2.0.20",
+ "tracing",
  "zerocopy",
 ]
 
@@ -2891,6 +2895,7 @@ dependencies = [
  "orbistoun-env",
  "orbistoun-nid",
  "serde",
+ "thiserror 2.0.20",
  "toml 0.8.23",
 ]
 
@@ -2917,6 +2922,7 @@ dependencies = [
  "orbistoun-thunk",
  "serde",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -2930,6 +2936,7 @@ dependencies = [
  "orbistoun-mem",
  "orbistoun-thunk",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -3010,6 +3017,7 @@ name = "orbistoun-overrides"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror 2.0.20",
  "toml 0.8.23",
 ]
 
@@ -3039,6 +3047,7 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-hle",
  "orbistoun-nid",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3112,6 +3121,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -3131,6 +3141,7 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-core",
  "serde",
+ "thiserror 2.0.20",
  "toml 0.8.23",
 ]
 
@@ -3145,6 +3156,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-overrides",
  "serde",
+ "thiserror 2.0.20",
  "toml 0.8.23",
 ]
 
@@ -3232,6 +3244,8 @@ dependencies = [
  "orbistoun-video",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
  "windows-sys 0.61.2",
  "zerocopy",
 ]

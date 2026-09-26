@@ -122,8 +122,8 @@ impl Numbers {
         *RESOLVED.get_or_init(|| {
             let read = Self::read_from_table();
             if read.is_none() {
-                eprintln!(
-                    "orbistoun: this build cannot name the event filters, so kqueue is refused - the harvested sys/sys/event.h is incomplete"
+                tracing::warn!(
+                    "this build cannot name the event filters, so kqueue is refused - the harvested sys/sys/event.h is incomplete"
                 );
             }
             read

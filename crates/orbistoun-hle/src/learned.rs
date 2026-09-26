@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{StubPolicy, StubRegion, StubReturn, knowledge::Oracle};
+use crate::{HleError, StubPolicy, StubRegion, StubReturn, knowledge::Oracle};
 
 /// Everything a machine has measured and kept.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -108,13 +108,21 @@ impl Learned {
     ///
     /// When the file exists and cannot be parsed. **Deliberately not silent**: a malformed file
     /// that fell back to empty would look exactly like a machine that had measured nothing.
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+    pub fn load(path: &std::path::Path) -> Result<Self, HleError> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+            Err(source) => {
+                return Err(HleError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
         };
-        toml::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
+        toml::from_str(&text).map_err(|source| HleError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })
     }
 
     /// The file as text, for writing it back.
@@ -122,8 +130,8 @@ impl Learned {
     /// # Errors
     ///
     /// When the measurements cannot be serialised.
-    pub fn to_toml(&self) -> Result<String, String> {
-        toml::to_string_pretty(self).map_err(|e| e.to_string())
+    pub fn to_toml(&self) -> Result<String, HleError> {
+        Ok(toml::to_string_pretty(self)?)
     }
 
     /// Adds a measurement, replacing any earlier one for the same function.
