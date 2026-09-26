@@ -76,11 +76,24 @@ fn shipped_modules(root: &Path) -> BTreeMap<String, Vec<PathBuf>> {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        // Sorted, so a title with two spellings of one name resolves the same way twice.
-        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        // Sorted, so a title with two spellings of one name resolves the same way twice. The kind
+        // comes from the listing: a separate stat per entry costs seconds on a title whose data
+        // tree holds thousands of files. A link is followed, as a stat would.
+        let mut paths: Vec<(PathBuf, bool)> = entries
+            .flatten()
+            .map(|e| {
+                let path = e.path();
+                let is_dir = match e.file_type() {
+                    Ok(kind) if kind.is_symlink() => path.is_dir(),
+                    Ok(kind) => kind.is_dir(),
+                    Err(_) => false,
+                };
+                (path, is_dir)
+            })
+            .collect();
         paths.sort();
-        for path in paths {
-            if path.is_dir() {
+        for (path, is_dir) in paths {
+            if is_dir {
                 queue.push((path, depth + 1));
                 continue;
             }
