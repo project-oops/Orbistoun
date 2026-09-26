@@ -406,9 +406,11 @@ mod tests {
     /// and a range nothing mapped is refused.
     #[test]
     fn an_already_mapped_image_is_adopted_as_placing_would_describe_it() {
-        const ADOPT_BASE: u64 = 0x0000_5100_0000_0000;
+        // Its own two bases: placing at the shared one races the tests that use it.
+        const PLACE_BASE: u64 = 0x0000_5100_0000_0000;
+        const ADOPT_BASE: u64 = 0x0000_5200_0000_0000;
         let bytes = elf_with_segment(0x1000, 64, 0x3000, 0xAB);
-        let placed = place(&bytes, TEST_BASE, 4096).expect("place");
+        let placed = place(&bytes, PLACE_BASE, 4096).expect("place");
         let (placed_span, placed_segments) = (placed.span(), placed.segments().to_vec());
         drop(placed);
 
@@ -417,14 +419,14 @@ mod tests {
             "nothing is mapped there yet"
         );
         let mut host = orbistoun_mem::AddressSpace::new();
-        let (span_base, span_len) = (placed_span.0 - TEST_BASE + ADOPT_BASE, placed_span.1);
+        let (span_base, span_len) = (placed_span.0 - PLACE_BASE + ADOPT_BASE, placed_span.1);
         host.reserve(span_base, span_len, orbistoun_mem::Protection::READ_WRITE)
             .expect("the host's own mapping");
         let adopted = super::adopt(&bytes, ADOPT_BASE, 4096).expect("adopt");
         assert_eq!(adopted.span(), (span_base, span_len));
         assert_eq!(adopted.entry(), ADOPT_BASE + 0x1000);
         for (a, p) in adopted.segments().iter().zip(&placed_segments) {
-            assert_eq!(a.address - ADOPT_BASE, p.address - TEST_BASE);
+            assert_eq!(a.address - ADOPT_BASE, p.address - PLACE_BASE);
             assert_eq!((a.copied, a.zeroed, a.flags), (p.copied, p.zeroed, p.flags));
         }
         drop(adopted);
