@@ -128,6 +128,8 @@ pub(crate) struct App {
     aot: Option<std::path::PathBuf>,
     /// When the controls card went up, while it is up: a build shows it before its title starts.
     controls_card: Option<std::time::Instant>,
+    /// What this machine lacks to play the build's title; while any is missing nothing launches.
+    missing: Vec<String>,
     /// When the last frame was drawn, for the press-versus-hold decision.
     last_frame: std::time::Instant,
     /// Where the highlight is in the shell.
@@ -199,6 +201,7 @@ impl App {
             power_menu: false,
 
             controls_card: build.is_some().then(std::time::Instant::now),
+            missing: Vec::new(),
             aot: build,
             last_frame: std::time::Instant::now(),
             at: orbistoun_shell::Cross {
@@ -234,6 +237,14 @@ impl App {
     /// Draws the controls card a build shows before its title starts, and answers whether it is
     /// still up (D724).
     fn controls_card_up(&mut self, ctx: &egui::Context) -> bool {
+        if !self.missing.is_empty() {
+            let title = self
+                .rows
+                .first()
+                .map_or_else(String::new, |row| row.title.clone());
+            crate::controls::requirements(ctx, &title, &self.missing);
+            return true;
+        }
         let Some(since) = self.controls_card else {
             return false;
         };
@@ -599,6 +610,12 @@ impl App {
                 capture: self.input_capture.clone(),
             },
         ));
+    }
+
+    /// Holds a build's title back when this machine lacks what playing it needs (D724).
+    pub(crate) fn lacking(mut self, missing: Vec<String>) -> Self {
+        self.missing = missing;
+        self
     }
 
     /// Arms `script` for the next launch, as `--playback <file>` does (D721).

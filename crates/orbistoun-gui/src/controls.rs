@@ -160,6 +160,29 @@ pub(crate) fn card(
     false
 }
 
+/// Draws what this machine lacks to play `title`, in place of the title: shown until the window
+/// closes, because nothing here can supply it.
+pub(crate) fn requirements(ctx: &egui::Context, title: &str, missing: &[String]) {
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none().fill(egui::Color32::from_gray(16)))
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(24.0);
+                ui.heading(title);
+                ui.label("cannot start on this machine, which lacks:");
+                ui.add_space(12.0);
+                for what in missing {
+                    ui.label(format!("- {what}"));
+                }
+                ui.add_space(12.0);
+                ui.label(concat!(
+                    "It needs 64-bit Windows, a recent x86-64 processor, and a GPU whose Vulkan ",
+                    "driver offers mesh shaders."
+                ));
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::rows;

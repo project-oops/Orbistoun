@@ -88,19 +88,38 @@ fn main() -> eframe::Result<()> {
         // Large by default, to fit a ranked import list and a call tail side by side.
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([900.0, 600.0])
-        .with_title(
-            build
-                .as_ref()
-                .map_or("orbistoun", |(_, m)| m.title.as_str()),
-        );
+        .with_title("orbistoun");
 
-    // The project logo for the title bar and taskbar. `include_bytes!` resolves relative to
-    // this file, so the path cannot move behind a shared helper.
-    match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo.png")) {
+    // A build's window is the title's: its published name, and its own icon when it ships one.
+    let title = build
+        .as_ref()
+        .map(|(folder, manifest)| orbistoun_service::aot::title_entry(folder, manifest));
+    let title_icon = title
+        .as_ref()
+        .and_then(|entry| entry.metadata.as_ref())
+        .and_then(|meta| meta.icon.as_ref())
+        .and_then(|path| std::fs::read(path).ok());
+    if let Some(entry) = &title {
+        viewport = viewport.with_title(entry.display_name());
+    }
+
+    // The project logo for the title bar and taskbar otherwise. `include_bytes!` resolves
+    // relative to this file, so the path cannot move behind a shared helper.
+    let icon_bytes: &[u8] = title_icon
+        .as_deref()
+        .unwrap_or(include_bytes!("../../../assets/logo.png"));
+    match eframe::icon_data::from_png_bytes(icon_bytes) {
         Ok(icon) => viewport = viewport.with_icon(icon),
         // Reported and carried on: a window with the default icon is still usable.
         Err(e) => eprintln!("orbistoun: window icon: {e}"),
     }
+
+    // A build names what this machine lacks before it launches anything.
+    let missing = if build.is_some() {
+        orbistoun_worker::missing_requirements()
+    } else {
+        Vec::new()
+    };
 
     let options = eframe::NativeOptions {
         viewport,
@@ -124,7 +143,8 @@ fn main() -> eframe::Result<()> {
             eprintln!("orbistoun: renderer: {renderer}");
             Ok(Box::new(
                 app::App::new(start, renderer, build.map(|(folder, _)| folder))
-                    .arm_playback(playback),
+                    .arm_playback(playback)
+                    .lacking(missing),
             ))
         }),
     )

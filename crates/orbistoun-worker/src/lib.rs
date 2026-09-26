@@ -1151,6 +1151,37 @@ pub fn serve_as_worker_process() -> Result<(), Error> {
     .map_err(Error::WorkerLoop)
 }
 
+/// What this machine lacks that playing a title needs, each in words for the person at it; empty
+/// when it has everything. An orbistoun-aot build asks before it launches (D724), so a missing
+/// part is named rather than met as a failure partway into the title.
+#[must_use]
+pub fn missing_requirements() -> Vec<String> {
+    let mut missing = Vec::new();
+    // Every guest thread points `fs` at its own thread-local block.
+    if !orbistoun_abi::thread_pointer::processor_supports_base_writes() {
+        missing.push(
+            "a processor that lets a program set its own thread pointer (the FSGSBASE feature)"
+                .to_owned(),
+        );
+    }
+    match orbistoun_gpu_vulkan::probe() {
+        orbistoun_gpu_vulkan::Availability::Unavailable { reason } => {
+            missing.push(format!("a GPU with a Vulkan 1.2 driver: {reason}"));
+        }
+        // A guest's primitive shaders draw through a mesh stage (D688).
+        orbistoun_gpu_vulkan::Availability::Available { properties }
+            if !properties.mesh_shading =>
+        {
+            missing.push(format!(
+                "a GPU whose Vulkan driver offers mesh shaders (VK_EXT_mesh_shader); {} does not",
+                properties.device
+            ));
+        }
+        orbistoun_gpu_vulkan::Availability::Available { .. } => {}
+    }
+    missing
+}
+
 /// Runs one title in this process, as an orbistoun-aot launcher does (D724): the request a shim
 /// would send, answered by the same loop, with its events written to stderr.
 ///
