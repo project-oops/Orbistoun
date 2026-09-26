@@ -474,6 +474,9 @@ pub struct LinkSummary {
     /// Raw `syscall` instructions across every module's executable segments.
     #[serde(default)]
     pub syscalls: usize,
+    /// Instructions only an AMD processor executes, across every module (D725).
+    #[serde(default)]
+    pub amd_only: usize,
     /// `new`, `match` or `mismatch` against the stored plan, or empty when none could be kept.
     pub stored: String,
     /// What differed from the stored plan, on a mismatch or a relink, in words.

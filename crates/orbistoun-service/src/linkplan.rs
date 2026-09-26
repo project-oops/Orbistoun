@@ -57,8 +57,10 @@ pub fn module_plan(
     bytes: &[u8],
     writes: Vec<SlotWrite>,
 ) -> Result<ModulePlan, ServiceError> {
-    let syscalls = orbistoun_loader::inventory::syscall_sites(bytes, image.base())?;
-    Ok(ModulePlan::of(library, image, writes).with_syscalls(syscalls))
+    let found = orbistoun_loader::inventory::inventory(bytes, image.base())?;
+    Ok(ModulePlan::of(library, image, writes)
+        .with_syscalls(found.syscalls)
+        .with_amd_only(found.amd_only))
 }
 
 /// How many differing slots are named before the rest are only counted.
@@ -206,6 +208,7 @@ impl Service {
             modules: plan.modules.len(),
             writes: plan.write_count(),
             syscalls: plan.syscall_count(),
+            amd_only: plan.amd_only_count(),
             ..LinkSummary::default()
         };
         let Some(file) = self.link_plan_file(path) else {

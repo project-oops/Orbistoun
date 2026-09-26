@@ -96,6 +96,7 @@ fn describe_link(summary: &orbistoun_proto::LinkSummary, relink: bool) -> Vec<St
         format!("modules  {}", summary.modules),
         format!("writes   {}", summary.writes),
         format!("syscalls {}", summary.syscalls),
+        format!("amd-only {}", summary.amd_only),
         format!("digest   {}", summary.digest),
         format!("stored   {stored}"),
     ];
@@ -322,6 +323,7 @@ mod link_tests {
             modules: 3,
             writes: 564_184,
             syscalls: 1,
+            amd_only: 0,
             stored: "mismatch".to_owned(),
             differs: vec!["libc::malloc at 0x10: stored 0x1, now 0x2".to_owned()],
         };
@@ -329,9 +331,10 @@ mod link_tests {
         assert_eq!(lines[0], "modules  3");
         assert_eq!(lines[1], "writes   564184");
         assert_eq!(lines[2], "syscalls 1");
-        assert_eq!(lines[3], "digest   0123456789abcdef");
-        assert_eq!(lines[4], "stored   mismatch");
-        assert!(lines[5].contains("loader defect"));
-        assert_eq!(lines[6], "  libc::malloc at 0x10: stored 0x1, now 0x2");
+        assert_eq!(lines[3], "amd-only 0");
+        assert_eq!(lines[4], "digest   0123456789abcdef");
+        assert_eq!(lines[5], "stored   mismatch");
+        assert!(lines[6].contains("loader defect"));
+        assert_eq!(lines[7], "  libc::malloc at 0x10: stored 0x1, now 0x2");
     }
 }

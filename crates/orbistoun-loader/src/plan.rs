@@ -49,6 +49,9 @@ pub struct ModulePlan {
     /// Every raw `syscall` instruction in the module's executable segments, by address.
     #[serde(default)]
     pub syscalls: Vec<u64>,
+    /// Every instruction only an AMD processor executes, by address, with its mnemonic (D725).
+    #[serde(default)]
+    pub amd_only: Vec<(u64, String)>,
 }
 
 impl ModulePlan {
@@ -72,7 +75,16 @@ impl ModulePlan {
                 .collect(),
             writes,
             syscalls: Vec::new(),
+            amd_only: Vec::new(),
         }
+    }
+
+    /// The same plan, with the module's AMD-only instructions listed.
+    #[must_use]
+    pub fn with_amd_only(mut self, mut sites: Vec<(u64, String)>) -> Self {
+        sites.sort_unstable();
+        self.amd_only = sites;
+        self
     }
 
     /// The same plan, with the module's raw `syscall` sites listed.
@@ -120,6 +132,11 @@ impl LinkPlan {
             for site in &module.syscalls {
                 hash.update(site.to_le_bytes());
             }
+            hash.update((module.amd_only.len() as u64).to_le_bytes());
+            for (site, mnemonic) in &module.amd_only {
+                hash.update(site.to_le_bytes());
+                hash.update(mnemonic.as_bytes());
+            }
         }
         let digest = hash.finalize();
         let mut name = String::with_capacity(16);
@@ -150,7 +167,7 @@ impl LinkPlan {
             if was.map(placed) != now.map(placed) {
                 difference.placements.push(library.to_owned());
             }
-            if was.map(|m| &m.syscalls) != now.map(|m| &m.syscalls) {
+            if was.map(|m| (&m.syscalls, &m.amd_only)) != now.map(|m| (&m.syscalls, &m.amd_only)) {
                 difference.syscalls.push(library.to_owned());
             }
             let empty = Vec::new();
@@ -165,6 +182,12 @@ impl LinkPlan {
     #[must_use]
     pub fn syscall_count(&self) -> usize {
         self.modules.iter().map(|m| m.syscalls.len()).sum()
+    }
+
+    /// AMD-only instructions across every module.
+    #[must_use]
+    pub fn amd_only_count(&self) -> usize {
+        self.modules.iter().map(|m| m.amd_only.len()).sum()
     }
 
     /// Total relocation writes across every module.
@@ -582,6 +605,7 @@ mod tests {
             }],
             writes,
             syscalls: Vec::new(),
+            amd_only: Vec::new(),
         }
     }
 
