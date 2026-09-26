@@ -1,10 +1,15 @@
 # D005 - Interception is linking, not hooking
 
-**decided** · 2026-08-19
+**Status:** decided
+**Date:** 2026-08-19
 
-Guests import by NID hash; the loader resolves each against the registry and writes
-the address into the guest's relocation slot. No instrumentation pass, ever.
+Guest imports are resolved by NID against the registry, and the loader writes each resolved
+address into the guest's relocation slot. There is no instrumentation pass.
 
-The consequence is the project's main early asset: the complete list of what a title
-needs is available **statically**, before a single guest instruction executes.
+**Why:** writing an address into a linkage slot is the interception, so the guest calls
+whatever the slot holds. The complete list of what a title needs is available statically,
+before a guest instruction executes.
 
+**Rejected:**
+- Patching guest code at call sites: rewrites the program being measured.
+- Trapping calls at run time: costs a fault per call and hides the static import list.

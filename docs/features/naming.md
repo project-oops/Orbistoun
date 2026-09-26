@@ -1,51 +1,59 @@
 # Names and hashes
 
-A guest imports by **hash**, not by name. Turning those hashes back into names is a large part of
-what Orbistoun does, and it is why some entries in the library show a readable function and
-others show sixteen hex characters.
+A guest imports functions by hash, not by name. Turning hashes back into names is why some
+imports appear as a readable function and others as sixteen hex characters: a name is shown
+where the symbol database holds one, and a bare hash where it does not.
 
-## Why it is hard
+## The hash
 
-The hash is the first eight bytes of a SHA-1 over the function's name plus a fixed suffix,
-little-endian. It is one-way. There is no table to look the answer up in, and nothing to invert.
+A **NID** is the first eight bytes, little-endian, of a SHA-1 over the function's name plus a
+fixed suffix. It cannot be inverted, so naming is generate and test: propose a name, hash it,
+compare. A match is proof rather than evidence, which makes a proposed name cheap to check and
+impossible to get wrong silently. [SYMBOLS.md](../SYMBOLS.md) describes the algorithm and the
+database format.
 
-So naming is **generate and test**: propose a name, hash it, compare. That sounds hopeless and is
-not, because the check is exact. A collision is not evidence - it is proof. Nothing else in this
-project gets an oracle that good, which is why the naming work is worth doing at all.
+## Reading the count
 
-## Doing it
+The detail panel's imports line, `N of M named`, is how many of the selected title's imports
+the database can name. `orbistoun-cli verify <title>/eboot.bin` prints the same measure. A
+bare hash is an import nothing has named. Orbistoun can still implement behaviour behind it,
+but a function without a name is one nobody can look up, so an unnamed import is worth
+reporting.
+
+## Commands
 
 ```bash
-orbistoun-cli names            # what is named and what is not
-orbistoun-cli harvest          # take names from a lawful source and test them
-orbistoun-cli learn            # record what was established
-orbistoun-cli ask              # ask a model for vocabulary to try
+orbistoun-cli verify <module>                  # how many of a module's imports are named
+orbistoun-cli names <module-or-directory>      # search generated names for the unnamed imports
+orbistoun-cli harvest <freebsd-checkout>       # rebuild the standard-library word list from FreeBSD's symbol maps
+orbistoun-cli nid <name>...                    # hash names
+orbistoun-cli symbols --filter <text>          # list the libraries and functions orbistoun declares
+orbistoun-cli audit <database>                 # re-derive every name in a symbol database
 ```
 
-`harvest` reads published sources - FreeBSD's own symbol maps, for one - and tests every name in
-them. It is cheap and it is where most answers come from.
+| `names` option | Does |
+|---|---|
+| `--words <file>` | also try each line of a file, verbatim |
+| `--words-from probe\|supplied` | record where that list came from; `supplied` (the default) never verifies, and an audit lists it separately |
+| `--from-trace` | also try strings a previous run captured from guest memory |
+| `--from-report <report>` | also name hashes a conformance probe reported the platform exports |
+| `--out <file>` | write the names found to a symbol database |
+| `--wanted <file>` | write the hashes still unnamed, as a prioritised work list |
 
-`ask` exists because the remaining names are not in any list. When the shapes are known but the
-*words* are not, a model proposing candidate vocabulary is genuinely useful: every suggestion is
-checked by the hash, so a wrong one costs nothing and a right one is proved. This is the one
-place in the project where a model's guess is admissible, and it is admissible precisely because
-nothing is taken on trust.
+A directory is one search: the unnamed imports of every module under it are pooled, and every
+module's strings are tried against all of them.
 
-## What a bare hash in the library means
+`harvest` reads only FreeBSD's `Symbol.map` files, so a sparse checkout is enough:
 
-The title imports something nothing has named yet. That is not necessarily a blocker - Orbistoun
-can implement behaviour behind an unnamed hash - but an unnamed import is one nobody can reason
-about, so it is worth reporting.
+```bash
+git clone --filter=blob:none --sparse https://github.com/freebsd/freebsd-src
+cd freebsd-src && git sparse-checkout set lib/libc lib/libthr lib/msun lib/libutil
+```
 
-## Where names may come from
+## Where names come from
 
-Names come from **sources that can be named**: published documentation, open-source
-implementations, and standards. The FreeBSD lineage of the platform's C library makes a great
-deal of it legitimately knowable.
-
-Names are **not** taken by reading vendor binaries, and every recorded behaviour carries a field
-saying how it came to be known - `published`, `measured`, and so on. That accounting is what
-makes the work shareable rather than merely usable, and it is checked by the build rather than
-left to good intentions.
-
-If you contribute a name, the source matters as much as the answer.
+Names come from sources that can be named: published documentation, standards, open-source
+implementations such as FreeBSD, and this project's own generated vocabulary. A name enters
+the database only if this repository can re-derive it (D242), and `audit` checks exactly
+that. Names are not taken from vendor binaries or from other projects' lists.
+[PROVENANCE.md](../PROVENANCE.md) describes how a name is shown to be this project's.

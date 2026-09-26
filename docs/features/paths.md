@@ -1,75 +1,73 @@
-# Where Orbistoun writes
+# Where orbistoun writes
 
-Everything Orbistoun produces - logs, traces, reports, screenshots, title data, savestates,
-settings - hangs off one root. `orbistoun-cli paths` prints them for the machine you are on, in
-the mode you are in, which is always more reliable than a page like this one.
+Everything orbistoun reads and writes - settings, titles, saves, reports, screenshots,
+traces, logs - hangs off one resolved root, and orbistoun never writes outside it.
+`orbistoun-cli paths` prints every location for the machine and mode it runs in.
 
-## The three ways the root is chosen
+## Choosing the root
 
-In order. The first that applies wins.
+The first rule that applies wins:
 
-1. **Portable** - `./.portable/` beside the executable. Nothing is written anywhere else.
-2. **`ORBISTOUN_DATA_DIR`** - an explicit relocation for anyone who wants one.
-3. **The collection's directory** - `%APPDATA%\OOPS\` on Windows, `~/.local/share/OOPS`
-   on Linux, the equivalent on macOS. **Shared with the sibling projects**, which is the
-   point: a save Prosperous pulls off real hardware lands in the tree Orbistoun mounts.
+1. **Portable** - the `.portable` directory beside the executable is the root, and nothing is
+   written anywhere else.
+2. **`ORBISTOUN_DATA_DIR`** - an explicit path.
+3. **The collection's directory** - `%APPDATA%\OOPS\` on Windows, `~/.local/share/OOPS/` on
+   Linux. It is shared with the other OOPS projects, so a save Prosperous copies off real
+   hardware lands in the tree a title's filesystem mounts.
 
-**Portable deliberately outranks the environment variable.** If a variable in your shell could
-move data outside the portable root, then "does not touch anything outside its own directory"
-would be a suggestion rather than a guarantee - and the whole point of portable mode is that it
-is a guarantee.
+Portable outranks the environment variable, so no variable can move data outside a portable
+root.
 
-## Turning portable mode on
+## Portable mode
 
-Any of these, and they are OR'd:
+Any one of these turns it on:
 
-- a `.portable` directory beside the executable - the durable way, and what the preferences
-  toggle creates
-- `ORBISTOUN_PORTABLE_MODE=1` - also `true`, `yes`, `on`
-- an executable whose own filename contains `portable`, so a downloaded build can announce
-  itself with nobody configuring anything
+- a `.portable` directory beside the executable. The directory is both the sentinel and the
+  root, so a portable install stays portable.
+- `ORBISTOUN_PORTABLE_MODE` set to `1`, `true`, `yes` or `on`, in any case. Any other value is
+  off.
+- an executable whose filename contains `portable`, in any case, such as
+  `orbistoun-portable.exe`.
 
-An unrecognised value is **not** on. Reading `ORBISTOUN_PORTABLE_MODE=no` as "yes" would be
-exactly the kind of surprise portable mode must never have.
+## Data and cache
 
-## Two roots, and which is which
+Material that can be rebuilt goes to a second root, the platform's cache directory:
+`%LOCALAPPDATA%\OOPS\` on Windows, `~/.cache/OOPS/` on Linux. The test is whether it can be
+recovered without the hardware.
 
-Windows distinguishes data that follows you between machines from data that does not, and so do
-Linux and macOS. The test for which side something is on: **can you get it back without the
-console?**
-
-| | |
+| Root | Holds |
 |---|---|
-| `%APPDATA%\OOPS\` | `titles/`, `saves/`, `overrides/`, `reports/`, `screenshots/`, `config.toml`, `learned.toml` |
-| `%LOCALAPPDATA%\OOPS\` | `models/`, `runtime/`, `shaders/`, `filesystem/`, `traces/`, `logs/` |
+| data | `titles/`, `payloads/`, `packages/`, `console/`, `overrides/`, `reports/`, `screenshots/`, `config.toml`, `shell.toml`, `learned.toml` |
+| cache | `traces/`, `logs/`, `filesystem/`, `shaders/`, `models/`, `runtime/` |
 
-Models and runtimes download again, shaders compile again, the base filesystem is materialised
-from a manifest, and a trace is one re-run away. A report measured against real hardware is not,
-and neither is an override you typed.
+A report measured against real hardware and an override somebody typed cannot be regenerated,
+so they are data. Traces are one re-run away, shaders recompile, the base filesystem is
+rebuilt from its manifest, and models and runtimes download again. In portable mode, and
+under `ORBISTOUN_DATA_DIR`, both roots are the same directory.
 
-**In a portable run they are the same directory**, because the point of portable mode is that
-everything is on the stick.
+| Path | Holds |
+|---|---|
+| `titles/` | the title library: one directory per title (see [the library](library.md)) |
+| `titles/<title>/fs/` | the title's writable filesystem, keyed by guest path and merged over the base tree while it runs |
+| `titles/<title>/savestates/` | the title's save states |
+| `titles/data/homebrew/<id>/` | staged titles, with a writable `/app0` |
+| `payloads/` | single executables run directly rather than installed |
+| `packages/` | packages that have not been installed |
+| `console/` | the writable storage shared by everything run with the system filesystem view |
+| `overrides/<title>.toml` | per-title overrides |
+| `config.toml` | how the emulator is configured: library, limits, entry, threads, memory, controllers |
+| `shell.toml` | what the emulated machine is set to: users, language, confirm button, [machine profile](running.md#machine-profile) |
+| `learned.toml` | policy the loop worked out for itself; entries in `config.toml` win, and deleting it undoes all of it |
 
-`titles/<title>/` holds that title's guest filesystem and its savestates, so everything one
-title accumulated is in one place - and the guest filesystem is the tree Prosperous fills from
-real hardware.
+A title's writable filesystem keeps what the guest wrote between runs.
+`ORBISTOUN_SANDBOX=ephemeral` empties it at the start of each run instead.
 
-## Sending logs to a file
+## Logs to a file
 
-Orbistoun logs to the terminal by default. To keep them:
+Orbistoun logs to the terminal. To keep a run's log:
 
 ```bash
-OOPS_LOG=debug orbistoun-cli run <title> 2> run.log
+OOPS_LOG=debug orbistoun-cli run <title>/eboot.bin 2> run.log
 ```
 
-Levels and filtering are the same in every tool in the collection - see
-[running a title](running.md).
-
-## Two things worth knowing
-
-**Nothing is written until something needs writing.** Starting the window does not create a tree
-of empty directories.
-
-**The root moved, twice.** It was `%APPDATA%\orbistoun\data\`, then briefly a directory of
-this project's own under a shared parent, and it is now the collection's directory with every
-sibling. Nothing has shipped, so there was nothing to migrate but one developer's machine.
+The levels are listed under [running a title](running.md#log-levels).

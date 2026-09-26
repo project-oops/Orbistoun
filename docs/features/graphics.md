@@ -1,41 +1,56 @@
 # Graphics
 
-RDNA2 PM4 command-stream decode, shader translation to SPIR-V, and the Vulkan backend that
-does not present yet.
+A guest draws by building command buffers in the vendor command-stream format and submitting
+them. Orbistoun decodes those buffers, translates the guest's shaders to SPIR-V, and executes
+the result on a Vulkan device. The frame a guest flips is shown in the window.
 
-Orbistoun decodes GFX10 PM4 packets from platform graphics command buffers
-(`sceAgcDriverSubmitDcb`), translates RDNA2 Wave32 shaders into SPIR-V, dispatches a
-translated shader on a real Vulkan device for compute, and runs translated draws into a
-read-back frame. **Presentation is not implemented**: `orbistoun-gpu-vulkan` is the only crate
-that knows Vulkan exists (CLAUDE.md principle 12), and its module documentation
-(`crates/orbistoun-gpu-vulkan/src/lib.rs`) records that draws and dispatches execute while
-`ClearColour`, `Fence` and `present` are refused by name, tracked against roadmap phase 6. See
-[PROJECT_STATUS.md](../PROJECT_STATUS.md) for the current, generated numbers.
+## The pipeline
 
-There is also no CPU software renderer, current or planned: this project has deliberately
-chosen not to build a second graphics backend (CLAUDE.md principle 12) or a second
-execution backend, so "Vulkan or CPU fallback" is not a real choice anywhere in the tool.
+| Stage | Crate | Does |
+|---|---|---|
+| decode | `orbistoun-gpu` | walks the command packets, keeps the register file, assembles pipelines. It has no dependency on a host graphics API. |
+| shaders | `orbistoun-shader`, `orbistoun-translate`, `orbistoun-spirv` | decode the vendor shader bytecode and translate it to SPIR-V |
+| execution | `orbistoun-gpu-vulkan` | makes resources resident, runs dispatches and draws, and reads results back. The only crate that names a graphics API. |
 
----
+A guest's geometry stage translates to a mesh shader, so a device without mesh shading refuses
+a draw that needs one rather than issuing it. A command the backend cannot perform is refused
+by name, so an unimplemented command is never mistaken for a rendering fault. Translated
+shaders are checked by executing them on a real device and comparing the values they produce.
 
-## What exists today
+## In the window
 
-- **Command-stream decode.** PM4 packet walking, register file, and pipeline assembly, in
-  `orbistoun-gpu` — no dependency on a host graphics API, so nothing here can leak Vulkan
-  concepts into the translator.
-- **Shader translation.** RDNA2 GFX10 bytecode decode and an instruction census
-  (`orbistoun-shader`), and decoded shaders to SPIR-V (`orbistoun-translate`,
-  `orbistoun-spirv`), checked by executing the result on a real device and comparing
-  against expected values rather than only validating structure.
-- **Vulkan compute dispatch.** `orbistoun-gpu-vulkan` depends on `ash` for exactly this: a
-  real device, a translated shader, and a buffer read back — the mechanical correctness
-  signal the translation work is checked against.
-- **Vulkan draws and dispatch.** A translated compute dispatch and a translated draw both run
-  on a real device and read their result back — the mechanical correctness signal, extended from
-  compute to geometry.
-- **Vulkan presentation.** Not yet. `ClearColour`, `Fence` and `present` are refused, by name, so
-  a missing implementation is never mistaken for a rendering bug.
+While a title runs, the right side of the window shows the last frame it flipped, as large as
+fits with its aspect kept, on black. Until the first frame arrives the window says the title
+is starting. In the shell view the frame fills the window.
 
-There is no GUI graphics-settings panel to describe yet, and no `run` flags for renderer
-device selection or V-Sync — neither exists in `orbistoun-cli` today. When presentation
-lands, this page will document the real settings surface rather than a mockup of one.
+### Performance overlay
+
+`F3` shows and hides an overlay over the running title's picture, updated about once a
+second:
+
+| Line | Shows |
+|---|---|
+| fps | frames flipped per second |
+| submissions/s, draws/s | how many command buffers and draws those frames took |
+| gpu busy | the share of the second the device was working |
+| shares | each part of presenting a frame as a percentage of the second, the largest highlighted, with the remainder (the guest's own time and anything unmeasured) listed as such |
+
+### Renderer
+
+The window itself draws through `wgpu`, and reports which backend and adapter it got: printed
+to the terminal at startup as `orbistoun: renderer: <backend> - <adapter>`, and shown in the
+shell view's footer.
+
+## Diagnostics
+
+| Variable | Does |
+|---|---|
+| `ORBISTOUN_TARGET_WRITEBACK=flip\|submit` | write a drawn target back at the flip (default) or after every submission |
+| `ORBISTOUN_TRACE_SUBMITS=1` | print a line for every submission whose draws ran; refusals are printed regardless |
+| `ORBISTOUN_PERF_DETAIL=1` | print each submission span's time once a second, beside the performance phases |
+| `ORBISTOUN_PROFILE=<n>` | sample the guest's main and device threads and print where they spend their time |
+| `ORBISTOUN_FLIP_TO_ALL=1` | post a flip completion to every queue |
+
+```bash
+orbistoun-cli shaders <directory> --top 10   # rank the instructions that block translation across a directory of shader binaries
+```

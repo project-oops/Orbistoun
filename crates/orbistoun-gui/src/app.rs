@@ -965,7 +965,7 @@ impl App {
                 ui.add_enabled(false, egui::Button::new("⏺ record"))
                     .on_disabled_hover_text(concat!(
                         "recording needs a frame source and an encoder, and neither exists ",
-                        "yet - no guest has rendered a pixel. See docs/ROADMAP.md phase 6"
+                        "yet"
                     ));
 
                 // Short and fixed in shape so the controls beside it do not move; the path

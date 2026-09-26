@@ -1,24 +1,18 @@
 # D051 - Fixtures are generated, never extracted
 
-**decided** · 2026-08-19
+**Status:** decided
+**Date:** 2026-09-26
 
-Nothing derived from `titles/` is ever committed - not bytes, not a header, not a
-trimmed copy, not a hex dump pasted into a test. If a fixture needs to resemble a real
-container, the generator builds it from the *structure* that was observed, never from
-the file.
+Nothing derived from a title is committed - no bytes, header, trimmed copy or hex dump. A
+fixture that resembles a real container is built by a generator from observed structure.
+Generated shader fixtures use `.gcn`; a shader dumped from a title keeps `.bin`, which the
+provenance gate bans.
 
-**Why this needs stating rather than assuming.** `tests/fixtures/synthetic/` is
-deliberately **exempt** from the provenance guard, because those files are committed
-on purpose and may legitimately carry banned extensions. That exemption is correct and
-it also makes the guard blind in precisely the place the temptation lands: mid parser
-work, "just save the first 4 KB of this real module as a fixture" is an easy and
-entirely natural thing to do, and nothing would catch it.
+**Why:** committed fixtures are exempt from the provenance gate's extension rules, so the gate
+cannot see a carved fixture; the rule is held by the generator being the only route. The two
+shader extensions carry opposite obligations - one must be tracked, the other never - and
+splitting them keeps the gate exactly as strict.
 
-So this rule is unenforced by tooling and held by discipline alone - which is exactly
-why it is written down rather than left implicit. D014 bans firmware and dumps; it did
-not say anything about carving fixtures out of them.
-
-Practical consequence: observations from real material are recorded as **facts in the
-decision log** (D049's magic bytes, offsets, and `e_type` values) and reproduced by
-code. The bytes themselves stay outside the repository.
-
+**Rejected:**
+- Saving the first bytes of a real module as a fixture: console-derived material in the tree.
+- A path exception in the provenance gate: weakens the gate to fix a naming collision.

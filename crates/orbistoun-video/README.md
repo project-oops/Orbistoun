@@ -1,21 +1,16 @@
 # orbistoun-video
 
-Video output - the guest's video-output library. Swapchain and flip queue.
+Video output: the guest's video-output library, the swapchain and the flip queue.
 
-**Models:** declarations for open, close, buffer registration, flip submission, and
-flip status.
+The guest opens an output, registers buffers, submits flips and waits on their completion. The
+crate serves open, close, buffer registration and attributes, flip submission, flip events and
+output configuration. Together with [orbistoun-gpu](../orbistoun-gpu/README.md) it produces a
+title's visible output.
 
-**Deliberately fakes:** the flip path. Opening an output, closing it, and registering
-buffers are implemented; submitting a flip and reporting its completion are not.
+## Rule
 
-**Design note.** The guest registers buffers, submits flips, and waits on their
-completion. Getting flip completion wrong is the classic cause of a title that
-boots, renders one correct frame, and then appears to freeze - so the completion
-path deserves attention before the rendering path looks right.
-
-Together with [orbistoun-gpu](../orbistoun-gpu/README.md) this is the pair that
-produces the first visible output, which makes it the natural first milestone after
-the loader.
-
-**Status:** four functions implemented - open, close, and both buffer-registration
-entry points. Remaining arities provisional. `docs/ROADMAP.md` phase 6.
+**Flip completion always arrives.** A wrong flip-completion path is the classic cause of a
+title that boots, renders one correct frame, and then appears to freeze, so completion is
+settled before rendering. The flip queue is a counter that completes on submit - what a
+headless emulator with no scanout can model honestly, and enough for a guest that polls flip
+completion to proceed rather than hang.

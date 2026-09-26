@@ -1,21 +1,17 @@
-# Orbistoun Features & Screens
+# Orbistoun features
 
-Feature and screen documentation for Orbistoun. Each page covers both the desktop GUI window (`orbistoun-gui`) and the command-line interface (`orbistoun`) side by side.
+One page per feature of the two programs: `orbistoun-gui`, the desktop window, and
+`orbistoun-cli`, the command line. Both are shims over the same crates, so every page covers
+both. The window shows these pages under help - documentation.
 
-The binary is `orbistoun-cli` (there is no bare `orbistoun` executable); `orbistoun-gui` is
-the separate desktop shell.
-
-| Feature / Screen | GUI View | CLI Counterpart | Documentation Page |
-| :--- | :--- | :--- | :--- |
-| **Library** | Game Library & Title Dashboard | `orbistoun-cli inspect`, `orbistoun-cli status` | [library.md](library.md) |
-| **Running** | Execution Runner & Verification | `orbistoun-cli run`, `orbistoun-cli report`, `orbistoun-cli verify` | [running.md](running.md) |
-| **Inspector** | Live Call Trace & HLE Inspector | `OOPS_LOG=trace orbistoun-cli run` | [inspector.md](inspector.md) |
-| **Memory** | Virtual Memory & Register State | `orbistoun-cli load`, `OOPS_LOG=orbistoun_mem=debug orbistoun-cli run` | [memory.md](memory.md) |
-| **Graphics** | Vulkan device info (presentation is a stub - no settings yet) | none yet - see [graphics.md](graphics.md) | [graphics.md](graphics.md) |
-| **Controllers** | Gamepad & Keyboard Mapping (HLE, no host gamepad library) | none - mapping lives in the settings file | [controllers.md](controllers.md) |
-| **Names & Hashes** | NID Import Resolution | `orbistoun-cli symbols`, `orbistoun-cli names` | [naming.md](naming.md) |
-| **Where it Writes** | Paths & Portable Mode | `orbistoun-cli paths` | [paths.md](paths.md) |
-| **User Guide** | Player & Tester Guide | `orbistoun-cli --help` | [user-guide.md](user-guide.md) |
-
-For higher-level instructions, see the [User Guide](user-guide.md).
-
+| Page | In the window | On the command line |
+|---|---|---|
+| [User guide](user-guide.md) | starting the window, its views, menus and toolbar; troubleshooting | `orbistoun-cli --help`, the quickstart |
+| [The library](library.md) | the library list, the shell view, the detail panel | `orbistoun-cli inspect`, `orbistoun-cli imports` |
+| [Running a title](running.md) | start, stop, the run result, preferences, the machine profile | `orbistoun-cli run`, `report`, `verify` |
+| [Inspecting a run](inspector.md) | the run result's call lists and events | `OOPS_LOG=trace`, `orbistoun-cli knows`, `worklist` |
+| [Memory](memory.md) | the memory preferences pane | `orbistoun-cli load`, the memory diagnostics |
+| [Graphics](graphics.md) | the running title's picture and the performance overlay | `ORBISTOUN_PROFILE`, `ORBISTOUN_TRACE_SUBMITS` |
+| [Controllers](controllers.md) | the controllers pane, input capture and playback | `run --input`, pad scripts |
+| [Names and hashes](naming.md) | the import count in the detail panel | `orbistoun-cli verify`, `names`, `harvest`, `nid` |
+| [Where it writes](paths.md) | the settings file line under the library | `orbistoun-cli paths` |

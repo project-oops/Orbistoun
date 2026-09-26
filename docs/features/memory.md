@@ -1,45 +1,49 @@
 # Memory
 
-Host x86-64 register dumps and guest virtual memory layout.
+Guest code runs natively, so guest virtual addresses are host addresses: orbistoun reserves
+the ranges a guest expects in its own address space and maps the guest's segments, stacks,
+heap and direct memory into them. Guest memory is reached only through `orbistoun-mem`, which
+every other crate uses through checked accessors.
 
-Because Orbistoun runs guest code natively without binary translation, guest virtual addresses map directly to reserved ranges in the host address space.
+## The address map
 
----
+Every fixed base orbistoun places something at, and its owner, is listed in
+[ADDRESS_MAP.md](../ADDRESS_MAP.md). The map is checked against the source, so it is the place
+to look before choosing an address (D513).
 
-## GUI: Memory & Register State
+## Preferences
 
-Open the **Memory** tab from the main emulation window (or press `Ctrl+M`).
+The memory pane of the preferences window has one switch:
 
-```text
-+-------------------------------------------------------------------------------+
-|  Memory & Register State                                         [_][O][X]    |
-+-------------------------------------------------------------------------------+
-| RAX: 0000000000000000  RBX: 0000000800402000  RCX: 0000000000000038           |
-| RDX: 00007fffffffe120  RSI: 00007fffffffe100  RDI: 0000000800400000           |
-| RSP: 00007fffffffe0c0  RBP: 00007fffffffe0f0  R8 : 0000000000000000           |
-| RIP: 0000000000401140 (gl-cube.elf: main + 0x140)                             |
-|-------------------------------------------------------------------------------|
-| Virtual Memory Range:                                                         |
-|   0x0000000000400000 - 0x0000000000600000 : Main Executable (RX)              |
-|   0x0000000800000000 - 0x0000000880000000 : Direct Memory / AGC Ring Buffer    |
-|   0x00007fffff800000 - 0x00007ffffffff000 : Main Thread Stack (RW)            |
-+-------------------------------------------------------------------------------+
-```
+| Setting | Does |
+|---|---|
+| map direct memory for real | on: a guest's direct-memory reservations are mapped and return addresses. Off: the calls answer unimplemented and the guest gets no address. |
 
-*(Screenshot placeholder: Memory & Register State)*
+It is saved in `config.toml` and applies to the next run.
 
-### GUI Controls:
-- **General Purpose Registers**: Real-time snapshot of the active thread's x86-64 context (`RAX`, `RBX`, `RCX`, etc.).
-- **Memory Map**: Lists active direct memory allocations (`sceKernelAllocateDirectMemory`), mapped executable segments, and stack allocations.
-- **RIP Tracker**: Shows current instruction pointer symbol resolution.
-
----
-
-## CLI: Memory Inspection
-
-To print memory maps at execution exit:
+## On the command line
 
 ```bash
-OOPS_LOG=orbistoun_mem=debug orbistoun-cli run build/title/GLCB00001
+orbistoun-cli load <module> --base <address>     # reserve the address space a module demands, without executing it
+OOPS_LOG=orbistoun_mem=debug orbistoun-cli run <title>/eboot.bin   # log memory decisions during a run
 ```
 
+`--base` places a module; modules link at zero and need one, and executables carry absolute
+addresses and take the default `0`.
+
+## Memory diagnostics
+
+Each of these asks one question of a run by changing what the guest's memory holds. They are
+off unless set; `orbistoun-cli env` lists them with their current values.
+
+| Variable | Question it asks |
+|---|---|
+| `ORBISTOUN_STACK_FILL=<byte>` | does the run depend on stack memory nobody wrote? |
+| `ORBISTOUN_HEAP_FILL=<byte>` | the same for every heap allocation |
+| `ORBISTOUN_BSS_FILL=<byte>` | the same for `.bss` globals |
+| `ORBISTOUN_DIRECT_FILL=<byte>` | the same for direct-memory mappings |
+| `ORBISTOUN_HEAP_BASE=default\|<addr>` | does the run depend on where the host put the heap? |
+| `ORBISTOUN_MAP=<addr>[+len]` | reserve a range before entry: does a fault there become a region the guest wanted? |
+| `ORBISTOUN_MAP_SHAPE=whole\|reserved-low\|fragmented` | which physical map shape the guest is shown |
+| `ORBISTOUN_POKE=<addr>:<value>` | write a value before entry: does the fault follow it? |
+| `ORBISTOUN_PEEK=caller\|<addr>[+len]` | hex-dump guest memory at a fault, at the faulting call site or an address |

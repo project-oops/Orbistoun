@@ -15,7 +15,6 @@ on:
     # Docs-only pushes to main do not affect fmt/clippy/test - skip them. PRs are
     # left unfiltered below so a required status check always reports on a PR.
     paths-ignore:
-      - "CHANGELOG.md"
       - "README.md"
       - "docs/**"
       - "LICENSE-*"

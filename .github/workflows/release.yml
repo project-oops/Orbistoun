@@ -18,7 +18,6 @@ on:
     # tweak does not burn a release run, and with cancel-in-progress below does not
     # cancel an in-flight one that is actually producing artifacts.
     paths-ignore:
-      - "CHANGELOG.md"
       - "README.md"
       - "docs/**"
       - "LICENSE-*"

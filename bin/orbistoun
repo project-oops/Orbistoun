@@ -33,7 +33,6 @@
 #   ./bin/orbistoun constants     # the harvested ABI constants still match their headers
 #   ./bin/orbistoun tables         # the shader tables still match what generates them
 #   ./bin/orbistoun decide "<title>" # reserve the next decision number, atomically
-#   ./bin/orbistoun worklog "<title>" # reserve the next worklog number, atomically
 #   ./bin/orbistoun hooks          # install the pre-push hook + the tools it needs
 #
 # Every verb here is a thin wrapper over the EXACT command
@@ -144,170 +143,27 @@ decide() {
     printf '%s\n' "$file"
 }
 
-# Reserves the next worklog number, atomically - the same gap `decide` closed for decisions.
-#
-# **This race was not theoretical.** On 2026-09-14 two sessions working the same afternoon both
-# created `docs/worklog/535-*.md`, twenty-five minutes apart. Nothing refused the second, and the
-# collision surfaced only because somebody happened to list the directory. Decision numbers have
-# been claimed under a lock since D316; worklog numbers were still read-the-directory-and-add-one,
-# which is a race whose window is as wide as writing the entry - and entries here take a while,
-# because the useful ones are long.
-#
-# Same mechanism as `decide`, deliberately rather than cleverly: `mkdir` is the lock because it is
-# atomic everywhere this runs, the number is claimed before a word of the body exists, and the lock
-# is released however this exits.
-#
-# The index row is NOT written here. It is the author's, added when the entry is finished - a
-# RESERVED stub listed in `docs/WORKLOG.md` would advertise work that does not exist yet.
-worklog() {
-    local title="$1"
-    [ -n "$title" ] || die "worklog needs a title: ./bin/orbistoun worklog \"What was done\""
-
-    local lock=docs/.worklog-number.lock
-    # Waits rather than fails, for the reason `decide` gives: the other holder is about to
-    # finish, and telling a person to retry is asking them to be the lock.
-    local waited=0
-    while ! mkdir "$lock" 2>/dev/null; do
-        waited=$((waited + 1))
-        [ "$waited" -lt 50 ] || die "$lock held for five seconds - remove it if no session is writing"
-        sleep 0.1
-    done
-    trap 'rmdir "$lock" 2>/dev/null || true' RETURN
-
-    local next
-    # From the files, not the index: the index is hand-maintained and lags, so counting it
-    # would hand out a number somebody is already writing under.
-    next=$(ls docs/worklog | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1)
-    next=$((10#$next + 1))
-
-    # The same slug rule as `decide`, so the two directories read alike.
-    local slug file
-    slug="$(printf '%s' "$title" | tr 'A-Z' 'a-z' | tr -d '`' \
-        | sed 's/[^a-z0-9]\+/-/g; s/^-\+//; s/-\+$//' | cut -c1-40 | sed 's/-[^-]*$//')"
-    file="docs/worklog/$next-$slug.md"
-    {
-        printf '# %s. %s\n\n' "$next" "$title"
-        printf '**RESERVED** - being written. A number claimed and never spent reads like work\n'
-        printf 'that was done, so the gate refuses one.\n'
-    } > "$file"
-
-    printf '%s\n' "$file"
-}
-
-# The gate that makes the reservation worth having.
-#
-# Two failures and one note. The failures are the numbering itself: a duplicate number makes
-# every citation of it ambiguous, and a reservation nobody filled in reads in the directory as
-# though work were recorded. Both are the reasons `decisions` gives, one directory over.
-#
-# The note is **coverage** - a worklog file with no row in `docs/WORKLOG.md` is invisible to
-# anyone reading the index. That is a real defect and it is deliberately not a failure: the index
-# row is added when an entry is finished, so a file being written right now by another session is
-# *expected* to be missing one, and a gate that reds the tree for somebody else's work in progress
-# is the scope problem `--only` exists to avoid.
-worklogs() {
-    step "worklog numbers are unique"
-    local numbers duplicates reserved unindexed file base dup failed=0
-
-    numbers=$(ls docs/worklog | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p' | sort)
-    if [ -z "$numbers" ]; then
-        bad "no numbered worklog entries found - this guard is reading the wrong shape"
-        return 1
-    fi
-
-    duplicates=$(printf '%s\n' "$numbers" | uniq -d || true)
-    if [ -n "$duplicates" ]; then
-        bad "these worklog numbers are used twice - a citation of them is ambiguous:" || failed=1
-        printf '%s\n' "$duplicates" | while read -r n; do
-            [ -n "$n" ] || continue
-            for dup in docs/worklog/"$n"-*.md; do echo "    ${dup#docs/worklog/}"; done
-        done
-        failed=1
-    fi
-
-    reserved=$(grep -l '^\*\*RESERVED\*\*' docs/worklog/*.md 2>/dev/null || true)
-    if [ -n "$reserved" ]; then
-        bad "these worklog numbers were reserved and never written - finish them or remove them:" || failed=1
-        printf '%s\n' "$reserved" | sed 's/^/    /'
-        failed=1
-    fi
-
-    unindexed=""
-    for file in docs/worklog/*.md; do
-        base=$(basename "$file")
-        # `_preamble.md` and friends are structure, not entries - no number, no index row.
-        case "$base" in _*) continue ;; esac
-        grep -q "worklog/$base" docs/WORKLOG.md || unindexed="$unindexed    $base
-"
-    done
-    if [ -n "$unindexed" ]; then
-        warn "not listed in docs/WORKLOG.md (expected while an entry is still being written):"
-        printf '%s' "$unindexed"
-    fi
-
-    [ "$failed" -eq 0 ]
-}
-
 decisions() {
     step "decision numbers are unique"
-    local duplicates known unlisted stale reserved
-    # **Read off the index table, not off headings.** This used to grep for `^## D123`,
-    # which was the shape of the log when every entry lived in one file. The entries moved
-    # into `docs/decisions/` and the headings went with them, so the pattern matched nothing
-    # and the guard concluded that *every* listed number had stopped duplicating - the exact
-    # opposite of the truth, and an instruction to delete a backlog that was still entirely
-    # live. A guard reading a field that no longer exists reports confidently and is wrong,
-    # which is principle 3 one level down (D608).
-    duplicates=$(grep -oE '^\| [^|]* \| D[0-9]+ ' docs/DECISIONS.md \
-        | grep -oE 'D[0-9]+' | sort | uniq -d || true)
-    if [ -z "$duplicates" ] && [ "$(grep -cE '^\| [^|]* \| D[0-9]+ ' docs/DECISIONS.md)" -eq 0 ]; then
-        bad "no decision numbers found in docs/DECISIONS.md - this guard is reading the wrong shape again"
-        return 1
-    fi
-    known=$(grep -vE '^#|^$' docs/decision-number-backlog.txt | sort || true)
-
-    # A reservation is a number claimed and not spent. Cheap to leave behind - a session
-    # ends, a context is lost - and it reads in the log as though a decision were recorded.
-    reserved=$(grep -B 2 '^\*\*RESERVED\*\*' docs/DECISIONS.md | grep -oE '^## D[0-9]+.*' || true)
-    if [ -n "$reserved" ]; then
-        echo "$reserved"
-        bad "these numbers were reserved and never written - finish them or remove them"
+    local duplicates unindexed="" entry base
+    # Read off the file names, where a number is claimed; a number used twice makes every
+    # citation of it ambiguous.
+    duplicates=$(ls docs/decisions | sed -n 's/^\(D[0-9][0-9]*\)-.*/\1/p' | sort | uniq -d)
+    if [ -n "$duplicates" ]; then
+        echo "$duplicates"
+        bad "these decision numbers are used twice - a citation of them is ambiguous"
         return 1
     fi
 
-    unlisted=$(comm -23 <(echo "$duplicates") <(echo "$known"))
-    if [ -n "$unlisted" ]; then
-        echo "$unlisted"
-        bad "these decision numbers are newly duplicated - a citation of them is ambiguous"
-        return 1
-    fi
-
-    # The backlog is a ceiling, not an allowance: an entry that has stopped duplicating
-    # has to leave, or the list slowly stops describing anything.
-    stale=$(comm -13 <(echo "$duplicates") <(echo "$known"))
-    if [ -n "$stale" ]; then
-        echo "$stale"
-        bad "these are listed in docs/decision-number-backlog.txt and no longer duplicate - remove them"
-        return 1
-    fi
-
-    # **Coverage, the direction nothing checked.** Everything above reads the index and
-    # asks whether its numbers are sound. None of it asks whether the index describes the
-    # *files*, so a decision written and never listed is invisible in the one place
-    # CLAUDE.md says to consult - and nine of them were, D691 and D693 through D700, which
-    # is every decision taken over two days. The worklog gate has had exactly this check
-    # for its own directory all along; this is that check, one directory across.
-    #
-    # A warn rather than a failure, for the same reason it is a warn there: an entry
-    # written minutes ago has not been indexed yet and that is not a broken tree.
-    local unindexed="" entry base
+    # A decision written and not listed in the generated index. A warning, because an entry
+    # written minutes ago is not indexed yet.
     for entry in docs/decisions/D*.md; do
         base=$(basename "$entry")
         grep -q "decisions/$base" docs/DECISIONS.md || unindexed="$unindexed    $base
 "
     done
     if [ -n "$unindexed" ]; then
-        warn "written but not listed in docs/DECISIONS.md (expected while one is still being written):"
+        warn "written but not listed in docs/DECISIONS.md - regenerate it with tools/split-decisions.sh --index orbistoun:"
         printf '%s' "$unindexed"
     fi
 }
@@ -371,14 +227,9 @@ prose() {
     fi
     echo "  none added; $(echo "$known" | grep -c .) file(s) on the known ceiling"
 
-    # **The other way to bake a newline into a message**, which the search above cannot see: a
-    # literal that simply contains one, with no backslash anywhere. Then the newline and the
-    # next line's indentation are in the rendered text from the moment it is written, and no
-    # formatter has to do anything for the damage to be there.
-    #
-    # Six such messages were found in one session and every one had shipped, including a lint's
-    # own reason and a refusal a reader sees with twenty-nine spaces through the middle of it
-    # (worklogs 578 and 582). There is no ceiling for this one because it started at zero.
+    # The other way to bake a newline into a message, which the search above cannot see: a
+    # literal that contains one directly, with the next line's indentation after it. No
+    # ceiling: none exists.
     step "no literal carries a newline into its own text"
     local newlines
     newlines=$(find crates -name '*.rs' -print0 \
@@ -404,13 +255,9 @@ prose() {
 # installed. Regenerating from it and diffing is the check that was impossible before
 # (D209).
 #
-# **There are two questions here, not one, and this step used to answer only the first.**
-# Diffing the table against its recording catches a hand-edited table. It cannot catch a
-# hand-edited *probe*: a recording that predates a probe edit still replays, still solves,
-# and still produces the committed table, so the gate stays green while the recording no
-# longer describes the probes it claims to be a recording of. That happened - worklog 588
-# found `operands-memory.in` predating the flat-offset probes added in worklog 565, green
-# throughout.
+# Two questions. Diffing the table against its recording catches a hand-edited table. It
+# cannot catch a hand-edited probe: a recording that predates a probe edit still replays and
+# still produces the committed table.
 #
 # The generator answers the second question itself: every solver calls `check_recording`
 # before replaying, which compares the recorded input against the probe text being solved
@@ -790,7 +637,6 @@ check() {
     also provenance
     also constants
     also decisions
-    also worklogs
     also prose
     also generated_numbers
     also symbols_audit
@@ -1516,8 +1362,6 @@ case "$cmd" in
     prose)      prose ;;
     decide)     decide "$@" ;;
     decisions)  decisions ;;
-    worklog)    worklog "$@" ;;
-    worklogs)   worklogs ;;
     names)      names ;;
     suggest)    suggest "$@" ;;
     sweep)      sweep ;;

@@ -1,14 +1,12 @@
 # orbistoun-gen
 
-Offline generators for the shader data tables. **Not part of the emulator.**
+Offline generators for the shader data tables. It is not part of the emulator.
 
-**Models:** the reference-assembler interface, and the solvers that turn its output into the
-`.toml` tables `orbistoun-shader` reads.
+It holds the reference-assembler interface and the solvers that turn the assembler's output
+into the `.toml` tables [orbistoun-shader](../orbistoun-shader/) reads. A code the assembler
+does not accept is reported as refused, never guessed at.
 
-**Deliberately fakes:** nothing. A code the assembler will not accept is reported as
-refused, never guessed at.
-
-## What it produces
+## Commands
 
 | Command | Writes |
 |---|---|
@@ -18,17 +16,17 @@ refused, never guessed at.
 | `fixtures` | `tests/fixtures/*` and `crates/orbistoun-shader/data/mnemonics.toml` |
 | `encodings` | nothing - reports what it solved |
 
-`encodings` reports rather than writes because `crates/orbistoun-shader/data/encodings.toml` is not purely
-generated: it carries the reasoning behind each row and citations into the published
-reference, which is where a wrong row gets *corrected* from. A person edits it, acting on
-what the solver says.
+`encodings` reports rather than writes because `crates/orbistoun-shader/data/encodings.toml`
+is not purely generated: it carries the reasoning behind each row and citations into the
+published reference, which is where a wrong row is corrected from. A person edits it, acting
+on what the solver says.
 
-## Running it needs a toolchain. Checking it does not.
+## Toolchain and replay
 
-The solvers get their bytes from `llvm-mc` with the AMDGPU target, which most machines -
-including CI - do not have. `tools/toolchain/setup.sh` builds a VM that does.
+The solvers get their bytes from `llvm-mc` with the AMDGPU target, which most machines,
+including CI, do not have. `tools/toolchain/setup.sh` builds a VM that does.
 
-**Everything else works without one**, because the assembler call is a seam:
+Checking needs no toolchain, because the assembler call is a seam:
 
 ```bash
 # Anywhere, no toolchain: replay committed recordings and diff against the tables.
@@ -39,8 +37,8 @@ sh tools/toolchain/run.sh env CARGO_TARGET_DIR=/tmp/orb-target \
     cargo run --release -p orbistoun-gen -- --record crates/orbistoun-gen/tests/fixtures/transcripts operands
 ```
 
-**Where the VM cannot mount the repository**, which is Multipass's default on Windows
-(`local.privileged-mounts` is off, and turning it on is a privileged machine-wide setting),
+Where the VM cannot mount the repository (Multipass's default on Windows, where
+`local.privileged-mounts` is off and turning it on is a privileged machine-wide setting),
 copy the tree in and the generated files back:
 
 ```bash
@@ -51,35 +49,30 @@ sh tools/toolchain/sync.sh pull crates/orbistoun-shader/data/opcode-operands.tom
     crates/orbistoun-gen/tests/fixtures/transcripts
 ```
 
-Pull immediately, and pull by name. A copy is one more step than a mount and a step is
-where a stale table hides; a whole-tree copy back would carry the guest's `Cargo.lock` and
-overwrite whatever else had been edited meanwhile.
+Pull immediately, and pull by name. A whole-tree copy back would carry the VM's `Cargo.lock`
+and overwrite whatever else was edited meanwhile.
 
-A recording carries its own input, and replaying checks it. A solver whose probe list has
-changed since the recording was taken would otherwise be handed the old answers to new
-questions - and that shows up as a wrong table rather than as a stale recording.
+## Recordings
 
-Keys are derived from the probe text, not from call order, so a recording matches by *what
-was asked*. That is not a nicety: the symbolic-code probes make forty-seven calls, and under
-a single shared key replay hands all of them the same canned answer - which silently drops
-two whole families out of the operand table.
+- A recording carries its own input, and replay checks it. A solver whose probe list changed
+  since the recording would otherwise be handed old answers to new questions, which shows up
+  as a wrong table rather than a stale recording.
+- Keys are derived from the probe text, not from call order, so a recording matches by what
+  was asked. Under a single shared key, replay hands every call of a multi-call probe the
+  same answer and whole families drop out of the operand table.
+- Recording is a separate act, not a cache. A cache decides for itself when it is stale; a
+  committed recording is a decision somebody made.
 
-Recording is a separate act rather than a cache. A cache decides for itself when it is
-stale; a committed recording is a decision somebody made.
+## Checks
 
-## What is checked, and where
-
-| check | needs a toolchain | catches |
+| Check | Needs a toolchain | Catches |
 |---|---|---|
 | `./bin/orbistoun tables` | no | a table edited by hand, or a solver that changed what it produces |
 | `tests/rendering.rs` | no | a formatting change in the renderer; a `.gcn` disagreeing with its `.txt` |
-| unit tests in `solve`, `table`, `patterns`, `operands` | no | the bit arithmetic, including four cases that produce a *wrong table* rather than an error |
+| unit tests in `solve`, `table`, `patterns`, `operands` | no | the bit arithmetic, including the silent-failure cases below |
 | a live run in the VM | yes | everything above, against the real reference |
 
-The four solver cases worth naming, because each fails silently rather than loudly: a
-rejected probe shifting the input pairing of every later sample; a partial trailing word
-padded rather than dropped; an operand accepted with *different bits* recorded as implicit;
-and an implicit slot at word 0 bit 0 colliding with a real field there.
-
-**Status:** complete and verified against a live reference assembler. tests, plus the
-replay diff in `check`.
+The solver cases that produce a wrong table rather than an error, each pinned by a unit test:
+a rejected probe shifting the input pairing of every later sample; a partial trailing word
+padded rather than dropped; an operand accepted with different bits recorded as implicit; and
+an implicit slot at word 0 bit 0 colliding with a real field there.

@@ -1,46 +1,82 @@
 # Workflow
 
-What to run, in what order, and how often. This is the cycle the whole project is shaped
-around:
+The commands that turn the loop: what to run, with which flags, and when.
+[THE_LOOP.md](THE_LOOP.md) describes what a turn does, who does each step, and how to read
+its output.
 
-> **Execute it. Read what it wanted. Implement the frequent ones. Execute it again.**
+`./bin/orbistoun` is the development driver: it builds, resolves title ids and passes the
+symbol database. `orbistoun-cli` is the tool itself (`./target/release/orbistoun-cli`, or
+`./bin/orbistoun cli <args>` for the debug build). `./bin/orbistoun --help` lists every verb;
+`orbistoun-cli --help` lists every subcommand.
 
-Everything else - the container parser, the loader, the stub table, the name search -
-exists to make one turn of that loop cheap.
-
-**[THE_LOOP.md](THE_LOOP.md) explains what a turn actually does**, step by step, with a
-diagram and an honest account of which steps still need a person. This page is the command
-reference; read that one first if the shape is not already familiar.
-
-## Debugging one title
+## Setup
 
 ```bash
-./bin/orbistoun run PPSA04263
+./bin/orbistoun doctor --fix   # what is missing, and install it
+./bin/orbistoun check          # confirm the tree is sound
+orbistoun-cli paths            # where the title library, config.toml and outputs are
+./bin/orbistoun run <title>    # first turn
 ```
 
-**The single command.** It resolves the title id to a module, rebuilds the binary,
-refreshes names **if and only if they are stale**, runs the guest under a time limit, and
-prints what it asked for. Nothing static a run depends on is left for you to remember.
+`doctor` runs automatically before any verb that needs a toolchain, so a missing requirement
+surfaces as one line rather than as a build error. `--fix` installs the optional tools and
+enables the pre-push hook; it does not install a Rust toolchain, which is a machine-wide
+decision left to the user.
 
-With no argument it lists what is available locally. A full path works too.
+A title is a directory holding an `eboot.bin` in the title library that `orbistoun-cli paths`
+prints. `orbistoun-cli corpus sync` fills the library from the pinned sources in
+`corpus/sources.toml`.
 
-Names are rebuilt when the grammar or the word list is newer than the database, or when
-the module is. Searching 2.6 billion candidates takes about ninety seconds - **once for
-the whole corpus, not once per module**, because the cost of a sweep does not depend on how
-many hashes it is looking for (D213). Paying even that on every debug run of an unchanged
-tree would make the fast path slow enough that people start skipping it, at which point
-they are debugging against stale names, which is worse than either.
+## One title
 
-## Every title at once
+```bash
+./bin/orbistoun run <title-id> [-- <extra args>]
+```
+
+Resolves the title id to a module (a staged title under the library's `data/homebrew` first,
+then the library; a path also works), builds the release binary, refreshes names if they are
+stale, runs the guest, and prints the worklist for it. With no argument it lists the titles
+available. `ORBISTOUN_LIMIT` sets the time limit in seconds (default 20). Arguments after `--`
+go to `orbistoun-cli run`.
+
+Names are rebuilt when the grammar, the standard word list or the module is newer than the
+symbol database. The rebuild searches the whole corpus in one sweep, whose cost does not
+depend on how many hashes it looks for (D213).
+
+`orbistoun-cli run` takes:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--limit <s>` | 20 | Seconds of guest execution; `0` removes the limit |
+| `--calls <n>` | 20000000 | Imports the guest may call; the deterministic limit, `0` removes it |
+| `--profile <name>` | `shell.toml` | Present a named hardware profile, e.g. `prospero-cex-12.40` |
+| `--input <script>` | none | Play this pad script on player 1 (D721) |
+| `--staged` | off | Run a loose build as a staged title with a writable `/app0` (D722) |
+
+## One turn, unattended
+
+```bash
+./bin/orbistoun turn <title-id> [--record | --apply | --verify <file>]
+```
+
+Runs `orbistoun-cli turn` with the same resolution and symbol database as `run`: the guest,
+the ranked findings, and every mechanical step the findings call for (see
+[THE_LOOP.md](THE_LOOP.md#step-17-the-dispatcher)).
+
+| Flag | Effect |
+|---|---|
+| `--record` | Print what the turn established as a `learn` command |
+| `--apply` | Write what the turn measured into `learned.toml` beside `config.toml`. Every entry a person wrote wins over it; deleting the file undoes it |
+| `--verify <file>` | Check a submitted learned file against what this machine measures |
+
+## Every title
 
 ```bash
 ./bin/orbistoun sweep
 ```
 
-The same thing across every module available locally, ending in a ranked list of what
-all of them called.
-
-The last section of its output is the answer to "what should I do next":
+Refreshes names, runs every module in the library, and ends in a ranked list of what all of
+them called:
 
 ```
          CALLS  SHARE  MODULES  IMPORT
@@ -49,311 +85,211 @@ The last section of its output is the answer to "what should I do next":
            474   0.0%        4  libc::memset
 ```
 
-**Ranked by calls, not by count of modules.** A function called four hundred million
-times is not four hundred million times more important than one called twice - it is a
-guest stuck in a loop waiting for an answer, which is a wall rather than a feature. Both
-are worth knowing and the ordering makes the difference obvious.
-
-## Did that help?
-
-Every run ends with the answer:
-
-```
-progress
-  FURTHER  image+0x13514 -> image+0x1a4c20
-  imports  31 distinct (+2), 402 calls (+65)
-```
-
-**`FURTHER` means the guest executed code it could not reach before.** That is the
-measure this project optimises, and the only one that says a change was worth making.
-`BACK` means something regressed - worth knowing immediately rather than three changes
-later. `same` on an unchanged tree is the expected result, and the fact that it *is*
-reliably the same is what makes any movement attributable.
-
-## What a turn tells you, and what to do about it
-
-| What you see | What it means | What to do |
-|---|---|---|
-| A name at the top with an enormous count | A guest is spinning on it | **Implement it.** This is the wall |
-| `library::0x…` at the top | Same, but not yet named | Extend `crates/orbistoun-names/data/vendor.toml`, re-run |
-| A fault instead of a time-out | The guest got somewhere and died | Read the `faulted` block - operation, address, registers, and the calls just before |
-| Lots of calls spread thinly | The guest is making progress | Implement the frequent ones and go again |
-| `standing` fell while `calls` rose | A stub started answering, and lying | Look at what the new answers unlocked before believing the progress |
-
-Every finding ends in an arrow saying what to do about it. If one does not, the finding is
-underspecified and that is a bug in `orbistoun-report::diagnose`, not something for the
-reader to work around.
-
-## When the report is not enough
-
-Two escape hatches, both deterministic, both preferable to writing a throwaway script:
+The list is ranked by calls, not by modules. An enormous count is a guest waiting in a loop
+for an answer - a wall rather than a feature - and the ordering makes that obvious.
 
 ```bash
-ORBISTOUN_DUMP=memalign,malloc ./bin/orbistoun run PPSA02664
+orbistoun-cli worklist [--top N]    # totals across every trace on disk; re-runs nothing
+orbistoun-cli worklist --static-gap # rank static import lists by where an answer can come from
 ```
 
-**Forces argument dumps for functions that are already implemented.** Dumps are attached to
-unimplemented calls by default, on the reasoning that an implementation needs no
-explanation - which is exactly backwards when the implementation is the suspect. Scalars
-are recorded as well as pointees, because an argument that *is* a value points at nothing
-and would otherwise be invisible (D198).
+## Inspecting
 
 ```bash
-orbistoun-cli knows sceKernelCreateSema
-orbistoun-cli questions --top 20
+orbistoun-cli knows [pattern]             # what is recorded about a function, and on what it rests
+orbistoun-cli questions [--top N]         # every open assumption, ranked by call frequency
+orbistoun-cli questions --premises        # grouped by the premise entries share
+orbistoun-cli questions --json            # for a probe or an agent
+orbistoun-cli imports <module>            # what a module imports, without running it
+orbistoun-cli imports <module> --own      # the modules the title ships that answer its imports
+orbistoun-cli report <module>             # survey a module, persist a report, show the delta
+orbistoun-cli compat list                 # how far each title got, furthest first
 ```
 
-**What is recorded about a function, and what is still guessed at.** Before changing an
-implementation, this says what the current behaviour rests on - `published`, `measured`,
-`guest-observed` or `assumed` - and what nobody has established. Changing something that
-rests on a citation is a different act from changing something that rests on a guess.
+`knows` says whether the current behaviour of a function is `published`, `measured`,
+`guest-observed` or `assumed`, and what nobody has established. Changing something that rests
+on a citation is a different act from changing a guess, so check it before editing an
+implementation.
 
-## Writing down what a turn produced
-
-Nothing here happens automatically, on purpose. A finding recorded by hand is a finding
-somebody decided was true.
+## Recording what a turn produced
 
 ```bash
-orbistoun-cli learn <function> ...   # a behaviour, with what it rests on
-orbistoun-cli compat record <title>  # how far this title got, read off the trace
+orbistoun-cli learn <function> --library <lib> --known <how> [--purpose ... --edge ... --assumes ...]
+orbistoun-cli compat record <module> [--note "..."] [--force]
+orbistoun-cli submit export [--out submission]
+orbistoun-cli submit check <directory>
 ```
 
-`learn` refuses an entry that does not say where it came from. `compat record` is
-transcription rather than opinion - it reads the last trace and writes the numbers.
+`learn` appends to the knowledge files under `crates/orbistoun-hle/data/knowledge/` and
+refuses an entry that does not say where it came from. It is never automatic: a finding
+recorded by hand is one somebody decided was true.
 
-It writes into one of two slots and picks for you. A run measuring the emulator as it stands
-updates `[status]`; a run helped along - a loosened default, or functions answered by name
-from `learned.toml` - updates `[experiment]`. Each is compared only against its own slot, so
-neither can overwrite the other and **no run is refused for its policy** (D312). `--force`
-remains for one case: replacing a better entry inside a slot.
+`compat record` transcribes the last trace of a title into `compat/<title>.toml`. A run
+measuring the emulator as it stands updates the `[status]` slot; a run helped by a loosened
+default or by `learned.toml` answers updates `[experiment]`. Each slot is compared only with
+itself, so no run is refused for its policy (D312). `--force` replaces a better entry within a
+slot. The run prompts for this after it moves.
 
-## Cadence
+`submit export` collects the `learned.toml` measurements and both compat slots into one
+directory with a manifest naming the build. It refuses to write an empty bundle.
+`submit check` re-derives what a bundle claims rather than trusting it: agreement is silent, a
+claim this machine never measured is reported as unmeasured rather than as a contradiction,
+and files are counted rather than read off the manifest (D315). A `patches/` directory with a
+`patches.toml` describing each diff travels in the bundle and is reported apart from the
+claims; a patch is inert until a person reads it, runs the gate and merges it.
 
-There is no schedule. Each of these is triggered by something, not by a clock.
-
-| Run | When |
-|---|---|
-| `./bin/orbistoun run <title>` | Constantly. This is the debug loop |
-| `./bin/orbistoun sweep` | After any change that could move a guest further |
-| `./bin/orbistoun check` | Before considering any unit of work done. Non-negotiable |
-| `./bin/orbistoun names` | Included in `sweep`; separately after extending the vocabulary |
-| `orbistoun-cli worklist` | Any time. It reads persisted traces, it does not re-run anything |
-| `orbistoun-cli questions` | Before implementing anything - it says what is not known about it |
-| `orbistoun-cli learn` | Whenever a turn established something. Not automatic, deliberately |
-| `orbistoun-cli compat record` | After a run that moved. The run prompts for it |
-| `orbistoun-cli harvest <freebsd-src>` | Rarely. When you want a bigger standard-library list |
-| `./bin/orbistoun symbols-audit` | Included in `check` and in CI. Never by hand |
-
-## The pieces, if you want to drive them individually
+## Names
 
 ```bash
-# What does this module need, without running it?
-orbistoun-cli imports <library>/SOME-TITLE/eboot.bin   # <library>: `orbistoun-cli paths`
-
-# Work out names for hashes nothing can name yet. A directory is ONE search over the
-# whole corpus, not one per module - and it is the only form that can find a name lying
-# in one title's strings that explains a different title's import (D213).
-orbistoun-cli names titles \
-  --out symbols/generated.json --wanted symbols/wanted.txt
-
-# Add what a previous run read out of guest memory. Needs a run to have happened.
-orbistoun-cli names titles --from-trace --out symbols/generated.json
-
-# Re-read the modules behind every static record, and confirm each contains its string.
-# The tier of claim CI cannot check, checked by whoever has the corpus.
-orbistoun-cli audit symbols/generated.json --verify-harvest
-
-# Run one guest and watch what it asks for.
-orbistoun-cli --symbols-db symbols/generated.json \
-  run titles/SOME-TITLE/eboot.bin --limit 20
-
-# Aggregate every run so far into one work list.
-orbistoun-cli worklist --top 40
+./bin/orbistoun names                         # regenerate symbols/ from the library, then audit
+orbistoun-cli names <dir> --out symbols/generated.json --wanted symbols/wanted.txt --from-trace
+orbistoun-cli audit symbols/generated.json    # re-derive every name from this repository's inputs
+orbistoun-cli audit symbols/generated.json --verify-harvest   # re-read the modules behind static records
+orbistoun-cli nid <name>...                   # the import hash of a name
+orbistoun-cli harvest <freebsd-src>           # rebuild the standard-library word list
+./bin/orbistoun suggest [rounds]              # ask a local model for vocabulary
 ```
 
-## Where the input comes from
+`names` on a directory is one search over the whole corpus, and it is the only form that finds
+a name in one title's strings explaining another title's import (D213). `--from-trace` adds
+strings a previous run captured from guest memory. `./bin/orbistoun names` also runs
+`audit --repair --verify-harvest`, because every learned word renumbers the candidates a
+generated record cites.
 
-Two mechanisms, and the rule for which is which is worth stating because nothing else here
-does.
+`ORBISTOUN_PROBE_REPORTS` names a directory of obSCEne reports. `./bin/orbistoun names` reads
+every `*.obs.log` under it and passes each as `--from-report`: hashes the platform exports, as
+targets to name, never as names. The variable is a path rather than a script setting
+because the reports live in another repository, and a path written here would make a build
+dependency between the two. It is not listed by `orbistoun-cli env`, because only the shell
+driver reads it.
+
+```bash
+ORBISTOUN_PROBE_REPORTS=<directory of reports> ./bin/orbistoun names
+```
+
+`suggest` runs `orbistoun-suggest` (three rounds per grammar position by default) and writes
+the words the hash confirms to `symbols/proposed-*.txt`. Promoting one is manual: put a noun
+in `object` or a suffix in `tail` of `crates/orbistoun-names/data/vendor.toml`, then run
+`./bin/orbistoun names`. Before asking for words,
+`cargo test -p orbistoun-propose --release --test shapes -- --nocapture` says whether the
+unnamed imports are short of vocabulary or short of shapes.
+
+## Probe transcripts
+
+```bash
+orbistoun-cli probe <transcript> --device <name> [--firmware <version>] [--is-target]
+orbistoun-cli probe <transcript> --as-knowledge          # print what it established as knowledge entries
+orbistoun-cli probe <local-transcript> --against <hardware-transcript>
+```
+
+`probe` grades an obSCEne transcript by the machine the operator says it ran on. `--against`
+compares a run under orbistoun with the same probe's transcript from the hardware and reports
+the checks that disagree. Sending and supervising the probe is Prosperous's job (see
+[THE_LOOP.md](THE_LOOP.md#probing-on-the-hardware)).
+
+## Settings and the environment
 
 | | Where | What belongs in it |
 |---|---|---|
-| **Settings** | `<data>/config.toml` | How the emulator behaves: entry presentation, thread placement, memory behaviour, the library folder, what unimplemented functions answer. Persistent, and the thing you edit to bisect a stub (D166) |
-| **The environment** | Variables, listed by `orbistoun-cli env` | The two settings that *cannot* live in the file - because they decide where the file is - plus every **diagnostic**, which is meant to go away rather than persist |
+| Settings | `<data>/config.toml` | How the emulator behaves: entry presentation, thread placement, memory behaviour, the library folder, what unimplemented functions answer. Persistent; the file to edit to bisect a stub |
+| The environment | variables listed by `orbistoun-cli env` | The two settings that decide where `config.toml` is, and every diagnostic |
 
-`orbistoun-cli paths` says where `config.toml` is; `orbistoun-cli env` lists the variables.
+`config.toml` is composed of settings owned by the loader, the kernel and the HLE layer, so it
+sits high in the dependency spine. The environment registry sits at the bottom, because
+`orbistoun-paths` needs it to find the data root (D221).
 
-The split is structural rather than stylistic. `config.toml` is composed of settings owned
-by the loader, the kernel and the HLE layer, so it lives near the top of the dependency
-spine. The environment registry lives at the bottom, because `orbistoun-paths` needs it to
-work out where the data root - and therefore `config.toml` - is (D221).
-
-### One more, and it is a path rather than a setting
-
-`ORBISTOUN_PROBE_REPORTS` names a directory of obSCEne reports. `./bin/orbistoun names` reads
-every `*.obs.log` under it and hands the name search the hashes those reports say the platform
-exports - hashes to look for, never names (D605, D606).
-
-```bash
-ORBISTOUN_PROBE_REPORTS=<wherever the reports are> ./bin/orbistoun names
-```
-
-**In the environment rather than in the repository on purpose.** The reports live in the
-sibling conformance-probe project. A path to them written into a script here would be a build
-dependency between two repositories - the coupling D207 exists to prevent - and would fail for
-anybody holding one checkout and not the other. Unset, `names` searches exactly what it always
-did.
-
-It is not in `orbistoun-cli env`, because it is not a diagnostic and nothing below the shims
-reads it: the shell driver turns it into `--from-report` arguments and the tool sees only paths.
-
-## The diagnostics
+## Diagnostics
 
 ```bash
 orbistoun-cli env
 ```
 
-**That is the list, and this document deliberately does not repeat it.** It prints every
-variable orbistoun reads, what each is for, an example you can copy, which crate reads it,
-and what is set right now - from the one registry in `orbistoun-env`, so a diagnostic added
-anywhere shows up without anybody remembering to write it down here. A table copied into
-this file is a second list, and second lists drift (D221).
+`env` prints every variable orbistoun reads, what each is for, an example, the crate that
+reads it and its current value, from the one registry in `orbistoun-env`. This document does
+not copy the list.
 
-What is worth saying here is the shape rather than the contents:
-
-- **They are not settings.** Each answers one question, once. A diagnostic left configured
-  for three weeks stops being an experiment and becomes an undocumented workaround for a
-  bug nobody found (D185), which is why they live in the environment and why a future
-  `.env` file would be allowed to carry settings and refused for these.
-- **Every one is recorded in the run's conditions**, so a verdict taken under a diagnostic
-  is never compared with an ordinary run as though they measured the same thing (D181).
-- **An import is matched by name or by any part of its label**, so an unnamed function is
-  addressed by its hash: `ORBISTOUN_DUMP=0x6abac2f3dc6f8cee`. That is the point rather than
-  a convenience - the functions most worth experimenting on are the ones nothing has named.
-- **A request that matches nothing says so**, rather than reporting a run that changed
-  nothing. And a variable that is *nearly* one of these - `ORBISTOUN_STACK_FIL` - is
-  reported as unrecognised, because a misspelled variable is an absence rather than an
-  error and would otherwise produce an ordinary result that gets believed.
+- A diagnostic is not a setting. It answers one question once, which is why it lives in the
+  environment and not in `config.toml` (D221).
+- Every diagnostic in effect is recorded in the run's conditions, so a verdict taken under one
+  is never compared with an ordinary run (D181).
+- An import is matched by name or by any part of its label, so an unnamed function is
+  addressed by its hash: `ORBISTOUN_DUMP=0x6abac2f3dc6f8cee`.
+- A request that matches nothing says so, and a variable that is nearly a known name
+  (`ORBISTOUN_STACK_FIL`) is reported as unrecognised.
 
 ```bash
-# What is the wall being handed, and does planting a base move the fault?
-ORBISTOUN_DUMP=0x6abac2f3dc6f8cee ./target/release/orbistoun-cli run titles/X/eboot.bin
-ORBISTOUN_WRITE=0x6abac2f3dc6f8cee:0:0x11000000 ./target/release/orbistoun-cli run titles/X/eboot.bin
+# Force argument dumps for functions that are already implemented.
+ORBISTOUN_DUMP=memalign,malloc ./bin/orbistoun run <title>
+# What is the wall handed, and does planting a value move the fault?
+ORBISTOUN_WRITE=0x6abac2f3dc6f8cee:0:0x11000000 ./bin/orbistoun run <title>
 ```
 
-Only the **stack** is writable by a forced write. The image's runs are protected after
-relocation, so planting into one would fault inside the emulator and produce a crash with no
-relation to the guest.
+Dumps are attached to unimplemented calls by default; `ORBISTOUN_DUMP` forces them where the
+implementation is the suspect, scalars included (D179). Only the stack is writable by a forced
+write: the image's runs are protected after relocation.
 
-### Two of them compose: which slot, then who touched it
-
-`ORBISTOUN_WATCH` and `ORBISTOUN_WATCHPOINT` sound like the same thing and are not. The
-first copies a region before the run and diffs it afterwards, so it says **which words ended
-up different** - and therefore which nobody wrote. The second arms an x86 debug register, so
-it says **which instruction touched an address**, how often, and what it saw there.
-
-Run them in that order and the second needs no guesswork about where to point:
+`ORBISTOUN_WATCH` and `ORBISTOUN_WATCHPOINT` compose. The first copies a region before the run
+and diffs it afterwards, naming the words nobody wrote; the second arms an x86 debug register
+and reports which instruction touched an address, how often, and what it saw (D276).
 
 ```bash
-# 1. Which words in this structure did nobody ever write?
-ORBISTOUN_WATCH=0x4000019e9c00+0x80 ./target/release/orbistoun-cli run titles/X/eboot.bin
+# 1. Which words in this structure did nobody write?
+ORBISTOUN_WATCH=0x4000019e9c00+0x80 ./bin/orbistoun run <title>
 # 2. Who reads the one that stayed zero?
-ORBISTOUN_WATCHPOINT=0x4000019e9cb0:rw ./target/release/orbistoun-cli run titles/X/eboot.bin
+ORBISTOUN_WATCHPOINT=0x4000019e9cb0:rw ./bin/orbistoun run <title>
 ```
 
-Neither step reads the guest's code, which is what keeps the pair inside principle 1 and
-makes it a candidate for automation rather than a manual detour (D276).
+`ORBISTOUN_WATCHPOINT` takes `<addr>[+len][:w|rw]`: up to four, each of one, two, four or eight
+bytes aligned to its length. x86 has no read-only encoding, so `rw` also traps writes. A data
+breakpoint fires after the access completes, so each line reports `after the access at` the
+next instruction; naming the instruction itself would mean disassembling a vendor binary
+(D276).
 
-Two things the hardware imposes, both refused out loud rather than rounded off: there are
-**four** watchpoints, of one, two, four or eight bytes, each aligned to its own length; and
-x86 has no read-only encoding, so `rw` traps writes as well.
-
-One thing it imposes that cannot be refused: a data breakpoint fires *after* the access
-completes, so the instruction pointer reported belongs to the **next** instruction. Every
-line says `after the access at` for that reason. Naming the instruction that actually did it
-would mean decoding it, which is disassembly of a vendor binary (D277).
-
-## Where the output goes
-
-Nothing important is left on a terminal. A run that takes ten minutes and prints its
-findings to a scrollback has produced nothing durable.
+## Outputs
 
 | Artifact | Where | Written by |
 |---|---|---|
-| Call traces | `<data>/traces/*.json` | Every run, on both the fault and time-limit paths |
+| Call traces | `<data>/traces/*.json` | every run, on every outcome |
 | Run reports | `<data>/reports/` | `orbistoun-cli report` |
+| Learned answers | `<data>/learned.toml` | `orbistoun-cli turn --apply` |
 | Names worked out | `symbols/generated.json` | `./bin/orbistoun names`, accumulating |
-| Hashes still unnamed | `symbols/wanted.txt` | Same, accumulating |
+| Hashes still unnamed | `symbols/wanted.txt` | the same |
 | What a title reached | `compat/<title>.toml` | `orbistoun-cli compat record` |
 | What this machine can contribute | `submission/` | `orbistoun-cli submit export` |
 | What is known, and not | `crates/orbistoun-hle/data/knowledge/` | `orbistoun-cli learn` |
-| Window captures | `<data>/screenshots/*.png` | The GUI toolbar's **capture** button (D215) |
+| Window captures | `<data>/screenshots/*.png` | the GUI toolbar's capture button (D162) |
 
-`<data>` is the platform data directory, or the binary's own directory in portable mode.
-`orbistoun-cli paths` prints it.
+`<data>` is the platform data directory, or the binary's own directory in portable mode;
+`orbistoun-cli paths` prints it. Traces are keyed by module, and `worklist` totals across all
+of them.
 
-Traces are keyed by module, so a sweep leaves one per title rather than each overwriting
-the last, and `worklist` totals across all of them.
+## Run limits
 
-## Why the guest is given a time limit
+A guest whose imports all answer "unimplemented" can wait forever on a function it calls
+millions of times without faulting. Killing it from outside loses the trace, so the worker
+stops it itself, writes the trace, and exits with a status saying which limit fired (D238):
+the time limit (`--limit`) or the call budget (`--calls`). The call budget is the deterministic
+one - two runs of one build stop at the same call - and the clock is a backstop for a guest
+that stops calling imports.
 
-A guest whose imports all return "unimplemented" does not necessarily crash. One
-commercial executable here ran for **ten minutes** without faulting, calling a single
-function four hundred million times - which looks like success and is really a wait that
-will never end.
+## Cadence
 
-Killing it from outside loses the trace, which is the only thing the run was for. So the
-worker stops it itself, writes what it learned, and exits with a status meaning exactly
-that (D066). `--limit 0` removes the limit when you genuinely want it.
+| Run | When |
+|---|---|
+| `./bin/orbistoun run <title>` | Constantly; this is the debug loop |
+| `./bin/orbistoun turn <title>` | When the top finding is one the dispatcher can sweep |
+| `./bin/orbistoun sweep` | After any change that could move a guest further |
+| `./bin/orbistoun check` | Before any unit of work is done |
+| `./bin/orbistoun names` | Included in `sweep`; separately after extending the vocabulary |
+| `orbistoun-cli worklist` | Any time; it reads persisted traces |
+| `orbistoun-cli questions` | Before implementing a function |
+| `orbistoun-cli learn` | Whenever a turn established something |
+| `orbistoun-cli compat record` | After a run that moved; the run prompts for it |
+| `orbistoun-cli harvest <freebsd-src>` | For a larger standard-library word list |
+| `./bin/orbistoun symbols-audit` | Included in `check` and in CI |
 
-## Starting from nothing
+## Without a title
 
-```bash
-./bin/orbistoun doctor --fix   # what is missing, and install it
-./bin/orbistoun check          # confirm the tree is sound
-./bin/orbistoun run <title>    # first turn
-```
-
-`doctor` runs automatically before anything that needs a toolchain, so a missing
-requirement surfaces as one clear line rather than as a build error three steps in.
-`--fix` installs the optional tools and enables the pre-push hook; it will not install a
-Rust toolchain, because that is a machine-wide decision that belongs to you.
-
-With no modules under `titles/`, `sweep` still works and says so: the name generator
-produces candidates, but confirming one needs a real import table to collide against.
-See [PROVENANCE.md](PROVENANCE.md) for exactly what that does and does not imply.
-
-## Asking a model for vocabulary
-
-Naming is limited by the grammar, so the way to name more imports is to have more words.
-`orbistoun-propose` asks a local model for them, one grammar position at a time, and lets
-the hash decide - a wrong suggestion costs a sweep and vanishes.
-
-```bash
-ROUNDS=3 cargo test -p orbistoun-propose --release --test live -- --ignored --nocapture
-```
-
-Opt-in, because it downloads and runs a model on the GPU. `ROUNDS` defaults to 3 and there
-is little reason to raise it: a measured 36-round run earned three names, and effectively
-all of the yield was in the first round of each position.
-
-Words the hash confirms land in `symbols/proposed-*.txt`. Promoting one into
-`crates/orbistoun-names/data/vendor.toml` is deliberate and manual - put a noun in `object`
-and a suffix in `tail`, then re-run the name search:
-
-```bash
-./bin/orbistoun names
-```
-
-## Turning the loop without reading the findings
-
-`orbistoun-turn` reads the run's ranked findings and performs the ones that are
-mechanical - sweeping every argument of the call that led into a fault, asking every other
-diagnostic axis about the faulting address - then stops at the ones that need a person.
-
-```bash
-cargo test -p orbistoun-propose --release --test turn -- --ignored --nocapture
-```
-
-It is a dispatcher, not a chooser. A boot costs about 0.13 seconds, so every sweep it runs
-is exhaustive rather than ranked; nothing here decides what is *worth* trying (D231).
+With nothing in the library, `sweep`, `worklist`, `questions` and `compat list` still run. The
+name generator produces candidates, but confirming one needs a real import table to collide
+against; [PROVENANCE.md](PROVENANCE.md) says what that implies.

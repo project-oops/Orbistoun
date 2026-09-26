@@ -1,39 +1,37 @@
 # orbistoun-worker
 
-Worker mode: hosting the crates behind the protocol, and driving one from a shim.
+Worker mode: hosting the crates behind the protocol, and driving a worker from a shim.
 
-**Models:** both halves of the child-process arrangement - `serve` (the child) and
-`WorkerHandle` (the parent).
+It holds both halves of the child-process arrangement: `serve` (the child) and
+`WorkerHandle` (the parent). A `Run` request loads the module, executes it, catches the fault
+if there is one, and returns the phases reached with a terminal `Outcome`. The run report -
+trace, progress verdict, fault detail and ranked findings - is assembled here (`report.rs`)
+from what the dispatch layer recorded, using [orbistoun-report](../orbistoun-report/)'s
+types. It speaks [orbistoun-proto](../orbistoun-proto/).
 
-**Deliberately fakes:** nothing. `Run` loads the module, executes it, catches the fault
-if there is one, and returns the phases reached with a terminal `Outcome`.
+## Isolation
 
-**Design note.** The parent **re-invokes the running executable** with a hidden
-`--worker` flag rather than spawning a separate worker binary (D033). The worker is
-then literally the same build, so version skew is impossible by construction. No
-binary is privileged: worker mode is a mode any shim can enter, and it is as thin as
-the other shims.
+A guest fault is an access violation in the process that runs it, so the guest runs in the
+child and the parent survives to write out what was learned. A run that killed the tool would
+lose the trace, which is the only thing the run was for.
 
-Two failure policies worth knowing:
+## Rules
 
-- **A failing request does not end the session.** Request errors come back as
-  `Failed` and the loop continues - a worker that exited on the first bad request would
-  turn a recoverable problem into a lost session.
-- **A version mismatch does end it.** Continuing would parse every later message
-  against the wrong contract, which is far harder to diagnose than a refusal.
-- **A control channel that closes without a `Shutdown` ends the process** (D715). The
-  parent is gone, so there is nobody to report to. The worker exits with `EXIT_ORPHANED`
-  even when a guest is running, so it cannot outlive the window that launched it.
+- **Self-reinvocation.** The parent re-invokes the running executable with a hidden
+  `--worker` flag (`WORKER_FLAG`) rather than spawning a separate worker binary (D033). The
+  worker is the same build, so version skew is impossible by construction. Worker mode is a
+  mode any shim can enter, and it is as thin as the other shims.
+- **A failing request does not end the session.** Request errors come back as `Failed` and the
+  loop continues; exiting on the first bad request would turn a recoverable problem into a
+  lost session.
+- **A version mismatch ends the session.** Continuing would parse every later message against
+  the wrong contract.
+- **A closed control channel ends the process.** When the channel closes without a `Shutdown`,
+  the parent is gone and there is nobody to report to, so the worker exits with
+  `EXIT_ORPHANED`, even with a guest running, and never outlives the window that launched it.
 
-**Testability.** `serve` takes a reader and writer rather than reaching for real stdio,
-so the whole protocol loop runs over in-memory pipes with no process spawned. Spawning
-is covered separately by integration tests in `orbistoun-cli`, so a protocol bug and a
-process bug stay distinguishable.
+## Tests
 
-**Status:** done. The protocol loop, process management, and execution all work, and the
-run report - the trace, the progress verdict, the fault detail, and the ranked findings -
-is assembled here (`report.rs`) from what the dispatch layer recorded.
-
-**Isolation is the point.** A guest fault is an access violation in this process, so it
-happens in the child and the parent survives to write out what was learned. A run that
-killed the tool would lose the trace, which is the only thing the run was for.
+`serve` takes a reader and a writer rather than real stdio, so the whole protocol loop runs
+over in-memory pipes with no process spawned. Spawning is covered by integration tests in
+`orbistoun-cli`, so a protocol bug and a process bug stay distinguishable.

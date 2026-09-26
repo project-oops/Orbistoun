@@ -1,160 +1,164 @@
 # Building orbistoun
 
-There is one command and it is `bin/orbistoun`. Everything below is a verb on it, and every
-verb is the same command CI runs - not a description of one.
+`bin/orbistoun` is the one command. Everything below is a verb on it, and each verb is the
+command CI runs.
 
 ```bash
 ./bin/orbistoun doctor --fix   # is this machine ready; --fix installs what is missing
 ./bin/orbistoun check          # is the tree sound
 ```
 
-If those two pass, you have a working build.
+When both pass, the build is working.
 
-## What you need
+## Requirements
 
-**A Rust toolchain**, and no C compiler, vendor SDK, firmware or signing keys. Nothing about a
-build touches the hardware.
+**A Rust toolchain.** No C compiler, vendor SDK, firmware or signing keys; a build never
+touches the hardware.
 
-### One sibling
+### The sibling repository
 
-**A clone of only this repository is no longer enough.** orbistoun takes `oops-build`,
-`oops-log`, `oops-paths` and `oops-docs` from `oops-libs` by relative path, as a sibling, so
-the collection layout is a build requirement. Without it the build fails as a missing
-*directory* rather than as a missing dependency, which is a much worse error to read.
+orbistoun takes `oops-build`, `oops-log`, `oops-paths` and `oops-docs` from `oops-libs` by
+relative path, so the collection layout is a build requirement. Without the sibling, the
+build fails on a missing directory rather than a missing dependency.
 
 ```bash
 ./bin/oops bootstrap orbistoun    # fetches oops-libs, and nothing else
 ```
 
-Three things said otherwise until recently, and each had been true once: the README's
-"Standalone works here", the collection's `bootstrap` table, and this repository's own CI,
-which checked itself out flat and so could not have built. None of them was wrong when
-written.
+CI checks out the collection the same way.
 
 ### The toolchain
 
-`rust-toolchain.toml` pins the build toolchain, and rustup honours it over whatever default
-is already installed - including over the toolchain a CI action just set up. So there is
-nothing to select and no version to match by hand.
+`rust-toolchain.toml` pins the build toolchain, and rustup honours it over any installed
+default, including one a CI action sets up. There is nothing to select by hand.
 
 | | |
 |---|---|
 | build toolchain | pinned in `rust-toolchain.toml`, with `rustfmt`, `clippy` and `rust-src` |
-| MSRV floor | `rust-version` in `Cargo.toml` - a separate number, and deliberately lower |
+| MSRV floor | `rust-version` in `Cargo.toml`, a separate and lower number |
 
-`rust-src` is there because the conformance harness runs the host-side crates under Miri
-(see [TESTING.md](TESTING.md)), which needs a local std source.
+`rust-src` is included for running host-side crates under Miri, which needs a local std
+source.
 
-Four cargo tools are **optional**: `cargo-nextest`, `cargo-deny`, `cargo-audit`,
-`cargo-machete`. Without them `check` falls back to `cargo test` and skips the audits, and it
-says so in the run rather than passing quietly. `./bin/orbistoun doctor --fix` installs them.
+Four cargo tools are optional: `cargo-nextest`, `cargo-deny`, `cargo-audit` and
+`cargo-machete`. Without them `check` falls back to `cargo test`, skips the audits, and says
+so in its output. `./bin/orbistoun doctor --fix` installs them. It does not install a Rust
+toolchain: that is a machine-wide decision left to the person running it.
 
-Installing a Rust toolchain is deliberately *not* something `--fix` does. That is a
-machine-wide decision belonging to the person who ran a script to ask a question.
+## The shared verbs
 
-## The seven shared verbs
+Every OOPS project carries these seven, so `oops test orbistoun` and `./bin/orbistoun test` are
+one command reached two ways.
 
-Every OOPS project carries these, so `oops test orbistoun` and `./bin/orbistoun test` are one
-command reached two ways.
-
-| verb | what it does |
+| Verb | What it does |
 |---|---|
-| `build` | release build of `orbistoun-cli`. Extra arguments pass through, so the release workflow's `--target <triple>` reaches the same verb a person runs |
+| `build` | release build of `orbistoun-cli`. Extra arguments pass through, so the release workflow's `--target <triple>` reaches the same verb |
 | `test` | the test suite, under nextest when it is installed |
 | `lint` | clippy at `-D warnings` |
 | `fmt` | format in place |
-| `check` | the full gate - see below |
+| `check` | the full gate, below |
 | `clean` | remove build output |
 | `doc` | build the API docs, without opening a browser |
 
 ## orbistoun's own verbs
 
-Far more than the seven, because the emulator's own loop lives in this script rather than
-beside it.
+The emulator's working loop lives in this script as well.
 
-| verb | what it does |
+| Verb | What it does |
 |---|---|
-| `run <title>` | one turn of the actual work: resolve a title, refresh names if stale, run under a time limit, report how far it got |
+| `run <title>` | boot one title: resolve it, refresh names if stale, run under a time limit, report how far it got |
+| `turn <title>` | one turn of the loop with nobody reading the findings |
 | `doctor [--fix]` | is this machine ready |
-| `fix` | `cargo fmt` **and** `clippy --fix` |
+| `fix` | `cargo fmt` and `clippy --fix` |
 | `cli <args...>` | the `orbistoun-cli` binary, raw |
 | `docs` | build the API docs and open a browser |
 | `site` | assemble the Pages bundle into `./site` for local preview |
 | `sweep` | run every local guest and rank what to implement next |
 | `names` | regenerate `symbols/` from local guest modules |
 | `suggest [n\|benchmark] [id]` | ask a model for words; `benchmark` ranks them |
-| `provenance` | no console-derived material is tracked |
+| `fmt-check` | formatting, checked rather than applied |
+| `compile` | `cargo check --workspace --all-targets` |
+| `security` | `cargo audit` and `cargo deny check` |
+| `provenance` | no firmware, keys, dumps or guest binaries are tracked |
 | `symbols-audit` | every committed name re-derives here, or is on the ceiling |
+| `knowledge-audit` | every recorded behaviour accounts for itself |
 | `constants` | the harvested ABI constants still match their headers |
 | `tables` | the shader tables still match what generates them |
-| `knowledge-audit` | every recorded behaviour accounts for itself |
 | `prose` | no line-continued string literals |
+| `decisions` | decision numbers are unique and indexed |
 | `decide "<title>"` | reserve the next decision number, atomically |
-| `hooks` | install the pre-push gate |
+| `worklog "<title>"` | reserve the next worklog number, atomically |
+| `hooks` | install the pre-push gate and the tools it needs |
 
-Two of those are deliberately **not** folded into a shared verb. `fix` applies clippy
-suggestions as well as formatting, which is a mutating operation that should be asked for by
-name rather than hidden inside `fmt`. And `docs` opens a browser where `doc` does not, because
-a build step that launches a browser cannot go in a pipeline.
+`fix` is separate from `fmt` because it applies clippy suggestions, a mutating operation that
+is asked for by name. `docs` is separate from `doc` because it opens a browser, which a
+pipeline step cannot do.
 
-## What `check` actually runs
+## The gate
 
-In order, and it does **not stop at the first failure**: a setup problem should end the run,
-but a failing gate step should not take the rest of the tree with it. Failures accumulate and
-are listed at the end.
+`check` runs these steps in order. A setup problem ends the run; a failing gate step does not.
+Failures accumulate and are listed at the end.
 
-1. `provenance` - no firmware, keys, dumps or guest binaries tracked
-2. `constants` - harvested ABI constants still match their headers
-3. `decisions` - the decision log is well-formed
-4. `prose` - no line-continued string literals
-5. generated numbers still match what generates them
-6. `symbols-audit` - every committed name re-derives
-7. `tables` - shader tables still match their generator
-8. `cargo fmt --check`
-9. `cargo clippy --all-targets -- -D warnings`
-10. `cargo check --all-targets`
-11. the test suite, then the doctests
-12. the device-dependent tests, **re-run with output shown**
-13. the packet vocabulary check
-14. `cargo doc` with broken intra-doc links as errors
-15. the optional audits, when installed
+1. `provenance`: no firmware, keys, dumps or guest binaries tracked
+2. `constants`: harvested ABI constants still match their headers
+3. `decisions`: decision numbers are unique and indexed
+4. worklog numbers are unique
+5. `prose`: no line-continued string literals
+6. the generated numbers blocks are current (`orbistoun-cli status --check`)
+7. `symbols-audit`: every committed name re-derives
+8. `tables`: shader tables still match their generator
+9. measured hardware behaviour is asserted or declared outstanding
+10. the committed differential reference run matches the reference program
+11. `cargo fmt --check`
+12. `cargo clippy --all-targets -- -D warnings`
+13. `cargo check --all-targets`
+14. the test suite, then the doctests
+15. the device-dependent Vulkan tests, re-run with output shown
+16. the packet vocabulary check
+17. `cargo doc` with broken intra-doc links as errors
+18. the optional audits, when installed (advisory)
 
-Steps 12 and 13 are re-run rather than trusted. The Vulkan tests *skip* when there is no
-device, and a test harness captures the output of a passing test - so the skip is invisible in
-the run above it. The packet vocabulary is checked against captures of a real guest and there
-are none yet, so that suite passes while verifying nothing. Both are reported explicitly,
-because a green run must not imply a check that did not happen.
+Steps 15 and 16 report whether they verified anything. The Vulkan tests skip when there is no
+device, and a test harness hides the output of a passing test, so the re-run prints either
+that the tests executed against a device or which ones were skipped. The packet vocabulary is
+checked against captured command streams, and the step warns when there are none. A green run
+does not imply a check that did not happen.
 
-### Narrowing it
+### Narrowing the gate
 
 ```bash
 ./bin/orbistoun check --only "orbistoun-submit orbistoun-cli"
 ```
 
-`--only` narrows the cargo steps to those crates, for when another session has a half-written
-crate elsewhere in the workspace. It prints **"passed for &lt;crates&gt;"** rather than "all checks
-passed", and says in as many words that the rest of the workspace was not compiled. A subset
-that passed is not a tree that is sound, and the two must never print the same word.
+`--only` narrows the cargo steps to the named crates, for when another crate in the workspace
+is mid-edit. A scoped run prints `passed for <crates>` instead of `all checks passed` and states
+that the rest of the workspace was not compiled, linted or tested (D319). Clippy gets
+`--no-deps` when scoped, because `-p` alone still lints every workspace crate it compiles.
+`--only` is accepted only by `check`.
 
-Note that clippy gets `--no-deps` when scoped. `-p` alone is not a scope: clippy runs on every
-workspace crate it compiles from source, so scoping to `orbistoun-cli` - which depends on
-nearly everything - lints the whole tree and reports somebody else's finding as yours.
+## CI
 
-## What CI runs
+`.github/workflows/ci.yml` reaches every step through this script:
 
-`.github/workflows/ci.yml`, and every job reaches through this script rather than past it:
-`fmt-check`, `lint`, `compile`, `provenance`, `prose`, `knowledge-audit`, `symbols-audit`,
-`security`, `test`, `doc`. The tests run on Linux, Windows and macOS.
+| Job | Runs |
+|---|---|
+| Check + fmt + clippy | `fmt-check`, `lint`, `compile` |
+| Provenance guard | `provenance`, `prose` |
+| Knowledge provenance audit | `knowledge-audit` |
+| Symbol provenance audit | `symbols-audit` |
+| Audit + deny + machete | `security` |
+| Test | `oops test orbistoun` on Linux, Windows and macOS |
+| Rustdoc | the API docs |
 
-**Local `check` is a superset of CI**, not a copy of it. It also runs `constants`,
-`decisions`, `tables` and the generated-number check, and it re-runs the device tests. So a
-local pass implies a CI pass; the reverse does not hold.
+Local `check` also runs `constants`, `decisions`, the worklog and generated-number checks,
+`tables`, the hardware and differential checks, and the device-test re-run. `knowledge-audit`
+runs in CI and by its own verb, not inside `check`.
 
 ## Running a title
 
-Building is not the same as having something to run. `run` needs a title in the title library -
-the one shared `titles/` under the data directory (`orbistoun-cli paths`), outside this
-repository. With none present, everything that describes what orbistoun *knows* still works:
+`run` needs a title in the title library: the shared `titles/` under the data directory
+(`orbistoun-cli paths` prints it), outside this repository. Without one, the commands that
+describe what orbistoun knows still run:
 
 ```bash
 ./bin/orbistoun cli symbols      # every system-library function declared
@@ -162,19 +166,18 @@ repository. With none present, everything that describes what orbistoun *knows* 
 ./bin/orbistoun cli worklist     # what to implement next, totalled across every run
 ```
 
-[THE_LOOP.md](THE_LOOP.md) is the one-page explanation of what a turn of the work does,
-including which steps still need a person.
+[THE_LOOP.md](THE_LOOP.md) explains what a turn of the work does.
 
 ## From the collection
 
-[OOPS](https://github.com/project-oops/OOPS) holds all four side by side and carries one entry
-point over them:
+The [OOPS](https://github.com/project-oops/OOPS) collection holds the projects side by side
+with one entry point over them:
 
 ```bash
 ./bin/oops check orbistoun
 ```
 
-That relays to this script rather than reimplementing anything, so the two cannot disagree.
+It relays to this script, so the two cannot disagree.
 [The collection's BUILDING.md](https://github.com/project-oops/OOPS/blob/main/docs/BUILDING.md)
-covers the verbs that are about the collection rather than about one project - `bootstrap`,
-`gates`, `all`, `git`, `status` - and the Windows and WSL handling.
+covers the collection-level verbs (`bootstrap`, `gates`, `all`, `git`, `status`) and the
+Windows and WSL handling.

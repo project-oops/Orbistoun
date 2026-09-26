@@ -4,124 +4,122 @@
 
 # Orbistoun
 
-**The Clean-Room x86-64 Native High-Level Emulator for Prospero.**
+Orbistoun is a clean-room high-level emulator (HLE) for Orbis-generation and
+Prospero-generation software, written in Rust. Guest and host share the x86-64 architecture, so
+guest code executes natively with no interpreter or recompiler. Orbistoun reimplements the layer
+beneath it: guest memory mapping, dynamic linker relocation of NID-hashed imports, threads and
+synchronisation, and translation of the guest's GPU command streams and shader bytecode to Vulkan
+and SPIR-V.
 
-Orbistoun is a high-level emulator (HLE) for 8th and 9th generation console software (Orbis and Prospero), written in Rust. Because both the guest console and host PC share the x86-64 CPU architecture, guest code executes **natively** with zero interpreter or CPU recompilation overhead. Orbistoun's work lies entirely in the operating system layer: memory management, dynamic NID linking, thread scheduling, and translating RDNA2 GPU command streams into modern Vulkan.
+- [docs/features/user-guide.md](docs/features/user-guide.md) - running titles from the GUI and
+  the command line.
+- [docs/README.md](docs/README.md) - the technical reference index.
 
-Site: **[project-oops.github.io/Orbistoun](https://project-oops.github.io/Orbistoun/)**
+## Building
 
-| 📖 **[Player & Tester Guide (GUI & CLI)](docs/USER_GUIDE.md)** | ⚙️ **[Technical Reference & Architecture](docs/README.md)** |
-| :--- | :--- |
-| *Running titles, controller mapping, GUI walkthrough, and crash traces.* | *Address maps, RDNA2/Vulkan pipeline, ABI bridge, and blame engine.* |
-
----
-
-## Role in THE LOOP
-
-Within the [OOPS ecosystem](../docs/THE_LOOP.md), Orbistoun is the **execution and verification engine**:
-
-```
-Title Executable (from oops-apps or commercial)
-         │
-         ▼
-┌────────────────────────────────────────┐
-│ Orbistoun Native Execution             │
-│ (x86-64 native; GPU command decode -   │
-│  the Vulkan backend does not present   │
-│  a frame yet)                          │
-└──────────────────┬─────────────────────┘
-                   │
-         [Fault / Crash / Stub]
-                   │
-                   ▼
-┌────────────────────────────────────────┐
-│ orbistoun-turn (mechanical findings)   │
-│ - Snapshot unwritten struct memory     │
-│ - Arm watchpoints on empty slots       │
-│ - Diff trace: FURTHER / same / BACK    │
-└──────────────────┬─────────────────────┘
-                   │
-         [Unmeasured Question]
-                   │
-                   ▼
-   A person runs an obSCEne probe on
-   real hardware via Prosperous
-```
-
-1. **Native Execution**: Orbistoun maps the title into memory, resolves import NID hashes statically, and jumps to entry.
-2. **Mechanical findings (`orbistoun-turn`)**: When a guest faults, the steps that need no person - argument sweeps, watchpoints identifying which register or unwritten struct field triggered the crash - run automatically and rank what to try next.
-3. **The Hardware Oracle is a person's step.** If the function or struct is unmeasured,
-   somebody writes an [obSCEne](../obscene/) probe and runs it on real hardware via
-   [Prosperous](../prosperous/). `orbistoun-cli probe` then reads the resulting transcript
-   and reports what it establishes - it does not open a socket, drive a probe, or dispatch
-   anything itself (see `crates/orbistoun-probe`). Writing the Rust implementation from that
-   measurement, tagged `known_by: measured`, is a deliberate act by whoever read the result,
-   not an automated one.
-4. **Progress Verification**: The title re-runs. If progress is made (`verdict: FURTHER`), the implementation is kept. If it regresses (`BACK`), it is reverted.
-
-👉 **Read the full emulator loop specification in [docs/THE_LOOP.md](docs/THE_LOOP.md)**.
-
----
-
-## Developer Quickstart
-
-### 1. Build and Health Check
-Orbistoun is developed as a sibling under the [OOPS meta-repository](../README.md):
+Orbistoun is one member of the [OOPS collection](../README.md). From this directory:
 
 ```bash
-# From repository root
-./bin/orbistoun doctor --fix   # verify toolchains and fix missing dependencies
-./bin/orbistoun check          # compile and run the test suite
+./bin/orbistoun doctor --fix   # check the toolchain; --fix installs the optional gate tools
+./bin/orbistoun check          # build, lint and run the test suite
 ```
 
-### 2. Run a Title
-To run a title (for example, [`gl1-cube`](../oops-apps/src/oops-gl/gl1-cube)):
+[docs/BUILDING.md](docs/BUILDING.md) lists what `bin/orbistoun` needs and every verb it takes.
+
+## Running a title
+
 ```bash
 ./bin/orbistoun run GLCB00001
 ```
-Orbistoun executes the guest until completion or timeout, records the trace, compares it against the previous run, and prints the verdict (`FURTHER`, `same`, or `BACK`) followed by ranked diagnostic findings.
 
-### 3. Query Knowledge, Questions, and Worklist
-Inspect what Orbistoun knows, what rests on empirical measurement, and what remains an open question:
+`run` builds `orbistoun-cli`, resolves the title id in the title library
+(`orbistoun-cli paths` prints where it is), runs the guest until it exits, faults or reaches the
+time limit, and prints the verdict against the previous run (`FURTHER`, `same` or `BACK`)
+followed by ranked findings. Arguments after `--` go to `orbistoun-cli run`.
+
+The desktop shell is `orbistoun-gui`; [docs/features/](docs/features/README.md) describes each
+screen beside its command-line equivalent.
+
+## Querying what Orbistoun knows
+
+`./bin/orbistoun cli <args>` runs `orbistoun-cli`.
 
 | Command | Purpose |
 |---|---|
-| `orbistoun-cli symbols` | Every system-library function Orbistoun declares |
-| `orbistoun-cli questions` | Lists open questions ranked by how often guest titles call them |
-| `orbistoun-cli worklist` | Ranked action list of what to implement next across all runs |
-| `orbistoun-cli knows <symbol>` | Displays the empirical proof and citation behind any function |
-| `orbistoun-cli compat list` | Shows how far every title in the corpus has reached |
+| `orbistoun-cli symbols` | every system-library function Orbistoun declares |
+| `orbistoun-cli questions` | open questions, ranked by how often guests call them |
+| `orbistoun-cli worklist` | what to implement next, ranked across all recorded runs |
+| `orbistoun-cli knows <symbol>` | the evidence and citation behind one function |
+| `orbistoun-cli compat list` | how far each recorded title reaches |
 
-For what Orbistoun can do today — the working subsystems and the current walls — see
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md).
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) is the generated status page, and
+[COMPATIBILITY.md](COMPATIBILITY.md) the generated per-title table.
 
----
+## The loop
 
-## Architecture & Crates
+```
+Guest executable (oops-apps homebrew or a retail title)
+         |
+         v
++----------------------------------------+
+| Orbistoun: native execution,           |
+| HLE library calls, GPU translation     |
++-------------------+--------------------+
+                    |
+          [fault / stub / limit]
+                    |
+                    v
++----------------------------------------+
+| orbistoun-turn: mechanical findings    |
+| - snapshot unwritten struct memory     |
+| - watchpoints on empty slots           |
+| - trace diff: FURTHER / same / BACK    |
++-------------------+--------------------+
+                    |
+          [unmeasured question]
+                    |
+                    v
+  a person runs an obSCEne probe on the
+  hardware through Prosperous
+```
 
-Eight of the workspace's 41 crates, to give the shape of it; **[docs/CRATES.md](docs/CRATES.md)
-is the complete, accurate map**:
+1. **Execution.** Orbistoun maps the guest into memory, resolves every import statically and
+   jumps to the entry point.
+2. **Mechanical findings.** When a guest faults, `orbistoun-turn` runs the steps that need no
+   person - argument sweeps, and watchpoints naming the register or unwritten field behind the
+   fault - and ranks what to try next.
+3. **Hardware measurement.** An unmeasured function or structure is a person's step: an
+   [obSCEne](../obscene/) probe run on the hardware through [Prosperous](../prosperous/).
+   `orbistoun-cli probe` reads the resulting transcript and reports what it establishes; it
+   opens no connection and dispatches nothing. An implementation written from that measurement
+   is tagged `known_by = "measured"`.
+4. **Verification.** The title runs again. `FURTHER` keeps the change; `BACK` rejects it.
+
+[docs/THE_LOOP.md](docs/THE_LOOP.md) specifies the loop in full.
+
+## Layout
+
+The workspace crates are under `crates/`; [docs/CRATES.md](docs/CRATES.md) says what each one
+is for. A few of them:
 
 ```
 crates/
-├── orbistoun-loader   # ELF64 / SELF container loading, TLS, and address space layout
-├── orbistoun-nid      # Import hash resolution and candidate grammar generation
-├── orbistoun-abi      # System V AMD64 ↔ Microsoft x64 calling convention bridge
-├── orbistoun-hle      # Clean-room system service stubs (libkernel, libScePad, etc.)
-├── orbistoun-gpu      # GFX10 PM4 packet processor, context registers, and queue dispatch
-├── orbistoun-shader   # RDNA2 GFX10 bytecode decoder and SPIR-V recompiler
-├── orbistoun-turn     # Mechanical findings: 2D argument sweep, watchpoint diagnostics
-├── orbistoun-report   # Trace capture, diff comparator, and ranked findings generator
-└── orbistoun-cli      # Developer command-line interface
+  orbistoun-elf       ELF and container parsing
+  orbistoun-nid       NID hashing and symbol-name resolution
+  orbistoun-loader    parse, reserve, resolve, relocate, TLS, entry
+  orbistoun-hle       module registry, guest_module!, stub policy
+  orbistoun-gpu       command-stream translation
+  orbistoun-shader    guest shader bytecode decoding
+  orbistoun-turn      mechanical findings
+  orbistoun-report    traces, the progress verdict, ranked findings
+  orbistoun-cli       the orbistoun-cli binary
 ```
 
----
+## Related projects
 
-## Cross-Project Links
-
-- **[Master OOPS Front Door](../README.md)** — Collection overview and building instructions.
-- **[The OOPS Loop](../docs/THE_LOOP.md)** — Master ecosystem loop specification.
-- **[obSCEne](../obscene/)** — Hardware conformance probe providing empirical silicon truth.
-- **[Prosperous](../prosperous/)** — Remote hardware tool deploying payloads and streaming logs.
-- **[SELFish](../selfish/)** — Platform file format compiler and ELF/PKG unpacker.
-- **[oops-apps](../oops-apps/)** — Conforming homebrew titles used as test fixtures.
+- [OOPS](../README.md) - the collection and its shared build instructions.
+- [The OOPS loop](../docs/THE_LOOP.md) - how the collection's projects feed each other.
+- [obSCEne](../obscene/) - the hardware conformance probe.
+- [Prosperous](../prosperous/) - remote hardware management: deploying payloads, streaming logs.
+- [SELFish](../selfish/) - the platform container formats: building and unpacking.
+- [oops-apps](../oops-apps/) - homebrew titles used as test guests.

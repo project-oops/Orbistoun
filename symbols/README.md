@@ -1,51 +1,50 @@
 # Symbol databases
 
-Names orbistoun has worked out, and the record of how.
+Names Orbistoun has worked out, and the record of how.
 
-Every name in every file here is **re-derivable from this repository alone** - from the
-published-standard word list in `crates/orbistoun-names/data/standard.txt`, or from the
-candidate grammar in `crates/orbistoun-names/data/vendor.toml`. Each carries a
-derivation saying which, and where.
+Every name here is re-derivable from this repository alone - from the published-standard word
+list in `crates/orbistoun-names/data/standard.txt`, or from the candidate grammar in
+`crates/orbistoun-names/data/vendor.toml` - and each carries a derivation saying which (D242).
 
-**Which is not the same as saying this file could be rebuilt with no guest module.** The
-generator produces 251 million candidate names and cannot know which of them name a
-function that exists; a module's import table is what supplies that. The names are ours,
-the selection is the module's, and the audit proves the first half - the half a
-provenance question is about. See [docs/PROVENANCE.md](../docs/PROVENANCE.md).
+Re-derivable is not the same as rebuildable without a guest module. The generator produces far
+more candidate names than exist, and a module's import table is what selects the real ones. The
+names are generated here; the selection is the module's. The audit proves the first half, which
+is the half a provenance question is about. See [docs/PROVENANCE.md](../docs/PROVENANCE.md).
 
-That claim is checked mechanically, not asserted:
+Nothing here comes from a NID database, a disassembly or a vendor binary.
+
+## The audit
 
 ```bash
 orbistoun-cli audit symbols/generated.json
 ```
 
-It runs in `./bin/orbistoun check` and in CI over every file here, and it re-runs each
-recorded derivation rather than trusting it - so a forged record fails exactly as
-loudly as a missing one.
+It re-runs each recorded derivation rather than trusting it, so a forged record fails as loudly
+as a missing one. `./bin/orbistoun check` and CI run it over every file here; it needs no guest
+module.
 
-**Nothing here came from a NID database, a disassembly, or a vendor binary.** The full
-argument, including its honest limits, is in [docs/PROVENANCE.md](../docs/PROVENANCE.md).
+## Regenerating
 
-## These files are generated
-
-Never hand-edited. Editing one would put a name in the tree with no derivation behind
-it, which is exactly what the audit exists to catch.
+These files are generated and never hand-edited: a hand-added name has no derivation behind it,
+which is what the audit exists to catch.
 
 ```bash
 ./bin/orbistoun names
 ```
 
-Sweeps every guest module under `titles/`, accumulating - each module contributes the
-imports only it needs, and nothing already learned is ever dropped. The right way to add
-a name is to make the generator produce it, by extending
-`crates/orbistoun-names/data/vendor.toml`.
-
-There is no schedule. Re-run it after extending the vocabulary, or after adding a module
-to `titles/`. CI does not run it - `titles/` is gitignored, and it does not need to: what
-CI checks is the audit, which needs no module at all.
+`names` sweeps every guest module in the title library and accumulates - each module contributes
+the imports only it needs, and nothing already learned is dropped. A name is added by making the
+generator produce it, by extending `crates/orbistoun-names/data/vendor.toml`. Re-run it after
+extending the vocabulary or adding a module to the library. `./bin/orbistoun run` re-runs it
+automatically when the names are stale. CI does not run it, because the library is not in the
+repository.
 
 ## Files
 
-- `generated.json` - names worked out so far, with the record of how each was arrived at.
-- `wanted.txt` - hashes still unnamed, accumulated across every module ever searched.
-  The work list: extending the grammar is aimed at these, and it needs no rebuild.
+| File | Holds |
+|---|---|
+| `generated.json` | the names worked out, each with the record of how it was derived |
+| `wanted.txt` | unnamed import hashes, accumulated across every module searched; the naming work list |
+| `exported-unnamed.txt` | unnamed platform export hashes - what the hardware's export table offers whether or not a title imports it |
+| `proposed-learned.txt`, `proposed-tail.txt`, `proposed-verb.txt` | words a model proposed that the NID hash then confirmed |
+| `unaccounted-ceiling.txt` | names this repository cannot re-derive, as a ceiling: `orbistoun-cli audit --ceiling` fails on an unaccounted name not listed, and on a listed name that has become accounted for |

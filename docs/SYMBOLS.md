@@ -1,40 +1,38 @@
 # Symbol databases and the NID hash
 
-guest modules do not import by name. A guest module's dynamic table
-references a library plus a **NID**: a 64-bit hash derived from the symbol name.
-Resolving imports therefore needs both halves of that relationship.
+Guest modules do not import by name. A guest module's dynamic table references a library plus
+a **NID**: a 64-bit hash derived from the symbol name. Resolving imports needs both directions
+of that relationship.
 
 ## The algorithm
 
-1. Append a fixed byte suffix to the symbol name.
-2. SHA-1 the result.
-3. Take the first eight bytes, little-endian, as a `u64`.
+1. Append a fixed 16-byte suffix to the symbol name.
+2. Take the SHA-1 digest of the result.
+3. Take the first eight bytes of the digest as a `u64`, with `digest[0]` as the most
+   significant byte.
 
-Implemented in `orbistoun-nid::NidHasher`. A hash is not invertible, so the reverse
-direction (NID to name) is pure lookup: hash every name you know and build a map.
-That is `SymbolDb`.
+`orbistoun_nid::NidHasher` implements it, and a round-trip test against the encoded form in an
+import table pins the byte order. A hash is not invertible, so the reverse direction (NID to
+name) is lookup: hash every known name and build a map. That is `orbistoun_nid::SymbolDb`.
 
-## Why the suffix is not in the source
+## The hash suffix
 
-The suffix is a publicly documented constant from hardware reverse-engineering
-work. It is deliberately **not** compiled in. Two reasons:
+The suffix ships in selfish's `data/hash-suffix.toml`, embedded in the binary by `selfish-nid`
+at build time. It is a salt on a name-mangling hash, not a key: it decrypts, signs and protects
+nothing. It lives in a labelled data file rather than a Rust literal so that its origin and
+verification are written next to it (see [CLAUDE.md](../CLAUDE.md) principle 1).
 
-- **It keeps a magic constant out of the tree.** A bare hex blob in source with no
-  derivation is exactly the kind of artefact that makes provenance questions hard to
-  answer (see [CLAUDE.md](../CLAUDE.md) principle 1). As runtime data it is an
-  input, like a ROM path.
-- **It makes the hasher testable.** `NidHasher` is exercised against arbitrary
-  suffixes in unit tests, with no dependency on the real value being present or
-  correct.
+The value verifies itself. The target C library is FreeBSD-derived and exports ISO C and POSIX
+functions under their published names, so hashing those names with the right suffix matches
+real imports in a real module, and a wrong suffix or byte order matches none.
 
-The practical consequence: `orbistoun symbols` without `--suffix-hex` prints correct
-*names* and meaningless *hashes*, and warns that it is doing so. Import resolution
-against a real module needs the real suffix.
+`--suffix-hex <HEX>` overrides the shipped value for any command. `NidHasher` takes the suffix
+as a parameter, so its unit tests run against arbitrary suffixes.
 
 ## File format
 
-One file carries both halves, so a single input fully determines resolution
-behaviour and cannot disagree with itself:
+One file carries the suffix and the names, so a single input determines resolution and cannot
+disagree with itself:
 
 ```json
 {
@@ -43,64 +41,70 @@ behaviour and cannot disagree with itself:
     "sceAudioOutInit",
     "sceAudioOutOpen",
     "sceKernelAllocateDirectMemory"
-  ]
+  ],
+  "derivations": {}
 }
 ```
 
-NIDs are **derived, never stored**. A file listing both names and hashes could
-carry a pair that does not actually hash to each other, and that inconsistency
-would surface as a mystery unresolved import much later.
+NIDs are derived, never stored. A file listing both names and hashes could carry a pair that
+does not hash to each other, which would surface later as an unexplained unresolved import.
 
-Deserialised as `orbistoun_nid::SymbolDbFile`.
+`derivations` is optional. It records, per name, how the name was arrived at, so anyone can
+re-derive it; a name without an entry is unaccounted for, which the audit reports.
+[PROVENANCE.md](PROVENANCE.md) describes that vocabulary and how it is checked.
 
-## Obtaining one
+The file deserialises as `orbistoun_nid::SymbolDbFile`. Any file of this shape loads through
+`--symbols-db <path>`.
 
-**Generate it, with `orbistoun names`.** The reverse direction is a search, and this
-repository does the search itself rather than consulting anything (D068):
+## The shipped database
+
+`symbols/generated.json` is embedded in the binary and loaded unless `--symbols-db` names
+another file. `./bin/orbistoun names` regenerates it from the modules in the title library,
+and `./bin/orbistoun symbols-audit` checks that every committed name re-derives from this
+repository.
+
+## Generating names
+
+`orbistoun-cli names` searches for names; the repository derives them itself rather than
+consulting an external database (D068):
 
 ```bash
-orbistoun-cli names --suffix-hex <HEX> --out symbols.json path/to/guest
-orbistoun-cli names --suffix-hex <HEX> --out symbols.json titles   # or a whole corpus
+orbistoun-cli names --out symbols.json path/to/guest
+orbistoun-cli names --out symbols.json path/to/titles    # a whole corpus
 ```
 
-**A directory is one search, not one per module.** Every module beneath it is read, their
-unnamed imports are unioned, and a single sweep answers all of them - a wider target set
-costs a sweep nothing, because each candidate is one hash-set lookup whatever the set
-holds. It is also the only form that finds a name lying in one title's data that explains
-a *different* title's import, which is where a large share of them are (D213).
+A directory is one search. Every module beneath it is read, their unnamed imports are
+unioned, and a single sweep answers all of them. Each candidate costs one hash-set lookup
+whatever the target set holds, and a name found in one title's data can explain a different
+title's import (D213).
 
-Candidates come from four places, and only one is guesswork:
+Candidates come from four sources:
 
-- **Published standard-library names.** The target C library is FreeBSD-derived, so much
-  of it is ISO C and POSIX under the names those standards publish, and they ship in
-  `crates/orbistoun-names/data/standard.txt`. These are not guesses.
-- **A module's own bytes.** Diagnostic and assertion text leaves real function names in a
-  binary. Not a guess about the vendor's naming - it is the vendor's naming (D193).
-- **The rest of the corpus.** The same mechanism, pooled, so the vendor C library module's
-  strings name imports of titles that never mention them.
-- **Generated vendor names.** The convention is strict - prefix, module, action, object,
-  revision mark - so candidates are enumerated from a grammar in
-  `crates/orbistoun-names/data/vendor.toml`. Billions of them, searched at around 30
-  million per second, and the count grows every time a confirmed name teaches it a word.
+- **Published standard-library names.** ISO C and POSIX names, in
+  `crates/orbistoun-names/data/standard.txt`.
+- **A module's own bytes.** Diagnostic and assertion text in a binary carries real function
+  names (D242).
+- **The rest of the corpus.** The same mechanism, pooled across every module searched.
+- **Generated vendor names.** Vendor names follow a strict convention (prefix, module,
+  action, object, revision mark), so candidates are enumerated from the grammar in
+  `crates/orbistoun-names/data/vendor.toml`. Confirmed names teach it new words.
 
-A match is proof: the hash agrees or it does not, whichever of those proposed the
-candidate. A miss proves only that the name was not among those tried, so **extending the
-vocabulary is the method** - and because it is data, that costs no rebuild.
+Other options: `--words <file>` adds verbatim candidates (`--words-from` records their
+source), `--grammar <file>` replaces the built-in vocabulary, `--wanted <file>` writes the
+hashes still unnamed as a work list, and `--from-trace` reads candidates from guest memory a
+previous run captured.
 
-Every name is stored with a record of which of those proposed it, what kind of material it
-came out of, and what somebody else would need to arrive at it again.
-[PROVENANCE.md](PROVENANCE.md) is that vocabulary and how it is checked.
+A match is proof: the hash agrees or it does not, whichever source proposed the candidate. A
+miss proves only that the name was not among those tried, so extending the vocabulary is the
+method, and because the vocabulary is data that costs no rebuild.
 
-Public NID-to-name databases do exist, and any file matching the shape above will load.
-Nothing here depends on one.
+## Unknown NIDs
 
-Names that no database knows stay unknown, and that is a normal, reportable state -
-`orbistoun imports` prints `<unknown>` and counts it. An unknown NID means "a
-function we have no name for yet", which is still useful: you know the title needs
-it, how many times it is called, and from where.
+A NID no database names stays unknown, which is a normal, reportable state.
+`orbistoun-cli imports` prints `<unknown>` in its place. An unknown NID still says
+that the title needs the function, how often it is called, and from where.
 
-## What a name does not give you
+## What a name does not give
 
-A resolved name tells you what a function is *called*. It says nothing about what it
-does, what it returns, or what it expects. That is the actual hard problem, and
-[TESTING.md](TESTING.md) covers the four places real answers come from.
+A resolved name says what a function is called, not what it does, returns or expects.
+[TESTING.md](TESTING.md) covers where those answers come from.

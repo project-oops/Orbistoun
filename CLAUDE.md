@@ -137,8 +137,8 @@ message.
   file. It does not index it: regenerate the index from the collection root with
   `tools/split-decisions.sh --index orbistoun`. `./bin/orbistoun decisions` warns about
   written but unlisted entries.
-- `docs/DECISIONS.md` and `docs/WORKLOG.md` are generated (the worklog from
-  `docs/worklog/`). Never edit either by hand.
+- `docs/DECISIONS.md` is generated; never edit it by hand. `docs/WORKLOG.md` is written by
+  hand, one entry per milestone (STYLE section 4).
 - Commits use conventional prefixes (`feat:`, `fix:`, `ci:`, `docs:`, `refactor:`,
   `chore:`, `test:`) with a crate scope where it helps (`feat(nid): ...`).
 - The pre-push hook ([.githooks/pre-push](.githooks/pre-push)) mirrors CI's static gate.
@@ -157,14 +157,12 @@ message.
 | [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) | reference-only credits |
 | [docs/README.md](docs/README.md) | documentation hub |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | generated index of decisions |
-| [docs/WORKLOG.md](docs/WORKLOG.md) | generated index of worklog entries |
+| [docs/WORKLOG.md](docs/WORKLOG.md) | one entry per milestone |
 | [docs/THE_LOOP.md](docs/THE_LOOP.md) | what one turn does, with a diagram |
 | [docs/WORKFLOW.md](docs/WORKFLOW.md) | the commands that turn the loop |
 | [docs/PROVENANCE.md](docs/PROVENANCE.md) | how a symbol name is shown to be ours |
 | [docs/REFERENCES.md](docs/REFERENCES.md) | external documents relied on, what was taken, how it was checked |
-| [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) | project status |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | intended order of work |
-| [docs/BACKLOG.md](docs/BACKLOG.md) | considered work |
+| [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) | generated project numbers and per-title progress |
 | [docs/SCOPE.md](docs/SCOPE.md) | what orbistoun is not |
 | [docs/SYMBOLS.md](docs/SYMBOLS.md) | symbol database format and the hash suffix |
 | [docs/ADDRESS_MAP.md](docs/ADDRESS_MAP.md) | every fixed base and its owner; check it before choosing an address, it is gated against the source (D513) |

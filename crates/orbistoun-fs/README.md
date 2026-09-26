@@ -1,23 +1,31 @@
 # orbistoun-fs
 
-Guest filesystem - libkernel file IO and the async streaming layer.
+The guest filesystem: libkernel file IO, descriptors and sockets, and the vendor async
+streaming layer.
 
-**Models:** the POSIX-shaped libkernel file calls - open, close, read, write, and seek -
-against a sandboxed host directory, plus declarations for the rest.
+The crate covers two layers. The libkernel calls are POSIX-shaped and map almost directly
+onto host IO: open, read, write, seek, directory entries, metadata, `fcntl`, BSD sockets,
+`select` and `kqueue`. Above them sits the vendor async streaming layer, which is what
+open-world titles use. [orbistoun-libc](../orbistoun-libc/),
+[orbistoun-posix](../orbistoun-posix/) and orbistoun-net build on its descriptors.
 
-**Deliberately fakes:** the async streaming layer entirely, and everything beyond the
-five synchronous calls.
+## Main pieces
 
-**Design note.** Two layers, one job. The libkernel calls are POSIX-shaped and map
-almost directly onto host IO; the async streaming layer is the vendor's own, and it is what
-open-world titles actually use.
+| Module | Holds |
+|---|---|
+| `mount` | the mount table: where a guest path lands on the host |
+| `filesystem` | the base tree materialised from a knowledge file, with a per-title writable overlay |
+| `sandbox` | a title's sandbox, assembled in one fixed order: empty the overlay, install the base tree, layer the title's files over `/app0` |
+| `descriptor` | file descriptors and the standard streams |
+| `socket`, `select`, `kqueue` | BSD sockets mapped onto the host's, and readiness waiting |
 
-**Path sandboxing is not optional.** Guest paths (`/app0/..`, `/savedata0/..`) are
-mount points, and every one must resolve inside a directory orbistoun owns. A guest
-path that escapes to a host path is a straightforward arbitrary-write vulnerability,
-so translation goes through one function with one test suite rather than being
-open-coded per call site.
+## Rules
 
-**Status:** five functions implemented. One title reads ten texture files through them
-with correct sizes, which is what confirms the layer rather than inferring it. The async
-layer is unscheduled - not reachable until threading works.
+- **Path sandboxing.** Guest paths (`/app0/...`, `/savedata0/...`) are mount points, and every
+  one resolves inside a directory orbistoun owns. A guest path that escapes to a host path is
+  an arbitrary-write vulnerability, so translation goes through one function with one test
+  suite rather than being open-coded per call site.
+- The mount table takes no special case for a particular title; per-title behaviour belongs
+  in [orbistoun-overrides](../orbistoun-overrides/).
+- A guest's standard output never goes to the worker's standard output, which carries the
+  worker protocol.

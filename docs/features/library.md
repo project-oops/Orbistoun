@@ -1,87 +1,96 @@
 # The library
 
-What Orbistoun has found that it can try to run, and how it decides.
-
-The window's left panel is the library; the detail panel is what is known about the selected
-entry. On the command line the same material is reached through `orbistoun-cli inspect` and
-`orbistoun-cli status`.
-
----
-
-## GUI: Game Library & Dashboard
-
-```text
-+-------------------------------------------------------------------------------+
-|  Orbistoun - Next-Generation Console Emulator                    [_][O][X]    |
-+-------------------------------------------------------------------------------+
-| File  Emulation  View  Debug  Help                                            |
-|-------------------------------------------------------------------------------|
-| [Add Title Dir...]  [Refresh Library]  [Settings]  [Stop Emulation]           |
-|-------------------------------------------------------------------------------|
-| Icon    | Title ID   | Title Name                   | Category | Compatibility|
-|---------+------------+------------------------------+----------+--------------|
-| [ICON]  | GLCB00001  | GL-Cube 3D Demo (Stage 2)    | BIG_APP  | entered      |
-| [ICON]  | OBSC00001  | obSCEne Hardware Conformance | BIG_APP  | flipped      |
-| [ICON]  | WIPE00001  | WipEout Model Viewer         | BIG_APP  | entered      |
-| [ICON]  | PPSA02664  | Commercial Title A           | BIG_APP  | flipped      |
-+-------------------------------------------------------------------------------+
-| Status: Idle | Vulkan: AMD Radeon RX 6700 XT | Backend: Native x86-64         |
-+-------------------------------------------------------------------------------+
-```
-
-Compatibility is the reach column from [COMPATIBILITY.md](../../COMPATIBILITY.md)
-(`rejected` / `parsed` / `linked` / `entered` / `flipped`) - not a "does it play" verdict.
-"flipped" means a frame reached the output layer, not that anything was drawn; see
-[graphics.md](graphics.md).
-
-*(Screenshot placeholder: Game Library & Dashboard)*
-
----
+The library is the set of titles orbistoun has found in the library folder. The list view
+shows it down the left of the window with the selected title's details beside it; the shell
+view shows it as tiles. On the command line the same information comes from
+`orbistoun-cli inspect`, `imports` and `compat list`.
 
 ## Where titles come from
 
-Orbistoun **does not ship any**, and never will. What it scans is a directory you point it at.
+Orbistoun ships no titles. It scans one folder, set under preferences - general as the
+library folder. The default is `titles`, relative to the data root, which is the
+collection's shared `titles/` directory (see [where it writes](paths.md)); an absolute path
+is used as given (D038).
 
-The scan reads each candidate far enough to say what it is - the container, the executable
-inside it, and the imports it declares - and stops there. Nothing is executed by scanning, which
-is what makes it safe to point at a directory of unknown things.
+A **title** is a directory holding an `eboot.bin`. The scan also reads
+`sce_sys/param.json` for the title's name, ID, version and required system version, and
+`sce_sys/icon0.png` for its icon; a title without them is named after its folder. Titles
+staged under the folder's `data/homebrew/<id>` tree are found too, and a staged copy takes
+precedence over another of the same name, because its storage is the one a title can write.
 
-`file → rescan library` picks up anything added since the window opened. It is a menu item
-rather than a filesystem watcher on purpose: a rescan can be slow over a network share, and a
-tool that quietly stalls because a directory changed is worse than one that rescans when asked.
+The scan reads each title far enough to describe it and never executes anything, so it is
+safe to point at a folder of unknown files. It runs when the window opens and again on file -
+rescan library, the toolbar's refresh, or settings - reload settings file.
 
-## What the detail panel is telling you
+## The list
 
-The useful column is **imports**: the list of platform functions a title asks for before it runs
-a single instruction.
+Each row shows:
 
-That list is knowable in advance because interception here is *linking* rather than hooking - the
-guest imports by hash, the loader resolves the whole table, and so the complete set of demands is
-in hand before anything executes. It is the single best predictor of whether a title will get
-anywhere, and it costs nothing to look at.
+| Line | Shows |
+|---|---|
+| first | the title's name |
+| second | its title ID, and `fw <version>` when it states the system version it requires |
+| third | the last run: how many distinct imports it called, then where it ended - `<region>+<offset>` for a fault, or "ran to the limit". "never run" when it has no trace. |
 
-A name shown in full is one Orbistoun implements or has a record of. A bare hash is one nothing
-has named yet - see [naming](naming.md).
+Click a row to select it; double-click to run it. When the scan fails the panel shows why, and
+when the folder is empty it shows which folder was scanned. Under either message is the
+settings file that chose the folder, or "no such file" when every setting is a default.
 
-## Running one
+The bottom of the panel shows which build this is: a commit, or when the binary was compiled
+when there is none. Hover it for the full form, to paste into a report.
 
-Selecting an entry and running it loads the container, maps its segments, resolves the import
-table and starts the guest. Guest instructions are x86-64 and **run natively** - there is no
-interpreter and no recompiler - so everything Orbistoun does is the operating system underneath
-them.
+## The detail panel
 
-That is why a title stopping is usually a missing or wrong system call rather than a wrong
-instruction, and it is why the report from a run is about calls rather than about code.
+The right side of the list view describes the selected title.
 
-## What "it did not work" looks like
+| Part | Shows |
+|---|---|
+| header | icon, name, and a line with title ID, version, required system version, the toolchain it was built with when it says, and the folder name |
+| run result | after a run, what it produced; see [running a title](running.md#the-run-result) |
+| imports | `N of M named`: how many of the title's imports the symbol database can name; see [names and hashes](naming.md) |
+| container | the container's structure as `orbistoun-cli inspect` reports it, or why it could not be read |
 
-**It stopped immediately.** Almost always an import that could not be resolved. The detail panel
-lists them before you run.
+The import list is knowable before anything runs because interception is linking: the guest
+imports by hash and the loader resolves the whole table before the first guest instruction,
+so the complete set of demands a title makes is in hand in advance.
 
-**It stopped later, somewhere unrelated.** Usually a stub that returned a plausible answer
-instead of failing honestly. This is the failure mode Orbistoun is built to avoid and the one
-worth reporting, because it is the expensive kind: the damage happens at the call and shows up
-thousands of frames later.
+## Title overrides
 
-**It ran and drew nothing.** The graphics path is the newest part. A run that reaches the command
-stream and produces no frame is a normal state today, not a surprise.
+settings - title overrides..., or configure on the toolbar, opens the selected title's
+override file as text. It is saved to `overrides/<title>.toml` under the data root. Settings in
+it are merged per key over the shipped defaults, so a key left out keeps its value. A
+compatibility entry names the behaviour it changes, never the title, and carries a mandatory
+reason. A file that does not exist opens as a commented template.
+
+## The shell view
+
+The shell view presents the same library as rows of tiles, moved through with the pad's
+directions and chosen with its south button, or with the pointer.
+
+| Row | Holds |
+|---|---|
+| user | the signed-in user; choosing it opens the settings |
+| titles | one tile per title, with its icon; choosing one runs it. The highlight starts here. |
+| settings | console and controllers (the preferences window), rescan the library, developer list view |
+| power | quit the title (while one runs), close orbistoun |
+
+The footer shows the build and the renderer the window is drawing with. When the library
+cannot be read, or is empty, the titles row says so and offers "look again".
+
+## Reach
+
+The compatibility record of each title, generated into [COMPATIBILITY.md](../../COMPATIBILITY.md),
+ranks titles by **reach**: `rejected`, `parsed`, `linked`, `entered`, `exited`, `flipped`,
+`presented`. `flipped` means the guest got a frame to the output layer, a place reached rather
+than a picture judged; `presented` means a buffer whose pixels differ from what it held before
+the guest ran. `orbistoun-cli compat list` prints the same ranking.
+
+## On the command line
+
+```bash
+orbistoun-cli inspect <title>/eboot.bin          # the container's structure, without executing it
+orbistoun-cli imports <title>/eboot.bin          # what it imports
+orbistoun-cli imports <title>/eboot.bin --own    # the modules it ships that answer its own imports
+orbistoun-cli exports <module>                   # what a module provides
+orbistoun-cli compat list                        # every recorded title, furthest first
+```

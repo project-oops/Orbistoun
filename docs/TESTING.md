@@ -1,54 +1,47 @@
 # Testing strategy
 
-The central difficulty of this project is that **there is no specification**. Most
-of what needs writing is undocumented semantics, so "is this correct?" usually has
-no cheap answer. Everything below is organised around that.
+There is no specification for most of what orbistoun implements. The semantics are
+undocumented, so "is this correct?" rarely has a cheap answer, and the test strategy is built
+around that.
 
-## Where ground truth actually comes from
+## Sources of ground truth
 
-Four sources, in order of preference. If a change cannot be justified from one of
-them, say so in the commit message.
+Four sources, in order of preference. A change that cannot be justified from one of them says
+so in its commit message.
 
 ### 1. FreeBSD source
 
-The target kernel is FreeBSD-derived and a large fraction of libkernel is POSIX
-with the vendor naming. Lawful, citable, and the strongest reference available. When
-implementing a libkernel function, look for the analogue first and name it in a
-comment.
-
-This is why `orbistoun-kernel` should need less guesswork than any other crate.
+The target kernel is FreeBSD-derived, and much of libkernel is POSIX under vendor naming.
+FreeBSD source is lawful, citable and the strongest reference available. When implementing a
+libkernel function, find the FreeBSD analogue first and name it in a comment. This is why
+`orbistoun-kernel` needs less guesswork than any other crate.
 
 ### 2. Framebuffer diffing
 
-For the GPU layer: render a frame, compare numerically against a reference, get a
-number. The only cheap and mechanical correctness signal anywhere in the codebase,
-which is why the GPU crate is the best target for tooling and automation.
+For the GPU layer: render a frame, compare it numerically against a reference, and get a
+number. It is the one cheap, mechanical correctness signal in the codebase, which makes the
+GPU crates the best target for tooling and automation.
 
 ### 3. The guest itself
 
-A one-bit oracle per call site. Return `Ok` - does the guest proceed? Return an
-error - does it bail? Bisectable, and the reason `StubPolicy` is runtime data: you
-answer the question by editing a TOML and relaunching, not by rebuilding.
+A one-bit oracle per call site. Return success: does the guest proceed? Return an error: does
+it bail? The answer is bisectable, and `StubPolicy` is runtime data so that a question costs
+an edit to a TOML file and a relaunch, not a rebuild.
 
-Two limits worth being honest about. Each query costs a boot, so it is expensive;
-and it only constrains behaviour the guest actually *observes and checks*, so you
-converge on "correct for this title" rather than correct. Use a prior - a FreeBSD
-analogue, a name, observed argument usage - to choose what to try first rather than
-bisecting blind.
+Each query costs a boot, and it constrains only behaviour the guest observes and checks, so it
+converges on "correct for this title" rather than correct. Use a prior (a FreeBSD analogue, a
+name, observed argument usage) to choose what to try first rather than bisecting blind.
 
 ### 4. Instruction test suites
 
-Total ground truth, but only for retro targets: `SingleStepTests` and
-`ProcessorTests` give per-instruction JSON with full pre/post CPU and memory state.
-Irrelevant to this target directly, and genuinely useful for one thing -
-**validating tooling before pointing it at something unverifiable.** If an automated
-approach cannot pass a suite where the answers are known, it should not be trusted
-where they are not.
+`SingleStepTests` and `ProcessorTests` give per-instruction JSON with full pre- and post-state
+for retro CPUs. They do not cover this target. Their use here is validating tooling: an
+automated approach that cannot pass a suite where the answers are known is not trusted where
+they are not.
 
-## What gets tested here
+## What gets tested
 
-The high-value targets are the pure ones with concrete contracts, and they are
-written test-first:
+The high-value targets are the pure ones with concrete contracts, written test-first:
 
 | Crate | What is pinned |
 |-------|----------------|
@@ -57,90 +50,68 @@ written test-first:
 | `orbistoun-hle` | NID resolution, policy override isolation, loud-by-default |
 | `orbistoun-elf` | Truncation, bad magic, wrong class, honest failure on vendor data |
 | `orbistoun-core` | Error-code round-tripping, placeholder/real code separation |
-| `orbistoun-libc` | ISO C and POSIX behaviour at the edges - the one crate here with a real specification |
-| `orbistoun-shader` | Decode against a reference disassembler, and against bytes that are not instructions at all - random, degenerate, truncated, ragged |
+| `orbistoun-libc` | ISO C and POSIX behaviour at the edges, against a real specification |
+| `orbistoun-shader` | Decode against a reference disassembler, and against bytes that are not instructions: random, degenerate, truncated, ragged |
 | `orbistoun-translate` | Per-instruction behaviour, executed and compared rather than asserted structurally |
 | `orbistoun-gpu` | Submission handling: a shader that will not translate is reported, a window that runs out refuses |
 | `orbistoun-names` | A generated index has a specific answer; a confirmed name round-trips through the hash |
 | `orbistoun-report` | The progress verdict, and that a differing-conditions comparison is labelled as measuring a settings change |
 | `orbistoun-probe` | Every captured transcript parses, and nothing grades above an assumption without an asserted target |
 
-Every test states the property it protects in a comment. A test should survive a
-refactor that preserves the contract and fail when the contract changes.
+Every test states the property it protects in a comment. A test survives a refactor that
+preserves the contract and fails when the contract changes.
 
-## The failure mode a passing suite hides
+Tested lightly on purpose: the CLI's output formatting, and anything whose failure is
+cosmetic. Effort goes to the layers where a wrong answer is silent.
 
-A check that iterates over what the code produced and validates each item **passes when
-the code produces nothing**. The loop body never runs, every assertion inside it is
-vacuously satisfied, and the report says green.
+## Vacuous loops
 
-This is not hypothetical here. `every_decoded_operand_appears_in_the_reference` compares
-each decoded operand against a reference disassembly, and it is the test the whole
-differential fixture set exists to support. For a period it was green while
-`v_mov_b32_e32` - the most common instruction in any shader - decoded to a mnemonic and an
-**empty operand list**, because an unsolvable opcode produces no operands and no operands
-produce no comparisons.
+A check that iterates over what the code produced and validates each item passes when the
+code produces nothing. The loop body never runs, every assertion inside it is vacuously
+satisfied, and the report is green. `every_decoded_operand_appears_in_the_reference` in
+`orbistoun-shader` has this shape: an instruction that decodes to an empty operand list
+produces no comparisons.
 
-The shape to watch for is a test whose assertions all live inside a loop over
-model-produced data. It is testing that what was produced is right, and saying nothing
-about whether anything was produced.
+The shape to watch for is a test whose assertions all live inside a loop over produced data.
+It checks that what was produced is right, and says nothing about whether anything was
+produced.
 
-**The fix is a converse, and the useful form of it is an exact inventory.** Not "at least
-one operand", which drifts into meaninglessness, but: the set of things producing nothing
-is *exactly* this written-down list, each with its reason. Closing a gap then fails until
-the entry is deleted, and opening one fails until it is added and justified. Both
-directions are load-bearing - a list that only grows is a list nobody prunes.
+**The converse inventory** is the rule for such a test. Not "at least one item", which drifts
+into meaninglessness, but an exact list: the set of cases producing nothing is exactly this
+written-down list, each entry with its reason. Closing a gap fails until the entry is deleted,
+and opening one fails until it is added and justified. For any "for each X found, check X"
+test, ask what it reports when nothing is found; if the answer is "it passes", write the
+converse.
 
-The same reasoning applies to any "for each X we found, check X" test: ask what it says
-when nothing is found, and if the answer is "it passes", write the converse.
+## Validation separate from effect
 
-## The pattern to copy
+`orbistoun-mem` separates validation from mapping: `validate()` is a pure function over the
+ABI rules, and the effectful `reserve()` calls it first. The rules are fully testable without
+touching the host address space.
 
-`orbistoun-mem` separates **validation** from **mapping**: `validate()` is a pure
-function over the ABI rules, and the effectful `reserve()` calls it first. The rules
-are therefore fully testable without touching the host address space.
-
-Prefer that shape wherever it fits - a pure decision function plus a thin effectful
-wrapper. In a codebase where most effects are hard to test, it is what keeps
-coverage meaningful.
+Prefer that shape wherever it fits: a pure decision function plus a thin effectful wrapper.
+Where most effects are hard to test, it keeps coverage meaningful.
 
 ## Running
 
 ```bash
-cargo nextest run --workspace
+./bin/orbistoun test            # the suite, under nextest when installed
+cargo nextest run --workspace   # directly
+cargo test --doc --workspace    # doctests, which nextest does not run
 ```
 
-`nextest` over `cargo test`: the conformance suite will be thousands of tiny cases
-and nextest runs them process-per-test in parallel. It does **not** run doctests, so
-CI runs `cargo test --doc --workspace` separately - the `guest_module!` contract is a
-doctest and is worth keeping.
+nextest runs each test in its own process, in parallel. It does not run doctests, so the gate
+runs them separately; the `guest_module!` contract is a doctest. `./bin/orbistoun check` runs
+both, then re-runs the device-dependent tests with output shown ([BUILDING.md](BUILDING.md)).
 
-## What is tested lightly, on purpose
+## Coverage
 
-The CLI's output formatting, and anything whose failure mode is cosmetic. Effort
-belongs on the layers where a wrong answer is silent.
+`cargo llvm-cov --ignore-run-fail` continues past a failing test binary but records nothing
+from it. The profile is written when a process exits normally, and a `libtest` failure exits
+by a path that does not write it. Every file covered only by that binary reports `0.00%`, and
+every file covered partly by it reports whatever other binaries reached.
 
-## Measuring coverage: a failing test destroys its binary's numbers
-
-`cargo llvm-cov --ignore-run-fail` lets a run continue past a failing test binary. **It
-does not give you partial data from that binary - it gives you none.** The profile is
-written as the process exits normally; a `libtest` failure exits through a path that does
-not write it, so every file covered *only* by that binary reports as `0.00%` and every file
-covered partly by it reports whatever the other binaries happened to reach.
-
-Measured, not assumed. With one unrelated unit test failing in `orbistoun-hle`:
-
-| file | reported | actual |
-|------|----------|--------|
-| `knowledge.rs` | 35.16% | 97.14% |
-| `learned.rs` | 0.00% | 88.89% |
-| `lib.rs` | 0.00% | 92.50% |
-| crate total | 23.18% | 94.92% |
-
-So a zero in a coverage report is two different facts wearing the same number: "nothing
-tests this" and "the thing that tests this did not finish". They need opposite responses,
-and the second one silently invites writing tests that already exist.
-
-**Fix the suite before reading a coverage number, or skip the failing test explicitly** -
-`-- --skip <name>` keeps the rest of that binary's profile. A baseline taken while anything
-fails is not a baseline.
+A zero in a coverage report therefore means either "nothing tests this" or "the binary that
+tests this failed". Fix the suite before reading a coverage number, or skip the failing test
+explicitly with `-- --skip <name>`, which keeps the rest of that binary's profile. A baseline
+taken while any test fails is not a baseline.
