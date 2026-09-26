@@ -1794,7 +1794,9 @@ impl Service {
         let (libraries, _modules) = self.module_tables(&bytes)?;
         let root = executable.parent().unwrap_or(Path::new("."));
         let wanted: Vec<String> = libraries.into_values().collect();
-        Ok(titlemodules::find(root, &wanted))
+        Ok(titlemodules::find(root, &wanted, |library| {
+            self.registry.declares_library(library)
+        }))
     }
 
     /// Places the title's own modules and reports what they export.
