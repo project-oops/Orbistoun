@@ -11,12 +11,14 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - PPSA04263: the IME update and user-service game-preset stubs need measured values.
 - PPSA21564: stops in its own module code at +0x7af792 with no missing import named.
 - PPSA28061: aborts after `libSceJson2` initialisation answers a placeholder.
-- NVRB00001: the menu draws over black because depth, stencil and cull state are decoded but not applied per draw.
 - NVRB00001: busy-waits on the process time counter (about 100 million reads in 40 s).
 
 ## Graphics
 
-- Depth, stencil and cull state are decoded but not applied per draw.
+- The host depth attachment is never read from or written to the guest's depth surface, whose tiling is unmeasured: a guest that reads depth back sees its own memory, and a depth clear other than a whole-surface fill or a `DB_RENDER_CONTROL` clear draw is not seen.
+- A `DB_RENDER_CONTROL` clear draw clears the whole host depth target, not only the pixels it covers.
+- Polygon offset (`PA_SU_SC_MODE_CNTL`'s offset enables, `PA_SU_POLY_OFFSET_*`), the depth-bounds test and the depth range are not decoded; a draw asking for depth bounds is refused.
+- A `Z_24` depth surface's fill is not recognised as a clear, and a `Z_16` surface is held at 32-bit float precision.
 - The clear-colour state is not decoded; the Vulkan backend refuses `ClearColour`, `Fence` and `present`.
 - The Vulkan backend ignores the decoded colour-target state (`CB_COLOR0_BASE`, `ATTRIB2`, swizzle mode).
 - gl1-probe fails most checks (scissor, stencil, clip plane, logic op, depth range, mipmaps, readbacks; many rows read `0xbf800000`).
